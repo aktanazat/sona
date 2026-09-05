@@ -55,6 +55,11 @@ const DEFAULT_RECORD_MAX_PAYLOAD_BYTES: u32 = 4 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_INTERVAL_MS: u32 = 1_000;
 const DEFAULT_SOURCE_SAMPLE_CAPACITY: u32 = 96_000;
 const DEFAULT_SOURCE_DESCRIPTOR_CAPACITY: u32 = 128;
+/// How much audio a source lane holds before its writer must have drained it.
+/// The ring is a time budget, not a sample count: 96,000 f32 is two seconds of
+/// 48 kHz mono and one second of stereo, so a fixed count silently gave the
+/// stereo lane half the slack.
+const SOURCE_LANE_TARGET_SECONDS: u32 = 4;
 const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const RETENTION_OPERATION_NAMESPACE: Uuid =
     Uuid::from_u128(0x5192_4d08_51d9_4f31_a369_1f2d_a7de_c9d4);
@@ -110,6 +115,19 @@ impl MeetingSourceProvider for NoCaptureSources {
     ) -> Result<Box<dyn MeetingCaptureSource>, MeetingCaptureError> {
         Err(MeetingCaptureError::Unavailable)
     }
+}
+/// The plan's capacity is the floor for a source that starts without
+/// announcing a format; a source that announced one gets the same seconds of
+/// slack whatever its rate and channel count.
+fn lane_sample_capacity(floor: u32, format: Option<AudioFormat>) -> u64 {
+    format
+        .and_then(|format| {
+            u64::from(format.sample_rate_hz)
+                .checked_mul(u64::from(format.channels))?
+                .checked_mul(u64::from(SOURCE_LANE_TARGET_SECONDS))
+        })
+        .unwrap_or(0)
+        .max(u64::from(floor))
 }
 
 pub(crate) fn production_source_provider(
@@ -1595,44 +1613,73 @@ impl MeetingSessionManager {
 
         let mut active_sources = HashMap::new();
         let source_provider = Arc::clone(&*self.sources_lock());
+        // Two devices cannot be handed the same instant, but they can be asked
+        // in the same one. ScreenCaptureKit's start blocks on
+        // SCShareableContent and startCapture for hundreds of milliseconds, so
+        // starting the sources in sequence put that whole wait into the far end
+        // of the meeting - measured at 196 to 1,566 ms behind the microphone.
+        // Each source owns its own sink and worker and shares nothing with its
+        // sibling; the store is only touched after the join.
+        let mut prepared = Vec::new();
         for source_kind in &plan.requested_sources {
             let probe = source_provider.probe(*source_kind);
             if probe.availability != SourceAvailability::Available {
                 continue;
             }
-            let Ok(mut source) = source_provider.acquire(*source_kind) else {
+            let Ok(source) = source_provider.acquire(*source_kind) else {
                 continue;
             };
             let track_id = SourceTrackId::new();
             let (sink, lane_reader) = PacketSink::new(
                 track_id,
-                usize::try_from(plan.storage.source_lane_sample_capacity)
-                    .map_err(|_| MeetingCommandError::InvalidRequest)?,
+                usize::try_from(lane_sample_capacity(
+                    plan.storage.source_lane_sample_capacity,
+                    probe.negotiated_format,
+                ))
+                .map_err(|_| MeetingCommandError::InvalidRequest)?,
                 usize::try_from(plan.storage.source_lane_descriptor_capacity)
                     .map_err(|_| MeetingCommandError::InvalidRequest)?,
             );
-            let source_plan = SourceStartPlan {
-                session_id: request.session_id,
-                track_id,
-                source_kind: *source_kind,
-                required: plan.required_sources.contains(source_kind),
-                frozen_application_bundle_ids: plan
-                    .frozen_system_audio_application_bundle_ids
-                    .clone(),
-                source_epoch: SourceEpoch::new(0),
-            };
-            let report = match source.start(source_plan, plan.session_clock_anchor, sink) {
-                Ok(report) if report.track_id == track_id && report.source_kind == *source_kind => {
-                    report
-                }
-                Ok(_) | Err(_) => continue,
-            };
+            prepared.push((*source_kind, track_id, source, sink, lane_reader));
+        }
+        let anchor = plan.session_clock_anchor;
+        let started =
+            thread::scope(|scope| {
+                let attempts = prepared
+                    .into_iter()
+                    .map(|(source_kind, track_id, mut source, sink, lane_reader)| {
+                        let source_plan = SourceStartPlan {
+                            session_id: request.session_id,
+                            track_id,
+                            source_kind,
+                            required: plan.required_sources.contains(&source_kind),
+                            frozen_application_bundle_ids: plan
+                                .frozen_system_audio_application_bundle_ids
+                                .clone(),
+                            source_epoch: SourceEpoch::new(0),
+                        };
+                        let handle =
+                            scope.spawn(move || (source.start(source_plan, anchor, sink), source));
+                        (source_kind, track_id, lane_reader, handle)
+                    })
+                    .collect::<Vec<_>>();
+                attempts
+                    .into_iter()
+                    .filter_map(|(source_kind, track_id, lane_reader, handle)| {
+                        let (report, source) = handle.join().ok()?;
+                        let report = report.ok()?;
+                        (report.track_id == track_id && report.source_kind == source_kind)
+                            .then_some((source_kind, track_id, source, lane_reader, report))
+                    })
+                    .collect::<Vec<_>>()
+            });
+        for (source_kind, track_id, source, lane_reader, report) in started {
             store
                 .create_track(TrackCreation {
                     session_id: request.session_id,
                     plan_id: plan.plan_id,
-                    source_kind: *source_kind,
-                    required: plan.required_sources.contains(source_kind),
+                    source_kind,
+                    required: plan.required_sources.contains(&source_kind),
                     requested: true,
                     descriptor_json: "{}",
                     report,
@@ -1643,7 +1690,7 @@ impl MeetingSessionManager {
                 .map_err(map_store_error)?;
             let worker = TrackWorker::start(Arc::clone(&store), writer, lane_reader, report);
             active_sources.insert(
-                *source_kind,
+                source_kind,
                 ActiveSource {
                     track_id,
                     epoch: report.epoch,
@@ -1957,6 +2004,12 @@ impl MeetingSessionManager {
             let _ = source.source.stop();
             source.worker.stop().map_err(map_store_error)?;
         }
+        // Every worker has drained and sealed, so whether a lane produced audio
+        // is now a fact. Do it before the snapshot below reads the revision the
+        // stop transition expects.
+        store
+            .seal_source_health(request.session_id)
+            .map_err(map_store_error)?;
         let stopping = store
             .session_snapshot(request.session_id)
             .map_err(map_store_error)?;
@@ -4281,7 +4334,7 @@ pub(crate) mod tests {
             Ok(SourceStopReport {
                 track_id: SourceTrackId::new(),
                 final_offset_ns: Some(0),
-                health: SourceHealth::Stopped,
+                health: SourceHealth::Healthy,
                 observed_gaps: Vec::new(),
             })
         }
@@ -4338,29 +4391,34 @@ pub(crate) mod tests {
         }
     }
 
+    fn manager_with(sources: Arc<dyn MeetingSourceProvider>) -> (TempDir, MeetingSessionManager) {
+        let directory = TempDir::new().unwrap();
+        let secrets = Arc::new(SecretManager::with_backend(Arc::new(
+            MemorySecretBackend::new(),
+        )));
+        let manager = MeetingSessionManager::with_parts(
+            None,
+            Some(directory.path().join("meetings")),
+            secrets,
+            sources,
+        );
+        (directory, manager)
+    }
+
     fn manager() -> (
         TempDir,
         MeetingSessionManager,
         Arc<std::sync::atomic::AtomicUsize>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        let directory = TempDir::new().unwrap();
-        let secrets = Arc::new(SecretManager::with_backend(Arc::new(
-            MemorySecretBackend::new(),
-        )));
         let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let aborts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let manager = MeetingSessionManager::with_parts(
-            None,
-            Some(directory.path().join("meetings")),
-            secrets,
-            Arc::new(FakeSources {
-                starts: Arc::clone(&starts),
-                aborts: Arc::clone(&aborts),
-                unavailable: None,
-                lane: Arc::new(Mutex::new(None)),
-            }),
-        );
+        let (directory, manager) = manager_with(Arc::new(FakeSources {
+            starts: Arc::clone(&starts),
+            aborts: Arc::clone(&aborts),
+            unavailable: None,
+            lane: Arc::new(Mutex::new(None)),
+        }));
         (directory, manager, starts, aborts)
     }
     fn review_ready_session(manager: &MeetingSessionManager) -> MeetingSessionSnapshot {
@@ -6465,6 +6523,228 @@ pub(crate) mod tests {
                 .questions
                 .is_empty(),
             "a provisional answer is returned, not kept as history"
+        );
+    }
+
+    /// A meeting point two lanes can only clear together. A lane records that
+    /// it arrived and then waits a bounded moment for its sibling; asked one
+    /// after the other, the first waits out the whole window alone and says so.
+    #[derive(Default)]
+    struct Rendezvous {
+        arrived: Mutex<usize>,
+        sibling: std::sync::Condvar,
+        alone: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Rendezvous {
+        fn arrive(&self) {
+            let mut arrived = self
+                .arrived
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *arrived += 1;
+            if *arrived >= 2 {
+                self.sibling.notify_all();
+                return;
+            }
+            let (_guard, wait) = self
+                .sibling
+                .wait_timeout_while(arrived, Duration::from_millis(750), |arrived| *arrived < 2)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if wait.timed_out() {
+                self.alone.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    struct RendezvousSource {
+        kind: SourceKind,
+        rendezvous: Arc<Rendezvous>,
+    }
+
+    impl MeetingCaptureSource for RendezvousSource {
+        fn probe(&self) -> SourceProbe {
+            SourceProbe {
+                source_kind: self.kind,
+                availability: SourceAvailability::Available,
+                health: SourceHealth::Healthy,
+                detail: None,
+                negotiated_format: Some(AudioFormat {
+                    sample_rate_hz: 48_000,
+                    channels: 1,
+                }),
+            }
+        }
+
+        fn start(
+            &mut self,
+            plan: SourceStartPlan,
+            _anchor: SessionClockAnchor,
+            _sink: PacketSink,
+        ) -> Result<SourceStartReport, MeetingCaptureError> {
+            self.rendezvous.arrive();
+            Ok(SourceStartReport {
+                track_id: plan.track_id,
+                source_kind: plan.source_kind,
+                format: AudioFormat {
+                    sample_rate_hz: 48_000,
+                    channels: 1,
+                },
+                epoch: SourceEpoch::new(0),
+                format_epoch: 0,
+                timestamp_bridge: TimestampBridge {
+                    native_anchor_value: 0,
+                    native_timescale: 1_000_000_000,
+                    host_monotonic_anchor_ns: 0,
+                    session_offset_ns: 0,
+                },
+            })
+        }
+
+        fn pause(&mut self) -> Result<(), MeetingCaptureError> {
+            Ok(())
+        }
+
+        fn resume(
+            &mut self,
+            _epoch: SourceEpoch,
+        ) -> Result<SourceStartReport, MeetingCaptureError> {
+            Err(MeetingCaptureError::InvalidState)
+        }
+
+        fn stop(&mut self) -> Result<SourceStopReport, MeetingCaptureError> {
+            Ok(SourceStopReport {
+                track_id: SourceTrackId::new(),
+                final_offset_ns: Some(0),
+                health: SourceHealth::Healthy,
+                observed_gaps: Vec::new(),
+            })
+        }
+
+        fn abort(&mut self) -> Result<(), MeetingCaptureError> {
+            Ok(())
+        }
+    }
+
+    struct RendezvousSources {
+        rendezvous: Arc<Rendezvous>,
+    }
+
+    impl MeetingSourceProvider for RendezvousSources {
+        fn probe(&self, source_kind: SourceKind) -> SourceProbe {
+            RendezvousSource {
+                kind: source_kind,
+                rendezvous: Arc::clone(&self.rendezvous),
+            }
+            .probe()
+        }
+
+        fn acquire(
+            &self,
+            source_kind: SourceKind,
+        ) -> Result<Box<dyn MeetingCaptureSource>, MeetingCaptureError> {
+            Ok(Box::new(RendezvousSource {
+                kind: source_kind,
+                rendezvous: Arc::clone(&self.rendezvous),
+            }))
+        }
+    }
+
+    /// ScreenCaptureKit's start blocks on `SCShareableContent` and
+    /// `startCapture`, so asking the sources one after the other put that whole
+    /// wait into the far end of the meeting: the owner's captures show system
+    /// audio starting 196 to 1,566 ms after the microphone.
+    #[test]
+    fn both_lanes_are_asked_to_start_at_once() {
+        let rendezvous = Arc::new(Rendezvous::default());
+        let (_directory, manager) = manager_with(Arc::new(RendezvousSources {
+            rendezvous: Arc::clone(&rendezvous),
+        }));
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+            MeetingPreflightCreateRequest {
+                operation_id: MeetingOperationId::new(),
+                expected_revision: 0,
+                title: "Design sync".to_string(),
+                origin: MeetingOrigin::Manual,
+                suggestion_id: None,
+                calendar_event_key: None,
+                requested_sources: SourceKind::ALL.to_vec(),
+                required_sources: SourceKind::ALL.to_vec(),
+                accepted_known_missing_sources: Vec::new(),
+                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                destination: ProcessingDestination::Local,
+                remote_acknowledgement: None,
+                microphone_device_uid: None,
+                frozen_system_audio_application_bundle_ids: Vec::new(),
+            },
+        ))
+        .unwrap();
+
+        let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
+            operation_id: MeetingOperationId::new(),
+            session_id: preflight.snapshot.session_id,
+            expected_revision: preflight.snapshot.revision,
+            consent: MeetingConsentInput {
+                policy_version: 1,
+                microphone_acknowledged: true,
+                system_audio_acknowledged: true,
+                known_missing_sources_acknowledged: Vec::new(),
+                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                destination: ProcessingDestination::Local,
+                remote_acknowledgement: None,
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(
+            rendezvous.alone.load(Ordering::Acquire),
+            0,
+            "a lane asked to start after its sibling waits alone for it"
+        );
+        assert_eq!(
+            started
+                .snapshot
+                .sources
+                .iter()
+                .filter(|source| source.track_id.is_some())
+                .count(),
+            SourceKind::ALL.len(),
+            "both lanes still have a track after starting together"
+        );
+    }
+
+    /// The ring is how much audio a lane holds before its writer must have
+    /// drained it, and 96,000 samples is two seconds of one channel but one of
+    /// two, so the fixed count silently halved the stereo lane's slack.
+    #[test]
+    fn a_lane_holds_the_same_seconds_of_audio_in_any_format() {
+        for (channels, samples_per_second) in [(1_u16, 48_000_u64), (2, 96_000)] {
+            assert_eq!(
+                lane_sample_capacity(
+                    96_000,
+                    Some(AudioFormat {
+                        sample_rate_hz: 48_000,
+                        channels,
+                    })
+                ),
+                samples_per_second * u64::from(SOURCE_LANE_TARGET_SECONDS)
+            );
+        }
+    }
+
+    #[test]
+    fn a_lane_that_announced_no_format_keeps_the_plan_capacity() {
+        assert_eq!(lane_sample_capacity(96_000, None), 96_000);
+        assert_eq!(
+            lane_sample_capacity(
+                96_000,
+                Some(AudioFormat {
+                    sample_rate_hz: 8_000,
+                    channels: 1,
+                })
+            ),
+            96_000,
+            "the plan's count is a floor, not a target"
         );
     }
 }
