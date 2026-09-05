@@ -99,7 +99,16 @@ function TabsContent({
   return (
     <TabsPrimitive.Content
       data-slot="tabs-content"
-      className={cn("flex-1 outline-none", className)}
+      /* No `outline-none` here: Radix puts `tabindex=0` on the panel, so it is
+       * a Tab stop, and styles/base.css paints `[tabindex]:focus-visible`. The
+       * utility layer outranks that base rule, so the word left every tab
+       * panel in the app a stop that showed the reader nothing.
+       *
+       * The ring is inset because a panel fills its pane: at the app's default
+       * offset the left edge lands under the rail and the right edge lands
+       * outside the window, and the reader sees two horizontal rules instead
+       * of a rectangle. */
+      className={cn("flex-1 focus-visible:-outline-offset-2", className)}
       {...props}
     />
   );

@@ -82,30 +82,47 @@ body {
     outline-color: var(--focus-ring);
     outline-offset: var(--focus-ring-offset);
   }
+}
 
-  /* A field you type in shows focus in its own edge, not in a ring around it.
-   * A text field matches :focus-visible on a plain click, so the offset ring
-   * was a second box drawn around the box being typed in — on the chat
-   * composer, whose own wrapper already darkens its hairline, two boxes at
-   * once. The border goes to the accent at the width it already draws, so the
-   * field changes state without changing size, and a borderless field nested
-   * in a bordered wrapper leaves the indicator to that wrapper. Sliders,
-   * checkboxes and radios keep the ring: they are not text. */
-  :where(
-    input:not([type]),
-    input[type="text"],
-    input[type="search"],
-    input[type="password"],
-    input[type="email"],
-    input[type="url"],
-    input[type="tel"],
-    input[type="number"],
+/* A field you type in shows focus in its own edge, not in a ring around it.
+ * A text field matches :focus-visible on a plain click, so the offset ring
+ * was a second box drawn around the box being typed in — on the chat
+ * composer, whose own wrapper already darkens its hairline, two boxes at
+ * once. The border goes to the focus colour at the width it already draws, so
+ * the field changes state without changing size, and a borderless field
+ * nested in a bordered wrapper leaves the indicator to that wrapper. Sliders,
+ * checkboxes and radios keep the ring: they are not text.
+ *
+ * This rule is deliberately outside every layer. The kit draws a field's edge
+ * with `border-gray-alpha-400`, a utility, and the utilities layer beats the
+ * base layer whatever the specificity — inside `base` this rule lost and a
+ * focused field showed nothing at all (measured: focus-visible true, border
+ * still resting). Unlayered, it wins; `:where()` keeps it at zero specificity
+ * so the invalid rule below overrides it with one attribute. */
+:where(
+  input:not([type]),
+  input[type="text"],
+  input[type="search"],
+  input[type="password"],
+  input[type="email"],
+  input[type="url"],
+  input[type="tel"],
+  input[type="number"],
+  textarea,
+  [contenteditable="true"]
+):focus-visible {
+  border-color: var(--focus-ring);
+  outline: none;
+}
+
+/* An invalid field keeps its red edge while it is being corrected; the caret
+ * and the hint under it already say it has focus. */
+:where(
+    input,
     textarea,
     [contenteditable="true"]
-  ):focus-visible {
-    border-color: var(--color-accent);
-    outline: none;
-  }
+  )[aria-invalid="true"]:focus-visible {
+  border-color: var(--color-destructive);
 }
 
 :where(button, input, select, textarea):disabled {
