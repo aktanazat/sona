@@ -36,7 +36,6 @@ const RUNTIME_COUNT_KEYS = [
   "people.review.meetingsBefore",
   "people.briefing.metCount",
   "people.briefing.metBefore",
-  "overview.activity.days",
   "overview.activity.streakAria",
   "settings.workflows.vocabularySuggestions.occurrences",
   "settings.workflows.vocabularySuggestions.meetings",
@@ -47,6 +46,28 @@ const RUNTIME_COUNT_KEYS = [
   "libraryV2.words",
   "meetings.review.unresolvedSpeakers",
   "consentPanel.wrap.unresolvedSpeakers",
+] as const;
+
+/* French, Hindi, and Portuguese select the same CLDR form for zero and one.
+ * These counters remain visible at zero, so a reader must see the supplied
+ * count rather than a singular form that hard-codes 1. */
+const ZERO_AND_ONE_SHARED_KEYS = [
+  "consentPanel.wrap.unresolvedSpeakers",
+  "learningV2.feed.evidence",
+  "learningV2.outcomes.noticed",
+  "meetings.review.unresolvedSpeakers",
+  "overview.week.dictations",
+  "overview.week.streak",
+  "overview.week.words",
+  "people.list.meetings",
+  "people.review.meetingsBefore",
+  "secureInput.blockedNoCulprit",
+  "secureInput.blockedWithCulprit",
+  "settings.history.emptyRecordings",
+  "settings.workflows.outcomes.continuity",
+  "settings.workflows.outcomes.personLinks",
+  "settings.workflows.vocabularySuggestions.meetings",
+  "settings.workflows.vocabularySuggestions.occurrences",
 ] as const;
 
 const PLURAL_SAMPLE_COUNTS = [
@@ -326,6 +347,36 @@ describe("runtime plural resolution", () => {
           });
           expect(details.exactUsedKey).toBe(`${key}_${category}`);
         }
+      }
+    }
+  });
+
+  test("zero stays distinct from one when both select one", async () => {
+    for (const locale of ["fr", "hi", "pt"]) {
+      // SAFETY: parity checks above validate this locale's nested string tree
+      // before it reaches this runtime i18next probe.
+      const bundle = JSON.parse(
+        fs.readFileSync(
+          path.join(localesRoot, locale, "translation.json"),
+          "utf8",
+        ),
+      ) as TranslationTree;
+      const instance = i18next.createInstance();
+      await instance.init({
+        lng: locale,
+        fallbackLng: false,
+        resources: { [locale]: { translation: bundle } },
+      });
+
+      const rules = new Intl.PluralRules(locale);
+      expect(rules.select(0)).toBe("one");
+      expect(rules.select(1)).toBe("one");
+
+      for (const key of ZERO_AND_ONE_SHARED_KEYS) {
+        const options = { days: 7, name: "Sona" };
+        expect(instance.t(key, { ...options, count: 0 })).not.toBe(
+          instance.t(key, { ...options, count: 1 }),
+        );
       }
     }
   });

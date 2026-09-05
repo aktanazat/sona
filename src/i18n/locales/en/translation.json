@@ -41,14 +41,10 @@
     "subtitle": "Models run on this Mac and trade accuracy against speed.",
     "existingModelsTitle": "Compatible models",
     "downloadModelsTitle": "Available to download",
-    "showAllModels": "Show all {{total}} models",
-    "showFewerModels": "Show fewer models",
+    "otherModels": "Other models",
+    "moreModels": "{{total}} more",
     "recommended": "Recommended",
     "customModelDescription": "Not officially supported",
-    "modelCard": {
-      "accuracy": "accuracy",
-      "speed": "speed"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "Required to type transcribed text into your applications."
       },
       "grant": "Grant permission",
-      "granted": "Granted",
       "waiting": "Waiting…",
       "allGranted": "Both granted",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "Loading {{modelName}}…",
     "loadingGeneric": "Loading…",
     "deleteModel": "Delete {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "Cancel",
     "cancelDownload": "Cancel download",
     "capabilities": {
-      "languageSelection": "Supports multiple input languages",
-      "singleLanguage": "Supports this language only",
       "languageCount": "{{total}} languages",
       "languageOnly": "{{language}} only",
-      "translation": "Can translate to English",
-      "translate": "Translate",
-      "streaming": "Shows live transcription as you speak"
+      "translate": "Translate"
     }
   },
   "settings": {
@@ -669,8 +659,12 @@
       },
       "title": "History",
       "openFolder": "Open recordings folder",
+      "import": "Import",
+      "showRawText": "Show raw text",
+      "emptyRecordings_one": "1 empty recording",
+      "emptyRecordings_other": "{{count}} empty recordings",
       "loading": "Loading history…",
-      "empty": "No recordings yet.",
+      "empty": "Dictations you make appear here.",
       "copyToClipboard": "Copy transcript to clipboard",
       "copyFailed": "Couldn't copy the transcript",
       "save": "Save entry",
@@ -687,11 +681,6 @@
       "retry": "Try again",
       "saveError": "Couldn't update the saved status. Try again.",
       "postProcessEmpty": "Post-processing produced no text, so this is the raw transcript.",
-      "textView": {
-        "label": "Transcript view",
-        "processed": "Processed",
-        "raw": "Raw"
-      },
       "receipts": {
         "showDetails": "Show run details",
         "hideDetails": "Hide run details",
@@ -800,7 +789,6 @@
         "saveError": "Couldn't save the correction. Try again."
       },
       "audioImport": {
-        "start": "Transcribe file",
         "fileFilter": "Audio and video files",
         "jobs": "File imports",
         "status": {
@@ -982,7 +970,7 @@
         "license": "MIT licensed. Copyright 2025 CJ Pais."
       },
       "updates": {
-        "autoDescription": "Asks GitHub for the latest release. Sona never installs anything on its own.",
+        "autoDescription": "Sona never installs anything on its own.",
         "autoLabel": "Check for updates automatically",
         "check": "Check now",
         "checking": "Checking…",
@@ -1365,7 +1353,7 @@
         "title": "Data on this device",
         "historyLimit": {
           "label": "History limit",
-          "description": "Keep this many recent history entries. Set 0 to disable saved history."
+          "description": "Set 0 to disable saved history."
         },
         "retention": {
           "label": "Recording retention",
@@ -1617,7 +1605,6 @@
       "title": "Workflows",
       "loadError": "Couldn't load workflows.",
       "updateError": "Couldn't update the workflow.",
-      "empty": "No workflows are available.",
       "neverRun": "Not run yet",
       "toggleLabel": "Enable {{name}}",
       "items": {
@@ -1681,13 +1668,6 @@
         "accept": "Add",
         "dismiss": "Dismiss"
       },
-      "overview": {
-        "whatSonaDid": "What Sona did",
-        "openLoops": "Open loops",
-        "openMeeting": "Open meeting {{title}}",
-        "loadError": "Couldn't load this card.",
-        "retry": "Retry"
-      },
       "runLog": {
         "title": "Activity",
         "empty": "No activity yet.",
@@ -1706,9 +1686,9 @@
       },
       "automations": {
         "title": "After a meeting",
-        "description": "Actions that run on this Mac when a series' notes are written. Off for every series until you turn one on.",
+        "description": "Actions that run on this Mac when a series' notes are written.",
         "loading": "Reading your series…",
-        "empty": "No recorded series yet. Record a meeting from a calendar event and it will show up here.",
+        "empty": "Record a meeting from a calendar event to see its automations here.",
         "seriesFact": "{{count}} recorded · last met {{when}}",
         "reminders": "Add my open commitments to Reminders",
         "remindersHint": "Writes what you still owe into a list called Sona. Nothing is ever read back out of it.",
@@ -1763,6 +1743,8 @@
     "pause": "Pause",
     "seek": "Playback position",
     "resetSetting": "Reset {{name}}",
+    "more": "More",
+    "none": "None",
     "day": {
       "today": "Today",
       "yesterday": "Yesterday"
@@ -1770,7 +1752,7 @@
   },
   "commandPalette": {
     "open": "Search",
-    "placeholder": "Search or choose an action",
+    "placeholder": "Search or ask",
     "navigation": "Navigation",
     "actions": "Actions",
     "noResults": "Nothing found",
@@ -1781,7 +1763,6 @@
     "openAgent": "Open agent",
     "runPrompt": "Run a prompt",
     "newPrompt": "New prompt",
-    "esc": "esc",
     "search": {
       "meetings": "Meetings",
       "people": "People",
@@ -1857,9 +1838,8 @@
     "recordingFailed": "Couldn't start recording: {{error}}. Try again.",
     "modelLoadFailed": "Couldn't load {{model}}. Try again.",
     "modelLoadFailedUnknown": "unknown model",
-    "pasteFailedTitle": "Couldn't paste the transcript",
     "pasteFailed": "The transcript could not be pasted into the active app. Focus a text field and try again.",
-    "transcriptionFailedTitle": "Couldn't transcribe",
+    "transcriptionFailed": "Couldn't transcribe. Try again.",
     "noModelSelected": "No transcription model selected. Choose one in Settings > Models.",
     "commandNoSelection": "Select the text you want to change, then hold the command shortcut and say the change.",
     "commandRewriteUnavailable": "The rewrite returned nothing, so your selection was left as it was. Check the provider in Settings > Post-processing and try again.",
@@ -1883,7 +1863,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "Input level",
     "state": {
       "starting": "Starting",
       "listening": "Listening",
@@ -1948,13 +1927,8 @@
       "unknown": "Checking"
     },
     "health": {
-      "not_started": "Not started",
       "starting": "Starting",
-      "healthy": "Healthy",
-      "paused": "Paused",
-      "degraded": "Degraded",
-      "failed": "Failed",
-      "stopped": "Stopped"
+      "failed": "Failed"
     },
     "completeness": {
       "not_started": "Not started",
@@ -1975,17 +1949,12 @@
       }
     },
     "start": {
-      "label": "Start a meeting",
-      "action": "Start recording",
+      "action": "Record",
       "starting": "Starting…",
-      "assurance": "Records your Mac's audio locally. Nothing joins the call.",
-      "capture": "Capture",
-      "noSources": "Choose at least one source.",
-      "localOnly": "Local only",
-      "retention": "Kept: {{policy}}"
+      "assurance": "Records this Mac's audio locally. Nothing joins the call."
     },
     "import": {
-      "action": "Import",
+      "action": "Import recording",
       "recordingFilter": "Recording",
       "transcriptFilter": "Transcript export"
     },
@@ -1993,12 +1962,14 @@
       "title": "Recording did not start",
       "readyTitle": "Ready to record",
       "recordAnyway": "Record without it",
-      "recordAnywayHint": "The meeting is marked partial, and the missing source is named in it."
+      "recordAnywayHint": "The meeting is marked partial, and the missing source is named in it.",
+      "sources": "What this will record"
     },
     "actions": {
       "back": "Back",
       "delete": "Delete meeting",
       "discard": "Discard",
+      "openRecordings": "Open recordings folder",
       "pause": "Pause",
       "refresh": "Refresh",
       "resume": "Resume",
@@ -2014,10 +1985,7 @@
       "remoteUnavailable": "Remote processing is unavailable in this version of Sona, so every meeting is transcribed and summarized on this Mac."
     },
     "preflight": {
-      "storage": "Storage",
-      "storageAvailable": "Encrypted meeting storage is available.",
       "storageUnavailable": "Encrypted meeting storage is unavailable.",
-      "localModel": "Local model",
       "localModelDescription": "Processing remains local when a local model is available.",
       "starting": "Starting the recording…",
       "refreshing": "Checking…"
@@ -2030,39 +1998,30 @@
       "elapsed": "Elapsed",
       "microphoneOnlyPartial": "Recording the microphone only. System audio is unavailable, so this meeting will be partial.",
       "partialCapture": "Some audio is missing. Check the gaps before relying on the generated notes.",
-      "inputs": "Inputs",
-      "signal": "Signal",
-      "signalUnavailable": "{{source}} does not report its level.",
-      "notReported": "Not reported",
-      "durabilityLag": "Saved to disk",
-      "behind": "{{duration}} behind",
-      "progress": "Transcript progress",
       "transcript": "Transcript",
-      "asrLag": "Transcript lag",
-      "storage": "Storage",
-      "storageHealthy": "Encrypted local storage is healthy.",
+      "transcriptEmpty": "Words appear here as they are recognized.",
       "storageUnavailable": "Storage needs attention.",
-      "processing": "Processing",
-      "manualNote": "Manual note",
+      "manualNote": "Note for this moment",
       "notePlaceholder": "Write a note for this moment",
-      "addNote": "Add timestamped note"
+      "addNote": "Add a note"
     },
     "recovery": {
-      "title": "Unfinished meetings",
-      "finalize": "Finish saving"
+      "title": "Unfinished meetings"
     },
     "trash": {
       "title": "Recently deleted",
+      "empty": "Meetings you delete appear here.",
       "expires": "Deleted {{deleted}} · gone in {{count}} days",
       "expiresToday": "Deleted {{deleted}} · gone today",
       "restore": "Restore",
+      "restoreItem": "Restore “{{title}}”",
       "restored": "{{title}} is back.",
       "restoreFailed": "Couldn't restore that meeting."
     },
     "history": {
-      "title": "Meeting history",
+      "title": "Recorded",
       "loading": "Loading meeting history…",
-      "emptyTitle": "No meetings yet"
+      "emptyTitle": "Meetings you record appear here."
     },
     "retention": {
       "title": "Retention",
@@ -2147,10 +2106,10 @@
     "review": {
       "meetingTitle": "Meeting title",
       "editTitle": "Rename this meeting",
+      "rename": "Rename",
+      "backToList": "Meetings",
       "noStartTime": "This meeting did not record a start time.",
-      "started": "Started {{date}}",
       "partialRecording": "Partial recording",
-      "status": "Capture status",
       "capture": "How this was recorded",
       "timeline": "Audio timeline and gaps",
       "timeUnknown": "Unknown time",
@@ -2190,18 +2149,14 @@
       "notePlaceholder": "Add a manual note",
       "addNote": "Add a note",
       "editNote": "Edit this note",
-      "generatedNotes": "Generated notes",
       "regenerate": "Regenerate",
       "remoteCancellationPending": "Remote cancellation is pending. Local deletion does not claim the remote copy is deleted.",
       "cancelRemote": "Cancel remote processing",
       "remoteCancellationRequested": "Cancellation requested",
-      "export": "Export",
-      "exportMarkdown": "Export Markdown",
-      "exportJson": "Export JSON",
+      "exportMarkdown": "Export notes (Markdown)",
+      "exportJson": "Export notes (JSON)",
       "exportComplete": "Meeting exported",
-      "moreActions": "More",
       "citation": "Transcript {{time}}",
-      "noGeneratedNotes": "No generated notes are available yet.",
       "topics": "Topics",
       "nothingRecorded": "No decisions, action items, questions, or risks were recorded.",
       "templateName": {
@@ -2228,10 +2183,9 @@
         "manualNote": "Manual note",
         "title": "Meeting title"
       },
-      "generationFailedDescription": "The transcript and your manual notes are unaffected. Regenerate once the cause is resolved.",
-      "noGeneratedNotesDescription": "Generated notes are derived from the transcript, so they can be rebuilt at any time.",
+      "generationFailedDescription": "Regenerate once the cause is resolved.",
+      "noGeneratedNotesDescription": "Regenerate writes notes from this transcript.",
       "processingDescription": "Generated notes and local answers appear once the transcript is complete.",
-      "processingTitle": "Sona is still processing this meeting",
       "tabs": {
         "insights": "Insights",
         "ledger": "Ledger",
@@ -2240,15 +2194,10 @@
       "tabsLabel": "Meeting review sections"
     },
     "ledger": {
-      "title": "Ledger",
-      "emptyTitle": "No ledger has been read from this meeting yet",
-      "emptyDescription": "A ledger is written alongside the generated notes. Regenerate the notes to read this conversation as threads.",
+      "emptyDescription": "Regenerate the notes to read this conversation as threads.",
       "exportHtml": "Export ledger page",
       "exported": "Ledger written to {{path}}",
       "exportMissing": "This meeting has no ledger to export. Regenerate the notes first.",
-      "statThreads": "Threads settled",
-      "statReceipts": "Receipts",
-      "receiptsVerified": "verified",
       "receiptsDegraded": "{{threads}} threads and {{commitments}} commitments removed",
       "threads": "Threads",
       "asideThread": "aside",
@@ -2259,7 +2208,7 @@
       "stances": "Stances",
       "noStances": "No position was taken up or reversed.",
       "trust": "How much of this to trust",
-      "trustMeasured": "Turns, timings, word counts, and talk share come from the transcript. Every state is a judgment read out of the quote beside it: check the quote before acting on it.",
+      "trustMeasured": "Every state is a judgment read out of the quote beside it.",
       "unattributed": "Unattributed",
       "columnAt": "At",
       "columnDirection": "Direction",
@@ -2320,9 +2269,7 @@
     "list": {
       "searchLabel": "Search meetings",
       "searchPlaceholder": "Search by title",
-      "clearFilters": "Clear filters",
-      "noMatchesFiltered": "No meetings match",
-      "noMatchesFilteredDescription": "Nothing matches these filters. Sona looked through every meeting it has kept, not just this page.",
+      "noMatches": "No meeting title matches “{{query}}”.",
       "rowActions": "Meeting actions",
       "exportMarkdown": "Export notes (Markdown)",
       "exportJson": "Export notes (JSON)",
@@ -2331,27 +2278,7 @@
       "previousPage": "Newer",
       "nextPage": "Older",
       "status": {
-        "live": "Live",
-        "ready": "Ready",
-        "processing": "Processing",
         "needs_attention": "Needs attention"
-      },
-      "filters": {
-        "label": "Filter meetings",
-        "statusKey": "Status",
-        "timeKey": "Time",
-        "status": {
-          "any": "Any",
-          "ready": "Ready",
-          "processing": "Processing",
-          "failed": "Failed"
-        },
-        "time": {
-          "any": "Any",
-          "today": "Today",
-          "last_7_days": "7 days",
-          "last_30_days": "30 days"
-        }
       }
     },
     "status": {
@@ -2365,7 +2292,6 @@
     },
     "analytics": {
       "title": "Conversation",
-      "noSpeech": "No speech was transcribed, so there is nothing to measure.",
       "longestMonologue": "Longest monologue",
       "patience": "Patience",
       "patienceDetail": "Median pause before replying",
@@ -2382,7 +2308,7 @@
       "trackersTitle": "Keyword trackers",
       "addTracker": "Add tracker",
       "removeTracker": "Remove tracker",
-      "noTrackers": "No trackers yet. Add one to start counting how often a phrase comes up.",
+      "noTrackers": "Add a tracker to start counting how often a phrase comes up.",
       "trackerName": "Name",
       "trackerPatterns": "discount, best price, too expensive",
       "trackerPatternsLabel": "Phrases, separated by commas",
@@ -2522,8 +2448,7 @@
       "actions": {
         "skip": "Skip"
       },
-      "linkFailed": "Sona could not open that link.",
-      "skippedNote": "Skipping hides an offer here. Sona keeps seeing the call until the offer expires."
+      "linkFailed": "Sona could not open that link."
     },
     "seriesTemplate": {
       "use": "Use this template for this series",
@@ -2533,17 +2458,13 @@
     "upcoming": {
       "title": "Upcoming",
       "loading": "Reading your calendar…",
-      "empty": "Nothing scheduled for the next week.",
+      "empty": "Nothing scheduled for the next 7 days.",
       "noAccess": "Sona cannot see your calendar.",
-      "noAccessHint": "Turn on \"Use my calendar\" in Meetings settings, then allow full access when macOS asks. Whatever macOS Calendar already shows (Google, iCloud, Outlook) comes with it.",
+      "noAccessFix": "Turn on “Use my calendar” in Settings",
       "unavailable": "This system has no calendar Sona can read.",
-      "attendees": "Attendees",
-      "you": "You",
-      "attendeesMore": "+{{count}}",
       "recurring": "Repeats",
       "seriesOptions": "Series options for {{title}}",
       "alwaysRecord": "Always record this series",
-      "alwaysRecordNeedsSource": "Choose a capture source above first.",
       "template": "Notes template",
       "templateDefault": "App default",
       "digest": "Include in the evening digest"
@@ -2590,10 +2511,11 @@
     "unpaired": "Pair the Sona agent in Settings",
     "close": "Close chat",
     "history": "Recent chats",
-    "historyEmpty": "No earlier chats yet.",
+    "historyEmpty": "Chats you start appear here.",
     "newChat": "New chat",
-    "empty": "Ask what you said or agreed, or what to change.",
+    "empty": "Ask what was said, what you owe, or who someone is.",
     "placeholder": "Ask anything",
+    "placeholderConfig": "Change a setting",
     "inputLabel": "Ask about Sona",
     "send": "Send",
     "stop": "Stop",
@@ -2689,8 +2611,22 @@
       "shortcutAction": "Change dictation shortcut",
       "setShortcutAction": "Set a shortcut"
     },
+    "needsYou": {
+      "title": "Needs you",
+      "empty": "Nothing needs you.",
+      "openMeeting": "Open meeting {{title}}",
+      "loadError": "Couldn't load this list."
+    },
+    "week": {
+      "title": "This week",
+      "dictations_one": "1 dictation",
+      "dictations_other": "{{count}} dictations",
+      "words_one": "1 word",
+      "words_other": "{{count}} words",
+      "streak_one": "1-day streak",
+      "streak_other": "{{count}}-day streak"
+    },
     "activity": {
-      "title": "Activity",
       "dictations": "Dictations",
       "words": "Words",
       "streak": "Streak",
@@ -2698,16 +2634,19 @@
       "rangeNext": "Next 7 days",
       "dictationsAria": "Dictations per day, highest {{count}} on {{day}}",
       "wordsAria": "Words per day, {{count}} total, ending at {{last}}",
-      "days_one": "{{count}} day",
-      "days_other": "{{count}} days",
       "streakAria_one": "Current streak, {{count}} day. Active days this week: {{days}}.",
       "streakAria_other": "Current streak, {{count}} days. Active days this week: {{days}}."
+    },
+    "recent": {
+      "title": "Recent",
+      "today_one": "{{count}} today",
+      "today_other": "{{count}} today",
+      "empty": "Nothing yet",
+      "emptyHint": "People, words and follow-ups Sona files after a meeting show up here."
     },
     "update": {
       "available": "Sona {{latest}} is available. This install is on {{current}}.",
       "dismiss": "Dismiss",
-      "failed": "Could not check for updates.",
-      "failedWithReason": "Could not check for updates: {{reason}}",
       "view": "View release"
     }
   },
@@ -2820,13 +2759,12 @@
       "dismiss": "Dismiss",
       "confirm": "Confirm",
       "loadError": "Couldn't load people.",
-      "empty": "No people yet.",
+      "empty": "People from your meetings appear here.",
       "meetings": "{{count}} meetings"
     },
     "detail": {
       "nameLabel": "Person name",
       "rename": "Rename",
-      "personActions": "Person actions",
       "deletePerson": "Delete person",
       "removeVoiceProfile": "Remove voice profile",
       "removeVoiceProfileTitle": "Remove voice profile?",
@@ -2845,23 +2783,19 @@
       "carriedSince": "Open since {{date}}",
       "noOpenLoops": "Nothing is still open.",
       "commitments": "Commitments",
-      "noCommitments": "No commitments recorded.",
       "meetingsTogether": "Meetings together",
       "noMeetings": "No linked meetings.",
       "series": "Meeting {{number}} in series",
-      "meetingActions": "Meeting actions",
       "unlink": "Unlink meeting",
       "unlinkTitle": "Unlink this meeting?",
       "unlinkDescription": "Remove {{meeting}} from this person?",
       "documents": "Documents",
       "importDocument": "Import document",
       "documentsLoadError": "Documents couldn't be loaded.",
-      "noDocuments": "No imported documents.",
       "deleteDocument": "Delete document",
       "deleteDocumentTitle": "Delete this document?",
       "deleteDocumentDescription": "Delete {{document}} from Sona's documents?",
       "cadence": "Meeting cadence",
-      "lastMeeting": "Last meeting",
       "talkShare": "Talk share",
       "cadenceAria": "Meetings by month: {{values}}",
       "documentFilter": "Text documents",
@@ -2889,7 +2823,6 @@
     },
     "summary": {
       "title": "About",
-      "empty": "No summary yet.",
       "regenerate": "Regenerate",
       "provenance": "Written by {{model}} on {{date}}"
     },
@@ -2945,15 +2878,7 @@
       "copy": "Copy",
       "copied": "Copied",
       "transcribeAgain": "Transcribe again",
-      "delete": "Delete",
-      "more": "More actions"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "Kept forever",
-      "keptDays": "Kept {{days}} days",
-      "change": "change in Settings"
+      "delete": "Delete"
     }
   },
   "peopleV2": {
@@ -2962,8 +2887,7 @@
     },
     "detail": {
       "openLoops": "Open loops",
-      "howSonaKnows": "Why Sona links this person",
-      "noEvidence": "Nothing links this person to a meeting yet."
+      "howSonaKnows": "Why Sona links this person"
     }
   },
   "modesV2": {
@@ -3098,7 +3022,7 @@
       "dictation": "Dictation",
       "keepDictations": "Dictations to keep",
       "readsFromOtherApps": "What Sona may read from other apps",
-      "workflows": "What Sona does after a meeting",
+      "workflows": "What Sona does on its own",
       "sync": "Sync",
       "leavesThisMac": "What leaves this Mac",
       "agents": "Agents",
@@ -3108,11 +3032,9 @@
     },
     "apps": {
       "label": "Meeting apps",
-      "browsersAutomatic": "A call in a browser tab is noticed without being listed here.",
       "runningNow": "Running now",
       "autoRecord": "Record automatically",
       "autoRecordSources": "Record automatically captures your microphone and this Mac's audio output whenever that app is in a call.",
-      "autoRecordConsent": "Some places require everyone on a call to agree to recording.",
       "add": "Add an app",
       "addTitle": "Add a meeting app",
       "addDescription": "Sona needs the app ID, which you can find in the app's About window or with `osascript -e 'id of app \"Name\"'`.",
@@ -3188,14 +3110,12 @@
       }
     },
     "feed": {
-      "title": "What Sona noticed",
       "spokenPunctuation": "You say {{spoken}} a lot. Write it as {{written}}?",
       "vocabularyCorrection": "You keep changing {{spoken}} to {{written}}. Learn it?",
       "modeHabit": "You reach for {{mode}} by shortcut most days. Make it your default?",
       "retryRate": "Dictations on {{subject}} get retried {{times}}× more often than the rest.",
       "lostCaptureRate": "Dictations on {{subject}} end cut off or silent {{times}}× more often than the rest.",
       "inputLevel": "{{percent}}% of your recordings came in quiet. Check your microphone level?",
-      "example": "“{{text}}”",
       "accept": "Yes",
       "dismiss": "No thanks",
       "evidence_one": "1 time, across {{days}} days",

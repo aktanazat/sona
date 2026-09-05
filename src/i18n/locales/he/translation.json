@@ -41,14 +41,10 @@
     "subtitle": "המודלים פועלים במחשב Mac זה ומאזנים בין דיוק למהירות.",
     "existingModelsTitle": "מודלים תואמים",
     "downloadModelsTitle": "זמינים להורדה",
-    "showAllModels": "הצג את כל {{total}} המודלים",
-    "showFewerModels": "הצג פחות מודלים",
+    "otherModels": "מודלים אחרים",
+    "moreModels": "עוד {{total}}",
     "recommended": "מומלץ",
     "customModelDescription": "לא נתמך באופן רשמי",
-    "modelCard": {
-      "accuracy": "דיוק",
-      "speed": "מהירות"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "נדרש כדי להקליד את הטקסט המתומלל לתוך האפליקציות שלך."
       },
       "grant": "תן הרשאה",
-      "granted": "ניתנה",
       "waiting": "ממתין…",
       "allGranted": "שתי ההרשאות ניתנו",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "טוען את {{modelName}}…",
     "loadingGeneric": "טוען…",
     "deleteModel": "מחק את {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "ביטול",
     "cancelDownload": "בטל הורדה",
     "capabilities": {
-      "languageSelection": "תומך בכמה שפות קלט",
-      "singleLanguage": "תומך רק בשפה הזו",
       "languageCount": "{{total}} שפות",
       "languageOnly": "{{language}} בלבד",
-      "translation": "יכול לתרגם לאנגלית",
-      "translate": "תרגם לאנגלית",
-      "streaming": "מציג תמלול חי תוך כדי דיבור"
+      "translate": "תרגם לאנגלית"
     }
   },
   "settings": {
@@ -669,8 +659,13 @@
       },
       "title": "היסטוריה",
       "openFolder": "פתח את תיקיית ההקלטות",
+      "import": "ייבוא",
+      "showRawText": "הצג טקסט גולמי",
+      "emptyRecordings_one": "הקלטה ריקה אחת",
+      "emptyRecordings_two": "שתי הקלטות ריקות",
+      "emptyRecordings_other": "{{count}} הקלטות ריקות",
       "loading": "טוען היסטוריה…",
-      "empty": "עדיין אין הקלטות.",
+      "empty": "הכתבות שתבצע יופיעו כאן.",
       "copyToClipboard": "העתק תמלול ללוח",
       "copyFailed": "לא ניתן להעתיק את התמלול",
       "save": "שמור רשומה",
@@ -687,11 +682,6 @@
       "retry": "נסה שוב",
       "saveError": "לא ניתן לעדכן את מצב השמירה. נסה שוב.",
       "postProcessEmpty": "העיבוד שלאחר מכן לא הפיק טקסט, ולכן זהו התמלול הגולמי.",
-      "textView": {
-        "label": "תצוגת תמליל",
-        "processed": "מעובד",
-        "raw": "גולמי"
-      },
       "receipts": {
         "showDetails": "הצג פרטי הרצה",
         "hideDetails": "הסתר פרטי הרצה",
@@ -800,7 +790,6 @@
         "saveError": "לא ניתן לשמור את התיקון. נסה שוב."
       },
       "audioImport": {
-        "start": "תמלול קובץ",
         "fileFilter": "קובצי שמע ווידאו",
         "jobs": "ייבואי קבצים",
         "status": {
@@ -982,7 +971,7 @@
         "license": "רישיון MIT. זכויות יוצרים 2025 CJ Pais."
       },
       "updates": {
-        "autoDescription": "שואל את GitHub לגבי הגרסה האחרונה. Sona לעולם לא מתקין דבר בעצמו.",
+        "autoDescription": "Sona לעולם לא מתקין דבר בעצמו.",
         "autoLabel": "בדוק עדכונים אוטומטית",
         "check": "בדוק עכשיו",
         "checking": "בודק…",
@@ -1365,7 +1354,7 @@
         "title": "נתונים במכשיר הזה",
         "historyLimit": {
           "label": "מגבלת היסטוריה",
-          "description": "שמור מספר זה של רשומות היסטוריה אחרונות. הגדר 0 כדי לבטל שמירת היסטוריה."
+          "description": "הגדר 0 כדי לבטל שמירת היסטוריה."
         },
         "retention": {
           "label": "שמירת הקלטות",
@@ -1607,6 +1596,7 @@
           "invalid_configuration": "Sona לא תשתמש בכתובת או במפתח האלה.",
           "secret_unavailable": "לא ניתן היה לקרוא את המפתח של המחשב הזה.",
           "untrusted_response": "התגובה לא הייתה חתומה על ידי השרת המצומד.",
+          "workspace_mismatch": "התשובה לא תאמה את השאלה שנשאלה.",
           "remote_rejected": "השרת סירב לבקשה.",
           "ownership_rejected": "השרת השיב עבור אדם אחר."
         }
@@ -1616,7 +1606,6 @@
       "title": "תהליכי עבודה",
       "loadError": "לא ניתן לטעון את תהליכי העבודה.",
       "updateError": "לא ניתן לעדכן את תהליך העבודה.",
-      "empty": "אין תהליכי עבודה זמינים.",
       "neverRun": "טרם הופעל",
       "toggleLabel": "הפעלת {{name}}",
       "items": {
@@ -1686,13 +1675,6 @@
         "accept": "הוספה",
         "dismiss": "דחייה"
       },
-      "overview": {
-        "whatSonaDid": "מה Sona עשתה",
-        "openLoops": "שאלות פתוחות",
-        "openMeeting": "פתיחת הפגישה {{title}}",
-        "loadError": "לא ניתן לטעון את הכרטיס הזה.",
-        "retry": "נסה שוב"
-      },
       "runLog": {
         "title": "פעילות",
         "empty": "אין פעילות עדיין.",
@@ -1711,9 +1693,9 @@
       },
       "automations": {
         "title": "אחרי פגישה",
-        "description": "פעולות שרצות על ה-Mac הזה כשההערות של סדרה נכתבות. כבויות בכל סדרה עד שתדליק אחת.",
+        "description": "פעולות שרצות על ה-Mac הזה כשההערות של סדרה נכתבות.",
         "loading": "קוראים את הסדרות שלך…",
-        "empty": "אין עדיין סדרות מוקלטות. הקלט פגישה מאירוע ביומן והיא תופיע כאן.",
+        "empty": "הקלט פגישה מאירוע ביומן כדי לראות כאן את האוטומציות שלה.",
         "seriesFact": "{{count}} הוקלטו · לאחרונה {{when}}",
         "reminders": "הוסף את ההתחייבויות הפתוחות שלי לתזכורות",
         "remindersHint": "כותב את מה שעוד עליך לרשימה בשם Sona. לעולם לא נקרא ממנה דבר בחזרה.",
@@ -1768,6 +1750,8 @@
     "pause": "השהה",
     "seek": "מקום הנגינה",
     "resetSetting": "איפוס {{name}}",
+    "more": "עוד",
+    "none": "ללא",
     "day": {
       "today": "היום",
       "yesterday": "אתמול"
@@ -1775,7 +1759,7 @@
   },
   "commandPalette": {
     "open": "חיפוש",
-    "placeholder": "חפש או בחר פעולה",
+    "placeholder": "חפש או שאל",
     "navigation": "ניווט",
     "actions": "פעולות",
     "noResults": "לא נמצאו תוצאות",
@@ -1786,7 +1770,6 @@
     "openAgent": "פתח סוכן",
     "runPrompt": "הרצת פרומפט",
     "newPrompt": "פרומפט חדש",
-    "esc": "esc",
     "search": {
       "meetings": "פגישות",
       "people": "אנשים",
@@ -1862,9 +1845,8 @@
     "recordingFailed": "לא ניתן להתחיל את ההקלטה: {{error}}. נסה שוב.",
     "modelLoadFailed": "לא ניתן לטעון את {{model}}. נסה שוב.",
     "modelLoadFailedUnknown": "מודל לא ידוע",
-    "pasteFailedTitle": "לא ניתן להדביק את התמלול",
     "pasteFailed": "התמלול לא הודבק באפליקציה הפעילה. מקד את הסמן בשדה טקסט ונסה שוב.",
-    "transcriptionFailedTitle": "לא ניתן לתמלל",
+    "transcriptionFailed": "לא ניתן לתמלל. נסה שוב.",
     "noModelSelected": "לא נבחר דגם תמלול. בחר אחד ב־Settings > Models.",
     "commandNoSelection": "סמן את הטקסט שברצונך לשנות, אחר כך החזק את קיצור הפקודה ואמור את השינוי.",
     "commandRewriteUnavailable": "הניסוח מחדש לא החזיר שום דבר, כך שהסימון שלך נשאר כפי שהיה. בדוק את הספק ב־Settings > Post-processing ונסה שוב.",
@@ -1888,7 +1870,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "עוצמת הקלט",
     "state": {
       "starting": "מתחיל",
       "listening": "מקשיב",
@@ -1953,13 +1934,8 @@
       "unknown": "בודק"
     },
     "health": {
-      "not_started": "לא התחיל",
       "starting": "מתחיל",
-      "healthy": "תקין",
-      "paused": "מושהה",
-      "degraded": "ירוד",
-      "failed": "נכשל",
-      "stopped": "נעצר"
+      "failed": "נכשל"
     },
     "completeness": {
       "not_started": "לא התחיל",
@@ -1980,17 +1956,12 @@
       }
     },
     "start": {
-      "label": "התחל פגישה",
-      "action": "התחל הקלטה",
+      "action": "הקלטה",
       "starting": "מתחיל…",
-      "assurance": "מקליט את הקול של ה-Mac שלך מקומית. שום דבר לא מצטרף לשיחה.",
-      "capture": "לכידה",
-      "noSources": "בחר מקור אחד לפחות.",
-      "localOnly": "מקומי בלבד",
-      "retention": "נשמר: {{policy}}"
+      "assurance": "מקליט את הקול של ה-Mac הזה מקומית. שום דבר לא מצטרף לשיחה."
     },
     "import": {
-      "action": "ייבוא",
+      "action": "ייבוא הקלטה",
       "recordingFilter": "הקלטה",
       "transcriptFilter": "ייצוא תמלול"
     },
@@ -1998,12 +1969,14 @@
       "title": "ההקלטה לא התחילה",
       "readyTitle": "מוכן להקלטה",
       "recordAnyway": "הקלט בלעדיו",
-      "recordAnywayHint": "הפגישה מסומנת כחלקית, והמקור החסר מצוין בה."
+      "recordAnywayHint": "הפגישה מסומנת כחלקית, והמקור החסר מצוין בה.",
+      "sources": "מה יוקלט"
     },
     "actions": {
       "back": "חזרה",
       "delete": "מחק פגישה",
       "discard": "זרוק",
+      "openRecordings": "פתח את תיקיית ההקלטות",
       "pause": "השהה",
       "refresh": "רענן",
       "resume": "המשך",
@@ -2019,10 +1992,7 @@
       "remoteUnavailable": "עיבוד מרוחק אינו זמין בגרסה הזו של Sona, ולכן כל פגישה מתומללת ומסוכמת ב-Mac הזה."
     },
     "preflight": {
-      "storage": "אחסון",
-      "storageAvailable": "אחסון הפגישות המוצפן זמין.",
       "storageUnavailable": "אחסון הפגישות המוצפן אינו זמין.",
-      "localModel": "מודל מקומי",
       "localModelDescription": "העיבוד נשאר מקומי כשיש מודל מקומי זמין.",
       "starting": "מתחיל את ההקלטה…",
       "refreshing": "בודק…"
@@ -2035,39 +2005,30 @@
       "elapsed": "זמן שעבר",
       "microphoneOnlyPartial": "מוקלט רק המיקרופון. שמע המערכת אינו זמין, ולכן הפגישה הזו תהיה חלקית.",
       "partialCapture": "חסר חלק מהשמע. בדוק את הפערים לפני שתסתמך על הסיכומים שנוצרו.",
-      "inputs": "קלטים",
-      "signal": "אות",
-      "signalUnavailable": "{{source}} לא מדווח על העוצמה שלו.",
-      "notReported": "לא דווח",
-      "durabilityLag": "נשמר לדיסק",
-      "behind": "בפיגור של {{duration}}",
-      "progress": "התקדמות התמלול",
       "transcript": "תמלול",
-      "asrLag": "פיגור בתמלול",
-      "storage": "אחסון",
-      "storageHealthy": "האחסון המקומי המוצפן תקין.",
+      "transcriptEmpty": "מילים מופיעות כאן ברגע שהן מזוהות.",
       "storageUnavailable": "האחסון דורש טיפול.",
-      "processing": "בעיבוד",
-      "manualNote": "הערה ידנית",
+      "manualNote": "הערה לרגע הזה",
       "notePlaceholder": "כתוב הערה לרגע הזה",
-      "addNote": "הוסף הערה עם חותמת זמן"
+      "addNote": "הוסף הערה"
     },
     "recovery": {
-      "title": "פגישות שלא הושלמו",
-      "finalize": "לסיים לשמור"
+      "title": "פגישות שלא הושלמו"
     },
     "trash": {
       "title": "נמחקו לאחרונה",
+      "empty": "פגישות שתמחק יופיעו כאן.",
       "expires": "נמחק {{deleted}} · ייעלם בעוד {{count}} ימים",
       "expiresToday": "נמחק {{deleted}} · ייעלם היום",
       "restore": "שחזור",
+      "restoreItem": "שחזור “{{title}}”",
       "restored": "{{title}} חזרה.",
       "restoreFailed": "לא ניתן היה לשחזר את הפגישה הזו."
     },
     "history": {
-      "title": "היסטוריית פגישות",
+      "title": "מוקלטות",
       "loading": "טוען היסטוריית פגישות…",
-      "emptyTitle": "אין עדיין פגישות"
+      "emptyTitle": "פגישות שתקליט יופיעו כאן."
     },
     "retention": {
       "title": "שמירה",
@@ -2152,10 +2113,10 @@
     "review": {
       "meetingTitle": "כותרת הפגישה",
       "editTitle": "שינוי שם הפגישה",
+      "rename": "שינוי שם",
+      "backToList": "פגישות",
       "noStartTime": "הפגישה הזאת לא רשמה שעת התחלה.",
-      "started": "התחילה ב־{{date}}",
       "partialRecording": "הקלטה חלקית",
-      "status": "מצב הלכידה",
       "capture": "איך זה הוקלט",
       "timeline": "ציר הזמן של האודיו והפערים",
       "timeUnknown": "שעה לא ידועה",
@@ -2196,18 +2157,14 @@
       "notePlaceholder": "הוסף הערה ידנית",
       "addNote": "הוסף הערה",
       "editNote": "עריכת ההערה הזאת",
-      "generatedNotes": "הערות שנוצרו",
       "regenerate": "צור מחדש",
       "remoteCancellationPending": "הביטול המרוחק ממתין. מחיקה מקומית אינה טוענת שהעותק המרוחק נמחק.",
       "cancelRemote": "בטל עיבוד מרוחק",
       "remoteCancellationRequested": "התבקש ביטול",
-      "export": "ייצוא",
-      "exportMarkdown": "ייצוא Markdown",
-      "exportJson": "ייצוא JSON",
+      "exportMarkdown": "ייצוא הערות (Markdown)",
+      "exportJson": "ייצוא הערות (JSON)",
       "exportComplete": "הפגישה יוצאה",
-      "moreActions": "עוד",
       "citation": "תמלול {{time}}",
-      "noGeneratedNotes": "עדיין אין הערות שנוצרו.",
       "topics": "נושאים",
       "nothingRecorded": "לא נרשמו החלטות, פעולות לביצוע, שאלות או סיכונים.",
       "templateName": {
@@ -2234,10 +2191,9 @@
         "manualNote": "הערה ידנית",
         "title": "כותרת הפגישה"
       },
-      "generationFailedDescription": "התמלול וההערות הידניות שלך לא נפגעים. צור מחדש לאחר שהסיבה תטופל.",
-      "noGeneratedNotesDescription": "הערות שנוצרו נגזרות מהתמלול, ולכן ניתן לבנות אותן מחדש בכל עת.",
+      "generationFailedDescription": "צור מחדש לאחר שהסיבה תטופל.",
+      "noGeneratedNotesDescription": "יצירה מחדש כותבת הערות מהתמלול הזה.",
       "processingDescription": "הערות שנוצרו ותשובות מקומיות יופיעו לאחר שהתמלול יושלם.",
-      "processingTitle": "Sona עדיין מעבד את הפגישה הזו",
       "tabs": {
         "insights": "תובנות",
         "ledger": "רישום",
@@ -2246,15 +2202,10 @@
       "tabsLabel": "מקטעי סקירת פגישה"
     },
     "ledger": {
-      "title": "רישום",
-      "emptyTitle": "עדיין לא נקרא רישום מהפגישה הזו",
-      "emptyDescription": "הרישום נכתב יחד עם הסיכום שנוצר. צור את הסיכום מחדש כדי לקרוא את השיחה הזו לפי נושאים.",
+      "emptyDescription": "צור את הסיכום מחדש כדי לקרוא את השיחה הזו לפי נושאים.",
       "exportHtml": "ייצוא עמוד הרישום",
       "exported": "הרישום נכתב אל {{path}}",
       "exportMissing": "לפגישה הזו אין רישום לייצוא. צור קודם את הסיכום מחדש.",
-      "statThreads": "נושאים שהוכרעו",
-      "statReceipts": "ציטוטים",
-      "receiptsVerified": "אומתו",
       "receiptsDegraded": "{{threads}} שרשורים ו-{{commitments}} התחייבויות הוסרו",
       "threads": "נושאים",
       "asideThread": "הערת אגב",
@@ -2265,7 +2216,7 @@
       "stances": "עמדות",
       "noStances": "לא נתפסה ולא נזנחה שום עמדה.",
       "trust": "עד כמה אפשר לסמוך על זה",
-      "trustMeasured": "התורים, הזמנים, ספירות המילים וחלוקת זמן הדיבור באים מהתמלול. כל מצב הוא שיקול דעת שנקרא מהציטוט שלידו: בדוק את הציטוט לפני שאתה פועל לפיו.",
+      "trustMeasured": "כל מצב הוא שיקול דעת שנקרא מהציטוט שלידו.",
       "unattributed": "בלי שיוך",
       "columnAt": "בזמן",
       "columnDirection": "כיוון",
@@ -2326,9 +2277,7 @@
     "list": {
       "searchLabel": "חיפוש פגישות",
       "searchPlaceholder": "חיפוש לפי כותרת",
-      "clearFilters": "נקה מסננים",
-      "noMatchesFiltered": "אין פגישות מתאימות",
-      "noMatchesFilteredDescription": "שום דבר לא מתאים למסננים האלה. סונה עברה על כל פגישה ששמרה, לא רק על העמוד הזה.",
+      "noMatches": "אין כותרת פגישה שתואמת ל“{{query}}”.",
       "rowActions": "פעולות לפגישה",
       "exportMarkdown": "ייצוא סיכום (Markdown)",
       "exportJson": "ייצוא סיכום (JSON)",
@@ -2337,27 +2286,7 @@
       "previousPage": "חדשות יותר",
       "nextPage": "ישנות יותר",
       "status": {
-        "live": "בזמן אמת",
-        "ready": "מוכן",
-        "processing": "בעיבוד",
         "needs_attention": "דורש טיפול"
-      },
-      "filters": {
-        "label": "סינון פגישות",
-        "statusKey": "מצב",
-        "timeKey": "זמן",
-        "status": {
-          "any": "הכול",
-          "ready": "מוכן",
-          "processing": "בעיבוד",
-          "failed": "נכשל"
-        },
-        "time": {
-          "any": "הכול",
-          "today": "היום",
-          "last_7_days": "7 ימים",
-          "last_30_days": "30 יום"
-        }
       }
     },
     "status": {
@@ -2371,7 +2300,6 @@
     },
     "analytics": {
       "title": "שיחה",
-      "noSpeech": "לא תומלל שום דיבור, כך שאין מה למדוד.",
       "longestMonologue": "המונולוג הארוך ביותר",
       "patience": "סבלנות",
       "patienceDetail": "חציון ההשתקה לפני תשובה",
@@ -2388,7 +2316,7 @@
       "trackersTitle": "מעקב מילות מפתח",
       "addTracker": "הוסף מעקב",
       "removeTracker": "הסר מעקב",
-      "noTrackers": "אין עוד מעקבים. הוסף אחד כדי להתחיל לספור כמה פעמים ביטוי עולה.",
+      "noTrackers": "הוסף מעקב כדי להתחיל לספור כמה פעמים ביטוי עולה.",
       "trackerName": "שם",
       "trackerPatterns": "הנחה, המחיר הטוב ביותר, יקר מדי",
       "trackerPatternsLabel": "ביטויים מופרדים בפסיקים",
@@ -2528,8 +2456,7 @@
       "actions": {
         "skip": "דלג"
       },
-      "linkFailed": "Sona לא הצליחה לפתוח את הקישור.",
-      "skippedNote": "דילוג מסתיר את ההצעה מכאן. Sona ממשיכה לראות את השיחה עד שההצעה תפוג."
+      "linkFailed": "Sona לא הצליחה לפתוח את הקישור."
     },
     "seriesTemplate": {
       "use": "השתמש בתבנית הזו לסדרה הזו",
@@ -2539,17 +2466,13 @@
     "upcoming": {
       "title": "הקרובים",
       "loading": "קורא את היומן שלך…",
-      "empty": "אין דבר מתוכנן לשבוע הקרוב.",
+      "empty": "אין דבר מתוכנן לשבעת הימים הקרובים.",
       "noAccess": "Sona לא רואה את היומן שלך.",
-      "noAccessHint": "הפעל את \"השתמש בלוח השנה שלי\" בהגדרות הפגישות, ואז אשר גישה מלאה כש-macOS מבקש. כל מה שלוח השנה של macOS כבר מציג (Google, iCloud, Outlook) מגיע איתו.",
+      "noAccessFix": "הפעל את “השתמש בלוח השנה שלי” בהגדרות",
       "unavailable": "במערכת הזו אין יומן ש-Sona יכולה לקרוא.",
-      "attendees": "משתתפים",
-      "you": "את/ה",
-      "attendeesMore": "+{{count}}",
       "recurring": "חוזר",
       "seriesOptions": "אפשרויות הסדרה עבור {{title}}",
       "alwaysRecord": "תמיד להקליט את הסדרה הזו",
-      "alwaysRecordNeedsSource": "בחר תחילה מקור הקלטה למעלה.",
       "template": "תבנית סיכום",
       "templateDefault": "ברירת המחדל של האפליקציה",
       "digest": "לכלול בסיכום הערב"
@@ -2596,10 +2519,11 @@
     "unpaired": "התאם את סוכן Sona בהגדרות",
     "close": "סגירת הצ'אט",
     "history": "צ'אטים אחרונים",
-    "historyEmpty": "אין עדיין צ'אטים קודמים.",
+    "historyEmpty": "צ'אטים שתתחיל יופיעו כאן.",
     "newChat": "צ'אט חדש",
-    "empty": "אפשר לשאול מה אמרת או על מה הסכמת, או מה לשנות.",
+    "empty": "אפשר לשאול מה נאמר, מה עוד מוטל עליך או מי מישהו הוא.",
     "placeholder": "שאלו כל דבר",
+    "placeholderConfig": "שינוי הגדרה",
     "inputLabel": "שאל על Sona",
     "send": "שלח",
     "stop": "עצירה",
@@ -2695,8 +2619,25 @@
       "shortcutAction": "שנה את קיצור ההכתבה",
       "setShortcutAction": "הגדר קיצור"
     },
+    "needsYou": {
+      "title": "מחכה לך",
+      "empty": "שום דבר לא מחכה לך.",
+      "openMeeting": "פתיחת הפגישה {{title}}",
+      "loadError": "לא היה ניתן לטעון את הרשימה הזו."
+    },
+    "week": {
+      "title": "השבוע",
+      "dictations_one": "הכתבה אחת",
+      "dictations_two": "שתי הכתבות",
+      "dictations_other": "{{count}} הכתבות",
+      "words_one": "מילה אחת",
+      "words_two": "שתי מילים",
+      "words_other": "{{count}} מילים",
+      "streak_one": "רצף של יום אחד",
+      "streak_two": "רצף של יומיים",
+      "streak_other": "רצף של {{count}} ימים"
+    },
     "activity": {
-      "title": "פעילות",
       "dictations": "הכתבות",
       "words": "מילים",
       "streak": "רצף",
@@ -2704,18 +2645,21 @@
       "rangeNext": "7 הימים הבאים",
       "dictationsAria": "הכתבות ליום, השיא {{count}} ביום {{day}}",
       "wordsAria": "מילים ליום, {{count}} בסך הכול, מסתיים ב-{{last}}",
-      "days_one": "יום אחד",
-      "days_two": "יומיים",
-      "days_other": "{{count}} ימים",
       "streakAria_one": "רצף נוכחי, יום אחד. ימים פעילים השבוע: {{days}}.",
       "streakAria_two": "רצף נוכחי, יומיים. ימים פעילים השבוע: {{days}}.",
       "streakAria_other": "רצף נוכחי, {{count}} ימים. ימים פעילים השבוע: {{days}}."
     },
+    "recent": {
+      "title": "אחרונים",
+      "today_one": "{{count}} היום",
+      "today_two": "{{count}} היום",
+      "today_other": "{{count}} היום",
+      "empty": "עדיין אין כלום",
+      "emptyHint": "אנשים, מילים ומשימות המשך ש-Sona מתייקת אחרי פגישה יופיעו כאן."
+    },
     "update": {
       "available": "Sona {{latest}} זמין. ההתקנה הזו על {{current}}.",
       "dismiss": "סגור",
-      "failed": "לא ניתן היה לבדוק עדכונים.",
-      "failedWithReason": "לא ניתן היה לבדוק עדכונים: {{reason}}",
       "view": "הצג גרסה"
     }
   },
@@ -2829,13 +2773,12 @@
       "dismiss": "דחייה",
       "confirm": "אישור",
       "loadError": "לא ניתן לטעון את האנשים.",
-      "empty": "עדיין אין אנשים.",
+      "empty": "אנשים מהפגישות שלך יופיעו כאן.",
       "meetings": "{{count}} פגישות"
     },
     "detail": {
       "nameLabel": "שם האדם",
       "rename": "שינוי שם",
-      "personActions": "פעולות עבור האדם",
       "deletePerson": "מחיקת אדם",
       "removeVoiceProfile": "הסרת פרופיל קול",
       "removeVoiceProfileTitle": "להסיר את פרופיל הקול?",
@@ -2854,23 +2797,19 @@
       "carriedSince": "פתוח מאז {{date}}",
       "noOpenLoops": "לא נותר דבר פתוח.",
       "commitments": "התחייבויות",
-      "noCommitments": "לא נרשמו התחייבויות.",
       "meetingsTogether": "פגישות משותפות",
       "noMeetings": "אין פגישות מקושרות.",
       "series": "פגישה {{number}} בסדרה",
-      "meetingActions": "פעולות פגישה",
       "unlink": "ניתוק פגישה",
       "unlinkTitle": "לנתק את הפגישה הזאת?",
       "unlinkDescription": "להסיר את {{meeting}} מהאדם הזה?",
       "documents": "מסמכים",
       "importDocument": "ייבוא מסמך",
       "documentsLoadError": "לא ניתן לטעון את המסמכים.",
-      "noDocuments": "אין מסמכים מיובאים.",
       "deleteDocument": "מחיקת מסמך",
       "deleteDocumentTitle": "למחוק את המסמך הזה?",
       "deleteDocumentDescription": "למחוק את {{document}} מתוך מסמכי Sona?",
       "cadence": "תדירות פגישות",
-      "lastMeeting": "פגישה אחרונה",
       "talkShare": "חלק יחסי בדיבור",
       "cadenceAria": "פגישות לפי חודש: {{values}}",
       "documentFilter": "מסמכי טקסט",
@@ -2898,7 +2837,6 @@
     },
     "summary": {
       "title": "אודות",
-      "empty": "אין עדיין סיכום.",
       "regenerate": "יצירה מחדש",
       "provenance": "נכתב על ידי {{model}} בתאריך {{date}}"
     },
@@ -2960,15 +2898,7 @@
       "copy": "העתק",
       "copied": "הועתק",
       "transcribeAgain": "תמלל שוב",
-      "delete": "מחק",
-      "more": "פעולות נוספות"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "נשמר לתמיד",
-      "keptDays": "נשמר {{days}} ימים",
-      "change": "שינוי בהגדרות"
+      "delete": "מחק"
     }
   },
   "peopleV2": {
@@ -2977,8 +2907,7 @@
     },
     "detail": {
       "openLoops": "שאלות פתוחות",
-      "howSonaKnows": "למה Sona מקשרת את האדם הזה",
-      "noEvidence": "עדיין שום דבר לא מקשר את האדם הזה לפגישה."
+      "howSonaKnows": "למה Sona מקשרת את האדם הזה"
     }
   },
   "modesV2": {
@@ -3113,7 +3042,7 @@
       "dictation": "הכתבה",
       "keepDictations": "כמה הכתבות לשמור",
       "readsFromOtherApps": "מה Sona רשאית לקרוא מאפליקציות אחרות",
-      "workflows": "מה Sona עושה אחרי פגישה",
+      "workflows": "מה Sona עושה מעצמה",
       "sync": "סנכרון",
       "leavesThisMac": "מה יוצא מה-Mac הזה",
       "agents": "סוכנים",
@@ -3123,11 +3052,9 @@
     },
     "apps": {
       "label": "אפליקציות פגישה",
-      "browsersAutomatic": "שיחה בלשונית של דפדפן מזוהה גם בלי להופיע כאן.",
       "runningNow": "פועלות כעת",
       "autoRecord": "הקלטה אוטומטית",
       "autoRecordSources": "הקלטה אוטומטית מקליטה את המיקרופון שלך ואת פלט השמע של ה‑Mac הזה בכל פעם שהאפליקציה הזו נמצאת בשיחה.",
-      "autoRecordConsent": "במקומות מסוימים נדרשת הסכמה של כל המשתתפים בשיחה להקלטה.",
       "add": "הוסף אפליקציה",
       "addTitle": "הוספת אפליקציית פגישה",
       "addDescription": "Sona זקוק למזהה האפליקציה, שניתן למצוא בחלון 'אודות' של האפליקציה או באמצעות `osascript -e 'id of app \"Name\"'`.",
@@ -3205,14 +3132,12 @@
       }
     },
     "feed": {
-      "title": "מה Sona שמה לב",
       "spokenPunctuation": "אתה אומר {{spoken}} הרבה. לכתוב את זה כ-{{written}}?",
       "vocabularyCorrection": "אתה משנה שוב ושוב את {{spoken}} ל-{{written}}. ללמוד את זה?",
       "modeHabit": "אתה בוחר ב-{{mode}} דרך קיצור הדרך ברוב הימים. להפוך אותו לברירת המחדל?",
       "retryRate": "הכתבות דרך {{subject}} נעשות מחדש פי {{times}} יותר מהשאר.",
       "lostCaptureRate": "הכתבות דרך {{subject}} מסתיימות קטועות או שקטות פי {{times}} יותר מהשאר.",
       "inputLevel": "‏{{percent}}% מההקלטות שלך הגיעו חלשות. לבדוק את עוצמת המיקרופון?",
-      "example": "”{{text}}“",
       "accept": "כן",
       "dismiss": "לא, תודה",
       "evidence_one": "פעם אחת, על פני {{days}} ימים",

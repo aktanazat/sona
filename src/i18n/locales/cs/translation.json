@@ -41,14 +41,10 @@
     "subtitle": "Modely běží na tomto Macu a volí kompromis mezi přesností a rychlostí.",
     "existingModelsTitle": "Kompatibilní modely",
     "downloadModelsTitle": "Dostupné ke stažení",
-    "showAllModels": "Zobrazit všech {{total}} modelů",
-    "showFewerModels": "Zobrazit méně modelů",
+    "otherModels": "Ostatní modely",
+    "moreModels": "Dalších {{total}}",
     "recommended": "Doporučeno",
     "customModelDescription": "Oficiálně nepodporováno",
-    "modelCard": {
-      "accuracy": "přesnost",
-      "speed": "rychlost"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "Potřebný pro psaní přepsaného textu do vašich aplikací."
       },
       "grant": "Udělit oprávnění",
-      "granted": "Uděleno",
       "waiting": "Čekání…",
       "allGranted": "Obě udělena",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "Načítám {{modelName}}…",
     "loadingGeneric": "Načítání…",
     "deleteModel": "Smazat {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "Zrušit",
     "cancelDownload": "Zrušit stahování",
     "capabilities": {
-      "languageSelection": "Podporuje více vstupních jazyků",
-      "singleLanguage": "Podporuje pouze tento jazyk",
       "languageCount": "{{total}} jazyků",
       "languageOnly": "Pouze {{language}}",
-      "translation": "Umí překládat do angličtiny",
-      "translate": "Přeložit do angličtiny",
-      "streaming": "Zobrazuje přepis živě, jak mluvíte"
+      "translate": "Přeložit do angličtiny"
     }
   },
   "settings": {
@@ -669,8 +659,14 @@
       },
       "title": "Historie",
       "openFolder": "Otevřít složku nahrávek",
+      "import": "Importovat",
+      "showRawText": "Zobrazit surový text",
+      "emptyRecordings_one": "1 prázdná nahrávka",
+      "emptyRecordings_few": "{{count}} prázdné nahrávky",
+      "emptyRecordings_many": "{{count}} prázdné nahrávky",
+      "emptyRecordings_other": "{{count}} prázdných nahrávek",
       "loading": "Načítám historii…",
-      "empty": "Zatím žádné nahrávky.",
+      "empty": "Diktáty, které vytvoříte, se objeví tady.",
       "copyToClipboard": "Kopírovat přepis do schránky",
       "copyFailed": "Přepis se nepodařilo zkopírovat",
       "save": "Uložit záznam",
@@ -687,11 +683,6 @@
       "retry": "Zkusit znovu",
       "saveError": "Stav uložení se nepodařilo aktualizovat. Zkuste to znovu.",
       "postProcessEmpty": "Následné zpracování nevytvořilo žádný text, takže tohle je surový přepis.",
-      "textView": {
-        "label": "Zobrazení přepisu",
-        "processed": "Zpracováno",
-        "raw": "Surové"
-      },
       "receipts": {
         "showDetails": "Zobrazit podrobnosti běhu",
         "hideDetails": "Skrýt podrobnosti běhu",
@@ -800,7 +791,6 @@
         "saveError": "Opravu se nepodařilo uložit. Zkuste to znovu."
       },
       "audioImport": {
-        "start": "Transkribovat soubor",
         "fileFilter": "Zvukové a video soubory",
         "jobs": "Importy souborů",
         "status": {
@@ -982,7 +972,7 @@
         "license": "Licence MIT. Copyright 2025 CJ Pais."
       },
       "updates": {
-        "autoDescription": "Dotazuje se GitHub na nejnovější vydání. Sona nikdy nic neinstaluje sama.",
+        "autoDescription": "Sona nikdy nic neinstaluje sama.",
         "autoLabel": "Kontrolovat aktualizace automaticky",
         "check": "Zkontrolovat nyní",
         "checking": "Kontrola…",
@@ -1365,7 +1355,7 @@
         "title": "Data v tomto zařízení",
         "historyLimit": {
           "label": "Limit historie",
-          "description": "Uchovávat tento počet nedávných záznamů historie. Nastavením 0 vypnete ukládání historie."
+          "description": "Nastavením 0 vypnete ukládání historie."
         },
         "retention": {
           "label": "Uchovávání nahrávek",
@@ -1607,6 +1597,7 @@
           "invalid_configuration": "Tuto adresu ani klíč Sona nepoužije.",
           "secret_unavailable": "Klíč tohoto Macu se nepodařilo přečíst.",
           "untrusted_response": "Odpověď nebyla podepsána párovaným serverem.",
+          "workspace_mismatch": "Odpověď neodpovídala položené otázce.",
           "remote_rejected": "Server požádávku odmítl.",
           "ownership_rejected": "Server odpověděl pro jinou osobu."
         }
@@ -1616,7 +1607,6 @@
       "title": "Pracovní postupy",
       "loadError": "Pracovní postupy se nepodařilo načíst.",
       "updateError": "Pracovní postup se nepodařilo aktualizovat.",
-      "empty": "Nejsou k dispozici žádné pracovní postupy.",
       "neverRun": "Zatím nebyl spuštěn",
       "toggleLabel": "Povolit {{name}}",
       "items": {
@@ -1692,13 +1682,6 @@
         "accept": "Přidat",
         "dismiss": "Skrýt"
       },
-      "overview": {
-        "whatSonaDid": "Co Sona udělala",
-        "openLoops": "Otevřené otázky",
-        "openMeeting": "Otevřít schůzku {{title}}",
-        "loadError": "Tuto kartu se nepodařilo načíst.",
-        "retry": "Zkusit znovu"
-      },
       "runLog": {
         "title": "Činnost",
         "empty": "Žádná aktivita.",
@@ -1717,9 +1700,9 @@
       },
       "automations": {
         "title": "Po schůzce",
-        "description": "Akce, které běží na tomto Macu, jakmile jsou zapsané poznámky série. U každé série vypnuté, dokud jednu nezapnete.",
+        "description": "Akce, které běží na tomto Macu, jakmile jsou zapsané poznámky série.",
         "loading": "Načítáme vaše série…",
-        "empty": "Zatím žádná nahraná série. Nahrajte schůzku z události v kalendáři a objeví se tady.",
+        "empty": "Nahrajte schůzku z události v kalendáři a její automatizace se objeví tady.",
         "seriesFact": "{{count}} nahráno · naposled {{when}}",
         "reminders": "Přidávat mé otevřené závazky do Připomínek",
         "remindersHint": "Zapisuje to, co ještě dlužíte, do seznamu Sona. Nic se odtud nikdy nečte zpět.",
@@ -1774,6 +1757,8 @@
     "pause": "Pozastavit",
     "seek": "Pozice přehrávání",
     "resetSetting": "Obnovit {{name}}",
+    "more": "Více",
+    "none": "Žádné",
     "day": {
       "today": "Dnes",
       "yesterday": "Včera"
@@ -1781,7 +1766,7 @@
   },
   "commandPalette": {
     "open": "Hledat",
-    "placeholder": "Vyhledat nebo vybrat akci",
+    "placeholder": "Vyhledat nebo se zeptat",
     "navigation": "Navigace",
     "actions": "Akce",
     "noResults": "Nič nebylo nalezeno",
@@ -1792,7 +1777,6 @@
     "openAgent": "Otevřít agenta",
     "runPrompt": "Spustit prompt",
     "newPrompt": "Nový prompt",
-    "esc": "esc",
     "search": {
       "meetings": "Schůzky",
       "people": "Lidé",
@@ -1868,9 +1852,8 @@
     "recordingFailed": "Nahrávání se nepodařilo spustit: {{error}}. Zkuste to znovu.",
     "modelLoadFailed": "{{model}} se nepodařilo načíst. Zkuste to znovu.",
     "modelLoadFailedUnknown": "neznámý model",
-    "pasteFailedTitle": "Přepis se nepodařilo vložit",
     "pasteFailed": "Transcript se nepodařilo vložit do aktivní aplikace. Klikněte do textového pole a zkuste to znovu.",
-    "transcriptionFailedTitle": "Přepsat se nepodařilo",
+    "transcriptionFailed": "Přepsat se nepodařilo. Zkuste to znovu.",
     "noModelSelected": "Není vybrán žádný přepisovací model. Vyberte jej v Settings > Models.",
     "commandNoSelection": "Označte text, který chcete změnit, pak přidržte zkratku pro příkaz a řekněte změnu.",
     "commandRewriteUnavailable": "Přepsání nic nevrátilo, takže označený text zůstal, jak byl. Zkontrolujte poskytovatele v Settings > Post-processing a zkuste to znovu.",
@@ -1894,7 +1877,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "Úroveň vstupu",
     "state": {
       "starting": "Startuji",
       "listening": "Poslouchá",
@@ -1959,13 +1941,8 @@
       "unknown": "Kontrola"
     },
     "health": {
-      "not_started": "Nespuštěno",
       "starting": "Spouštění",
-      "healthy": "V pořádku",
-      "paused": "Pozastaveno",
-      "degraded": "Zhoršené",
-      "failed": "Selhalo",
-      "stopped": "Zastaveno"
+      "failed": "Selhalo"
     },
     "completeness": {
       "not_started": "Nespuštěno",
@@ -1986,17 +1963,12 @@
       }
     },
     "start": {
-      "label": "Spustit schůzku",
-      "action": "Spustit nahrávání",
+      "action": "Nahrát",
       "starting": "Spouštění…",
-      "assurance": "Nahrává zvuk vašeho Macu lokálně. Nic se k hovoru nepřipojuje.",
-      "capture": "Záznam",
-      "noSources": "Vyberte alespoň jeden zdroj.",
-      "localOnly": "Jen lokálně",
-      "retention": "Uchováno: {{policy}}"
+      "assurance": "Nahrává zvuk tohoto Macu lokálně. Nic se k hovoru nepřipojuje."
     },
     "import": {
-      "action": "Importovat",
+      "action": "Importovat nahrávku",
       "recordingFilter": "Nahrávka",
       "transcriptFilter": "Export přepisu"
     },
@@ -2004,12 +1976,14 @@
       "title": "Nahrávání se nespustilo",
       "readyTitle": "Připraveno k nahrávání",
       "recordAnyway": "Nahrát bez něj",
-      "recordAnywayHint": "Schůzka se označí jako částečná a chybějící zdroj se v ní jmenuje."
+      "recordAnywayHint": "Schůzka se označí jako částečná a chybějící zdroj se v ní jmenuje.",
+      "sources": "Co se bude nahrávat"
     },
     "actions": {
       "back": "Zpět",
       "delete": "Smazat schůzku",
       "discard": "Zahodit",
+      "openRecordings": "Otevřít složku nahrávek",
       "pause": "Pozastavit",
       "refresh": "Obnovit",
       "resume": "Pokračovat",
@@ -2025,10 +1999,7 @@
       "remoteUnavailable": "Vzdálené zpracování není v této verzi Sony dostupné, takže se každá schůzka přepisuje a shrnuje na tomto Macu."
     },
     "preflight": {
-      "storage": "Úložiště",
-      "storageAvailable": "Šifrované úložiště schůzek je dostupné.",
       "storageUnavailable": "Šifrované úložiště schůzek není dostupné.",
-      "localModel": "Místní model",
       "localModelDescription": "Zpracování zůstává místní, pokud je dostupný místní model.",
       "starting": "Spouštění nahrávání…",
       "refreshing": "Kontrola…"
@@ -2041,39 +2012,30 @@
       "elapsed": "Uplynulo",
       "microphoneOnlyPartial": "Nahrává se jen mikrofon. Systémový zvuk není k dispozici, takže tato schůzka bude neúplná.",
       "partialCapture": "Část zvuku chybí. Než se spolehnete na vygenerované poznámky, zkontrolujte mezery.",
-      "inputs": "Vstupy",
-      "signal": "Signál",
-      "signalUnavailable": "{{source}} nehlásí svou úroveň.",
-      "notReported": "Nenahlášeno",
-      "durabilityLag": "Uloženo na disk",
-      "behind": "{{duration}} pozadu",
-      "progress": "Průběh přepisu",
       "transcript": "Přepis",
-      "asrLag": "Zpoždění přepisu",
-      "storage": "Úložiště",
-      "storageHealthy": "Šifrované místní úložiště je v pořádku.",
+      "transcriptEmpty": "Slova se tu objeví, jak budou rozpoznána.",
       "storageUnavailable": "Úložiště vyžaduje pozornost.",
-      "processing": "Zpracování",
-      "manualNote": "Ruční poznámka",
+      "manualNote": "Poznámka k tomuto okamžiku",
       "notePlaceholder": "Napište poznámku k tomuto okamžiku",
-      "addNote": "Přidat poznámku s časovou značkou"
+      "addNote": "Přidat poznámku"
     },
     "recovery": {
-      "title": "Nedokončené schůzky",
-      "finalize": "Dokončit uložení"
+      "title": "Nedokončené schůzky"
     },
     "trash": {
       "title": "Nedávno smazané",
+      "empty": "Schůzky, které smažete, se objeví tady.",
       "expires": "Smazáno {{deleted}} · zmizí za {{count}} dní",
       "expiresToday": "Smazáno {{deleted}} · zmizí dnes",
       "restore": "Obnovit",
+      "restoreItem": "Obnovit „{{title}}“",
       "restored": "{{title}} je zpět.",
       "restoreFailed": "Tuto schůzku se nepodařilo obnovit."
     },
     "history": {
-      "title": "Historie schůzek",
+      "title": "Nahrané",
       "loading": "Načítání historie schůzek…",
-      "emptyTitle": "Zatím žádné schůzky"
+      "emptyTitle": "Schůzky, které nahrajete, se objeví tady."
     },
     "retention": {
       "title": "Uchovávání",
@@ -2158,10 +2120,10 @@
     "review": {
       "meetingTitle": "Název schůzky",
       "editTitle": "Přejmenovat tuto schůzku",
+      "rename": "Přejmenovat",
+      "backToList": "Schůzky",
       "noStartTime": "Tato schůzka nezaznamenala čas začátku.",
-      "started": "Začátek {{date}}",
       "partialRecording": "Částečný záznam",
-      "status": "Stav záznamu",
       "capture": "Jak se to nahrávalo",
       "timeline": "Časová osa audia a mezery",
       "timeUnknown": "Neznámý čas",
@@ -2203,18 +2165,14 @@
       "notePlaceholder": "Přidejte ruční poznámku",
       "addNote": "Přidat poznámku",
       "editNote": "Upravit tuto poznámku",
-      "generatedNotes": "Generované poznámky",
       "regenerate": "Vygenerovat znovu",
       "remoteCancellationPending": "Vzdálené zrušení probíhá. Místní smazání netvrdí, že vzdálená kopie je smazaná.",
       "cancelRemote": "Zrušit vzdálené zpracování",
       "remoteCancellationRequested": "Zrušení vyžádáno",
-      "export": "Exportovat",
-      "exportMarkdown": "Exportovat Markdown",
-      "exportJson": "Exportovat JSON",
+      "exportMarkdown": "Exportovat poznámky (Markdown)",
+      "exportJson": "Exportovat poznámky (JSON)",
       "exportComplete": "Schůzka exportována",
-      "moreActions": "Více",
       "citation": "Přepis {{time}}",
-      "noGeneratedNotes": "Zatím nejsou dostupné žádné generované poznámky.",
       "topics": "Témata",
       "nothingRecorded": "Nebyla zaznamenána žádná rozhodnutí, úkoly, otázky ani rizika.",
       "templateName": {
@@ -2241,10 +2199,9 @@
         "manualNote": "Ruční poznámka",
         "title": "Název schůzky"
       },
-      "generationFailedDescription": "Přepis i vaše ruční poznámky zůstávají nedotčené. Až bude příčina vyřešena, vygenerujte je znovu.",
-      "noGeneratedNotesDescription": "Generované poznámky vycházejí z přepisu, takže je lze kdykoli znovu vytvořit.",
+      "generationFailedDescription": "Až bude příčina vyřešena, vygenerujte je znovu.",
+      "noGeneratedNotesDescription": "Opětovné vygenerování zapíše poznámky z tohoto přepisu.",
       "processingDescription": "Generované poznámky a místní odpovědi se zobrazí po dokončení přepisu.",
-      "processingTitle": "Sona tuto schůzku stále zpracovává",
       "tabs": {
         "insights": "Postřehy",
         "ledger": "Registr",
@@ -2253,15 +2210,10 @@
       "tabsLabel": "Sekce přehledu schůzky"
     },
     "ledger": {
-      "title": "Registr",
-      "emptyTitle": "Z této schůzky ještě nebyl vyčten žádný registr",
-      "emptyDescription": "Registr se píše společně s generovanými poznámkami. Vygenerujte poznámky znovu, abyste si tento rozhovor přečetli po tématech.",
+      "emptyDescription": "Vygenerujte poznámky znovu, abyste si tento rozhovor přečetli po tématech.",
       "exportHtml": "Exportovat stránku registru",
       "exported": "Registr zapsán do {{path}}",
       "exportMissing": "Tato schůzka nemá registr k exportu. Nejprve vygenerujte poznámky znovu.",
-      "statThreads": "Vyřešená témata",
-      "statReceipts": "Citace",
-      "receiptsVerified": "ověřeno",
       "receiptsDegraded": "Odstraněno: {{threads}} vláken a {{commitments}} závazků",
       "threads": "Témata",
       "asideThread": "odbočka",
@@ -2272,7 +2224,7 @@
       "stances": "Postoje",
       "noStances": "Nikdo nezaujal ani neopustil žádný postoj.",
       "trust": "Nakolik tomu věřit",
-      "trustMeasured": "Promluvy, časy, počty slov a podíl na hovoru pocházejí z přepisu. Každý stav je úsudek vyčtený z citace vedle něj: než podle něj začnete jednat, ověřte citaci.",
+      "trustMeasured": "Každý stav je úsudek vyčtený z citace vedle něj.",
       "unattributed": "Bez autora",
       "columnAt": "V",
       "columnDirection": "Směr",
@@ -2333,9 +2285,7 @@
     "list": {
       "searchLabel": "Hledat schůzky",
       "searchPlaceholder": "Hledat podle názvu",
-      "clearFilters": "Vymazat filtry",
-      "noMatchesFiltered": "Žádné schůzky neodpovídají",
-      "noMatchesFilteredDescription": "Těmto filtrům nic neodpovídá. Sona prošla všechny schůzky, které si nechala, ne jen tuto stránku.",
+      "noMatches": "Žádný název schůzky neodpovídá „{{query}}“.",
       "rowActions": "Akce schůzky",
       "exportMarkdown": "Exportovat poznámky (Markdown)",
       "exportJson": "Exportovat poznámky (JSON)",
@@ -2344,27 +2294,7 @@
       "previousPage": "Novější",
       "nextPage": "Starší",
       "status": {
-        "live": "Živě",
-        "ready": "Hotovo",
-        "processing": "Zpracovává se",
         "needs_attention": "Vyžaduje pozornost"
-      },
-      "filters": {
-        "label": "Filtrovat schůzky",
-        "statusKey": "Stav",
-        "timeKey": "Čas",
-        "status": {
-          "any": "Vše",
-          "ready": "Hotovo",
-          "processing": "Zpracovává se",
-          "failed": "Selhalo"
-        },
-        "time": {
-          "any": "Vše",
-          "today": "Dnes",
-          "last_7_days": "7 dní",
-          "last_30_days": "30 dní"
-        }
       }
     },
     "status": {
@@ -2378,7 +2308,6 @@
     },
     "analytics": {
       "title": "Konverzace",
-      "noSpeech": "Nebyla přepsána žádná řeč, takže není co měřit.",
       "longestMonologue": "Nejdelší monolog",
       "patience": "Trpělivost",
       "patienceDetail": "Mediánová pauza před odpovědí",
@@ -2395,7 +2324,7 @@
       "trackersTitle": "Sledování klíčových slov",
       "addTracker": "Přidat sledování",
       "removeTracker": "Odebrat sledování",
-      "noTrackers": "Zatím žádná sledování. Přidejte jedno a začněte počítat, jak často se fráze objeví.",
+      "noTrackers": "Přidejte sledování a začněte počítat, jak často se fráze objeví.",
       "trackerName": "Název",
       "trackerPatterns": "sleva, nejlepší cena, příliš drahé",
       "trackerPatternsLabel": "Fráze oddělené čárkami",
@@ -2535,8 +2464,7 @@
       "actions": {
         "skip": "Přeskočit"
       },
-      "linkFailed": "Sona nedokázala ten odkaz otevřít.",
-      "skippedNote": "Přeskočením se nabídka odsud skryje. Sona vidí ten hovor dál, dokud nabídka nevyprší."
+      "linkFailed": "Sona nedokázala ten odkaz otevřít."
     },
     "seriesTemplate": {
       "use": "Použít tuto šablonu pro tuto sérii",
@@ -2546,17 +2474,13 @@
     "upcoming": {
       "title": "Nadcházející",
       "loading": "Načítání kalendáře…",
-      "empty": "Na příští týden nic naplánovaného.",
+      "empty": "Na příštích 7 dní nic naplánovaného.",
       "noAccess": "Sona nevidí váš kalendář.",
-      "noAccessHint": "Zapněte „Používat můj kalendář“ v nastavení schůzek a pak povolte plný přístup, až se macOS zeptá. Přijde s tím všechno, co Kalendář v macOS už zobrazuje (Google, iCloud, Outlook).",
+      "noAccessFix": "Zapněte „Používat můj kalendář“ v Settings",
       "unavailable": "Tento systém nemá kalendář, který by Sona přečetla.",
-      "attendees": "Účastníci",
-      "you": "Vy",
-      "attendeesMore": "+{{count}}",
       "recurring": "Opakuje se",
       "seriesOptions": "Možnosti série {{title}}",
       "alwaysRecord": "Vždy nahrávat tuto sérii",
-      "alwaysRecordNeedsSource": "Nejprve vyberte zdroj nahrávání výše.",
       "template": "Šablona poznámek",
       "templateDefault": "Výchozí nastavení aplikace",
       "digest": "Zahrnout do večerního souhrnu"
@@ -2603,10 +2527,11 @@
     "unpaired": "Spárujte agenta Sona v Nastavení",
     "close": "Zavřít chat",
     "history": "Nedávné chaty",
-    "historyEmpty": "Zatím žádné dřívější chaty.",
+    "historyEmpty": "Chaty, které začnete, se objeví tady.",
     "newChat": "Nový chat",
-    "empty": "Zeptejte se, co jste řekli nebo na čem jste se dohodli, nebo co změnit.",
+    "empty": "Zeptejte se, co bylo řečeno, co ještě dlužíte, nebo kdo je kdo.",
     "placeholder": "Zeptejte se na cokoli",
+    "placeholderConfig": "Změnit nastavení",
     "inputLabel": "Zeptejte se na Sona",
     "send": "Odeslat",
     "stop": "Zastavit",
@@ -2702,8 +2627,28 @@
       "shortcutAction": "Změnit zkratku pro diktování",
       "setShortcutAction": "Nastavit zkratku"
     },
+    "needsYou": {
+      "title": "Čeká na vás",
+      "empty": "Nic na vás nečeká.",
+      "openMeeting": "Otevřít schůzku {{title}}",
+      "loadError": "Tento seznam se nepodařilo načíst."
+    },
+    "week": {
+      "title": "Tento týden",
+      "dictations_one": "1 diktát",
+      "dictations_few": "{{count}} diktáty",
+      "dictations_many": "{{count}} diktátu",
+      "dictations_other": "{{count}} diktátů",
+      "words_one": "1 slovo",
+      "words_few": "{{count}} slova",
+      "words_many": "{{count}} slova",
+      "words_other": "{{count}} slov",
+      "streak_one": "1denní série",
+      "streak_few": "{{count}}denní série",
+      "streak_many": "{{count}}denní série",
+      "streak_other": "{{count}}denní série"
+    },
     "activity": {
-      "title": "Aktivita",
       "dictations": "Diktáty",
       "words": "Slova",
       "streak": "Série",
@@ -2711,20 +2656,23 @@
       "rangeNext": "Následujících 7 dní",
       "dictationsAria": "Diktáty za den, nejvíce {{count}} v {{day}}",
       "wordsAria": "Slova za den, celkem {{count}}, poslední hodnota {{last}}",
-      "days_one": "{{count}} den",
-      "days_few": "{{count}} dny",
-      "days_many": "{{count}} dne",
-      "days_other": "{{count}} dní",
       "streakAria_one": "Aktuální série, {{count}} den. Aktivní dny tento týden: {{days}}.",
       "streakAria_few": "Aktuální série, {{count}} dny. Aktivní dny tento týden: {{days}}.",
       "streakAria_many": "Aktuální série, {{count}} dne. Aktivní dny tento týden: {{days}}.",
       "streakAria_other": "Aktuální série, {{count}} dní. Aktivní dny tento týden: {{days}}."
     },
+    "recent": {
+      "title": "Nedávné",
+      "today_one": "{{count}} dnes",
+      "today_few": "{{count}} dnes",
+      "today_many": "{{count}} dnes",
+      "today_other": "{{count}} dnes",
+      "empty": "Zatím nic",
+      "emptyHint": "Lidé, slova a navazující kroky, které Sona po schůzce zapíše, se objeví tady."
+    },
     "update": {
       "available": "Sona {{latest}} je k dispozici. Tato instalace má verzi {{current}}.",
       "dismiss": "Zavřít",
-      "failed": "Nepodařilo se zkontrolovat aktualizace.",
-      "failedWithReason": "Nepodařilo se zkontrolovat aktualizace: {{reason}}",
       "view": "Zobrazit vydání"
     }
   },
@@ -2839,13 +2787,12 @@
       "dismiss": "Zamítnout",
       "confirm": "Potvrdit",
       "loadError": "Lidi se nepodařilo načíst.",
-      "empty": "Zatím tu nikdo není.",
+      "empty": "Lidé z vašich schůzek se objeví tady.",
       "meetings": "{{count}} schůzek"
     },
     "detail": {
       "nameLabel": "Jméno osoby",
       "rename": "Přejmenovat",
-      "personActions": "Akce osoby",
       "deletePerson": "Smazat osobu",
       "removeVoiceProfile": "Odstranit hlasový profil",
       "removeVoiceProfileTitle": "Odstranit hlasový profil?",
@@ -2864,23 +2811,19 @@
       "carriedSince": "Otevřeno od {{date}}",
       "noOpenLoops": "Nic nezůstává otevřené.",
       "commitments": "Závazky",
-      "noCommitments": "Nejsou zaznamenány žádné závazky.",
       "meetingsTogether": "Společné schůzky",
       "noMeetings": "Žádné propojené schůzky.",
       "series": "Schůzka {{number}} v sérii",
-      "meetingActions": "Akce schůzky",
       "unlink": "Odpojit schůzku",
       "unlinkTitle": "Odpojit tuto schůzku?",
       "unlinkDescription": "Odebrat {{meeting}} od této osoby?",
       "documents": "Dokumenty",
       "importDocument": "Importovat dokument",
       "documentsLoadError": "Dokumenty se nepodařilo načíst.",
-      "noDocuments": "Žádné importované dokumenty.",
       "deleteDocument": "Smazat dokument",
       "deleteDocumentTitle": "Smazat tento dokument?",
       "deleteDocumentDescription": "Smazat {{document}} z dokumentů Sona?",
       "cadence": "Frekvence schůzek",
-      "lastMeeting": "Poslední schůzka",
       "talkShare": "Podíl na hovoru",
       "cadenceAria": "Schůzky podle měsíců: {{values}}",
       "documentFilter": "Textové dokumenty",
@@ -2908,7 +2851,6 @@
     },
     "summary": {
       "title": "O osobě",
-      "empty": "Zatím žádné shrnutí.",
       "regenerate": "Vytvořit znovu",
       "provenance": "Napsal model {{model}} dne {{date}}"
     },
@@ -2976,15 +2918,7 @@
       "copy": "Kopírovat",
       "copied": "Zkopírováno",
       "transcribeAgain": "Přepsat znovu",
-      "delete": "Smazat",
-      "more": "Další akce"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "Uchová se navždy",
-      "keptDays": "Uchová se {{days}} dní",
-      "change": "změnit v Nastavení"
+      "delete": "Smazat"
     }
   },
   "peopleV2": {
@@ -2993,8 +2927,7 @@
     },
     "detail": {
       "openLoops": "Otevřené otázky",
-      "howSonaKnows": "Proč Sona tuto osobu propojuje",
-      "noEvidence": "Tuto osobu zatím nic nespojuje se schůzkou."
+      "howSonaKnows": "Proč Sona tuto osobu propojuje"
     }
   },
   "modesV2": {
@@ -3129,7 +3062,7 @@
       "dictation": "Diktování",
       "keepDictations": "Kolik diktátů uchovat",
       "readsFromOtherApps": "Co smí Sona číst z jiných aplikací",
-      "workflows": "Co Sona dělá po schůzce",
+      "workflows": "Co Sona dělá sama",
       "sync": "Synchronizace",
       "leavesThisMac": "Co opouští tento Mac",
       "agents": "Agenti",
@@ -3139,11 +3072,9 @@
     },
     "apps": {
       "label": "Aplikace pro schůzky",
-      "browsersAutomatic": "Hovor na kartě prohlížeče se rozpozná, aniž by byl uveden zde.",
       "runningNow": "Právě běží",
       "autoRecord": "Nahrávat automaticky",
       "autoRecordSources": "Nahrávat automaticky zachytává váš mikrofon a zvukový výstup tohoto Macu vždy, když je daná aplikace v hovoru.",
-      "autoRecordConsent": "Na některých místech musí s nahráváním souhlasit všichni účastníci hovoru.",
       "add": "Přidat aplikaci",
       "addTitle": "Přidat aplikaci pro schůzky",
       "addDescription": "Sona potřebuje ID aplikace, které najdete v okně Informace o aplikaci nebo pomocí `osascript -e 'id of app \"Name\"'`.",
@@ -3223,14 +3154,12 @@
       }
     },
     "feed": {
-      "title": "Co si Sona všimla",
       "spokenPunctuation": "Říkáte {{spoken}} často. Psát to jako {{written}}?",
       "vocabularyCorrection": "Pořád měníte {{spoken}} na {{written}}. Naučit se to?",
       "modeHabit": "Většinu dní saháte po {{mode}} přes zkratku. Nastavit ho jako výchozí?",
       "retryRate": "Diktáty přes {{subject}} se opakují {{times}}× častěji než ostatní.",
       "lostCaptureRate": "Diktáty přes {{subject}} končí useknuté nebo tiché {{times}}× častěji než ostatní.",
       "inputLevel": "{{percent}} % vašich nahrávek přišlo tiše. Zkontrolovat úroveň mikrofonu?",
-      "example": "„{{text}}“",
       "accept": "Ano",
       "dismiss": "Ne, děkuji",
       "evidence_one": "1×, za {{days}} dní",

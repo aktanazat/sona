@@ -41,14 +41,10 @@
     "subtitle": "Modellen draaien op deze Mac en wegen nauwkeurigheid af tegen snelheid.",
     "existingModelsTitle": "Compatibele modellen",
     "downloadModelsTitle": "Beschikbaar voor download",
-    "showAllModels": "Toon alle {{total}} modellen",
-    "showFewerModels": "Minder modellen tonen",
+    "otherModels": "Andere modellen",
+    "moreModels": "Nog {{total}}",
     "recommended": "Aanbevolen",
     "customModelDescription": "Niet officieel ondersteund",
-    "modelCard": {
-      "accuracy": "nauwkeurigheid",
-      "speed": "snelheid"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "Vereist om getranscribeerde tekst in je applicaties te kunnen typen."
       },
       "grant": "Machtiging verlenen",
-      "granted": "Verleend",
       "waiting": "Wachten…",
       "allGranted": "Beide verleend",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "Laden van {{modelName}}…",
     "loadingGeneric": "Laden…",
     "deleteModel": "{{modelName}} verwijderen",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "Annuleren",
     "cancelDownload": "Download annuleren",
     "capabilities": {
-      "languageSelection": "Ondersteunt meerdere invoertalen",
-      "singleLanguage": "Ondersteunt alleen deze taal",
       "languageCount": "{{total}} talen",
       "languageOnly": "Alleen {{language}}",
-      "translation": "Kan vertalen naar het Engels",
-      "translate": "Vertalen",
-      "streaming": "Toont live transcriptie tijdens het spreken"
+      "translate": "Vertalen"
     }
   },
   "settings": {
@@ -669,8 +659,12 @@
       },
       "title": "Geschiedenis",
       "openFolder": "Opnamemap openen",
+      "import": "Importeer",
+      "showRawText": "Ruwe tekst tonen",
+      "emptyRecordings_one": "1 lege opname",
+      "emptyRecordings_other": "{{count}} lege opnames",
       "loading": "Geschiedenis laden…",
-      "empty": "Nog geen opnames.",
+      "empty": "Dictees die je maakt, verschijnen hier.",
       "copyToClipboard": "Transcriptie naar klembord kopiëren",
       "copyFailed": "Kon transcript niet kopiëren",
       "save": "Item opslaan",
@@ -687,11 +681,6 @@
       "retry": "Opnieuw proberen",
       "saveError": "Kon de bewaarstatus niet bijwerken. Probeer het opnieuw.",
       "postProcessEmpty": "De naverwerking leverde geen tekst op, dus dit is de originele transcriptie.",
-      "textView": {
-        "label": "Transcriptieweergave",
-        "processed": "Verwerkt",
-        "raw": "Onbewerkt"
-      },
       "receipts": {
         "showDetails": "Uitvoeringsdetails tonen",
         "hideDetails": "Uitvoeringsdetails verbergen",
@@ -800,7 +789,6 @@
         "saveError": "Kon de correctie niet opslaan. Probeer het opnieuw."
       },
       "audioImport": {
-        "start": "Bestand transcriberen",
         "fileFilter": "Audio- en videobestanden",
         "jobs": "Bestandsimporten",
         "status": {
@@ -982,7 +970,7 @@
         "license": "MIT-gelicentieerd. Copyright 2025 CJ Pais."
       },
       "updates": {
-        "autoDescription": "Vraagt GitHub om de nieuwste release. Sona installeert nooit iets zelfstandig.",
+        "autoDescription": "Sona installeert nooit iets zelfstandig.",
         "autoLabel": "Automatisch op updates controleren",
         "check": "Nu controleren",
         "checking": "Controleren…",
@@ -1365,7 +1353,7 @@
         "title": "Gegevens op dit apparaat",
         "historyLimit": {
           "label": "Geschiedenislimiet",
-          "description": "Bewaar dit aantal recente geschiedenisitems. Zet op 0 om opgeslagen geschiedenis uit te schakelen."
+          "description": "Zet op 0 om opgeslagen geschiedenis uit te schakelen."
         },
         "retention": {
           "label": "Bewaartermijn van opnames",
@@ -1607,6 +1595,7 @@
           "invalid_configuration": "Dat adres of die sleutel gebruikt Sona niet.",
           "secret_unavailable": "De sleutel van deze Mac kon niet worden gelezen.",
           "untrusted_response": "Het antwoord was niet ondertekend door de gekoppelde server.",
+          "workspace_mismatch": "Het antwoord kwam niet overeen met de gestelde vraag.",
           "remote_rejected": "De server weigerde de aanvraag.",
           "ownership_rejected": "De server antwoordde voor iemand anders."
         }
@@ -1616,7 +1605,6 @@
       "title": "Werkstromen",
       "loadError": "De werkstromen konden niet worden geladen.",
       "updateError": "De werkstroom kon niet worden bijgewerkt.",
-      "empty": "Er zijn geen werkstromen beschikbaar.",
       "neverRun": "Nog niet uitgevoerd",
       "toggleLabel": "{{name}} inschakelen",
       "items": {
@@ -1680,13 +1668,6 @@
         "accept": "Toevoegen",
         "dismiss": "Negeren"
       },
-      "overview": {
-        "whatSonaDid": "Wat Sona deed",
-        "openLoops": "Open vragen",
-        "openMeeting": "Vergadering {{title}} openen",
-        "loadError": "Deze kaart kon niet worden geladen.",
-        "retry": "Opnieuw proberen"
-      },
       "runLog": {
         "title": "Activiteit",
         "empty": "Nog geen activiteit.",
@@ -1705,9 +1686,9 @@
       },
       "automations": {
         "title": "Na een vergadering",
-        "description": "Acties die op deze Mac draaien zodra de notities van een serie geschreven zijn. Voor elke serie uit, tot je er een aanzet.",
+        "description": "Acties die op deze Mac draaien zodra de notities van een serie geschreven zijn.",
         "loading": "Je series worden gelezen…",
-        "empty": "Nog geen opgenomen series. Neem een vergadering op vanuit een agenda-item en hij verschijnt hier.",
+        "empty": "Neem een vergadering op vanuit een agenda-item om de automatiseringen ervan hier te zien.",
         "seriesFact": "{{count}} opgenomen · laatst {{when}}",
         "reminders": "Mijn openstaande toezeggingen aan Herinneringen toevoegen",
         "remindersHint": "Schrijft wat je nog moet doen in een lijst met de naam Sona. Er wordt nooit iets uit teruggelezen.",
@@ -1762,6 +1743,8 @@
     "pause": "Pauzeren",
     "seek": "Weergavepositie",
     "resetSetting": "{{name}} herstellen",
+    "more": "Meer",
+    "none": "Geen",
     "day": {
       "today": "Vandaag",
       "yesterday": "Gisteren"
@@ -1769,7 +1752,7 @@
   },
   "commandPalette": {
     "open": "Zoeken",
-    "placeholder": "Zoek of kies een actie",
+    "placeholder": "Zoek of vraag",
     "navigation": "Navigatie",
     "actions": "Acties",
     "noResults": "Niets gevonden",
@@ -1780,7 +1763,6 @@
     "openAgent": "Agent openen",
     "runPrompt": "Een prompt uitvoeren",
     "newPrompt": "Nieuwe prompt",
-    "esc": "esc",
     "search": {
       "meetings": "Vergaderingen",
       "people": "Personen",
@@ -1856,9 +1838,8 @@
     "recordingFailed": "Kon de opname niet starten: {{error}}. Probeer het opnieuw.",
     "modelLoadFailed": "Kon {{model}} niet laden. Probeer het opnieuw.",
     "modelLoadFailedUnknown": "onbekend model",
-    "pasteFailedTitle": "Kon de transcriptie niet plakken",
     "pasteFailed": "Het transcript kon niet in de actieve app worden geplakt. Zet de cursor in een tekstveld en probeer het opnieuw.",
-    "transcriptionFailedTitle": "Kon niet transcriberen",
+    "transcriptionFailed": "Kon niet transcriberen. Probeer het opnieuw.",
     "noModelSelected": "Geen transcriptiemodel geselecteerd. Kies er een in Settings > Models.",
     "commandNoSelection": "Selecteer de tekst die je wilt veranderen, houd dan de opdrachtsneltoets vast en zeg de wijziging.",
     "commandRewriteUnavailable": "De herschrijving gaf niets terug, dus je selectie bleef zoals hij was. Controleer de provider in Settings > Post-processing en probeer het opnieuw.",
@@ -1882,7 +1863,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "Ingangsniveau",
     "state": {
       "starting": "Starten",
       "listening": "Luistert",
@@ -1947,13 +1927,8 @@
       "unknown": "Controleren"
     },
     "health": {
-      "not_started": "Niet gestart",
       "starting": "Starten",
-      "healthy": "In orde",
-      "paused": "Gepauzeerd",
-      "degraded": "Verslechterd",
-      "failed": "Mislukt",
-      "stopped": "Gestopt"
+      "failed": "Mislukt"
     },
     "completeness": {
       "not_started": "Niet gestart",
@@ -1974,17 +1949,12 @@
       }
     },
     "start": {
-      "label": "Een vergadering starten",
-      "action": "Opname starten",
+      "action": "Opnemen",
       "starting": "Starten…",
-      "assurance": "Neemt de audio van je Mac lokaal op. Er neemt niets deel aan het gesprek.",
-      "capture": "Opname",
-      "noSources": "Kies minstens één bron.",
-      "localOnly": "Alleen lokaal",
-      "retention": "Bewaard: {{policy}}"
+      "assurance": "Neemt de audio van deze Mac lokaal op. Er neemt niets deel aan het gesprek."
     },
     "import": {
-      "action": "Importeer",
+      "action": "Opname importeren",
       "recordingFilter": "Opname",
       "transcriptFilter": "Transcriptexport"
     },
@@ -1992,12 +1962,14 @@
       "title": "De opname is niet gestart",
       "readyTitle": "Klaar om op te nemen",
       "recordAnyway": "Zonder die bron opnemen",
-      "recordAnywayHint": "De vergadering wordt als gedeeltelijk gemarkeerd en de ontbrekende bron blijft erin genoemd."
+      "recordAnywayHint": "De vergadering wordt als gedeeltelijk gemarkeerd en de ontbrekende bron blijft erin genoemd.",
+      "sources": "Wat er wordt opgenomen"
     },
     "actions": {
       "back": "Terug",
       "delete": "Vergadering verwijderen",
       "discard": "Weggooien",
+      "openRecordings": "Opnamemap openen",
       "pause": "Pauzeren",
       "refresh": "Verversen",
       "resume": "Hervatten",
@@ -2013,10 +1985,7 @@
       "remoteUnavailable": "Verwerking op afstand is niet beschikbaar in deze versie van Sona, dus elke vergadering wordt op deze Mac getranscribeerd en samengevat."
     },
     "preflight": {
-      "storage": "Opslag",
-      "storageAvailable": "Versleutelde vergaderopslag is beschikbaar.",
       "storageUnavailable": "Versleutelde vergaderopslag is niet beschikbaar.",
-      "localModel": "Lokaal model",
       "localModelDescription": "De verwerking blijft lokaal wanneer er een lokaal model beschikbaar is.",
       "starting": "Opname wordt gestart…",
       "refreshing": "Controleren…"
@@ -2029,39 +1998,30 @@
       "elapsed": "Verstreken",
       "microphoneOnlyPartial": "Alleen de microfoon wordt opgenomen. Systeemaudio is niet beschikbaar, dus deze vergadering wordt gedeeltelijk.",
       "partialCapture": "Er ontbreekt audio. Controleer de gaten voordat je op de gegenereerde notities vertrouwt.",
-      "inputs": "Ingangen",
-      "signal": "Signaal",
-      "signalUnavailable": "{{source}} meldt het niveau niet.",
-      "notReported": "Niet gerapporteerd",
-      "durabilityLag": "Opgeslagen op schijf",
-      "behind": "{{duration}} achter",
-      "progress": "Voortgang van transcript",
       "transcript": "Transcript",
-      "asrLag": "Vertraging van het transcript",
-      "storage": "Opslag",
-      "storageHealthy": "De versleutelde lokale opslag is in orde.",
+      "transcriptEmpty": "Woorden verschijnen hier zodra ze worden herkend.",
       "storageUnavailable": "De opslag vereist aandacht.",
-      "processing": "Verwerking",
-      "manualNote": "Handmatige notitie",
+      "manualNote": "Notitie voor dit moment",
       "notePlaceholder": "Schrijf een notitie voor dit moment",
-      "addNote": "Notitie met tijdstempel toevoegen"
+      "addNote": "Notitie toevoegen"
     },
     "recovery": {
-      "title": "Onafgeronde vergaderingen",
-      "finalize": "Opslaan afronden"
+      "title": "Onafgeronde vergaderingen"
     },
     "trash": {
       "title": "Recent verwijderd",
+      "empty": "Vergaderingen die je verwijdert, verschijnen hier.",
       "expires": "Verwijderd {{deleted}} · verdwijnt over {{count}} dagen",
       "expiresToday": "Verwijderd {{deleted}} · verdwijnt vandaag",
       "restore": "Zet terug",
+      "restoreItem": "‘{{title}}’ terugzetten",
       "restored": "{{title}} is terug.",
       "restoreFailed": "Die vergadering kon niet worden teruggezet."
     },
     "history": {
-      "title": "Vergadergeschiedenis",
+      "title": "Opgenomen",
       "loading": "Vergadergeschiedenis laden…",
-      "emptyTitle": "Nog geen vergaderingen"
+      "emptyTitle": "Vergaderingen die je opneemt, verschijnen hier."
     },
     "retention": {
       "title": "Bewaartermijn",
@@ -2146,10 +2106,10 @@
     "review": {
       "meetingTitle": "Vergadertitel",
       "editTitle": "Naam van deze vergadering wijzigen",
+      "rename": "Naam wijzigen",
+      "backToList": "Vergaderingen",
       "noStartTime": "Voor deze vergadering is geen starttijd vastgelegd.",
-      "started": "Gestart {{date}}",
       "partialRecording": "Gedeeltelijke opname",
-      "status": "Opnamestatus",
       "capture": "Hoe dit is opgenomen",
       "timeline": "Audiotijdlijn en hiaten",
       "timeUnknown": "Onbekend tijdstip",
@@ -2189,18 +2149,14 @@
       "notePlaceholder": "Een handmatige notitie toevoegen",
       "addNote": "Notitie toevoegen",
       "editNote": "Deze notitie bewerken",
-      "generatedNotes": "Gegenereerde notities",
       "regenerate": "Opnieuw genereren",
       "remoteCancellationPending": "De externe annulering is nog in behandeling. Lokale verwijdering beweert niet dat de externe kopie is verwijderd.",
       "cancelRemote": "Externe verwerking annuleren",
       "remoteCancellationRequested": "Annulering aangevraagd",
-      "export": "Exporteren",
-      "exportMarkdown": "Markdown exporteren",
-      "exportJson": "JSON exporteren",
+      "exportMarkdown": "Notities exporteren (Markdown)",
+      "exportJson": "Notities exporteren (JSON)",
       "exportComplete": "Vergadering geëxporteerd",
-      "moreActions": "Meer",
       "citation": "Transcript {{time}}",
-      "noGeneratedNotes": "Er zijn nog geen gegenereerde notities beschikbaar.",
       "topics": "Onderwerpen",
       "nothingRecorded": "Er zijn geen besluiten, actiepunten, vragen of risico's vastgelegd.",
       "templateName": {
@@ -2227,10 +2183,9 @@
         "manualNote": "Handmatige notitie",
         "title": "Vergadertitel"
       },
-      "generationFailedDescription": "De transcriptie en je eigen notities blijven ongewijzigd. Genereer opnieuw zodra de oorzaak is verholpen.",
-      "noGeneratedNotesDescription": "Gegenereerde notities zijn afgeleid van het transcript en kunnen dus altijd opnieuw worden opgebouwd.",
+      "generationFailedDescription": "Genereer opnieuw zodra de oorzaak is verholpen.",
+      "noGeneratedNotesDescription": "Opnieuw genereren schrijft notities op basis van dit transcript.",
       "processingDescription": "Gegenereerde notities en lokale antwoorden verschijnen zodra het transcript voltooid is.",
-      "processingTitle": "Sona verwerkt deze vergadering nog",
       "tabs": {
         "insights": "Inzichten",
         "ledger": "Register",
@@ -2239,15 +2194,10 @@
       "tabsLabel": "Secties vergaderoverzicht"
     },
     "ledger": {
-      "title": "Register",
-      "emptyTitle": "Uit deze vergadering is nog geen register gelezen",
-      "emptyDescription": "Het register wordt samen met de gegenereerde notities geschreven. Genereer de notities opnieuw om dit gesprek per onderwerp te lezen.",
+      "emptyDescription": "Genereer de notities opnieuw om dit gesprek per onderwerp te lezen.",
       "exportHtml": "Registerpagina exporteren",
       "exported": "Register geschreven naar {{path}}",
       "exportMissing": "Deze vergadering heeft geen register om te exporteren. Genereer eerst de notities opnieuw.",
-      "statThreads": "Afgeronde onderwerpen",
-      "statReceipts": "Citaten",
-      "receiptsVerified": "gecontroleerd",
       "receiptsDegraded": "{{threads}} threads en {{commitments}} toezeggingen verwijderd",
       "threads": "Onderwerpen",
       "asideThread": "zijspoor",
@@ -2258,7 +2208,7 @@
       "stances": "Standpunten",
       "noStances": "Er is geen standpunt ingenomen of verlaten.",
       "trust": "Hoeveel hiervan te vertrouwen is",
-      "trustMeasured": "Spreekbeurten, tijden, woordaantallen en spreektijdverdeling komen uit het transcript. Elke stand is een oordeel dat uit het citaat ernaast is gelezen: controleer het citaat voordat je erop handelt.",
+      "trustMeasured": "Elke stand is een oordeel dat uit het citaat ernaast is gelezen.",
       "unattributed": "Zonder toeschrijving",
       "columnAt": "Op",
       "columnDirection": "Richting",
@@ -2319,9 +2269,7 @@
     "list": {
       "searchLabel": "Vergaderingen zoeken",
       "searchPlaceholder": "Zoeken op titel",
-      "clearFilters": "Filters wissen",
-      "noMatchesFiltered": "Geen vergaderingen komen overeen",
-      "noMatchesFilteredDescription": "Niets past bij deze filters. Sona heeft elke bewaarde vergadering doorgekeken, niet alleen deze pagina.",
+      "noMatches": "Geen vergadertitel komt overeen met ‘{{query}}’.",
       "rowActions": "Vergaderacties",
       "exportMarkdown": "Notities exporteren (Markdown)",
       "exportJson": "Notities exporteren (JSON)",
@@ -2330,27 +2278,7 @@
       "previousPage": "Nieuwer",
       "nextPage": "Ouder",
       "status": {
-        "live": "Live",
-        "ready": "Klaar",
-        "processing": "In behandeling",
         "needs_attention": "Vereist aandacht"
-      },
-      "filters": {
-        "label": "Vergaderingen filteren",
-        "statusKey": "Status",
-        "timeKey": "Tijd",
-        "status": {
-          "any": "Alle",
-          "ready": "Klaar",
-          "processing": "In behandeling",
-          "failed": "Mislukt"
-        },
-        "time": {
-          "any": "Alle",
-          "today": "Vandaag",
-          "last_7_days": "7 dagen",
-          "last_30_days": "30 dagen"
-        }
       }
     },
     "status": {
@@ -2364,7 +2292,6 @@
     },
     "analytics": {
       "title": "Gesprek",
-      "noSpeech": "Er is geen spraak getranscribeerd, dus er valt niets te meten.",
       "longestMonologue": "Langste monoloog",
       "patience": "Geduld",
       "patienceDetail": "Mediane pauze voor het antwoord",
@@ -2381,7 +2308,7 @@
       "trackersTitle": "Trefwoordtrackers",
       "addTracker": "Tracker toevoegen",
       "removeTracker": "Tracker verwijderen",
-      "noTrackers": "Nog geen trackers. Voeg er een toe om te gaan tellen hoe vaak een uitdrukking voorkomt.",
+      "noTrackers": "Voeg een tracker toe om te gaan tellen hoe vaak een uitdrukking voorkomt.",
       "trackerName": "Naam",
       "trackerPatterns": "korting, beste prijs, te duur",
       "trackerPatternsLabel": "Uitdrukkingen, gescheiden door komma's",
@@ -2521,8 +2448,7 @@
       "actions": {
         "skip": "Overslaan"
       },
-      "linkFailed": "Sona kon die link niet openen.",
-      "skippedNote": "Overslaan verbergt het aanbod hier. Sona blijft het gesprek zien tot het aanbod verloopt."
+      "linkFailed": "Sona kon die link niet openen."
     },
     "seriesTemplate": {
       "use": "Dit sjabloon voor deze reeks gebruiken",
@@ -2532,17 +2458,13 @@
     "upcoming": {
       "title": "Binnenkort",
       "loading": "Je agenda wordt gelezen…",
-      "empty": "Niets gepland voor de komende week.",
+      "empty": "Niets gepland voor de komende 7 dagen.",
       "noAccess": "Sona kan je agenda niet zien.",
-      "noAccessHint": "Zet 'Mijn agenda gebruiken' aan in de vergaderinstellingen en geef daarna volledige toegang wanneer macOS erom vraagt. Alles wat macOS Agenda al toont (Google, iCloud, Outlook) komt mee.",
+      "noAccessFix": "Zet ‘Mijn agenda gebruiken’ aan in Settings",
       "unavailable": "Dit systeem heeft geen agenda die Sona kan lezen.",
-      "attendees": "Deelnemers",
-      "you": "Jij",
-      "attendeesMore": "+{{count}}",
       "recurring": "Herhaalt",
       "seriesOptions": "Serieopties voor {{title}}",
       "alwaysRecord": "Deze serie altijd opnemen",
-      "alwaysRecordNeedsSource": "Kies eerst hierboven een opnamebron.",
       "template": "Notitiesjabloon",
       "templateDefault": "Standaard van de app",
       "digest": "Opnemen in de avondsamenvatting"
@@ -2589,10 +2511,11 @@
     "unpaired": "Koppel de Sona-agent in Instellingen",
     "close": "Chat sluiten",
     "history": "Recente chats",
-    "historyEmpty": "Nog geen eerdere chats.",
+    "historyEmpty": "Chats die je start, verschijnen hier.",
     "newChat": "Nieuwe chat",
-    "empty": "Vraag wat je zei of afsprak, of wat er moet veranderen.",
+    "empty": "Vraag wat er is gezegd, wat je hebt toegezegd, of wie iemand is.",
     "placeholder": "Vraag wat je wilt",
+    "placeholderConfig": "Een instelling wijzigen",
     "inputLabel": "Vraag over Sona",
     "send": "Verzenden",
     "stop": "Stoppen",
@@ -2688,8 +2611,22 @@
       "shortcutAction": "De dicteersneltoets wijzigen",
       "setShortcutAction": "Een sneltoets instellen"
     },
+    "needsYou": {
+      "title": "Wacht op jou",
+      "empty": "Er wacht niets op je.",
+      "openMeeting": "Vergadering {{title}} openen",
+      "loadError": "Deze lijst kon niet worden geladen."
+    },
+    "week": {
+      "title": "Deze week",
+      "dictations_one": "1 dictee",
+      "dictations_other": "{{count}} dictees",
+      "words_one": "1 woord",
+      "words_other": "{{count}} woorden",
+      "streak_one": "1 dag op rij",
+      "streak_other": "{{count}} dagen op rij"
+    },
     "activity": {
-      "title": "Activiteit",
       "dictations": "Dictees",
       "words": "Woorden",
       "streak": "Reeks",
@@ -2697,16 +2634,19 @@
       "rangeNext": "Volgende 7 dagen",
       "dictationsAria": "Dictees per dag, hoogste aantal {{count}} op {{day}}",
       "wordsAria": "Woorden per dag, {{count}} in totaal, laatste waarde {{last}}",
-      "days_one": "{{count}} dag",
-      "days_other": "{{count}} dagen",
       "streakAria_one": "Huidige reeks, {{count}} dag. Actieve dagen deze week: {{days}}.",
       "streakAria_other": "Huidige reeks, {{count}} dagen. Actieve dagen deze week: {{days}}."
+    },
+    "recent": {
+      "title": "Recent",
+      "today_one": "{{count}} vandaag",
+      "today_other": "{{count}} vandaag",
+      "empty": "Nog niets",
+      "emptyHint": "Personen, woorden en opvolging die Sona na een vergadering vastlegt, verschijnen hier."
     },
     "update": {
       "available": "Sona {{latest}} is beschikbaar. Deze installatie draait {{current}}.",
       "dismiss": "Sluiten",
-      "failed": "Kon niet op updates controleren.",
-      "failedWithReason": "Kon niet op updates controleren: {{reason}}",
       "view": "Release bekijken"
     }
   },
@@ -2819,13 +2759,12 @@
       "dismiss": "Negeren",
       "confirm": "Bevestigen",
       "loadError": "Personen konden niet worden geladen.",
-      "empty": "Nog geen personen.",
+      "empty": "Personen uit je vergaderingen verschijnen hier.",
       "meetings": "{{count}} vergaderingen"
     },
     "detail": {
       "nameLabel": "Naam van persoon",
       "rename": "Naam wijzigen",
-      "personActions": "Persoonsacties",
       "deletePerson": "Persoon verwijderen",
       "removeVoiceProfile": "Spraakprofiel verwijderen",
       "removeVoiceProfileTitle": "Spraakprofiel verwijderen?",
@@ -2844,23 +2783,19 @@
       "carriedSince": "Open sinds {{date}}",
       "noOpenLoops": "Er staat niets meer open.",
       "commitments": "Toezeggingen",
-      "noCommitments": "Geen toezeggingen vastgelegd.",
       "meetingsTogether": "Vergaderingen samen",
       "noMeetings": "Geen gekoppelde vergaderingen.",
       "series": "Vergadering {{number}} in de reeks",
-      "meetingActions": "Vergaderacties",
       "unlink": "Vergadering ontkoppelen",
       "unlinkTitle": "Deze vergadering ontkoppelen?",
       "unlinkDescription": "{{meeting}} bij deze persoon verwijderen?",
       "documents": "Documenten",
       "importDocument": "Document importeren",
       "documentsLoadError": "Documenten konden niet worden geladen.",
-      "noDocuments": "Geen geïmporteerde documenten.",
       "deleteDocument": "Document verwijderen",
       "deleteDocumentTitle": "Dit document verwijderen?",
       "deleteDocumentDescription": "Verwijder {{document}} uit de documenten van Sona?",
       "cadence": "Vergaderfrequentie",
-      "lastMeeting": "Laatste vergadering",
       "talkShare": "Aandeel spreektijd",
       "cadenceAria": "Vergaderingen per maand: {{values}}",
       "documentFilter": "Tekstdocumenten",
@@ -2888,7 +2823,6 @@
     },
     "summary": {
       "title": "Over deze persoon",
-      "empty": "Nog geen samenvatting.",
       "regenerate": "Opnieuw genereren",
       "provenance": "Geschreven door {{model}} op {{date}}"
     },
@@ -2944,15 +2878,7 @@
       "copy": "Kopiëren",
       "copied": "Gekopieerd",
       "transcribeAgain": "Opnieuw transcriberen",
-      "delete": "Verwijderen",
-      "more": "Meer acties"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "Blijft altijd bewaard",
-      "keptDays": "Blijft {{days}} dagen bewaard",
-      "change": "wijzigen in Instellingen"
+      "delete": "Verwijderen"
     }
   },
   "peopleV2": {
@@ -2961,8 +2887,7 @@
     },
     "detail": {
       "openLoops": "Open vragen",
-      "howSonaKnows": "Waarom Sona deze persoon koppelt",
-      "noEvidence": "Nog niets koppelt deze persoon aan een vergadering."
+      "howSonaKnows": "Waarom Sona deze persoon koppelt"
     }
   },
   "modesV2": {
@@ -3097,7 +3022,7 @@
       "dictation": "Dictaat",
       "keepDictations": "Te bewaren dictaten",
       "readsFromOtherApps": "Wat Sona uit andere apps mag lezen",
-      "workflows": "Wat Sona doet na een vergadering",
+      "workflows": "Wat Sona zelf doet",
       "sync": "Synchronisatie",
       "leavesThisMac": "Wat deze Mac verlaat",
       "agents": "Agents",
@@ -3107,11 +3032,9 @@
     },
     "apps": {
       "label": "Vergaderapps",
-      "browsersAutomatic": "Een gesprek in een browsertabblad wordt gedetecteerd zonder dat het hier staat.",
       "runningNow": "Draait nu",
       "autoRecord": "Automatisch opnemen",
       "autoRecordSources": "Automatisch opnemen legt je microfoon en de audio-uitvoer van deze Mac vast wanneer die app in een gesprek is.",
-      "autoRecordConsent": "Op sommige plaatsen moet iedereen in een gesprek instemmen met de opname.",
       "add": "Een app toevoegen",
       "addTitle": "Een vergaderapp toevoegen",
       "addDescription": "Sona heeft het app-ID nodig, dat je kunt vinden in het 'Over'-venster van de app of met `osascript -e 'id of app \"Naam\"'`.",
@@ -3187,14 +3110,12 @@
       }
     },
     "feed": {
-      "title": "Wat Sona opviel",
       "spokenPunctuation": "Je zegt vaak {{spoken}}. Als {{written}} schrijven?",
       "vocabularyCorrection": "Je verandert {{spoken}} steeds in {{written}}. Zal ik dat onthouden?",
       "modeHabit": "Je grijpt de meeste dagen met de sneltoets naar {{mode}}. Als standaard instellen?",
       "retryRate": "Dictaten via {{subject}} worden {{times}}× vaker opnieuw geprobeerd dan de rest.",
       "lostCaptureRate": "Dictaten via {{subject}} eindigen {{times}}× vaker afgekapt of stil dan de rest.",
       "inputLevel": "{{percent}}% van je opnames kwam zacht binnen. Microfoonniveau controleren?",
-      "example": "“{{text}}”",
       "accept": "Ja",
       "dismiss": "Nee, bedankt",
       "evidence_one": "1 keer, over {{days}} dagen",

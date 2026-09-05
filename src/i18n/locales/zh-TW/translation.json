@@ -41,14 +41,10 @@
     "subtitle": "模型在這台 Mac 上執行，準確度與速度需取捨。",
     "existingModelsTitle": "相容的模型",
     "downloadModelsTitle": "可供下載",
-    "showAllModels": "顯示全部 {{total}} 個模型",
-    "showFewerModels": "顯示較少模型",
+    "otherModels": "其他模型",
+    "moreModels": "還有 {{total}} 個",
     "recommended": "推薦",
     "customModelDescription": "官方不支援",
-    "modelCard": {
-      "accuracy": "準確度",
-      "speed": "速度"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "需要將轉錄文字輸入到您的應用程式中"
       },
       "grant": "授予權限",
-      "granted": "已授予",
       "waiting": "等待中…",
       "allGranted": "兩項皆已授予",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "正在載入 {{modelName}}…",
     "loadingGeneric": "載入中…",
     "deleteModel": "刪除 {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "取消",
     "cancelDownload": "取消下載",
     "capabilities": {
-      "languageSelection": "支援多種輸入語言",
-      "singleLanguage": "僅支援此語言",
       "languageCount": "{{total}} 種語言",
       "languageOnly": "僅 {{language}}",
-      "translation": "可翻譯為英語",
-      "translate": "翻譯為英語",
-      "streaming": "在您說話時即時顯示轉錄"
+      "translate": "翻譯為英語"
     }
   },
   "settings": {
@@ -669,8 +659,11 @@
       },
       "title": "歷史紀錄",
       "openFolder": "開啟錄音資料夾",
+      "import": "匯入",
+      "showRawText": "顯示原始文字",
+      "emptyRecordings_other": "{{count}} 段空錄音",
       "loading": "載入歷史紀錄中…",
-      "empty": "還沒有錄音。",
+      "empty": "你的口述會出現在這裡。",
       "copyToClipboard": "複製轉錄到剪貼簿",
       "copyFailed": "無法複製轉錄內容",
       "save": "儲存項目",
@@ -687,11 +680,6 @@
       "retry": "重試",
       "saveError": "無法更新儲存狀態。請重試。",
       "postProcessEmpty": "後處理沒有產出文字，所以這是原始轉錄。",
-      "textView": {
-        "label": "轉錄檢視",
-        "processed": "已處理",
-        "raw": "原始"
-      },
       "receipts": {
         "showDetails": "顯示執行詳情",
         "hideDetails": "隱藏執行詳情",
@@ -800,7 +788,6 @@
         "saveError": "無法儲存校正。請重試。"
       },
       "audioImport": {
-        "start": "轉錄檔案",
         "fileFilter": "音訊和視訊檔案",
         "jobs": "檔案匯入",
         "status": {
@@ -982,7 +969,7 @@
         "license": "採用 MIT 授權。版權所有 2025 CJ Pais。"
       },
       "updates": {
-        "autoDescription": "向 GitHub 查詢最新版本。Sona 絕不會自行安裝任何內容。",
+        "autoDescription": "Sona 絕不會自行安裝任何內容。",
         "autoLabel": "自動檢查更新",
         "check": "立即檢查",
         "checking": "正在檢查…",
@@ -1365,7 +1352,7 @@
         "title": "這台裝置上的資料",
         "historyLimit": {
           "label": "歷史紀錄上限",
-          "description": "保留這麼多筆最近的歷史紀錄。設為 0 則停用紀錄儲存。"
+          "description": "設為 0 則停用紀錄儲存。"
         },
         "retention": {
           "label": "錄音保留期限",
@@ -1607,6 +1594,7 @@
           "invalid_configuration": "Sona 不會使用該位址或金鑰。",
           "secret_unavailable": "無法讀取本機金鑰。",
           "untrusted_response": "回應未由配對的伺服器簽署。",
+          "workspace_mismatch": "回覆與提出的問題不相符。",
           "remote_rejected": "伺服器拒絕請求。",
           "ownership_rejected": "伺服器回應了其他人的請求。"
         }
@@ -1616,7 +1604,6 @@
       "title": "工作流程",
       "loadError": "無法載入工作流程。",
       "updateError": "無法更新工作流程。",
-      "empty": "沒有可用的工作流程。",
       "neverRun": "尚未執行",
       "toggleLabel": "啟用「{{name}}」",
       "items": {
@@ -1674,13 +1661,6 @@
         "accept": "加入",
         "dismiss": "略過"
       },
-      "overview": {
-        "whatSonaDid": "Sona 完成的工作",
-        "openLoops": "未答的問題",
-        "openMeeting": "開啟會議 {{title}}",
-        "loadError": "無法載入此卡片。",
-        "retry": "重試"
-      },
       "runLog": {
         "title": "活動紀錄",
         "empty": "尚無活動紀錄。",
@@ -1699,9 +1679,9 @@
       },
       "automations": {
         "title": "會議之後",
-        "description": "系列的筆記寫好後，在這台 Mac 上執行的動作。每個系列預設關閉，直到你打開其中一個。",
+        "description": "系列的筆記寫好後，在這台 Mac 上執行的動作。",
         "loading": "正在讀取你的系列…",
-        "empty": "還沒有錄製過的系列。從行事曆事件錄一場會議，它就會出現在這裡。",
+        "empty": "從行事曆事件錄一場會議，就能在這裡看到它的自動化。",
         "seriesFact": "已錄 {{count}} 場 · 最近 {{when}}",
         "reminders": "把我未了結的承諾加入提醒事項",
         "remindersHint": "把你還欠著的事寫進一個叫 Sona 的列表。絕不會從裡面讀回任何內容。",
@@ -1756,6 +1736,8 @@
     "pause": "暫停",
     "seek": "播放位置",
     "resetSetting": "重設{{name}}",
+    "more": "更多",
+    "none": "無",
     "day": {
       "today": "今天",
       "yesterday": "昨天"
@@ -1763,7 +1745,7 @@
   },
   "commandPalette": {
     "open": "搜尋",
-    "placeholder": "搜尋或選擇動作",
+    "placeholder": "搜尋或提問",
     "navigation": "導覽",
     "actions": "動作",
     "noResults": "找不到任何結果",
@@ -1774,7 +1756,6 @@
     "openAgent": "開啟代理",
     "runPrompt": "執行提示",
     "newPrompt": "新增提示",
-    "esc": "esc",
     "search": {
       "meetings": "會議",
       "people": "人物",
@@ -1850,9 +1831,8 @@
     "recordingFailed": "無法開始錄音：{{error}}。請重試。",
     "modelLoadFailed": "無法載入 {{model}}。請重試。",
     "modelLoadFailedUnknown": "未知模型",
-    "pasteFailedTitle": "無法貼上轉錄文字",
     "pasteFailed": "Transcript 無法貼到目前的應用程式。請把游標放到文字欄位中再重試。",
-    "transcriptionFailedTitle": "無法轉錄",
+    "transcriptionFailed": "無法轉錄。請重試。",
     "noModelSelected": "尚未選擇轉錄模型。請在 Settings > Models 中選擇一個。",
     "commandNoSelection": "選取你要修改的文字，然後按住命令快速鍵，說出要做的修改。",
     "commandRewriteUnavailable": "改寫沒有回傳任何內容，所選文字保持原樣。請在 Settings > Post-processing 中檢查供應商後重試。",
@@ -1876,7 +1856,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "輸入電平",
     "state": {
       "starting": "正在啟動",
       "listening": "正在聆聽",
@@ -1941,13 +1920,8 @@
       "unknown": "正在檢查"
     },
     "health": {
-      "not_started": "未開始",
       "starting": "正在啟動",
-      "healthy": "正常",
-      "paused": "已暫停",
-      "degraded": "已降級",
-      "failed": "失敗",
-      "stopped": "已停止"
+      "failed": "失敗"
     },
     "completeness": {
       "not_started": "未開始",
@@ -1968,17 +1942,12 @@
       }
     },
     "start": {
-      "label": "開始一場會議",
-      "action": "開始錄製",
+      "action": "錄製",
       "starting": "正在啟動…",
-      "assurance": "在本機錄製你 Mac 的聲音。沒有任何東西加入通話。",
-      "capture": "擷取",
-      "noSources": "請至少選擇一個來源。",
-      "localOnly": "僅本機",
-      "retention": "保留：{{policy}}"
+      "assurance": "在本機錄製這台 Mac 的聲音。沒有任何東西加入通話。"
     },
     "import": {
-      "action": "匯入",
+      "action": "匯入錄音",
       "recordingFilter": "錄音",
       "transcriptFilter": "逐字稿匯出檔"
     },
@@ -1986,12 +1955,14 @@
       "title": "錄製沒有開始",
       "readyTitle": "可以開始錄製",
       "recordAnyway": "不用它也錄製",
-      "recordAnywayHint": "該會議會標記為不完整，缺少的音源會在其中寫明。"
+      "recordAnywayHint": "該會議會標記為不完整，缺少的音源會在其中寫明。",
+      "sources": "會錄下哪些內容"
     },
     "actions": {
       "back": "返回",
       "delete": "刪除會議",
       "discard": "丟棄",
+      "openRecordings": "開啟錄音資料夾",
       "pause": "暫停",
       "refresh": "重新整理",
       "resume": "繼續",
@@ -2007,10 +1978,7 @@
       "remoteUnavailable": "此版本的 Sona 不提供遠端處理，因此每場會議都在這台 Mac 上轉錄和摘要。"
     },
     "preflight": {
-      "storage": "儲存空間",
-      "storageAvailable": "加密的會議儲存空間可用。",
       "storageUnavailable": "加密的會議儲存空間不可用。",
-      "localModel": "本機模型",
       "localModelDescription": "有可用的本機模型時，處理會留在本機。",
       "starting": "正在開始錄音…",
       "refreshing": "正在檢查…"
@@ -2023,39 +1991,30 @@
       "elapsed": "已用時間",
       "microphoneOnlyPartial": "只在錄製麥克風。系統聲音無法使用，因此這場會議會不完整。",
       "partialCapture": "有部分聲音缺漏。在依賴產生的筆記之前，請先檢查空缺處。",
-      "inputs": "輸入",
-      "signal": "訊號",
-      "signalUnavailable": "{{source}} 不回報自己的音量。",
-      "notReported": "未回報",
-      "durabilityLag": "已寫入磁碟",
-      "behind": "落後 {{duration}}",
-      "progress": "逐字稿進度",
       "transcript": "逐字稿",
-      "asrLag": "逐字稿延遲",
-      "storage": "儲存空間",
-      "storageHealthy": "加密的本機儲存空間正常。",
+      "transcriptEmpty": "辨識出的字詞會出現在這裡。",
       "storageUnavailable": "儲存空間需要處理。",
-      "processing": "處理中",
-      "manualNote": "手動筆記",
+      "manualNote": "為這一刻寫的筆記",
       "notePlaceholder": "為這一刻寫下筆記",
-      "addNote": "新增帶時間戳記的筆記"
+      "addNote": "新增筆記"
     },
     "recovery": {
-      "title": "未完成的會議",
-      "finalize": "完成儲存"
+      "title": "未完成的會議"
     },
     "trash": {
       "title": "最近刪除",
+      "empty": "你刪除的會議會出現在這裡。",
       "expires": "已於 {{deleted}} 刪除 · {{count}} 天後永久移除",
       "expiresToday": "已於 {{deleted}} 刪除 · 今天永久移除",
       "restore": "復原",
+      "restoreItem": "復原「{{title}}」",
       "restored": "{{title}} 已復原。",
       "restoreFailed": "無法復原該場會議。"
     },
     "history": {
-      "title": "會議記錄",
+      "title": "已錄製",
       "loading": "正在載入會議記錄…",
-      "emptyTitle": "還沒有會議"
+      "emptyTitle": "你錄製的會議會出現在這裡。"
     },
     "retention": {
       "title": "保留",
@@ -2140,10 +2099,10 @@
     "review": {
       "meetingTitle": "會議標題",
       "editTitle": "重新命名這場會議",
+      "rename": "重新命名",
+      "backToList": "會議",
       "noStartTime": "這場會議沒有記錄開始時間。",
-      "started": "{{date}} 開始",
       "partialRecording": "部分錄音",
-      "status": "擷取狀態",
       "capture": "這段錄音是如何記錄的",
       "timeline": "音訊時間軸與間隔",
       "timeUnknown": "時間未知",
@@ -2182,18 +2141,14 @@
       "notePlaceholder": "新增手動筆記",
       "addNote": "新增筆記",
       "editNote": "編輯這則筆記",
-      "generatedNotes": "生成的筆記",
       "regenerate": "重新產生",
       "remoteCancellationPending": "遠端取消仍在等待中。本機刪除並不表示遠端副本已被刪除。",
       "cancelRemote": "取消遠端處理",
       "remoteCancellationRequested": "已請求取消",
-      "export": "匯出",
-      "exportMarkdown": "匯出 Markdown",
-      "exportJson": "匯出 JSON",
+      "exportMarkdown": "匯出筆記（Markdown）",
+      "exportJson": "匯出筆記（JSON）",
       "exportComplete": "會議已匯出",
-      "moreActions": "更多",
       "citation": "逐字稿 {{time}}",
-      "noGeneratedNotes": "目前還沒有可用的生成筆記。",
       "topics": "話題",
       "nothingRecorded": "沒有記錄到決定事項、行動項目、問題或風險。",
       "templateName": {
@@ -2220,10 +2175,9 @@
         "manualNote": "手動筆記",
         "title": "會議標題"
       },
-      "generationFailedDescription": "轉錄和你自己寫的筆記不受影響。原因解決後可重新產生。",
-      "noGeneratedNotesDescription": "生成的筆記衍生自逐字稿，因此隨時可以重新建立。",
+      "generationFailedDescription": "原因解決後可重新產生。",
+      "noGeneratedNotesDescription": "重新產生會依據這份逐字稿寫出筆記。",
       "processingDescription": "逐字稿完成後，生成的筆記和本機回答就會出現。",
-      "processingTitle": "Sona 仍在處理這場會議",
       "tabs": {
         "insights": "洞察",
         "ledger": "紀錄簿",
@@ -2232,15 +2186,10 @@
       "tabsLabel": "會議回顧區段"
     },
     "ledger": {
-      "title": "紀錄簿",
-      "emptyTitle": "還沒有從這場會議讀出紀錄簿",
-      "emptyDescription": "紀錄簿會與產生的筆記一起寫出。重新產生筆記，就能依議題閱讀這場對話。",
+      "emptyDescription": "重新產生筆記，就能依議題閱讀這場對話。",
       "exportHtml": "匯出紀錄簿頁面",
       "exported": "紀錄簿已寫入 {{path}}",
       "exportMissing": "這場會議沒有可匯出的紀錄簿。請先重新產生筆記。",
-      "statThreads": "已有結論的議題",
-      "statReceipts": "引文",
-      "receiptsVerified": "已核對",
       "receiptsDegraded": "已移除 {{threads}} 個討論串和 {{commitments}} 項承諾",
       "threads": "議題",
       "asideThread": "題外話",
@@ -2251,7 +2200,7 @@
       "stances": "立場",
       "noStances": "沒有人表明或改變過立場。",
       "trust": "這些內容能信到什麼程度",
-      "trustMeasured": "輪次、時長、字詞數與發言占比來自逐字稿。每個狀態都是從旁邊那條引文讀出的判斷：照做之前請先核對引文。",
+      "trustMeasured": "每個狀態都是從旁邊那條引文讀出的判斷。",
       "unattributed": "未標明發言者",
       "columnAt": "時間點",
       "columnDirection": "方向",
@@ -2312,9 +2261,7 @@
     "list": {
       "searchLabel": "搜尋會議",
       "searchPlaceholder": "依標題搜尋",
-      "clearFilters": "清除篩選",
-      "noMatchesFiltered": "沒有會議符合條件",
-      "noMatchesFilteredDescription": "沒有符合這些篩選條件的內容。Sona 檢視了所有保留的會議，而不只是這一頁。",
+      "noMatches": "沒有會議標題與「{{query}}」相符。",
       "rowActions": "會議操作",
       "exportMarkdown": "匯出筆記（Markdown）",
       "exportJson": "匯出筆記（JSON）",
@@ -2323,27 +2270,7 @@
       "previousPage": "較新",
       "nextPage": "較早",
       "status": {
-        "live": "即時",
-        "ready": "已完成",
-        "processing": "處理中",
         "needs_attention": "需要處理"
-      },
-      "filters": {
-        "label": "篩選會議",
-        "statusKey": "狀態",
-        "timeKey": "時間",
-        "status": {
-          "any": "全部",
-          "ready": "已完成",
-          "processing": "處理中",
-          "failed": "失敗"
-        },
-        "time": {
-          "any": "全部",
-          "today": "今天",
-          "last_7_days": "7 天",
-          "last_30_days": "30 天"
-        }
       }
     },
     "status": {
@@ -2357,7 +2284,6 @@
     },
     "analytics": {
       "title": "對話",
-      "noSpeech": "沒有轉錄到任何語音，因此沒有可衡量的內容。",
       "longestMonologue": "最長的獨白",
       "patience": "耐心",
       "patienceDetail": "回話前停頓的中位數",
@@ -2374,7 +2300,7 @@
       "trackersTitle": "關鍵詞追蹤",
       "addTracker": "新增追蹤詞",
       "removeTracker": "移除追蹤詞",
-      "noTrackers": "還沒有追蹤詞。新增一個，開始統計某個詞語出現的頻率。",
+      "noTrackers": "新增一個追蹤詞，開始統計某個詞語出現的頻率。",
       "trackerName": "名稱",
       "trackerPatterns": "折扣、最優價格、太貴了",
       "trackerPatternsLabel": "以逗號分隔的詞語",
@@ -2514,8 +2440,7 @@
       "actions": {
         "skip": "略過"
       },
-      "linkFailed": "Sona 無法開啟該連結。",
-      "skippedNote": "略過會在這裡隱藏該提議。在提議過期之前，Sona 仍會看到這通通話。"
+      "linkFailed": "Sona 無法開啟該連結。"
     },
     "seriesTemplate": {
       "use": "此系列使用這個範本",
@@ -2525,17 +2450,13 @@
     "upcoming": {
       "title": "即將開始",
       "loading": "正在讀取你的行事曆…",
-      "empty": "未來一週沒有安排。",
+      "empty": "未來 7 天沒有安排。",
       "noAccess": "Sona 看不到你的行事曆。",
-      "noAccessHint": "在會議設定中開啟「使用我的行事曆」，然後在 macOS 詢問時授予完全存取權。macOS 行事曆已經顯示的內容（Google、iCloud、Outlook）都會一併進來。",
+      "noAccessFix": "在設定中開啟「使用我的行事曆」",
       "unavailable": "此系統沒有 Sona 能讀取的行事曆。",
-      "attendees": "參與者",
-      "you": "你",
-      "attendeesMore": "+{{count}}",
       "recurring": "重複",
       "seriesOptions": "{{title}} 的系列選項",
       "alwaysRecord": "一律錄製此系列",
-      "alwaysRecordNeedsSource": "請先在上方選擇一個擷取來源。",
       "template": "筆記範本",
       "templateDefault": "應用程式預設",
       "digest": "納入晚間摘要"
@@ -2582,10 +2503,11 @@
     "unpaired": "在設定中配對 Sona 代理",
     "close": "關閉聊天",
     "history": "最近的聊天",
-    "historyEmpty": "還沒有更早的聊天。",
+    "historyEmpty": "你開始的聊天會出現在這裡。",
     "newChat": "新增聊天",
-    "empty": "可以問你說過或談定的事，或是想改哪個設定。",
+    "empty": "可以問說過什麼、你欠著什麼，或某個人是誰。",
     "placeholder": "問點什麼",
+    "placeholderConfig": "改一個設定",
     "inputLabel": "詢問 Sona",
     "send": "傳送",
     "stop": "停止",
@@ -2681,8 +2603,19 @@
       "shortcutAction": "修改口述快速鍵",
       "setShortcutAction": "設定一個快速鍵"
     },
+    "needsYou": {
+      "title": "需要你處理",
+      "empty": "沒有需要你處理的。",
+      "openMeeting": "開啟會議 {{title}}",
+      "loadError": "無法載入這個清單。"
+    },
+    "week": {
+      "title": "本週",
+      "dictations_other": "{{count}} 次口述",
+      "words_other": "{{count}} 個字詞",
+      "streak_other": "連續 {{count}} 天"
+    },
     "activity": {
-      "title": "活動",
       "dictations": "口述",
       "words": "字詞",
       "streak": "連續紀錄",
@@ -2690,14 +2623,17 @@
       "rangeNext": "後 7 天",
       "dictationsAria": "每日口述，{{day}}最高 {{count}} 次",
       "wordsAria": "每日字詞，共 {{count}} 個，最後為 {{last}}",
-      "days_other": "{{count}} 天",
       "streakAria_other": "目前連續紀錄，{{count}} 天。本週活躍日：{{days}}。"
+    },
+    "recent": {
+      "title": "最近",
+      "today_other": "今天 {{count}} 筆",
+      "empty": "還沒有內容",
+      "emptyHint": "會議之後 Sona 整理的人物、字詞與後續事項會出現在這裡。"
     },
     "update": {
       "available": "Sona {{latest}} 已推出。目前安裝的是 {{current}}。",
       "dismiss": "關閉",
-      "failed": "無法檢查更新。",
-      "failedWithReason": "無法檢查更新：{{reason}}",
       "view": "查看版本資訊"
     }
   },
@@ -2810,13 +2746,12 @@
       "dismiss": "略過",
       "confirm": "確認",
       "loadError": "無法載入人物。",
-      "empty": "尚無人物。",
+      "empty": "會議中出現的人物會顯示在這裡。",
       "meetings": "{{count}} 次會議"
     },
     "detail": {
       "nameLabel": "人物名稱",
       "rename": "重新命名",
-      "personActions": "聯絡人操作",
       "deletePerson": "刪除人物",
       "removeVoiceProfile": "移除聲音檔案",
       "removeVoiceProfileTitle": "移除聲音檔案？",
@@ -2835,23 +2770,19 @@
       "carriedSince": "自 {{date}} 起尚未處理",
       "noOpenLoops": "沒有待處理事項。",
       "commitments": "承諾事項",
-      "noCommitments": "沒有已記錄的承諾事項。",
       "meetingsTogether": "共同會議",
       "noMeetings": "沒有已連結的會議。",
       "series": "系列中的第 {{number}} 次會議",
-      "meetingActions": "會議操作",
       "unlink": "取消會議連結",
       "unlinkTitle": "取消連結此會議？",
       "unlinkDescription": "從此人物移除 {{meeting}}？",
       "documents": "文件",
       "importDocument": "匯入文件",
       "documentsLoadError": "無法載入文件。",
-      "noDocuments": "沒有已匯入的文件。",
       "deleteDocument": "刪除文件",
       "deleteDocumentTitle": "刪除此文件？",
       "deleteDocumentDescription": "要從 Sona 的文件清單中刪除 {{document}} 嗎？",
       "cadence": "會議頻率",
-      "lastMeeting": "最近一次會議",
       "talkShare": "發言比例",
       "cadenceAria": "每月會議：{{values}}",
       "documentFilter": "文字文件",
@@ -2879,7 +2810,6 @@
     },
     "summary": {
       "title": "簡介",
-      "empty": "尚無摘要。",
       "regenerate": "重新產生",
       "provenance": "由 {{model}} 於 {{date}} 撰寫"
     },
@@ -2932,15 +2862,7 @@
       "copy": "複製",
       "copied": "已複製",
       "transcribeAgain": "重新轉錄",
-      "delete": "刪除",
-      "more": "更多操作"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "永久保留",
-      "keptDays": "保留 {{days}} 天",
-      "change": "在設定中變更"
+      "delete": "刪除"
     }
   },
   "peopleV2": {
@@ -2949,8 +2871,7 @@
     },
     "detail": {
       "openLoops": "未答的問題",
-      "howSonaKnows": "為什麼 Sona 關聯此人",
-      "noEvidence": "目前還沒有任何內容把這個人和會議連在一起。"
+      "howSonaKnows": "為什麼 Sona 關聯此人"
     }
   },
   "modesV2": {
@@ -3085,7 +3006,7 @@
       "dictation": "聽寫",
       "keepDictations": "保留多少則聽寫",
       "readsFromOtherApps": "Sona 可以從其他應用程式讀取什麼",
-      "workflows": "會議之後 Sona 會做什麼",
+      "workflows": "Sona 會自己做什麼",
       "sync": "同步",
       "leavesThisMac": "有什麼會離開這台 Mac",
       "agents": "代理程式",
@@ -3095,11 +3016,9 @@
     },
     "apps": {
       "label": "會議應用程式",
-      "browsersAutomatic": "瀏覽器分頁裡的通話不必列在這裡也能被偵測到。",
       "runningNow": "正在執行",
       "autoRecord": "自動錄製",
       "autoRecordSources": "自動錄製會在該 App 進行通話時擷取你的麥克風和這台 Mac 的音訊輸出。",
-      "autoRecordConsent": "部分地區要求通話中的每個人都同意錄製。",
       "add": "新增應用程式",
       "addTitle": "新增會議應用程式",
       "addDescription": "Sona 需要應用程式 ID，您可以在應用程式的「關於」視窗中找到，或使用 `osascript -e 'id of app \"Name\"'`。",
@@ -3173,14 +3092,12 @@
       }
     },
     "feed": {
-      "title": "Sona 注意到",
       "spokenPunctuation": "你經常說 {{spoken}}。要寫成 {{written}} 嗎？",
       "vocabularyCorrection": "你總是把 {{spoken}} 改成 {{written}}。要記住嗎？",
       "modeHabit": "你多數日子都用快捷鍵切到 {{mode}}。要設為預設嗎？",
       "retryRate": "走 {{subject}} 的口述被重試的次數是其餘的 {{times}} 倍。",
       "lostCaptureRate": "走 {{subject}} 的口述被截斷或無聲的次數是其餘的 {{times}} 倍。",
       "inputLevel": "你有 {{percent}}% 的錄音音量偏小。要檢查一下麥克風輸入嗎？",
-      "example": "「{{text}}」",
       "accept": "好",
       "dismiss": "不用了",
       "evidence_other": "{{count}} 次，跨 {{days}} 天"

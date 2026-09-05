@@ -41,14 +41,10 @@
     "subtitle": "模型在这台 Mac 上运行，需要在准确度和速度之间取舍。",
     "existingModelsTitle": "兼容的模型",
     "downloadModelsTitle": "可供下载",
-    "showAllModels": "显示全部 {{total}} 个模型",
-    "showFewerModels": "显示较少模型",
+    "otherModels": "其他模型",
+    "moreModels": "还有 {{total}} 个",
     "recommended": "推荐",
     "customModelDescription": "非官方支持",
-    "modelCard": {
-      "accuracy": "准确度",
-      "speed": "速度"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "需要将转录文本输入到您的应用程序中。"
       },
       "grant": "授予权限",
-      "granted": "已授予",
       "waiting": "等待中…",
       "allGranted": "两项均已授予",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "正在加载 {{modelName}}…",
     "loadingGeneric": "加载中…",
     "deleteModel": "删除 {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "取消",
     "cancelDownload": "取消下载",
     "capabilities": {
-      "languageSelection": "支持多种输入语言",
-      "singleLanguage": "仅支持此语言",
       "languageCount": "{{total}} 种语言",
       "languageOnly": "仅 {{language}}",
-      "translation": "可翻译为英语",
-      "translate": "翻译为英语",
-      "streaming": "在您说话时实时显示转录"
+      "translate": "翻译为英语"
     }
   },
   "settings": {
@@ -669,8 +659,11 @@
       },
       "title": "历史记录",
       "openFolder": "打开录音文件夹",
+      "import": "导入",
+      "showRawText": "显示原始文本",
+      "emptyRecordings_other": "{{count}} 段空录音",
       "loading": "加载历史记录中…",
-      "empty": "还没有录音。",
+      "empty": "你的口述会出现在这里。",
       "copyToClipboard": "复制转录到剪贴板",
       "copyFailed": "无法复制转录内容",
       "save": "保存条目",
@@ -687,11 +680,6 @@
       "retry": "重试",
       "saveError": "无法更新保存状态。请重试。",
       "postProcessEmpty": "后处理没有产出文本，所以这是原始转录。",
-      "textView": {
-        "label": "转录视图",
-        "processed": "已处理",
-        "raw": "原始"
-      },
       "receipts": {
         "showDetails": "显示运行详情",
         "hideDetails": "隐藏运行详情",
@@ -800,7 +788,6 @@
         "saveError": "无法保存校正。请重试。"
       },
       "audioImport": {
-        "start": "转录文件",
         "fileFilter": "音频和视频文件",
         "jobs": "文件导入",
         "status": {
@@ -982,7 +969,7 @@
         "license": "采用 MIT 许可证。版权归 CJ Pais 所有（2025）。"
       },
       "updates": {
-        "autoDescription": "向 GitHub 查询最新发布。Sona 从不自行安装任何内容。",
+        "autoDescription": "Sona 从不自行安装任何内容。",
         "autoLabel": "自动检查更新",
         "check": "立即检查",
         "checking": "正在检查…",
@@ -1365,7 +1352,7 @@
         "title": "本设备上的数据",
         "historyLimit": {
           "label": "历史记录上限",
-          "description": "保留这么多条最近的历史记录。设为 0 则停用历史保存。"
+          "description": "设为 0 则停用历史保存。"
         },
         "retention": {
           "label": "录音保留期限",
@@ -1607,6 +1594,7 @@
           "invalid_configuration": "Sona 不会使用该地址或密钥。",
           "secret_unavailable": "无法读取本机密钥。",
           "untrusted_response": "响应未由配对的服务器签名。",
+          "workspace_mismatch": "回复与提出的问题不匹配。",
           "remote_rejected": "服务器拒绝请求。",
           "ownership_rejected": "服务器响应了其他人的请求。"
         }
@@ -1616,7 +1604,6 @@
       "title": "工作流",
       "loadError": "无法加载工作流。",
       "updateError": "无法更新工作流。",
-      "empty": "没有可用的工作流。",
       "neverRun": "尚未运行",
       "toggleLabel": "启用“{{name}}”",
       "items": {
@@ -1674,13 +1661,6 @@
         "accept": "添加",
         "dismiss": "忽略"
       },
-      "overview": {
-        "whatSonaDid": "Sona 完成的工作",
-        "openLoops": "未答的问题",
-        "openMeeting": "打开会议 {{title}}",
-        "loadError": "无法加载此卡片。",
-        "retry": "重试"
-      },
       "runLog": {
         "title": "活动记录",
         "empty": "暂无活动记录。",
@@ -1699,9 +1679,9 @@
       },
       "automations": {
         "title": "会议之后",
-        "description": "系列的笔记写好后，在这台 Mac 上运行的动作。每个系列默认关闭，直到你打开其中一个。",
+        "description": "系列的笔记写好后，在这台 Mac 上运行的动作。",
         "loading": "正在读取你的系列…",
-        "empty": "还没有录制过的系列。从日历事件录一场会议，它就会出现在这里。",
+        "empty": "从日历事件录一场会议，就能在这里看到它的自动化。",
         "seriesFact": "已录 {{count}} 场 · 最近 {{when}}",
         "reminders": "把我未了结的承诺加入提醒事项",
         "remindersHint": "把你还欠着的事写进一个叫 Sona 的列表。绝不会从里面读回任何内容。",
@@ -1756,6 +1736,8 @@
     "pause": "暂停",
     "seek": "播放位置",
     "resetSetting": "重置{{name}}",
+    "more": "更多",
+    "none": "无",
     "day": {
       "today": "今天",
       "yesterday": "昨天"
@@ -1763,7 +1745,7 @@
   },
   "commandPalette": {
     "open": "搜索",
-    "placeholder": "搜索或选择操作",
+    "placeholder": "搜索或提问",
     "navigation": "导航",
     "actions": "操作",
     "noResults": "未找到结果",
@@ -1774,7 +1756,6 @@
     "openAgent": "打开智能体",
     "runPrompt": "运行提示",
     "newPrompt": "新建提示",
-    "esc": "esc",
     "search": {
       "meetings": "会议",
       "people": "人物",
@@ -1850,9 +1831,8 @@
     "recordingFailed": "无法开始录音：{{error}}。请重试。",
     "modelLoadFailed": "无法加载 {{model}}。请重试。",
     "modelLoadFailedUnknown": "未知模型",
-    "pasteFailedTitle": "无法粘贴转写文本",
     "pasteFailed": "Transcript 无法粘贴到当前应用。请把光标放到文本框中再重试。",
-    "transcriptionFailedTitle": "无法转写",
+    "transcriptionFailed": "无法转写。请重试。",
     "noModelSelected": "未选择转录模型。请在 Settings > Models 中选择。",
     "commandNoSelection": "选中你要修改的文本，然后按住命令快捷键，说出修改内容。",
     "commandRewriteUnavailable": "改写没有返回任何内容，所选文本保持原样。请在 Settings > Post-processing 中检查改写模型后重试。",
@@ -1876,7 +1856,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "输入电平",
     "state": {
       "starting": "正在启动",
       "listening": "正在聆听",
@@ -1941,13 +1920,8 @@
       "unknown": "正在检查"
     },
     "health": {
-      "not_started": "未开始",
       "starting": "正在启动",
-      "healthy": "正常",
-      "paused": "已暂停",
-      "degraded": "已降级",
-      "failed": "失败",
-      "stopped": "已停止"
+      "failed": "失败"
     },
     "completeness": {
       "not_started": "未开始",
@@ -1968,17 +1942,12 @@
       }
     },
     "start": {
-      "label": "开始一次会议",
-      "action": "开始录制",
+      "action": "录制",
       "starting": "正在启动…",
-      "assurance": "在本地录制你 Mac 的声音。没有任何东西加入通话。",
-      "capture": "采集",
-      "noSources": "请至少选择一个来源。",
-      "localOnly": "仅本地",
-      "retention": "保留：{{policy}}"
+      "assurance": "在本地录制这台 Mac 的声音。没有任何东西加入通话。"
     },
     "import": {
-      "action": "导入",
+      "action": "导入录音",
       "recordingFilter": "录音",
       "transcriptFilter": "转录文本导出"
     },
@@ -1986,12 +1955,14 @@
       "title": "录制没有开始",
       "readyTitle": "可以开始录制",
       "recordAnyway": "不用它也录制",
-      "recordAnywayHint": "该会议会标记为不完整，缺少的音源会在其中写明。"
+      "recordAnywayHint": "该会议会标记为不完整，缺少的音源会在其中写明。",
+      "sources": "会录制哪些内容"
     },
     "actions": {
       "back": "返回",
       "delete": "删除会议",
       "discard": "丢弃",
+      "openRecordings": "打开录音文件夹",
       "pause": "暂停",
       "refresh": "刷新",
       "resume": "继续",
@@ -2007,10 +1978,7 @@
       "remoteUnavailable": "此版本的 Sona 不提供远端处理，因此每场会议都在这台 Mac 上转录和总结。"
     },
     "preflight": {
-      "storage": "存储",
-      "storageAvailable": "加密的会议存储可用。",
       "storageUnavailable": "加密的会议存储不可用。",
-      "localModel": "本地模型",
       "localModelDescription": "有可用的本地模型时，处理会保持在本地。",
       "starting": "正在开始录音…",
       "refreshing": "正在检查…"
@@ -2023,39 +1991,30 @@
       "elapsed": "已用时间",
       "microphoneOnlyPartial": "只在录制麦克风。系统声音不可用，因此这场会议会不完整。",
       "partialCapture": "有部分声音缺失。在依赖生成的笔记之前，请先查看空缺处。",
-      "inputs": "输入",
-      "signal": "信号",
-      "signalUnavailable": "{{source}} 不报告自己的音量。",
-      "notReported": "未报告",
-      "durabilityLag": "已写入磁盘",
-      "behind": "落后 {{duration}}",
-      "progress": "转录进度",
       "transcript": "转录",
-      "asrLag": "转录延迟",
-      "storage": "存储",
-      "storageHealthy": "加密的本地存储正常。",
+      "transcriptEmpty": "识别出的字词会出现在这里。",
       "storageUnavailable": "存储需要处理。",
-      "processing": "处理中",
-      "manualNote": "手动笔记",
+      "manualNote": "为这一刻写的笔记",
       "notePlaceholder": "为这一刻写条笔记",
-      "addNote": "添加带时间戳的笔记"
+      "addNote": "添加笔记"
     },
     "recovery": {
-      "title": "未完成的会议",
-      "finalize": "完成保存"
+      "title": "未完成的会议"
     },
     "trash": {
       "title": "最近删除",
+      "empty": "你删除的会议会出现在这里。",
       "expires": "删除于 {{deleted}} · {{count}} 天后彻底移除",
       "expiresToday": "删除于 {{deleted}} · 今天彻底移除",
       "restore": "恢复",
+      "restoreItem": "恢复“{{title}}”",
       "restored": "{{title}} 已恢复。",
       "restoreFailed": "无法恢复该会议。"
     },
     "history": {
-      "title": "会议历史",
+      "title": "已录制",
       "loading": "正在加载会议历史…",
-      "emptyTitle": "还没有会议"
+      "emptyTitle": "你录制的会议会出现在这里。"
     },
     "retention": {
       "title": "保留",
@@ -2140,10 +2099,10 @@
     "review": {
       "meetingTitle": "会议标题",
       "editTitle": "重命名这场会议",
+      "rename": "重命名",
+      "backToList": "会议",
       "noStartTime": "这场会议没有记录开始时间。",
-      "started": "{{date}} 开始",
       "partialRecording": "部分录音",
-      "status": "采集状态",
       "capture": "这段录音是如何记录的",
       "timeline": "音频时间线与间隙",
       "timeUnknown": "时间未知",
@@ -2182,18 +2141,14 @@
       "notePlaceholder": "添加手动笔记",
       "addNote": "添加笔记",
       "editNote": "编辑这条笔记",
-      "generatedNotes": "生成的笔记",
       "regenerate": "重新生成",
       "remoteCancellationPending": "远程取消仍在等待中。本地删除并不表示远程副本已被删除。",
       "cancelRemote": "取消远程处理",
       "remoteCancellationRequested": "已请求取消",
-      "export": "导出",
-      "exportMarkdown": "导出 Markdown",
-      "exportJson": "导出 JSON",
+      "exportMarkdown": "导出笔记（Markdown）",
+      "exportJson": "导出笔记（JSON）",
       "exportComplete": "会议已导出",
-      "moreActions": "更多",
       "citation": "转录 {{time}}",
-      "noGeneratedNotes": "目前还没有可用的生成笔记。",
       "topics": "话题",
       "nothingRecorded": "没有记录到决定事项、行动项、问题或风险。",
       "templateName": {
@@ -2220,10 +2175,9 @@
         "manualNote": "手动笔记",
         "title": "会议标题"
       },
-      "generationFailedDescription": "转录和你自己写的笔记不受影响。原因解决后可重新生成。",
-      "noGeneratedNotesDescription": "生成的笔记来自转录，因此随时可以重新生成。",
+      "generationFailedDescription": "原因解决后可重新生成。",
+      "noGeneratedNotesDescription": "重新生成会依据这份转录写出笔记。",
       "processingDescription": "转录完成后即会显示生成的笔记和本地回答。",
-      "processingTitle": "Sona 仍在处理此会议",
       "tabs": {
         "insights": "洞察",
         "ledger": "台账",
@@ -2232,15 +2186,10 @@
       "tabsLabel": "会议回顾栏目"
     },
     "ledger": {
-      "title": "台账",
-      "emptyTitle": "还没有从这场会议中读出台账",
-      "emptyDescription": "台账与生成的笔记一同写出。重新生成笔记，即可按议题阅读这场对话。",
+      "emptyDescription": "重新生成笔记，即可按议题阅读这场对话。",
       "exportHtml": "导出台账页面",
       "exported": "台账已写入 {{path}}",
       "exportMissing": "这场会议没有可导出的台账。请先重新生成笔记。",
-      "statThreads": "已有结论的议题",
-      "statReceipts": "引文",
-      "receiptsVerified": "已核对",
       "receiptsDegraded": "已移除 {{threads}} 个线程和 {{commitments}} 项承诺",
       "threads": "议题",
       "asideThread": "题外话",
@@ -2251,7 +2200,7 @@
       "stances": "立场",
       "noStances": "没有人表明或改变过立场。",
       "trust": "这些内容能信到什么程度",
-      "trustMeasured": "轮次、时长、词数和发言占比来自转录。每个状态都是从旁边那条引文读出的判断：照做之前请先核对引文。",
+      "trustMeasured": "每个状态都是从旁边那条引文读出的判断。",
       "unattributed": "未标明发言人",
       "columnAt": "时间点",
       "columnDirection": "方向",
@@ -2312,9 +2261,7 @@
     "list": {
       "searchLabel": "搜索会议",
       "searchPlaceholder": "按标题搜索",
-      "clearFilters": "清除筛选",
-      "noMatchesFiltered": "没有会议符合条件",
-      "noMatchesFilteredDescription": "没有符合这些筛选条件的内容。Sona 查看了所有保留的会议，而不只是这一页。",
+      "noMatches": "没有会议标题与“{{query}}”匹配。",
       "rowActions": "会议操作",
       "exportMarkdown": "导出笔记（Markdown）",
       "exportJson": "导出笔记（JSON）",
@@ -2323,27 +2270,7 @@
       "previousPage": "更近",
       "nextPage": "更早",
       "status": {
-        "live": "实时",
-        "ready": "已完成",
-        "processing": "处理中",
         "needs_attention": "需要处理"
-      },
-      "filters": {
-        "label": "筛选会议",
-        "statusKey": "状态",
-        "timeKey": "时间",
-        "status": {
-          "any": "全部",
-          "ready": "已完成",
-          "processing": "处理中",
-          "failed": "失败"
-        },
-        "time": {
-          "any": "全部",
-          "today": "今天",
-          "last_7_days": "7 天",
-          "last_30_days": "30 天"
-        }
       }
     },
     "status": {
@@ -2357,7 +2284,6 @@
     },
     "analytics": {
       "title": "对话",
-      "noSpeech": "没有转写到任何语音，因此没有可衡量的内容。",
       "longestMonologue": "最长的独白",
       "patience": "耐心",
       "patienceDetail": "回话前停顿的中位数",
@@ -2374,7 +2300,7 @@
       "trackersTitle": "关键词追踪",
       "addTracker": "添加追踪词",
       "removeTracker": "移除追踪词",
-      "noTrackers": "还没有追踪词。添加一个，开始统计某个短语出现的频率。",
+      "noTrackers": "添加一个追踪词，开始统计某个短语出现的频率。",
       "trackerName": "名称",
       "trackerPatterns": "折扣、最优价格、太贵了",
       "trackerPatternsLabel": "用逗号分隔的短语",
@@ -2514,8 +2440,7 @@
       "actions": {
         "skip": "跳过"
       },
-      "linkFailed": "Sona 打不开该链接。",
-      "skippedNote": "跳过会在这里隐藏该提议。在提议过期之前，Sona 仍会看到这通通话。"
+      "linkFailed": "Sona 打不开该链接。"
     },
     "seriesTemplate": {
       "use": "此系列使用该模板",
@@ -2525,17 +2450,13 @@
     "upcoming": {
       "title": "即将开始",
       "loading": "正在读取你的日历…",
-      "empty": "未来一周没有安排。",
+      "empty": "未来 7 天没有安排。",
       "noAccess": "Sona 看不到你的日历。",
-      "noAccessHint": "在会议设置中开启“使用我的日历”，然后在 macOS 询问时授予完全访问权限。macOS 日历已经显示的内容（Google、iCloud、Outlook）都会一并进来。",
+      "noAccessFix": "在设置中开启“使用我的日历”",
       "unavailable": "此系统没有 Sona 能读取的日历。",
-      "attendees": "参与者",
-      "you": "你",
-      "attendeesMore": "+{{count}}",
       "recurring": "重复",
       "seriesOptions": "{{title}} 的系列选项",
       "alwaysRecord": "始终录制此系列",
-      "alwaysRecordNeedsSource": "请先在上方选择一个采集来源。",
       "template": "笔记模板",
       "templateDefault": "应用默认",
       "digest": "纳入晚间摘要"
@@ -2582,10 +2503,11 @@
     "unpaired": "在设置中配对 Sona 代理",
     "close": "关闭聊天",
     "history": "最近的聊天",
-    "historyEmpty": "还没有更早的聊天。",
+    "historyEmpty": "你开始的聊天会出现在这里。",
     "newChat": "新建聊天",
-    "empty": "可以问你说过或谈定的事，或是想改哪个设置。",
+    "empty": "可以问说过什么、你欠着什么，或某个人是谁。",
     "placeholder": "问点什么",
+    "placeholderConfig": "改一个设置",
     "inputLabel": "询问 Sona",
     "send": "发送",
     "stop": "停止",
@@ -2681,8 +2603,19 @@
       "shortcutAction": "修改口述快捷键",
       "setShortcutAction": "设置一个快捷键"
     },
+    "needsYou": {
+      "title": "需要你处理",
+      "empty": "没有需要你处理的。",
+      "openMeeting": "打开会议 {{title}}",
+      "loadError": "无法加载这个列表。"
+    },
+    "week": {
+      "title": "本周",
+      "dictations_other": "{{count}} 次口述",
+      "words_other": "{{count}} 个字词",
+      "streak_other": "连续 {{count}} 天"
+    },
     "activity": {
-      "title": "活动",
       "dictations": "口述",
       "words": "字词",
       "streak": "连续记录",
@@ -2690,14 +2623,17 @@
       "rangeNext": "后 7 天",
       "dictationsAria": "每日口述，{{day}}最高 {{count}} 次",
       "wordsAria": "每日字词，共 {{count}} 个，最后为 {{last}}",
-      "days_other": "{{count}} 天",
       "streakAria_other": "当前连续记录，{{count}} 天。本周活跃日：{{days}}。"
+    },
+    "recent": {
+      "title": "最近",
+      "today_other": "今天 {{count}} 条",
+      "empty": "暂时还没有",
+      "emptyHint": "会议之后 Sona 归档的人物、字词和后续事项会出现在这里。"
     },
     "update": {
       "available": "Sona {{latest}} 已可用。当前安装的是 {{current}}。",
       "dismiss": "忽略",
-      "failed": "无法检查更新。",
-      "failedWithReason": "无法检查更新：{{reason}}",
       "view": "查看发布"
     }
   },
@@ -2810,13 +2746,12 @@
       "dismiss": "忽略",
       "confirm": "确认",
       "loadError": "无法加载人物。",
-      "empty": "暂无人物。",
+      "empty": "会议中出现的人物会显示在这里。",
       "meetings": "{{count}} 次会议"
     },
     "detail": {
       "nameLabel": "人物名称",
       "rename": "重命名",
-      "personActions": "联系人操作",
       "deletePerson": "删除人物",
       "removeVoiceProfile": "移除声音档案",
       "removeVoiceProfileTitle": "移除声音档案？",
@@ -2835,23 +2770,19 @@
       "carriedSince": "自 {{date}} 起待处理",
       "noOpenLoops": "没有待处理事项。",
       "commitments": "承诺事项",
-      "noCommitments": "没有已记录的承诺事项。",
       "meetingsTogether": "共同会议",
       "noMeetings": "没有已关联的会议。",
       "series": "系列中的第 {{number}} 次会议",
-      "meetingActions": "会议操作",
       "unlink": "取消会议关联",
       "unlinkTitle": "取消关联此会议？",
       "unlinkDescription": "从此人物移除 {{meeting}}？",
       "documents": "文档",
       "importDocument": "导入文档",
       "documentsLoadError": "无法加载文档。",
-      "noDocuments": "没有已导入的文档。",
       "deleteDocument": "删除文档",
       "deleteDocumentTitle": "删除此文档？",
       "deleteDocumentDescription": "是否从 Sona 的文档中删除 {{document}}？",
       "cadence": "会议频率",
-      "lastMeeting": "最近一次会议",
       "talkShare": "发言比例",
       "cadenceAria": "每月会议：{{values}}",
       "documentFilter": "文本文档",
@@ -2879,7 +2810,6 @@
     },
     "summary": {
       "title": "简介",
-      "empty": "还没有摘要。",
       "regenerate": "重新生成",
       "provenance": "由 {{model}} 于 {{date}} 撰写"
     },
@@ -2932,15 +2862,7 @@
       "copy": "复制",
       "copied": "已复制",
       "transcribeAgain": "重新转录",
-      "delete": "删除",
-      "more": "更多操作"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "永久保留",
-      "keptDays": "保留 {{days}} 天",
-      "change": "在设置中更改"
+      "delete": "删除"
     }
   },
   "peopleV2": {
@@ -2949,8 +2871,7 @@
     },
     "detail": {
       "openLoops": "未答的问题",
-      "howSonaKnows": "Sona 关联此人的原因",
-      "noEvidence": "目前还没有任何内容把这个人和会议联系起来。"
+      "howSonaKnows": "Sona 关联此人的原因"
     }
   },
   "modesV2": {
@@ -3085,7 +3006,7 @@
       "dictation": "听写",
       "keepDictations": "保留多少条听写",
       "readsFromOtherApps": "Sona 可以从其他应用读取什么",
-      "workflows": "会议之后 Sona 会做什么",
+      "workflows": "Sona 会自己做什么",
       "sync": "同步",
       "leavesThisMac": "有什么会离开这台 Mac",
       "agents": "智能体",
@@ -3095,11 +3016,9 @@
     },
     "apps": {
       "label": "会议应用",
-      "browsersAutomatic": "浏览器标签页里的通话无需列在这里也能被检测到。",
       "runningNow": "正在运行",
       "autoRecord": "自动录制",
       "autoRecordSources": "自动录制会在该应用处于通话中时录制你的麦克风和这台 Mac 的音频输出。",
-      "autoRecordConsent": "在某些地区，录制通话需要通话中的每个人同意。",
       "add": "添加应用",
       "addTitle": "添加会议应用",
       "addDescription": "Sona 需要应用 ID，您可以在应用的“关于”窗口中找到，或使用 `osascript -e 'id of app \"Name\"'` 获取。",
@@ -3173,14 +3092,12 @@
       }
     },
     "feed": {
-      "title": "Sona 注意到",
       "spokenPunctuation": "你经常说 {{spoken}}。要写成 {{written}} 吗？",
       "vocabularyCorrection": "你总是把 {{spoken}} 改成 {{written}}。要记住吗？",
       "modeHabit": "你多数日子都用快捷键切到 {{mode}}。要设为默认吗？",
       "retryRate": "走 {{subject}} 的口述被重试的次数是其余的 {{times}} 倍。",
       "lostCaptureRate": "走 {{subject}} 的口述被截断或无声的次数是其余的 {{times}} 倍。",
       "inputLevel": "你有 {{percent}}% 的录音音量偏小。要检查一下麦克风输入吗？",
-      "example": "“{{text}}”",
       "accept": "好",
       "dismiss": "不用了",
       "evidence_other": "{{count}} 次，跨 {{days}} 天"

@@ -41,14 +41,10 @@
     "subtitle": "Modellerna körs på den här datorn och avväger noggrannhet mot hastighet.",
     "existingModelsTitle": "Kompatibla modeller",
     "downloadModelsTitle": "Tillgängliga för nedladdning",
-    "showAllModels": "Visa alla {{total}} modeller",
-    "showFewerModels": "Visa färre modeller",
+    "otherModels": "Andra modeller",
+    "moreModels": "{{total}} fler",
     "recommended": "Rekommenderat",
     "customModelDescription": "Stöds inte officiellt",
-    "modelCard": {
-      "accuracy": "noggrannhet",
-      "speed": "hastighet"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "Krävs för att skriva transkriberad text i dina program."
       },
       "grant": "Bevilja behörighet",
-      "granted": "Beviljad",
       "waiting": "Väntar…",
       "allGranted": "Båda beviljade",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "Laddar {{modelName}}…",
     "loadingGeneric": "Laddar…",
     "deleteModel": "Ta bort {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "Avbryt",
     "cancelDownload": "Avbryt nedladdning",
     "capabilities": {
-      "languageSelection": "Stöder flera indataspråk",
-      "singleLanguage": "Stöder endast detta språk",
       "languageCount": "{{total}} språk",
       "languageOnly": "Endast {{language}}",
-      "translation": "Kan översätta till engelska",
-      "translate": "Översätt till engelska",
-      "streaming": "Visar transkription i realtid medan du talar"
+      "translate": "Översätt till engelska"
     }
   },
   "settings": {
@@ -669,8 +659,12 @@
       },
       "title": "Historik",
       "openFolder": "Öppna mapp för inspelningar",
+      "import": "Importera",
+      "showRawText": "Visa rå text",
+      "emptyRecordings_one": "1 tom inspelning",
+      "emptyRecordings_other": "{{count}} tomma inspelningar",
       "loading": "Laddar historik…",
-      "empty": "Inga inspelningar ännu.",
+      "empty": "Dikteringar du gör visas här.",
       "copyToClipboard": "Kopiera transkription till urklipp",
       "copyFailed": "Det gick inte att kopiera transkriberingen",
       "save": "Spara post",
@@ -687,11 +681,6 @@
       "retry": "Försök igen",
       "saveError": "Kunde inte uppdatera sparat-statusen. Försök igen.",
       "postProcessEmpty": "Efterbearbetningen gav ingen text, så det här är originaltranskriptionen.",
-      "textView": {
-        "label": "Transkriptionsvy",
-        "processed": "Bearbetad",
-        "raw": "Rå"
-      },
       "receipts": {
         "showDetails": "Visa körningsdetaljer",
         "hideDetails": "Dölj körningsdetaljer",
@@ -800,7 +789,6 @@
         "saveError": "Kunde inte spara korrigeringen. Försök igen."
       },
       "audioImport": {
-        "start": "Transkribera fil",
         "fileFilter": "Ljud- och videofiler",
         "jobs": "Filimporter",
         "status": {
@@ -982,7 +970,7 @@
         "license": "MIT-licensierad. Copyright 2025 CJ Pais."
       },
       "updates": {
-        "autoDescription": "Frågar GitHub efter den senaste versionen. Sona installerar aldrig något på egen hand.",
+        "autoDescription": "Sona installerar aldrig något på egen hand.",
         "autoLabel": "Sök efter uppdateringar automatiskt",
         "check": "Sök nu",
         "checking": "Söker…",
@@ -1365,7 +1353,7 @@
         "title": "Data på den här enheten",
         "historyLimit": {
           "label": "Historikgräns",
-          "description": "Behåll så här många senaste historikposter. Ange 0 för att stänga av sparad historik."
+          "description": "Ange 0 för att stänga av sparad historik."
         },
         "retention": {
           "label": "Lagring av inspelningar",
@@ -1607,6 +1595,7 @@
           "invalid_configuration": "Sona använder inte den adressen eller nyckeln.",
           "secret_unavailable": "Det gick inte att läsa den här datorns nyckel.",
           "untrusted_response": "Svaret var inte signerat av den kopplade servern.",
+          "workspace_mismatch": "Svaret matchade inte frågan som ställdes.",
           "remote_rejected": "Servern avvisade förfrågan.",
           "ownership_rejected": "Servern svarade för någon annan."
         }
@@ -1616,7 +1605,6 @@
       "title": "Arbetsflöden",
       "loadError": "Arbetsflödena kunde inte läsas in.",
       "updateError": "Arbetsflödet kunde inte uppdateras.",
-      "empty": "Det finns inga tillgängliga arbetsflöden.",
       "neverRun": "Inte kört ännu",
       "toggleLabel": "Aktivera {{name}}",
       "items": {
@@ -1680,13 +1668,6 @@
         "accept": "Lägg till",
         "dismiss": "Avvisa"
       },
-      "overview": {
-        "whatSonaDid": "Vad Sona gjorde",
-        "openLoops": "Öppna frågor",
-        "openMeeting": "Öppna mötet {{title}}",
-        "loadError": "Det gick inte att läsa in det här kortet.",
-        "retry": "Försök igen"
-      },
       "runLog": {
         "title": "Aktivitet",
         "empty": "Ingen aktivitet än.",
@@ -1705,9 +1686,9 @@
       },
       "automations": {
         "title": "Efter ett möte",
-        "description": "Åtgärder som körs på den här Macen när en series anteckningar skrivits. Av för varje serie tills du slår på någon.",
+        "description": "Åtgärder som körs på den här Macen när en series anteckningar skrivits.",
         "loading": "Läser dina serier…",
-        "empty": "Inga inspelade serier än. Spela in ett möte från en kalenderhändelse så dyker det upp här.",
+        "empty": "Spela in ett möte från en kalenderhändelse för att se dess automationer här.",
         "seriesFact": "{{count}} inspelade · senast {{when}}",
         "reminders": "Lägg mina öppna löften i Påminnelser",
         "remindersHint": "Skriver det du fortfarande är skyldig till en lista som heter Sona. Inget läses någonsin tillbaka därifrån.",
@@ -1762,6 +1743,8 @@
     "pause": "Pausa",
     "seek": "Uppspelningsposition",
     "resetSetting": "Återställ {{name}}",
+    "more": "Mer",
+    "none": "Ingen",
     "day": {
       "today": "I dag",
       "yesterday": "I går"
@@ -1769,7 +1752,7 @@
   },
   "commandPalette": {
     "open": "Sök",
-    "placeholder": "Sök eller välj en åtgärd",
+    "placeholder": "Sök eller fråga",
     "navigation": "Navigering",
     "actions": "Åtgärder",
     "noResults": "Ingenting hittades",
@@ -1780,7 +1763,6 @@
     "openAgent": "Öppna agent",
     "runPrompt": "Kör en prompt",
     "newPrompt": "Ny prompt",
-    "esc": "esc",
     "search": {
       "meetings": "Möten",
       "people": "Personer",
@@ -1856,9 +1838,8 @@
     "recordingFailed": "Kunde inte starta inspelningen: {{error}}. Försök igen.",
     "modelLoadFailed": "Kunde inte läsa in {{model}}. Försök igen.",
     "modelLoadFailedUnknown": "okänd modell",
-    "pasteFailedTitle": "Kunde inte klistra in transkriberingen",
     "pasteFailed": "Transcript kunde inte klistras in i den aktiva appen. Sätt markören i ett textfält och försök igen.",
-    "transcriptionFailedTitle": "Kunde inte transkribera",
+    "transcriptionFailed": "Kunde inte transkribera. Försök igen.",
     "noModelSelected": "Ingen transkriberingsmodell vald. Välj en under Settings > Models.",
     "commandNoSelection": "Markera texten du vill ändra, håll sedan ned kommandogenvägen och säg ändringen.",
     "commandRewriteUnavailable": "Omskrivningen gav inget tillbaka, så din markering lämnades som den var. Kontrollera leverantören under Settings > Post-processing och försök igen.",
@@ -1882,7 +1863,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "Ingångsnivå",
     "state": {
       "starting": "Startar",
       "listening": "Lyssnar",
@@ -1947,13 +1927,8 @@
       "unknown": "Kontrollerar"
     },
     "health": {
-      "not_started": "Inte startad",
       "starting": "Startar",
-      "healthy": "I gott skick",
-      "paused": "Pausad",
-      "degraded": "Försämrad",
-      "failed": "Misslyckades",
-      "stopped": "Stoppad"
+      "failed": "Misslyckades"
     },
     "completeness": {
       "not_started": "Inte startad",
@@ -1974,17 +1949,12 @@
       }
     },
     "start": {
-      "label": "Starta ett möte",
-      "action": "Starta inspelning",
+      "action": "Spela in",
       "starting": "Startar…",
-      "assurance": "Spelar in din Macs ljud lokalt. Ingenting ansluter till samtalet.",
-      "capture": "Inspelning",
-      "noSources": "Välj minst en källa.",
-      "localOnly": "Endast lokalt",
-      "retention": "Sparas: {{policy}}"
+      "assurance": "Spelar in den här Macens ljud lokalt. Ingenting ansluter till samtalet."
     },
     "import": {
-      "action": "Importera",
+      "action": "Importera inspelning",
       "recordingFilter": "Inspelning",
       "transcriptFilter": "Transkriptexport"
     },
@@ -1992,12 +1962,14 @@
       "title": "Inspelningen startade inte",
       "readyTitle": "Klar att spela in",
       "recordAnyway": "Spela in utan den",
-      "recordAnywayHint": "Mötet markeras som ofullständigt, och den saknade källan namnges i det."
+      "recordAnywayHint": "Mötet markeras som ofullständigt, och den saknade källan namnges i det.",
+      "sources": "Vad som spelas in"
     },
     "actions": {
       "back": "Tillbaka",
       "delete": "Ta bort mötet",
       "discard": "Släng",
+      "openRecordings": "Öppna mapp för inspelningar",
       "pause": "Pausa",
       "refresh": "Uppdatera",
       "resume": "Återuppta",
@@ -2013,10 +1985,7 @@
       "remoteUnavailable": "Fjärrbearbetning är inte tillgänglig i den här versionen av Sona, så varje möte transkriberas och sammanfattas på den här datorn."
     },
     "preflight": {
-      "storage": "Lagring",
-      "storageAvailable": "Krypterat möteslager är tillgängligt.",
       "storageUnavailable": "Krypterat möteslager är inte tillgängligt.",
-      "localModel": "Lokal modell",
       "localModelDescription": "Bearbetningen sker lokalt när en lokal modell är tillgänglig.",
       "starting": "Startar inspelningen…",
       "refreshing": "Kontrollerar…"
@@ -2029,39 +1998,30 @@
       "elapsed": "Förfluten tid",
       "microphoneOnlyPartial": "Bara mikrofonen spelas in. Systemljudet är inte tillgängligt, så det här mötet blir ofullständigt.",
       "partialCapture": "Ljud saknas. Kontrollera luckorna innan du litar på de genererade anteckningarna.",
-      "inputs": "Ingångar",
-      "signal": "Signal",
-      "signalUnavailable": "{{source}} rapporterar inte sin nivå.",
-      "notReported": "Ej rapporterat",
-      "durabilityLag": "Sparat på disk",
-      "behind": "{{duration}} efter",
-      "progress": "Transkriptets förlopp",
       "transcript": "Transkript",
-      "asrLag": "Fördröjning i transkriptet",
-      "storage": "Lagring",
-      "storageHealthy": "Den krypterade lokala lagringen är i gott skick.",
+      "transcriptEmpty": "Orden visas här när de känns igen.",
       "storageUnavailable": "Lagringen kräver åtgärd.",
-      "processing": "Bearbetning",
-      "manualNote": "Manuell anteckning",
+      "manualNote": "Anteckning för det här ögonblicket",
       "notePlaceholder": "Skriv en anteckning för det här ögonblicket",
-      "addNote": "Lägg till anteckning med tidsstämpel"
+      "addNote": "Lägg till anteckning"
     },
     "recovery": {
-      "title": "Oavslutade möten",
-      "finalize": "Slutför sparandet"
+      "title": "Oavslutade möten"
     },
     "trash": {
       "title": "Nyligen borttagna",
+      "empty": "Möten du tar bort visas här.",
       "expires": "Borttaget {{deleted}} · försvinner om {{count}} dagar",
       "expiresToday": "Borttaget {{deleted}} · försvinner i dag",
       "restore": "Återställ",
+      "restoreItem": "Återställ ”{{title}}”",
       "restored": "{{title}} är tillbaka.",
       "restoreFailed": "Det gick inte att återställa det mötet."
     },
     "history": {
-      "title": "Möteshistorik",
+      "title": "Inspelade",
       "loading": "Läser in möteshistorik…",
-      "emptyTitle": "Inga möten än"
+      "emptyTitle": "Möten du spelar in visas här."
     },
     "retention": {
       "title": "Lagring",
@@ -2146,10 +2106,10 @@
     "review": {
       "meetingTitle": "Mötestitel",
       "editTitle": "Byt namn på det här mötet",
+      "rename": "Byt namn",
+      "backToList": "Möten",
       "noStartTime": "Det här mötet registrerade ingen starttid.",
-      "started": "Startade {{date}}",
       "partialRecording": "Delvis inspelning",
-      "status": "Inspelningsstatus",
       "capture": "Så här spelades det in",
       "timeline": "Ljudtidslinje och luckor",
       "timeUnknown": "Okänd tid",
@@ -2189,18 +2149,14 @@
       "notePlaceholder": "Lägg till en manuell anteckning",
       "addNote": "Lägg till anteckning",
       "editNote": "Redigera den här anteckningen",
-      "generatedNotes": "Genererade anteckningar",
       "regenerate": "Generera om",
       "remoteCancellationPending": "Fjärravbrytningen väntar fortfarande. Lokal borttagning gör inget anspråk på att fjärrkopian är borttagen.",
       "cancelRemote": "Avbryt fjärrbearbetning",
       "remoteCancellationRequested": "Avbrytning begärd",
-      "export": "Exportera",
-      "exportMarkdown": "Exportera Markdown",
-      "exportJson": "Exportera JSON",
+      "exportMarkdown": "Exportera anteckningar (Markdown)",
+      "exportJson": "Exportera anteckningar (JSON)",
       "exportComplete": "Mötet exporterat",
-      "moreActions": "Mer",
       "citation": "Transkript {{time}}",
-      "noGeneratedNotes": "Inga genererade anteckningar är tillgängliga än.",
       "topics": "Ämnen",
       "nothingRecorded": "Inga beslut, åtgärdspunkter, frågor eller risker registrerades.",
       "templateName": {
@@ -2227,10 +2183,9 @@
         "manualNote": "Manuell anteckning",
         "title": "Mötestitel"
       },
-      "generationFailedDescription": "Transkriptionen och dina egna anteckningar påverkas inte. Generera om när orsaken är åtgärdad.",
-      "noGeneratedNotesDescription": "Genererade anteckningar härleds från transkriptet, så de kan byggas om när som helst.",
+      "generationFailedDescription": "Generera om när orsaken är åtgärdad.",
+      "noGeneratedNotesDescription": "Generera om skriver anteckningar från det här transkriptet.",
       "processingDescription": "Genererade anteckningar och lokala svar visas när transkriptet är klart.",
-      "processingTitle": "Sona bearbetar fortfarande detta möte",
       "tabs": {
         "insights": "Insikter",
         "ledger": "Register",
@@ -2239,15 +2194,10 @@
       "tabsLabel": "Sektioner för mötesgenomgång"
     },
     "ledger": {
-      "title": "Register",
-      "emptyTitle": "Inget register har ännu lästs ur det här mötet",
-      "emptyDescription": "Registret skrivs tillsammans med de genererade anteckningarna. Generera om anteckningarna för att läsa samtalet som trådar.",
+      "emptyDescription": "Generera om anteckningarna för att läsa det här samtalet som trådar.",
       "exportHtml": "Exportera registersida",
       "exported": "Registret skrevs till {{path}}",
       "exportMissing": "Det här mötet har inget register att exportera. Generera om anteckningarna först.",
-      "statThreads": "Avklarade ämnen",
-      "statReceipts": "Citat",
-      "receiptsVerified": "kontrollerat",
       "receiptsDegraded": "{{threads}} trådar och {{commitments}} åtaganden togs bort",
       "threads": "Trådar",
       "asideThread": "sidospår",
@@ -2258,7 +2208,7 @@
       "stances": "Ståndpunkter",
       "noStances": "Ingen ståndpunkt togs eller övergavs.",
       "trust": "Hur mycket av det här som går att lita på",
-      "trustMeasured": "Turtagning, tider, ordantal och taltid kommer från transkriptet. Varje läge är en bedömning läst ur citatet bredvid: kontrollera citatet innan du agerar på det.",
+      "trustMeasured": "Varje läge är en bedömning läst ur citatet bredvid.",
       "unattributed": "Utan avsändare",
       "columnAt": "Vid",
       "columnDirection": "Riktning",
@@ -2319,9 +2269,7 @@
     "list": {
       "searchLabel": "Sök möten",
       "searchPlaceholder": "Sök efter titel",
-      "clearFilters": "Rensa filter",
-      "noMatchesFiltered": "Inga möten matchar",
-      "noMatchesFilteredDescription": "Inget matchar de här filtren. Sona gick igenom alla möten den har sparat, inte bara den här sidan.",
+      "noMatches": "Ingen mötestitel matchar ”{{query}}”.",
       "rowActions": "Mötesåtgärder",
       "exportMarkdown": "Exportera anteckningar (Markdown)",
       "exportJson": "Exportera anteckningar (JSON)",
@@ -2330,27 +2278,7 @@
       "previousPage": "Nyare",
       "nextPage": "Äldre",
       "status": {
-        "live": "Live",
-        "ready": "Klart",
-        "processing": "Bearbetas",
         "needs_attention": "Kräver åtgärd"
-      },
-      "filters": {
-        "label": "Filtrera möten",
-        "statusKey": "Status",
-        "timeKey": "Tid",
-        "status": {
-          "any": "Alla",
-          "ready": "Klart",
-          "processing": "Bearbetas",
-          "failed": "Misslyckades"
-        },
-        "time": {
-          "any": "Alla",
-          "today": "I dag",
-          "last_7_days": "7 dagar",
-          "last_30_days": "30 dagar"
-        }
       }
     },
     "status": {
@@ -2364,7 +2292,6 @@
     },
     "analytics": {
       "title": "Samtal",
-      "noSpeech": "Inget tal transkriberades, så det finns inget att mäta.",
       "longestMonologue": "Längsta monolog",
       "patience": "Tålamod",
       "patienceDetail": "Medianpausen innan svar",
@@ -2381,7 +2308,7 @@
       "trackersTitle": "Nyckelordsbevakningar",
       "addTracker": "Lägg till bevakning",
       "removeTracker": "Ta bort bevakning",
-      "noTrackers": "Inga bevakningar än. Lägg till en för att börja räkna hur ofta en fras dyker upp.",
+      "noTrackers": "Lägg till en bevakning för att börja räkna hur ofta en fras dyker upp.",
       "trackerName": "Namn",
       "trackerPatterns": "rabatt, bästa pris, för dyrt",
       "trackerPatternsLabel": "Fraser, separerade med kommatecken",
@@ -2521,8 +2448,7 @@
       "actions": {
         "skip": "Hoppa över"
       },
-      "linkFailed": "Sona kunde inte öppna den länken.",
-      "skippedNote": "Att hoppa över döljer erbjudandet här. Sona fortsätter se samtalet tills erbjudandet går ut."
+      "linkFailed": "Sona kunde inte öppna den länken."
     },
     "seriesTemplate": {
       "use": "Använd den här mallen för den här serien",
@@ -2532,17 +2458,13 @@
     "upcoming": {
       "title": "Kommande",
       "loading": "Läser din kalender…",
-      "empty": "Inget inplanerat den kommande veckan.",
+      "empty": "Inget inplanerat de kommande 7 dagarna.",
       "noAccess": "Sona kan inte se din kalender.",
-      "noAccessHint": "Slå på ”Använd min kalender” i mötesinställningarna och ge sedan full åtkomst när macOS frågar. Allt som macOS Kalender redan visar (Google, iCloud, Outlook) följer med.",
+      "noAccessFix": "Slå på ”Använd min kalender” i Settings",
       "unavailable": "Det här systemet har ingen kalender som Sona kan läsa.",
-      "attendees": "Deltagare",
-      "you": "Du",
-      "attendeesMore": "+{{count}}",
       "recurring": "Upprepas",
       "seriesOptions": "Seriealternativ för {{title}}",
       "alwaysRecord": "Spela alltid in den här serien",
-      "alwaysRecordNeedsSource": "Välj först en inspelningskälla ovan.",
       "template": "Anteckningsmall",
       "templateDefault": "Appens standard",
       "digest": "Ta med i kvällssammanfattningen"
@@ -2589,10 +2511,11 @@
     "unpaired": "Parkoppla Sona-agenten i Inställningar",
     "close": "Stäng chatten",
     "history": "Senaste chattar",
-    "historyEmpty": "Inga tidigare chattar än.",
+    "historyEmpty": "Chattar du startar visas här.",
     "newChat": "Ny chatt",
-    "empty": "Fråga vad du sa eller kom överens om, eller vad som ska ändras.",
+    "empty": "Fråga vad som sades, vad du lovat, eller vem någon är.",
     "placeholder": "Fråga vad som helst",
+    "placeholderConfig": "Ändra en inställning",
     "inputLabel": "Fråga om Sona",
     "send": "Skicka",
     "stop": "Stoppa",
@@ -2688,8 +2611,22 @@
       "shortcutAction": "Ändra dikteringsgenvägen",
       "setShortcutAction": "Ange en genväg"
     },
+    "needsYou": {
+      "title": "Väntar på dig",
+      "empty": "Inget väntar på dig.",
+      "openMeeting": "Öppna mötet {{title}}",
+      "loadError": "Det gick inte att läsa in listan."
+    },
+    "week": {
+      "title": "Den här veckan",
+      "dictations_one": "1 diktering",
+      "dictations_other": "{{count}} dikteringar",
+      "words_one": "1 ord",
+      "words_other": "{{count}} ord",
+      "streak_one": "1 dag i svit",
+      "streak_other": "{{count}} dagar i svit"
+    },
     "activity": {
-      "title": "Aktivitet",
       "dictations": "Dikteringar",
       "words": "Ord",
       "streak": "Svit",
@@ -2697,16 +2634,19 @@
       "rangeNext": "Nästa 7 dagar",
       "dictationsAria": "Dikteringar per dag, högst {{count}} på {{day}}",
       "wordsAria": "Ord per dag, totalt {{count}}, sista värde {{last}}",
-      "days_one": "{{count}} dag",
-      "days_other": "{{count}} dagar",
       "streakAria_one": "Aktuell svit, {{count}} dag. Aktiva dagar den här veckan: {{days}}.",
       "streakAria_other": "Aktuell svit, {{count}} dagar. Aktiva dagar den här veckan: {{days}}."
+    },
+    "recent": {
+      "title": "Senaste",
+      "today_one": "{{count}} i dag",
+      "today_other": "{{count}} i dag",
+      "empty": "Inget än",
+      "emptyHint": "Personer, ord och uppföljningar som Sona sparar efter ett möte visas här."
     },
     "update": {
       "available": "Sona {{latest}} är tillgänglig. Den här installationen har {{current}}.",
       "dismiss": "Stäng",
-      "failed": "Kunde inte söka efter uppdateringar.",
-      "failedWithReason": "Kunde inte söka efter uppdateringar: {{reason}}",
       "view": "Visa version"
     }
   },
@@ -2819,13 +2759,12 @@
       "dismiss": "Avvisa",
       "confirm": "Bekräfta",
       "loadError": "Det gick inte att läsa in personer.",
-      "empty": "Inga personer ännu.",
+      "empty": "Personer från dina möten visas här.",
       "meetings": "{{count}} möten"
     },
     "detail": {
       "nameLabel": "Personens namn",
       "rename": "Byt namn",
-      "personActions": "Personåtgärder",
       "deletePerson": "Ta bort person",
       "removeVoiceProfile": "Ta bort röstprofil",
       "removeVoiceProfileTitle": "Ta bort röstprofil?",
@@ -2844,23 +2783,19 @@
       "carriedSince": "Öppet sedan {{date}}",
       "noOpenLoops": "Inget är längre öppet.",
       "commitments": "Åtaganden",
-      "noCommitments": "Inga åtaganden registrerade.",
       "meetingsTogether": "Möten tillsammans",
       "noMeetings": "Inga länkade möten.",
       "series": "Möte {{number}} i serien",
-      "meetingActions": "Mötesåtgärder",
       "unlink": "Ta bort möteslänk",
       "unlinkTitle": "Ta bort länken till det här mötet?",
       "unlinkDescription": "Ta bort {{meeting}} från den här personen?",
       "documents": "Dokument",
       "importDocument": "Importera dokument",
       "documentsLoadError": "Dokumenten kunde inte läsas in.",
-      "noDocuments": "Inga importerade dokument.",
       "deleteDocument": "Ta bort dokument",
       "deleteDocumentTitle": "Ta bort det här dokumentet?",
       "deleteDocumentDescription": "Ta bort {{document}} från Sonas dokument?",
       "cadence": "Mötesfrekvens",
-      "lastMeeting": "Senaste mötet",
       "talkShare": "Andel talartid",
       "cadenceAria": "Möten per månad: {{values}}",
       "documentFilter": "Textdokument",
@@ -2888,7 +2823,6 @@
     },
     "summary": {
       "title": "Om personen",
-      "empty": "Ingen sammanfattning ännu.",
       "regenerate": "Skapa på nytt",
       "provenance": "Skriven av {{model}} den {{date}}"
     },
@@ -2944,15 +2878,7 @@
       "copy": "Kopiera",
       "copied": "Kopierad",
       "transcribeAgain": "Transkribera igen",
-      "delete": "Ta bort",
-      "more": "Fler åtgärder"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "Sparas för alltid",
-      "keptDays": "Sparas {{days}} dagar",
-      "change": "ändra i Inställningar"
+      "delete": "Ta bort"
     }
   },
   "peopleV2": {
@@ -2961,8 +2887,7 @@
     },
     "detail": {
       "openLoops": "Öppna frågor",
-      "howSonaKnows": "Varför Sona kopplar ihop den här personen",
-      "noEvidence": "Inget kopplar den här personen till ett möte ännu."
+      "howSonaKnows": "Varför Sona kopplar ihop den här personen"
     }
   },
   "modesV2": {
@@ -3097,7 +3022,7 @@
       "dictation": "Diktering",
       "keepDictations": "Dikteringar att spara",
       "readsFromOtherApps": "Vad Sona får läsa från andra appar",
-      "workflows": "Vad Sona gör efter ett möte",
+      "workflows": "Vad Sona gör på egen hand",
       "sync": "Synkronisering",
       "leavesThisMac": "Vad som lämnar den här Macen",
       "agents": "Agents",
@@ -3107,11 +3032,9 @@
     },
     "apps": {
       "label": "Mötesappar",
-      "browsersAutomatic": "Ett samtal i en webbläsarflik upptäcks utan att stå med här.",
       "runningNow": "Körs nu",
       "autoRecord": "Spela in automatiskt",
       "autoRecordSources": "Spela in automatiskt fångar din mikrofon och den här datorns ljudutgång varje gång den appen är i ett samtal.",
-      "autoRecordConsent": "På vissa platser krävs att alla i ett samtal samtycker till inspelning.",
       "add": "Lägg till en app",
       "addTitle": "Lägg till en mötesapp",
       "addDescription": "Sona behöver app-ID, som du kan hitta i appens Info-fönster eller med `osascript -e 'id of app \"Name\"'`.",
@@ -3187,14 +3110,12 @@
       }
     },
     "feed": {
-      "title": "Vad Sona lade märke till",
       "spokenPunctuation": "Du säger {{spoken}} ofta. Skriva det som {{written}}?",
       "vocabularyCorrection": "Du ändrar hela tiden {{spoken}} till {{written}}. Ska det läras in?",
       "modeHabit": "Du tar till {{mode}} med kortkommandot de flesta dagar. Ska det bli standard?",
       "retryRate": "Dikteringar via {{subject}} görs om {{times}}× oftare än de andra.",
       "lostCaptureRate": "Dikteringar via {{subject}} slutar avkapade eller tysta {{times}}× oftare än de andra.",
       "inputLevel": "{{percent}} % av dina inspelningar kom in svaga. Vill du kolla mikrofonnivån?",
-      "example": "”{{text}}”",
       "accept": "Ja",
       "dismiss": "Nej tack",
       "evidence_one": "1 gång, över {{days}} dagar",

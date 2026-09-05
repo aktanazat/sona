@@ -41,14 +41,10 @@
     "subtitle": "मॉडल इसी Mac पर चलते हैं और सटीकता व रफ़्तार के बीच संतुलन बनाते हैं।",
     "existingModelsTitle": "संगत मॉडल",
     "downloadModelsTitle": "डाउनलोड के लिए उपलब्ध",
-    "showAllModels": "सभी {{total}} मॉडल दिखाएं",
-    "showFewerModels": "कम मॉडल दिखाएं",
+    "otherModels": "अन्य मॉडल",
+    "moreModels": "{{total}} और",
     "recommended": "सुझाया गया",
     "customModelDescription": "आधिकारिक रूप से समर्थित नहीं",
-    "modelCard": {
-      "accuracy": "सटीकता",
-      "speed": "स्पीड"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "ट्रांसक्राइब किया गया टेक्स्ट आपके ऐप्लिकेशन में टाइप करने के लिए ज़रूरी."
       },
       "grant": "अनुमति दें",
-      "granted": "अनुमति मिल गई",
       "waiting": "इंतज़ार किया जा रहा है…",
       "allGranted": "दोनों अनुमतियाँ मिल गईं",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "{{modelName}} लोड हो रहा है…",
     "loadingGeneric": "लोड हो रहा है…",
     "deleteModel": "{{modelName}} हटाएं",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "रद्द करें",
     "cancelDownload": "डाउनलोड रद्द करें",
     "capabilities": {
-      "languageSelection": "कई इनपुट भाषाओं के साथ काम करता है",
-      "singleLanguage": "केवल इसी भाषा के साथ काम करता है",
       "languageCount": "{{total}} भाषाएं",
       "languageOnly": "केवल {{language}}",
-      "translation": "अंग्रेज़ी में अनुवाद कर सकता है",
-      "translate": "अनुवाद करें",
-      "streaming": "बोलते समय लाइव ट्रांसक्रिप्शन दिखाता है"
+      "translate": "अनुवाद करें"
     }
   },
   "settings": {
@@ -669,8 +659,12 @@
       },
       "title": "इतिहास",
       "openFolder": "रिकॉर्डिंग फ़ोल्डर खोलें",
+      "import": "आयात करें",
+      "showRawText": "कच्चा टेक्स्ट दिखाएँ",
+      "emptyRecordings_one": "{{count}} खाली रिकॉर्डिंग",
+      "emptyRecordings_other": "{{count}} खाली रिकॉर्डिंग",
       "loading": "इतिहास लोड हो रहा है…",
-      "empty": "अभी तक कोई रिकॉर्डिंग नहीं है.",
+      "empty": "आप जो श्रुतलेख करेंगे वे यहाँ दिखेंगे।",
       "copyToClipboard": "Transcript क्लिपबोर्ड पर कॉपी करें",
       "copyFailed": "ट्रांसक्रिप्ट कॉपी नहीं हो सका",
       "save": "एंट्री सेव करें",
@@ -687,11 +681,6 @@
       "retry": "फिर से कोशिश करें",
       "saveError": "सहेजी गई स्थिति अपडेट नहीं हो सकी। फिर कोशिश करें।",
       "postProcessEmpty": "पोस्ट-प्रोसेसिंग से कोई टेक्स्ट नहीं बना, इसलिए यह कच्चा ट्रांसक्रिप्ट है.",
-      "textView": {
-        "label": "ट्रांसक्रिप्ट दृश्य",
-        "processed": "प्रोसेस किया गया",
-        "raw": "कच्चा"
-      },
       "receipts": {
         "showDetails": "रन विवरण दिखाएं",
         "hideDetails": "रन विवरण छिपाएं",
@@ -800,7 +789,6 @@
         "saveError": "सुधार सहेजा नहीं जा सका। फिर कोशिश करें।"
       },
       "audioImport": {
-        "start": "फ़ाइल ट्रांसक्राइब करें",
         "fileFilter": "ऑडियो और वीडियो फ़ाइलें",
         "jobs": "फ़ाइल इंपोर्ट",
         "status": {
@@ -982,7 +970,7 @@
         "license": "MIT लाइसेंस। कॉपीराइट 2025 CJ Pais।"
       },
       "updates": {
-        "autoDescription": "नवीनतम रिलीज़ के लिए GitHub से पूछता है। Sona कभी भी अपने आप कुछ इंस्टॉल नहीं करता।",
+        "autoDescription": "Sona कभी भी अपने आप कुछ इंस्टॉल नहीं करता।",
         "autoLabel": "अपडेट की जाँच स्वतः करें",
         "check": "अभी जाँचें",
         "checking": "जाँच हो रही है…",
@@ -1365,7 +1353,7 @@
         "title": "इस डिवाइस पर डेटा",
         "historyLimit": {
           "label": "इतिहास की सीमा",
-          "description": "इतनी हालिया इतिहास प्रविष्टियाँ रखें। सहेजा गया इतिहास बंद करने के लिए 0 सेट करें।"
+          "description": "सहेजा गया इतिहास बंद करने के लिए 0 सेट करें।"
         },
         "retention": {
           "label": "रिकॉर्डिंग प्रतिधारण",
@@ -1607,6 +1595,7 @@
           "invalid_configuration": "Sona उस पते या कुंजी का उपयोग नहीं करेगा।",
           "secret_unavailable": "इस Mac की कुंजी पढ़ी नहीं जा सकी।",
           "untrusted_response": "जवाब पेयर किए गए सर्वर द्वारा साइन नहीं किया गया था।",
+          "workspace_mismatch": "जवाब पूछे गए सवाल से मेल नहीं खाता था।",
           "remote_rejected": "सर्वर ने अनुरोध अस्वीकार कर दिया।",
           "ownership_rejected": "सर्वर ने किसी और के लिए जवाब दिया।"
         }
@@ -1616,7 +1605,6 @@
       "title": "वर्कफ़्लो",
       "loadError": "वर्कफ़्लो लोड नहीं किए जा सके।",
       "updateError": "वर्कफ़्लो अपडेट नहीं किया जा सका।",
-      "empty": "कोई वर्कफ़्लो उपलब्ध नहीं है।",
       "neverRun": "अभी तक नहीं चला",
       "toggleLabel": "{{name}} चालू करें",
       "items": {
@@ -1653,10 +1641,10 @@
         "skipped": "छोड़ा गया"
       },
       "outcomes": {
-        "personLinks_one": "1 व्यक्ति याद रखा गया",
+        "personLinks_one": "{{count}} व्यक्ति याद रखा गया",
         "personLinks_other": "{{count}} लोग याद रखे गए",
         "briefing": "आपकी मीटिंग का सार तैयार है",
-        "continuity_one": "1 अनुत्तरित सवाल आगे ले जाया गया",
+        "continuity_one": "{{count}} अनुत्तरित सवाल आगे ले जाया गया",
         "continuity_other": "{{count}} अनुत्तरित सवाल आगे ले जाए गए",
         "vocabularyCandidates_one": "एक नया शब्द सीखा",
         "vocabularyCandidates_other": "{{count}} नए शब्द सीखे",
@@ -1673,19 +1661,12 @@
       },
       "vocabularySuggestions": {
         "title": "आपकी बैठकों से",
-        "occurrences_one": "1 उल्लेख",
+        "occurrences_one": "{{count}} उल्लेख",
         "occurrences_other": "{{count}} उल्लेख",
-        "meetings_one": "1 बैठक",
+        "meetings_one": "{{count}} बैठक",
         "meetings_other": "{{count}} बैठकें",
         "accept": "जोड़ें",
         "dismiss": "हटाएँ"
-      },
-      "overview": {
-        "whatSonaDid": "Sona ने क्या किया",
-        "openLoops": "अनुत्तरित सवाल",
-        "openMeeting": "बैठक {{title}} खोलें",
-        "loadError": "यह कार्ड लोड नहीं किया जा सका।",
-        "retry": "पुनः प्रयास करें"
       },
       "runLog": {
         "title": "गतिविधि",
@@ -1705,9 +1686,9 @@
       },
       "automations": {
         "title": "मीटिंग के बाद",
-        "description": "किसी सिरीज़ के नोट्स लिखे जाने पर इसी Mac पर चलने वाली क्रियाएँ। हर सिरीज़ के लिए बंद, जब तक आप कोई चालू न करें।",
+        "description": "किसी सिरीज़ के नोट्स लिखे जाने पर इसी Mac पर चलने वाली क्रियाएँ।",
         "loading": "आपकी सिरीज़ पढ़ी जा रही हैं…",
-        "empty": "अभी कोई रिकॉर्ड की गई सिरीज़ नहीं है। कैलेंडर इवेंट से कोई मीटिंग रिकॉर्ड करें, वह यहाँ दिखेगी।",
+        "empty": "किसी सिरीज़ के ऑटोमेशन यहाँ देखने के लिए कैलेंडर इवेंट से कोई मीटिंग रिकॉर्ड करें।",
         "seriesFact": "{{count}} रिकॉर्ड · अंतिम बार {{when}}",
         "reminders": "मेरी खुली प्रतिबद्धताएँ Reminders में जोड़ें",
         "remindersHint": "जो आप पर अब भी बाकी है उसे Sona नाम की सूची में लिखता है। उसमें से कभी कुछ वापस नहीं पढ़ा जाता।",
@@ -1762,6 +1743,8 @@
     "pause": "रोकें",
     "seek": "प्लेबैक की जगह",
     "resetSetting": "{{name}} रीसेट करें",
+    "more": "अधिक",
+    "none": "कोई नहीं",
     "day": {
       "today": "आज",
       "yesterday": "कल"
@@ -1769,7 +1752,7 @@
   },
   "commandPalette": {
     "open": "खोजें",
-    "placeholder": "एक्शन खोजें या चुनें",
+    "placeholder": "खोजें या पूछें",
     "navigation": "नेविगेशन",
     "actions": "कार्रवाइयाँ",
     "noResults": "कुछ नहीं मिला",
@@ -1780,7 +1763,6 @@
     "openAgent": "एजेंट खोलें",
     "runPrompt": "प्रॉम्प्ट चलाएँ",
     "newPrompt": "नया प्रॉम्प्ट",
-    "esc": "esc",
     "search": {
       "meetings": "मीटिंग",
       "people": "लोग",
@@ -1856,9 +1838,8 @@
     "recordingFailed": "रिकॉर्डिंग शुरू नहीं हो सकी: {{error}}। फिर कोशिश करें।",
     "modelLoadFailed": "{{model}} लोड नहीं हो सका। फिर कोशिश करें।",
     "modelLoadFailedUnknown": "अज्ञात मॉडल",
-    "pasteFailedTitle": "प्रतिलेख चिपकाया नहीं जा सका",
     "pasteFailed": "Transcript सक्रिय ऐप में चिपकाया नहीं जा सका। किसी टेक्स्ट फ़ील्ड पर फ़ोकस करें और फिर कोशिश करें।",
-    "transcriptionFailedTitle": "प्रतिलेखन नहीं हो सका",
+    "transcriptionFailed": "प्रतिलेखन नहीं हो सका। फिर कोशिश करें।",
     "noModelSelected": "कोई ट्रांसक्रिप्शन मॉडल नहीं चुना गया है। Settings > Models में एक चुनें।",
     "commandNoSelection": "जिस टेक्स्ट को बदलना है उसे चुनें, फिर कमांड शॉर्टकट दबाए रखें और बदलाव बोलें।",
     "commandRewriteUnavailable": "फिर से लिखने से कुछ नहीं मिला, इसलिए आपका चुना हुआ हिस्सा जैसा था वैसा ही रहा। Settings > Post-processing में प्रोवाइडर जाँचें और फिर कोशिश करें।",
@@ -1882,7 +1863,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "इनपुट स्तर",
     "state": {
       "starting": "शुरू हो रहा है",
       "listening": "सुन रहा है",
@@ -1898,9 +1878,9 @@
     }
   },
   "secureInput": {
-    "blockedWithCulprit_one": "{{name}} शायद 1 शॉर्टकट को ब्लॉक कर रहा है",
+    "blockedWithCulprit_one": "{{name}} शायद {{count}} शॉर्टकट को ब्लॉक कर रहा है",
     "blockedWithCulprit_other": "{{name}} शायद {{count}} शॉर्टकट को ब्लॉक कर रहा है",
-    "blockedNoCulprit_one": "macOS अस्थायी रूप से 1 शॉर्टकट को ब्लॉक कर रहा है",
+    "blockedNoCulprit_one": "macOS अस्थायी रूप से {{count}} शॉर्टकट को ब्लॉक कर रहा है",
     "blockedNoCulprit_other": "macOS अस्थायी रूप से {{count}} शॉर्टकट को ब्लॉक कर रहा है",
     "recorderBlockedWithCulprit": "{{name}} शायद शॉर्टकट में बदलाव को ब्लॉक कर रहा है",
     "recorderBlockedNoCulprit": "macOS अस्थायी रूप से शॉर्टकट में बदलाव को ब्लॉक कर रहा है",
@@ -1947,13 +1927,8 @@
       "unknown": "जाँच हो रही है"
     },
     "health": {
-      "not_started": "शुरू नहीं हुआ",
       "starting": "शुरू हो रहा है",
-      "healthy": "ठीक",
-      "paused": "रोका गया",
-      "degraded": "कमज़ोर",
-      "failed": "असफल",
-      "stopped": "रुक गया"
+      "failed": "असफल"
     },
     "completeness": {
       "not_started": "शुरू नहीं हुआ",
@@ -1974,17 +1949,12 @@
       }
     },
     "start": {
-      "label": "एक मीटिंग शुरू करें",
-      "action": "रिकॉर्डिंग शुरू करें",
+      "action": "रिकॉर्ड करें",
       "starting": "शुरू हो रही है…",
-      "assurance": "आपके Mac की आवाज़ इसी मशीन पर रिकॉर्ड करता है। कॉल में कुछ भी शामिल नहीं होता।",
-      "capture": "कैप्चर",
-      "noSources": "कम से कम एक स्रोत चुनें।",
-      "localOnly": "सिर्फ़ स्थानीय",
-      "retention": "रखा गया: {{policy}}"
+      "assurance": "इस Mac की आवाज़ इसी मशीन पर रिकॉर्ड करता है। कॉल में कुछ भी शामिल नहीं होता।"
     },
     "import": {
-      "action": "आयात करें",
+      "action": "रिकॉर्डिंग आयात करें",
       "recordingFilter": "रिकॉर्डिंग",
       "transcriptFilter": "ट्रांसक्रिप्ट निर्यात"
     },
@@ -1992,12 +1962,14 @@
       "title": "रिकॉर्डिंग शुरू नहीं हुई",
       "readyTitle": "रिकॉर्ड करने के लिए तैयार",
       "recordAnyway": "उसके बिना रिकॉर्ड करें",
-      "recordAnywayHint": "मीटिंग को आंशिक चिह्नित किया जाता है, और उसमें छूटा हुआ स्रोत नाम से दर्ज रहता है।"
+      "recordAnywayHint": "मीटिंग को आंशिक चिह्नित किया जाता है, और उसमें छूटा हुआ स्रोत नाम से दर्ज रहता है।",
+      "sources": "यह क्या रिकॉर्ड करेगा"
     },
     "actions": {
       "back": "वापस",
       "delete": "मीटिंग हटाएँ",
       "discard": "छोड़ दें",
+      "openRecordings": "रिकॉर्डिंग फ़ोल्डर खोलें",
       "pause": "रोकें",
       "refresh": "रीफ़्रेश करें",
       "resume": "फिर से शुरू करें",
@@ -2013,10 +1985,7 @@
       "remoteUnavailable": "Sona के इस संस्करण में रिमोट प्रोसेसिंग उपलब्ध नहीं है, इसलिए हर मीटिंग इसी Mac पर ट्रांसक्राइब और सारांशित होती है।"
     },
     "preflight": {
-      "storage": "स्टोरेज",
-      "storageAvailable": "एन्क्रिप्टेड मीटिंग स्टोरेज उपलब्ध है।",
       "storageUnavailable": "एन्क्रिप्टेड मीटिंग स्टोरेज उपलब्ध नहीं है।",
-      "localModel": "स्थानीय मॉडल",
       "localModelDescription": "जब कोई स्थानीय मॉडल उपलब्ध हो तो प्रोसेसिंग इसी मशीन पर रहती है।",
       "starting": "रिकॉर्डिंग शुरू हो रही है…",
       "refreshing": "जाँच हो रही है…"
@@ -2029,39 +1998,30 @@
       "elapsed": "बीता समय",
       "microphoneOnlyPartial": "सिर्फ़ माइक्रोफ़ोन रिकॉर्ड हो रहा है। सिस्टम ऑडियो उपलब्ध नहीं है, इसलिए यह मीटिंग अधूरी रहेगी।",
       "partialCapture": "कुछ ऑडियो गायब है। तैयार नोट्स पर भरोसा करने से पहले खाली जगहें देख लें।",
-      "inputs": "इनपुट",
-      "signal": "सिग्नल",
-      "signalUnavailable": "{{source}} अपना स्तर नहीं बताता।",
-      "notReported": "रिपोर्ट नहीं किया गया",
-      "durabilityLag": "डिस्क पर सहेजा गया",
-      "behind": "{{duration}} पीछे",
-      "progress": "ट्रांसक्रिप्ट की प्रगति",
       "transcript": "ट्रांसक्रिप्ट",
-      "asrLag": "ट्रांसक्रिप्ट में देरी",
-      "storage": "स्टोरेज",
-      "storageHealthy": "एन्क्रिप्टेड लोकल स्टोरेज ठीक है।",
+      "transcriptEmpty": "शब्द पहचाने जाते ही यहाँ दिखते हैं।",
       "storageUnavailable": "स्टोरेज पर ध्यान चाहिए।",
-      "processing": "प्रोसेस हो रही",
-      "manualNote": "मैनुअल नोट",
+      "manualNote": "इस पल के लिए नोट",
       "notePlaceholder": "इस पल के लिए एक नोट लिखें",
-      "addNote": "टाइमस्टैम्प वाला नोट जोड़ें"
+      "addNote": "नोट जोड़ें"
     },
     "recovery": {
-      "title": "अधूरी मीटिंग",
-      "finalize": "सहेजना पूरा करें"
+      "title": "अधूरी मीटिंग"
     },
     "trash": {
       "title": "हाल ही में हटाए गए",
+      "empty": "आप जो मीटिंग हटाएँगे वे यहाँ दिखेंगी।",
       "expires": "{{deleted}} को हटाया गया · {{count}} दिनों में स्थायी रूप से हट जाएगा",
       "expiresToday": "{{deleted}} को हटाया गया · आज स्थायी रूप से हट जाएगा",
       "restore": "पुनर्स्थापित करें",
+      "restoreItem": "“{{title}}” पुनर्स्थापित करें",
       "restored": "{{title}} वापस आ गई है।",
       "restoreFailed": "वह मीटिंग पुनर्स्थापित नहीं की जा सकी।"
     },
     "history": {
-      "title": "मीटिंग इतिहास",
+      "title": "रिकॉर्ड किए गए",
       "loading": "मीटिंग इतिहास लोड हो रहा है…",
-      "emptyTitle": "अभी कोई मीटिंग नहीं"
+      "emptyTitle": "आप जो मीटिंग रिकॉर्ड करेंगे वे यहाँ दिखेंगी।"
     },
     "retention": {
       "title": "प्रतिधारण",
@@ -2146,10 +2106,10 @@
     "review": {
       "meetingTitle": "मीटिंग शीर्षक",
       "editTitle": "इस मीटिंग का नाम बदलें",
+      "rename": "नाम बदलें",
+      "backToList": "मीटिंग",
       "noStartTime": "इस मीटिंग ने शुरू होने का समय दर्ज नहीं किया।",
-      "started": "{{date}} को शुरू हुई",
       "partialRecording": "अधूरी रिकॉर्डिंग",
-      "status": "कैप्चर स्थिति",
       "capture": "यह कैसे रिकॉर्ड हुआ",
       "timeline": "ऑडियो टाइमलाइन और गैप",
       "timeUnknown": "अज्ञात समय",
@@ -2167,7 +2127,7 @@
       "speakerName": "वक्ता का नाम",
       "renameSpeaker": "इस वक्ता का नाम बदलें",
       "samePersonAs": "{{name}} के समान व्यक्ति",
-      "unresolvedSpeakers_one": "1 वक्ता को लेबल करना है",
+      "unresolvedSpeakers_one": "{{count}} वक्ता को लेबल करना है",
       "unresolvedSpeakers_other": "{{count}} वक्ताओं को लेबल करना है",
       "labelSpeaker": "वक्ता को लेबल करें",
       "correctSpeaker": "वक्ता को सुधारें",
@@ -2189,18 +2149,14 @@
       "notePlaceholder": "एक मैनुअल नोट जोड़ें",
       "addNote": "नोट जोड़ें",
       "editNote": "इस नोट को संपादित करें",
-      "generatedNotes": "जनरेट किए गए नोट",
       "regenerate": "फिर से जनरेट करें",
       "remoteCancellationPending": "रिमोट रद्दीकरण लंबित है। लोकल विलोपन यह दावा नहीं करता कि रिमोट कॉपी हट गई।",
       "cancelRemote": "रिमोट प्रोसेसिंग रद्द करें",
       "remoteCancellationRequested": "रद्द करने का अनुरोध किया गया",
-      "export": "एक्सपोर्ट करें",
-      "exportMarkdown": "Markdown एक्सपोर्ट करें",
-      "exportJson": "JSON एक्सपोर्ट करें",
+      "exportMarkdown": "नोट्स एक्सपोर्ट करें (Markdown)",
+      "exportJson": "नोट्स एक्सपोर्ट करें (JSON)",
       "exportComplete": "मीटिंग निर्यात हो गई",
-      "moreActions": "और",
       "citation": "ट्रांसक्रिप्ट {{time}}",
-      "noGeneratedNotes": "अभी कोई जनरेट किए गए नोट उपलब्ध नहीं हैं।",
       "topics": "विषय",
       "nothingRecorded": "कोई निर्णय, कार्य बिंदु, सवाल या जोखिम दर्ज नहीं हुआ।",
       "templateName": {
@@ -2227,10 +2183,9 @@
         "manualNote": "मैनुअल नोट",
         "title": "मीटिंग शीर्षक"
       },
-      "generationFailedDescription": "ट्रांसक्रिप्ट और आपके अपने नोट्स प्रभावित नहीं होते। कारण ठीक होने पर फिर से जनरेट करें।",
-      "noGeneratedNotesDescription": "जनरेट किए गए नोट ट्रांसक्रिप्ट से बनते हैं, इसलिए इन्हें कभी भी फिर से बनाया जा सकता है।",
+      "generationFailedDescription": "कारण ठीक होने पर फिर से जनरेट करें।",
+      "noGeneratedNotesDescription": "फिर से जनरेट करने पर नोट्स इसी ट्रांसक्रिप्ट से बनते हैं।",
       "processingDescription": "ट्रांसक्रिप्ट पूरा होने पर जनरेट किए गए नोट और लोकल उत्तर दिखाई देते हैं।",
-      "processingTitle": "Sona अभी भी इस मीटिंग को प्रोसेस कर रहा है",
       "tabs": {
         "insights": "इनसाइट्स",
         "ledger": "रजिस्टर",
@@ -2239,15 +2194,10 @@
       "tabsLabel": "मीटिंग समीक्षा अनुभाग"
     },
     "ledger": {
-      "title": "रजिस्टर",
-      "emptyTitle": "इस मीटिंग से अभी कोई रजिस्टर नहीं पढ़ा गया",
-      "emptyDescription": "रजिस्टर तैयार किए गए नोट्स के साथ ही लिखा जाता है। इस बातचीत को विषयों के रूप में पढ़ने के लिए नोट्स फिर से तैयार करें।",
+      "emptyDescription": "इस बातचीत को विषयों के रूप में पढ़ने के लिए नोट्स फिर से तैयार करें।",
       "exportHtml": "रजिस्टर पेज एक्सपोर्ट करें",
       "exported": "रजिस्टर {{path}} में लिखा गया",
       "exportMissing": "इस मीटिंग का कोई रजिस्टर एक्सपोर्ट करने के लिए नहीं है। पहले नोट्स फिर से तैयार करें।",
-      "statThreads": "तय हुए विषय",
-      "statReceipts": "उद्धरण",
-      "receiptsVerified": "सत्यापित",
       "receiptsDegraded": "{{threads}} थ्रेड और {{commitments}} प्रतिबद्धताएँ हटाई गईं",
       "threads": "विषय",
       "asideThread": "अलग बात",
@@ -2258,7 +2208,7 @@
       "stances": "रुख",
       "noStances": "किसी ने कोई रुख अपनाया या बदला नहीं।",
       "trust": "इस पर कितना भरोसा करें",
-      "trustMeasured": "बारी, समय, शब्दों की गिनती और बोलने का हिस्सा ट्रांसक्रिप्ट से आते हैं। हर स्थिति उसके साथ दिए उद्धरण से पढ़ा गया आकलन है: उस पर काम करने से पहले उद्धरण जाँच लें।",
+      "trustMeasured": "हर स्थिति उसके साथ दिए उद्धरण से पढ़ा गया आकलन है।",
       "unattributed": "बिना श्रेय",
       "columnAt": "समय",
       "columnDirection": "दिशा",
@@ -2319,9 +2269,7 @@
     "list": {
       "searchLabel": "मीटिंग खोजें",
       "searchPlaceholder": "शीर्षक से खोजें",
-      "clearFilters": "फ़िल्टर साफ़ करें",
-      "noMatchesFiltered": "कोई मीटिंग मेल नहीं खाती",
-      "noMatchesFilteredDescription": "इन फ़िल्टरों से कुछ भी मेल नहीं खाता। Sona ने अपनी रखी हुई हर मीटिंग देखी, सिर्फ़ यह पेज नहीं।",
+      "noMatches": "“{{query}}” से मेल खाने वाला कोई मीटिंग शीर्षक नहीं।",
       "rowActions": "मीटिंग की कार्रवाइयाँ",
       "exportMarkdown": "नोट्स एक्सपोर्ट करें (Markdown)",
       "exportJson": "नोट्स एक्सपोर्ट करें (JSON)",
@@ -2330,27 +2278,7 @@
       "previousPage": "नई",
       "nextPage": "पुरानी",
       "status": {
-        "live": "लाइव",
-        "ready": "तैयार",
-        "processing": "प्रोसेस हो रही",
         "needs_attention": "ध्यान चाहिए"
-      },
-      "filters": {
-        "label": "मीटिंग फ़िल्टर करें",
-        "statusKey": "स्थिति",
-        "timeKey": "समय",
-        "status": {
-          "any": "कोई भी",
-          "ready": "तैयार",
-          "processing": "प्रोसेस हो रही",
-          "failed": "असफल"
-        },
-        "time": {
-          "any": "कोई भी",
-          "today": "आज",
-          "last_7_days": "7 दिन",
-          "last_30_days": "30 दिन"
-        }
       }
     },
     "status": {
@@ -2364,7 +2292,6 @@
     },
     "analytics": {
       "title": "बातचीत",
-      "noSpeech": "कोई बोली प्रतिलेखित नहीं हुई, इसलिए मापने के लिए कुछ नहीं है।",
       "longestMonologue": "सबसे लंबा एकालाप",
       "patience": "धैर्य",
       "patienceDetail": "जवाब देने से पहले का मध्य ठहराव",
@@ -2381,7 +2308,7 @@
       "trackersTitle": "कीवर्ड ट्रैकर",
       "addTracker": "ट्रैकर जोड़ें",
       "removeTracker": "ट्रैकर हटाएँ",
-      "noTrackers": "अभी कोई ट्रैकर नहीं। एक जोड़ें और गिनना शुरू करें कि कोई वाक्यांश कितनी बार आता है।",
+      "noTrackers": "कोई वाक्यांश कितनी बार आता है यह गिनना शुरू करने के लिए एक ट्रैकर जोड़ें।",
       "trackerName": "नाम",
       "trackerPatterns": "छूट, सबसे अच्छी कीमत, बहुत महँगा",
       "trackerPatternsLabel": "वाक्यांश, कॉमा से अलग किए हुए",
@@ -2521,8 +2448,7 @@
       "actions": {
         "skip": "छोड़ें"
       },
-      "linkFailed": "Sona वह लिंक नहीं खोल सकी।",
-      "skippedNote": "छोड़ने पर यह पेशकश यहाँ से छिप जाती है। पेशकश की अवधि खत्म होने तक Sona उस कॉल को देखती रहती है।"
+      "linkFailed": "Sona वह लिंक नहीं खोल सकी।"
     },
     "seriesTemplate": {
       "use": "इस शृंखला के लिए यही टेम्पलेट रखें",
@@ -2532,17 +2458,13 @@
     "upcoming": {
       "title": "आगामी",
       "loading": "आपका कैलेंडर पढ़ा जा रहा है…",
-      "empty": "अगले सप्ताह के लिए कुछ भी निर्धारित नहीं है।",
+      "empty": "अगले 7 दिनों के लिए कुछ भी निर्धारित नहीं है।",
       "noAccess": "Sona आपका कैलेंडर नहीं देख सकता।",
-      "noAccessHint": "मीटिंग सेटिंग्स में \"मेरा कैलेंडर इस्तेमाल करें\" चालू करें, फिर macOS पूछे तो पूरी पहुँच दें। macOS कैलेंडर जो पहले से दिखाता है (Google, iCloud, Outlook), वह सब साथ आ जाता है।",
+      "noAccessFix": "सेटिंग्स में “मेरा कैलेंडर इस्तेमाल करें” चालू करें",
       "unavailable": "इस सिस्टम में ऐसा कोई कैलेंडर नहीं है जिसे Sona पढ़ सके।",
-      "attendees": "उपस्थित लोग",
-      "you": "आप",
-      "attendeesMore": "+{{count}}",
       "recurring": "दोहराता है",
       "seriesOptions": "{{title}} के लिए शृंखला विकल्प",
       "alwaysRecord": "इस शृंखला को हमेशा रिकॉर्ड करें",
-      "alwaysRecordNeedsSource": "पहले ऊपर एक कैप्चर स्रोत चुनें।",
       "template": "नोट्स टेम्पलेट",
       "templateDefault": "ऐप डिफ़ॉल्ट",
       "digest": "शाम के सारांश में शामिल करें"
@@ -2589,10 +2511,11 @@
     "unpaired": "सेटिंग्स में Sona एजेंट को पेयर करें",
     "close": "चैट बंद करें",
     "history": "हाल की चैट",
-    "historyEmpty": "अभी तक कोई पिछली चैट नहीं।",
+    "historyEmpty": "आप जो चैट शुरू करेंगे वे यहाँ दिखेंगी।",
     "newChat": "नई चैट",
-    "empty": "पूछें कि आपने क्या कहा या तय किया, या क्या बदलना है।",
+    "empty": "पूछें कि क्या कहा गया, आप पर क्या बाकी है, या कोई व्यक्ति कौन है।",
     "placeholder": "कुछ भी पूछें",
+    "placeholderConfig": "कोई सेटिंग बदलें",
     "inputLabel": "Sona के बारे में पूछें",
     "send": "भेजें",
     "stop": "रोकें",
@@ -2688,8 +2611,22 @@
       "shortcutAction": "बोलने का शॉर्टकट बदलें",
       "setShortcutAction": "एक शॉर्टकट सेट करें"
     },
+    "needsYou": {
+      "title": "आपका ध्यान चाहिए",
+      "empty": "कुछ भी ध्यान नहीं चाहता।",
+      "openMeeting": "{{title}} मीटिंग खोलें",
+      "loadError": "यह सूची लोड नहीं की जा सकी।"
+    },
+    "week": {
+      "title": "इस सप्ताह",
+      "dictations_one": "{{count}} श्रुतलेख",
+      "dictations_other": "{{count}} श्रुतलेख",
+      "words_one": "{{count}} शब्द",
+      "words_other": "{{count}} शब्द",
+      "streak_one": "{{count}} दिन का सिलसिला",
+      "streak_other": "{{count}} दिन का सिलसिला"
+    },
     "activity": {
-      "title": "गतिविधि",
       "dictations": "श्रुतलेख",
       "words": "शब्द",
       "streak": "लगातार दिन",
@@ -2697,16 +2634,19 @@
       "rangeNext": "अगले 7 दिन",
       "dictationsAria": "प्रतिदिन श्रुतलेख, {{day}} को सबसे अधिक {{count}}",
       "wordsAria": "प्रतिदिन शब्द, कुल {{count}}, अंतिम मान {{last}}",
-      "days_one": "{{count}} दिन",
-      "days_other": "{{count}} दिन",
       "streakAria_one": "वर्तमान सिलसिला, {{count}} दिन। इस सप्ताह सक्रिय दिन: {{days}}।",
       "streakAria_other": "वर्तमान सिलसिला, {{count}} दिन। इस सप्ताह सक्रिय दिन: {{days}}।"
+    },
+    "recent": {
+      "title": "हाल ही में",
+      "today_one": "आज {{count}}",
+      "today_other": "आज {{count}}",
+      "empty": "अभी कुछ नहीं",
+      "emptyHint": "मीटिंग के बाद Sona जो लोग, शब्द और आगे के काम दर्ज करता है, वे यहाँ दिखते हैं।"
     },
     "update": {
       "available": "Sona {{latest}} उपलब्ध है। यह इंस्टॉल {{current}} पर है।",
       "dismiss": "हटाएँ",
-      "failed": "अपडेट की जाँच नहीं हो सकी।",
-      "failedWithReason": "अपडेट की जाँच नहीं हो सकी: {{reason}}",
       "view": "रिलीज़ देखें"
     }
   },
@@ -2814,18 +2754,17 @@
       "suggested": "सुझाया गया"
     },
     "list": {
-      "meetings_one": "1 मीटिंग",
+      "meetings_one": "{{count}} मीटिंग",
       "meetings_other": "{{count}} मीटिंग",
       "dismiss": "खारिज करें",
       "confirm": "पुष्टि करें",
       "loadError": "लोगों को लोड नहीं किया जा सका।",
-      "empty": "अभी कोई व्यक्ति नहीं है।",
+      "empty": "आपकी मीटिंग के लोग यहाँ दिखेंगे।",
       "meetings": "{{count}} मीटिंग"
     },
     "detail": {
       "nameLabel": "व्यक्ति का नाम",
       "rename": "नाम बदलें",
-      "personActions": "व्यक्ति की कार्रवाइयाँ",
       "deletePerson": "व्यक्ति हटाएँ",
       "removeVoiceProfile": "आवाज़ प्रोफ़ाइल हटाएँ",
       "removeVoiceProfileTitle": "आवाज़ प्रोफ़ाइल हटाएँ?",
@@ -2844,23 +2783,19 @@
       "carriedSince": "{{date}} से खुला",
       "noOpenLoops": "कुछ भी खुला नहीं है।",
       "commitments": "प्रतिबद्धताएँ",
-      "noCommitments": "कोई प्रतिबद्धता दर्ज नहीं है।",
       "meetingsTogether": "साथ की मीटिंग",
       "noMeetings": "कोई लिंक की गई मीटिंग नहीं है।",
       "series": "श्रृंखला की मीटिंग {{number}}",
-      "meetingActions": "मीटिंग की कार्रवाइयाँ",
       "unlink": "मीटिंग का लिंक हटाएँ",
       "unlinkTitle": "इस मीटिंग का लिंक हटाएँ?",
       "unlinkDescription": "इस व्यक्ति से {{meeting}} हटाएँ?",
       "documents": "दस्तावेज़",
       "importDocument": "दस्तावेज़ आयात करें",
       "documentsLoadError": "दस्तावेज़ों को लोड नहीं किया जा सका।",
-      "noDocuments": "कोई आयातित दस्तावेज़ नहीं है।",
       "deleteDocument": "दस्तावेज़ हटाएँ",
       "deleteDocumentTitle": "यह दस्तावेज़ हटाएँ?",
       "deleteDocumentDescription": "Sona के दस्तावेजों से {{document}} हटा दें?",
       "cadence": "मीटिंग की आवृत्ति",
-      "lastMeeting": "पिछली मीटिंग",
       "talkShare": "बोलने का हिस्सा",
       "cadenceAria": "महीने के अनुसार मीटिंग: {{values}}",
       "documentFilter": "टेक्स्ट दस्तावेज़",
@@ -2888,14 +2823,13 @@
     },
     "summary": {
       "title": "परिचय",
-      "empty": "अभी कोई सारांश नहीं है।",
       "regenerate": "फिर से बनाएँ",
       "provenance": "{{model}} द्वारा {{date}} को लिखा गया"
     },
     "review": {
       "personDetails": "व्यक्ति का विवरण",
       "previouslyTogether": "पहले साथ मिले",
-      "meetingsBefore_one": "1 पिछली मीटिंग",
+      "meetingsBefore_one": "{{count}} पिछली मीटिंग",
       "meetingsBefore_other": "{{count}} पिछली मीटिंग",
       "last": "पिछली {{date}}",
       "agentPromptIntro": "इन मीटिंग्स का उपयोग करके “{{title}}” के लिए फॉलो-अप ड्राफ्ट करने में मेरी मदद करें।",
@@ -2944,15 +2878,7 @@
       "copy": "कॉपी करें",
       "copied": "कॉपी हो गया",
       "transcribeAgain": "फिर से ट्रांसक्राइब करें",
-      "delete": "हटाएं",
-      "more": "और कार्रवाइयाँ"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "हमेशा रखी जाएगी",
-      "keptDays": "{{days}} दिन रखी जाएगी",
-      "change": "सेटिंग्स में बदलें"
+      "delete": "हटाएं"
     }
   },
   "peopleV2": {
@@ -2961,8 +2887,7 @@
     },
     "detail": {
       "openLoops": "अनुत्तरित सवाल",
-      "howSonaKnows": "Sona इस व्यक्ति को क्यों जोड़ता है",
-      "noEvidence": "अभी तक कुछ भी इस व्यक्ति को किसी मीटिंग से नहीं जोड़ता।"
+      "howSonaKnows": "Sona इस व्यक्ति को क्यों जोड़ता है"
     }
   },
   "modesV2": {
@@ -3097,7 +3022,7 @@
       "dictation": "डिक्टेशन",
       "keepDictations": "कितने डिक्टेशन रखने हैं",
       "readsFromOtherApps": "Sona दूसरे ऐप से क्या पढ़ सकता है",
-      "workflows": "मीटिंग के बाद Sona क्या करता है",
+      "workflows": "Sona अपने आप क्या करता है",
       "sync": "सिंक",
       "leavesThisMac": "इस Mac से क्या बाहर जाता है",
       "agents": "एजेंट",
@@ -3107,11 +3032,9 @@
     },
     "apps": {
       "label": "मीटिंग ऐप",
-      "browsersAutomatic": "ब्राउज़र टैब में हो रही कॉल यहाँ सूचीबद्ध हुए बिना ही पहचानी जाती है।",
       "runningNow": "अभी चल रहे हैं",
       "autoRecord": "अपने आप रिकॉर्ड करें",
       "autoRecordSources": "स्वचालित रूप से रिकॉर्ड करें आपके माइक्रोफ़ोन और इस Mac के ऑडियो आउटपुट को तब कैप्चर करता है जब भी वह ऐप किसी कॉल में होता है।",
-      "autoRecordConsent": "कुछ जगहों पर रिकॉर्डिंग के लिए कॉल में मौजूद सभी की सहमति आवश्यक होती है।",
       "add": "ऐप जोड़ें",
       "addTitle": "मीटिंग ऐप जोड़ें",
       "addDescription": "Sona को ऐप आईडी की आवश्यकता है, जिसे आप ऐप के About विंडो में या `osascript -e 'id of app \"Name\"'` के साथ पा सकते हैं।",
@@ -3158,7 +3081,7 @@
       "waitingOn": "इंतज़ार में ({{count}})",
       "openNotes": "नोट्स खोलें",
       "copyFollowUp": "फ़ॉलो-अप कॉपी करें",
-      "unresolvedSpeakers_one": "1 वक्ता को लेबल करना है",
+      "unresolvedSpeakers_one": "{{count}} वक्ता को लेबल करना है",
       "unresolvedSpeakers_other": "{{count}} वक्ताओं को लेबल करना है",
       "copied": "कॉपी हो गया",
       "done": "हो गया"
@@ -3187,22 +3110,20 @@
       }
     },
     "feed": {
-      "title": "Sona ने क्या देखा",
       "spokenPunctuation": "आप {{spoken}} बहुत कहते हैं. इसे {{written}} लिखें?",
       "vocabularyCorrection": "आप बार-बार {{spoken}} को {{written}} में बदलते हैं. इसे सीख लें?",
       "modeHabit": "आप ज़्यादातर दिन शॉर्टकट से {{mode}} पर जाते हैं. इसे डिफ़ॉल्ट बना दें?",
       "retryRate": "{{subject}} पर की गई डिक्टेशन बाकी की तुलना में {{times}}× ज़्यादा बार दोहरानी पड़ती हैं.",
       "lostCaptureRate": "{{subject}} पर की गई डिक्टेशन बाकी की तुलना में {{times}}× ज़्यादा बार कटी या खामोश निकलती हैं.",
       "inputLevel": "आपकी {{percent}}% रिकॉर्डिंग धीमी आईं. माइक्रोफ़ोन का स्तर जाँच लें?",
-      "example": "“{{text}}”",
       "accept": "हाँ",
       "dismiss": "नहीं, धन्यवाद",
-      "evidence_one": "1 बार, {{days}} दिनों में",
+      "evidence_one": "{{count}} बार, {{days}} दिनों में",
       "evidence_other": "{{count}} बार, {{days}} दिनों में"
     },
     "outcomes": {
       "primed": "एक आवर्ती बैठक तैयार की",
-      "noticed_one": "1 बात देखी",
+      "noticed_one": "{{count}} बात देखी",
       "noticed_other": "{{count}} बातें देखीं"
     }
   },

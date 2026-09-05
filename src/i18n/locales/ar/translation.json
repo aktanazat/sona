@@ -41,14 +41,10 @@
     "subtitle": "تعمل النماذج على جهاز Mac هذا وتوازن بين الدقة والسرعة.",
     "existingModelsTitle": "النماذج المتوافقة",
     "downloadModelsTitle": "متاح للتنزيل",
-    "showAllModels": "عرض كل النماذج ({{total}})",
-    "showFewerModels": "عرض عدد أقل من النماذج",
+    "otherModels": "نماذج أخرى",
+    "moreModels": "{{total}} أخرى",
     "recommended": "موصى به",
     "customModelDescription": "غير مدعوم رسميًا",
-    "modelCard": {
-      "accuracy": "الدقة",
-      "speed": "السرعة"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": ".مطلوب لكتابة النص المفرغ في تطبيقاتك"
       },
       "grant": "منح الإذن",
-      "granted": "تم المنح",
       "waiting": "...في الانتظار",
       "allGranted": "تم منح الإذنين",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "...جاري تحميل {{modelName}}",
     "loadingGeneric": "...جاري التحميل",
     "deleteModel": "حذف {{modelName}}",
-    "downloadSpeed": "{{speed}} ميجابايت/ث",
     "cancel": "إلغاء",
     "cancelDownload": "إلغاء التنزيل",
     "capabilities": {
-      "languageSelection": "يدعم اختيار اللغة",
-      "singleLanguage": "يدعم هذه اللغة فقط",
       "languageCount": "{{total}} لغة",
       "languageOnly": "{{language}} فقط",
-      "translation": "يدعم الترجمة",
-      "translate": "ترجمة",
-      "streaming": "يعرض النسخ المباشر أثناء التحدث"
+      "translate": "ترجمة"
     }
   },
   "settings": {
@@ -669,8 +659,16 @@
       },
       "title": "السجل",
       "openFolder": "فتح مجلد التسجيلات",
+      "import": "استيراد",
+      "showRawText": "إظهار النص الخام",
+      "emptyRecordings_zero": "لا تسجيلات فارغة",
+      "emptyRecordings_one": "تسجيل فارغ واحد",
+      "emptyRecordings_two": "تسجيلان فارغان",
+      "emptyRecordings_few": "{{count}} تسجيلات فارغة",
+      "emptyRecordings_many": "{{count}} تسجيلًا فارغًا",
+      "emptyRecordings_other": "{{count}} تسجيل فارغ",
       "loading": "...جاري تحميل السجل",
-      "empty": "لا توجد تسجيلات بعد.",
+      "empty": "تظهر هنا الإملاءات التي تجريها.",
       "copyToClipboard": "نسخ التفريغ إلى الحافظة",
       "copyFailed": "تعذر نسخ النص المفرغ",
       "save": "حفظ الإدخال",
@@ -687,11 +685,6 @@
       "retry": "حاول مجددًا",
       "saveError": "لم يتم تحديث حالة الحفظ. حاول مرة أخرى.",
       "postProcessEmpty": "لم تنتج المعالجة اللاحقة أي نص، لذا هذا هو النص الأصلي.",
-      "textView": {
-        "label": "عرض النص",
-        "processed": "معالج",
-        "raw": "خام"
-      },
       "receipts": {
         "showDetails": "إظهار تفاصيل التشغيل",
         "hideDetails": "إخفاء تفاصيل التشغيل",
@@ -800,7 +793,6 @@
         "saveError": "لم يتم حفظ التصحيح. حاول مرة أخرى."
       },
       "audioImport": {
-        "start": "تفريغ ملف",
         "fileFilter": "ملفات صوت وفيديو",
         "jobs": "استيرادات الملفات",
         "status": {
@@ -982,7 +974,7 @@
         "license": "مرخّص بترخيص MIT. حقوق النشر 2025 لـ CJ Pais."
       },
       "updates": {
-        "autoDescription": "يسأل GitHub عن أحدث إصدار. لا يثبّت Sona أي شيء من تلقاء نفسه أبدًا.",
+        "autoDescription": "لا يثبّت Sona أي شيء من تلقاء نفسه أبدًا.",
         "autoLabel": "التحقق من التحديثات تلقائيًا",
         "check": "التحقق الآن",
         "checking": "جارٍ التحقق…",
@@ -1365,7 +1357,7 @@
         "title": "البيانات على هذا الجهاز",
         "historyLimit": {
           "label": "حد السجل",
-          "description": "احتفظ بهذا العدد من عناصر السجل الأخيرة. اضبطه على 0 لتعطيل حفظ السجل."
+          "description": "اضبطه على 0 لتعطيل حفظ السجل."
         },
         "retention": {
           "label": "مدة الاحتفاظ بالتسجيلات",
@@ -1607,6 +1599,7 @@
           "invalid_configuration": "هذا العنوان أو المفتاح لن يستخدمه Sona.",
           "secret_unavailable": "تعذّرت قراءة مفتاح هذا الجهاز.",
           "untrusted_response": "الرد لم يتم توقيعه من الخادم المقرن.",
+          "workspace_mismatch": "لم يطابق الرد السؤال الذي طُرح.",
           "remote_rejected": "رفض الخادم الطلب.",
           "ownership_rejected": "الخادم أجاب لشخص آخر."
         }
@@ -1616,7 +1609,6 @@
       "title": "سير العمل",
       "loadError": "تعذّر تحميل عمليات سير العمل.",
       "updateError": "تعذّر تحديث سير العمل.",
-      "empty": "لا تتوفر عمليات سير عمل.",
       "neverRun": "لم يُشغّل بعد",
       "toggleLabel": "تفعيل {{name}}",
       "items": {
@@ -1704,13 +1696,6 @@
         "accept": "إضافة",
         "dismiss": "تجاهل"
       },
-      "overview": {
-        "whatSonaDid": "ما فعله Sona",
-        "openLoops": "الأسئلة المعلّقة",
-        "openMeeting": "فتح الاجتماع {{title}}",
-        "loadError": "تعذر تحميل هذه البطاقة.",
-        "retry": "إعادة المحاولة"
-      },
       "runLog": {
         "title": "النشاط",
         "empty": "لا يوجد نشاط بعد.",
@@ -1729,9 +1714,9 @@
       },
       "automations": {
         "title": "بعد الاجتماع",
-        "description": "إجراءات تعمل على هذا الـ Mac عند كتابة ملاحظات سلسلة. مغلقة لكل سلسلة حتى تشغّل واحدة.",
+        "description": "إجراءات تعمل على هذا الـ Mac عند كتابة ملاحظات سلسلة.",
         "loading": "جارٍ قراءة سلاسلك…",
-        "empty": "لا توجد سلاسل مسجّلة بعد. سجّل اجتماعًا من حدث في التقويم وسيظهر هنا.",
+        "empty": "سجّل اجتماعًا من حدث في التقويم لترى إجراءاته التلقائية هنا.",
         "seriesFact": "{{count}} مسجّلة · آخر مرة {{when}}",
         "reminders": "أضف التزاماتي المفتوحة إلى التذكيرات",
         "remindersHint": "يكتب ما لا يزال عليك في قائمة اسمها Sona. لا يُقرأ منها شيء أبدًا.",
@@ -1786,6 +1771,8 @@
     "pause": "إيقاف مؤقت",
     "seek": "موضع التشغيل",
     "resetSetting": "إعادة تعيين {{name}}",
+    "more": "المزيد",
+    "none": "بلا",
     "day": {
       "today": "اليوم",
       "yesterday": "أمس"
@@ -1793,7 +1780,7 @@
   },
   "commandPalette": {
     "open": "بحث",
-    "placeholder": "ابحث أو اختر إجراءً",
+    "placeholder": "ابحث أو اسأل",
     "navigation": "التنقل",
     "actions": "إجراءات",
     "noResults": "لم يتم العثور على نتائج",
@@ -1804,7 +1791,6 @@
     "openAgent": "فتح المساعد",
     "runPrompt": "تشغيل موجّه",
     "newPrompt": "موجّه جديد",
-    "esc": "esc",
     "search": {
       "meetings": "الاجتماعات",
       "people": "الأشخاص",
@@ -1880,9 +1866,8 @@
     "recordingFailed": "لم يبدأ التسجيل: {{error}}. حاول مرة أخرى.",
     "modelLoadFailed": "لم يتم تحميل {{model}}. حاول مرة أخرى.",
     "modelLoadFailedUnknown": "نموذج غير معروف",
-    "pasteFailedTitle": "لم يتم لصق النص",
     "pasteFailed": "لم يمكن لصق النص في التطبيق النشط. ضع المؤشر في حقل نصي وحاول مرة أخرى.",
-    "transcriptionFailedTitle": "لم يتم التحويل إلى نص",
+    "transcriptionFailed": "تعذّر التفريغ. حاول مرة أخرى.",
     "noModelSelected": "لم يتم اختيار نموذج نسخ. اختر واحدًا في Settings > Models.",
     "commandNoSelection": "حدد النص الذي تريد تغييره، ثم استمر بالضغط على اختصار الأمر وقل التغيير.",
     "commandRewriteUnavailable": "لم تُرجع إعادة الكتابة شيئًا، فبقي تحديدك كما هو. تحقق من المزود في Settings > Post-processing وحاول مرة أخرى.",
@@ -1906,7 +1891,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "مستوى الإدخال",
     "state": {
       "starting": "جاري البدء",
       "listening": "يستمع",
@@ -1971,13 +1955,8 @@
       "unknown": "جارٍ التحقق"
     },
     "health": {
-      "not_started": "لم يبدأ",
       "starting": "جاري البدء",
-      "healthy": "سليم",
-      "paused": "متوقف مؤقتًا",
-      "degraded": "متدهور",
-      "failed": "فاشل",
-      "stopped": "متوقف"
+      "failed": "فاشل"
     },
     "completeness": {
       "not_started": "لم يبدأ",
@@ -1998,17 +1977,12 @@
       }
     },
     "start": {
-      "label": "ابدأ اجتماعًا",
-      "action": "ابدأ التسجيل",
+      "action": "تسجيل",
       "starting": "جارٍ البدء…",
-      "assurance": "يسجّل صوت جهاز Mac محليًا. لا شيء ينضم إلى المكالمة.",
-      "capture": "التسجيل",
-      "noSources": "اختر مصدرًا واحدًا على الأقل.",
-      "localOnly": "محلي فقط",
-      "retention": "يُحفظ: {{policy}}"
+      "assurance": "يسجّل صوت هذا الـ Mac محليًا. لا شيء ينضم إلى المكالمة."
     },
     "import": {
-      "action": "استيراد",
+      "action": "استيراد تسجيل",
       "recordingFilter": "تسجيل",
       "transcriptFilter": "نص مفرّغ مُصدَّر"
     },
@@ -2016,12 +1990,14 @@
       "title": "لم يبدأ التسجيل",
       "readyTitle": "جاهز للتسجيل",
       "recordAnyway": "سجّل بدونه",
-      "recordAnywayHint": "يُوسم الاجتماع بأنه جزئي، ويُذكر المصدر الناقص فيه."
+      "recordAnywayHint": "يُوسم الاجتماع بأنه جزئي، ويُذكر المصدر الناقص فيه.",
+      "sources": "ما سيُسجَّل"
     },
     "actions": {
       "back": "رجوع",
       "delete": "حذف الاجتماع",
       "discard": "تخلّص",
+      "openRecordings": "فتح مجلد التسجيلات",
       "pause": "إيقاف مؤقت",
       "refresh": "تحديث",
       "resume": "استئناف",
@@ -2037,10 +2013,7 @@
       "remoteUnavailable": "المعالجة عن بُعد غير متاحة في هذا الإصدار من Sona، لذا يُنسخ كل اجتماع ويُلخَّص على هذا الـMac."
     },
     "preflight": {
-      "storage": "التخزين",
-      "storageAvailable": "تخزين الاجتماعات المشفّر متاح.",
       "storageUnavailable": "تخزين الاجتماعات المشفّر غير متاح.",
-      "localModel": "النموذج المحلي",
       "localModelDescription": "تبقى المعالجة محلية عندما يتوفر نموذج محلي.",
       "starting": "جارٍ بدء التسجيل…",
       "refreshing": "جارٍ التحقق…"
@@ -2053,39 +2026,30 @@
       "elapsed": "المنقضي",
       "microphoneOnlyPartial": "يجري تسجيل الميكروفون فقط. صوت النظام غير متاح، لذا سيكون هذا الاجتماع ناقصًا.",
       "partialCapture": "جزء من الصوت مفقود. تحقّق من الفجوات قبل الاعتماد على الملاحظات المُنشأة.",
-      "inputs": "المدخلات",
-      "signal": "الإشارة",
-      "signalUnavailable": "{{source}} لا يبلّغ عن مستواه.",
-      "notReported": "غير مُبلَّغ عنه",
-      "durabilityLag": "محفوظ على القرص",
-      "behind": "متأخر بمقدار {{duration}}",
-      "progress": "تقدّم النص",
       "transcript": "النص",
-      "asrLag": "تأخّر النص",
-      "storage": "التخزين",
-      "storageHealthy": "التخزين المحلي المشفّر سليم.",
+      "transcriptEmpty": "تظهر الكلمات هنا أثناء التعرف عليها.",
       "storageUnavailable": "التخزين يحتاج إلى انتباه.",
-      "processing": "قيد المعالجة",
-      "manualNote": "ملاحظة يدوية",
+      "manualNote": "ملاحظة لهذه اللحظة",
       "notePlaceholder": "اكتب ملاحظة لهذه اللحظة",
-      "addNote": "إضافة ملاحظة بطابع زمني"
+      "addNote": "إضافة ملاحظة"
     },
     "recovery": {
-      "title": "اجتماعات لم تكتمل",
-      "finalize": "إنهاء الحفظ"
+      "title": "اجتماعات لم تكتمل"
     },
     "trash": {
       "title": "المحذوفة مؤخرًا",
+      "empty": "تظهر هنا الاجتماعات التي تحذفها.",
       "expires": "حُذف {{deleted}} · يُزال خلال {{count}} أيام",
       "expiresToday": "حُذف {{deleted}} · يُزال اليوم",
       "restore": "استعادة",
+      "restoreItem": "استعادة «{{title}}»",
       "restored": "عاد {{title}}.",
       "restoreFailed": "تعذّرت استعادة هذا الاجتماع."
     },
     "history": {
-      "title": "سجل الاجتماعات",
+      "title": "المسجّلة",
       "loading": "جارٍ تحميل سجل الاجتماعات…",
-      "emptyTitle": "لا توجد اجتماعات بعد"
+      "emptyTitle": "تظهر هنا الاجتماعات التي تسجّلها."
     },
     "retention": {
       "title": "مدة الاحتفاظ",
@@ -2170,10 +2134,10 @@
     "review": {
       "meetingTitle": "عنوان الاجتماع",
       "editTitle": "إعادة تسمية هذا الاجتماع",
+      "rename": "إعادة التسمية",
+      "backToList": "الاجتماعات",
       "noStartTime": "لم يسجّل هذا الاجتماع وقت بداية.",
-      "started": "بدأ {{date}}",
       "partialRecording": "تسجيل جزئي",
-      "status": "حالة التسجيل",
       "capture": "كيف سُجِّل هذا",
       "timeline": "الخط الزمني للصوت والفجوات",
       "timeUnknown": "وقت غير معروف",
@@ -2217,18 +2181,14 @@
       "notePlaceholder": "أضف ملاحظة يدوية",
       "addNote": "إضافة ملاحظة",
       "editNote": "تعديل هذه الملاحظة",
-      "generatedNotes": "الملاحظات المولّدة",
       "regenerate": "إعادة التوليد",
       "remoteCancellationPending": "الإلغاء عن بُعد معلّق. الحذف المحلي لا يعني أن النسخة البعيدة قد حُذفت.",
       "cancelRemote": "إلغاء المعالجة عن بُعد",
       "remoteCancellationRequested": "تم طلب الإلغاء",
-      "export": "تصدير",
-      "exportMarkdown": "تصدير Markdown",
-      "exportJson": "تصدير JSON",
+      "exportMarkdown": "تصدير الملاحظات (Markdown)",
+      "exportJson": "تصدير الملاحظات (JSON)",
       "exportComplete": "تم تصدير الاجتماع",
-      "moreActions": "المزيد",
       "citation": "النص {{time}}",
-      "noGeneratedNotes": "لا تتوفر ملاحظات مولّدة بعد.",
       "topics": "الموضوعات",
       "nothingRecorded": "لم تُسجَّل أي قرارات أو بنود عمل أو أسئلة أو مخاطر.",
       "templateName": {
@@ -2255,10 +2215,9 @@
         "manualNote": "ملاحظة يدوية",
         "title": "عنوان الاجتماع"
       },
-      "generationFailedDescription": "النص وملاحظاتك اليدوية لم تتأثر. أعد التوليد بعد معالجة السبب.",
-      "noGeneratedNotesDescription": "الملاحظات المولّدة مشتقة من النص، لذا يمكن إعادة إنشائها في أي وقت.",
+      "generationFailedDescription": "أعد التوليد بعد معالجة السبب.",
+      "noGeneratedNotesDescription": "إعادة التوليد تكتب ملاحظات من هذا النص.",
       "processingDescription": "تظهر الملاحظات المولّدة والإجابات المحلية بمجرد اكتمال النص.",
-      "processingTitle": "لا يزال Sona يعالج هذا الاجتماع",
       "tabs": {
         "insights": "الرؤى",
         "ledger": "السجل",
@@ -2267,15 +2226,10 @@
       "tabsLabel": "أقسام مراجعة الاجتماع"
     },
     "ledger": {
-      "title": "السجل",
-      "emptyTitle": "لم يُقرأ أي سجل من هذا الاجتماع بعد",
-      "emptyDescription": "يُكتب السجل جنبًا إلى جنب مع الملاحظات المولّدة. أعد توليد الملاحظات لقراءة هذا الحديث على شكل مواضيع.",
+      "emptyDescription": "أعد توليد الملاحظات لقراءة هذا الحديث على شكل مواضيع.",
       "exportHtml": "تصدير صفحة السجل",
       "exported": "تم كتابة السجل في {{path}}",
       "exportMissing": "لا يوجد سجل لهذا الاجتماع لتصديره. أعد توليد الملاحظات أولًا.",
-      "statThreads": "المواضيع المحسومة",
-      "statReceipts": "الإسنادات",
-      "receiptsVerified": "مُتحقَّق منها",
       "receiptsDegraded": "أزيلت {{threads}} سلاسل و{{commitments}} التزامات",
       "threads": "المواضيع",
       "asideThread": "استطراد",
@@ -2286,7 +2240,7 @@
       "stances": "المواقف",
       "noStances": "لم يُتخذ موقف ولم يُعكس أي موقف.",
       "trust": "إلى أي حد يمكن الاعتماد على هذا",
-      "trustMeasured": "الأدوار والتوقيتات وأعداد الكلمات ونصيب الكلام كلها من النص. أما كل حالة فهي حكم قُرئ من الاقتباس المجاور لها: راجع الاقتباس قبل التصرف بناءً عليه.",
+      "trustMeasured": "كل حالة هي حكم قُرئ من الاقتباس المجاور لها.",
       "unattributed": "غير منسوب",
       "columnAt": "عند",
       "columnDirection": "الاتجاه",
@@ -2347,9 +2301,7 @@
     "list": {
       "searchLabel": "البحث في الاجتماعات",
       "searchPlaceholder": "البحث حسب العنوان",
-      "clearFilters": "مسح عوامل التصفية",
-      "noMatchesFiltered": "لا توجد اجتماعات مطابقة",
-      "noMatchesFilteredDescription": "لا شيء يطابق عوامل التصفية هذه. بحثت سونا في كل اجتماع محفوظ لديها، وليس في هذه الصفحة وحدها.",
+      "noMatches": "لا يوجد عنوان اجتماع يطابق «{{query}}».",
       "rowActions": "إجراءات الاجتماع",
       "exportMarkdown": "تصدير الملاحظات (Markdown)",
       "exportJson": "تصدير الملاحظات (JSON)",
@@ -2358,27 +2310,7 @@
       "previousPage": "أحدث",
       "nextPage": "أقدم",
       "status": {
-        "live": "مباشر",
-        "ready": "جاهز",
-        "processing": "قيد المعالجة",
         "needs_attention": "يحتاج إلى انتباه"
-      },
-      "filters": {
-        "label": "تصفية الاجتماعات",
-        "statusKey": "الحالة",
-        "timeKey": "الوقت",
-        "status": {
-          "any": "أي",
-          "ready": "جاهز",
-          "processing": "قيد المعالجة",
-          "failed": "فاشل"
-        },
-        "time": {
-          "any": "أي",
-          "today": "اليوم",
-          "last_7_days": "7 أيام",
-          "last_30_days": "30 يومًا"
-        }
       }
     },
     "status": {
@@ -2392,7 +2324,6 @@
     },
     "analytics": {
       "title": "المحادثة",
-      "noSpeech": "لم يُحوَّل أي كلام إلى نص، فلا شيء يمكن قياسه.",
       "longestMonologue": "أطول حديث منفرد",
       "patience": "الصبر",
       "patienceDetail": "وسيط الصمت قبل الرد",
@@ -2409,7 +2340,7 @@
       "trackersTitle": "متتبّعات الكلمات المفتاحية",
       "addTracker": "إضافة متتبّع",
       "removeTracker": "إزالة المتتبّع",
-      "noTrackers": "لا توجد متتبّعات بعد. أضف واحدًا لتبدأ بعدّ تكرار عبارة ما.",
+      "noTrackers": "أضف متتبّعًا لتبدأ بعدّ تكرار عبارة ما.",
       "trackerName": "الاسم",
       "trackerPatterns": "خصم، أفضل سعر، مكلف جدًا",
       "trackerPatternsLabel": "عبارات يفصل بينها فاصلات",
@@ -2549,8 +2480,7 @@
       "actions": {
         "skip": "تخطٍ"
       },
-      "linkFailed": "لم تستطع Sona فتح هذا الرابط.",
-      "skippedNote": "التخطي يخفي العرض من هنا. تبقى Sona ترى المكالمة حتى تنتهي صلاحية العرض."
+      "linkFailed": "لم تستطع Sona فتح هذا الرابط."
     },
     "seriesTemplate": {
       "use": "استخدم هذا القالب لهذه السلسلة",
@@ -2560,17 +2490,13 @@
     "upcoming": {
       "title": "القادم",
       "loading": "جارٍ قراءة تقويمك…",
-      "empty": "لا شيء مجدول خلال الأسبوع القادم.",
+      "empty": "لا شيء مجدول خلال الأيام السبعة القادمة.",
       "noAccess": "لا يستطيع Sona رؤية تقويمك.",
-      "noAccessHint": "فعّل \"استخدام تقويمي\" في إعدادات الاجتماعات، ثم اسمح بالوصول الكامل عندما يطلب macOS ذلك. كل ما يعرضه تقويم macOS بالفعل (Google أو iCloud أو Outlook) يأتي معه.",
+      "noAccessFix": "شغّل «استخدم تقويمي» في الإعدادات",
       "unavailable": "لا يوجد في هذا النظام تقويم يستطيع Sona قراءته.",
-      "attendees": "الحضور",
-      "you": "أنت",
-      "attendeesMore": "+{{count}}",
       "recurring": "يتكرر",
       "seriesOptions": "خيارات السلسلة لـ {{title}}",
       "alwaysRecord": "سجّل هذه السلسلة دائمًا",
-      "alwaysRecordNeedsSource": "اختر مصدر تسجيل بالأعلى أولًا.",
       "template": "قالب الملاحظات",
       "templateDefault": "الإعداد الافتراضي للتطبيق",
       "digest": "ضمّنها في الملخص المسائي"
@@ -2617,10 +2543,11 @@
     "unpaired": "اقترن بوكيل Sona في الإعدادات",
     "close": "إغلاق المحادثة",
     "history": "المحادثات الأخيرة",
-    "historyEmpty": "لا توجد محادثات سابقة بعد.",
+    "historyEmpty": "تظهر هنا المحادثات التي تبدأها.",
     "newChat": "محادثة جديدة",
-    "empty": "اسأل عمّا قلته أو وافقت عليه، أو عمّا تريد تغييره.",
+    "empty": "اسأل عمّا قيل، أو عمّا يجب عليك، أو عن هوية شخص ما.",
     "placeholder": "اسأل أي شيء",
+    "placeholderConfig": "تغيير إعداد",
     "inputLabel": "اسأل عن Sona",
     "send": "إرسال",
     "stop": "إيقاف",
@@ -2716,8 +2643,34 @@
       "shortcutAction": "غيّر اختصار الإملاء",
       "setShortcutAction": "حدّد اختصارًا"
     },
+    "needsYou": {
+      "title": "يحتاج إليك",
+      "empty": "لا شيء يحتاج إليك.",
+      "openMeeting": "فتح الاجتماع {{title}}",
+      "loadError": "تعذر تحميل هذه القائمة."
+    },
+    "week": {
+      "title": "هذا الأسبوع",
+      "dictations_zero": "لا إملاءات",
+      "dictations_one": "إملاء واحد",
+      "dictations_two": "إملاءان",
+      "dictations_few": "{{count}} إملاءات",
+      "dictations_many": "{{count}} إملاءً",
+      "dictations_other": "{{count}} إملاء",
+      "words_zero": "لا كلمات",
+      "words_one": "كلمة واحدة",
+      "words_two": "كلمتان",
+      "words_few": "{{count}} كلمات",
+      "words_many": "{{count}} كلمة",
+      "words_other": "{{count}} كلمة",
+      "streak_zero": "بلا تتابع",
+      "streak_one": "تتابع يوم واحد",
+      "streak_two": "تتابع يومين",
+      "streak_few": "تتابع {{count}} أيام",
+      "streak_many": "تتابع {{count}} يومًا",
+      "streak_other": "تتابع {{count}} يوم"
+    },
     "activity": {
-      "title": "النشاط",
       "dictations": "الإملاءات",
       "words": "الكلمات",
       "streak": "التتابع",
@@ -2725,12 +2678,6 @@
       "rangeNext": "الأيام السبعة التالية",
       "dictationsAria": "الإملاءات يوميًا، الأعلى {{count}} يوم {{day}}",
       "wordsAria": "الكلمات يوميًا، المجموع {{count}}، وتنتهي عند {{last}}",
-      "days_zero": "0 يوم",
-      "days_one": "يوم واحد",
-      "days_two": "يومان",
-      "days_few": "{{count}} أيام",
-      "days_many": "{{count}} يومًا",
-      "days_other": "{{count}} يوم",
       "streakAria_zero": "التتابع الحالي، 0 يوم. الأيام النشطة هذا الأسبوع: {{days}}.",
       "streakAria_one": "التتابع الحالي، يوم واحد. الأيام النشطة هذا الأسبوع: {{days}}.",
       "streakAria_two": "التتابع الحالي، يومان. الأيام النشطة هذا الأسبوع: {{days}}.",
@@ -2738,11 +2685,20 @@
       "streakAria_many": "التتابع الحالي، {{count}} يومًا. الأيام النشطة هذا الأسبوع: {{days}}.",
       "streakAria_other": "التتابع الحالي، {{count}} يوم. الأيام النشطة هذا الأسبوع: {{days}}."
     },
+    "recent": {
+      "title": "الأحدث",
+      "today_zero": "لا شيء اليوم",
+      "today_one": "{{count}} اليوم",
+      "today_two": "{{count}} اليوم",
+      "today_few": "{{count}} اليوم",
+      "today_many": "{{count}} اليوم",
+      "today_other": "{{count}} اليوم",
+      "empty": "لا شيء بعد",
+      "emptyHint": "يظهر هنا الأشخاص والكلمات والمتابعات التي يسجّلها Sona بعد الاجتماع."
+    },
     "update": {
       "available": "Sona {{latest}} متاح. هذا التثبيت على {{current}}.",
       "dismiss": "تجاهل",
-      "failed": "تعذر التحقق من التحديثات.",
-      "failedWithReason": "تعذر التحقق من التحديثات: {{reason}}",
       "view": "عرض الإصدار"
     }
   },
@@ -2859,13 +2815,12 @@
       "dismiss": "تجاهل",
       "confirm": "تأكيد",
       "loadError": "تعذر تحميل الأشخاص.",
-      "empty": "لا يوجد أشخاص بعد.",
+      "empty": "يظهر هنا الأشخاص من اجتماعاتك.",
       "meetings": "{{count}} اجتماعات"
     },
     "detail": {
       "nameLabel": "اسم الشخص",
       "rename": "إعادة التسمية",
-      "personActions": "إجراءات الشخص",
       "deletePerson": "حذف الشخص",
       "removeVoiceProfile": "إزالة ملف تعريف الصوت",
       "removeVoiceProfileTitle": "إزالة ملف تعريف الصوت؟",
@@ -2884,23 +2839,19 @@
       "carriedSince": "مفتوح منذ {{date}}",
       "noOpenLoops": "لا يوجد شيء مفتوح.",
       "commitments": "الالتزامات",
-      "noCommitments": "لا توجد التزامات مسجلة.",
       "meetingsTogether": "الاجتماعات معًا",
       "noMeetings": "لا توجد اجتماعات مرتبطة.",
       "series": "الاجتماع {{number}} في السلسلة",
-      "meetingActions": "إجراءات الاجتماع",
       "unlink": "إلغاء ربط الاجتماع",
       "unlinkTitle": "إلغاء ربط هذا الاجتماع؟",
       "unlinkDescription": "إزالة {{meeting}} من هذا الشخص؟",
       "documents": "المستندات",
       "importDocument": "استيراد مستند",
       "documentsLoadError": "تعذر تحميل المستندات.",
-      "noDocuments": "لا توجد مستندات مستوردة.",
       "deleteDocument": "حذف المستند",
       "deleteDocumentTitle": "حذف هذا المستند؟",
       "deleteDocumentDescription": "هل تريد حذف {{document}} من مستندات Sona؟",
       "cadence": "وتيرة الاجتماعات",
-      "lastMeeting": "الاجتماع الأخير",
       "talkShare": "حصة الحديث",
       "cadenceAria": "الاجتماعات حسب الشهر: {{values}}",
       "documentFilter": "مستندات نصية",
@@ -2928,7 +2879,6 @@
     },
     "summary": {
       "title": "نبذة",
-      "empty": "لا يوجد ملخص بعد.",
       "regenerate": "إعادة الإنشاء",
       "provenance": "كتبه {{model}} في {{date}}"
     },
@@ -3008,15 +2958,7 @@
       "copy": "نسخ",
       "copied": "تم النسخ",
       "transcribeAgain": "إعادة التفريغ",
-      "delete": "حذف",
-      "more": "إجراءات أخرى"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "يُحفظ إلى الأبد",
-      "keptDays": "يُحفظ {{days}} يومًا",
-      "change": "غيّرها في الإعدادات"
+      "delete": "حذف"
     }
   },
   "peopleV2": {
@@ -3025,8 +2967,7 @@
     },
     "detail": {
       "openLoops": "الأسئلة المعلّقة",
-      "howSonaKnows": "لماذا تربط Sona هذا الشخص",
-      "noEvidence": "لا شيء يربط هذا الشخص باجتماع حتى الآن."
+      "howSonaKnows": "لماذا تربط Sona هذا الشخص"
     }
   },
   "modesV2": {
@@ -3161,7 +3102,7 @@
       "dictation": "الإملاء",
       "keepDictations": "عدد الإملاءات المحفوظة",
       "readsFromOtherApps": "ما يمكن أن يقرأه Sona من التطبيقات الأخرى",
-      "workflows": "ما يفعله Sona بعد الاجتماع",
+      "workflows": "ما يفعله Sona من تلقاء نفسه",
       "sync": "المزامنة",
       "leavesThisMac": "ما يغادر جهاز Mac هذا",
       "agents": "الوكلاء",
@@ -3171,11 +3112,9 @@
     },
     "apps": {
       "label": "تطبيقات الاجتماعات",
-      "browsersAutomatic": "المكالمة في علامة تبويب المتصفح تُكتشف دون إدراجها هنا.",
       "runningNow": "قيد التشغيل الآن",
       "autoRecord": "التسجيل تلقائيًا",
       "autoRecordSources": "يقوم التسجيل التلقائي بالتقاط صوت الميكروفون وإخراج الصوت من هذا الـ Mac كلما كان ذلك التطبيق في مكالمة.",
-      "autoRecordConsent": "تشترط بعض الأماكن موافقة جميع المشاركين في المكالمة على التسجيل.",
       "add": "إضافة تطبيق",
       "addTitle": "إضافة تطبيق اجتماعات",
       "addDescription": "تحتاج Sona إلى معرف التطبيق، والذي يمكنك العثور عليه في نافذة 'حول' (About) الخاصة بالتطبيق أو باستخدام `osascript -e 'id of app \"Name\"'`.",
@@ -3259,14 +3198,12 @@
       }
     },
     "feed": {
-      "title": "ما لاحظته Sona",
       "spokenPunctuation": "تقول {{spoken}} كثيرًا. أنكتبها {{written}}؟",
       "vocabularyCorrection": "تغيّر {{spoken}} إلى {{written}} باستمرار. أتعلّمها؟",
       "modeHabit": "تلجأ إلى {{mode}} بالاختصار معظم الأيام. أتجعله وضعك الافتراضي؟",
       "retryRate": "تُعاد محاولة الإملاءات على {{subject}} بمعدل {{times}}× أكثر من غيرها.",
       "lostCaptureRate": "تنتهي الإملاءات على {{subject}} مبتورة أو صامتة بمعدل {{times}}× أكثر من غيرها.",
       "inputLevel": "‏{{percent}}% من تسجيلاتك جاءت خافتة. أتتحقق من مستوى الميكروفون؟",
-      "example": "«{{text}}»",
       "accept": "نعم",
       "dismiss": "لا شكرًا",
       "evidence_zero": "{{count}} مرة، عبر {{days}} يوم",

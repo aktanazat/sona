@@ -41,14 +41,10 @@
     "subtitle": "Modellerne kører på denne Mac og afvejer nøjagtighed mod hastighed.",
     "existingModelsTitle": "Kompatible modeller",
     "downloadModelsTitle": "Tilgængelig til download",
-    "showAllModels": "Vis alle {{total}} modeller",
-    "showFewerModels": "Vis færre modeller",
+    "otherModels": "Andre modeller",
+    "moreModels": "{{total}} flere",
     "recommended": "Anbefalet",
     "customModelDescription": "Ikke officielt understøttet",
-    "modelCard": {
-      "accuracy": "nøjagtighed",
-      "speed": "hastighed"
-    },
     "models": {
       "small": {
         "name": "Whisper Small",
@@ -130,7 +126,6 @@
         "description": "Påkrævet for at skrive den transskriberede tekst ind i dine programmer."
       },
       "grant": "Giv tilladelse",
-      "granted": "Givet",
       "waiting": "Venter…",
       "allGranted": "Begge givet",
       "errors": {
@@ -159,17 +154,12 @@
     "loading": "Indlæser {{modelName}}…",
     "loadingGeneric": "Indlæser…",
     "deleteModel": "Slet {{modelName}}",
-    "downloadSpeed": "{{speed}} MB/s",
     "cancel": "Annuller",
     "cancelDownload": "Annuller download",
     "capabilities": {
-      "languageSelection": "Understøtter flere inputsprog",
-      "singleLanguage": "Understøtter kun dette sprog",
       "languageCount": "{{total}} sprog",
       "languageOnly": "Kun {{language}}",
-      "translation": "Kan oversætte til engelsk",
-      "translate": "Oversæt",
-      "streaming": "Viser live transskription, mens du taler"
+      "translate": "Oversæt"
     }
   },
   "settings": {
@@ -669,8 +659,12 @@
       },
       "title": "Historik",
       "openFolder": "Åbn optagelsesmappe",
+      "import": "Importer",
+      "showRawText": "Vis rå tekst",
+      "emptyRecordings_one": "1 tom optagelse",
+      "emptyRecordings_other": "{{count}} tomme optagelser",
       "loading": "Indlæser historik…",
-      "empty": "Ingen optagelser endnu.",
+      "empty": "Dikteringer, du laver, vises her.",
       "copyToClipboard": "Kopiér transskription til udklipsholder",
       "copyFailed": "Transskriptionen kunne ikke kopieres",
       "save": "Gem post",
@@ -687,11 +681,6 @@
       "retry": "Prøv igen",
       "saveError": "Kunne ikke opdatere gemt-status. Prøv igen.",
       "postProcessEmpty": "Efterbehandlingen gav ingen tekst, så dette er den rå transskription.",
-      "textView": {
-        "label": "Transskriptionsvisning",
-        "processed": "Bearbejdet",
-        "raw": "Rådata"
-      },
       "receipts": {
         "showDetails": "Vis kørselsdetaljer",
         "hideDetails": "Skjul kørselsdetaljer",
@@ -800,7 +789,6 @@
         "saveError": "Kunne ikke gemme korrektionen. Prøv igen."
       },
       "audioImport": {
-        "start": "Transskriber fil",
         "fileFilter": "Lyd- og videofiler",
         "jobs": "Filimporter",
         "status": {
@@ -982,7 +970,7 @@
         "license": "MIT-licenseret. Copyright 2025 CJ Pais."
       },
       "updates": {
-        "autoDescription": "Spørger GitHub om den seneste udgivelse. Sona installerer aldrig noget på egen hånd.",
+        "autoDescription": "Sona installerer aldrig noget på egen hånd.",
         "autoLabel": "Søg automatisk efter opdateringer",
         "check": "Søg nu",
         "checking": "Kontrollerer…",
@@ -1365,7 +1353,7 @@
         "title": "Data på denne enhed",
         "historyLimit": {
           "label": "Historikgrænse",
-          "description": "Behold så mange seneste historikposter. Angiv 0 for at slå gemt historik fra."
+          "description": "Angiv 0 for at slå gemt historik fra."
         },
         "retention": {
           "label": "Opbevaring af optagelser",
@@ -1607,6 +1595,7 @@
           "invalid_configuration": "Den adresse eller nøgle vil Sona ikke bruge.",
           "secret_unavailable": "Denne Macs nøgle kunne ikke læses.",
           "untrusted_response": "Svaret var ikke signeret af den parrede server.",
+          "workspace_mismatch": "Svaret passede ikke til det spørgsmål, der blev stillet.",
           "remote_rejected": "Serveren afviste anmodningen.",
           "ownership_rejected": "Serveren svarede for en anden person."
         }
@@ -1616,7 +1605,6 @@
       "title": "Arbejdsgange",
       "loadError": "Arbejdsgangene kunne ikke indlæses.",
       "updateError": "Arbejdsgangen kunne ikke opdateres.",
-      "empty": "Der er ingen tilgængelige arbejdsgange.",
       "neverRun": "Ikke kørt endnu",
       "toggleLabel": "Aktivér {{name}}",
       "items": {
@@ -1680,13 +1668,6 @@
         "accept": "Tilføj",
         "dismiss": "Afvis"
       },
-      "overview": {
-        "whatSonaDid": "Hvad Sona gjorde",
-        "openLoops": "Åbne spørgsmål",
-        "openMeeting": "Åbn mødet {{title}}",
-        "loadError": "Kortet kunne ikke indlæses.",
-        "retry": "Prøv igen"
-      },
       "runLog": {
         "title": "Aktivitet",
         "empty": "Ingen aktivitet endnu.",
@@ -1705,9 +1686,9 @@
       },
       "automations": {
         "title": "Efter et møde",
-        "description": "Handlinger, der kører på denne Mac, når en series noter er skrevet. Slået fra for hver serie, indtil du slår en til.",
+        "description": "Handlinger, der kører på denne Mac, når en series noter er skrevet.",
         "loading": "Læser dine serier…",
-        "empty": "Ingen optagne serier endnu. Optag et møde fra en kalenderbegivenhed, så dukker det op her.",
+        "empty": "Optag et møde fra en kalenderbegivenhed for at se dets automatiseringer her.",
         "seriesFact": "{{count}} optaget · senest {{when}}",
         "reminders": "Føj mine åbne løfter til Påmindelser",
         "remindersHint": "Skriver det, du stadig skylder, ind i en liste ved navn Sona. Der læses aldrig noget tilbage fra den.",
@@ -1762,6 +1743,8 @@
     "pause": "Pause",
     "seek": "Afspilningsposition",
     "resetSetting": "Nulstil {{name}}",
+    "more": "Mere",
+    "none": "Ingen",
     "day": {
       "today": "I dag",
       "yesterday": "I går"
@@ -1769,7 +1752,7 @@
   },
   "commandPalette": {
     "open": "Søg",
-    "placeholder": "Søg eller vælg en handling",
+    "placeholder": "Søg eller spørg",
     "navigation": "Navigation",
     "actions": "Handlinger",
     "noResults": "Intet fundet",
@@ -1780,7 +1763,6 @@
     "openAgent": "Åbn agent",
     "runPrompt": "Kør en prompt",
     "newPrompt": "Ny prompt",
-    "esc": "esc",
     "search": {
       "meetings": "Møder",
       "people": "Personer",
@@ -1856,9 +1838,8 @@
     "recordingFailed": "Kunne ikke starte optagelsen: {{error}}. Prøv igen.",
     "modelLoadFailed": "Kunne ikke indlæse {{model}}. Prøv igen.",
     "modelLoadFailedUnknown": "ukendt model",
-    "pasteFailedTitle": "Kunne ikke indsætte transkriptionen",
     "pasteFailed": "Transkriptionen kunne ikke indsættes i den aktive app. Sæt fokus i et tekstfelt og prøv igen.",
-    "transcriptionFailedTitle": "Kunne ikke transkribere",
+    "transcriptionFailed": "Kunne ikke transkribere. Prøv igen.",
     "noModelSelected": "Ingen transskriptionsmodel er valgt. Vælg en under Settings > Models.",
     "commandNoSelection": "Markér den tekst du vil ændre, hold så kommandogenvejen nede og sig ændringen.",
     "commandRewriteUnavailable": "Omskrivningen returnerede intet, så din markering blev efterladt som den var. Kontrollér udbyderen under Settings > Post-processing og prøv igen.",
@@ -1882,7 +1863,6 @@
     }
   },
   "overlay": {
-    "inputLevel": "Indgangsniveau",
     "state": {
       "starting": "Starter",
       "listening": "Lytter",
@@ -1947,13 +1927,8 @@
       "unknown": "Kontrollerer"
     },
     "health": {
-      "not_started": "Ikke startet",
       "starting": "Starter",
-      "healthy": "I orden",
-      "paused": "Sat på pause",
-      "degraded": "Forringet",
-      "failed": "Mislykkedes",
-      "stopped": "Stoppet"
+      "failed": "Mislykkedes"
     },
     "completeness": {
       "not_started": "Ikke startet",
@@ -1974,17 +1949,12 @@
       }
     },
     "start": {
-      "label": "Start et møde",
-      "action": "Start optagelse",
+      "action": "Optag",
       "starting": "Starter…",
-      "assurance": "Optager din Macs lyd lokalt. Intet deltager i opkaldet.",
-      "capture": "Optagelse",
-      "noSources": "Vælg mindst én kilde.",
-      "localOnly": "Kun lokalt",
-      "retention": "Gemt: {{policy}}"
+      "assurance": "Optager denne Macs lyd lokalt. Intet deltager i opkaldet."
     },
     "import": {
-      "action": "Importer",
+      "action": "Importér optagelse",
       "recordingFilter": "Optagelse",
       "transcriptFilter": "Transskripteksport"
     },
@@ -1992,12 +1962,14 @@
       "title": "Optagelsen startede ikke",
       "readyTitle": "Klar til optagelse",
       "recordAnyway": "Optag uden den",
-      "recordAnywayHint": "Mødet markeres som delvist, og den manglende kilde nævnes i det."
+      "recordAnywayHint": "Mødet markeres som delvist, og den manglende kilde nævnes i det.",
+      "sources": "Hvad der bliver optaget"
     },
     "actions": {
       "back": "Tilbage",
       "delete": "Slet mødet",
       "discard": "Kassér",
+      "openRecordings": "Åbn optagelsesmappe",
       "pause": "Pause",
       "refresh": "Opdater",
       "resume": "Genoptag",
@@ -2013,10 +1985,7 @@
       "remoteUnavailable": "Fjernbehandling er ikke tilgængelig i denne version af Sona, så alle møder transskriberes og opsummeres på denne Mac."
     },
     "preflight": {
-      "storage": "Lager",
-      "storageAvailable": "Krypteret mødelager er tilgængeligt.",
       "storageUnavailable": "Krypteret mødelager er ikke tilgængeligt.",
-      "localModel": "Lokal model",
       "localModelDescription": "Behandlingen forbliver lokal, når en lokal model er tilgængelig.",
       "starting": "Starter optagelsen…",
       "refreshing": "Kontrollerer…"
@@ -2029,39 +1998,30 @@
       "elapsed": "Forløbet",
       "microphoneOnlyPartial": "Kun mikrofonen optages. Systemlyden er ikke tilgængelig, så dette møde bliver ufuldstændigt.",
       "partialCapture": "Der mangler lyd. Tjek hullerne, før du stoler på de genererede noter.",
-      "inputs": "Indgange",
-      "signal": "Signal",
-      "signalUnavailable": "{{source}} rapporterer ikke sit niveau.",
-      "notReported": "Ikke rapporteret",
-      "durabilityLag": "Gemt på disken",
-      "behind": "{{duration}} bagud",
-      "progress": "Transskriptionens forløb",
       "transcript": "Transskription",
-      "asrLag": "Forsinkelse i transskriptionen",
-      "storage": "Lager",
-      "storageHealthy": "Det krypterede lokale lager er i orden.",
+      "transcriptEmpty": "Ordene vises her, efterhånden som de genkendes.",
       "storageUnavailable": "Lageret kræver opmærksomhed.",
-      "processing": "Behandling",
-      "manualNote": "Manuel note",
+      "manualNote": "Note til dette øjeblik",
       "notePlaceholder": "Skriv en note til dette øjeblik",
-      "addNote": "Tilføj note med tidsstempel"
+      "addNote": "Tilføj note"
     },
     "recovery": {
-      "title": "Ufærdige møder",
-      "finalize": "Færdiggør lagring"
+      "title": "Ufærdige møder"
     },
     "trash": {
       "title": "Slettet for nylig",
+      "empty": "Møder, du sletter, vises her.",
       "expires": "Slettet {{deleted}} · væk om {{count}} dage",
       "expiresToday": "Slettet {{deleted}} · væk i dag",
       "restore": "Gendan",
+      "restoreItem": "Gendan „{{title}}“",
       "restored": "{{title}} er tilbage.",
       "restoreFailed": "Mødet kunne ikke gendannes."
     },
     "history": {
-      "title": "Mødehistorik",
+      "title": "Optagede",
       "loading": "Indlæser mødehistorik…",
-      "emptyTitle": "Ingen møder endnu"
+      "emptyTitle": "Møder, du optager, vises her."
     },
     "retention": {
       "title": "Opbevaring",
@@ -2146,10 +2106,10 @@
     "review": {
       "meetingTitle": "Mødetitel",
       "editTitle": "Omdøb dette møde",
+      "rename": "Omdøb",
+      "backToList": "Møder",
       "noStartTime": "Dette møde registrerede ikke et starttidspunkt.",
-      "started": "Startet {{date}}",
       "partialRecording": "Delvis optagelse",
-      "status": "Optagelsesstatus",
       "capture": "Sådan blev det optaget",
       "timeline": "Lydtidslinje og huller",
       "timeUnknown": "Ukendt tidspunkt",
@@ -2189,18 +2149,14 @@
       "notePlaceholder": "Tilføj en manuel note",
       "addNote": "Tilføj note",
       "editNote": "Rediger denne note",
-      "generatedNotes": "Genererede noter",
       "regenerate": "Regenerér",
       "remoteCancellationPending": "Fjernannulleringen afventer stadig. Lokal sletning hævder ikke, at fjernkopien er slettet.",
       "cancelRemote": "Annuller fjernbehandling",
       "remoteCancellationRequested": "Annullering anmodet",
-      "export": "Eksportér",
-      "exportMarkdown": "Eksportér Markdown",
-      "exportJson": "Eksportér JSON",
+      "exportMarkdown": "Eksportér noter (Markdown)",
+      "exportJson": "Eksportér noter (JSON)",
       "exportComplete": "Mødet eksporteret",
-      "moreActions": "Mere",
       "citation": "Transskription {{time}}",
-      "noGeneratedNotes": "Der er endnu ingen genererede noter tilgængelige.",
       "topics": "Emner",
       "nothingRecorded": "Der blev ikke registreret beslutninger, handlingspunkter, spørgsmål eller risici.",
       "templateName": {
@@ -2227,10 +2183,9 @@
         "manualNote": "Manuel note",
         "title": "Mødetitel"
       },
-      "generationFailedDescription": "Transskriptionen og dine manuelle noter er uberørte. Regenerér, når årsagen er løst.",
-      "noGeneratedNotesDescription": "Genererede noter er afledt af transskriptionen, så de kan gendannes når som helst.",
+      "generationFailedDescription": "Regenerér, når årsagen er løst.",
+      "noGeneratedNotesDescription": "Regenerér skriver noter ud fra denne transskription.",
       "processingDescription": "Genererede noter og lokale svar vises, når transskriptionen er færdig.",
-      "processingTitle": "Sona behandler stadig dette møde",
       "tabs": {
         "insights": "Indsigter",
         "ledger": "Register",
@@ -2239,15 +2194,10 @@
       "tabsLabel": "Sektioner til mødegennemgang"
     },
     "ledger": {
-      "title": "Register",
-      "emptyTitle": "Der er endnu ikke læst et register ud af dette møde",
-      "emptyDescription": "Registeret skrives sammen med de genererede noter. Generér noterne igen for at læse denne samtale som emner.",
+      "emptyDescription": "Generér noterne igen for at læse denne samtale som emner.",
       "exportHtml": "Eksportér registerside",
       "exported": "Register skrevet til {{path}}",
       "exportMissing": "Dette møde har intet register at eksportere. Generér noterne igen først.",
-      "statThreads": "Afklarede emner",
-      "statReceipts": "Citater",
-      "receiptsVerified": "verificeret",
       "receiptsDegraded": "{{threads}} tråde og {{commitments}} forpligtelser blev fjernet",
       "threads": "Emner",
       "asideThread": "sidespor",
@@ -2258,7 +2208,7 @@
       "stances": "Standpunkter",
       "noStances": "Der blev ikke indtaget eller forladt et standpunkt.",
       "trust": "Hvor meget af dette kan man stole på",
-      "trustMeasured": "Taleture, tider, ordtal og taletid kommer fra transskriptionen. Hver tilstand er et skøn læst ud af citatet ved siden af: kontrollér citatet, før du handler på det.",
+      "trustMeasured": "Hver tilstand er et skøn læst ud af citatet ved siden af.",
       "unattributed": "Uden afsender",
       "columnAt": "Ved",
       "columnDirection": "Retning",
@@ -2319,9 +2269,7 @@
     "list": {
       "searchLabel": "Søg i møder",
       "searchPlaceholder": "Søg efter titel",
-      "clearFilters": "Ryd filtre",
-      "noMatchesFiltered": "Ingen møder matcher",
-      "noMatchesFilteredDescription": "Intet matcher disse filtre. Sona gennemgik alle de møder, den har gemt, ikke kun denne side.",
+      "noMatches": "Ingen mødetitel matcher „{{query}}“.",
       "rowActions": "Mødehandlinger",
       "exportMarkdown": "Eksportér noter (Markdown)",
       "exportJson": "Eksportér noter (JSON)",
@@ -2330,27 +2278,7 @@
       "previousPage": "Nyere",
       "nextPage": "Ældre",
       "status": {
-        "live": "Live",
-        "ready": "Klar",
-        "processing": "Behandles",
         "needs_attention": "Kræver opmærksomhed"
-      },
-      "filters": {
-        "label": "Filtrér møder",
-        "statusKey": "Status",
-        "timeKey": "Tid",
-        "status": {
-          "any": "Alle",
-          "ready": "Klar",
-          "processing": "Behandles",
-          "failed": "Mislykket"
-        },
-        "time": {
-          "any": "Alle",
-          "today": "I dag",
-          "last_7_days": "7 dage",
-          "last_30_days": "30 dage"
-        }
       }
     },
     "status": {
@@ -2364,7 +2292,6 @@
     },
     "analytics": {
       "title": "Samtale",
-      "noSpeech": "Der blev ikke transkriberet nogen tale, så der er intet at måle.",
       "longestMonologue": "Længste monolog",
       "patience": "Tålmodighed",
       "patienceDetail": "Medianpausen før svar",
@@ -2381,7 +2308,7 @@
       "trackersTitle": "Nøgleordssporinger",
       "addTracker": "Tilføj sporing",
       "removeTracker": "Fjern sporing",
-      "noTrackers": "Ingen sporinger endnu. Tilføj en for at begynde at tælle, hvor ofte en vending optræder.",
+      "noTrackers": "Tilføj en sporing for at begynde at tælle, hvor ofte en vending optræder.",
       "trackerName": "Navn",
       "trackerPatterns": "rabat, bedste pris, for dyrt",
       "trackerPatternsLabel": "Vendinger adskilt af kommaer",
@@ -2521,8 +2448,7 @@
       "actions": {
         "skip": "Spring over"
       },
-      "linkFailed": "Sona kunne ikke åbne det link.",
-      "skippedNote": "Springer du over, skjules tilbuddet her. Sona ser fortsat opkaldet, indtil tilbuddet udløber."
+      "linkFailed": "Sona kunne ikke åbne det link."
     },
     "seriesTemplate": {
       "use": "Brug denne skabelon til denne serie",
@@ -2532,17 +2458,13 @@
     "upcoming": {
       "title": "Kommende",
       "loading": "Læser din kalender…",
-      "empty": "Intet planlagt den næste uge.",
+      "empty": "Intet planlagt de næste 7 dage.",
       "noAccess": "Sona kan ikke se din kalender.",
-      "noAccessHint": "Slå \"Brug min kalender\" til i mødeindstillingerne, og giv derefter fuld adgang, når macOS spørger. Alt, hvad macOS Kalender allerede viser (Google, iCloud, Outlook), følger med.",
+      "noAccessFix": "Slå „Brug min kalender“ til i Settings",
       "unavailable": "Dette system har ingen kalender, Sona kan læse.",
-      "attendees": "Deltagere",
-      "you": "Dig",
-      "attendeesMore": "+{{count}}",
       "recurring": "Gentages",
       "seriesOptions": "Seriemuligheder for {{title}}",
       "alwaysRecord": "Optag altid denne serie",
-      "alwaysRecordNeedsSource": "Vælg først en optagekilde ovenfor.",
       "template": "Notatskabelon",
       "templateDefault": "Appens standard",
       "digest": "Tag med i aftenopsummeringen"
@@ -2589,10 +2511,11 @@
     "unpaired": "Par Sona-agenten under Indstillinger",
     "close": "Luk chat",
     "history": "Seneste chats",
-    "historyEmpty": "Ingen tidligere chats endnu.",
+    "historyEmpty": "Chats, du starter, vises her.",
     "newChat": "Ny chat",
-    "empty": "Spørg hvad du sagde eller aftalte, eller hvad der skal ændres.",
+    "empty": "Spørg hvad der blev sagt, hvad du har lovet, eller hvem en person er.",
     "placeholder": "Spørg om hvad som helst",
+    "placeholderConfig": "Ændr en indstilling",
     "inputLabel": "Spørg om Sona",
     "send": "Send",
     "stop": "Stop",
@@ -2688,8 +2611,22 @@
       "shortcutAction": "Ændr dikteringsgenvejen",
       "setShortcutAction": "Angiv en genvej"
     },
+    "needsYou": {
+      "title": "Venter på dig",
+      "empty": "Intet venter på dig.",
+      "openMeeting": "Åbn mødet {{title}}",
+      "loadError": "Listen kunne ikke indlæses."
+    },
+    "week": {
+      "title": "Denne uge",
+      "dictations_one": "1 diktering",
+      "dictations_other": "{{count}} dikteringer",
+      "words_one": "1 ord",
+      "words_other": "{{count}} ord",
+      "streak_one": "1 dag i træk",
+      "streak_other": "{{count}} dage i træk"
+    },
     "activity": {
-      "title": "Aktivitet",
       "dictations": "Dikteringer",
       "words": "Ord",
       "streak": "Serie",
@@ -2697,16 +2634,19 @@
       "rangeNext": "Næste 7 dage",
       "dictationsAria": "Dikteringer pr. dag, højest {{count}} på {{day}}",
       "wordsAria": "Ord pr. dag, {{count}} i alt, slutter på {{last}}",
-      "days_one": "{{count}} dag",
-      "days_other": "{{count}} dage",
       "streakAria_one": "Aktuel serie, {{count}} dag. Aktive dage denne uge: {{days}}.",
       "streakAria_other": "Aktuel serie, {{count}} dage. Aktive dage denne uge: {{days}}."
+    },
+    "recent": {
+      "title": "Seneste",
+      "today_one": "{{count}} i dag",
+      "today_other": "{{count}} i dag",
+      "empty": "Intet endnu",
+      "emptyHint": "Personer, ord og opfølgninger, som Sona gemmer efter et møde, vises her."
     },
     "update": {
       "available": "Sona {{latest}} er tilgængelig. Denne installation kører {{current}}.",
       "dismiss": "Afvis",
-      "failed": "Kunne ikke søge efter opdateringer.",
-      "failedWithReason": "Kunne ikke søge efter opdateringer: {{reason}}",
       "view": "Se udgivelse"
     }
   },
@@ -2819,13 +2759,12 @@
       "dismiss": "Afvis",
       "confirm": "Bekræft",
       "loadError": "Personer kunne ikke indlæses.",
-      "empty": "Ingen personer endnu.",
+      "empty": "Personer fra dine møder vises her.",
       "meetings": "{{count}} møder"
     },
     "detail": {
       "nameLabel": "Personens navn",
       "rename": "Omdøb",
-      "personActions": "Personhandlinger",
       "deletePerson": "Slet person",
       "removeVoiceProfile": "Fjern stemmeprofil",
       "removeVoiceProfileTitle": "Fjern stemmeprofil?",
@@ -2844,23 +2783,19 @@
       "carriedSince": "Åben siden {{date}}",
       "noOpenLoops": "Intet er længere åbent.",
       "commitments": "Tilsagn",
-      "noCommitments": "Ingen registrerede tilsagn.",
       "meetingsTogether": "Møder sammen",
       "noMeetings": "Ingen tilknyttede møder.",
       "series": "Møde {{number}} i serien",
-      "meetingActions": "Mødehandlinger",
       "unlink": "Fjern mødetilknytning",
       "unlinkTitle": "Fjern tilknytningen til dette møde?",
       "unlinkDescription": "Fjern {{meeting}} fra denne person?",
       "documents": "Dokumenter",
       "importDocument": "Importér dokument",
       "documentsLoadError": "Dokumenterne kunne ikke indlæses.",
-      "noDocuments": "Ingen importerede dokumenter.",
       "deleteDocument": "Slet dokument",
       "deleteDocumentTitle": "Slet dette dokument?",
       "deleteDocumentDescription": "Slet {{document}} fra Sona's dokumenter?",
       "cadence": "Mødefrekvens",
-      "lastMeeting": "Seneste møde",
       "talkShare": "Andel af taletiden",
       "cadenceAria": "Møder pr. måned: {{values}}",
       "documentFilter": "Tekstdokumenter",
@@ -2888,7 +2823,6 @@
     },
     "summary": {
       "title": "Om personen",
-      "empty": "Intet resumé endnu.",
       "regenerate": "Generer igen",
       "provenance": "Skrevet af {{model}} den {{date}}"
     },
@@ -2944,15 +2878,7 @@
       "copy": "Kopiér",
       "copied": "Kopieret",
       "transcribeAgain": "Transskribér igen",
-      "delete": "Slet",
-      "more": "Flere handlinger"
-    }
-  },
-  "meetingsV2": {
-    "retention": {
-      "keptForever": "Gemmes for altid",
-      "keptDays": "Gemmes i {{days}} dage",
-      "change": "ændr i Indstillinger"
+      "delete": "Slet"
     }
   },
   "peopleV2": {
@@ -2961,8 +2887,7 @@
     },
     "detail": {
       "openLoops": "Åbne spørgsmål",
-      "howSonaKnows": "Hvorfor Sona forbinder denne person",
-      "noEvidence": "Intet knytter endnu denne person til et møde."
+      "howSonaKnows": "Hvorfor Sona forbinder denne person"
     }
   },
   "modesV2": {
@@ -3097,7 +3022,7 @@
       "dictation": "Diktering",
       "keepDictations": "Dikteringer der skal gemmes",
       "readsFromOtherApps": "Hvad Sona må læse fra andre apps",
-      "workflows": "Hvad Sona gør efter et møde",
+      "workflows": "Hvad Sona gør på egen hånd",
       "sync": "Synkronisering",
       "leavesThisMac": "Hvad der forlader denne Mac",
       "agents": "Agents",
@@ -3107,11 +3032,9 @@
     },
     "apps": {
       "label": "Mødeapps",
-      "browsersAutomatic": "Et opkald i en browserfane bliver registreret uden at stå her.",
       "runningNow": "Kører nu",
       "autoRecord": "Optag automatisk",
       "autoRecordSources": "Optag automatisk optager din mikrofon og denne Macs lydoutput, hver gang den pågældende app er i et opkald.",
-      "autoRecordConsent": "Nogle steder kræver, at alle på et opkald samtykker til optagelse.",
       "add": "Tilføj en app",
       "addTitle": "Tilføj en mødeapp",
       "addDescription": "Sona skal bruge app-ID'et, som du kan finde i appens 'Om'-vindue eller med `osascript -e 'id of app \"Navn\"'`.",
@@ -3187,14 +3110,12 @@
       }
     },
     "feed": {
-      "title": "Hvad Sona bemærkede",
       "spokenPunctuation": "Du siger {{spoken}} tit. Skal det skrives som {{written}}?",
       "vocabularyCorrection": "Du ændrer hele tiden {{spoken}} til {{written}}. Skal det læres?",
       "modeHabit": "Du griber til {{mode}} med genvejen de fleste dage. Skal den være standard?",
       "retryRate": "Dikteringer via {{subject}} bliver forsøgt igen {{times}}× oftere end resten.",
       "lostCaptureRate": "Dikteringer via {{subject}} ender afkortet eller tavse {{times}}× oftere end resten.",
       "inputLevel": "{{percent}} % af dine optagelser kom ind lavt. Vil du tjekke mikrofonniveauet?",
-      "example": "“{{text}}”",
       "accept": "Ja",
       "dismiss": "Nej tak",
       "evidence_one": "1 gang, over {{days}} dage",
