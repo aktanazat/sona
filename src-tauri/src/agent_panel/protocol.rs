@@ -644,8 +644,9 @@ impl SonaAgentResponseV1 {
 
     /// A workspace may only answer in its own currency. The settings proposer
     /// does not chat and the assistant does not propose: crossing that line is
-    /// a remote side claiming authority it was never granted, so it fails the
-    /// same way a bad signature does.
+    /// a remote side claiming authority it was never granted, so the answer is
+    /// refused whole — and named for the crossing, not for the signature it
+    /// passed on the way in.
     ///
     /// Validated against the turn it answers rather than against three values
     /// copied off it, because the settings revision a proposal must match and
