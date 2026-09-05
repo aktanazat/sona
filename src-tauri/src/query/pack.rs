@@ -250,7 +250,10 @@ fn session_behind(row: &QueryRow) -> Option<MeetingSessionId> {
 /// direction `processing::series_opted_out_of_remote` already leans for the
 /// same fact: the failure being guarded is evidence leaving the machine for a
 /// series whose answer we could not read.
-fn series_opted_out_of_remote(store: &MeetingStore, session_id: MeetingSessionId) -> bool {
+pub(super) fn series_opted_out_of_remote(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> bool {
     match store.series_preferences_for_session(session_id) {
         Ok(preferences) => preferences.remote_intelligence_opt_out,
         Err(error) => {

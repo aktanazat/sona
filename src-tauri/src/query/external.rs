@@ -1241,7 +1241,7 @@ pub(crate) fn loops_page(
             "That loop id is no longer in the corpus. Start again without --after.",
         ));
     }
-    let reason = loops_reason(&entries, scanned, corpus.awaiting_continuity);
+    let reason = loops_reason(entries.len(), scanned, corpus.awaiting_continuity);
     Ok(ExternalLoopsPage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries,
@@ -1256,16 +1256,17 @@ pub(crate) fn loops_page(
 /// Three different nothings reach the same empty array: a corpus with no
 /// commitments in it, one whose rows are all waiting on a continuity pass, and
 /// one where the filters excluded every row there was. Only the scan knows
-/// which, so it says.
-fn loops_reason(
-    entries: &[ExternalLoopRow],
+/// which, so it says. The chat tool's `loops` walks the same corpus and
+/// answers with the same word.
+pub(super) fn loops_reason(
+    kept: usize,
     scanned: usize,
     awaiting_continuity: bool,
 ) -> Option<QueryPageReason> {
     if awaiting_continuity {
         return Some(QueryPageReason::AwaitingContinuity);
     }
-    if !entries.is_empty() {
+    if kept > 0 {
         return None;
     }
     // Every row that was scanned and not kept was excluded by a filter: with

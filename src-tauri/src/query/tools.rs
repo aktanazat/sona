@@ -30,8 +30,8 @@
 //! Nothing here panics on input and nothing retries: the model reads the error
 //! in the next round and asks differently, or stops.
 
-use super::external::{current_artifacts, speaker_names, transcript_line};
-use super::pack::{one_line, without_excluded_series};
+use super::external::{current_artifacts, loops_reason, speaker_names, transcript_line};
+use super::pack::{one_line, series_opted_out_of_remote, without_excluded_series};
 use super::{
     bounded, dictation_row, loop_link, meeting_link, person_link, token, QueryError, QueryRow,
     QueryRowKind, QueryScope, MAX_SNIPPET_CHARS, MAX_TITLE_CHARS,
@@ -1271,17 +1271,26 @@ fn person_result(store: &MeetingStore, person_id: PersonId) -> Result<Outcome, S
 
 /// Actionable rows across the corpus, newest meeting first, as the external
 /// plane walks them.
+///
+/// A meeting whose series is kept off the server is skipped before its rows
+/// are counted, so it leaves no trace in `scanned` either: a `reason` that
+/// said "filtered out" for a call that passed no filter would name the
+/// exclusion from the shape of the page.
 fn loops_result(
     store: &MeetingStore,
     status: LoopFilter,
     person_id: Option<PersonId>,
     limit: usize,
 ) -> Result<Outcome, String> {
-    let mut candidates = Vec::new();
+    let mut rows = Vec::new();
     let mut facts = HashMap::new();
     let mut scanned = 0usize;
     let mut more = false;
-    'corpus: for meeting in store.corpus_loops().map_err(store_refusal)?.meetings {
+    let corpus = store.corpus_loops().map_err(store_refusal)?;
+    'corpus: for meeting in corpus.meetings {
+        if series_opted_out_of_remote(store, meeting.session_id) {
+            continue;
+        }
         for row in meeting.rows {
             scanned += 1;
             if scanned > LOOP_SCAN_DEPTH {
@@ -1296,7 +1305,7 @@ fn loops_result(
             if !wanted || person_id.is_some_and(|person| row.owner_person_id != Some(person)) {
                 continue;
             }
-            candidates.push(loop_row(&row, &meeting.title, meeting.at_utc_ms));
+            rows.push(loop_row(&row, &meeting.title, meeting.at_utc_ms));
             facts.insert(
                 row.loop_id.as_str().to_string(),
                 json!({
@@ -1313,7 +1322,6 @@ fn loops_result(
             );
         }
     }
-    let mut rows = without_excluded_series(store, candidates);
     more |= rows.len() > limit;
     rows.truncate(limit);
     let mut value = Map::new();
@@ -1324,6 +1332,9 @@ fn loops_result(
             .collect(),
     );
     value.insert("more".to_string(), Value::Bool(more));
+    if let Some(reason) = loops_reason(rows.len(), scanned, corpus.awaiting_continuity) {
+        value.insert("reason".to_string(), json!(reason));
+    }
     let mut outcome = Outcome::new(value, &["/rows"]);
     outcome.quoted.push(("rows", rows));
     Ok(outcome)
@@ -2272,6 +2283,62 @@ mod tests {
             loops_result(&corpus.store, LoopFilter::Open, Some(PersonId::new()), 20).unwrap(),
         );
         assert_eq!(value["rows"], json!([]), "nobody is linked as an owner yet");
+    }
+
+    /// Three empty pages, three different words: rows the continuity pass has
+    /// not released, rows a filter excluded, and a page that carries its rows
+    /// and so has nothing to explain. Before this the model read the first as
+    /// "no open loops".
+    #[test]
+    fn loops_say_why_a_page_is_empty_the_way_the_external_plane_does() {
+        let corpus = corpus();
+
+        let (value, _) =
+            result_json(loops_result(&corpus.store, LoopFilter::Open, None, 20).unwrap());
+        assert_eq!(value["rows"], json!([]));
+        assert_eq!(value["reason"], "awaiting_continuity", "{value}");
+
+        finalize(&corpus.store, corpus.excluded);
+        finalize(&corpus.store, corpus.allowed);
+
+        let (value, _) =
+            result_json(loops_result(&corpus.store, LoopFilter::Open, None, 20).unwrap());
+        assert_eq!(value["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(value["reason"], Value::Null, "{value}");
+
+        let (value, _) =
+            result_json(loops_result(&corpus.store, LoopFilter::Done, None, 20).unwrap());
+        assert_eq!(value["rows"], json!([]));
+        assert_eq!(value["reason"], "filtered_out", "{value}");
+    }
+
+    /// A series kept off the server is skipped before its rows are counted, so
+    /// an unfiltered call over nothing but that series reads as an empty
+    /// corpus rather than as one whose filter excluded something.
+    #[test]
+    fn loops_over_a_kept_series_alone_read_as_an_empty_corpus() {
+        let (_directory, store) = store();
+        let session_id = reviewable_meeting(&store, "Pricing sync", WHEN);
+        transcript(
+            &store,
+            session_id,
+            "The enterprise tier lands at forty thousand.",
+        );
+        in_series(&store, session_id, "weekly-pricing", "Weekly");
+        note(&store, session_id, "Typed during the call.");
+        artifact(
+            &store,
+            session_id,
+            "Pricing stayed open.",
+            "Dana's tier question stayed open.",
+        );
+        exclude(&store, "weekly-pricing");
+        finalize(&store, session_id);
+
+        let (value, _) = result_json(loops_result(&store, LoopFilter::All, None, 20).unwrap());
+
+        assert_eq!(value["rows"], json!([]));
+        assert_eq!(value["reason"], "no_rows", "{value}");
     }
 
     #[test]
