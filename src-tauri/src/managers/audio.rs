@@ -20,11 +20,14 @@ use crate::meeting::{
 use crate::settings::{get_settings, update_settings, AppSettings};
 use crate::utils;
 use log::{debug, error, info, trace, warn};
+use serde::Serialize;
+use specta::Type;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
+use tauri_specta::Event as _;
 
 /// How long an on-demand stream stays open after a recording stops, when
 /// `lazy_stream_close` is on. The stream stays *playing* for this long, which is
@@ -360,6 +363,16 @@ pub enum RecordingState {
     Idle,
     Recording { binding_id: String },
     Stopping,
+}
+
+/// `is_recording()` flipped, broadcast to every webview. A window that wants to
+/// draw dictation's state reads the boolean once on mount and then follows this;
+/// it is emitted from `set_state()`, the one place the boolean is written, so
+/// the two can never disagree. Start, stop, cancel and every error path reach
+/// idle through that function, which is what makes one event enough.
+#[derive(Clone, Debug, Serialize, Type, tauri_specta::Event)]
+pub struct DictationRecordingChangedEvent {
+    pub recording: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1212,7 +1225,8 @@ impl AudioRecordingManager {
     /// The one place `state` is written. Derives `recording_active` (the
     /// lock-free mirror read by `is_recording()`) from the new value itself,
     /// so the two can never drift: a new `RecordingState` variant only needs
-    /// its active-set membership decided here, once.
+    /// its active-set membership decided here, once. The same branch broadcasts
+    /// `DictationRecordingChangedEvent`, so no window has to poll for the flip.
     ///
     /// It used to raise the detection lease as well. It no longer does, and
     /// must not: the recording state is not when Sona holds the input device,
@@ -1236,6 +1250,11 @@ impl AudioRecordingManager {
         if self.recording_active.swap(active, Ordering::SeqCst) != active {
             if let Some(manager) = self.app_handle.try_state::<Arc<TranscriptionManager>>() {
                 manager.signal_idle_watcher();
+            }
+            if let Err(error) =
+                (DictationRecordingChangedEvent { recording: active }).emit(&self.app_handle)
+            {
+                warn!("Failed to emit the dictation recording state: {error}");
             }
         }
         if release_dictation {

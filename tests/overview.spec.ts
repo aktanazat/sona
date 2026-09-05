@@ -26,3 +26,24 @@ test.describe("the Capture page's weekly detail", () => {
     ).toBeVisible();
   });
 });
+
+test.describe("the Capture page's recording state", () => {
+  test("names the state the backend announced", async ({ page }) => {
+    /* The mock answers `is_recording` false, so the only way to Listening is
+     * the event — which is what this asserts the page is wired to. */
+    await installTauriMock(page, {
+      responses: CAPTURE_AT_FULL_HEIGHT,
+      events: { "dictation-recording-changed-event": [{ recording: true }] },
+    });
+    await page.goto("/");
+
+    const status = page.locator("#overview-status");
+    await expect(status).toHaveText("Listening");
+    await expect(status).toHaveAttribute("data-recording", "true");
+
+    /* Nothing asserts the invocation count here: the dev server renders under
+     * React's strict mode, so every mount read happens twice. That the page
+     * schedules no repeat is asserted where it is deterministic, in
+     * src/components/overview/Overview.test.tsx. */
+  });
+});

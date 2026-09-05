@@ -41,10 +41,42 @@ import {
  * This week's numbers and what Sona did on its own are two closed rows under
  * it, each carrying the measurement that decides whether to open it. */
 
-/* Recording is a command, not an event: the backend starts and stops on a
- * global chord this window never sees, so the status word is polled. One
- * boolean a second is the whole backend cost of this page while it is open. */
-const RECORDING_POLL_MS = 1000;
+/* Recording starts and stops on a global chord this window never sees, so the
+ * status word follows the backend's own broadcast: one read on mount, then an
+ * event per transition. It used to poll `isRecording()` once a second and pause
+ * only on `document.hidden`, which stays false on macOS while another app's
+ * window merely covers Sona — 3,600 IPC round trips an hour, on the surface the
+ * app lands on, to watch a boolean that changes twice per dictation.
+ *
+ * The event is emitted from the one place that boolean is written
+ * (`AudioRecordingManager::set_state`), so start, stop, cancel and every error
+ * path that resets the state all arrive here. */
+export const subscribeToRecordingState = (
+  set: (recording: boolean) => void,
+): (() => void) => {
+  let stopped = false;
+  /* A transition that lands while the seed read is in flight is newer than the
+   * answer that read will bring back, and no interval remains to correct a
+   * stale seed on the next tick. */
+  let observed = false;
+  const registration = events.dictationRecordingChangedEvent.listen((event) => {
+    observed = true;
+    if (!stopped) set(event.payload.recording);
+  });
+  void registration.then(async () => {
+    try {
+      const recording = await commands.isRecording();
+      if (!stopped && !observed) set(recording);
+    } catch {
+      /* Nothing to seed with, so the state word stays at the Ready it mounted
+       * with — where the poll's own failure branch put it too. */
+    }
+  });
+  return () => {
+    stopped = true;
+    void registration.then((unlisten) => unlisten());
+  };
+};
 
 const subscribeToActivityUpdates = (reload: () => void): (() => void) => {
   const subscription = events.historyUpdatePayload.listen((event) => {
@@ -72,8 +104,8 @@ export interface CaptureHeroProps {
 
 /**
  * The page's one surface. Everything it draws is passed in, because the state
- * behind it is polled, dialog-driven or read from the settings store — none of
- * which is what this card is: the state word, the chord drawn once, and its
+ * behind it is subscribed, dialog-driven or read from the settings store — none
+ * of which is what this card is: the state word, the chord drawn once, and its
  * one direct action.
  */
 export const CaptureHero: React.FC<CaptureHeroProps> = ({
@@ -257,39 +289,7 @@ export const Overview: React.FC<OverviewProps> = ({
   const [updateChecked, setUpdateChecked] = useState(false);
   const [updateDismissed, setUpdateDismissed] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-    let interval: number | undefined;
-    const refreshRecording = async () => {
-      try {
-        const recording = await commands.isRecording();
-        if (active) setIsRecording(recording);
-      } catch {
-        if (active) setIsRecording(false);
-      }
-    };
-    const syncPolling = () => {
-      if (document.hidden) {
-        if (interval !== undefined) {
-          window.clearInterval(interval);
-          interval = undefined;
-        }
-        return;
-      }
-      void refreshRecording();
-      interval ??= window.setInterval(
-        () => void refreshRecording(),
-        RECORDING_POLL_MS,
-      );
-    };
-    syncPolling();
-    document.addEventListener("visibilitychange", syncPolling);
-    return () => {
-      active = false;
-      document.removeEventListener("visibilitychange", syncPolling);
-      if (interval !== undefined) window.clearInterval(interval);
-    };
-  }, []);
+  useEffect(() => subscribeToRecordingState(setIsRecording), []);
 
   useEffect(() => {
     let active = true;

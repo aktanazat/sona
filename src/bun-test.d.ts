@@ -39,6 +39,10 @@ declare module "bun:test" {
   /* File-scoped lifecycle hooks; Bun also accepts async setup functions. */
   export function beforeAll(fn: () => void | Promise<void>): void;
   export function afterAll(fn: () => void | Promise<void>): void;
+  /* Per-test lifecycle hooks, for state a test installs on a global and has
+   * to hand back before the next file in the process sees it. */
+  export function beforeEach(fn: () => void | Promise<void>): void;
+  export function afterEach(fn: () => void | Promise<void>): void;
   export function expect<Actual>(
     value: Actual,
   ): Matchers<Actual> & { not: Matchers<Actual> };

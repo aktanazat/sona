@@ -1,4 +1,11 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -6,11 +13,19 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
-import type { HistoryTrendProjection } from "@/bindings";
+import type {
+  DictationRecordingChangedEvent,
+  HistoryTrendProjection,
+} from "@/bindings";
 import { TooltipProvider } from "@/components/vg/tooltip";
 import { ActivityBand } from "./ActivityBand";
 import { activityPage } from "./activityPaging";
-import { CaptureHero, Overview, type CaptureHeroProps } from "./Overview";
+import {
+  CaptureHero,
+  Overview,
+  subscribeToRecordingState,
+  type CaptureHeroProps,
+} from "./Overview";
 
 /* Capture's contract covers the hero's state, chord and actions. The activity
  * band has its own data-driven assertions below. Keys resolve through the real
@@ -36,8 +51,9 @@ const localeRoot = path.join(
 /* @tauri-apps/plugin-os reads its platform off a window global the Tauri
  * runtime injects, and the keycaps are macOS glyphs because of it. Static
  * rendering has no window, so without this the hero throws before it can be
- * inspected. Nothing else is needed: `renderToStaticMarkup` runs no effect, so
- * the page reaches no command.
+ * inspected. The IPC internals beside it belong to the recording-state block,
+ * the one place in this file that reaches the backend seam — no render does,
+ * because `renderToStaticMarkup` runs no effect.
  *
  * Installed at module scope (a module-scope render below needs it at import
  * time) and RESTORED in afterAll: a leaked bare `window` makes every later
@@ -46,9 +62,76 @@ const localeRoot = path.join(
  * `matchMedia` and pins the device preference to false, which broke
  * motion.test.tsx only in full-suite order. */
 const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+
+/* The one event this page follows, in the envelope the event plugin hands a
+ * listener: the generated payload type under the plugin's own header. */
+type RecordingEnvelope = {
+  event: string;
+  id: number;
+  payload: DictationRecordingChangedEvent;
+};
+type RecordingHandler = (envelope: RecordingEnvelope) => void;
+/* Everything the page sends the host: the listen registration's handler id
+ * and event name, or nothing for `is_recording`. */
+type HostArgs = { handler?: number; event?: string };
+type HostReply = boolean | number | null;
+
+/* The backend seam, driven the way the Tauri runtime drives it: `listen()`
+ * leaves as a `plugin:event|listen` invocation carrying a callback id, and a
+ * transition arrives later as a call to that callback. Nothing stands in for
+ * `@/bindings`, so the event name and payload field asserted below are the
+ * generated ones — rename the Rust event without re-exporting bindings and
+ * these tests stop seeing transitions. */
+const backend = {
+  /** Every command the page sent, in order. A reinstated poll shows up here. */
+  invoked: new Array<string>(),
+  /** What `is_recording` answers, and when it answers it. */
+  recording: Promise.resolve(false),
+  /** Callback id to the handler the event plugin will call. */
+  callbacks: new Map<number, RecordingHandler>(),
+  /** Event name to the handler registered for it. */
+  handlers: new Map<string, RecordingHandler>(),
+  /** Repeating timers scheduled through the window. */
+  intervals: 0,
+};
+
 Object.defineProperty(globalThis, "window", {
   configurable: true,
-  value: { __TAURI_OS_PLUGIN_INTERNALS__: { os_type: "macos" } },
+  value: {
+    __TAURI_OS_PLUGIN_INTERNALS__: { os_type: "macos" },
+    __TAURI_INTERNALS__: {
+      transformCallback: (callback: RecordingHandler): number => {
+        const id = backend.callbacks.size + 1;
+        backend.callbacks.set(id, callback);
+        return id;
+      },
+      invoke: (command: string, args: HostArgs = {}): Promise<HostReply> => {
+        backend.invoked.push(command);
+        switch (command) {
+          case "plugin:event|listen": {
+            const handler = backend.callbacks.get(Number(args.handler));
+            if (!handler)
+              throw new Error(`no callback ${String(args.handler)}`);
+            backend.handlers.set(String(args.event), handler);
+            return Promise.resolve(backend.callbacks.size);
+          }
+          case "plugin:event|unlisten":
+            backend.handlers.delete(String(args.event));
+            return Promise.resolve(null);
+          case "is_recording":
+            return backend.recording;
+          default:
+            throw new Error(`unstubbed command: ${command}`);
+        }
+      },
+    },
+    __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
+    setInterval: (): number => {
+      backend.intervals += 1;
+      return 0;
+    },
+    clearInterval: () => {},
+  },
 });
 afterAll(() => {
   if (priorWindow) Object.defineProperty(globalThis, "window", priorWindow);
@@ -172,6 +255,111 @@ describe("the Capture page", () => {
     expect(markup.includes("This week")).toBe(false);
     expect(markup.includes("Dictations per day")).toBe(false);
     expect(markup.includes("is available. This install is on")).toBe(false);
+  });
+});
+
+const RECORDING_EVENT = "dictation-recording-changed-event";
+
+/* Every mocked invocation above resolves immediately, so one macrotask hop
+ * drains every microtask the subscription queues. Nothing here waits on a
+ * clock, because nothing in the subscription reads one. */
+const settled = (): Promise<void> =>
+  /* The executor form, because `Promise.withResolvers` is ES2024 and this
+   * project compiles against ES2020 (tsconfig.json). */
+  new Promise<void>((resolve) => {
+    setImmediate(() => resolve());
+  });
+
+const emitRecording = (recording: boolean): void => {
+  const handler = backend.handlers.get(RECORDING_EVENT);
+  if (!handler) throw new Error("nothing is following recording transitions");
+  handler({ event: RECORDING_EVENT, id: 1, payload: { recording } });
+};
+
+/* The state word is the whole reason this page talked to the backend on a
+ * timer for a year. It now follows one broadcast, so what has to hold is that
+ * every transition arrives, that nothing is scheduled to ask again, and that
+ * the one mount read cannot overwrite a newer answer. */
+describe("the Capture page's recording state", () => {
+  const realSetInterval = globalThis.setInterval;
+
+  beforeEach(() => {
+    backend.invoked.length = 0;
+    backend.callbacks.clear();
+    backend.handlers.clear();
+    backend.intervals = 0;
+    backend.recording = Promise.resolve(false);
+    /* The poll this replaced went through `window.setInterval`; a bare
+     * `setInterval` would miss the window stub, so both are counted. Neither
+     * schedules anything: a reinstated poll fails on the count, and a live
+     * timer would only leak into the next test. The widened alias exists
+     * because a counting stub cannot satisfy the host's Timer-returning
+     * signature. */
+    const mutableGlobals: { setInterval: unknown } = globalThis;
+    mutableGlobals.setInterval = (): number => {
+      backend.intervals += 1;
+      return 0;
+    };
+  });
+
+  afterEach(() => {
+    globalThis.setInterval = realSetInterval;
+  });
+
+  test("follows every transition the backend announces", async () => {
+    const seen: boolean[] = [];
+    const stop = subscribeToRecordingState((recording) => seen.push(recording));
+    await settled();
+
+    emitRecording(true);
+    emitRecording(false);
+
+    expect(seen).toEqual([false, true, false]);
+    stop();
+  });
+
+  test("reads the state once and schedules nothing to ask again", async () => {
+    const stop = subscribeToRecordingState(() => {});
+    await settled();
+    emitRecording(true);
+    await settled();
+
+    expect(
+      backend.invoked.filter((command) => command === "is_recording"),
+    ).toEqual(["is_recording"]);
+    expect(backend.intervals).toBe(0);
+    stop();
+  });
+
+  test("keeps a transition that arrives while the mount read is out", async () => {
+    let answerRead!: (recording: boolean) => void;
+    backend.recording = new Promise<boolean>((resolve) => {
+      answerRead = resolve;
+    });
+    const seen: boolean[] = [];
+    const stop = subscribeToRecordingState((recording) => seen.push(recording));
+    await settled();
+
+    emitRecording(true);
+    answerRead(false);
+    await settled();
+
+    /* The stale answer must not land on top of the newer transition: no
+     * interval remains to correct it on the next tick, so the page would claim
+     * Ready for the rest of the dictation. */
+    expect(seen).toEqual([true]);
+    stop();
+  });
+
+  test("unregisters its listener when the page goes away", async () => {
+    const stop = subscribeToRecordingState(() => {});
+    await settled();
+    expect(backend.handlers.has(RECORDING_EVENT)).toBe(true);
+
+    stop();
+    await settled();
+
+    expect(backend.handlers.has(RECORDING_EVENT)).toBe(false);
   });
 });
 
