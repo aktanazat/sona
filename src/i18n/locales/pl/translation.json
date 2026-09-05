@@ -791,9 +791,14 @@
         "saveError": "Nie udało się zapisać poprawki. Spróbuj ponownie."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "Zapisano {{file}} jako spotkanie",
+          "dictation": "Zapisano {{file}} w historii"
+        },
         "fileFilter": "Pliki audio i wideo",
         "jobs": "Importy plików",
         "status": {
+          "savedAsMeeting": "Zapisano jako spotkanie",
           "queued": "W kolejce",
           "decoding": "Wczytywanie dźwięku",
           "transcribing": "Transkrybowanie",
@@ -804,6 +809,7 @@
         },
         "cancel": "Anuluj",
         "failure": {
+          "meeting_import": "Nie udało się zapisać tego nagrania jako spotkania.",
           "invalid_file": "Nie można odczytać wybranego pliku.",
           "unsupported_format": "Ten format audio nie jest obsługiwany.",
           "no_audio": "Ten plik multimedialny nie ma ścieżki dźwiękowej.",

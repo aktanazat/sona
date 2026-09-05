@@ -2,6 +2,8 @@ use crate::audio_toolkit::{audio::FrameResampler, constants::WHISPER_SAMPLE_RATE
 use crate::context::ContextReceipt;
 use crate::managers::history::{HistoryManager, HistorySourceKind, NewRunReceipt};
 use crate::managers::transcription::TranscriptionManager;
+use crate::meeting::session::{ImportRecordingRequest, RecordingOrigin};
+use crate::meeting::types::MeetingSessionId;
 use crate::modes::{AsrPlan, ModeReceipt, RunPlan};
 use anyhow::Result as AnyResult;
 use parking_lot::{Condvar, Mutex};
@@ -31,6 +33,25 @@ const SUPPORTED_MEDIA_EXTENSIONS: &[&str] = &[
     "wav", "mp3", "m4a", "aac", "flac", "ogg", "mov", "mp4", "m4v",
 ];
 
+/// How long a recording the operating system hands to Sona has to run before
+/// it is a meeting rather than a dictation.
+///
+/// Two minutes. A dictation is spoken into a microphone in one breath or a
+/// few, and the ones this app records are seconds long; a file this long that
+/// arrived through Open With is a recording *of* something — a call, an
+/// interview, a talk. That route offers no destination and asks no question,
+/// so the length of the audio is the only evidence the import has, and two
+/// minutes is where the two populations stop overlapping. It is deliberately
+/// not a setting: a number the person has to guess at is a worse question
+/// than the one the in-app picker already asks out loud.
+const MEETING_IMPORT_MIN_DURATION: Duration = Duration::from_secs(120);
+
+/// The same threshold counted the way this decode counts, in emitted 16 kHz
+/// mono samples. Container metadata is not trusted anywhere on this path, so
+/// the comparison is against audio that actually came out of the decoder.
+const MEETING_IMPORT_MIN_SAMPLES: usize =
+    MEETING_IMPORT_MIN_DURATION.as_secs() as usize * WHISPER_SAMPLE_RATE as usize;
+
 static NEXT_MEDIA_IMPORT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
@@ -54,6 +75,7 @@ pub enum AudioImportFailureCode {
     DurationLimit,
     Transcription,
     History,
+    MeetingImport,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
@@ -61,6 +83,12 @@ pub enum AudioImportFailureCode {
 pub enum AudioImportResult {
     Done {
         history_id: i64,
+    },
+    /// Long enough to be a recording of something rather than a dictation, so
+    /// it became a meeting and no history row exists. Carries the id
+    /// `sona://meeting/<id>` addresses.
+    Meeting {
+        session_id: MeetingSessionId,
     },
     Cancelled,
     Failed {
@@ -84,6 +112,27 @@ pub struct AudioImportJob {
 #[derive(Clone, Debug, Deserialize, Serialize, Type, tauri_specta::Event)]
 pub struct AudioImportUpdateEvent {
     pub job: AudioImportJob,
+}
+
+/// Which of Sona's two homes for recorded speech one import landed in.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioImportDestination {
+    Meeting,
+    Dictation,
+}
+
+/// Where one file the operating system handed to Sona ended up.
+///
+/// Emitted only for that route, because it is the only one where the person
+/// was never asked: they chose Open With, and the length of the audio chose
+/// the destination. `link` is the `sona://` address of the meeting or the
+/// dictation, so the toast that reports this can open the thing it names.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, Type, tauri_specta::Event)]
+pub struct AudioImportRoutedEvent {
+    pub file_name: String,
+    pub destination: AudioImportDestination,
+    pub link: String,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +193,13 @@ impl AudioImportError {
         }
     }
 
+    fn meeting_import() -> Self {
+        Self {
+            code: AudioImportFailureCode::MeetingImport,
+            message: "The recording could not be saved as a meeting.",
+        }
+    }
+
     pub fn code(&self) -> AudioImportFailureCode {
         self.code
     }
@@ -168,10 +224,34 @@ pub(crate) struct ValidatedMediaPath {
     pub(crate) file_name: String,
 }
 
+/// Where the request to import one file came from.
+///
+/// The in-app picker asked which of the two destinations the person wanted,
+/// and this queue only ever receives the dictation half of that answer. An
+/// operating-system open asked nothing: Finder's Open With, `open -a Sona`
+/// and a drop on the Dock icon all hand over a path and no intention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImportOrigin {
+    Picker,
+    SystemOpen,
+}
+
+impl ImportOrigin {
+    /// The decoded length at which this import stops being a dictation, or
+    /// `None` when nothing the decode finds can change its destination.
+    const fn meeting_threshold_samples(self) -> Option<usize> {
+        match self {
+            Self::Picker => None,
+            Self::SystemOpen => Some(MEETING_IMPORT_MIN_SAMPLES),
+        }
+    }
+}
+
 struct PendingJob {
     canonical_path: PathBuf,
     extension: String,
     run: RunPlan,
+    origin: ImportOrigin,
     cancellation: Arc<AtomicBool>,
     public: AudioImportJob,
 }
@@ -181,6 +261,7 @@ struct WorkItem {
     canonical_path: PathBuf,
     extension: String,
     run: RunPlan,
+    origin: ImportOrigin,
     cancellation: Arc<AtomicBool>,
 }
 
@@ -210,9 +291,16 @@ trait ImportRuntime: Send + Sync {
     fn begin_job(&self) -> Box<dyn ImportActivity>;
     fn transcribe(&self, plan: &AsrPlan, audio: &[f32]) -> AnyResult<String>;
     fn save(&self, record: ImportHistoryRecord) -> AnyResult<i64>;
+    /// Hand one opened recording to the meeting pipeline, blocking until the
+    /// meeting exists. Blocking is what this queue's single worker is for, and
+    /// the caller needs the meeting's id to report where the file went.
+    fn import_meeting(&self, path: &Path) -> AnyResult<MeetingSessionId>;
+    /// Report where one opened file landed.
+    fn announce(&self, routed: AudioImportRoutedEvent);
 }
 
 struct AppImportRuntime {
+    app_handle: AppHandle,
     transcription: Arc<TranscriptionManager>,
     history: Arc<HistoryManager>,
 }
@@ -248,6 +336,34 @@ impl ImportRuntime for AppImportRuntime {
         )?;
         Ok(entry.id)
     }
+
+    fn import_meeting(&self, path: &Path) -> AnyResult<MeetingSessionId> {
+        let manager = self
+            .app_handle
+            .try_state::<Arc<crate::meeting::session::MeetingSessionManager>>()
+            .ok_or_else(|| anyhow::anyhow!("no meeting session manager is running"))?;
+        // Title and recording time are left unset on purpose: the import reads
+        // the file name and the file's own modification time, which are the
+        // two facts a file the operating system handed over actually carries.
+        // The bytes are already on this Mac, so the origin is a local file
+        // whichever application wrote them.
+        let snapshot = tauri::async_runtime::block_on(Arc::clone(&manager).import_recording(
+            ImportRecordingRequest {
+                path: path.to_path_buf(),
+                title: None,
+                recorded_at_utc_ms: None,
+                origin: RecordingOrigin::LocalFile,
+            },
+        ))
+        .map_err(|error| anyhow::anyhow!("the meeting import refused the file: {error:?}"))?;
+        Ok(snapshot.session_id)
+    }
+
+    fn announce(&self, routed: AudioImportRoutedEvent) {
+        if let Err(error) = routed.emit(&self.app_handle) {
+            log::warn!("Failed to report where an opened file landed: {error}");
+        }
+    }
 }
 
 struct MediaImportInner {
@@ -275,6 +391,7 @@ impl MediaImportManager {
         Self::with_runtime(
             Some(app_handle.clone()),
             Arc::new(AppImportRuntime {
+                app_handle: app_handle.clone(),
                 transcription,
                 history,
             }),
@@ -297,10 +414,14 @@ impl MediaImportManager {
     /// Enqueue an already-frozen active-mode plan after validating the supplied
     /// path. The canonical path is retained only by the worker and is never
     /// serialized or emitted.
+    ///
+    /// `origin` is the one thing the queue cannot work out for itself: whether
+    /// a person chose this destination or the operating system chose Sona.
     pub fn enqueue(
         &self,
         path: String,
         run: RunPlan,
+        origin: ImportOrigin,
     ) -> std::result::Result<AudioImportJob, AudioImportError> {
         let path = validate_media_path(Path::new(&path))?;
         let id = NEXT_MEDIA_IMPORT_ID.fetch_add(1, Ordering::Relaxed);
@@ -320,6 +441,7 @@ impl MediaImportManager {
                     canonical_path: path.canonical_path,
                     extension: path.extension,
                     run,
+                    origin,
                     cancellation: Arc::new(AtomicBool::new(false)),
                     public: public.clone(),
                 },
@@ -402,6 +524,7 @@ fn next_work(inner: &Arc<MediaImportInner>) -> Option<WorkItem> {
                 canonical_path: job.canonical_path.clone(),
                 extension: job.extension.clone(),
                 run: job.run.clone(),
+                origin: job.origin,
                 cancellation: Arc::clone(&job.cancellation),
             })?;
             state.active = Some(id);
@@ -423,11 +546,16 @@ fn process_work(inner: &Arc<MediaImportInner>, work: WorkItem) {
         &work.canonical_path,
         &work.extension,
         &work.cancellation,
+        work.origin.meeting_threshold_samples(),
         |emitted_samples| update_decode_progress(inner, work.id, emitted_samples),
     );
 
     let audio = match decoded {
-        Ok(audio) => audio,
+        Ok(DecodedMedia::Whole(audio)) => audio,
+        Ok(DecodedMedia::ReachedStopPoint) => {
+            finish_as_meeting(inner, &work);
+            return;
+        }
         Err(DecodeFailure::Cancelled) => {
             finish_cancelled(inner, work.id);
             return;
@@ -484,7 +612,7 @@ fn process_work(inner: &Arc<MediaImportInner>, work: WorkItem) {
             return;
         }
     };
-    finish_done(inner, work.id, history_id, source_name);
+    finish_done(inner, work.id, history_id, source_name, work.origin);
 }
 
 fn set_status(inner: &Arc<MediaImportInner>, id: u64, status: AudioImportStatus) {
@@ -511,13 +639,26 @@ fn update_decode_progress(inner: &Arc<MediaImportInner>, id: u64, emitted_sample
     emit_update(inner, update);
 }
 
-fn finish_done(inner: &Arc<MediaImportInner>, id: u64, history_id: i64, source_name: String) {
+fn finish_done(
+    inner: &Arc<MediaImportInner>,
+    id: u64,
+    history_id: i64,
+    source_name: String,
+    origin: ImportOrigin,
+) {
     finish(
         inner,
         id,
         AudioImportStatus::Done,
         AudioImportResult::Done { history_id },
     );
+    if origin == ImportOrigin::SystemOpen {
+        inner.runtime.announce(AudioImportRoutedEvent {
+            file_name: source_name.clone(),
+            destination: AudioImportDestination::Dictation,
+            link: crate::query::dictation_link(history_id),
+        });
+    }
     let Some(app) = &inner.app_handle else {
         return;
     };
@@ -530,6 +671,40 @@ fn finish_done(inner: &Arc<MediaImportInner>, id: u64, history_id: i64, source_n
         manager
             .record_audio_imported(history_id.to_string(), source_name)
             .await;
+    });
+}
+
+/// Turn one opened file into a meeting instead of a dictation, and finish the
+/// queue row with the meeting it became.
+///
+/// The prefix the decode collected is already dropped by the time this runs:
+/// the meeting import decodes the file again, straight onto its own track on
+/// disk, which is the only path in the app whose ceiling is high enough for a
+/// recording of any length. Reachable only from `ImportOrigin::SystemOpen`,
+/// because that is the only origin that sets a stop point.
+fn finish_as_meeting(inner: &Arc<MediaImportInner>, work: &WorkItem) {
+    let Some(file_name) = current_file_name(inner, work.id) else {
+        finish_failed(inner, work.id, AudioImportError::meeting_import());
+        return;
+    };
+    let session_id = match inner.runtime.import_meeting(&work.canonical_path) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            log::warn!("Meeting import of an opened file failed: {error}");
+            finish_failed(inner, work.id, AudioImportError::meeting_import());
+            return;
+        }
+    };
+    finish(
+        inner,
+        work.id,
+        AudioImportStatus::Done,
+        AudioImportResult::Meeting { session_id },
+    );
+    inner.runtime.announce(AudioImportRoutedEvent {
+        file_name,
+        destination: AudioImportDestination::Meeting,
+        link: crate::query::meeting_link(session_id),
     });
 }
 
@@ -632,18 +807,34 @@ pub(crate) enum DecodeFailure {
     Failed(AudioImportError),
 }
 
+/// What a bounded dictation decode found.
+enum DecodedMedia {
+    /// The whole file, in one buffer, under the caller's stop point.
+    Whole(Vec<f32>),
+    /// The file is at least `stop_after` samples long, so the decode was
+    /// abandoned there and nothing was kept. The caller asked to be told this
+    /// rather than to hold the rest.
+    ReachedStopPoint,
+}
+
 /// Decode one media file into a fixed 16 kHz mono f32 stream, appended whole.
 /// Used by the dictation-history import, which needs the audio in one buffer to
 /// hand to a single ASR call.
+///
+/// `stop_after` is the length at which this buffer becomes the wrong shape for
+/// the file — a recording rather than a dictation. Reaching it is an answer,
+/// not a failure, so the decode stops and says so.
 fn decode_media(
     path: &Path,
     extension: &str,
     cancellation: &AtomicBool,
+    stop_after: Option<usize>,
     mut progress: impl FnMut(usize),
-) -> std::result::Result<Vec<f32>, DecodeFailure> {
+) -> std::result::Result<DecodedMedia, DecodeFailure> {
     let mut output = Vec::new();
     let mut next_progress = IMPORT_PROGRESS_SAMPLES;
-    decode_media_into(
+    let mut reached_stop_point = false;
+    let decoded = decode_media_into(
         path,
         extension,
         cancellation,
@@ -654,10 +845,21 @@ fn decode_media(
                 progress(output.len());
                 next_progress = next_progress.saturating_add(IMPORT_PROGRESS_SAMPLES);
             }
+            if stop_after.is_some_and(|stop_point| output.len() >= stop_point) {
+                // The error only unwinds the decoder's loop. Nothing reads it:
+                // `reached_stop_point` is the answer, and it outranks whatever
+                // the unwind reports.
+                reached_stop_point = true;
+                return Err(AudioImportError::duration_limit());
+            }
             Ok(())
         },
-    )?;
-    Ok(output)
+    );
+    if reached_stop_point {
+        return Ok(DecodedMedia::ReachedStopPoint);
+    }
+    decoded?;
+    Ok(DecodedMedia::Whole(output))
 }
 
 /// The one Symphonia decode path in the app: probe, pick the audio track,
@@ -977,6 +1179,17 @@ mod tests {
         transcripts: Mutex<Vec<Vec<f32>>>,
         saved_names: Mutex<Vec<String>>,
         gate: Option<Arc<QueueGate>>,
+        /// The paths handed to the meeting pipeline, in order. A path, not a
+        /// buffer: the meeting import decodes the file itself.
+        meeting_imports: Mutex<Vec<PathBuf>>,
+        /// The meeting this fake creates, fixed for the life of the fake so a
+        /// test can address the meeting it expects.
+        meeting_id: MeetingSessionId,
+        /// True when the meeting pipeline is unreachable, which is what an
+        /// import that arrives before the meeting manager is running sees.
+        refuse_meetings: bool,
+        /// Every destination the queue reported, in order.
+        announced: Mutex<Vec<AudioImportRoutedEvent>>,
     }
 
     impl FakeRuntime {
@@ -984,12 +1197,18 @@ mod tests {
             let gate = Arc::new(QueueGate::new());
             (
                 Self {
-                    transcripts: Mutex::new(Vec::new()),
-                    saved_names: Mutex::new(Vec::new()),
                     gate: Some(Arc::clone(&gate)),
+                    ..Self::default()
                 },
                 gate,
             )
+        }
+
+        fn refusing_meetings() -> Self {
+            Self {
+                refuse_meetings: true,
+                ..Self::default()
+            }
         }
     }
 
@@ -1011,6 +1230,18 @@ mod tests {
             saved_names.push(record.file_name);
             Ok(i64::try_from(saved_names.len()).unwrap_or(i64::MAX))
         }
+
+        fn import_meeting(&self, path: &Path) -> AnyResult<MeetingSessionId> {
+            self.meeting_imports.lock().push(path.to_path_buf());
+            if self.refuse_meetings {
+                anyhow::bail!("no meeting session manager is running");
+            }
+            Ok(self.meeting_id)
+        }
+
+        fn announce(&self, routed: AudioImportRoutedEvent) {
+            self.announced.lock().push(routed);
+        }
     }
 
     fn import_plan() -> RunPlan {
@@ -1018,14 +1249,26 @@ mod tests {
     }
 
     fn write_stereo_wav(path: &Path, seconds: usize, left: f32, right: f32) {
+        write_stereo_wav_at(path, 48_000, seconds, left, right);
+    }
+
+    /// The two-minute cases are written at the ASR rate on purpose. The
+    /// boundary this route turns on is counted in emitted 16 kHz samples, and
+    /// a 48 kHz source would make the resampler chew through three times the
+    /// audio to arrive at the same count.
+    fn write_asr_rate_wav(path: &Path, seconds: usize) {
+        write_stereo_wav_at(path, WHISPER_SAMPLE_RATE, seconds, 0.1, 0.1);
+    }
+
+    fn write_stereo_wav_at(path: &Path, rate: u32, seconds: usize, left: f32, right: f32) {
         let spec = WavSpec {
             channels: 2,
-            sample_rate: 48_000,
+            sample_rate: rate,
             bits_per_sample: 32,
             sample_format: SampleFormat::Float,
         };
         let mut writer = WavWriter::create(path, spec).expect("create wav fixture");
-        for _ in 0..(seconds * 48_000) {
+        for _ in 0..(seconds * rate as usize) {
             writer.write_sample(left).expect("write left sample");
             writer.write_sample(right).expect("write right sample");
         }
@@ -1101,7 +1344,9 @@ mod tests {
     }
 
     fn wait_for_terminal(manager: &MediaImportManager, id: u64) -> AudioImportJob {
-        for _ in 0..200 {
+        // Two minutes of audio has to decode inside this budget, so it is
+        // patience for a slow machine, not a guess at how long a job takes.
+        for _ in 0..3_000 {
             let job = manager
                 .list_jobs()
                 .into_iter()
@@ -1116,6 +1361,19 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("import job did not terminate");
+    }
+
+    /// The unbounded decode the picker route performs, with the outcome the
+    /// caller of a stop-free decode expects: the whole file, in one buffer.
+    fn decode_whole(
+        path: &Path,
+        extension: &str,
+        cancellation: &AtomicBool,
+    ) -> std::result::Result<Vec<f32>, DecodeFailure> {
+        match decode_media(path, extension, cancellation, None, |_| {})? {
+            DecodedMedia::Whole(audio) => Ok(audio),
+            DecodedMedia::ReachedStopPoint => panic!("an unbounded decode has no stop point"),
+        }
     }
 
     #[test]
@@ -1147,7 +1405,7 @@ mod tests {
         let path = directory.path().join("stereo.wav");
         write_stereo_wav(&path, 3, 0.75, -0.25);
         let cancellation = AtomicBool::new(false);
-        let decoded = decode_media(&path, "wav", &cancellation, |_| {}).expect("decode wav");
+        let decoded = decode_whole(&path, "wav", &cancellation).expect("decode wav");
         assert!(
             (47_000..=49_500).contains(&decoded.len()),
             "expected about 3 seconds at 16 kHz, got {} samples",
@@ -1177,7 +1435,7 @@ mod tests {
             ffmpeg_fixture(&source, &output, codec);
             let cancellation = AtomicBool::new(false);
             let extension = output.extension().unwrap().to_str().unwrap();
-            let decoded = decode_media(&output, extension, &cancellation, |_| {})
+            let decoded = decode_whole(&output, extension, &cancellation)
                 .unwrap_or_else(|_| panic!("failed to decode {name}"));
             assert!(
                 (30_000..=38_400).contains(&decoded.len()),
@@ -1200,7 +1458,11 @@ mod tests {
             let video = directory.path().join(&name);
             ffmpeg_video_fixture(&source, &video);
             let job = manager
-                .enqueue(video.to_string_lossy().into_owned(), import_plan())
+                .enqueue(
+                    video.to_string_lossy().into_owned(),
+                    import_plan(),
+                    ImportOrigin::Picker,
+                )
                 .expect("enqueue supported video");
 
             assert_eq!(
@@ -1237,7 +1499,11 @@ mod tests {
         let runtime = Arc::new(FakeRuntime::default());
         let manager = MediaImportManager::new_for_test(runtime.clone());
         let job = manager
-            .enqueue(video.to_string_lossy().into_owned(), import_plan())
+            .enqueue(
+                video.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
             .expect("enqueue supported video container");
 
         let completed = wait_for_terminal(&manager, job.id);
@@ -1258,7 +1524,7 @@ mod tests {
         fs::write(&corrupt, b"not audio").expect("write corrupt fixture");
         let cancellation = AtomicBool::new(false);
         assert!(matches!(
-            decode_media(&corrupt, "mp3", &cancellation, |_| {}),
+            decode_media(&corrupt, "mp3", &cancellation, None, |_| {}),
             Err(DecodeFailure::Failed(_))
         ));
 
@@ -1268,7 +1534,7 @@ mod tests {
         let bytes = fs::read(&complete).expect("read complete fixture");
         fs::write(&truncated, &bytes[..bytes.len() / 2]).expect("write truncated fixture");
         assert!(matches!(
-            decode_media(&truncated, "wav", &AtomicBool::new(false), |_| {}),
+            decode_media(&truncated, "wav", &AtomicBool::new(false), None, |_| {}),
             Err(DecodeFailure::Failed(_))
         ));
 
@@ -1295,7 +1561,7 @@ mod tests {
         let path = directory.path().join("long.wav");
         write_stereo_wav(&path, 6, 0.1, 0.1);
         let cancellation = AtomicBool::new(false);
-        let result = decode_media(&path, "wav", &cancellation, |_| {
+        let result = decode_media(&path, "wav", &cancellation, None, |_| {
             cancellation.store(true, Ordering::Release);
         });
         assert!(matches!(result, Err(DecodeFailure::Cancelled)));
@@ -1315,14 +1581,26 @@ mod tests {
         let manager = MediaImportManager::new_for_test(runtime.clone());
 
         let first_job = manager
-            .enqueue(first.to_string_lossy().into_owned(), import_plan())
+            .enqueue(
+                first.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
             .expect("enqueue first");
         gate.wait_until_entered();
         let second_job = manager
-            .enqueue(second.to_string_lossy().into_owned(), import_plan())
+            .enqueue(
+                second.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
             .expect("enqueue second");
         let third_job = manager
-            .enqueue(third.to_string_lossy().into_owned(), import_plan())
+            .enqueue(
+                third.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
             .expect("enqueue third");
         assert_eq!(
             manager
@@ -1362,10 +1640,18 @@ mod tests {
         let runtime = Arc::new(FakeRuntime::default());
         let manager = MediaImportManager::new_for_test(runtime.clone());
         let first_job = manager
-            .enqueue(first.to_string_lossy().into_owned(), import_plan())
+            .enqueue(
+                first.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
             .expect("enqueue first");
         let second_job = manager
-            .enqueue(second.to_string_lossy().into_owned(), import_plan())
+            .enqueue(
+                second.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
             .expect("enqueue second");
         assert_eq!(
             wait_for_terminal(&manager, first_job.id).status,
@@ -1377,6 +1663,160 @@ mod tests {
         );
         let transcripts = runtime.transcripts.lock();
         assert_eq!(transcripts[0], transcripts[1]);
+    }
+
+    /// One second short of the threshold, opened from Finder: a dictation, the
+    /// way every opened file used to be.
+    #[test]
+    fn an_opened_file_under_the_threshold_is_filed_as_a_dictation() {
+        let directory = tempfile::tempdir().expect("temporary fixture directory");
+        let path = directory.path().join("note.wav");
+        write_asr_rate_wav(&path, 119);
+        let runtime = Arc::new(FakeRuntime::default());
+        let manager = MediaImportManager::new_for_test(runtime.clone());
+
+        let job = manager
+            .enqueue(
+                path.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::SystemOpen,
+            )
+            .expect("enqueue an opened file");
+
+        let completed = wait_for_terminal(&manager, job.id);
+        assert_eq!(
+            completed.result,
+            Some(AudioImportResult::Done { history_id: 1 })
+        );
+        assert_eq!(runtime.saved_names.lock().as_slice(), ["note.wav"]);
+        assert!(
+            runtime.meeting_imports.lock().is_empty(),
+            "a dictation-length file must not reach the meeting pipeline"
+        );
+        assert_eq!(
+            runtime.announced.lock().as_slice(),
+            [AudioImportRoutedEvent {
+                file_name: "note.wav".to_string(),
+                destination: AudioImportDestination::Dictation,
+                link: "sona://dictation/1".to_string(),
+            }]
+        );
+    }
+
+    /// Exactly at the threshold, opened from Finder: a meeting. The file goes
+    /// to the meeting pipeline as a path, and nothing is transcribed or filed
+    /// here — this queue's ASR call and history row would both be wrong.
+    #[test]
+    fn an_opened_file_at_the_threshold_becomes_a_meeting() {
+        let directory = tempfile::tempdir().expect("temporary fixture directory");
+        let path = directory.path().join("call.wav");
+        write_asr_rate_wav(&path, 120);
+        let runtime = Arc::new(FakeRuntime::default());
+        let manager = MediaImportManager::new_for_test(runtime.clone());
+
+        let job = manager
+            .enqueue(
+                path.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::SystemOpen,
+            )
+            .expect("enqueue an opened file");
+
+        let completed = wait_for_terminal(&manager, job.id);
+        assert_eq!(completed.status, AudioImportStatus::Done);
+        assert_eq!(
+            completed.result,
+            Some(AudioImportResult::Meeting {
+                session_id: runtime.meeting_id,
+            })
+        );
+        assert_eq!(
+            runtime.meeting_imports.lock().as_slice(),
+            [fs::canonicalize(&path).expect("canonical fixture path")]
+        );
+        assert!(
+            runtime.transcripts.lock().is_empty(),
+            "a meeting is transcribed by the meeting pipeline, not by this queue"
+        );
+        assert!(
+            runtime.saved_names.lock().is_empty(),
+            "a meeting must not also become a history row"
+        );
+        assert_eq!(
+            runtime.announced.lock().as_slice(),
+            [AudioImportRoutedEvent {
+                file_name: "call.wav".to_string(),
+                destination: AudioImportDestination::Meeting,
+                link: format!("sona://meeting/{}", runtime.meeting_id.uuid()),
+            }]
+        );
+    }
+
+    /// The same length through the in-app picker stays a dictation and says
+    /// nothing: that route asked which destination the person wanted, and this
+    /// queue is the answer they gave.
+    #[test]
+    fn a_picker_import_of_the_same_length_stays_a_dictation() {
+        let directory = tempfile::tempdir().expect("temporary fixture directory");
+        let path = directory.path().join("chosen.wav");
+        write_asr_rate_wav(&path, 120);
+        let runtime = Arc::new(FakeRuntime::default());
+        let manager = MediaImportManager::new_for_test(runtime.clone());
+
+        let job = manager
+            .enqueue(
+                path.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::Picker,
+            )
+            .expect("enqueue a picked file");
+
+        let completed = wait_for_terminal(&manager, job.id);
+        assert_eq!(
+            completed.result,
+            Some(AudioImportResult::Done { history_id: 1 })
+        );
+        assert!(runtime.meeting_imports.lock().is_empty());
+        assert!(
+            runtime.announced.lock().is_empty(),
+            "nobody needs to be told where a file they chose a destination for went"
+        );
+    }
+
+    /// A refused meeting is a failure with its own code, not a quiet fall back
+    /// to history: filing an hour-long recording as a dictation is the defect
+    /// this route exists to fix, and a row that says so can be retried.
+    #[test]
+    fn a_refused_meeting_import_fails_instead_of_becoming_a_dictation() {
+        let directory = tempfile::tempdir().expect("temporary fixture directory");
+        let path = directory.path().join("interview.wav");
+        write_asr_rate_wav(&path, 120);
+        let runtime = Arc::new(FakeRuntime::refusing_meetings());
+        let manager = MediaImportManager::new_for_test(runtime.clone());
+
+        let job = manager
+            .enqueue(
+                path.to_string_lossy().into_owned(),
+                import_plan(),
+                ImportOrigin::SystemOpen,
+            )
+            .expect("enqueue an opened file");
+
+        let completed = wait_for_terminal(&manager, job.id);
+        assert_eq!(completed.status, AudioImportStatus::Failed);
+        assert!(
+            matches!(
+                completed.result,
+                Some(AudioImportResult::Failed {
+                    code: AudioImportFailureCode::MeetingImport,
+                    ..
+                })
+            ),
+            "a refused meeting handoff must say so: {:?}",
+            completed.result
+        );
+        assert!(runtime.saved_names.lock().is_empty());
+        assert!(runtime.announced.lock().is_empty());
     }
 
     #[test]

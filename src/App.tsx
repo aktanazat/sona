@@ -630,6 +630,29 @@ const AppEventListeners: React.FC = () => {
     };
   }, [t]);
 
+  /* Where a file the operating system handed to Sona ended up. Open With
+     carries a path and no destination, so this is the one import route that
+     has to say which of the two homes the recording went to — and the action
+     opens the thing the sentence names. */
+  useEffect(() => {
+    const unlisten = events.audioImportRoutedEvent.listen((event) => {
+      toast.success(
+        t(`settings.history.audioImport.routed.${event.payload.destination}`, {
+          file: event.payload.file_name,
+        }),
+        {
+          action: {
+            label: t("common.open"),
+            onClick: () => void commands.sonaOpenLink(event.payload.link),
+          },
+        },
+      );
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [t]);
+
   // Listen for model loading failures and show a toast
   useEffect(() => {
     const unlisten = listen<ModelStateEvent>("model-state-changed", (event) => {

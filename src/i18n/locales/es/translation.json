@@ -790,9 +790,14 @@
         "saveError": "No se pudo guardar la corrección. Inténtalo de nuevo."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} guardado como reunión",
+          "dictation": "{{file}} guardado en el historial"
+        },
         "fileFilter": "Archivos de audio y vídeo",
         "jobs": "Importaciones de archivos",
         "status": {
+          "savedAsMeeting": "Guardado como reunión",
           "queued": "En cola",
           "decoding": "Leyendo el audio",
           "transcribing": "Transcribiendo",
@@ -803,6 +808,7 @@
         },
         "cancel": "Cancelar",
         "failure": {
+          "meeting_import": "No se pudo guardar esta grabación como reunión.",
           "invalid_file": "El archivo seleccionado no se puede leer.",
           "unsupported_format": "Este formato de audio no es compatible.",
           "no_audio": "Este archivo multimedia no tiene pista de audio.",

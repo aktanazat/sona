@@ -788,9 +788,14 @@
         "saveError": "교정을 저장할 수 없습니다. 다시 시도하세요."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}}을(를) 회의로 저장했습니다",
+          "dictation": "{{file}}을(를) 히스토리에 저장했습니다"
+        },
         "fileFilter": "오디오 및 비디오 파일",
         "jobs": "파일 가져오기",
         "status": {
+          "savedAsMeeting": "회의로 저장됨",
           "queued": "대기 중",
           "decoding": "오디오 읽는 중",
           "transcribing": "전사 중",
@@ -801,6 +806,7 @@
         },
         "cancel": "취소",
         "failure": {
+          "meeting_import": "이 녹음을 회의로 저장할 수 없습니다.",
           "invalid_file": "선택한 파일을 읽을 수 없습니다.",
           "unsupported_format": "이 오디오 형식은 지원되지 않습니다.",
           "no_audio": "이 미디어 파일에는 오디오 트랙이 없습니다.",

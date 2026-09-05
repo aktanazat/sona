@@ -789,9 +789,14 @@
         "saveError": "Düzeltme kaydedilemedi. Yeniden deneyin."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} toplantı olarak kaydedildi",
+          "dictation": "{{file}} geçmişe kaydedildi"
+        },
         "fileFilter": "Ses ve video dosyaları",
         "jobs": "Dosya içe aktarımları",
         "status": {
+          "savedAsMeeting": "Toplantı olarak kaydedildi",
           "queued": "Kuyrukta",
           "decoding": "Ses okunuyor",
           "transcribing": "Transkribe ediliyor",
@@ -802,6 +807,7 @@
         },
         "cancel": "İptal",
         "failure": {
+          "meeting_import": "Bu kayıt toplantı olarak kaydedilemedi.",
           "invalid_file": "Seçilen dosya okunamıyor.",
           "unsupported_format": "Bu ses biçimi desteklenmiyor.",
           "no_audio": "Bu medya dosyasında ses parçası yok.",

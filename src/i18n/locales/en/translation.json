@@ -789,9 +789,14 @@
         "saveError": "Couldn't save the correction. Try again."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} saved as a meeting",
+          "dictation": "{{file}} saved to history"
+        },
         "fileFilter": "Audio and video files",
         "jobs": "File imports",
         "status": {
+          "savedAsMeeting": "Saved as a meeting",
           "queued": "Queued",
           "decoding": "Reading the audio",
           "transcribing": "Transcribing",
@@ -802,6 +807,7 @@
         },
         "cancel": "Cancel",
         "failure": {
+          "meeting_import": "This recording could not be saved as a meeting.",
           "invalid_file": "The selected file cannot be read.",
           "unsupported_format": "This audio format is not supported.",
           "no_audio": "This media file has no audio track.",

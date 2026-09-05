@@ -790,9 +790,14 @@
         "saveError": "Non è stato possibile salvare la correzione. Riprova."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} salvato come riunione",
+          "dictation": "{{file}} salvato nella cronologia"
+        },
         "fileFilter": "File audio e video",
         "jobs": "Importazioni di file",
         "status": {
+          "savedAsMeeting": "Salvato come riunione",
           "queued": "In coda",
           "decoding": "Lettura dell'audio",
           "transcribing": "Trascrizione in corso",
@@ -803,6 +808,7 @@
         },
         "cancel": "Annulla",
         "failure": {
+          "meeting_import": "Impossibile salvare questa registrazione come riunione.",
           "invalid_file": "Impossibile leggere il file selezionato.",
           "unsupported_format": "Questo formato audio non è supportato.",
           "no_audio": "Questo file multimediale non contiene una traccia audio.",

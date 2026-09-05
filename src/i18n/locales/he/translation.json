@@ -790,9 +790,14 @@
         "saveError": "לא ניתן לשמור את התיקון. נסה שוב."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} נשמר כפגישה",
+          "dictation": "{{file}} נשמר בהיסטוריה"
+        },
         "fileFilter": "קובצי שמע ווידאו",
         "jobs": "ייבואי קבצים",
         "status": {
+          "savedAsMeeting": "נשמר כפגישה",
           "queued": "בתור",
           "decoding": "קורא את השמע",
           "transcribing": "מתמלל",
@@ -803,6 +808,7 @@
         },
         "cancel": "ביטול",
         "failure": {
+          "meeting_import": "לא ניתן לשמור את ההקלטה כפגישה.",
           "invalid_file": "לא ניתן לקרוא את הקובץ שנבחר.",
           "unsupported_format": "תבנית השמע הזו אינה נתמכת.",
           "no_audio": "לקובץ מדיה זה אין רצועת שמע.",

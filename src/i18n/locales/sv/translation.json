@@ -789,9 +789,14 @@
         "saveError": "Kunde inte spara korrigeringen. Försök igen."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} sparad som möte",
+          "dictation": "{{file}} sparad i historiken"
+        },
         "fileFilter": "Ljud- och videofiler",
         "jobs": "Filimporter",
         "status": {
+          "savedAsMeeting": "Sparat som möte",
           "queued": "I kö",
           "decoding": "Läser ljudet",
           "transcribing": "Transkriberar",
@@ -802,6 +807,7 @@
         },
         "cancel": "Avbryt",
         "failure": {
+          "meeting_import": "Inspelningen kunde inte sparas som ett möte.",
           "invalid_file": "Den valda filen kan inte läsas.",
           "unsupported_format": "Det här ljudformatet stöds inte.",
           "no_audio": "Den här mediefilen saknar ljudspår.",

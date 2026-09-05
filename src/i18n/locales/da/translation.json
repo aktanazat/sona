@@ -789,9 +789,14 @@
         "saveError": "Kunne ikke gemme korrektionen. Prøv igen."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} gemt som møde",
+          "dictation": "{{file}} gemt i historikken"
+        },
         "fileFilter": "Lyd- og videofiler",
         "jobs": "Filimporter",
         "status": {
+          "savedAsMeeting": "Gemt som møde",
           "queued": "I kø",
           "decoding": "Læser lyden",
           "transcribing": "Transskriberer",
@@ -802,6 +807,7 @@
         },
         "cancel": "Annuller",
         "failure": {
+          "meeting_import": "Optagelsen kunne ikke gemmes som et møde.",
           "invalid_file": "Den valgte fil kan ikke læses.",
           "unsupported_format": "Dette lydformat understøttes ikke.",
           "no_audio": "Denne mediefil har intet lydspor.",

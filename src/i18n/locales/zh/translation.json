@@ -788,9 +788,14 @@
         "saveError": "无法保存校正。请重试。"
       },
       "audioImport": {
+        "routed": {
+          "meeting": "已将 {{file}} 保存为会议",
+          "dictation": "已将 {{file}} 保存到历史记录"
+        },
         "fileFilter": "音频和视频文件",
         "jobs": "文件导入",
         "status": {
+          "savedAsMeeting": "已保存为会议",
           "queued": "排队中",
           "decoding": "正在读取音频",
           "transcribing": "正在转录",
@@ -801,6 +806,7 @@
         },
         "cancel": "取消",
         "failure": {
+          "meeting_import": "无法将此录音保存为会议。",
           "invalid_file": "无法读取所选文件。",
           "unsupported_format": "不支持此音频格式。",
           "no_audio": "此媒体文件没有音频轨道。",

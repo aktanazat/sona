@@ -788,9 +788,14 @@
         "saveError": "修正を保存できませんでした。もう一度お試しください。"
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} を会議として保存しました",
+          "dictation": "{{file}} を履歴に保存しました"
+        },
         "fileFilter": "音声・動画ファイル",
         "jobs": "ファイルのインポート",
         "status": {
+          "savedAsMeeting": "会議として保存しました",
           "queued": "待機中",
           "decoding": "音声を読み込み中",
           "transcribing": "文字起こし中",
@@ -801,6 +806,7 @@
         },
         "cancel": "キャンセル",
         "failure": {
+          "meeting_import": "この録音を会議として保存できませんでした。",
           "invalid_file": "選択したファイルを読み取れません。",
           "unsupported_format": "この音声形式はサポートされていません。",
           "no_audio": "このメディアファイルには音声トラックがありません。",

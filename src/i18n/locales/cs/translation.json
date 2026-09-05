@@ -791,9 +791,14 @@
         "saveError": "Opravu se nepodařilo uložit. Zkuste to znovu."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} uložen jako schůzka",
+          "dictation": "{{file}} uložen do historie"
+        },
         "fileFilter": "Zvukové a video soubory",
         "jobs": "Importy souborů",
         "status": {
+          "savedAsMeeting": "Uloženo jako schůzka",
           "queued": "Ve frontě",
           "decoding": "Načítání zvuku",
           "transcribing": "Přepisování",
@@ -804,6 +809,7 @@
         },
         "cancel": "Zrušit",
         "failure": {
+          "meeting_import": "Tuto nahrávku se nepodařilo uložit jako schůzku.",
           "invalid_file": "Vybraný soubor nelze načíst.",
           "unsupported_format": "Tento formát zvuku není podporován.",
           "no_audio": "Tento mediální soubor nemá zvukovou stopu.",

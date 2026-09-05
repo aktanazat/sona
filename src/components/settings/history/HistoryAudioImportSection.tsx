@@ -13,6 +13,14 @@ interface HistoryAudioImportSectionProps {
   onCancel: (job: AudioImportJob) => void;
 }
 
+/* `done` is two sentences, not one: a dictation landed in History, and a
+ * recording the operating system opened landed in Library. The job's result
+ * says which of the two happened; its status only says it finished. */
+const statusKey = (job: AudioImportJob): string =>
+  job.result?.kind === "meeting"
+    ? "settings.history.audioImport.status.savedAsMeeting"
+    : `settings.history.audioImport.status.${job.status}`;
+
 /**
  * The file imports still running, on the page they will land on.
  *
@@ -57,7 +65,7 @@ export const HistoryAudioImportSection: React.FC<
                 job.result?.kind === "failed" ? job.result.code : null;
               const status = job.cancel_requested
                 ? t("settings.history.audioImport.status.cancelling")
-                : t(`settings.history.audioImport.status.${job.status}`);
+                : t(statusKey(job));
               return (
                 <li
                   key={job.id}

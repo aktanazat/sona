@@ -789,9 +789,14 @@
         "saveError": "Kon de correctie niet opslaan. Probeer het opnieuw."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} opgeslagen als vergadering",
+          "dictation": "{{file}} opgeslagen in de geschiedenis"
+        },
         "fileFilter": "Audio- en videobestanden",
         "jobs": "Bestandsimporten",
         "status": {
+          "savedAsMeeting": "Opgeslagen als vergadering",
           "queued": "In wachtrij",
           "decoding": "Audio lezen",
           "transcribing": "Transcriberen",
@@ -802,6 +807,7 @@
         },
         "cancel": "Annuleren",
         "failure": {
+          "meeting_import": "Deze opname kon niet als vergadering worden opgeslagen.",
           "invalid_file": "Het geselecteerde bestand kan niet worden gelezen.",
           "unsupported_format": "Deze audio-indeling wordt niet ondersteund.",
           "no_audio": "Dit mediabestand bevat geen audiotrack.",

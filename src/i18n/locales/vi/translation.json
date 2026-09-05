@@ -788,9 +788,14 @@
         "saveError": "Không lưu được phần chỉnh sửa. Hãy thử lại."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "Đã lưu {{file}} thành cuộc họp",
+          "dictation": "Đã lưu {{file}} vào Lịch sử"
+        },
         "fileFilter": "Tệp âm thanh và video",
         "jobs": "Nhập tệp",
         "status": {
+          "savedAsMeeting": "Đã lưu thành cuộc họp",
           "queued": "Đã xếp hàng",
           "decoding": "Đang đọc âm thanh",
           "transcribing": "Đang chuyển thành văn bản",
@@ -801,6 +806,7 @@
         },
         "cancel": "Hủy",
         "failure": {
+          "meeting_import": "Không thể lưu bản ghi này thành cuộc họp.",
           "invalid_file": "Không thể đọc tệp đã chọn.",
           "unsupported_format": "Định dạng âm thanh này không được hỗ trợ.",
           "no_audio": "Tệp phương tiện này không có bản âm thanh.",

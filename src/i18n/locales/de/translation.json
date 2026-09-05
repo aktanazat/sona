@@ -789,9 +789,14 @@
         "saveError": "Korrektur konnte nicht gespeichert werden. Versuchen Sie es erneut."
       },
       "audioImport": {
+        "routed": {
+          "meeting": "{{file}} als Meeting gespeichert",
+          "dictation": "{{file}} im Verlauf gespeichert"
+        },
         "fileFilter": "Audio- und Videodateien",
         "jobs": "Dateiimporte",
         "status": {
+          "savedAsMeeting": "Als Meeting gespeichert",
           "queued": "In Warteschlange",
           "decoding": "Audio wird gelesen",
           "transcribing": "Transkription läuft",
@@ -802,6 +807,7 @@
         },
         "cancel": "Abbrechen",
         "failure": {
+          "meeting_import": "Diese Aufnahme konnte nicht als Meeting gespeichert werden.",
           "invalid_file": "Die ausgewählte Datei kann nicht gelesen werden.",
           "unsupported_format": "Dieses Audioformat wird nicht unterstützt.",
           "no_audio": "Diese Mediendatei hat keine Audiospur.",

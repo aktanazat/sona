@@ -2924,11 +2924,13 @@ agentBridgeUpdateEvent: AgentBridgeUpdateEvent,
 agentPanelProposalChanged: AgentPanelProposalChangedEvent,
 agentPanelStatusChanged: AgentPanelStatusChangedEvent,
 agentPanelTurnChanged: AgentPanelTurnChangedEvent,
+audioImportRoutedEvent: AudioImportRoutedEvent,
 audioImportUpdateEvent: AudioImportUpdateEvent,
 cloudSyncChanged: CloudSyncChangedEvent,
 detectionPrompt: DetectionPromptEvent,
 detectionPromptRetracted: DetectionPromptRetractedEvent,
 detectionStatus: DetectionStatus,
+dictationRecordingChangedEvent: DictationRecordingChangedEvent,
 historyUpdatePayload: HistoryUpdatePayload,
 meetingRitual: MeetingRitualEvent,
 meetingRitualRetracted: MeetingRitualRetractedEvent,
@@ -2956,11 +2958,13 @@ agentBridgeUpdateEvent: "agent-bridge-update-event",
 agentPanelProposalChanged: "agent-panel://proposal-changed",
 agentPanelStatusChanged: "agent-panel://status-changed",
 agentPanelTurnChanged: "agent-panel://turn-changed",
+audioImportRoutedEvent: "audio-import-routed-event",
 audioImportUpdateEvent: "audio-import-update-event",
 cloudSyncChanged: "cloud-sync:changed",
 detectionPrompt: "detection-prompt",
 detectionPromptRetracted: "detection-prompt-retracted",
 detectionStatus: "detection-status",
+dictationRecordingChangedEvent: "dictation-recording-changed-event",
 historyUpdatePayload: "history-update-payload",
 meetingRitual: "meeting-ritual",
 meetingRitualRetracted: "meeting-ritual-retracted",
@@ -3500,13 +3504,32 @@ export type AppearanceMaterial = "solid" | "glass"
 export type ArtifactCitation = { segment_id: TranscriptSegmentId; start_offset_ns: number; end_offset_ns: number }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type AudioFormat = { sample_rate_hz: number; channels: number }
-export type AudioImportFailureCode = "invalid_file" | "unsupported_format" | "no_audio" | "decode" | "duration_limit" | "transcription" | "history"
+/**
+ * Which of Sona's two homes for recorded speech one import landed in.
+ */
+export type AudioImportDestination = "meeting" | "dictation"
+export type AudioImportFailureCode = "invalid_file" | "unsupported_format" | "no_audio" | "decode" | "duration_limit" | "transcription" | "history" | "meeting_import"
 /**
  * The complete public state for one GUI import. Source paths remain private;
  * only the original file name crosses the IPC boundary.
  */
 export type AudioImportJob = { id: number; file_name: string; status: AudioImportStatus; decoded_samples: number; cancel_requested: boolean; result: AudioImportResult | null }
-export type AudioImportResult = { kind: "done"; history_id: number } | { kind: "cancelled" } | { kind: "failed"; code: AudioImportFailureCode; message: string }
+export type AudioImportResult = { kind: "done"; history_id: number } |
+/**
+ * Long enough to be a recording of something rather than a dictation, so
+ * it became a meeting and no history row exists. Carries the id
+ * `sona://meeting/<id>` addresses.
+ */
+{ kind: "meeting"; session_id: MeetingSessionId } | { kind: "cancelled" } | { kind: "failed"; code: AudioImportFailureCode; message: string }
+/**
+ * Where one file the operating system handed to Sona ended up.
+ *
+ * Emitted only for that route, because it is the only one where the person
+ * was never asked: they chose Open With, and the length of the audio chose
+ * the destination. `link` is the `sona://` address of the meeting or the
+ * dictation, so the toast that reports this can open the thing it names.
+ */
+export type AudioImportRoutedEvent = { file_name: string; destination: AudioImportDestination; link: string }
 export type AudioImportStatus = "queued" | "decoding" | "transcribing" | "done" | "cancelled" | "failed"
 export type AudioImportUpdateEvent = { job: AudioImportJob }
 export type AutoSubmitKey = "enter" | "ctrl_enter" | "cmd_enter"
@@ -3984,6 +4007,14 @@ runningMeetingApps: string[];
  */
 inputDeviceReportingSuspect: boolean }
 export type DiarizationStatus = "not_requested" | "model_unavailable" | "downloading" | "running" | "succeeded" | "failed"
+/**
+ * `is_recording()` flipped, broadcast to every webview. A window that wants to
+ * draw dictation's state reads the boolean once on mount and then follows this;
+ * it is emitted from `set_state()`, the one place the boolean is written, so
+ * the two can never disagree. Start, stop, cancel and every error path reach
+ * idle through that function, which is what makes one event enough.
+ */
+export type DictationRecordingChangedEvent = { recording: boolean }
 export type Document = { summary: DocumentSummary; content: string }
 export type DocumentDeleteRequest = { document_id: DocumentId; expected_revision: number }
 export type DocumentId = string

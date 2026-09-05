@@ -1,6 +1,6 @@
 use crate::managers::media_import::{
     validate_audio_import_path, AudioImportError, AudioImportFailureCode, AudioImportJob,
-    AudioImportResult, AudioImportStatus, AudioImportUpdateEvent, MediaImportManager,
+    AudioImportResult, AudioImportStatus, AudioImportUpdateEvent, ImportOrigin, MediaImportManager,
 };
 use crate::modes::RunPlan;
 use crate::settings::get_settings;
@@ -105,11 +105,14 @@ pub(crate) fn report_opened_audio_failure(
 }
 /// Enqueue a path that is already in the app's file scope. The renderer and
 /// operating-system Open With routes both converge here, so validation cannot
-/// diverge between entry points.
+/// diverge between entry points. What cannot converge is the `origin`: the two
+/// routes differ in whether anybody was asked where the file should go, and
+/// the queue decides the destination of an unasked import from its length.
 pub(crate) fn enqueue_scoped_audio_file(
     app: &AppHandle,
     media_import_manager: &MediaImportManager,
     path: &Path,
+    origin: ImportOrigin,
 ) -> Result<AudioImportJob, String> {
     if !app.fs_scope().is_allowed(path) {
         return Err("Import source is outside the granted file scope".to_string());
@@ -119,7 +122,7 @@ pub(crate) fn enqueue_scoped_audio_file(
         .ok_or_else(|| "Import source path is not valid Unicode".to_string())?;
     let run = RunPlan::for_media_import(&get_settings(app)).map_err(|error| error.to_string())?;
     media_import_manager
-        .enqueue(path.to_string(), run)
+        .enqueue(path.to_string(), run, origin)
         .map_err(|error| error.to_string())
 }
 
@@ -127,6 +130,12 @@ pub(crate) fn enqueue_scoped_audio_file(
 /// regular audio file before granting that exact file to the existing scope, then
 /// use the same scoped import path as the picker command. Video imports remain
 /// available from the picker but are refused by the audio-only Open With route.
+///
+/// This is the only route into the app that carries no destination: Finder's
+/// Open With, `open -a Sona` and a drop on the Dock icon all say "this file"
+/// and nothing about what it is. `ImportOrigin::SystemOpen` is set here and
+/// nowhere else, and it is what lets the queue send a recording to Library
+/// instead of filing it as a dictation.
 pub(crate) fn enqueue_opened_audio_file(
     app: &AppHandle,
     media_import_manager: &MediaImportManager,
@@ -136,7 +145,7 @@ pub(crate) fn enqueue_opened_audio_file(
     app.fs_scope().allow_file(path).map_err(|_| {
         OpenedAudioImportFailure::invalid_file("Could not grant the opened audio file to Sona")
     })?;
-    enqueue_scoped_audio_file(app, media_import_manager, path)
+    enqueue_scoped_audio_file(app, media_import_manager, path, ImportOrigin::SystemOpen)
         .map_err(OpenedAudioImportFailure::invalid_file)
 }
 
@@ -151,6 +160,7 @@ pub fn import_audio_file(
         &app,
         media_import_manager.inner().as_ref(),
         Path::new(&path),
+        ImportOrigin::Picker,
     )
 }
 
