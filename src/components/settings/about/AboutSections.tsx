@@ -13,6 +13,7 @@ import { Button } from "@/components/vg/button";
 import { AppDataDirectory } from "../AppDataDirectory";
 import { AppLanguageSelector } from "../AppLanguageSelector";
 import { MaterialSelector } from "../MaterialSelector";
+import { ThemeSelector } from "../ThemeSelector";
 import { LogDirectory } from "../debug/LogDirectory";
 import { UpdateRows, type VersionState } from "./UpdateRows";
 
@@ -41,11 +42,12 @@ const openExternal = async (url: string) => {
  * the bundled license notices the source row opens are the authoritative
  * version of both.
  *
- * It leads with two rows that are not build facts: the language Sona speaks
- * and the material its windows are made of. Both are set once and then never
- * again, and this is the least prominent section on the page — which is the
- * whole argument for putting them here rather than on Essentials, where a
- * once-in-an-install choice would sit beside the microphone. */
+ * It leads with three rows that are not build facts: the language Sona
+ * speaks, its appearance, and the material its windows are made of. Each is
+ * set once and then never again, and this is the least prominent section on
+ * the page — which is the whole argument for putting them here rather than on
+ * Essentials, where a once-in-an-install choice would sit beside the
+ * microphone. */
 export const AboutSections: React.FC = () => {
   const { t } = useTranslation();
   const [version, setVersion] = useState<VersionState>({ kind: "loading" });
@@ -72,6 +74,7 @@ export const AboutSections: React.FC = () => {
   return (
     <SettingsSection label={t("settingsV2.advanced.about")}>
       <AppLanguageSelector />
+      <ThemeSelector />
       <MaterialSelector />
       <UpdateRows version={version} />
       <SettingsRow
