@@ -759,7 +759,7 @@ mod system_audio {
             self.format = None;
 
             let health = if result == BRIDGE_OK && !state.has_failure {
-                SourceHealth::Stopped
+                SourceHealth::Healthy
             } else if result == BRIDGE_OK {
                 SourceHealth::Degraded
             } else {
@@ -1213,6 +1213,193 @@ mod system_audio {
             BRIDGE_INVALID_ARGUMENT => MeetingCaptureError::InvalidState,
             BRIDGE_STREAM_FAILURE => MeetingCaptureError::StreamFailure,
             _ => MeetingCaptureError::StreamFailure,
+        }
+    }
+
+    /// These drive the Swift bridge's own format decision and sample
+    /// conversion through `sona_meeting_capture_convert_for_test`, which is the
+    /// pair of steps every ScreenCaptureKit buffer takes before it reaches
+    /// `meeting_packet_callback`. A live SCStream is not available in a unit
+    /// test; the format description and the plane layout are.
+    #[cfg(test)]
+    mod capture_format_tests {
+        use super::*;
+
+        extern "C" {
+            fn sona_meeting_capture_convert_for_test(
+                sample_rate: f64,
+                channels_per_frame: u32,
+                bytes_per_frame: u32,
+                format_flags: u32,
+                bits_per_channel: u32,
+                samples: *const f32,
+                sample_count: u32,
+                frame_count: u32,
+                out: *mut f32,
+            ) -> c_int;
+        }
+
+        const FLAG_FLOAT: u32 = 1 << 0;
+        const FLAG_PACKED: u32 = 1 << 3;
+        const FLAG_NON_INTERLEAVED: u32 = 1 << 5;
+
+        fn convert(
+            channels: u32,
+            bytes_per_frame: u32,
+            format_flags: u32,
+            bits_per_channel: u32,
+            payload: &[f32],
+            frame_count: u32,
+        ) -> (c_int, Vec<f32>) {
+            let mut out = vec![f32::NAN; frame_count as usize * channels as usize];
+            // `payload` outlives the call and `sample_count` is its real length.
+            // SAFETY: `out` holds the `frame_count * channels` samples the bridge fills on success.
+            let status = unsafe {
+                sona_meeting_capture_convert_for_test(
+                    48_000.0,
+                    channels,
+                    bytes_per_frame,
+                    format_flags,
+                    bits_per_channel,
+                    payload.as_ptr(),
+                    u32::try_from(payload.len()).unwrap(),
+                    frame_count,
+                    out.as_mut_ptr(),
+                )
+            };
+            (status, out)
+        }
+
+        /// ScreenCaptureKit delivers one Float32 plane per channel, so its
+        /// description sets the non-interleaved flag and counts a single
+        /// channel in `mBytesPerFrame`. Rejecting that shape is why no system
+        /// audio was ever recorded on this machine.
+        #[test]
+        fn planar_screen_capture_audio_becomes_interleaved_frames() {
+            let (status, samples) = convert(
+                2,
+                4,
+                FLAG_FLOAT | FLAG_PACKED | FLAG_NON_INTERLEAVED,
+                32,
+                &[1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+                3,
+            );
+
+            assert_eq!(status, 0);
+            assert_eq!(samples, vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+        }
+
+        #[test]
+        fn interleaved_audio_reaches_the_packet_unchanged() {
+            let (status, samples) = convert(
+                2,
+                8,
+                FLAG_FLOAT | FLAG_PACKED,
+                32,
+                &[1.0, -1.0, 2.0, -2.0, 3.0, -3.0],
+                3,
+            );
+
+            assert_eq!(status, 0);
+            assert_eq!(samples, vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0]);
+        }
+
+        /// The guard still has a job: this bridge reads 32-bit float and
+        /// nothing else, and a format it cannot read must be refused rather
+        /// than reinterpreted.
+        #[test]
+        fn integer_pcm_is_refused() {
+            let (status, _) = convert(
+                2,
+                4,
+                FLAG_PACKED | FLAG_NON_INTERLEAVED,
+                16,
+                &[1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+                3,
+            );
+
+            assert_eq!(status, 1);
+        }
+
+        /// A buffer list whose byte count disagrees with the frame count its
+        /// format promises is a mismatch, not a licence to reinterpret it.
+        #[test]
+        fn a_payload_that_contradicts_its_format_is_rejected() {
+            let (status, _) = convert(
+                2,
+                8,
+                FLAG_FLOAT | FLAG_PACKED,
+                32,
+                &[1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0],
+                3,
+            );
+
+            assert_eq!(status, 2);
+        }
+    }
+
+    #[cfg(test)]
+    mod live_capture_probe {
+        use super::*;
+        use crate::meeting::capture::PacketSink;
+        use crate::meeting::types::MeetingSessionId;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        #[ignore = "needs Screen Recording permission and live system audio"]
+        fn live_system_audio_delivers_packets() {
+            // SAFETY: the Swift probe reads only platform availability and permission state.
+            let permission = unsafe { sona_meeting_capture_probe() };
+            println!("probe={permission}");
+            assert_eq!(permission, BRIDGE_OK, "screen recording permission");
+
+            let track_id = SourceTrackId::new();
+            let (sink, mut reader) = PacketSink::new(track_id, 48_000 * 2 * 4, 512);
+            let mut capture = MacosSystemAudioCapture::new();
+            let anchor = SessionClockAnchor {
+                host_monotonic_anchor_ns: crate::meeting::clock::host_monotonic_now_ns(),
+                wall_start_utc_ms: 0,
+                clock_policy_version: 1,
+            };
+            let report = capture
+                .start(
+                    SourceStartPlan {
+                        session_id: MeetingSessionId::new(),
+                        track_id,
+                        source_kind: SourceKind::SystemAudio,
+                        required: true,
+                        frozen_application_bundle_ids: Vec::new(),
+                        source_epoch: SourceEpoch::new(0),
+                    },
+                    anchor,
+                    sink,
+                )
+                .expect("start system audio");
+            println!("format={:?} epoch={:?}", report.format, report.epoch);
+
+            let mut samples = Vec::new();
+            let mut packets = 0_u64;
+            let mut frames = 0_u64;
+            let mut gaps = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                while let Ok(Some(packet)) = reader.pop_into(&mut samples) {
+                    packets += 1;
+                    frames += u64::from(packet.frame_count);
+                }
+                while let Some(gap) = reader.pop_gap() {
+                    gaps.push(gap.reason);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let stop = capture.stop().expect("stop system audio");
+            println!(
+                "packets={packets} frames={frames} gaps={} reasons={:?} health={:?}",
+                gaps.len(),
+                &gaps[..gaps.len().min(4)],
+                stop.health
+            );
+            assert!(packets > 0, "no system audio packet ever reached Rust");
         }
     }
 }

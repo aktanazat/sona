@@ -48,6 +48,13 @@ private let maximumBundleIDCharacters = 255
 private let maximumEvidenceTitleCharacters = 160
 private let maximumEvidenceHostCharacters = 253
 private let accessibilityReadTimeoutSeconds: Float = 0.05
+/// The widest interleaved layout this bridge will assemble. ScreenCaptureKit is
+/// configured for two channels; the ceiling is what bounds the scratch buffer
+/// and the buffer list a renegotiated stream can ask for.
+private let maximumChannelCount: UInt32 = 8
+/// One second at that ceiling and 48 kHz, so a sample buffer claiming an
+/// impossible frame count cannot turn into an impossible allocation.
+private let maximumScratchSamples = 48_000 * Int(maximumChannelCount)
 
 private let packetTimestampReset: UInt32 = 1
 private let packetSourceRestarted: UInt32 = 1 << 2
@@ -115,6 +122,86 @@ private struct RawTimestamp: Equatable, Sendable {
 private struct PacketFormat: Equatable {
     let sampleRateHz: UInt32
     let channels: UInt32
+}
+
+/// What one audio format means to this bridge: the packet fields it produces,
+/// and whether its samples arrive one plane per channel. `nil` is a format the
+/// bridge cannot read at all.
+private struct AudioPacketLayout: Equatable {
+    let format: PacketFormat
+    let planar: Bool
+}
+
+/// A planar description counts one channel's frame in `mBytesPerFrame` and sets
+/// `kAudioFormatFlagIsNonInterleaved`. ScreenCaptureKit delivers exactly that,
+/// so a guard demanding the interleaved shape rejected every buffer the stream
+/// ever produced. Branch on the flag, and reject only what cannot be read.
+private func audioPacketLayout(_ format: AudioStreamBasicDescription) -> AudioPacketLayout? {
+    let flags = format.mFormatFlags
+    let channels = format.mChannelsPerFrame
+    let planar = (flags & kAudioFormatFlagIsNonInterleaved) != 0
+    let bytesPerFrame = UInt32(MemoryLayout<Float>.size)
+        .multipliedReportingOverflow(by: planar ? 1 : channels)
+    guard format.mSampleRate.isFinite,
+          format.mSampleRate > 0,
+          format.mSampleRate <= Double(UInt32.max),
+          format.mSampleRate.rounded(.towardZero) == format.mSampleRate,
+          channels > 0,
+          channels <= maximumChannelCount,
+          !bytesPerFrame.overflow,
+          format.mFormatID == kAudioFormatLinearPCM,
+          format.mBitsPerChannel == 32,
+          format.mFramesPerPacket == 1,
+          format.mBytesPerFrame == bytesPerFrame.partialValue,
+          format.mBytesPerPacket == bytesPerFrame.partialValue,
+          (flags & kAudioFormatFlagIsFloat) != 0
+    else {
+        return nil
+    }
+    return AudioPacketLayout(
+        format: PacketFormat(
+            sampleRateHz: UInt32(format.mSampleRate),
+            channels: channels
+        ),
+        planar: planar
+    )
+}
+
+/// Copies `planes` into `destination` as interleaved frames, which is the only
+/// shape the packet callback accepts. Planar input holds one buffer per
+/// channel; interleaved input holds one buffer of whole frames. False means the
+/// buffer list did not match the layout its format promised.
+private func interleaveAudio(
+    planes: UnsafeMutableAudioBufferListPointer,
+    frameCount: Int,
+    channels: Int,
+    planar: Bool,
+    into destination: UnsafeMutablePointer<Float>
+) -> Bool {
+    let planeCount = planar ? channels : 1
+    let planeFloats = planar ? frameCount : frameCount * channels
+    guard planes.count == planeCount else {
+        return false
+    }
+    let planeBytes = planeFloats * MemoryLayout<Float>.size
+    for plane in 0..<planeCount {
+        let buffer = planes[plane]
+        guard buffer.mNumberChannels == UInt32(planar ? 1 : channels),
+              Int(buffer.mDataByteSize) == planeBytes,
+              let data = buffer.mData
+        else {
+            return false
+        }
+        let source = data.assumingMemoryBound(to: Float.self)
+        if planar {
+            for frame in 0..<frameCount {
+                destination[frame * channels + plane] = source[frame]
+            }
+        } else {
+            destination.update(from: source, count: planeFloats)
+        }
+    }
+    return true
 }
 
 private struct StreamClockBridge: Sendable {
@@ -260,6 +347,15 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
     private var activeFormat: PacketFormat?
     private var pendingSourceRestart = false
     private var callbacksEnabled = false
+    private var unsupportedFormat = false
+    /// Interleaved staging for one sample buffer. ScreenCaptureKit delivers
+    /// planar Float32, and the packet callback's contract is interleaved, so
+    /// every buffer is assembled here before it crosses the boundary. It grows
+    /// only when a stream first delivers a larger buffer than any before it.
+    private var scratch: UnsafeMutablePointer<Float>?
+    private var scratchCapacity = 0
+    private let bufferList = AudioBufferList.allocate(maximumBuffers: Int(maximumChannelCount))
+
     init(
         requestedBundleIDs: [String],
         epoch: UInt64,
@@ -283,12 +379,15 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
             lastPresentationTimestamp = nil
             activeFormat = nil
             pendingSourceRestart = false
+            unsupportedFormat = false
         }
 
     }
 
     deinit {
         removeRouteObserver()
+        scratch?.deallocate()
+        free(bufferList.unsafeMutablePointer)
     }
 
     func startSynchronously(sessionHostAnchorNs: UInt64) -> (Int32, StreamClockBridge?) {
@@ -340,6 +439,7 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
             lastPresentationTimestamp = nil
             activeFormat = nil
             pendingSourceRestart = true
+            unsupportedFormat = false
         }
 
         let completion = StartCompletion()
@@ -458,42 +558,16 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
             return
         }
 
-        let format = streamDescription.pointee
-        let formatFlags = format.mFormatFlags
-        let sampleRate = format.mSampleRate
-        let channels = format.mChannelsPerFrame
-        let bytesPerFrame = UInt32(MemoryLayout<Float>.size)
-            .multipliedReportingOverflow(by: channels)
-        guard sampleRate.isFinite,
-              sampleRate > 0,
-              sampleRate <= Double(UInt32.max),
-              sampleRate.rounded(.towardZero) == sampleRate,
-              channels > 0,
-              !bytesPerFrame.overflow,
-              format.mFormatID == kAudioFormatLinearPCM,
-              format.mBitsPerChannel == 32,
-              format.mFramesPerPacket == 1,
-              format.mBytesPerFrame == bytesPerFrame.partialValue,
-              format.mBytesPerPacket == bytesPerFrame.partialValue,
-              (formatFlags & kAudioFormatFlagIsFloat) != 0,
-              (formatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-        else {
-            sourceEpoch &+= 1
-            formatEpoch &+= 1
-            activeFormat = nil
-            reportFailure(
-                .route,
-                FailureCode.audioFormatChanged.rawValue,
+        guard let layout = audioPacketLayout(streamDescription.pointee) else {
+            reportUnsupportedFormat(
                 timestamp: timestamp,
-                hostMonotonicAnchorNs: hostMonotonicAnchorNs
+                hostMonotonicAnchorNs: hostMonotonicAnchorNs,
+                frames: UInt32(clamping: CMSampleBufferGetNumSamples(sampleBuffer))
             )
             return
         }
-
-        let packetFormat = PacketFormat(
-            sampleRateHz: UInt32(sampleRate),
-            channels: channels
-        )
+        unsupportedFormat = false
+        let packetFormat = layout.format
         var flags: UInt32 = 0
         if let activeFormat, activeFormat != packetFormat {
             sourceEpoch &+= 1
@@ -527,41 +601,15 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
         lastPresentationTimestamp = presentationTime
 
         let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
-        guard frameCount > 0,
-              let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
-        else {
+        guard frameCount > 0 else {
             return
         }
-
-        let expectedByteCount = frameCount.multipliedReportingOverflow(by: Int(format.mBytesPerFrame))
-        guard !expectedByteCount.overflow,
-              CMBlockBufferIsRangeContiguous(blockBuffer, atOffset: 0, length: 0)
-        else {
-            reportFailure(
-                .route,
-                FailureCode.audioBufferNotContiguous.rawValue,
-                timestamp: timestamp,
-                hostMonotonicAnchorNs: hostMonotonicAnchorNs,
-                frames: UInt32(clamping: frameCount)
-            )
-            return
-        }
-
-        var contiguousLength = 0
-        var totalLength = 0
-        var dataPointer: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer,
-            atOffset: 0,
-            lengthAtOffsetOut: &contiguousLength,
-            totalLengthOut: &totalLength,
-            dataPointerOut: &dataPointer
-        )
-        guard status == kCMBlockBufferNoErr,
-              contiguousLength == totalLength,
-              totalLength == expectedByteCount.partialValue,
-              let dataPointer
-        else {
+        guard let samples = interleavedSamples(
+            sampleBuffer,
+            frameCount: frameCount,
+            channels: Int(packetFormat.channels),
+            planar: layout.planar
+        ) else {
             reportFailure(
                 .route,
                 FailureCode.audioBufferNotContiguous.rawValue,
@@ -574,7 +622,7 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
 
         packetCallback(
             callbackContext,
-            UnsafeRawPointer(dataPointer).assumingMemoryBound(to: Float.self),
+            samples,
             UInt(frameCount),
             packetFormat.sampleRateHz,
             packetFormat.channels,
@@ -827,6 +875,91 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
             frames
         )
     }
+
+    /// Copies one sample buffer's audio into `scratch`, interleaving planar
+    /// input on the way in, and returns it. The pointer belongs to this bridge
+    /// and stays valid until the next buffer arrives on the output queue; the
+    /// packet callback copies before it returns.
+    private func interleavedSamples(
+        _ sampleBuffer: CMSampleBuffer,
+        frameCount: Int,
+        channels: Int,
+        planar: Bool
+    ) -> UnsafePointer<Float>? {
+        let sampleCount = frameCount.multipliedReportingOverflow(by: channels)
+        guard !sampleCount.overflow,
+              let scratch = reserveScratch(sampleCount: sampleCount.partialValue)
+        else {
+            return nil
+        }
+
+        var blockBuffer: CMBlockBuffer?
+        // CoreMedia wants the size of the list it is about to fill, not the
+        // capacity of the one it was handed: a wider list reads as
+        // `kCMSampleBufferError_ArrayTooSmall`. The format already said how
+        // many planes to expect, so state that size and let a buffer that
+        // disagrees with its own format be refused.
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: bufferList.unsafeMutablePointer,
+            bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: planar ? channels : 1),
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr,
+              blockBuffer != nil,
+              interleaveAudio(
+                  planes: bufferList,
+                  frameCount: frameCount,
+                  channels: channels,
+                  planar: planar,
+                  into: scratch
+              )
+        else {
+            return nil
+        }
+        return UnsafePointer(scratch)
+    }
+
+    private func reserveScratch(sampleCount: Int) -> UnsafeMutablePointer<Float>? {
+        guard sampleCount > 0, sampleCount <= maximumScratchSamples else {
+            return nil
+        }
+        if scratchCapacity < sampleCount {
+            scratch?.deallocate()
+            scratch = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+            scratchCapacity = sampleCount
+        }
+        return scratch
+    }
+
+    /// One epoch bump per transition into the unsupported state, not one per
+    /// buffer. The epoch pair names which format a packet was captured under,
+    /// so bumping it for an unchanging condition wrote a clock-epoch row and a
+    /// gap row every 20 ms and starved the other lane's writer. The failure
+    /// itself is still reported per buffer, so the frames stay counted.
+    private func reportUnsupportedFormat(
+        timestamp: RawTimestamp,
+        hostMonotonicAnchorNs: UInt64,
+        frames: UInt32
+    ) {
+        if !unsupportedFormat {
+            unsupportedFormat = true
+            sourceEpoch &+= 1
+            formatEpoch &+= 1
+            activeFormat = nil
+        }
+        reportFailure(
+            .route,
+            FailureCode.audioFormatChanged.rawValue,
+            timestamp: timestamp,
+            hostMonotonicAnchorNs: hostMonotonicAnchorNs,
+            frames: frames
+        )
+    }
 }
 
 private struct AccessibilityEvidence {
@@ -1017,6 +1150,59 @@ public func sonaMeetingCaptureProbe() -> Int32 {
     return CGPreflightScreenCaptureAccess()
         ? BridgeResult.ok.rawValue
         : BridgeResult.permissionDenied.rawValue
+}
+
+/// The seam a unit check drives: one stream format and one payload through the
+/// same two decisions the audio callback makes, without a live SCStream. It
+/// returns 0 and fills `out` with `frameCount * channels` interleaved samples,
+/// 1 for a format this bridge cannot read, and 2 for a payload that does not
+/// match the format it came with.
+@_cdecl("sona_meeting_capture_convert_for_test")
+public func sonaMeetingCaptureConvertForTest(
+    _ sampleRate: Double,
+    _ channelsPerFrame: UInt32,
+    _ bytesPerFrame: UInt32,
+    _ formatFlags: UInt32,
+    _ bitsPerChannel: UInt32,
+    _ samples: UnsafePointer<Float>,
+    _ sampleCount: UInt32,
+    _ frameCount: UInt32,
+    _ out: UnsafeMutablePointer<Float>
+) -> Int32 {
+    var description = AudioStreamBasicDescription()
+    description.mSampleRate = sampleRate
+    description.mFormatID = kAudioFormatLinearPCM
+    description.mFormatFlags = formatFlags
+    description.mBytesPerPacket = bytesPerFrame
+    description.mFramesPerPacket = 1
+    description.mBytesPerFrame = bytesPerFrame
+    description.mChannelsPerFrame = channelsPerFrame
+    description.mBitsPerChannel = bitsPerChannel
+    guard let layout = audioPacketLayout(description) else {
+        return 1
+    }
+    let channels = Int(layout.format.channels)
+    let planeCount = layout.planar ? channels : 1
+    // The planes describe the payload that was actually handed over, not the
+    // one the format implies, so a buffer list contradicting its description
+    // reaches `interleaveAudio` the way a real one would.
+    let planeFloats = Int(sampleCount) / planeCount
+    let planes = AudioBufferList.allocate(maximumBuffers: planeCount)
+    defer { free(planes.unsafeMutablePointer) }
+    for plane in 0..<planeCount {
+        planes[plane] = AudioBuffer(
+            mNumberChannels: layout.planar ? 1 : UInt32(channels),
+            mDataByteSize: UInt32(planeFloats * MemoryLayout<Float>.size),
+            mData: UnsafeMutableRawPointer(mutating: samples.advanced(by: plane * planeFloats))
+        )
+    }
+    return interleaveAudio(
+        planes: planes,
+        frameCount: Int(frameCount),
+        channels: channels,
+        planar: layout.planar,
+        into: out
+    ) ? 0 : 2
 }
 
 @_cdecl("sona_meeting_capture_start")
