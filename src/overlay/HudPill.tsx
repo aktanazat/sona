@@ -1,5 +1,4 @@
 import { ChevronUp } from "lucide-react";
-import { SonaMark } from "@/components/icons/SonaMark";
 import { useTranslation } from "react-i18next";
 import type { LanguageDirection } from "@/lib/utils/rtl";
 import {
@@ -19,8 +18,9 @@ interface HudPillProps {
  * The always-visible idle pill.
  *
  * It shares the recording overlay's window, so it is a state of that overlay
- * rather than a second window manager. The mode name is the resting content;
- * hover raises the two things you can do to it — record, and switch mode.
+ * rather than a second window manager. The mode name is the resting content —
+ * the only thing this pill knows that the user cannot see from the app — and
+ * hover raises the two things you can do to it: record, and switch mode.
  *
  * Both actions are real buttons because the overlay is a non-activating
  * NSPanel: it cannot host a focusable webview popup, so the mode list is an OS
@@ -58,10 +58,6 @@ export const HudPill = ({ position, direction, modeName }: HudPillProps) => {
             "Click to dictate, right-click for modes",
           )}
         >
-          {/* The mark, not a status dot: the resting pill has no state to
-              report, and a coloured ring here competed with the one place a
-              colour means something — the live meter. */}
-          <SonaMark className="smark" width={16} height={16} />
           <span className="hud-pill-mode">{label}</span>
         </button>
         <button

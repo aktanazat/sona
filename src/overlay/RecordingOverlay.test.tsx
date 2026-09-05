@@ -16,6 +16,7 @@ import {
   hudRested,
   hudShown,
   hudStreamPhaseChanged,
+  hudTicked,
   INITIAL_HUD_STATE,
   type HudFrame,
   type HudPhase,
@@ -28,10 +29,11 @@ import { RecordingOverlayContent } from "./RecordingOverlayContent";
  * 140-215 ms to open (unbounded on Bluetooth) and the overlay is on screen for
  * all of it; a user who talks into that window loses the head of the utterance.
  *
- * Theme and material are root attributes resolved in CSS, so what is asserted
- * here is that every colour arrives through a `hud-<phase>` token hook and no
- * state hardcodes one. The rendered appearance in dark/light x solid/glass is
- * screenshot work for the parent. */
+ * The row is two readouts: the state word and the elapsed clock. Both are
+ * text, so what is asserted here is the text and the phase it belongs to.
+ * Theme and material are root attributes resolved in CSS, so every colour
+ * arrives through a `hud-<phase>` token hook and no state hardcodes one; the
+ * rendered appearance in dark/light x solid/glass is screenshot work. */
 
 const localeRoot = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -52,30 +54,16 @@ void i18n.init({
   interpolation: { escapeValue: false },
 });
 
-/* One reported frame: 16 buckets, the count `recorder.rs` publishes. */
-const LEVELS = [
-  0, 0.25, 1, 0.5, 0, 0.81, 0.09, 0.64, 0.12, 0.33, 0.71, 0.02, 0.9, 0.44, 0.18,
-  0.55,
-];
-
-/* A quiet room, one frame: real reported buckets, every one of them below the
- * top of the visualiser's calibrated speech window (~0.77 there against ~1.0
- * clamped for dictation). This is the frame that must NOT read as speech. */
-const ROOM_TONE = [
-  0.31, 0.42, 0.58, 0.55, 0.49, 0.61, 0.44, 0.52, 0.38, 0.47, 0.5, 0.36, 0.29,
-  0.33, 0.27, 0.24,
-];
-
 interface HudCase {
   hud: HudPhase;
-  levels?: number[];
+  elapsedSeconds?: number | null;
   error?: { error_type: string; detail?: string };
   frame?: HudFrame;
 }
 
 const render = ({
   hud,
-  levels = [],
+  elapsedSeconds = null,
   error = undefined,
   frame = "compact",
 }: HudCase): string =>
@@ -85,7 +73,7 @@ const render = ({
         isVisible
         hud={hud}
         frame={frame}
-        levels={levels}
+        elapsedSeconds={elapsedSeconds}
         streamText={{ committed: "", tentative: "" }}
         modeName="Email"
         error={error ?? null}
@@ -97,12 +85,6 @@ const render = ({
       />
     </I18nextProvider>,
   );
-
-/* Text a user can actually see. The state word is rendered into a
- * visually-hidden span for screen readers, so a plain `toContain` cannot tell
- * "the HUD shows the word Listening" from "the HUD announces it". */
-const visibleText = (markup: string): string =>
-  markup.replace(/<span class="sr-only"[^>]*>.*?<\/span>/g, "");
 
 describe("the HUD state machine", () => {
   test("withholds listening until the recorder reports its first buffer", () => {
@@ -151,6 +133,35 @@ describe("the HUD state machine", () => {
     expect(stopped.nowMs >= live.nowMs).toBe(true);
     // Frozen: the clock's origin survives, so the number stops moving.
     expect(stopped.readyAt).toBe(1);
+  });
+
+  /* The overlay schedules its one-second tick only while the microphone is
+   * open, but clearing that interval races the state change that closed the
+   * capture, so a tick can always land one beat late. The frozen capture
+   * length is a measurement: a late tick must not walk it forward into a
+   * number the recorder never reported. */
+  test("a tick after the capture stopped leaves the frozen readout alone", () => {
+    const live = hudCaptureReady(hudShown(INITIAL_HUD_STATE, "recording"), 1);
+    const stopped = hudShown(live, "transcribing");
+    expect(hudTicked(stopped)).toBe(stopped);
+    expect(
+      hudTicked(hudFailed(live, { error_type: "capture_overrun" })).nowMs,
+    ).toBe(hudFailed(live, { error_type: "capture_overrun" }).nowMs);
+  });
+
+  test("a tick before the first buffer has no origin to count from", () => {
+    const starting = hudShown(INITIAL_HUD_STATE, "recording");
+    expect(hudTicked(starting)).toBe(starting);
+    expect(deriveElapsedSeconds(hudTicked(starting))).toBe(null);
+  });
+
+  test("a tick while the microphone is open advances the readout", () => {
+    const live = hudCaptureReady(
+      hudShown(INITIAL_HUD_STATE, "recording"),
+      Date.now() - 5_000,
+    );
+    expect(deriveElapsedSeconds(live)).toBe(0);
+    expect(deriveElapsedSeconds(hudTicked(live))).toBeGreaterThan(4);
   });
 
   /* actions.rs emits `recording-error` and calls `hide_recording_overlay` back
@@ -212,188 +223,144 @@ describe("the HUD state machine", () => {
   });
 });
 
-describe("the compact HUD is a mark and a meter, and nothing else", () => {
-  test("at rest it draws the mark and the meter and no words", () => {
-    const markup = render({ hud: "listening", levels: LEVELS });
-    const seen = visibleText(markup);
-    expect(markup).toContain('class="smark"');
-    expect(markup).toContain("swave ready snap-measured");
-    /* Everything the row used to say out loud. The mode is the user's own
-     * choice, the chord is the key they just pressed, and the clock, the engine
-     * and the state word are the clutter the redesign exists to remove. */
-    for (const gone of [
-      "Listening",
+describe("the compact HUD is a state word and a clock", () => {
+  test("the row is those two readouts and nothing else", () => {
+    const markup = render({ hud: "listening", elapsedSeconds: 42 });
+    expect(markup).toContain("Listening");
+    expect(markup).toContain("0:42");
+    /* Everything the row used to carry: sixteen animated meter bars that asked
+     * a sighted reader to infer the state from a travelling opacity crest, the
+     * app mark beside them, and — before those — the mode, the engine, the
+     * chord and a hint. The word and the number are the whole instrument. */
+    const gone = [
+      "smark",
+      "swave",
+      "--bar-index",
+      "sr-only",
+      "Input level",
       "Email",
       "Cloud",
-      "1m 12s",
       "<kbd",
-      "stimer",
       "smode",
       "sengine",
       "shint",
       "sring",
-      "sstate",
-      "sspinner",
-    ]) {
-      expect(seen.includes(gone)).toBe(false);
-    }
-  });
-
-  test("the state a sighted user reads off the meter is announced in words", () => {
-    const announcements: [HudPhase, string][] = [
-      ["starting", "Starting"],
-      ["listening", "Listening"],
-      ["transcribing", "Transcribing"],
-      ["processing", "Processing"],
     ];
-    for (const [hud, word] of announcements) {
-      const markup = render({ hud, levels: LEVELS });
-      expect(/<span class="sr-only"[^>]*>(.*?)<\/span>/.exec(markup)?.[1]).toBe(
-        word,
-      );
+    expect(gone.filter((token) => markup.includes(token))).toEqual([]);
+  });
+
+  for (const [hud, word] of [
+    ["starting", "Starting"],
+    ["listening", "Listening"],
+    ["transcribing", "Transcribing"],
+    ["processing", "Processing"],
+  ] as const) {
+    test(`${hud} says its own word out loud`, () => {
+      const markup = render({ hud });
+      expect(markup).toContain(`>${word}<`);
+      // A word that changes under a reader's eyes is announced, not swapped.
       expect(markup).toContain('aria-live="polite"');
-    }
-  });
+    });
+  }
 
-  test("the meter names itself while it meters, and only while it meters", () => {
-    for (const hud of ["starting", "listening"] as const) {
-      expect(render({ hud, levels: LEVELS })).toContain(
-        'aria-label="Input level"',
+  /* The clock measures captured audio, so it may never claim a second the
+   * recorder has not finished. Flooring is what guarantees that. */
+  for (const [seconds, readout] of [
+    [0.9, "0:00"],
+    [59.9, "0:59"],
+    [60, "1:00"],
+    [671.5, "11:11"],
+  ] as const) {
+    test(`${seconds} captured seconds reads ${readout}`, () => {
+      expect(render({ hud: "listening", elapsedSeconds: seconds })).toContain(
+        readout,
       );
-    }
-    /* Working bars report nothing, so they stop claiming to be a level and
-     * leave the state to the status span rather than announcing a lie. */
-    const working = render({ hud: "transcribing", levels: LEVELS });
-    expect(working.includes("Input level")).toBe(false);
-    expect(working).toContain('class="swave working" aria-hidden="true"');
-  });
+    });
+  }
 
-  test("starting dims and pulses the same geometry it will meter with", () => {
-    const markup = render({ hud: "starting" });
-    expect(markup).toContain("hud-starting");
-    expect(markup).toContain("swave arming");
-    // Dimmed and pulsing is a display state, not a reported one.
-    expect(markup.includes("snap-measured")).toBe(false);
-  });
-
-  test("listening snaps the reported buckets and marks them measured", () => {
-    const markup = render({ hud: "listening", levels: LEVELS });
-    expect(markup).toContain("hud-listening");
-    expect(markup).toContain("swave ready snap-measured");
-  });
-
-  /* One colour event on this whole surface. The bars are ink until a reported
-   * bucket reaches the top of the visualiser's calibrated speech range, and
-   * then they are the accent — which is the entire "is it hearing me" answer
-   * the HUD exists to give, and why nothing else here is allowed an accent. */
-  test("the accent means speech, and only a reported bucket can claim it", () => {
-    expect(render({ hud: "listening", levels: LEVELS })).toContain(
-      'class="swave ready snap-measured hearing"',
+  test("there is no clock until the microphone is actually live", () => {
+    const starting = render({ hud: "starting" });
+    expect(starting).toContain("Starting");
+    expect(starting.includes("stime")).toBe(false);
+    // The number that does arrive opts out of every transition and keyframe.
+    expect(render({ hud: "listening", elapsedSeconds: 3 })).toContain(
+      "stime snap-measured",
     );
-
-    // A humming room reports real buckets the whole time and stays ink.
-    const quiet = render({ hud: "listening", levels: ROOM_TONE });
-    expect(quiet).toContain('class="swave ready snap-measured"');
-    expect(quiet.includes("hearing")).toBe(false);
-
-    // An opening stream has no buckets yet and a running transcriber reports
-    // none at all, so neither can tint the row on a stale frame.
-    for (const hud of ["starting", "transcribing", "processing"] as const) {
-      expect(render({ hud, levels: LEVELS }).includes("hearing")).toBe(false);
-    }
-  });
-
-  /* The one state that could lie. Working has no reported bucket behind it, so
-   * the renderer must emit no transform at all and let CSS hold every bar at
-   * one fixed scale — a bar that moved here would read as input that is not
-   * being captured. */
-  test("working keeps the bars but reports no level through them", () => {
-    for (const hud of ["transcribing", "processing"] as const) {
-      const markup = render({ hud, levels: LEVELS });
-      expect(markup).toContain(`hud-${hud}`);
-      expect(markup).toContain("swave working");
-      expect(markup.includes("scaleY")).toBe(false);
-      expect(markup.includes("snap-measured")).toBe(false);
-      // Each bar knows its place in the row, so the highlight can travel.
-      expect(markup).toContain("--bar-index:0");
-      expect(markup).toContain("--bar-index:15");
-    }
   });
 
   test("a failure names the cause in the app's own words, not its token", () => {
     const markup = render({
       hud: "error",
+      elapsedSeconds: 12,
       error: { error_type: "no_speech_detected" },
     });
     expect(markup).toContain("hud-error");
-    expect(visibleText(markup)).toContain("No speech detected");
+    expect(markup).toContain("No speech detected");
     expect(markup.includes("no_speech_detected")).toBe(false);
-    // Nothing to cancel once the run has failed, and nothing left to meter.
+    // Nothing to cancel once the run is over, and no elapsed time left to read.
     expect(markup.includes('class="sx"')).toBe(false);
-    expect(markup.includes("swave")).toBe(false);
+    expect(markup.includes("stime")).toBe(false);
   });
 
-  test("every emitted error_type has a short cause of its own", () => {
-    const causes = [
-      ["microphone_permission_denied", "Microphone access denied"],
-      ["no_input_device", "No microphone found"],
-      ["no_model_selected", "No model selected"],
-      ["no_speech_save_failed", "Sample not saved"],
-      ["capture_overrun", "Recording cut short"],
-      ["cloud_unavailable", "Cloud unavailable"],
-      ["cloud_transcription_held", "Cloud result held"],
-      ["command_no_selection", "Nothing selected"],
-      ["command_rewrite_unavailable", "Rewrite unavailable"],
-    ] as const;
-    for (const [errorType, cause] of causes) {
+  for (const [errorType, cause] of [
+    ["microphone_permission_denied", "Microphone access denied"],
+    ["no_input_device", "No microphone found"],
+    ["no_model_selected", "No model selected"],
+    ["no_speech_save_failed", "Sample not saved"],
+    ["capture_overrun", "Recording cut short"],
+    ["cloud_unavailable", "Cloud unavailable"],
+    ["cloud_transcription_held", "Cloud result held"],
+    ["command_no_selection", "Nothing selected"],
+    ["command_rewrite_unavailable", "Rewrite unavailable"],
+  ] as const) {
+    test(`${errorType} reads as its own cause`, () => {
       const markup = render({ hud: "error", error: { error_type: errorType } });
-      expect(visibleText(markup)).toContain(cause);
+      expect(markup).toContain(cause);
       expect(markup.includes(errorType)).toBe(false);
-    }
-  });
+    });
+  }
 
   test("an unmapped cause summarises instead of leaking the token", () => {
     const markup = render({
       hud: "error",
       error: { error_type: "some_future_error", detail: "raw backend detail" },
     });
-    expect(visibleText(markup)).toContain("Failed");
+    expect(markup).toContain("Failed");
     expect(markup.includes("some_future_error")).toBe(false);
     expect(markup.includes("raw backend detail")).toBe(false);
   });
 
-  /* Cancel is the only control left on the row. It is absolutely positioned and
-   * transparent until the row is hovered or it takes focus, so the resting pill
-   * is the mark and the wave and nothing else — but it is a real, labelled
-   * button in the markup the whole time, not something conjured on hover.
+  /* Cancel is the only control on the row. It is absolutely positioned and
+   * transparent until the row is hovered, so at rest the row is the two
+   * readouts — but it is a real, labelled button in the markup the whole time,
+   * not something conjured on hover.
    *
-   * The reveal itself is CSS, and the click path runs through the Tauri command
-   * bridge, so both are verified by driving the overlay in a browser rather than
-   * here: this repo renders every test to static markup and has no DOM. */
-  test("cancel is a real labelled button for as long as the run is alive", () => {
-    for (const hud of [
-      "starting",
-      "listening",
-      "transcribing",
-      "processing",
-    ] as const) {
-      const markup = render({ hud, levels: LEVELS });
+   * The reveal itself is CSS and the click path runs through the Tauri command
+   * bridge, so both are verified by driving the overlay in a browser rather
+   * than here: this repo renders every test to static markup and has no DOM. */
+  for (const hud of [
+    "starting",
+    "listening",
+    "transcribing",
+    "processing",
+  ] as const) {
+    test(`${hud} keeps cancel as a real labelled button`, () => {
+      const markup = render({ hud, elapsedSeconds: 5 });
       expect(markup).toContain('<button class="sx"');
       expect(markup).toContain('aria-label="Cancel"');
-    }
-  });
+    });
+  }
 
   test("idle renders the pill instead of an instrument row", () => {
     const markup = render({ hud: "idle", frame: "pill" });
     expect(markup).toContain('data-testid="hud-pill"');
     // The pill is the one surface that still names the mode: it is a switcher.
     expect(markup).toContain("Email");
-    expect(markup).toContain('class="smark"');
     expect(markup.includes("sbase")).toBe(false);
-    expect(markup.includes("sring")).toBe(false);
+    expect(markup.includes("smark")).toBe(false);
   });
 
-  /* The resting window is 184x36. The 40px instrument row drawn there would be
+  /* The resting window is 176x28. The instrument row drawn there would be
    * clipped by the window, so the failure takes the pill's own shape. */
   test("a failure in the resting window renders as a one-line pill", () => {
     const markup = render({
@@ -403,59 +370,39 @@ describe("the compact HUD is a mark and a meter, and nothing else", () => {
     });
     expect(markup).toContain('data-testid="hud-error-pill"');
     expect(markup).toContain("hud-pill hud-error");
-    expect(markup).toContain('class="smark"');
     expect(markup).toContain("No speech detected");
     expect(markup.includes("sbase")).toBe(false);
+    expect(markup.includes("smark")).toBe(false);
   });
 
-  test("every transient state hooks its colour on a phase class, none inline", () => {
-    for (const hud of [
-      "starting",
-      "listening",
-      "transcribing",
-      "processing",
-      "error",
-    ] as const) {
+  for (const hud of [
+    "starting",
+    "listening",
+    "transcribing",
+    "processing",
+    "error",
+  ] as const) {
+    test(`${hud} hooks its colour on a phase class, never inline`, () => {
       const markup = render({
         hud,
+        elapsedSeconds: 7,
         error: { error_type: "capture_overrun" },
       });
       expect(markup).toContain(`hud-${hud}`);
       expect(markup.includes("color:")).toBe(false);
-    }
-  });
-});
-
-describe("the HUD reports measurements and never tweens them", () => {
-  test("each bar sits exactly where its reported bucket puts it", () => {
-    const markup = render({ hud: "listening", levels: LEVELS });
-    for (const level of LEVELS) {
-      const scale = Math.max(0.06, Math.min(1, Math.pow(level, 0.7)));
-      expect(markup).toContain(`scaleY(${scale})`);
-    }
-    // A silent bucket is a baseline hairline, not an absent bar.
-    expect(markup).toContain("scaleY(0.06)");
-    // Height was the old, tweened channel; transforms are the only one now.
-    expect(markup.includes("height:")).toBe(false);
-  });
-
-  test("the meter keeps its geometry before the first level event", () => {
-    const countBars = (markup: string) => markup.split("<i ").length - 1;
-    expect(countBars(render({ hud: "starting" }))).toBe(16);
-    expect(countBars(render({ hud: "listening", levels: LEVELS }))).toBe(16);
-    expect(countBars(render({ hud: "transcribing", levels: LEVELS }))).toBe(16);
-  });
+    });
+  }
 });
 
 describe("the Live panel shares the instrument row", () => {
-  test("it keeps the streaming text region and the same mark-and-meter row", () => {
+  test("it keeps the streaming text region and the same two readouts", () => {
     const markup = renderToStaticMarkup(
       <I18nextProvider i18n={i18n}>
         <RecordingOverlayContent
           isVisible
           hud="listening"
           frame="stream"
-          levels={LEVELS}
+          elapsedSeconds={90}
           streamText={{ committed: "Hello", tentative: " world" }}
           modeName="Email"
           error={null}
@@ -471,12 +418,10 @@ describe("the Live panel shares the instrument row", () => {
     expect(markup).toContain("Hello");
     expect(markup).toContain("scard hud-listening open");
     expect(markup).toContain("sbase");
-    expect(markup).toContain('class="smark"');
-    expect(markup).toContain("swave ready snap-measured");
+    expect(markup).toContain("Listening");
+    expect(markup).toContain("1:30");
     // The row carries the same two things it carries in the compact window.
-    const seen = visibleText(markup);
-    expect(seen.includes("Email")).toBe(false);
-    expect(seen.includes("Cloud")).toBe(false);
-    expect(seen.includes("<kbd")).toBe(false);
+    const gone = ["swave", "smark", "Email", "Cloud", "<kbd"];
+    expect(gone.filter((token) => markup.includes(token))).toEqual([]);
   });
 });

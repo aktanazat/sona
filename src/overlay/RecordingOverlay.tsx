@@ -5,6 +5,7 @@ import { getLanguageDirection, initializeRTL } from "@/lib/utils/rtl";
 import { getHudPillState } from "@/lib/powerPackApi";
 import { readOverlayChrome, subscribeToOverlayEvents } from "./overlayEvents";
 import {
+  deriveElapsedSeconds,
   deriveHudFrame,
   deriveHudPhase,
   hudCaptureReady,
@@ -14,6 +15,7 @@ import {
   hudRested,
   hudShown,
   hudStreamPhaseChanged,
+  hudTicked,
   INITIAL_HUD_STATE,
   type HudState,
 } from "./hudMachine";
@@ -94,12 +96,6 @@ const RecordingOverlay: React.FC = () => {
         const readyAtMs = Date.now();
         dispatch((current) => hudCaptureReady(current, readyAtMs));
       },
-      onMicLevel: (levels) => {
-        if (disposedRef.current) return;
-        // Reported values, verbatim. Smoothing them here would be a low-pass
-        // filter on the only measurement the HUD shows at frame rate.
-        dispatch((current) => ({ ...current, levels }));
-      },
       onStreamText: (streamText) => {
         if (!disposedRef.current)
           dispatch((current) => ({ ...current, streamText }));
@@ -137,6 +133,19 @@ const RecordingOverlay: React.FC = () => {
     return () => clearTimeout(id);
   }, [hud.error, hud.restAfterError]);
 
+  /* One tick a second, and only while the microphone is open. `listening` is
+   * the one phase with a running clock: `starting` has measured nothing yet,
+   * and the working phases read the capture length `captureEndPatch` froze at
+   * the real end of the run. A stopped interval is also the whole reason this
+   * window is idle between runs — the meter it replaced dispatched on every
+   * `mic-level` event, which is a re-render per audio frame. */
+  const phase = deriveHudPhase(hud);
+  useEffect(() => {
+    if (phase !== "listening") return;
+    const id = setInterval(() => dispatch(hudTicked), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
+
   // Stick to the bottom as text streams in — but only while pinned, so a user
   // who has scrolled up to read history isn't yanked back down by the next chunk.
   useLayoutEffect(() => {
@@ -160,9 +169,9 @@ const RecordingOverlay: React.FC = () => {
   return (
     <RecordingOverlayContent
       isVisible={hud.isVisible}
-      hud={deriveHudPhase(hud)}
+      hud={phase}
       frame={deriveHudFrame(hud)}
-      levels={hud.levels}
+      elapsedSeconds={deriveElapsedSeconds(hud)}
       streamText={hud.streamText}
       modeName={hud.modeName}
       error={hud.error}

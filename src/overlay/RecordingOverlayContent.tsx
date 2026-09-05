@@ -1,8 +1,7 @@
-import type { CSSProperties, RefObject } from "react";
+import type { RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { commands } from "@/bindings";
 import type { StreamTextEvent } from "@/bindings";
-import { SonaMark } from "@/components/icons/SonaMark";
 import type { LanguageDirection } from "@/lib/utils/rtl";
 import type { OverlayPosition } from "@/lib/powerPackApi";
 import type { RecordingErrorEvent } from "@/lib/types/events";
@@ -14,12 +13,12 @@ interface RecordingOverlayContentProps {
   hud: HudPhase;
   /**
    * The window the HUD is being drawn into. `pill` is 184x36 and holds the idle
-   * mode switcher; `compact` and `stream` hold the instrument row — the mark on
-   * the leading edge and the meter on the trailing one, nothing else.
+   * mode switcher; `compact` and `stream` hold the instrument row — the state
+   * word on the leading edge, the elapsed clock on the trailing one.
    */
   frame: HudFrame;
-  /** The mic-level buckets exactly as the recorder reported them. */
-  levels: number[];
+  /** Seconds of captured audio; null before the microphone is live. */
+  elapsedSeconds: number | null;
   streamText: StreamTextEvent;
   modeName: string | null;
   error: RecordingErrorEvent | null;
@@ -31,14 +30,6 @@ interface RecordingOverlayContentProps {
   capRef: RefObject<HTMLDivElement | null>;
   onStreamScroll: () => void;
 }
-
-/**
- * Bar count held before the first `mic-level` event, so the meter's geometry is
- * the same in `starting` as it is in `listening` and the row never reflows when
- * real values start arriving. The recorder's visualiser publishes 16 buckets
- * (`audio_toolkit/audio/recorder.rs`, `const BUCKETS`).
- */
-const RESTING_METER_BARS: number[] = Array(16).fill(0);
 
 /**
  * Every `error_type` `actions.rs` and `command_mode.rs` emit, mapped to the
@@ -73,57 +64,19 @@ const errorTitleKey = (token: string): string | undefined => {
 };
 
 /**
- * Display gamma for one reported bucket. Level meters are read logarithmically;
- * without it everything below half scale collapses onto the baseline. The map is
- * monotonic, so bar order and bar ranking still carry the reported values. The
- * 0.06 floor is the baseline tick a silent channel draws — a zero bucket shows
- * as a hairline, never as nothing.
+ * m:ss, floored. A readout may never claim a second the recorder has not
+ * finished, so the partial second is dropped rather than rounded up.
  */
-const barScale = (level: number): number =>
-  Math.max(0.06, Math.min(1, Math.pow(Math.max(0, level), 0.7)));
-
-/**
- * The reported bucket level at which the meter stops being ink and becomes the
- * accent — the one colour event on this surface, and the whole answer to "is it
- * hearing me".
- *
- * Derived from the visualiser's own calibration
- * (`audio_toolkit/audio/visualizer.rs`: a bucket is
- * `((db + 68) / 38 * 1.3) ^ 0.7`, calibrated against measured mic audio at
- * dictation ~-32 and room tone ~-48 on that scale). Dictation saturates the
- * window and clamps to 1.0; room tone lands near 0.77. 0.9 sits between them,
- * so the tint means "a bucket is at the top of the calibrated speech range" and
- * a humming room cannot claim it.
- */
-const SPEECH_PEAK = 0.9;
-
-/**
- * Whether the reported frame carries speech. A loop rather than
- * `Math.max(...levels)`: this runs on every `mic-level` event, and the spread
- * allocates an argument list per frame to answer a question one comparison
- * settles.
- */
-const hearingSpeech = (levels: number[]): boolean => {
-  for (const level of levels) {
-    if (level >= SPEECH_PEAK) return true;
-  }
-  return false;
+const clock = (seconds: number): string => {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 };
-
-/**
- * React's `CSSProperties` has no slot for a custom property, and the working
- * state's traveling highlight needs every bar to know its own position in the
- * row. Declaring the property rather than casting keeps the style object typed.
- */
-interface BarStyle extends CSSProperties {
-  "--bar-index"?: number;
-}
 
 export const RecordingOverlayContent = ({
   isVisible,
   hud,
   frame,
-  levels,
+  elapsedSeconds,
   streamText,
   modeName,
   error,
@@ -137,10 +90,10 @@ export const RecordingOverlayContent = ({
 
   if (!isVisible) return null;
 
-  /* The HUD says nothing out loud. Every state is carried by the meter — dim
-   * and pulsing while the stream opens, live accent bars once buckets arrive,
-   * dim and travelling while the transcriber works — so the state word exists
-   * only for a screen reader, which cannot see any of that. */
+  /* The state word, on screen. It used to be visually hidden while sixteen
+   * animated bars carried the state to sighted readers, which asked them to
+   * infer "the transcriber is working" from a travelling opacity crest. One
+   * word answers it, in the app's own vocabulary, for everyone at once. */
   const stateLabel = {
     idle: t("overlay.hud.idle", "Ready"),
     starting: t("overlay.state.starting", "Starting"),
@@ -162,7 +115,7 @@ export const RecordingOverlayContent = ({
 
   /* The resting window holds 176x28. A failure that lands after the backend has
    * already rested the overlay to its pill therefore renders as the pill: the
-   * same shell and the same mark, with the cause in place of the mode name. */
+   * same shell, with the cause where the mode name was. */
   if (frame === "pill") {
     if (hud === "error") {
       return (
@@ -171,7 +124,6 @@ export const RecordingOverlayContent = ({
             className="scard compact hud-pill hud-error"
             data-testid="hud-error-pill"
           >
-            <SonaMark className="smark" width={16} height={16} />
             <span className="serror" role="alert">
               {failureText}
             </span>
@@ -184,65 +136,40 @@ export const RecordingOverlayContent = ({
     );
   }
 
-  const working = hud === "transcribing" || hud === "processing";
   const failed = hud === "error";
 
-  /* Three meters, one geometry. `ready` is the only one carrying reported
-   * values, so it is the only one marked measured — the other two are display
-   * states and are allowed to move. `hearing` rides on `ready` alone: it is a
-   * statement about the buckets in hand, and neither an opening stream nor a
-   * running transcriber has any. */
-  const waveMode = working
-    ? "working"
-    : hud === "listening"
-      ? `ready snap-measured${hearingSpeech(levels) ? " hearing" : ""}`
-      : "arming";
-
-  /* The meter is the content. Reported buckets are drawn as transforms with no
-   * transition, so a bar can only ever sit at a value the recorder actually
-   * published. While the transcriber works there is no reported value at all,
-   * so no transform is emitted and CSS holds every bar at one fixed low scale —
-   * the row is visibly running without inventing a level. */
-  const meter = (
-    <div
-      className={`swave ${waveMode}`}
-      /* While the transcriber works the row is no longer a meter — nothing is
-       * being reported through it — so it stops claiming to be one and the
-       * status span carries the state instead. */
-      role={working ? undefined : "img"}
-      aria-hidden={working || undefined}
-      aria-label={working ? undefined : t("overlay.inputLevel", "Input level")}
-    >
-      {(levels.length > 0 ? levels : RESTING_METER_BARS).map((level, index) => {
-        const style: BarStyle = working
-          ? { "--bar-index": index }
-          : { transform: `scaleY(${barScale(level)})` };
-        return <i key={index} style={style} />;
-      })}
-    </div>
-  );
-
+  /* Two things, one line: what the HUD is doing, and how long it has been
+   * capturing. A failure replaces both with its cause — there is no elapsed
+   * time worth reading once the run is over. */
   const instrumentRow = (
     <div className="sbase">
-      <span
-        className="sr-only"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
-        {stateLabel}
-      </span>
-      <SonaMark className="smark" width={16} height={16} />
       {failed ? (
         <span className="serror" role="alert">
           {failureText}
         </span>
       ) : (
-        meter
+        <>
+          <span
+            className="sstate"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {stateLabel}
+          </span>
+          {/* The clock is a measurement: it is stamped from the recorder's own
+              first-buffer time, frozen at the real end of the capture, and
+              opted out of every transition and keyframe so it can only ever
+              show a second that actually elapsed. Left out entirely until the
+              microphone is live, because there is nothing to count yet. */}
+          {elapsedSeconds !== null && (
+            <span className="stime snap-measured">{clock(elapsedSeconds)}</span>
+          )}
+        </>
       )}
       {/* Nothing to cancel once the run has failed. The button is the one thing
-          the pill hides until it is asked for: it rides the meter's trailing end
-          on hover, so at rest the row is only the mark and the wave.
+          the pill hides until it is asked for: it rides the trailing end of the
+          row on hover, so at rest the row is the two readouts and nothing else.
 
           Hover is the only way to reach it. The overlay is a nonactivating
           panel that never takes keyboard focus (overlay.rs: focusable(false),
@@ -269,10 +196,10 @@ export const RecordingOverlayContent = ({
     </div>
   );
 
-  /* Solid in both materials, by ruling: the level meter's legibility is the
-   * instrument's whole job, and a tint that lets unblurred wallpaper through
-   * contests exactly the thing the recording HUD exists to show. Glass lives on
-   * the idle pill only, where nothing measured is drawn. */
+  /* Solid in both materials, by ruling: the words on this card are what the
+   * instrument exists to show, and a tint that lets unblurred wallpaper through
+   * contests exactly that. Glass lives on the idle pill only, where nothing
+   * being reported is drawn. */
   if (frame === "stream") {
     const hasText =
       streamText.committed.length > 0 || streamText.tentative.length > 0;
@@ -294,7 +221,6 @@ export const RecordingOverlayContent = ({
                     {streamText.committed ? `${streamText.committed} ` : ""}
                   </span>
                   <span className="tentative">{streamText.tentative}</span>
-                  {!working && <span className="scaret" />}
                 </p>
               </div>
             </div>

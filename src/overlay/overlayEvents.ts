@@ -90,7 +90,6 @@ interface OverlayEventHandlers {
   onShow: (state: OverlayState) => void | Promise<void>;
   onHide: () => void;
   onRecordingReady: () => void;
-  onMicLevel: (levels: number[]) => void;
   onStreamText: (text: StreamTextEvent) => void;
   onStreamPhase: (phase: StreamPhaseEvent) => void;
   onStreamEngine: (engine: StreamEngineEvent) => void;
@@ -107,7 +106,6 @@ export const subscribeToOverlayEvents = ({
   onShow,
   onHide,
   onRecordingReady,
-  onMicLevel,
   onStreamText,
   onStreamPhase,
   onStreamEngine,
@@ -116,7 +114,6 @@ export const subscribeToOverlayEvents = ({
   listen<OverlayState>("show-overlay", (event) => onShow(event.payload)),
   listen("hide-overlay", onHide),
   listen("recording-ready", onRecordingReady),
-  listen<number[]>("mic-level", (event) => onMicLevel(event.payload)),
   events.streamTextEvent.listen((event) => onStreamText(event.payload)),
   events.streamPhaseEvent.listen((event) => onStreamPhase(event.payload)),
   events.streamEngineEvent.listen((event) => onStreamEngine(event.payload)),

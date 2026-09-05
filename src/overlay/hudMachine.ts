@@ -47,8 +47,6 @@ export interface HudState {
   state: OverlayState;
   /** True once the input stream has delivered its first buffer. */
   captureReady: boolean;
-  /** The mic-level buckets exactly as the recorder reported them. */
-  levels: number[];
   streamText: StreamTextEvent;
   phase: StreamPhase;
   workKind: StreamWorkKind;
@@ -75,7 +73,6 @@ export const INITIAL_HUD_STATE: HudState = {
   isVisible: false,
   state: "recording",
   captureReady: false,
-  levels: [],
   streamText: { committed: "", tentative: "" },
   phase: "listening",
   workKind: "transcribing",
@@ -131,6 +128,23 @@ export const deriveElapsedSeconds = (state: HudState): number | null =>
   state.readyAt === null ? null : (state.nowMs - state.readyAt) / 1000;
 
 /**
+ * One second of wall clock, while the microphone is open.
+ *
+ * Only an open capture may advance: `captureEndPatch` freezes `nowMs` at the
+ * instant the run stopped, and a tick landing after that would walk the frozen
+ * capture length forward into a number no recorder ever measured. The overlay
+ * only runs its interval while the phase is `listening`, but clearing an
+ * interval races the state change that stopped the capture, so the refusal
+ * lives here — in the machine that owns the readout — rather than in the one
+ * caller that happens to schedule it.
+ */
+export const hudTicked = (state: HudState): HudState => {
+  const capturing = state.state === "recording" || state.state === "streaming";
+  if (state.readyAt === null || !capturing) return state;
+  return { ...state, nowMs: Date.now() };
+};
+
+/**
  * `show-overlay`. A transient show resets everything about the previous run,
  * including readiness: the microphone is not open yet, and Rust queues
  * `recording-ready` onto the main thread *after* this event so the reset can
@@ -150,7 +164,6 @@ export const hudShown = (state: HudState, shown: OverlayState): HudState => {
     ...(transient
       ? {
           captureReady: false,
-          levels: [],
           readyAt: null,
           streamText: EMPTY_STREAM_TEXT,
         }

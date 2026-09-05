@@ -20,25 +20,19 @@
        idle     OVERLAY_IDLE_WIDTH/HEIGHT         184 x 36  */
   --ov-card-max-w: 248px;
   --ov-stream-w: 392px;
-  /* The compact HUD is one fixed-width pill: mark, meter, nothing else. 200px
-     inside a 256px window leaves 28px of clearance a side, which is what keeps
-     the card's shadow throw off the window edge. A failure is the one state
-     allowed to grow past it, up to --ov-card-max-w. */
-  --ov-pill-w: 200px;
+  /* The compact HUD is one fixed-width pill: a state word, an elapsed clock,
+     and the cancel button's slack. Fixed, not max-content, so the pill does
+     not resize under the reader as the word changes from Listening to
+     Transcribing. 176px is the width the idle pill already uses, which is what
+     makes the resting pill and the running one one shape; inside a 256px
+     window it leaves 40px of clearance a side for the shadow throw. A failure
+     is the one state allowed to grow past it, up to --ov-card-max-w. */
+  --ov-pill-w: 176px;
   /* 40px + the card's 1px border box = 42px inside a 46px window. The 4px of
      slack is not decoration: it is the room the shadow throw needs, and a card
      sized to the window clips that throw on every side. */
   --ov-base-h: 40px;
   --ov-cap-max-h: 64px;
-  /* Level-meter bar track. scaleY runs against this, so it is the only place
-     the meter's amplitude is defined. */
-  --ov-meter-h: 20px;
-  /* One meter, one size, in both frames. The Live panel's row is 392px wide and
-     a 16-bucket meter stretched across all of it reads as a dotted line, so the
-     meter is capped here and pushed to the trailing edge instead — which is the
-     mark-left / waves-right reading in both windows. */
-  --ov-wave-w: 148px;
-  --ov-bar-w: 4px;
 
   /* Spacing stays local because the native overlay geometry is fixed. Motion
      does not: these four were verbatim copies of theme.css's values, so a
@@ -57,9 +51,8 @@
   /* ---- colour, all of it an alias.
 
      Every rule below named a shared token at its call site before, which read
-     fine until the palette turned warm and the accent turned bronze: the one
-     hue in this window that says "it is hearing you" was still
-     --color-blue-700, the last blue on a surface whose neutrals are stone.
+     fine until the palette turned warm: the roles were still named in blues on
+     a surface whose neutrals are stone.
      Naming the roles here is what makes the HUD follow the theme rather than
      quote it, and it leaves one place to look when it does not.
 
@@ -73,7 +66,6 @@
   --ov-ink-quiet: var(--text-tertiary);
   --ov-wash-hover: var(--wash-hover);
   --ov-wash-active: var(--wash-active);
-  --ov-speech: var(--accent);
   --ov-error: var(--error);
   --ov-focus: var(--focus-ring);
 
@@ -179,18 +171,18 @@
 }
 
 /* The compact HUD and the idle pill are the two sanctioned pill radii. The
-   working HUD is a fixed width so the meter's bar spacing is the same every
-   run: a max-content pill would resize itself as the error line changed, and
-   the meter would re-space under a value it never reported. */
+   running HUD is a fixed width so nothing on it moves while it runs: a
+   max-content pill would re-measure itself every time the state word changed
+   length, and a readout that slides is a readout being read twice. */
 .scard.compact {
   animation: none;
   border-radius: var(--ov-radius-pill);
   inline-size: var(--ov-pill-w);
 }
 
-/* A cause is prose and can be longer than the meter: the working HUD is the one
-   state allowed to grow, and it stops at the width the window can still show.
-   The resting pill has its own, narrower ceiling further down. */
+/* A cause is prose and can be longer than two readouts: the failed HUD is the
+   one state allowed to grow, and it stops at the width the window can still
+   show. The resting pill has its own, narrower ceiling further down. */
 .scard.compact.hud-error:not(.hud-pill) {
   inline-size: max-content;
   min-inline-size: var(--ov-pill-w);
@@ -250,33 +242,20 @@
 .stext-cap .tentative {
   color: var(--ov-ink-muted);
 }
-.scaret {
-  display: inline-block;
-  width: 2px;
-  height: 1.02em;
-  translate: 0 3px;
-  margin-left: 1px;
-  background: var(--ov-speech);
-  border-radius: 2px;
-  animation: scaret-blink 1.05s steps(1) infinite;
-}
-@keyframes scaret-blink {
-  50% {
-    opacity: 0;
-  }
-}
 
 /* ============================================================
-   The instrument row. One line, two things:
+   The instrument row. One line, two readouts:
 
-     the mark on the leading edge · the level meter on the trailing one
+     the state word on the leading edge · the elapsed clock on the trailing one
 
-   Everything the row used to carry — a state word, a semaphore ring, an elapsed
-   clock, the mode name, the engine, the stop chord — is gone. Each of those
-   restated something the user already knew (they pressed the chord; they chose
-   the mode) or something the meter says better, and six of them at 11px inside
-   a 200px pill is why the HUD read as clutter. What remains is the one thing
-   only the HUD can tell you: whether it is hearing you.
+   Label left, value right — the same line every settings row in this app
+   draws. What used to be here was a sixteen-bar level meter that carried the
+   state in animation alone: dim and pulsing for starting, accent for speech,
+   a travelling opacity crest for working. It was beautiful and it asked the
+   reader to infer three states from three motions, while the word that says
+   them outright sat in a visually-hidden span for screen readers only. The
+   word is on screen now, the meter is gone, and the clock is the one thing
+   this window knows that the app cannot show: how long it has been listening.
 
    The row keeps --ov-base-h in every state, so nothing reflows as a run moves
    from starting to working to failed.
@@ -288,38 +267,15 @@
   align-items: center;
   gap: var(--ov-gap-2-5);
   min-inline-size: 0;
-  /* 14px leads; 20px trails, because the cancel button parks in that slack and
+  /* 14px leads; 32px trails, because the cancel button parks in that slack and
      an overlap between a control and a measurement is not acceptable. */
-  padding-inline: 14px 20px;
+  padding-inline: 14px 32px;
 }
 
 /* A failed run has no cancel button, so the slack it was holding is not slack
    any more — it is a lopsided end cap on a pill that is now pure text. */
 .hud-error .sbase {
   padding-inline-end: 14px;
-}
-
-/* The state word exists for a screen reader and for nothing else: the meter is
-   the sighted channel, and it cannot be read aloud. */
-.sr-only {
-  position: absolute;
-  inline-size: 1px;
-  block-size: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-/* The mark, at the cap height of the row it leads. It is identity, not status:
-   it never takes a phase colour, because the moment it did there would be two
-   places carrying state and the meter would stop being the answer. */
-.smark {
-  flex: none;
-  display: block;
-  color: var(--ov-ink);
 }
 
 /* The failure names its cause, in prose, in the one semantic colour that means
@@ -338,125 +294,43 @@
   white-space: nowrap;
 }
 
-/* ============================================================
-   Level meter — the content of the HUD, in every state.
+/* The state word. Carries the row-title role inline for the same reason
+   .serror does, in primary ink: it is the sentence this window exists to say,
+   and it truncates before the clock does because a clipped clock is a wrong
+   number where a clipped word is still the right word. */
+.sstate {
+  min-inline-size: 0;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 19px;
+  color: var(--ov-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-   Bars are driven by `transform: scaleY()` from the reported mic-level buckets
-   with NO transition: a measurement snaps or it is not a measurement, and the
-   previous `transition: height 80ms` both tweened a reading and animated a
-   layout property.
-
-   Three appearances, one geometry, so the row never reflows:
-     arming    dim --ov-ink-quiet, pulsing        the stream is still opening
-     ready     --ov-ink-muted, snapped to buckets audio is flowing
-     working   dim --ov-ink-quiet, one travelling highlight on a fixed scale
-
-   `ready` carries the one colour event on this surface: while a reported
-   bucket is at the top of the visualiser's calibrated speech range the bars go
-   --ov-speech, which is the app's bronze accent (it was blue-700, the last
-   blue on a surface whose neutrals are stone). That is the whole "is it
-   hearing me" answer, and it is why nothing else in this window is allowed an
-   accent colour — the cancel button's focus ring included, which now reads
-   --ov-focus instead of sharing this hue.
-
-   `working` is deliberately unlike `ready`: no bar ever leaves its fixed scale,
-   so the row cannot be misread as input while the transcriber runs. Only the
-   highlight moves, and it moves in opacity — the one channel that carries no
-   amplitude.
-   ============================================================ */
-.swave {
-  flex: 1 1 auto;
-  /* Capped and pushed to the trailing edge: the mark leads, the waves trail,
-     and the Live panel's much wider row does not stretch a 16-bucket meter into
-     a dotted line. Every reported bucket is drawn; none is dropped. */
-  max-inline-size: var(--ov-wave-w);
+/* The elapsed clock, on the trailing edge. Tabular figures because the digits
+   change once a second and proportional ones would shuffle the whole readout
+   sideways on every tick. Secondary ink: it is the second thing read, and one
+   line with two primary-weight statements has no first thing. */
+.stime {
+  flex: none;
   margin-inline-start: auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 2px;
-  block-size: var(--ov-meter-h);
-}
-.swave i {
-  flex: 1 1 0;
-  min-inline-size: 1px;
-  max-inline-size: var(--ov-bar-w);
-  block-size: 100%;
-  border-radius: var(--ov-radius-pill);
-  /* Ink, not accent: a meter that is always coloured has no way left to say
-     "this is you talking". gray-900 is the secondary-text step, which is
-     exactly the weight a resting readout wants. */
-  background: var(--ov-ink-muted);
-  transform-origin: center;
-  transition: none;
-}
-/* Speech, as reported. Set by the renderer when a bucket reaches the top of the
-   visualiser's speech window; no transition, because the tint is derived from
-   the same measurement the scale is and must snap with it. */
-.swave.hearing i {
-  background: var(--ov-speech);
-}
-.swave.arming i {
-  background: var(--ov-ink-quiet);
-  opacity: 0.35;
-  /* The pulse overrides the inline scaleY, which is the resting floor anyway. */
-  animation: swave-arming 900ms var(--ov-ease-in-out) infinite;
-}
-.swave.arming i:nth-child(3n + 2) {
-  animation-delay: 100ms;
-}
-.swave.arming i:nth-child(3n) {
-  animation-delay: 200ms;
-}
-@keyframes swave-arming {
-  0%,
-  100% {
-    transform: scaleY(0.08);
-    opacity: 0.25;
-  }
-  50% {
-    transform: scaleY(0.34);
-    opacity: 0.6;
-  }
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 19px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ov-ink-muted);
 }
 
-/* Work is not input. No bucket is being reported, so the renderer emits no
-   inline transform at all and the scale below is the whole truth of the row:
-   every bar flat, in the dim grey step, with a crest of opacity walking the row
-   once per cycle. `--bar-index` is that bar's position, set by the renderer, so
-   the crest travels rather than blinking in place. */
-.swave.working i {
-  background: var(--ov-ink-quiet);
-  /* 0.34, not a hairline: at 0.2 a 4px-wide bar renders square and the row
-     reads as a row of dots. A third of full scale is unmistakably a bar and
-     still nowhere near a level any speech would produce. */
-  transform: scaleY(0.34);
-  opacity: 0.3;
-  /* 45ms per bar spreads the crest over 675ms of a 1100ms cycle, and each bar's
-     bump is 58% of that cycle wide — so as the crest leaves the trailing bar it
-     is already re-entering the leading one and the row is never fully dark. */
-  animation: swave-working 1100ms var(--ov-ease-in-out) infinite;
-  animation-delay: calc(var(--bar-index) * 45ms);
-}
-@keyframes swave-working {
-  0%,
-  58%,
-  100% {
-    opacity: 0.3;
-  }
-  20% {
-    opacity: 0.9;
-  }
-}
-
-/* Cancel is the only control on the working HUD, and it is not part of the
-   resting picture: the pill at rest is the mark and the wave and nothing else.
-   It parks on the trailing slack the row already reserves and fades in when the
+/* Cancel is the only control on the running HUD, and it is not part of the
+   resting picture: the pill at rest is the two readouts and nothing else. It
+   parks on the trailing slack the row already reserves and fades in when the
    pointer is over the row or the button itself takes focus.
 
-   Opaque, not a wash: it sits over the meter's last bar, and a translucent fill
-   would let a measurement show through a control. Hover therefore reads as a
-   1px ring plus full-contrast ink rather than as a background tint. */
+   Opaque, not a wash: it sits at the end of a line that carries a measurement,
+   and a translucent fill would let one show through a control. Hover therefore
+   reads as a 1px ring plus full-contrast ink rather than as a background tint. */
 .sx {
   position: absolute;
   inset-inline-end: 4px;
@@ -476,7 +350,7 @@
   background: var(--ov-surface);
   cursor: pointer;
   opacity: 0;
-  /* Invisible and unclickable: a phantom 24px hit target over the meter is
+  /* Invisible and unclickable: a phantom 24px hit target over the clock is
      worse than no control at all. */
   pointer-events: none;
   transition:
@@ -521,18 +395,9 @@
     transition-duration: 0.01ms;
   }
 
-  .scard,
-  .swave.arming i,
-  .scaret {
+  .scard {
     animation: none;
     transform: none;
-  }
-
-  /* The working bars keep their fixed scale — that scale is the state — and
-     hold the lit end of the highlight so the row still reads as running. */
-  .swave.working i {
-    animation: none;
-    opacity: 0.55;
   }
 }
 
