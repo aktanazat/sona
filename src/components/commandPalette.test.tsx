@@ -9,7 +9,6 @@ import { I18nextProvider } from "react-i18next";
 import { TooltipProvider } from "@/components/vg/tooltip";
 import { destinationIcons } from "@/lib/navIcons";
 import {
-  commandActionIcons,
   groupPaletteActions,
   isCommandPaletteChord,
   type CommandPaletteAction,
@@ -29,7 +28,6 @@ import {
   openRow,
   paletteFilter,
   resultHeadingKeys,
-  resultIcons,
   RESULT_KINDS,
   rowValue,
   searchCorpus,
@@ -109,7 +107,6 @@ const action = (
   id,
   group,
   label: id,
-  icon: commandActionIcons.openRecordings,
   run: () => undefined,
 });
 
@@ -460,15 +457,11 @@ describe("what a page of the query plane looks like in the palette", () => {
     ).toEqual([]);
   });
 
-  test("every section heading and glyph is a shipped one", () => {
+  test("every section heading is a shipped one", () => {
     for (const kind of RESULT_KINDS) {
       expect(i18n.exists(resultHeadingKeys[kind])).toBe(true);
       expect(i18n.t(resultHeadingKeys[kind])).not.toBe("");
     }
-    // Meetings, People and Library wear the same glyph here as in the rail.
-    expect(resultIcons.meeting).toBe(destinationIcons.meetings);
-    expect(resultIcons.person).toBe(destinationIcons.people);
-    expect(resultIcons.dictation).toBe(destinationIcons.history);
   });
 
   /* A meeting can come back from the semantic half of the plane without sharing

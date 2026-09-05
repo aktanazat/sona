@@ -127,13 +127,9 @@ export const buildNavigationActions = (
   t: (key: string) => string,
   onNavigate: (section: SidebarSection) => void,
 ): CommandPaletteAction[] =>
-  SECTION_ORDER.map((section) => {
-    const config = SECTIONS_CONFIG[section];
-    return {
-      id: `nav-${section}`,
-      group: "navigation",
-      label: t(config.labelKey),
-      icon: destinationIcons[section],
-      run: () => onNavigate(section),
-    };
-  });
+  SECTION_ORDER.map((section) => ({
+    id: `nav-${section}`,
+    group: "navigation",
+    label: t(SECTIONS_CONFIG[section].labelKey),
+    run: () => onNavigate(section),
+  }));

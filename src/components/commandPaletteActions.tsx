@@ -1,36 +1,15 @@
-import {
-  FileAudio,
-  FolderOpen,
-  MessageSquare,
-  Sparkles,
-  MonitorUp,
-  type LucideIcon,
-} from "lucide-react";
-import { destinationIcons } from "@/lib/navIcons";
-
 export type CommandPaletteGroup = "navigation" | "actions";
 
+/* A row of the palette is its words. It carried a `LucideIcon` too, and every
+ * one of those glyphs sat beside a label that already said the same thing, so
+ * the field is gone rather than merely unrendered: a registry of marks nothing
+ * draws is the next surface's temptation. */
 export interface CommandPaletteAction {
   id: string;
   group: CommandPaletteGroup;
   label: string;
-  icon: LucideIcon;
   run: () => void;
 }
-
-/* Actions outside the destination list use the same glyph wherever they
- * appear. New meeting deliberately shares Meetings' destination glyph, and
- * importing a meeting shares the file glyph the dictation import already
- * uses — both bring a file in, and the label is what tells them apart. */
-export const commandActionIcons = {
-  recordScreen: MonitorUp,
-  newMeeting: destinationIcons.meetings,
-  importAudio: FileAudio,
-  importMeeting: FileAudio,
-  openRecordings: FolderOpen,
-  openAgent: MessageSquare,
-  newPrompt: Sparkles,
-} as const satisfies Record<string, LucideIcon>;
 
 /**
  * Whether one keydown is the chord that summons the palette.

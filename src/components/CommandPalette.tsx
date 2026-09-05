@@ -1,6 +1,5 @@
 import React from "react";
 import { useCommandState } from "cmdk";
-import { MessageSquare, Sparkles, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { commands, type QueryRow, type SavedPrompt } from "@/bindings";
@@ -19,7 +18,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/vg/dialog";
-import { Kbd } from "@/components/vg/kbd";
 import { cn } from "@/lib/cn";
 import { formatRelativeTime } from "@/lib/utils/format";
 import {
@@ -34,7 +32,6 @@ import {
   openRow,
   paletteFilter,
   resultHeadingKeys,
-  resultIcons,
   rowValue,
   searchCorpus,
   SEARCH_DEBOUNCE_MS,
@@ -102,29 +99,17 @@ export interface CommandPaletteProps {
   onAsk: () => void;
 }
 
-/* One row of the list, one heading over a set of them, and the icon a row
- * carries. The first two were spelled out four and three times respectively;
- * they are one string each now, because a row that reads differently in the
- * actions section than in the results section is the shape this surface keeps
- * regressing into.
+/* One row of the list, and one heading over a set of them. Each was spelled out
+ * four and three times respectively; they are one string each now, because a
+ * row that reads differently in the actions section than in the results section
+ * is the shape this surface keeps regressing into.
  *
- * The icon is sized to the cap height of the 14px row rather than to the
- * text's em box: at `size-4` it drew a 14px glyph beside a 9px capital, which
- * is the "icon larger than the thing it labels" tell. 11px is that cap height,
- * and lucide's 24-unit viewBox insets its ink, so the drawn mark lands just
- * under the capitals — a monochrome mark beside the words, the way the
- * reference panel does it.
- *
- * It has to go on the element, not on the row as a descendant variant. The
- * kit's own `[&_svg:not([class*='size-'])]:size-4` is a more specific selector
- * than `[&_svg]`, so a size stated on the row loses to it and the glyph stays
- * 14px — measured. Naming a `size-` class on the icon is what excludes that
- * rule, which is exactly what its `:not` is an escape hatch for. The muted
- * tier still comes from the kit's matching `[class*='text-']` rule. */
+ * No glyph on a row. Every one of them sat beside a word that already said the
+ * same thing — a camera beside "Meetings", a folder beside "Open recordings
+ * folder" — so a list of ten destinations and verbs was twenty marks to read
+ * instead of ten. The words are the list. */
 const ROW =
   "min-h-9 gap-2.5 rounded-md px-2 py-2 text-[14px] text-gray-1000 data-[selected=true]:bg-gray-alpha-300";
-
-const ROW_ICON = "size-[11px]";
 
 /* 12px, secondary, sentence case: a heading over rows is the smallest type on
  * the surface, not a second row. It shipped at the rows' own size, which made
@@ -134,7 +119,6 @@ const GROUP =
 
 interface ResultRowProps {
   row: QueryRow;
-  icon: LucideIcon;
   now: number;
   onSelect: () => void;
 }
@@ -147,18 +131,12 @@ interface ResultRowProps {
  * search result you have to open to evaluate. The time is the only number on
  * the row, so it sits at the end where the eye can skip it.
  */
-const ResultRow: React.FC<ResultRowProps> = ({
-  row,
-  icon: RowIcon,
-  now,
-  onSelect,
-}) => (
+const ResultRow: React.FC<ResultRowProps> = ({ row, now, onSelect }) => (
   <CommandItem
     value={rowValue(row)}
     onSelect={onSelect}
     className={cn(ROW, "items-start")}
   >
-    <RowIcon aria-hidden="true" className={cn(ROW_ICON, "mt-[3px]")} />
     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
       <span className="truncate">{row.title}</span>
       {row.snippet !== "" && (
@@ -386,20 +364,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           onValueChange={setSelected}
           className="bg-transparent **:data-[slot=command-input-wrapper]:h-12 **:data-[slot=command-input-wrapper]:border-gray-alpha-400 **:data-[slot=command-input-wrapper]:px-4 **:data-[slot=command-input-wrapper]:focus-within:border-gray-alpha-600"
         >
-          <div className="relative">
-            <CommandInput
-              value={query}
-              onValueChange={setQuery}
-              placeholder={t("commandPalette.placeholder")}
-              className="pe-14 text-[14px] leading-[20px] text-gray-1000 placeholder:text-gray-900 focus-visible:outline-none"
-            />
-            {/* The one hint the palette carries. The chord that opens it is
-                taught by the sidebar row; repeating it here would be the
-                second copy of the same datum on one screen. */}
-            <Kbd className="absolute end-4 top-1/2 -translate-y-1/2">
-              {t("commandPalette.esc")}
-            </Kbd>
-          </div>
+          <CommandInput
+            value={query}
+            onValueChange={setQuery}
+            placeholder={t("commandPalette.placeholder")}
+            className="text-[14px] leading-[20px] text-gray-1000 placeholder:text-gray-900 focus-visible:outline-none"
+          />
           {/* Sized so the whole registry fits. The 340px this inherited from
               the old stylesheet is 29px short of the ten rows and two headings
               the palette actually has, so it always scrolled and always cut a
@@ -416,36 +386,32 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 heading={groupLabels[section.group]}
                 className={GROUP}
               >
-                {section.items.map((action) => {
-                  const ActionIcon = action.icon;
-                  return (
-                    <CommandItem
-                      key={action.id}
-                      value={action.label}
-                      onSelect={() => {
-                        /* Closed first, then run: a navigating action goes
-                           through a view transition whose `flushSync` also
-                           flushes this close, so the palette leaves inside the
-                           same cross-fade as the route instead of lingering for
-                           a frame on the far side of it. */
-                        onOpenChange(false);
-                        action.run();
-                      }}
-                      /* Rows are the content of this surface, so they take the
-                         content tier. Shipping them at gray-900 was the mistake:
-                         measured against the palette's own #0a0a0a it is 7.66:1
-                         where gray-1000 is 16.91:1, so every row you came here
-                         to read was at less than half the contrast the surface
-                         it replaced gave them. gray-900 is for prose; a row you
-                         are scanning to pick is not prose. The muted tiers stay
-                         where they belong — group headings and the icons. */
-                      className={ROW}
-                    >
-                      <ActionIcon aria-hidden="true" className={ROW_ICON} />
-                      <span className="min-w-0 truncate">{action.label}</span>
-                    </CommandItem>
-                  );
-                })}
+                {section.items.map((action) => (
+                  <CommandItem
+                    key={action.id}
+                    value={action.label}
+                    onSelect={() => {
+                      /* Closed first, then run: a navigating action goes
+                         through a view transition whose `flushSync` also
+                         flushes this close, so the palette leaves inside the
+                         same cross-fade as the route instead of lingering for
+                         a frame on the far side of it. */
+                      onOpenChange(false);
+                      action.run();
+                    }}
+                    /* Rows are the content of this surface, so they take the
+                       content tier. Shipping them at gray-900 was the mistake:
+                       measured against the palette's own #0a0a0a it is 7.66:1
+                       where gray-1000 is 16.91:1, so every row you came here
+                       to read was at less than half the contrast the surface
+                       it replaced gave them. gray-900 is for prose; a row you
+                       are scanning to pick is not prose. The muted tier stays
+                       where it belongs — the group headings. */
+                    className={ROW}
+                  >
+                    <span className="min-w-0 truncate">{action.label}</span>
+                  </CommandItem>
+                ))}
               </CommandGroup>
             ))}
             {/* Run a prompt: one row per saved prompt, offered only while a
@@ -465,7 +431,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     onSelect={() => run(prompt)}
                     className={ROW}
                   >
-                    <Sparkles aria-hidden="true" className={ROW_ICON} />
                     <span className="min-w-0 truncate">{prompt.name}</span>
                   </CommandItem>
                 ))}
@@ -481,7 +446,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                   <ResultRow
                     key={row.link}
                     row={row}
-                    icon={resultIcons[section.kind]}
                     now={now}
                     onSelect={() => choose(row)}
                   />
@@ -492,7 +456,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             {asking && (
               <CommandGroup className="p-1.5">
                 <CommandItem value={ASK_VALUE} onSelect={ask} className={ROW}>
-                  <MessageSquare aria-hidden="true" className={ROW_ICON} />
                   <span className="min-w-0 truncate">
                     {t("chat.ask.row", { query: query.trim() })}
                   </span>

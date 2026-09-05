@@ -28,7 +28,6 @@ import { Toaster } from "./components/Toaster";
 import { RecorderDialog } from "./components/recorder/RecorderDialog";
 import { ImportDialogHost } from "./components/import/ImportDialog";
 import {
-  commandActionIcons,
   isCommandPaletteChord,
   type CommandPaletteAction,
 } from "./components/commandPaletteActions";
@@ -460,14 +459,12 @@ const buildCommandActions = ({
     id: "action-meeting",
     group: "actions",
     label: t("commandPalette.newMeeting"),
-    icon: commandActionIcons.newMeeting,
     run: onNewMeeting,
   },
   {
     id: "action-import",
     group: "actions",
     label: t("commandPalette.importAudio"),
-    icon: commandActionIcons.importAudio,
     run: onImportAudio,
   },
   ...(isMacos
@@ -476,7 +473,6 @@ const buildCommandActions = ({
           id: "action-screen-recording",
           group: "actions" as const,
           label: t("recorder.open"),
-          icon: commandActionIcons.recordScreen,
           run: onOpenRecorder,
         },
       ]
@@ -485,21 +481,18 @@ const buildCommandActions = ({
     id: "action-import-meeting",
     group: "actions",
     label: t("commandPalette.importMeeting"),
-    icon: commandActionIcons.importMeeting,
     run: onImportMeeting,
   },
   {
     id: "action-recordings",
     group: "actions",
     label: t("commandPalette.openRecordings"),
-    icon: commandActionIcons.openRecordings,
     run: onOpenRecordings,
   },
   {
     id: "action-new-prompt",
     group: "actions",
     label: t("commandPalette.newPrompt"),
-    icon: commandActionIcons.newPrompt,
     /* Settings is where prompts live, and the editor opens on arrival: an
      * action named "New prompt" that only scrolled you near one would be a
      * second press before anything happened. */
@@ -514,7 +507,6 @@ const buildCommandActions = ({
           id: "action-agent",
           group: "actions" as const,
           label: t("commandPalette.openAgent"),
-          icon: commandActionIcons.openAgent,
           run: onOpenAgent,
         },
       ]

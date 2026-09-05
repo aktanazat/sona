@@ -1,7 +1,5 @@
 import { defaultFilter } from "cmdk";
-import { ListTodo, type LucideIcon } from "lucide-react";
 import { commands, type QueryRow } from "@/bindings";
-import { destinationIcons } from "@/lib/navIcons";
 import { shouldPackChatTurn } from "./chat/chatModel";
 
 /* ⌘K's half of the one query plane.
@@ -34,19 +32,6 @@ export const SEARCH_LIMIT = 12;
 export const RESULT_KINDS = ["meeting", "person", "dictation", "loop"] as const;
 
 export type PaletteResultKind = (typeof RESULT_KINDS)[number];
-
-/**
- * One glyph per concept, taken from the destination that holds the noun so a
- * meeting row and the Meetings rail row cannot wear different marks. Loops have
- * no destination of their own — they open the meeting they were raised in — so
- * they are the one kind with a glyph of their own.
- */
-export const resultIcons = {
-  meeting: destinationIcons.meetings,
-  person: destinationIcons.people,
-  dictation: destinationIcons.history,
-  loop: ListTodo,
-} as const satisfies Record<PaletteResultKind, LucideIcon>;
 
 /** The translation key each section's heading answers to. */
 export const resultHeadingKeys = {
