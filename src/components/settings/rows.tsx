@@ -1,5 +1,6 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, Info } from "lucide-react";
+import { ChevronDown, ChevronRight, Info, RotateCcw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/vg/button";
 import {
@@ -288,6 +289,47 @@ export const RowActions: React.FC<{
 );
 
 /**
+ * The reset arrow, and the one rule about it: a row already at its default has
+ * nothing to undo, so the button is not in the DOM at all.
+ *
+ * Five rows drew this glyph by hand and not one of them asked that question.
+ * Three of those rows are on Essentials — the shortcut, the microphone and
+ * the spoken language — so a factory-fresh install opened on three undos of
+ * nothing, an affordance that cannot do anything and is noise a reader has to
+ * rule out.
+ *
+ * The gate lives here because it is one rule about one control, and a copy per
+ * consumer is how the nine boolean rows above this drifted.
+ *
+ * `changed` is the caller's comparison, because only the row knows its own
+ * default: a stored value can be absent, a sentinel, or the default spelled
+ * out, and all three mean unchanged.
+ */
+export const RowReset: React.FC<{
+  /** The row's name, which is all the accessible label needs. */
+  name: string;
+  /** False while the value equals its default. */
+  changed: boolean;
+  disabled?: boolean;
+  onReset: () => void;
+}> = ({ name, changed, disabled = false, onReset }) => {
+  const { t } = useTranslation();
+  if (!changed) return null;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      aria-label={t("common.resetSetting", { name })}
+      disabled={disabled}
+      onClick={onReset}
+    >
+      <RotateCcw aria-hidden="true" />
+    </Button>
+  );
+};
+
+/**
  * A row whose control is too wide to sit beside its label — a text area, a
  * list, a recorder. Same hairline surface, label stacked over the control.
  */
@@ -333,8 +375,8 @@ export const SettingsField: React.FC<SettingsRowProps> = ({
  * A row whose control is a jump: the setting it names lives on another
  * surface, and this row is the one place that says where.
  *
- * Essentials uses it so a page of ten rows can still reach the editors behind
- * it without growing a section for each one.
+ * Advanced uses it so a section can reach the editor its subject belongs to
+ * — dictation styles, the model catalogue — without a nested page.
  */
 export const SettingsLinkRow: React.FC<{
   label: string;
@@ -370,18 +412,33 @@ export const SettingsDisclosure: React.FC<{
   fact?: React.ReactNode;
   /** Mount children on first open instead of eagerly. */
   lazy?: boolean;
+  /** Dims the label the way a disabled `SettingsRow` does. The body still
+   * opens: it is the controls inside that refuse, and a reader who cannot see
+   * from the heading that the whole section is inert has to open it to find
+   * every control greyed out. */
+  disabled?: boolean;
   children: React.ReactNode;
   className?: string;
-}> = ({ label, fact, lazy = false, children, className }) => {
+}> = ({ label, fact, lazy = false, disabled = false, children, className }) => {
   const [opened, setOpened] = React.useState(!lazy);
   return (
     <details
       className={cn("group", className)}
+      data-disabled={disabled || undefined}
       onToggle={(event) => {
         if (event.currentTarget.open) setOpened(true);
       }}
     >
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-6 py-3.5 text-[14px] leading-[21px] text-gray-1000 transition-colors hover:bg-gray-alpha-100 focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:outline-none motion-reduce:transition-none [&::-webkit-details-marker]:hidden">
+      {/* The ring is inset because the surface around this row clips: a
+          summary is flush with the card's edges, so an outward ring loses its
+          left, right and bottom to `overflow-hidden` and the reader is left
+          with one heavier line that reads as a divider. */}
+      <summary
+        className={cn(
+          "flex cursor-pointer list-none items-center justify-between gap-4 px-6 py-3.5 text-[14px] leading-[21px] transition-colors hover:bg-gray-alpha-100 focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-inset focus-visible:outline-none motion-reduce:transition-none [&::-webkit-details-marker]:hidden",
+          disabled ? "text-gray-700" : "text-gray-1000",
+        )}
+      >
         {label}
         <span className="flex shrink-0 items-center gap-3">
           {fact ? (

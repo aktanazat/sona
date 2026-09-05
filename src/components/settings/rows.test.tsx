@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/vg/tooltip";
 import {
   FactChip,
   Notice,
+  RowReset,
   SettingsField,
   SettingsRow,
   SettingsSection,
@@ -79,6 +80,32 @@ describe("a settings row", () => {
 
     expect(markup).toContain("tabular-nums");
     expect(markup.split("60%").length - 1).toBe(1);
+  });
+});
+
+describe("the reset arrow", () => {
+  /* The rule five rows used to get wrong by hand: an undo of nothing is an
+   * affordance a reader has to press, or hover, or reason about, to learn it
+   * was never going to do anything. */
+  test("is absent while the value equals its default", () => {
+    const markup = paint(
+      <SettingsRow label="Microphone">
+        <RowReset name="Microphone" changed={false} onReset={() => {}} />
+      </SettingsRow>,
+    );
+
+    expect(markup).not.toContain("<button");
+  });
+
+  test("appears once the value differs from it", () => {
+    const markup = paint(
+      <SettingsRow label="Microphone">
+        <RowReset name="Microphone" changed onReset={() => {}} />
+      </SettingsRow>,
+    );
+
+    expect(markup).toContain("<button");
+    expect(markup).toContain("aria-label");
   });
 });
 
