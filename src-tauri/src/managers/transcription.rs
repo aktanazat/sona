@@ -4763,9 +4763,17 @@ mod tests {
         let settings = AppSettings {
             replacements_enabled: true,
             replacements_rules: vec![crate::settings::ReplacementRule {
-                spoken: "hanoi".to_string(),
-                written: "Ha Long Bay".to_string(),
+                spoken: "amei".to_string(),
+                written: "Ah Mei".to_string(),
                 enabled: true,
+            }],
+            snippets: vec![crate::snippets::Snippet {
+                id: "one".to_string(),
+                trigger: "signoff".to_string(),
+                expansion: "Yours, Ah Mei".to_string(),
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
             }],
             ..AppSettings::default()
         };
@@ -4793,8 +4801,15 @@ mod tests {
         // punctuation winning: the same input without the filler agrees.
         assert_eq!(deliver("a comma b"), "a, b");
 
-        // A replacement's written form is not rescanned for fillers.
-        assert_eq!(deliver("hanoi is beautiful"), "Ha Long Bay is beautiful");
+        // A written form is not rescanned for fillers, and `Ah Mei` is the
+        // shape that proves it: `ah` is on the gated English list, so filler
+        // removal at the tail deletes it and these two assertions are what
+        // fail. `Ha Long Bay` was the reported defect, but `ha` has since left
+        // the list, so a written form carrying it can no longer fail in either
+        // order - the fixture has to use a token the list still gates.
+        assert_eq!(deliver("amei is a singer"), "Ah Mei is a singer");
+        // The same for a snippet expansion, which is authored two passes later.
+        assert_eq!(deliver("signoff"), "Yours, Ah Mei");
 
         // A literal mention of a punctuation word is still left alone.
         assert_eq!(deliver("the word comma itself"), "the word comma itself");
