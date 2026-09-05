@@ -4,10 +4,21 @@ import {
   SettingsDisclosure,
   SettingsSection,
 } from "@/components/settings/rows";
+import { useSettings } from "@/hooks/useSettings";
 import { BooleanSettingRow } from "../BooleanSettingRow";
 import { AgentPanelToggle } from "../agents/AgentPanelToggle";
 import { SonaAgentPairing } from "../agents/SonaAgentPairing";
 import { AgentBridgeWorkspace } from "../agents/AgentBridgeWorkspace";
+
+/* Which consoles the bridge is currently observing. The switch names live
+ * beside the switches inside, so the summary reuses them rather than
+ * inventing a second vocabulary for the same four programs. */
+const BRIDGE_CONSOLES = [
+  ["claude_enabled", "settings.agents.controls.providers.claude.label"],
+  ["codex_enabled", "settings.agents.controls.providers.codex.label"],
+  ["grok_enabled", "settings.agents.controls.providers.grok.label"],
+  ["omp_enabled", "settings.agents.controls.providers.omp.label"],
+] as const;
 
 /* The four switches that decide whether Sona talks to anything else on this
  * Mac, and the consoles behind them.
@@ -25,9 +36,20 @@ import { AgentBridgeWorkspace } from "../agents/AgentBridgeWorkspace";
  * there is nothing to watch, so the hints carry the whole consequence. They are
  * two rows rather than one because letting a script read the corpus and letting
  * it close a loop are different answers, and a single switch would answer both
- * at once. */
+ * at once.
+ *
+ * Each console states its own answer on the summary - paired or not, which
+ * agents are observed - so a reader learns whether anything is connected
+ * without opening either one. */
 export const AdvancedAgents: React.FC = () => {
   const { t } = useTranslation();
+  const { settings } = useSettings();
+  const bridge = settings?.agent_bridge;
+  const observed = bridge?.master_enabled
+    ? BRIDGE_CONSOLES.filter(([key]) => bridge[key]).map(([, label]) =>
+        t(label),
+      )
+    : [];
 
   return (
     <SettingsSection label={t("settingsV2.advanced.agents")}>
@@ -42,10 +64,26 @@ export const AdvancedAgents: React.FC = () => {
         labelKey="settings.agents.externalMutations.label"
         hintKey="settings.agents.externalMutations.rowDescription"
       />
-      <SettingsDisclosure label={t("settings.agents.sonaAgent.title")} lazy>
+      <SettingsDisclosure
+        label={t("settings.agents.sonaAgent.title")}
+        fact={t(
+          settings?.agent_panel_paired
+            ? "settings.agents.sonaAgent.paired"
+            : "settings.agents.sonaAgent.unpaired",
+        )}
+        lazy
+      >
         <SonaAgentPairing />
       </SettingsDisclosure>
-      <SettingsDisclosure label={t("settingsV2.advanced.agentBridge")} lazy>
+      <SettingsDisclosure
+        label={t("settingsV2.advanced.agentBridge")}
+        fact={
+          observed.length === 0
+            ? t("settings.agents.status.disabled")
+            : observed.join(", ")
+        }
+        lazy
+      >
         <AgentBridgeWorkspace />
       </SettingsDisclosure>
     </SettingsSection>
