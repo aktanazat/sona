@@ -68,6 +68,11 @@ pub(crate) enum RelayError {
     ResponseSignatureInvalid,
     ResponseMalformed,
     RemoteRejected,
+    /// The relay would not accept this client at all: an unrecognised bridge
+    /// key, or a request signature it refused. Both go out as a 401 with no
+    /// signature of the relay's own, which is why the status has to be read
+    /// before the signature is checked.
+    Unauthorized,
     OwnershipRejected,
 }
 
@@ -431,6 +436,30 @@ impl RelayClient {
         }
         let headers = response.headers().clone();
         let response_bytes = read_limited_response(response).await?;
+        /* The status first, because the relay signs only what it accepted.
+         * `signed_v1_middleware` signs a response when the request that asked
+         * for it verified — `if verified and isinstance(response,
+         * web.Response)`, `relay/app.py:172` — plus the single oversized-body
+         * refusal it signs before verifying, `relay/app.py:132-146`. Its two
+         * rejections of the envelope itself therefore go out bare, both 401:
+         * an unrecognised bridge key at `relay/app.py:127-128`, and a request
+         * signature it would not take at `relay/app.py:168-169`. So does a
+         * handler that panicked, and so does whatever answers when the relay
+         * is not running at all.
+         *
+         * Verifying first reported every one of those as
+         * `ResponseSignatureInvalid`, which named this client's own trust
+         * check as the fault when the fact on the wire was a 401 or a 503,
+         * and left the panel saying the reply was not signed by the paired
+         * server for what was an outage or a pairing the relay had forgotten.
+         *
+         * Nothing is read out of a response that is not an answer — the
+         * status is the whole diagnosis and the body is dropped — so an
+         * unsigned one has nothing to lie its way into. The 2xx this client
+         * does parse is still verified first. */
+        if let Some(failure) = failure_for_status(status) {
+            return Err(failure);
+        }
         let response_verification = ResponseVerification {
             method: method.as_str(),
             path,
@@ -445,12 +474,6 @@ impl RelayClient {
             &self.nonce_cache,
             &response_verification,
         )?;
-        if status.is_client_error() || status.is_server_error() {
-            if status == StatusCode::NOT_FOUND || status == StatusCode::FORBIDDEN {
-                return Err(RelayError::OwnershipRejected);
-            }
-            return Err(RelayError::RemoteRejected);
-        }
         serde_json::from_slice(&response_bytes).map_err(|_| RelayError::ResponseMalformed)
     }
 }
@@ -788,6 +811,31 @@ fn sign_headers(
         headers.push(header(HEADER_REQUEST_NONCE, request_nonce)?);
     }
     Ok(headers)
+}
+
+/// The typed cause a response that is not an answer carries, or `None` for the
+/// 2xx this client goes on to parse.
+///
+/// A 401 is the relay refusing this client rather than its request: nothing
+/// but the two envelope checks in `signed_v1_middleware` answers with one, so
+/// what it asks for is a pairing and never a retry. 502, 503 and 504 are what
+/// answers for a relay that is not there, which is the outage `RequestFailed`
+/// already stands for, down to being the one error a turn may retry. The
+/// relay's own refusals are 400, 403, 404, 409, 413 and 429.
+fn failure_for_status(status: StatusCode) -> Option<RelayError> {
+    if status.is_success() {
+        return None;
+    }
+    Some(match status.as_u16() {
+        401 => RelayError::Unauthorized,
+        403 | 404 => RelayError::OwnershipRejected,
+        502 | 503 | 504 => RelayError::RequestFailed,
+        _ if status.is_client_error() || status.is_server_error() => RelayError::RemoteRejected,
+        /* Neither an answer nor a refusal: a redirect this client does not
+         * follow, or a 1xx. Nothing the relay sends, and nothing to name it
+         * with beyond "not the shape a reply has". */
+        _ => RelayError::ResponseMalformed,
+    })
 }
 
 fn verify_response(
@@ -1199,6 +1247,40 @@ mod tests {
         })
     }
 
+    /* The relay's own refusal in the parts that decide this: a body, and no
+     * `X-Bridge-*` header over it, because nothing signs a response written
+     * before the envelope verified. It answers off the request head alone,
+     * like the refusal it stands in for: the unknown-bridge-key return sits
+     * ahead of `await request.read()`, `relay/app.py:127-131`. */
+    fn bare_error_server(
+        listener: TcpListener,
+        status_line: &'static str,
+        body: &'static str,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept relay request");
+            let mut head_bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !head_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await.expect("read request");
+                assert_ne!(count, 0, "request closed before headers");
+                head_bytes.extend_from_slice(&buffer[..count]);
+            }
+            let head = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(head.as_bytes())
+                .await
+                .expect("write relay headers");
+            stream
+                .write_all(body.as_bytes())
+                .await
+                .expect("write relay body");
+        })
+    }
+
     async fn seed_open_loop(
         manager: &MeetingSessionManager,
     ) -> (Arc<MeetingStore>, MeetingSessionId, MeetingLoopRow) {
@@ -1513,6 +1595,51 @@ mod tests {
             Some(RelayJobFailure::Failed)
         );
     }
+
+    /* A relay that refuses the envelope answers without signing it: the
+     * unknown-key 401 at `relay/app.py:127-128` and the bad-signature 401 at
+     * `:168-169` are both written while `verified` is still false, and a 503
+     * from a unit that is down was never near the signing key at all.
+     *
+     * Verifying before reading the status turned all three into
+     * `ResponseSignatureInvalid` - this client accusing the relay of forgery
+     * over a pairing the relay had forgotten, or over an outage, and telling
+     * the reader the reply was not signed by the paired server either way. */
+    #[test]
+    fn an_unsigned_error_is_reported_as_its_status_and_not_as_a_forgery() {
+        tauri::async_runtime::block_on(async {
+            for (status_line, body, expected) in [
+                (
+                    "401 Unauthorized",
+                    r#"{"error": {"code": "unauthorized", "message": "unknown bridge key"}}"#,
+                    RelayError::Unauthorized,
+                ),
+                (
+                    "503 Service Unavailable",
+                    "<html><body><h1>503 Service Unavailable</h1></body></html>",
+                    RelayError::RequestFailed,
+                ),
+            ] {
+                let secrets = memory_secrets();
+                let listener = TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind relay listener");
+                let endpoint = endpoint(&listener);
+                let server = bare_error_server(listener, status_line, body);
+                let (client, _) = relay_client(&secrets, &endpoint, &signing_key()).await;
+                assert_eq!(
+                    client
+                        .cancel_job("job-e2e", AgentPanelWorkspaceV1::SonaChat)
+                        .await
+                        .err(),
+                    Some(expected),
+                    "unsigned {status_line}"
+                );
+                server.await.expect("relay server task");
+            }
+        });
+    }
+
     #[test]
     fn signed_config_proposal_is_pending_and_settings_replay_is_fenced() {
         tauri::async_runtime::block_on(async {

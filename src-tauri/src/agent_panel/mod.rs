@@ -1906,7 +1906,9 @@ pub(crate) enum ChatTurnError {
 /// Everything meaning "this client cannot talk to a relay at all right now" is
 /// `Unreachable`; everything meaning "it talked, and the answer was not one"
 /// is `Failed`. `RandomUnavailable` sits with the first group because a client
-/// that cannot mint a nonce never sends anything.
+/// that cannot mint a nonce never sends anything, and `Unauthorized` sits there
+/// because a key the relay does not know is refused at the envelope, so no turn
+/// this client sends ever runs.
 fn chat_turn_error(error: RelayError) -> ChatTurnError {
     match error {
         RelayError::Disabled
@@ -1915,7 +1917,8 @@ fn chat_turn_error(error: RelayError) -> ChatTurnError {
         | RelayError::CleartextRejected
         | RelayError::SecretUnavailable
         | RelayError::RandomUnavailable
-        | RelayError::RequestFailed => ChatTurnError::Unreachable,
+        | RelayError::RequestFailed
+        | RelayError::Unauthorized => ChatTurnError::Unreachable,
         RelayError::ResponseTooLarge
         | RelayError::ResponseSignatureInvalid
         | RelayError::ResponseMalformed
@@ -2058,7 +2061,8 @@ fn turn_failure_for_relay_error(error: RelayError) -> AgentPanelTurnFailureV1 {
         | RelayError::CleartextRejected
         | RelayError::SecretUnavailable
         | RelayError::RandomUnavailable
-        | RelayError::RequestFailed => AgentPanelTurnFailureV1::Unreachable,
+        | RelayError::RequestFailed
+        | RelayError::Unauthorized => AgentPanelTurnFailureV1::Unreachable,
         RelayError::RemoteRejected => AgentPanelTurnFailureV1::Refused,
         RelayError::ResponseTooLarge
         | RelayError::ResponseSignatureInvalid
@@ -2120,7 +2124,7 @@ fn relay_status_for_error(error: RelayError) -> AgentPanelRelayStatusV1 {
         RelayError::ResponseSignatureInvalid
         | RelayError::ResponseMalformed
         | RelayError::ResponseTooLarge => AgentPanelRelayStatusV1::UntrustedResponse,
-        RelayError::RemoteRejected | RelayError::RandomUnavailable => {
+        RelayError::RemoteRejected | RelayError::RandomUnavailable | RelayError::Unauthorized => {
             AgentPanelRelayStatusV1::RemoteRejected
         }
         RelayError::OwnershipRejected => AgentPanelRelayStatusV1::OwnershipRejected,
@@ -2151,7 +2155,7 @@ fn map_relay_error(error: RelayError) -> AgentPanelCommandErrorV1 {
         RelayError::ResponseSignatureInvalid
         | RelayError::ResponseMalformed
         | RelayError::ResponseTooLarge => AgentPanelCommandErrorV1::UntrustedResponse,
-        RelayError::RemoteRejected | RelayError::RandomUnavailable => {
+        RelayError::RemoteRejected | RelayError::RandomUnavailable | RelayError::Unauthorized => {
             AgentPanelCommandErrorV1::RemoteRejected
         }
         RelayError::OwnershipRejected => AgentPanelCommandErrorV1::OwnershipRejected,
