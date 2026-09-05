@@ -1,12 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { ChevronDown } from "lucide-react";
 import type { ModelInfo } from "@/bindings";
+import { SettingsDisclosure } from "@/components/settings/rows";
 import type { ModelCardStatus } from "./ModelCard";
 import ModelCard from "./ModelCard";
 import { isLegacySource } from "./modelSource";
-import { SonaMark } from "../icons/SonaMark";
 import { SonaWordmark } from "../icons/SonaWordmark";
 import { useModelStore } from "../../stores/modelStore";
 import "./onboarding.css";
@@ -25,50 +24,39 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
     verifyingModels,
     extractingModels,
     downloadProgress,
-    downloadStats,
     cancelDownload,
   } = useModelStore();
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  const [showAll, setShowAll] = useState(false);
   const hasStartedSelection = useRef(false);
 
   const isBusy = selectedModelId !== null;
 
-  // Curate the download list: legacy (.bin/ONNX) downloads are deprecated and
-  // never shown here (they still appear in the compatible section if already on
-  // disk). The catalog arrives rank-sorted, so the first two recommended models
-  // are the featured picks — currently Parakeet Unified (English) and Nemotron
-  // Streaming (multilingual). Everything else hides behind "Show all".
-  const { downloadedModels, downloadable, topPicks, otherRecommended, rest } =
-    useMemo(() => {
-      const downloadedModels = models.filter(
-        (model: ModelInfo) => model.is_downloaded,
-      );
-      const downloadable = models.filter(
-        (model: ModelInfo) => !model.is_downloaded && !isLegacySource(model),
-      );
-      const recommended = downloadable.filter(
-        (model: ModelInfo) => model.is_recommended,
-      );
-      // `models` arrives in editorial rank order (the backend sorts by rank_of,
-      // then accuracy), so keep that order here: ranked-but-not-recommended models
-      // surface first, then the unranked tail by accuracy.
-      const rest = downloadable.filter(
-        (model: ModelInfo) => !model.is_recommended,
-      );
-      return {
-        downloadedModels,
-        downloadable,
-        topPicks: recommended.slice(0, 2),
-        otherRecommended: recommended.slice(2),
-        rest,
-      };
-    }, [models]);
+  /* One model on the page; every other model behind one summary.
+   *
+   * The catalog arrives rank-sorted (the backend sorts by rank_of, then
+   * accuracy), so the first recommended download is the editorial pick — but a
+   * model already on this Mac beats it, because choosing that one costs no
+   * download at all. Legacy (.bin/ONNX) sources are never offered as downloads;
+   * they still appear among the compatible models when they are already on
+   * disk. */
+  const { featured, onDisk, toDownload } = useMemo(() => {
+    const downloaded = models.filter((model: ModelInfo) => model.is_downloaded);
+    const downloadable = models.filter(
+      (model: ModelInfo) => !model.is_downloaded && !isLegacySource(model),
+    );
+    const ranked = [
+      ...downloadable.filter((model: ModelInfo) => model.is_recommended),
+      ...downloadable.filter((model: ModelInfo) => !model.is_recommended),
+    ];
+    const pick = downloaded[0] ?? ranked[0] ?? null;
+    return {
+      featured: pick,
+      onDisk: downloaded.filter((model: ModelInfo) => model !== pick),
+      toDownload: ranked.filter((model: ModelInfo) => model !== pick),
+    };
+  }, [models]);
 
-  const hasRecommended = topPicks.length > 0 || otherRecommended.length > 0;
-  // When nothing recommended remains to download (e.g. all already on disk),
-  // there is no curated subset to collapse, so just show the full list.
-  const showRest = showAll || !hasRecommended;
+  const otherCount = onDisk.length + toDownload.length;
 
   // Watch for the selected model to finish downloading + verifying + extracting
   useEffect(() => {
@@ -131,135 +119,78 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
     }
   };
 
-  const handleSelectExistingModel = (modelId: string) => {
-    setSelectedModelId(modelId);
-  };
-
-  const getModelStatus = (modelId: string): ModelCardStatus => {
+  const downloadStatus = (modelId: string): ModelCardStatus => {
     if (modelId in extractingModels) return "extracting";
     if (modelId in verifyingModels) return "verifying";
     if (modelId in downloadingModels) return "downloading";
     return "downloadable";
   };
 
-  const getExistingModelStatus = (modelId: string): ModelCardStatus => {
-    if (selectedModelId === modelId) return "switching";
-    return "available";
-  };
-
-  const getModelDownloadProgress = (modelId: string): number | undefined => {
-    return downloadProgress[modelId]?.percentage;
-  };
-
-  const getModelDownloadSpeed = (modelId: string): number | undefined => {
-    return downloadStats[modelId]?.speed;
-  };
+  /* Every card except the one being worked on goes quiet while a model is
+   * arriving: the reader has already chosen, and the row doing the work is the
+   * only one with anything left to say. */
+  const card = (model: ModelInfo) =>
+    model.is_downloaded ? (
+      <ModelCard
+        key={model.id}
+        model={model}
+        status={selectedModelId === model.id ? "switching" : "available"}
+        disabled={isBusy && selectedModelId !== model.id}
+        onSelect={setSelectedModelId}
+      />
+    ) : (
+      <ModelCard
+        key={model.id}
+        model={model}
+        status={downloadStatus(model.id)}
+        disabled={isBusy && selectedModelId !== model.id}
+        onSelect={handleDownloadModel}
+        onDownload={handleDownloadModel}
+        onCancel={handleCancelDownload}
+        downloadProgress={downloadProgress[model.id]?.percentage}
+      />
+    );
 
   return (
     <div className="onboarding-shell ob-stage">
-      <div className="ob-column h-full">
-        <div className="shrink-0">
-          <div className="ob-brand">
-            <SonaMark width={22} height={22} />
-            <SonaWordmark className="text-[14px]" />
-          </div>
-          <h1 className="ob-headline">
-            {t("onboarding.headline", "Pick a transcription model")}
-          </h1>
-          <p className="ob-subhead">{t("onboarding.subtitle")}</p>
+      <div className="ob-column">
+        <div className="ob-brand">
+          <SonaWordmark className="text-[14px]" />
         </div>
+        <h1 className="ob-headline">{t("onboarding.headline")}</h1>
+        <p className="ob-subhead">{t("onboarding.subtitle")}</p>
 
-        <div className="onboarding-panel ob-scroll min-h-0 flex-1">
-          {downloadedModels.length > 0 && (
-            <section className="ob-group">
-              <h2 className="ob-group-label">
-                {t("onboarding.existingModelsTitle")}
-              </h2>
-              <div className="ob-group-items">
-                {downloadedModels.map((model: ModelInfo) => (
-                  <ModelCard
-                    key={model.id}
-                    model={model}
-                    status={getExistingModelStatus(model.id)}
-                    disabled={isBusy}
-                    onSelect={handleSelectExistingModel}
-                    showRecommended={false}
-                  />
-                ))}
-              </div>
-            </section>
+        <div className="ob-pick">
+          {featured ? (
+            card(featured)
+          ) : (
+            <p className="text-[13px] leading-5 text-gray-800">
+              {t("modelSelector.noModelsAvailable")}
+            </p>
           )}
 
-          {downloadable.length > 0 && (
-            <section className="ob-group">
-              <h2 className="ob-group-label">
-                {t("onboarding.downloadModelsTitle")}
-              </h2>
-              <div className="ob-group-items">
-                {topPicks.map((model: ModelInfo) => (
-                  <ModelCard
-                    key={model.id}
-                    model={model}
-                    variant="featured"
-                    status={getModelStatus(model.id)}
-                    disabled={isBusy}
-                    onSelect={handleDownloadModel}
-                    onDownload={handleDownloadModel}
-                    onCancel={handleCancelDownload}
-                    downloadProgress={getModelDownloadProgress(model.id)}
-                    downloadSpeed={getModelDownloadSpeed(model.id)}
-                    showRecommended={false}
-                  />
-                ))}
-
-                {otherRecommended.map((model: ModelInfo) => (
-                  <ModelCard
-                    key={model.id}
-                    model={model}
-                    status={getModelStatus(model.id)}
-                    disabled={isBusy}
-                    onSelect={handleDownloadModel}
-                    onDownload={handleDownloadModel}
-                    onCancel={handleCancelDownload}
-                    downloadProgress={getModelDownloadProgress(model.id)}
-                    downloadSpeed={getModelDownloadSpeed(model.id)}
-                    showRecommended={false}
-                  />
-                ))}
-
-                {showRest &&
-                  rest.map((model: ModelInfo) => (
-                    <ModelCard
-                      key={model.id}
-                      model={model}
-                      status={getModelStatus(model.id)}
-                      disabled={isBusy}
-                      onSelect={handleDownloadModel}
-                      onDownload={handleDownloadModel}
-                      onCancel={handleCancelDownload}
-                      downloadProgress={getModelDownloadProgress(model.id)}
-                      downloadSpeed={getModelDownloadSpeed(model.id)}
-                      showRecommended={false}
-                    />
-                  ))}
-              </div>
-
-              {hasRecommended && rest.length > 0 && (
-                <button
-                  type="button"
-                  className="ob-more"
-                  aria-expanded={showAll}
-                  onClick={() => setShowAll((v) => !v)}
-                >
-                  {showAll
-                    ? t("onboarding.showFewerModels")
-                    : t("onboarding.showAllModels", {
-                        total: downloadable.length,
-                      })}
-                  <ChevronDown className="h-4 w-4" />
-                </button>
+          {otherCount > 0 && (
+            <SettingsDisclosure
+              label={t("onboarding.otherModels")}
+              fact={t("onboarding.moreModels", { total: otherCount })}
+            >
+              {onDisk.length > 0 && (
+                <section className="ob-group">
+                  <h2 className="ob-group-label">
+                    {t("onboarding.existingModelsTitle")}
+                  </h2>
+                  {onDisk.map(card)}
+                </section>
               )}
-            </section>
+              {toDownload.length > 0 && (
+                <section className="ob-group">
+                  <h2 className="ob-group-label">
+                    {t("onboarding.downloadModelsTitle")}
+                  </h2>
+                  {toDownload.map(card)}
+                </section>
+              )}
+            </SettingsDisclosure>
           )}
         </div>
       </div>

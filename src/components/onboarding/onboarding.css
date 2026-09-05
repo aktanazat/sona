@@ -2,15 +2,21 @@
  *
  * Both are one column, left-aligned, on the page surface — no panel, no card.
  * A permission is not a selectable object, so it is a flat section with a
- * hairline above it, per vercel.com/design.md. The only boxed thing on either
- * screen is a model, which really is selectable. */
+ * hairline above it, per vercel.com/design.md; a model is one you pick, so it
+ * is a row with a hover wash. Nothing on either screen is boxed: one screen
+ * that asks for one thing does not need a container to say where it is. */
 
 .ob-stage {
-  align-items: center;
+  /* Top-aligned with an auto margin on the column, not `align-items: center`:
+     the model list can outgrow the window once the disclosure is open, and a
+     centered flex child overflows in both directions with only one of them
+     scrollable. This centers while it fits and scrolls when it does not. */
+  align-items: flex-start;
   block-size: 100vh;
   display: flex;
   inline-size: 100vw;
   justify-content: center;
+  overflow-y: auto;
   padding: var(--space-6);
 }
 
@@ -18,6 +24,7 @@
   display: flex;
   flex-direction: column;
   inline-size: 100%;
+  margin-block: auto;
   max-inline-size: 460px;
   min-inline-size: 0;
 }
@@ -97,14 +104,14 @@
   margin-top: var(--space-3);
 }
 
-/* The waiting line. It never stands alone: the buttons beside it are what
- * makes a stalled grant recoverable, so a spinner is never the whole row. */
-.ob-waiting {
-  align-items: center;
-  color: var(--color-text-secondary);
-  display: flex;
+/* The waiting word, on the title line. It never stands alone: the two buttons
+ * under it are what makes a stalled grant recoverable. Bronze because the
+ * reader still has something to do about it, in a window this app does not
+ * own. */
+.ob-row-state {
+  color: var(--color-accent-strong);
+  flex: none;
   font-size: var(--type-secondary-size);
-  gap: var(--space-2);
   line-height: var(--type-secondary-line);
 }
 
@@ -132,17 +139,23 @@
   margin-top: var(--space-6);
 }
 
-/* Model choice keeps the same column, but its list scrolls and its rows are
- * real cards, because a model is a thing you pick. */
-.ob-scroll {
+/* Model choice keeps the same column: one model on the surface, every other
+   model inside the shared disclosure. */
+.ob-pick {
   margin-top: var(--space-6);
-  min-block-size: 0;
-  overflow-y: auto;
-  padding-bottom: var(--space-2);
 }
 
-.ob-group + .ob-group {
-  margin-top: var(--space-6);
+/* The shared disclosure is padded for a settings card (px-6). There is no card
+   on this screen, so its summary aligns to the column edge like every other
+   first-run row. */
+.ob-pick summary {
+  padding-inline: 0;
+}
+
+/* One group of models inside the disclosure. The disclosure's own body draws
+   the rule between the groups, so a group only needs its own breathing room. */
+.ob-group {
+  padding-block: var(--space-3);
 }
 
 .ob-group-label {
@@ -151,48 +164,105 @@
   font-weight: 500;
   letter-spacing: var(--ls-microlabel);
   line-height: var(--lh-microlabel);
+  margin-bottom: var(--space-1);
 }
 
-.ob-group-items {
+/* One model, as a row you pick. No inline padding: the name lines up with the
+   headline and the disclosure's summary, and the hover wash reads as a band
+   across the column the way a list row should. */
+.ob-card {
+  border-radius: var(--radius-control);
+  cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
+  gap: var(--space-0-5);
+  padding-block: var(--space-3);
+  transition: background-color var(--duration-fast) var(--ease-out);
 }
 
-.ob-more {
-  align-items: center;
-  align-self: start;
-  background: transparent;
-  border: 0;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  display: inline-flex;
-  font-size: var(--type-secondary-size);
-  font-weight: var(--fw-button);
-  gap: var(--space-1-5);
-  margin-top: var(--space-3);
-  padding: var(--space-1) 0;
+.ob-card + .ob-card {
+  border-top: 1px solid var(--color-border-subtle);
 }
 
-.ob-more:hover {
+.ob-card:hover {
+  background: var(--wash-hover);
+}
+
+.ob-card:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* A model already downloading is not selectable and says so by weight, not by
+   a second word: the work line under it is the sentence that explains why. */
+.ob-card[data-disabled] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.ob-card-head {
+  align-items: baseline;
+  display: flex;
+  gap: var(--space-3);
+  justify-content: space-between;
+}
+
+.ob-card-name {
   color: var(--color-text-primary);
+  font-size: var(--fs-label-14);
+  font-weight: var(--fw-button);
+  line-height: 20px;
+  min-inline-size: 0;
 }
 
-.ob-more svg {
-  transition: transform var(--duration-standard) var(--ease-out);
+/* What the download costs, on the right of its own name — the one fact a
+   first-run reader acts on before clicking. */
+.ob-card-size {
+  color: var(--color-text-secondary);
+  flex: none;
+  font-size: var(--type-secondary-size);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--type-secondary-line);
 }
 
-.ob-more[aria-expanded="true"] svg {
-  transform: rotate(180deg);
+.ob-card-line {
+  color: var(--color-text-secondary);
+  font-size: var(--type-secondary-size);
+  line-height: var(--type-secondary-line);
+  max-inline-size: 48ch;
+  text-wrap: pretty;
+}
+
+.ob-card-work {
+  align-items: center;
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.ob-card-track {
+  background: var(--color-border-subtle);
+  block-size: 2px;
+  border-radius: var(--radius-pill);
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.ob-card-fill {
+  background: var(--accent);
+  block-size: 100%;
+}
+
+.ob-card-work-label {
+  color: var(--color-text-secondary);
+  flex: none;
+  font-size: var(--type-secondary-size);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--type-secondary-line);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .ob-spinner {
     animation-duration: 2s;
-  }
-
-  .ob-more svg {
-    transition: none;
   }
 }

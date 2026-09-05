@@ -9,17 +9,6 @@
   min-block-size: 100%;
 }
 
-.onboarding-panel {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  margin-inline: auto;
-  max-inline-size: 560px;
-  overflow-y: auto;
-  padding: var(--space-6) var(--space-4) var(--space-8);
-}
-
 /* ------------------------------------------------------------- motion */
 
 @media (prefers-reduced-motion: reduce) {
