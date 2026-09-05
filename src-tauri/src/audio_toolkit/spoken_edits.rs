@@ -15,8 +15,11 @@ use std::ops::Range;
 const SEGMENT_BOUNDARY_MARKS: &[char] = &['.', '!', '?', '…', ',', ';', ':', '\n'];
 
 /// The subset of [`SEGMENT_BOUNDARY_MARKS`] that closes a sentence, which is
-/// how far back `scratch that` reaches.
-const SENTENCE_END_MARKS: &[char] = &['.', '!', '?', '…', '\n'];
+/// how far back `scratch that` reaches. Shared with the query plane, which
+/// splits a transcript chunk into sentences to quote the one that matched:
+/// which marks close a sentence is a fact about the language, not about either
+/// caller.
+pub(crate) const SENTENCE_END_MARKS: &[char] = &['.', '!', '?', '…', '\n'];
 
 /// Padding that is not a line break. Vertical whitespace is load-bearing here
 /// (an earlier stage emits it deliberately), so it is never trimmed away.

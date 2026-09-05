@@ -26,8 +26,9 @@
 //! the push: the state row records *what* was indexed, so a missed
 //! notification costs latency, not accuracy.
 
+use crate::audio_toolkit::spoken_edits::SENTENCE_END_MARKS;
 use crate::managers::history::semantic::{
-    cosine_similarity, encode_vector, SemanticModel, SIMILARITY_FLOOR,
+    cosine_of_vectors, cosine_similarity, encode_vector, SemanticModel, SIMILARITY_FLOOR,
 };
 use crate::managers::history::HistoryManager;
 use crate::meeting::store::query_plane::MeetingQueryCandidate;
@@ -137,6 +138,13 @@ pub(crate) fn top_up_index(store: &MeetingStore, model: &SemanticModel, limit: u
 /// subject for an hour does not crowd out every other answer. Rows below the
 /// floor are not weak matches, they are absent: the floor is what keeps
 /// "everything is a little bit similar to everything" out of a search box.
+///
+/// The chunk is what scores; the sentence inside it is what the reader is
+/// shown. A chunk is a few sentences wide because that is the unit that embeds
+/// to a subject, and quoting all of it hands an answering model 480 characters
+/// of which one clause is the reason the row is there. So the winning chunk is
+/// re-scored sentence by sentence, against the same query vector, and the
+/// nearest sentence becomes the snippet.
 pub(crate) fn meeting_matches(
     store: &MeetingStore,
     model: &SemanticModel,
@@ -177,7 +185,17 @@ pub(crate) fn meeting_matches(
         .iter()
         .map(|(_, (_, chunk_id, _))| *chunk_id)
         .collect::<Vec<_>>();
-    store.query_meetings_by_chunk(&chunk_ids)
+    let mut candidates = store.query_meetings_by_chunk(&chunk_ids)?;
+    for candidate in &mut candidates {
+        // Bounded by construction: only the chunks that reached the page are
+        // split, and a chunk is at most a handful of sentences.
+        let sentence = best_sentence(&candidate.snippet, &vector, |text| model.encode(text))
+            .map(str::to_owned);
+        if let Some(sentence) = sentence {
+            candidate.snippet = sentence;
+        }
+    }
+    Ok(candidates)
 }
 
 /// Consecutive transcript segments joined up to [`TARGET_CHUNK_CHARS`].
@@ -205,6 +223,82 @@ fn chunk_transcript(segments: &[String]) -> Vec<String> {
         chunks.push(current);
     }
     chunks
+}
+
+/// The sentence of `chunk` nearest to `query`, or `None` when `chunk` is one
+/// sentence and is therefore already the text that matched.
+///
+/// No floor applies here. The chunk cleared it, and this is not a second
+/// membership decision: it picks which words of an answer that already belongs
+/// on the page are the ones to show. A sentence the model cannot embed — no
+/// token it knows — loses to any sentence it can, and a chunk of nothing but
+/// such sentences keeps the chunk.
+///
+/// `embed` is the model the chunk was embedded with, taken as a function so
+/// the choice can be tested against a vocabulary a test writes rather than a
+/// 28.8MB download.
+fn best_sentence<'chunk>(
+    chunk: &'chunk str,
+    query: &[f32],
+    embed: impl Fn(&str) -> Option<Vec<f32>>,
+) -> Option<&'chunk str> {
+    let sentences = sentences(chunk);
+    if sentences.len() < 2 {
+        return None;
+    }
+    let mut best: Option<(f32, &str)> = None;
+    for sentence in sentences {
+        let Some(score) = embed(sentence)
+            .as_deref()
+            .and_then(|vector| cosine_of_vectors(vector, query))
+        else {
+            continue;
+        };
+        if best.is_none_or(|(highest, _)| score > highest) {
+            best = Some((score, sentence));
+        }
+    }
+    best.map(|(_, sentence)| sentence)
+}
+
+/// One sentence per element, terminators kept, in the order they were said.
+///
+/// A mark closes a sentence only when whitespace or the end of the chunk
+/// follows it. So a decimal keeps its dot, a run of marks (`Wait?!`) closes
+/// once at the end of the run, and a line break — a mark that is whitespace
+/// itself — closes on its own.
+///
+/// An abbreviation before a space (`e.g. this`) does split, and the fragment
+/// it leaves is not a sentence. Nothing reads it as one: the fragment competes
+/// for the snippet on its own embedding, and three characters of `e.g.` score
+/// below whichever sentence carries the subject.
+fn sentences(chunk: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut characters = chunk.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if !SENTENCE_END_MARKS.contains(&character) {
+            continue;
+        }
+        let closes = character.is_whitespace()
+            || characters
+                .peek()
+                .is_none_or(|(_, next)| next.is_whitespace());
+        if !closes {
+            continue;
+        }
+        let end = index + character.len_utf8();
+        let sentence = chunk[start..end].trim();
+        if !sentence.is_empty() {
+            sentences.push(sentence);
+        }
+        start = end;
+    }
+    let tail = chunk[start..].trim();
+    if !tail.is_empty() {
+        sentences.push(tail);
+    }
+    sentences
 }
 
 fn utc_now_ms() -> i64 {
@@ -237,6 +331,85 @@ mod tests {
     fn empty_and_blank_segments_produce_no_chunks() {
         assert!(chunk_transcript(&[]).is_empty());
         assert!(chunk_transcript(&["   ".to_string(), "\n".to_string()]).is_empty());
+    }
+
+    /// A stand-in for the static embedding table: one lane per word of a
+    /// vocabulary this test writes, mean-pooled and normalised the way
+    /// [`SemanticModel::encode`] normalises, and `None` for text holding no
+    /// word it knows — the same answer the real encoder gives text of no known
+    /// tokens.
+    ///
+    /// It reproduces the one property the sentence pick rests on: text about
+    /// the query's words scores above text about other words. The real table
+    /// is a 28.8MB download, and a test that runs only where somebody fetched
+    /// it reports nothing about this machine.
+    fn embed(text: &str) -> Option<Vec<f32>> {
+        const VOCABULARY: [&str; 6] = ["beef", "supplier", "price", "deck", "friday", "tier"];
+
+        let mut vector = vec![0.0_f32; VOCABULARY.len()];
+        for word in text.split_whitespace() {
+            let word = word.trim_matches(|character: char| !character.is_alphanumeric());
+            if let Some(lane) = VOCABULARY
+                .iter()
+                .position(|known| known.eq_ignore_ascii_case(word))
+            {
+                vector[lane] += 1.0;
+            }
+        }
+        let length = vector.iter().map(|lane| lane * lane).sum::<f32>().sqrt();
+        (length > 0.0).then(|| vector.iter().map(|lane| lane / length).collect())
+    }
+
+    /// The defect this exists to close: a reader asked about beef and was
+    /// handed 227 characters that never mention it.
+    #[test]
+    fn the_snippet_is_the_sentence_that_matched_not_the_chunk_around_it() {
+        let query = embed("beef").expect("the query names a known word");
+
+        let sentence = best_sentence(
+            "The deck goes out on Friday. Our beef supplier raised the price again.",
+            &query,
+            embed,
+        );
+
+        assert_eq!(sentence, Some("Our beef supplier raised the price again."));
+    }
+
+    #[test]
+    fn a_one_sentence_chunk_is_already_the_text_that_matched() {
+        let query = embed("beef").expect("the query names a known word");
+
+        assert_eq!(
+            best_sentence("Our beef supplier raised the price.", &query, embed),
+            None,
+            "there is nothing to narrow, so the caller keeps the chunk it has"
+        );
+    }
+
+    #[test]
+    fn a_chunk_the_model_knows_no_word_of_keeps_its_own_text() {
+        let query = embed("beef").expect("the query names a known word");
+
+        assert_eq!(
+            best_sentence("Zzz qqq. Xyzzy plugh.", &query, embed),
+            None,
+            "no sentence could be scored, so none of them may be called the match"
+        );
+    }
+
+    #[test]
+    fn a_mark_closes_a_sentence_only_when_space_or_nothing_follows_it() {
+        assert_eq!(
+            sentences("The tier is 3.5x cheaper. Wait?! Yes.\nSend the deck"),
+            [
+                "The tier is 3.5x cheaper.",
+                "Wait?!",
+                "Yes.",
+                "Send the deck",
+            ],
+            "a decimal keeps its dot, a run of marks closes once, a line break \
+             closes on its own, and an unterminated tail is still a sentence"
+        );
     }
 
     /// The fixture model directory, the same one

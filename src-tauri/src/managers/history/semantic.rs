@@ -298,6 +298,24 @@ pub(crate) fn cosine_similarity(stored: &[u8], query: &[f32]) -> Option<f32> {
     sum.is_finite().then_some(sum)
 }
 
+/// Cosine similarity of two vectors that are both in memory, for text
+/// embedded to be compared once and thrown away rather than stored.
+///
+/// The same dot product as [`cosine_similarity`], on the same unit-vector
+/// guarantee, and `None` on a length mismatch for the same reason: two models'
+/// vectors are not comparable.
+pub(crate) fn cosine_of_vectors(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() {
+        return None;
+    }
+    let sum = left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum::<f32>();
+    sum.is_finite().then_some(sum)
+}
+
 /// The one text Sona embeds for a history row.
 ///
 /// Post-processing rewrites the same content, so the polished text is the
