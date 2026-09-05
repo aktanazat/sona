@@ -12,8 +12,15 @@ import { useSettings } from "@/hooks/useSettings";
  * answering one question — should Sona make a noise, and how loud — so it is
  * one row, with the loudness beside the switch that silences it.
  *
- * The percentage sits in `fact`, which is tabular, so the label does not shift
- * under the drag. */
+ * Off, the loudness is not there at all. A dimmed slider under a silent app
+ * is a control that cannot do anything, and the reader has to work that out
+ * from its grey before moving on; absent, there is nothing to work out.
+ *
+ * The percentage sits in `fact`, which is tabular, so the label does not
+ * shift under the drag — and it is the only place the volume is stated, which
+ * is why the "Sound volume" caption that used to sit beside the slider is
+ * gone. It survives as the slider's accessible name, where it is the one
+ * thing a screen reader cannot infer. */
 export const SoundsRow: React.FC = () => {
   const { t } = useTranslation();
   const { getSetting, updateSetting, isUpdating, audioFeedbackEnabled } =
@@ -28,21 +35,19 @@ export const SoundsRow: React.FC = () => {
       fact={audioFeedbackEnabled ? `${Math.round(volume * 100)}%` : undefined}
       controlId={id}
     >
-      <span className="text-[12px] text-gray-800">
-        {t("settingsV2.essentials.volume")}
-      </span>
-      <Slider
-        aria-label={t("settingsV2.essentials.volume")}
-        value={[volume]}
-        onValueChange={([next]) =>
-          void updateSetting("audio_feedback_volume", next)
-        }
-        min={0}
-        max={1}
-        step={0.01}
-        disabled={!audioFeedbackEnabled}
-        className="w-32"
-      />
+      {audioFeedbackEnabled ? (
+        <Slider
+          aria-label={t("settingsV2.essentials.volume")}
+          value={[volume]}
+          onValueChange={([next]) =>
+            void updateSetting("audio_feedback_volume", next)
+          }
+          min={0}
+          max={1}
+          step={0.01}
+          className="w-32"
+        />
+      ) : null}
       <Switch
         id={id}
         checked={audioFeedbackEnabled}
