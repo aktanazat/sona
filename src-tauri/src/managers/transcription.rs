@@ -4553,7 +4553,7 @@ mod tests {
 
         assert_eq!(
             result,
-            "so the weather forecast said it would probably rain throughout the whole weekend"
+            "So the weather forecast said it would probably rain throughout the whole weekend"
         );
     }
 

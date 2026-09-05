@@ -1078,6 +1078,68 @@ fn collapse_stutters(text: &str) -> String {
     result.join(" ")
 }
 
+/// Whether the text emitted so far leaves the next word opening a sentence.
+///
+/// Nothing but whitespace so far means the deleted filler stood at the very
+/// beginning, so whatever follows inherits the opening capital.
+fn opens_sentence(emitted: &str) -> bool {
+    emitted
+        .chars()
+        .rev()
+        .find(|character| !character.is_whitespace())
+        .is_none_or(|character| matches!(character, '.' | '!' | '?' | '…'))
+}
+
+/// Appends `text`, promoting its first word character to uppercase when a
+/// deleted filler owes the sentence its capital.
+///
+/// Only ASCII letters are promoted, the same Latin scope
+/// [`preserve_ascii_case`] keeps: elsewhere an uppercase form is either absent
+/// (Chinese, Japanese, Thai) or locale-dependent (Turkish dotless i), and
+/// there the recogniser's own casing is the better guess. The first word
+/// character settles the debt either way, so a digit or a Cyrillic word is not
+/// passed over in search of a letter that could carry the capital.
+fn append_restoring_capital(output: &mut String, text: &str, capital_owed: &mut bool) {
+    if !*capital_owed {
+        output.push_str(text);
+        return;
+    }
+    let Some((index, character)) = text
+        .char_indices()
+        .find(|(_, character)| character.is_alphanumeric())
+    else {
+        output.push_str(text);
+        return;
+    };
+
+    *capital_owed = false;
+    output.push_str(&text[..index]);
+    output.push(character.to_ascii_uppercase());
+    output.push_str(&text[index + character.len_utf8()..]);
+}
+
+/// Deletes every match of one filler pattern, carrying a sentence's capital
+/// over to the word that takes the deleted filler's place.
+///
+/// The sentence boundary is read off the text kept so far rather than the
+/// input, because the pattern also eats a trailing comma or period: when the
+/// deletion swallowed the period that ended the previous sentence, no sentence
+/// starts here any more and no capital is owed.
+fn remove_filler_matches(text: &str, pattern: &Regex) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut resume = 0;
+    let mut capital_owed = false;
+
+    for deleted in pattern.find_iter(text) {
+        append_restoring_capital(&mut kept, &text[resume..deleted.start()], &mut capital_owed);
+        capital_owed |= opens_sentence(&kept);
+        resume = deleted.end();
+    }
+    append_restoring_capital(&mut kept, &text[resume..], &mut capital_owed);
+
+    kept
+}
+
 /// Removes filler words from transcription output when enabled.
 ///
 /// Built-in removal is two-tiered: [`UNIVERSAL_FILLER_WORDS`] apply regardless
@@ -1087,6 +1149,11 @@ fn collapse_stutters(text: &str) -> String {
 /// evidence. `Some(empty vec)` disables removal, preserving the legacy
 /// power-user setting. The master toggle takes precedence over both built-in
 /// and custom lists.
+///
+/// A deletion that opens a sentence hands the capital to the word taking the
+/// filler's place: `"Um, so I think"` leaves `"So I think"`, because the
+/// recogniser capitalized `Um` for standing where it stood and not for being
+/// itself.
 ///
 /// # Arguments
 /// * `text` - The raw transcription text to filter
@@ -1129,10 +1196,9 @@ pub fn remove_filler_words(
             .collect(),
     };
 
-    // Remove filler words
     let mut filtered = text.to_string();
     for pattern in &patterns {
-        filtered = pattern.replace_all(&filtered, "").to_string();
+        filtered = remove_filler_matches(&filtered, pattern);
     }
 
     filtered
@@ -1427,7 +1493,7 @@ mod tests {
     fn test_filter_filler_words_case_insensitive() {
         let text = "UHM this is UH a test";
         let result = filter_transcription_output(text, "en", &None);
-        assert_eq!(result, "this is a test");
+        assert_eq!(result, "This is a test");
     }
 
     #[test]
@@ -1435,6 +1501,44 @@ mod tests {
         let text = "Well, uhm, I think, uh. that's right";
         let result = filter_transcription_output(text, "en", &None);
         assert_eq!(result, "Well, I think, that's right");
+    }
+
+    #[test]
+    fn a_leading_filler_hands_its_capital_to_the_next_word() {
+        let result = filter_transcription_output("Um, so I think this works", "en", &None);
+        assert_eq!(result, "So I think this works");
+    }
+
+    #[test]
+    fn a_filler_after_a_full_stop_opens_the_next_sentence() {
+        let result = filter_transcription_output("That works. Uh, this one does not", "en", &None);
+        assert_eq!(result, "That works. This one does not");
+    }
+
+    #[test]
+    fn a_filler_inside_a_sentence_leaves_the_next_word_lowercase() {
+        let result = filter_transcription_output("I was uh thinking about this", "en", &None);
+        assert_eq!(result, "I was thinking about this");
+    }
+
+    #[test]
+    fn a_filler_that_swallows_the_full_stop_owes_no_capital() {
+        // The pattern takes a trailing period with the filler, so the sentence
+        // that period ended is gone as well and the two halves merge. A
+        // capital here would open a sentence the reader cannot see.
+        let result = filter_transcription_output("that works uh. this one does not", "en", &None);
+        assert_eq!(result, "that works this one does not");
+    }
+
+    #[test]
+    fn a_restored_capital_stays_out_of_non_latin_scripts() {
+        let filtered = remove_filler_words(
+            "Ммм это работает",
+            &OutputLanguageEvidence::Unknown,
+            &None,
+            true,
+        );
+        assert_eq!(normalize_transcription_output(&filtered), "это работает");
     }
 
     #[test]
@@ -1455,7 +1559,7 @@ mod tests {
     fn test_filter_combined() {
         let text = "  Uhm, so I was, uh, thinking about this  ";
         let result = filter_transcription_output(text, "en", &None);
-        assert_eq!(result, "so I was, thinking about this");
+        assert_eq!(result, "So I was, thinking about this");
     }
 
     #[test]
@@ -1542,7 +1646,7 @@ mod tests {
 
         // The hesitations it stood for still go.
         let hesitation = filter_transcription_output("um so ah I think eh yes", "en", &None);
-        assert_eq!(hesitation, "so I think yes");
+        assert_eq!(hesitation, "So I think yes");
     }
 
     #[test]
@@ -1558,7 +1662,7 @@ mod tests {
         let custom = Some(vec!["okay".to_string(), "right".to_string()]);
         let text = "okay so I think right this works";
         let result = filter_transcription_output(text, "en", &custom);
-        assert_eq!(result, "so I think this works");
+        assert_eq!(result, "So I think this works");
     }
 
     #[test]
@@ -1594,7 +1698,7 @@ mod tests {
         );
         assert_eq!(
             normalize_transcription_output(&filtered),
-            "bueno creo que um ha llegado"
+            "Bueno creo que um ha llegado"
         );
 
         let cyrillic = remove_filler_words(
@@ -1617,7 +1721,7 @@ mod tests {
         assert_eq!(normalize_transcription_output(&unknown), text);
 
         let result = filter_transcription_output(text, "de", &None);
-        assert_eq!(result, "ich glaube das passt");
+        assert_eq!(result, "Ich glaube das passt");
     }
 
     #[test]
@@ -1646,7 +1750,7 @@ mod tests {
         );
         assert_eq!(
             normalize_transcription_output(&text),
-            "je pense que ça marche"
+            "Je pense que ça marche"
         );
     }
 
@@ -1669,7 +1773,7 @@ mod tests {
         let filtered = remove_filler_words(text, &OutputLanguageEvidence::Unknown, &custom, true);
         let result = normalize_transcription_output(&filtered);
 
-        assert_eq!(result, "should be removed but um should remain");
+        assert_eq!(result, "Should be removed but um should remain");
     }
 
     #[test]
