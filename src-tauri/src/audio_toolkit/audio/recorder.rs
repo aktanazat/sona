@@ -361,7 +361,7 @@ impl ActiveMeetingCapture {
         SourceStopReport {
             track_id: self.plan.track_id,
             final_offset_ns: self.final_offset_ns,
-            health: SourceHealth::Stopped,
+            health: SourceHealth::Healthy,
             observed_gaps: self.observed_gaps.clone(),
         }
     }

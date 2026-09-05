@@ -317,6 +317,7 @@ export const TranscriptTab: React.FC<TranscriptTabProps> = ({
       <SettingsSection label={t("meetings.review.capture")}>
         <MeetingSourceList
           sources={snapshot.session.sources}
+          phase={snapshot.session.phase}
           label={t("meetings.review.capture")}
         />
         <GapRows gaps={snapshot.gaps} />

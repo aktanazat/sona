@@ -9,10 +9,11 @@ import type {
   SourceHealth,
 } from "@/bindings";
 import { cn } from "@/lib/cn";
-import { FactChip, Microlabel } from "@/components/settings/rows";
+import { Microlabel } from "@/components/settings/rows";
 import {
   captureCompletenessKey,
-  formatMeetingOffset,
+  isActiveMeetingPhase,
+  isPreflightMeetingPhase,
   meetingPhaseKey,
   processingStatusKey,
   sourceAvailabilityKey,
@@ -192,10 +193,8 @@ const HEALTH_TONES = {
   not_started: "muted",
   starting: "muted",
   healthy: "muted",
-  paused: "muted",
   degraded: "warning",
   failed: "danger",
-  stopped: "muted",
 } as const satisfies Record<SourceHealth, StatusTone>;
 
 /** The one word a person reads for a source, out of the two states the
@@ -203,23 +202,25 @@ const HEALTH_TONES = {
  * `availability` says it is allowed to do anything at all.
  *
  * "Healthy" and "Not started" describe a subsystem; "Recording" and "Ready"
- * describe a recording. The three the wire has no human word for keep theirs:
- * a paused source is paused, a failed one failed, and both read as what
- * happened rather than as a status code. */
+ * describe a recording. The two the wire has no human word for keep theirs:
+ * a failed source failed, and it reads as what happened rather than as a
+ * status code.
+ *
+ * Health is granted by the first packet that reached the disk and taken by
+ * the first loss; the seal does not touch it, so a lane that recorded is
+ * `healthy` for the life of the meeting. Once the meeting is over that word
+ * is past tense: the lane is not recording, it recorded. */
 const SOURCE_STATE_KEYS = {
   not_started: "meetings.status.state.ready",
   starting: "meetings.health.starting",
   healthy: "meetings.status.state.recording",
-  paused: "meetings.health.paused",
   degraded: "meetings.status.state.recording",
   failed: "meetings.health.failed",
-  stopped: "meetings.status.state.recorded",
 } as const satisfies Record<SourceHealth, string>;
 
 interface MeetingSourceItemProps {
   source: MeetingSourceSnapshot;
-  elapsedOffsetNs: number | null;
-  showTelemetry: boolean;
+  sealed: boolean;
 }
 
 /* One capture source per row, flat on a hairline: what it is, and one word
@@ -233,21 +234,17 @@ interface MeetingSourceItemProps {
  * what the row says; the moments themselves are listed underneath it, where
  * they carry the times and the measured loss.
  *
- * There is no level meter here and there cannot be one: capture publishes
- * availability, health, a durable offset and that gap count, and no signal
- * amplitude at any point in the pipeline. A moving bar would be drawn from
- * nothing. "SIGNAL Not reported" is the honest version of that fact, set as a
- * measurement pair on the live surface, which is why it stays. */
+ * A signal reading and a durability lag used to sit under each row on the live
+ * screen. Round 7 took that screen down to the title, the clock, Stop and the
+ * arriving words, and nothing else renders this list with telemetry, so the
+ * pair went with it. Neither was a measurement of the recording anyway:
+ * capture publishes no signal amplitude at any point in the pipeline, so
+ * "SIGNAL Not reported" was a label for a number that does not exist. */
 const MeetingSourceItem: React.FC<MeetingSourceItemProps> = ({
   source,
-  elapsedOffsetNs,
-  showTelemetry,
+  sealed,
 }) => {
   const { t } = useTranslation();
-  const durableLagNs =
-    source.last_durable_offset_ns === null || elapsedOffsetNs === null
-      ? null
-      : Math.max(0, elapsedOffsetNs - source.last_durable_offset_ns);
   const blocked = source.availability !== "available";
 
   return (
@@ -277,7 +274,12 @@ const MeetingSourceItem: React.FC<MeetingSourceItemProps> = ({
         >
           {blocked
             ? t(sourceAvailabilityKey(source.availability))
-            : t(SOURCE_STATE_KEYS[source.health])}
+            : t(
+                sealed &&
+                  (source.health === "healthy" || source.health === "degraded")
+                  ? "meetings.status.state.recorded"
+                  : SOURCE_STATE_KEYS[source.health],
+              )}
         </StatusWord>
       </div>
       {source.gap_count > 0 ? (
@@ -285,49 +287,36 @@ const MeetingSourceItem: React.FC<MeetingSourceItemProps> = ({
           {t("meetings.status.someAudioMissing")}
         </StatusWord>
       ) : null}
-      {showTelemetry ? (
-        <p className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1">
-          <FactChip
-            label={t("meetings.live.signal")}
-            value={t("meetings.live.notReported")}
-          />
-          <FactChip
-            label={t("meetings.live.durabilityLag")}
-            value={
-              durableLagNs === null
-                ? t("meetings.live.notReported")
-                : t("meetings.live.behind", {
-                    duration: formatMeetingOffset(durableLagNs),
-                  })
-            }
-          />
-        </p>
-      ) : null}
     </li>
   );
 };
 
 export interface MeetingSourceListProps {
   sources: MeetingSourceSnapshot[];
+  phase: MeetingPhase;
   label: string;
-  elapsedOffsetNs?: number | null;
-  showTelemetry?: boolean;
 }
 
 export const MeetingSourceList: React.FC<MeetingSourceListProps> = ({
   sources,
+  phase,
   label,
-  elapsedOffsetNs = null,
-  showTelemetry = false,
-}) => (
-  <ul role="list" aria-label={label} className="divide-y divide-gray-alpha-400">
-    {sources.map((source) => (
-      <MeetingSourceItem
-        key={source.source_kind}
-        source={source}
-        elapsedOffsetNs={elapsedOffsetNs}
-        showTelemetry={showTelemetry}
-      />
-    ))}
-  </ul>
-);
+}) => {
+  const sealed =
+    !isActiveMeetingPhase(phase) && !isPreflightMeetingPhase(phase);
+  return (
+    <ul
+      role="list"
+      aria-label={label}
+      className="divide-y divide-gray-alpha-400"
+    >
+      {sources.map((source) => (
+        <MeetingSourceItem
+          key={source.source_kind}
+          source={source}
+          sealed={sealed}
+        />
+      ))}
+    </ul>
+  );
+};

@@ -147,7 +147,7 @@ const SNAPSHOT: MeetingReviewSnapshot = {
         source_kind: "microphone",
         required: true,
         availability: "available",
-        health: "stopped",
+        health: "healthy",
         format: { sample_rate_hz: 16_000, channels: 1 },
         last_durable_offset_ns: 1_845_000_000_000,
         gap_count: 0,

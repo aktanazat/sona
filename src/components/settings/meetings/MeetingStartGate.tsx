@@ -6,19 +6,17 @@ import type {
   MeetingReviewSnapshot,
   SourceKind,
 } from "@/bindings";
-import { cn } from "@/lib/cn";
 import {
   PageTitle,
   SETTINGS_SURFACE,
   SettingsPage,
-  SettingsRow,
   SettingsSection,
 } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { Checkbox } from "@/components/vg/checkbox";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { MeetingPreviewCard } from "./MeetingPreviewCard";
-import { MeetingSourceList, SourceAvailabilityText } from "./MeetingStatus";
+import { MeetingSourceList } from "./MeetingStatus";
 import type { MeetingStartOptions } from "./meetingTypes";
 import { preflightAllowsAction } from "./meetingUtils";
 
@@ -28,10 +26,16 @@ import { preflightAllowsAction } from "./meetingUtils";
  *
  * It is not a wizard step. It names the one thing that is wrong and offers the
  * two honest ways out — fix it and retry, or record without that source and
- * carry the partial mark. The wrong source is named once, in the capture-status
- * rows: those rows already print every source's availability in its own tone,
- * so the card that used to list the blocked ones above them was the same fact
- * twice on one screen.
+ * carry the partial mark. The wrong source is named once, in the list of what
+ * this will record: that list already prints every source's availability in
+ * its own tone, so the card that used to repeat the blocked ones above it was
+ * the same fact twice on one screen. Round 7 took the two rows that sat under
+ * it as well — a "Storage" row whose value read "Encrypted meeting storage is
+ * available" and a "Local model" row reading "Available" are the preflight
+ * reporting that it succeeded, on the one screen that exists because
+ * something failed. Storage now speaks only when it is broken, and a missing
+ * local model is Insights' subject, at the moment it stops notes from being
+ * written.
  *
  * The assurance sentence sits directly above the action row here too, on the
  * page rather than behind an affordance, because this is one of the three
@@ -143,39 +147,23 @@ export const MeetingStartGate: React.FC<MeetingStartGateProps> = ({
         </ul>
       )}
 
-      <SettingsSection label={t("meetings.review.status")}>
+      <SettingsSection label={t("meetings.gate.sources")}>
         <MeetingSourceList
           sources={snapshot.session.sources}
-          label={t("meetings.review.status")}
+          phase={snapshot.session.phase}
+          label={t("meetings.gate.sources")}
         />
-        <SettingsRow label={t("meetings.preflight.storage")}>
-          <span
-            className={cn(
-              "text-[13px] leading-[18px]",
-              storageAvailable ? "text-gray-900" : "text-red-900",
-            )}
-          >
-            {storageAvailable
-              ? t("meetings.preflight.storageAvailable")
-              : t("meetings.preflight.storageUnavailable")}
-          </span>
-        </SettingsRow>
-        <SettingsRow label={t("meetings.preflight.localModel")}>
-          <SourceAvailabilityText
-            availability={
-              snapshot.session.preflight_local_processing ?? "unknown"
-            }
-            live="polite"
-          />
-        </SettingsRow>
       </SettingsSection>
+
+      {storageAvailable ? null : (
+        <p role="status" className="text-[14px] leading-[21px] text-red-900">
+          {t("meetings.preflight.storageUnavailable")}
+        </p>
+      )}
 
       <div className="flex flex-col gap-4">
         <p className="text-[14px] leading-[21px] text-pretty text-gray-1000">
-          {t(
-            "meetings.start.assurance",
-            "Records your Mac's audio locally. Nothing joins the call.",
-          )}
+          {t("meetings.start.assurance")}
         </p>
 
         {blocked ? (
@@ -225,7 +213,7 @@ export const MeetingStartGate: React.FC<MeetingStartGateProps> = ({
             >
               {starting
                 ? t("meetings.start.starting", "Starting…")
-                : t("meetings.start.action", "Start recording")}
+                : t("meetings.start.action")}
             </Button>
           )}
         </div>

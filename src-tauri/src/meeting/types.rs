@@ -155,10 +155,8 @@ pub enum SourceHealth {
     NotStarted,
     Starting,
     Healthy,
-    Paused,
     Degraded,
     Failed,
-    Stopped,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
