@@ -2700,10 +2700,22 @@ impl MeetingSessionManager {
     /// receipt and one draft rather than two.
     ///
     /// No engine is not a failure. The evidence goes back either way and the
-    /// sheet renders it as the draft, which is why this returns `Ok` with
+    /// sheet renders it as the draft, which is why that case returns `Ok` with
     /// [`MeetingFollowUpSource::Structured`] rather than an error the button
     /// would have to hide behind. A meeting with no record at all is the one
     /// real absence, and that is `NotFound`.
+    ///
+    /// An engine that was asked and did not answer is a third thing, and it is
+    /// an error. Until this said so, `.ok()` swallowed it and the sheet showed
+    /// the structured draft as if that had been the plan, so a relay that was
+    /// down was indistinguishable from a machine with no engine configured.
+    ///
+    /// The generation runs off the runtime, for the same reason
+    /// `artifacts_regenerate` does it: the trait is synchronous, the engine
+    /// may be the relay, and a runtime worker blocked on the answer is a
+    /// worker the relay's own turn needs in order to run. That is why this
+    /// button sat at `Drafting...` forever with no request ever leaving the
+    /// process.
     pub async fn follow_up_draft(
         &self,
         operation_id: MeetingOperationId,
@@ -2728,21 +2740,32 @@ impl MeetingSessionManager {
         let generator = self
             .processing
             .text_generator_for_session(&store, session_id);
-        let generated = generator.as_ref().and_then(|generator| {
-            generator
-                .generate(
-                    &follow_up_prompt(),
-                    &evidence.as_prompt_input(),
-                    FOLLOW_UP_MAX_TOKENS,
-                    ReplyShape::Prose,
-                )
-                .ok()
-                .map(|message| message.trim().to_string())
-                .filter(|message| !message.is_empty())
-        });
-        let engine = match (&generated, &generator) {
-            (Some(_), Some(generator)) => generator.model_id(),
-            _ => "structured-fallback",
+        let generated = match generator {
+            Some(generator) => {
+                let engine = generator.model_id();
+                let prompt = follow_up_prompt();
+                let input = evidence.as_prompt_input();
+                let message = tauri::async_runtime::spawn_blocking(move || {
+                    generator.generate(&prompt, &input, FOLLOW_UP_MAX_TOKENS, ReplyShape::Prose)
+                })
+                .await
+                .map_err(|_| MeetingCommandError::EngineFailure)?
+                .map_err(map_generation_error)?;
+                let message = message.trim().to_string();
+                if message.is_empty() {
+                    // Reached, and answered with nothing usable. That is the
+                    // same outcome as `MeetingTextGenerationError::Failed` and
+                    // is reported as it, rather than quietly becoming the
+                    // structured draft.
+                    return Err(MeetingCommandError::EngineFailure);
+                }
+                Some((engine, message))
+            }
+            None => None,
+        };
+        let (engine, message) = match generated {
+            Some((engine, message)) => (engine, Some(message)),
+            None => ("structured-fallback", None),
         };
         let receipt = store
             .record_follow_up_draft(operation_id, session_id, engine)
@@ -2751,12 +2774,12 @@ impl MeetingSessionManager {
         Ok(MeetingFollowUpDraft {
             session_id,
             title: evidence.title,
-            source: if generated.is_some() {
+            source: if message.is_some() {
                 MeetingFollowUpSource::Generated
             } else {
                 MeetingFollowUpSource::Structured
             },
-            message: generated,
+            message,
             summary: evidence.summary,
             mine: evidence.mine,
             decisions: evidence.decisions,
@@ -4045,6 +4068,26 @@ fn map_processing_error(error: ProcessingFailure) -> MeetingCommandError {
         // recovery, which is the error that says so.
         ProcessingFailure::Interrupted => MeetingCommandError::RecoveryRequired,
         ProcessingFailure::EngineFailure => MeetingCommandError::EngineFailure,
+    }
+}
+
+/// A generation the operator asked for and did not get.
+///
+/// Every outcome leaves the press with no engine text, and every one is the
+/// command's answer rather than something to paper over: `Unreachable` is an
+/// engine that was chosen and then went away before the call, `Failed` is one
+/// that answered with nothing usable, and `ReplyNotStructured` is one that
+/// answered in the wrong form. The only caller asks for
+/// [`ReplyShape::Prose`], which no reply can be the wrong form of, so the
+/// third arm is here to keep this total rather than because a draft can reach
+/// it - and a shape refusal that somehow did arrive is the same thing to the
+/// sheet as nothing usable.
+const fn map_generation_error(error: MeetingTextGenerationError) -> MeetingCommandError {
+    match error {
+        MeetingTextGenerationError::Unreachable => MeetingCommandError::RemoteUnavailable,
+        MeetingTextGenerationError::Failed | MeetingTextGenerationError::ReplyNotStructured => {
+            MeetingCommandError::EngineFailure
+        }
     }
 }
 
@@ -6078,6 +6121,266 @@ pub(crate) mod tests {
         ) -> Result<String, super::super::processing::MeetingTextGenerationError> {
             Ok(self.output.clone())
         }
+    }
+
+    /// The engine a meeting resolved to, refusing the way a real one does.
+    struct RefusingGenerator {
+        error: MeetingTextGenerationError,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl super::super::processing::MeetingTextGenerator for RefusingGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "refusing"
+        }
+
+        fn model_version(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("refusing-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            _evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            self.calls.fetch_add(1, Ordering::Release);
+            Err(self.error)
+        }
+    }
+
+    /// An engine that enters the async runtime before answering, which is
+    /// what a relayed generation does: its transport is a submit-and-poll job
+    /// on the same runtime the command is running on. Asked from a runtime
+    /// worker this cannot answer at all, so it is the double that tells the
+    /// two arrangements apart.
+    struct RuntimeEnteringGenerator;
+
+    impl super::super::processing::MeetingTextGenerator for RuntimeEnteringGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "runtime-entering"
+        }
+
+        fn model_version(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("runtime-entering-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            _evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            tauri::async_runtime::block_on(async {});
+            Ok(FOLLOW_UP_MESSAGE.to_string())
+        }
+    }
+
+    const FOLLOW_UP_MESSAGE: &str = "Thanks all - pricing is still open.";
+
+    /// A review-ready meeting with a current artifact, which is the least a
+    /// follow-up can be drafted from: with no record at all the draft is
+    /// `NotFound` and no engine is ever asked.
+    fn meeting_with_artifact(manager: &MeetingSessionManager) -> MeetingSessionId {
+        let session_id = review_ready_session(manager).session_id;
+        tauri::async_runtime::block_on(async {
+            let store = manager.store().await.unwrap();
+            let content = crate::meeting::types::GeneratedMeetingArtifacts {
+                summary: crate::meeting::types::CitedArtifactText {
+                    text: RECAP_BULLET.to_string(),
+                    citations: Vec::new(),
+                },
+                summary_trace: Vec::new(),
+                outline: Vec::new(),
+                decisions: Vec::new(),
+                action_items: Vec::new(),
+                key_questions: Vec::new(),
+                risks: Vec::new(),
+                follow_up_draft: crate::meeting::types::CitedArtifactText {
+                    text: String::new(),
+                    citations: Vec::new(),
+                },
+                ledger: None,
+            };
+            // A `Current` artifact generated from a revision that is not the
+            // session's own is filed `OutOfDate` instead, which is the whole
+            // point of the field: the record moved on after the pass ran. The
+            // draft reads current artifacts only, so this fixture has to sit on
+            // the revision the meeting actually has.
+            let revision = store.session_snapshot(session_id).unwrap().revision;
+            let transcript_revision_id = store
+                .begin_transcript_revision(crate::meeting::store::TranscriptRevisionInput {
+                    session_id,
+                    engine_id: "test",
+                    model_version: None,
+                    destination: &ProcessingDestination::Local,
+                    source_set: &[SourceKind::Microphone],
+                    language: "en",
+                })
+                .unwrap();
+            store
+                .store_artifact_revision(crate::meeting::store::ArtifactRevisionInput {
+                    session_id,
+                    transcript_revision_id,
+                    input_revision: revision,
+                    template_id: "test",
+                    template_version: 1,
+                    generation_key: "test-follow-up",
+                    state: MeetingArtifactState::Current,
+                    content: Some(&content),
+                    generated_at_utc_ms: 1,
+                })
+                .unwrap();
+        });
+        session_id
+    }
+
+    /// The press that hung forever. The draft ran the engine on the runtime
+    /// and chained its answer into `.ok()`, so every refusal became the
+    /// structured draft: the sheet showed the record back with no message and
+    /// nothing anywhere said the engine had refused. A refusal is the
+    /// command's answer, and each one has a different thing to say to the
+    /// operator - a server that was not there is not a model that failed.
+    #[test]
+    fn a_refused_follow_up_draft_answers_with_the_refusal() {
+        for (error, expected) in [
+            (
+                MeetingTextGenerationError::Unreachable,
+                MeetingCommandError::RemoteUnavailable,
+            ),
+            (
+                MeetingTextGenerationError::Failed,
+                MeetingCommandError::EngineFailure,
+            ),
+            (
+                MeetingTextGenerationError::ReplyNotStructured,
+                MeetingCommandError::EngineFailure,
+            ),
+        ] {
+            let (_directory, manager, _starts, _aborts) = manager();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            manager.processing.set_text_generators(
+                Arc::new(RefusingGenerator {
+                    error,
+                    calls: Arc::clone(&calls),
+                }),
+                Arc::new(FixedGenerator {
+                    available: false,
+                    output: String::new(),
+                }),
+            );
+            let session_id = meeting_with_artifact(&manager);
+
+            let refusal = tauri::async_runtime::block_on(
+                manager.follow_up_draft(MeetingOperationId::new(), session_id),
+            )
+            .expect_err("a refused generation is not a draft");
+
+            assert_eq!(refusal, expected, "wire error for {error:?}");
+            assert_eq!(
+                calls.load(Ordering::Acquire),
+                1,
+                "the meeting's own engine is asked once and not failed over"
+            );
+        }
+    }
+
+    /// Reached, and answered with nothing. The operator asked for a message
+    /// and there is no message, which is the same outcome as a refusal and
+    /// must not arrive as a generated draft with an empty body.
+    #[test]
+    fn a_follow_up_draft_with_an_empty_answer_is_a_failure() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        manager.processing.set_text_generators(
+            Arc::new(FixedGenerator {
+                available: true,
+                output: "   \n".to_string(),
+            }),
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+        );
+        let session_id = meeting_with_artifact(&manager);
+
+        assert_eq!(
+            tauri::async_runtime::block_on(
+                manager.follow_up_draft(MeetingOperationId::new(), session_id),
+            )
+            .expect_err("an empty answer is not a draft"),
+            MeetingCommandError::EngineFailure
+        );
+    }
+
+    /// A relayed engine's transport runs on the same async runtime the
+    /// command does, so the generation has to leave the runtime's own workers
+    /// alone. Asked inline from the command's worker it cannot answer at all;
+    /// that is the hang the sheet showed as "Drafting..." forever.
+    #[test]
+    fn a_follow_up_draft_runs_its_engine_off_the_async_runtime() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        manager.processing.set_text_generators(
+            Arc::new(RuntimeEnteringGenerator),
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+        );
+        let session_id = meeting_with_artifact(&manager);
+
+        let draft = tauri::async_runtime::block_on(
+            manager.follow_up_draft(MeetingOperationId::new(), session_id),
+        )
+        .unwrap();
+
+        assert_eq!(draft.source, MeetingFollowUpSource::Generated);
+        assert_eq!(draft.message.as_deref(), Some(FOLLOW_UP_MESSAGE));
+    }
+
+    /// No engine at all is not a failure: the record is the draft, and the
+    /// sheet says so. This is the one case the old `.ok()` reported honestly,
+    /// and it stays reachable now that refusals do not land here.
+    #[test]
+    fn a_follow_up_draft_with_no_engine_hands_back_the_record() {
+        let (_directory, manager, _starts, _aborts) = manager();
+        manager.processing.set_text_generators(
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+        );
+        let session_id = meeting_with_artifact(&manager);
+
+        let draft = tauri::async_runtime::block_on(
+            manager.follow_up_draft(MeetingOperationId::new(), session_id),
+        )
+        .unwrap();
+
+        assert_eq!(draft.source, MeetingFollowUpSource::Structured);
+        assert!(draft.message.is_none());
+        assert_eq!(draft.summary, RECAP_BULLET);
     }
 
     const RECAP_BULLET: &str = "Pricing stayed open.";
