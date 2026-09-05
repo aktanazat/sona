@@ -925,8 +925,18 @@ impl ReplacementRule {
 }
 
 /// The symbol-dictation starter library. These are the phrases users expect to
-/// be able to speak on day one; every one of them is a multi-word phrase or an
-/// unambiguous noun, so none fires inside ordinary prose.
+/// be able to speak on day one, and each is only ever spoken when the symbol
+/// is meant: `em dash`, `en dash`, `open quote` and `close quote` are the
+/// characters' own names, and `hashtag`, `ellipsis` and `dot com` have no
+/// reading in English that is not about the character they produce.
+///
+/// The test is that collocation, not the number of words in it. `at sign` →
+/// `@` shipped here until it was caught rewriting `look at sign language` into
+/// `look @ language`: `at` and `sign` are two of the commonest words in the
+/// language, so their pairing turns up in prose that names no symbol at all.
+/// Schema 19 retired it and takes the seeded rule back out of an existing
+/// store. A user who wants `@` dictated can still write the rule, and then the
+/// collision is a trade they made knowingly.
 ///
 /// Spoken line-break phrases are deliberately absent. `new line` and `new
 /// paragraph` belong to the literal-punctuation table, which is the one owner
@@ -937,7 +947,6 @@ impl ReplacementRule {
 /// and this stage preserves the newlines it produces.
 pub fn default_replacement_rules() -> Vec<ReplacementRule> {
     [
-        ("at sign", "@"),
         ("dot com", ".com"),
         ("hashtag", "#"),
         ("ellipsis", "…"),
@@ -1452,7 +1461,7 @@ fn default_reliable_paste() -> bool {
     true
 }
 
-pub(crate) const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 18;
+pub(crate) const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 19;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -2548,6 +2557,17 @@ fn apply_settings_migrations(
         }
         updated = true;
     }
+    if stored_schema_version < 19 {
+        // `at sign` → `@` left the starter library, so the copy this store was
+        // seeded with goes too: it rewrote `look at sign language` into
+        // `look @ language`, and a seeded rule is not a choice anyone made.
+        // A row whose written form or enabled flag differs from the shipped
+        // one is a choice, and it stays - including the collision it accepts.
+        settings
+            .replacements_rules
+            .retain(|rule| !(rule.spoken == "at sign" && rule.written == "@" && rule.enabled));
+        updated = true;
+    }
     if settings.settings_schema_version < CURRENT_SETTINGS_SCHEMA_VERSION {
         settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
         updated = true;
@@ -3373,7 +3393,72 @@ mod tests {
         assert_eq!(settings.modes[0].llm.provider_id.as_deref(), Some("openai"));
     }
 
-    /// Migrations are a mechanism, not eighteen independent rules, and the
+    /// Schema 19 takes `at sign` → `@` out of a store that was seeded with it.
+    /// The seeded row is no one's decision, so it goes; a row whose written
+    /// form or enabled flag the user changed is a decision, and survives it.
+    #[test]
+    fn schema_nineteen_retires_only_the_seeded_at_sign_rule() {
+        let mut settings = get_default_settings();
+        settings.replacements_rules = vec![
+            ReplacementRule {
+                spoken: "at sign".to_string(),
+                written: "@".to_string(),
+                enabled: true,
+            },
+            ReplacementRule {
+                spoken: "at sign".to_string(),
+                written: " at ".to_string(),
+                enabled: true,
+            },
+            ReplacementRule {
+                spoken: "at sign".to_string(),
+                written: "@".to_string(),
+                enabled: false,
+            },
+            ReplacementRule {
+                spoken: "dot com".to_string(),
+                written: ".com".to_string(),
+                enabled: true,
+            },
+        ];
+        settings.settings_schema_version = 18;
+        let raw = serde_json::to_value(&settings).expect("eighteen settings serialize");
+
+        assert!(apply_settings_migrations(&mut settings, &raw));
+
+        let surviving: Vec<(&str, &str, bool)> = settings
+            .replacements_rules
+            .iter()
+            .map(|rule| (rule.spoken.as_str(), rule.written.as_str(), rule.enabled))
+            .collect();
+        assert_eq!(
+            surviving,
+            vec![
+                ("at sign", " at ", true),
+                ("at sign", "@", false),
+                ("dot com", ".com", true),
+            ]
+        );
+    }
+
+    /// A user who writes the retired rule back is not migrated a second time:
+    /// the branch runs at the bump, and their store is already past it.
+    #[test]
+    fn a_rewritten_at_sign_rule_survives_at_current_schema() {
+        let mut settings = get_default_settings();
+        settings.replacements_rules = vec![ReplacementRule {
+            spoken: "at sign".to_string(),
+            written: "@".to_string(),
+            enabled: true,
+        }];
+        settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
+        let raw = serde_json::to_value(&settings).expect("current settings serialize");
+
+        assert!(!apply_settings_migrations(&mut settings, &raw));
+        assert_eq!(settings.replacements_rules.len(), 1);
+    }
+
+    /// Migrations are a mechanism, not nineteen independent rules, and the
     /// mechanism is what an upgrader's data rides on. `get_settings_locked`
     /// re-runs every branch on every read, so three properties have to hold
     /// for each version this app has ever stamped:

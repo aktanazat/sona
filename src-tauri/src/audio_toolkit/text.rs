@@ -1292,11 +1292,24 @@ mod tests {
     fn replacements_rewrite_whole_phrases_case_insensitively() {
         let rules = starter_rules();
         assert_eq!(
-            apply_text_replacements("email me at sign example dot com", &rules),
-            "email me @ example .com"
+            apply_text_replacements("email me at example dot com", &rules),
+            "email me at example .com"
         );
-        assert_eq!(apply_text_replacements("At Sign", &rules), "@");
+        assert_eq!(apply_text_replacements("Dot Com", &rules), ".com");
         assert_eq!(apply_text_replacements("HASHTAG", &rules), "#");
+    }
+
+    /// The starter library ships to people who never opened its editor, so a
+    /// rule that fires in prose nobody meant as a symbol is a rule that cannot
+    /// ship. `at sign` → `@` was one, and it is why this test exists: `at` and
+    /// `sign` are ordinary English words that land side by side on their own.
+    #[test]
+    fn no_starter_rule_fires_inside_ordinary_prose() {
+        let sentence = "look at sign language";
+        assert_eq!(
+            apply_text_replacements(sentence, &starter_rules()),
+            sentence
+        );
     }
 
     #[test]

@@ -3777,13 +3777,13 @@ mod tests {
         assert!(asr.replacements_enabled);
         assert_eq!(
             post_process_transcription_text(
-                "write to me at sign example dot com".to_string(),
+                "write to me at example dot com".to_string(),
                 &asr,
                 false,
                 &english,
                 &[],
             ),
-            "write to me @ example .com"
+            "write to me at example .com"
         );
     }
 
