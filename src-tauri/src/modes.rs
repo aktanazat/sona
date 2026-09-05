@@ -753,8 +753,17 @@ pub enum ModeMutationError {
     WebsiteActivationConsentRequired,
     FrontmostWebsiteUnavailable,
     WebsiteActivationSecureField,
+    /// The mode change is in the running process and not on disk. Reported
+    /// rather than swallowed because the next launch reads the old modes.
+    NotPersisted,
     #[cfg(not(target_os = "macos"))]
     ModeActivationUnsupported,
+}
+
+impl From<crate::settings::SettingsPersistError> for ModeMutationError {
+    fn from(_: crate::settings::SettingsPersistError) -> Self {
+        Self::NotPersisted
+    }
 }
 
 fn check_expected_revision(
@@ -969,12 +978,15 @@ fn apply_remove_mode_website_activation_rule(
 fn commit_mode_mutation<E>(
     app: &AppHandle,
     apply: impl FnOnce(&mut AppSettings) -> Result<(), E>,
-) -> Result<ModeSettingsSnapshot, E> {
+) -> Result<ModeSettingsSnapshot, E>
+where
+    E: From<crate::settings::SettingsPersistError>,
+{
     let (result, old_bindings, new_bindings) = settings::try_update_settings(app, |settings| {
         let old_bindings = settings.bindings.clone();
         apply(settings)?;
         let result = mode_settings_snapshot(settings);
-        Ok((result, old_bindings, settings.bindings.clone()))
+        Ok::<_, E>((result, old_bindings, settings.bindings.clone()))
     })?;
 
     crate::shortcut::reconcile_mode_shortcuts(app, &old_bindings, &new_bindings);

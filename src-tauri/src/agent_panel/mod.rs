@@ -2168,6 +2168,7 @@ fn map_config_error(error: ConfigError) -> AgentPanelCommandErrorV1 {
         ConfigError::StaleRevision => AgentPanelCommandErrorV1::StaleProposal,
         ConfigError::InvalidProposal => AgentPanelCommandErrorV1::InvalidProposal,
         ConfigError::InvalidSetting => AgentPanelCommandErrorV1::InvalidSetting,
+        ConfigError::NotPersisted => AgentPanelCommandErrorV1::ActionFailed,
     }
 }
 
@@ -2338,7 +2339,7 @@ pub async fn agent_panel_public_identity(
 pub fn change_agent_panel_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     crate::settings::update_settings(&app, |settings| {
         settings.agent_panel_enabled = enabled;
-    });
+    })?;
     if !enabled {
         if let Some(manager) = app.try_state::<AgentPanelManager>() {
             manager.stop_polling();
@@ -2415,7 +2416,8 @@ pub fn set_agent_panel_pairing(
         if rotated {
             settings.agent_panel_last_successful_connection_at = None;
         }
-    });
+    })
+    .map_err(|_| AgentPanelCommandErrorV1::ActionFailed)?;
     pairing_receipt(&app, AgentPanelPairingCommandV1::Set, requested_at_utc_ms)
 }
 
@@ -2433,7 +2435,8 @@ pub fn clear_agent_panel_pairing(
         settings.agent_panel_relay_public_key = None;
         settings.agent_panel_paired = false;
         settings.agent_panel_last_successful_connection_at = None;
-    });
+    })
+    .map_err(|_| AgentPanelCommandErrorV1::ActionFailed)?;
     pairing_receipt(&app, AgentPanelPairingCommandV1::Clear, requested_at_utc_ms)
 }
 
@@ -2451,7 +2454,8 @@ pub async fn agent_panel_test_connection(
     manager.test_connection().await?;
     crate::settings::update_settings(&app, |settings| {
         settings.agent_panel_last_successful_connection_at = Some(requested_at_utc_ms);
-    });
+    })
+    .map_err(|_| AgentPanelCommandErrorV1::ActionFailed)?;
     pairing_receipt(
         &app,
         AgentPanelPairingCommandV1::TestConnection,

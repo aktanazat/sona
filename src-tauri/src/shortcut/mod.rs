@@ -46,7 +46,8 @@ pub fn init_shortcuts(app: &AppHandle) {
                 warn!("Falling back to Tauri global shortcut implementation and saving fallback to settings");
 
                 // Update settings to persist the fallback so we don't retry HandyKeys on next launch
-                settings::update_settings(app, |settings| {
+                // Nothing in this function's shape can report a store failure; the settings seam logs it.
+                let _ = settings::update_settings(app, |settings| {
                     settings.keyboard_implementation = KeyboardImplementation::Tauri;
                 });
 
@@ -238,7 +239,7 @@ pub fn change_binding(
                     settings.bindings.insert(id.clone(), stored_binding.clone());
                     stored_binding
                 })
-        });
+        })?;
         if let Some(binding) = updated {
             crate::secure_input::reconcile_fallback(&app);
             return Ok(BindingResponse {
@@ -282,7 +283,7 @@ pub fn change_binding(
     // Save the settings and synchronize any active Secure Input shadows.
     settings::update_settings(&app, |settings| {
         settings.bindings.insert(id, updated_binding.clone());
-    });
+    })?;
     crate::secure_input::reconcile_fallback(&app);
 
     // Return the updated binding
@@ -439,7 +440,7 @@ pub fn change_keyboard_implementation_setting(
     // Update the setting
     settings::update_settings(&app, |settings| {
         settings.keyboard_implementation = new_impl;
-    });
+    })?;
 
     // Carbon fallback registrations use the Tauri plugin. Remove them before
     // registering the full Tauri implementation to avoid duplicate conflicts.
@@ -587,7 +588,8 @@ fn register_all_shortcuts_for_implementation(
             .iter()
             .filter_map(|id| current_settings.bindings.get(id).cloned())
             .collect::<Vec<_>>();
-        settings::update_settings(app, |settings| {
+        // Nothing in this function's shape can report a store failure; the settings seam logs it.
+        let _ = settings::update_settings(app, |settings| {
             for binding in reset_values {
                 settings.bindings.insert(binding.id.clone(), binding);
             }
@@ -608,7 +610,7 @@ fn initialize_handy_keys_with_rollback(app: &AppHandle) -> Result<bool, String> 
         // Rollback to Tauri
         settings::update_settings(app, |settings| {
             settings.keyboard_implementation = KeyboardImplementation::Tauri;
-        });
+        })?;
         crate::secure_input::reconcile_fallback(app);
         tauri_impl::init_shortcuts(app);
         return Err(format!(
@@ -630,7 +632,7 @@ fn initialize_handy_keys_with_rollback(app: &AppHandle) -> Result<bool, String> 
 pub fn change_ptt_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.push_to_talk = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -639,7 +641,7 @@ pub fn change_ptt_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
 pub fn change_audio_feedback_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.audio_feedback = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -648,7 +650,7 @@ pub fn change_audio_feedback_setting(app: AppHandle, enabled: bool) -> Result<()
 pub fn change_audio_feedback_volume_setting(app: AppHandle, volume: f32) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.audio_feedback_volume = volume;
-    });
+    })?;
     Ok(())
 }
 
@@ -666,7 +668,7 @@ pub fn change_sound_theme_setting(app: AppHandle, theme: String) -> Result<(), S
     };
     settings::update_settings(&app, |settings| {
         settings.sound_theme = parsed;
-    });
+    })?;
     Ok(())
 }
 
@@ -684,7 +686,7 @@ pub fn change_theme_setting(app: AppHandle, theme: String) -> Result<(), String>
     };
     settings::update_settings(&app, |settings| {
         settings.theme = parsed;
-    });
+    })?;
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     apply_window_theme(&app, parsed);
     // Notify other webviews (the recording overlay) so they re-apply the palette
@@ -938,7 +940,7 @@ pub fn change_appearance_material_setting(app: AppHandle, material: String) -> R
     }
     settings::update_settings(&app, |settings| {
         settings.appearance_material = parsed;
-    });
+    })?;
     let effective = apply_window_material(&app, parsed);
     // The overlay webview cannot see this window's store, and
     // the effective material is not always the stored one, so the event carries
@@ -958,7 +960,7 @@ pub fn change_appearance_material_setting(app: AppHandle, material: String) -> R
 pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.translate_to_english = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -967,7 +969,7 @@ pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Res
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.selected_language = language;
-    });
+    })?;
     Ok(())
 }
 
@@ -979,7 +981,7 @@ pub fn change_english_spelling_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.english_spelling = spelling;
-    });
+    })?;
     Ok(())
 }
 
@@ -998,7 +1000,7 @@ pub fn change_overlay_position_setting(app: AppHandle, position: String) -> Resu
     };
     settings::update_settings(&app, |settings| {
         settings.overlay_position = parsed;
-    });
+    })?;
 
     // Whether the overlay shows at all is owned by overlay_style now; position
     // only ever toggles Top/Bottom, so the enabled cache is untouched here.
@@ -1022,7 +1024,7 @@ pub fn change_overlay_style_setting(app: AppHandle, style: String) -> Result<(),
     };
     settings::update_settings(&app, |settings| {
         settings.overlay_style = parsed;
-    });
+    })?;
 
     // Keep the cached overlay-enabled flag in sync so emit_levels stops (or
     // resumes) emitting on the next audio callback.
@@ -1039,7 +1041,7 @@ pub fn change_overlay_style_setting(app: AppHandle, style: String) -> Result<(),
 pub fn change_debug_mode_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.debug_mode = enabled;
-    });
+    })?;
     // Keep webview log streaming in sync: the live log viewer only exists in
     // debug mode, so logs are forwarded to the frontend only while it is on.
     crate::WEBVIEW_LOG_STREAMING.store(enabled, std::sync::atomic::Ordering::Relaxed);
@@ -1061,7 +1063,7 @@ pub fn change_debug_mode_setting(app: AppHandle, enabled: bool) -> Result<(), St
 pub fn change_start_hidden_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.start_hidden = enabled;
-    });
+    })?;
     // Notify frontend
     let _ = app.emit(
         "settings-changed",
@@ -1079,7 +1081,7 @@ pub fn change_start_hidden_setting(app: AppHandle, enabled: bool) -> Result<(), 
 pub fn change_autostart_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.autostart_enabled = enabled;
-    });
+    })?;
     // Apply the autostart setting immediately
     crate::autostart::apply_autostart(&app, enabled);
 
@@ -1103,7 +1105,7 @@ pub fn change_show_whats_new_on_update_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.show_whats_new_on_update = enabled;
-    });
+    })?;
     let _ = app.emit(
         "settings-changed",
         serde_json::json!({
@@ -1124,7 +1126,7 @@ pub fn change_whats_new_last_seen_version_setting(
     let version = version.trim().to_string();
     settings::update_settings(&app, |settings| {
         settings.whats_new_last_seen_version = version.clone();
-    });
+    })?;
     let _ = app.emit(
         "settings-changed",
         serde_json::json!({
@@ -1144,7 +1146,7 @@ pub fn change_word_correction_threshold_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.word_correction_threshold = threshold;
-    });
+    })?;
     Ok(())
 }
 
@@ -1153,7 +1155,7 @@ pub fn change_word_correction_threshold_setting(
 pub fn change_extra_recording_buffer_setting(app: AppHandle, ms: u64) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.extra_recording_buffer_ms = ms;
-    });
+    })?;
     Ok(())
 }
 
@@ -1178,7 +1180,7 @@ pub fn change_external_script_path_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.external_script_path = path;
-    });
+    })?;
     Ok(())
 }
 
@@ -1187,7 +1189,7 @@ pub fn change_external_script_path_setting(
 pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.post_process_enabled = enabled;
-    });
+    })?;
     crate::secure_input::reconcile_fallback(&app);
     Ok(())
 }
@@ -1197,7 +1199,7 @@ pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Res
 pub fn change_experimental_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.experimental_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -1294,7 +1296,7 @@ pub fn add_post_process_prompt(
 
     settings::update_settings(&app, |settings| {
         settings.post_process_prompts.push(new_prompt.clone());
-    });
+    })?;
 
     Ok(new_prompt)
 }
@@ -1499,7 +1501,7 @@ pub fn set_post_process_selected_prompt(app: AppHandle, id: String) -> Result<()
 pub fn change_mute_while_recording_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.mute_while_recording = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -1508,7 +1510,7 @@ pub fn change_mute_while_recording_setting(app: AppHandle, enabled: bool) -> Res
 pub fn change_append_trailing_space_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.append_trailing_space = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -1517,7 +1519,7 @@ pub fn change_append_trailing_space_setting(app: AppHandle, enabled: bool) -> Re
 pub fn change_lazy_stream_close_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.lazy_stream_close = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -1526,7 +1528,7 @@ pub fn change_lazy_stream_close_setting(app: AppHandle, enabled: bool) -> Result
 pub fn change_vad_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.vad_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -1538,7 +1540,7 @@ pub fn change_filler_word_removal_enabled_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.filler_word_removal_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -1547,7 +1549,7 @@ pub fn change_filler_word_removal_enabled_setting(
 pub fn change_app_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.app_language = language.clone();
-    });
+    })?;
     // Refresh the tray menu with the new language
     tray::update_tray_menu(&app);
 
@@ -1559,7 +1561,7 @@ pub fn change_app_language_setting(app: AppHandle, language: String) -> Result<(
 pub fn change_show_tray_icon_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.show_tray_icon = enabled;
-    });
+    })?;
     // Apply change immediately
     tray::set_tray_visibility(&app, enabled);
 
@@ -1581,7 +1583,7 @@ pub fn change_transcribe_accelerator_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.transcribe_accelerator = accelerator;
-    });
+    })?;
     reload_model_on_next_use(&app);
     Ok(())
 }
@@ -1594,7 +1596,7 @@ pub fn change_ort_accelerator_setting(
 ) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.ort_accelerator = accelerator;
-    });
+    })?;
     reload_model_on_next_use(&app);
     Ok(())
 }
@@ -1604,7 +1606,7 @@ pub fn change_ort_accelerator_setting(
 pub fn change_transcribe_gpu_device(app: AppHandle, device: Option<String>) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.transcribe_gpu_device = device;
-    });
+    })?;
     reload_model_on_next_use(&app);
     Ok(())
 }

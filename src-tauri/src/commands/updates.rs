@@ -244,7 +244,7 @@ async fn check_for_updates_for_runtime<R: tauri::Runtime>(
 pub fn change_update_check_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.update_check_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 

@@ -589,11 +589,21 @@ async setSnippetsEnabled(enabled: boolean) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async changeContextPolicyCeilingSetting(ceiling: ContextPolicy) : Promise<void> {
-    await TAURI_INVOKE("change_context_policy_ceiling_setting", { ceiling });
+async changeContextPolicyCeilingSetting(ceiling: ContextPolicy) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_context_policy_ceiling_setting", { ceiling }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
-async changeContextUrlCaptureEnabledSetting(enabled: boolean) : Promise<void> {
-    await TAURI_INVOKE("change_context_url_capture_enabled_setting", { enabled });
+async changeContextUrlCaptureEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_context_url_capture_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * The two consent rows on Settings > Agents and the three meeting rows
@@ -1455,8 +1465,13 @@ async setSelectedChannel(channel: number | null) : Promise<Result<null, string>>
     else return { status: "error", error: e  as any };
 }
 },
-async setModelUnloadTimeout(timeout: ModelUnloadTimeout) : Promise<void> {
-    await TAURI_INVOKE("set_model_unload_timeout", { timeout });
+async setModelUnloadTimeout(timeout: ModelUnloadTimeout) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_model_unload_timeout", { timeout }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 async getModelLoadStatus() : Promise<Result<ModelLoadStatus, string>> {
     try {
@@ -3651,7 +3666,13 @@ export type CloudSttProvider = "deepgram_nova_3" | "eleven_labs_scribe_v2"
  * the exact data-transfer contract and the last secret-store state.
  */
 export type CloudSttProviderSettings = { provider: CloudSttProvider; consent_version?: number; audio_transfer_consent?: boolean; privacy_consent?: boolean; local_fallback_consent?: boolean; secret_state?: SecretState }
-export type CloudSttProviderSettingsError = "unknown_provider"
+export type CloudSttProviderSettingsError = "unknown_provider" |
+/**
+ * The acknowledgement never reached the disk. Same reason as
+ * [`PostProcessProviderConsentError::NotSaved`]: an unpersisted grant is
+ * not a grant.
+ */
+"not_saved"
 export type CloudSyncBootstrapRequest = { endpoint: string; bootstrap_secret: string }
 export type CloudSyncBootstrapResult = { overview: CloudSyncOverview; recovery_code: string }
 export type CloudSyncChangedEvent = CloudSyncChangedPayload
@@ -5256,7 +5277,12 @@ model_id: string;
  * See [`crate::audio_toolkit::split_spoken_instruction`].
  */
 spoken_instructions?: boolean }
-export type ModeMutationError = { kind: "stale_revision"; expected_revision: number; actual_revision: number } | { kind: "invalid_mode_id" } | { kind: "empty_name" } | { kind: "cannot_delete_default" } | { kind: "unknown_mode"; mode_id: string } | { kind: "duplicate_mode_id"; mode_id: string } | { kind: "invalid_reorder" } | { kind: "invalid_app_identity" } | { kind: "frontmost_application_unavailable" } | { kind: "invalid_website_host" } | { kind: "website_activation_consent_required" } | { kind: "frontmost_website_unavailable" } | { kind: "website_activation_secure_field" }
+export type ModeMutationError = { kind: "stale_revision"; expected_revision: number; actual_revision: number } | { kind: "invalid_mode_id" } | { kind: "empty_name" } | { kind: "cannot_delete_default" } | { kind: "unknown_mode"; mode_id: string } | { kind: "duplicate_mode_id"; mode_id: string } | { kind: "invalid_reorder" } | { kind: "invalid_app_identity" } | { kind: "frontmost_application_unavailable" } | { kind: "invalid_website_host" } | { kind: "website_activation_consent_required" } | { kind: "frontmost_website_unavailable" } | { kind: "website_activation_secure_field" } |
+/**
+ * The mode change is in the running process and not on disk. Reported
+ * rather than swallowed because the next launch reads the old modes.
+ */
+{ kind: "not_persisted" }
 export type ModePromptSettings = { preset: PromptPreset; source_prompt_id: string | null; custom_prompt: string | null }
 /**
  * `Eq` is deliberately absent: the measured amplitudes below are floats, and a
@@ -5515,7 +5541,13 @@ export type PostProcessProvider = { id: string; label: string; base_url: string;
  * leave the device.
  */
 export type PostProcessProviderConsent = { consent_version: number; endpoint: string; origin: string; text_transfer_consent: boolean }
-export type PostProcessProviderConsentError = "unknown_provider" | "local_provider" | "invalid_destination"
+export type PostProcessProviderConsentError = "unknown_provider" | "local_provider" | "invalid_destination" |
+/**
+ * The consent was recorded in memory and the store would not write it
+ * out. The grant does not survive a restart, so the dialog must not
+ * report it as given.
+ */
+"not_saved"
 export type ProcessingDestination = { kind: "local" } | { kind: "remote"; destination_id: string }
 export type ProcessingFailure = "local_model_unavailable" | "remote_unavailable" | "engine_failure" | "cancelled" |
 /**

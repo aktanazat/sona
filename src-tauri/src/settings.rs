@@ -483,6 +483,10 @@ pub enum PostProcessProviderConsentError {
     UnknownProvider,
     LocalProvider,
     InvalidDestination,
+    /// The consent was recorded in memory and the store would not write it
+    /// out. The grant does not survive a restart, so the dialog must not
+    /// report it as given.
+    NotSaved,
 }
 
 /// Bump this whenever the consent copy or provider transfer behavior changes.
@@ -532,6 +536,10 @@ impl CloudSttProviderSettings {
 #[serde(rename_all = "snake_case")]
 pub enum CloudSttProviderSettingsError {
     UnknownProvider,
+    /// The acknowledgement never reached the disk. Same reason as
+    /// [`PostProcessProviderConsentError::NotSaved`]: an unpersisted grant is
+    /// not a grant.
+    NotSaved,
 }
 
 /// Bump this whenever the cloud-sync disclosure changes. Existing users must
@@ -2750,18 +2758,26 @@ pub(crate) fn merge_upstream_import_settings(
 
 #[tauri::command]
 #[specta::specta]
-pub fn change_context_policy_ceiling_setting(app: AppHandle, ceiling: ContextPolicy) {
+pub fn change_context_policy_ceiling_setting(
+    app: AppHandle,
+    ceiling: ContextPolicy,
+) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.context_policy_ceiling = ceiling;
-    });
+    })?;
+    Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn change_context_url_capture_enabled_setting(app: AppHandle, enabled: bool) {
+pub fn change_context_url_capture_enabled_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.context_url_capture_enabled = enabled;
-    });
+    })?;
+    Ok(())
 }
 
 /// The two consent rows on Settings > Agents and the three meeting rows
@@ -2773,7 +2789,7 @@ pub fn change_context_url_capture_enabled_setting(app: AppHandle, enabled: bool)
 pub fn change_external_query_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.external_query_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -2785,7 +2801,7 @@ pub fn change_external_mutations_enabled_setting(
 ) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.external_mutations_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -2797,7 +2813,7 @@ pub fn change_meeting_remote_intelligence_enabled_setting(
 ) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.meeting_remote_intelligence_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -2806,7 +2822,7 @@ pub fn change_meeting_remote_intelligence_enabled_setting(
 pub fn change_meeting_digest_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.meeting_digest_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -2818,7 +2834,7 @@ pub fn change_meeting_digest_minute_of_day_setting(
 ) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.meeting_digest_minute_of_day = minute_of_day;
-    });
+    })?;
     Ok(())
 }
 
@@ -2871,7 +2887,83 @@ pub fn accept_post_process_provider_consent(
     })
 }
 
-fn write_settings_locked(app: &AppHandle, mut settings: AppSettings) -> AppSettings {
+/// A settings mutation the store would not put on disk. The store's in-memory
+/// copy already carries it when this arrives, so the running process reads the
+/// new value and only the next launch would disagree - which is exactly why it
+/// has to reach whoever asked for the write instead of a log line.
+#[derive(Debug)]
+pub enum SettingsPersistError {
+    /// The typed document would not serialize, so the store was handed nothing.
+    Serialize(serde_json::Error),
+    /// The store took the document and could not write it out.
+    Save(tauri_plugin_store::Error),
+}
+
+impl std::fmt::Display for SettingsPersistError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(error) => {
+                write!(formatter, "settings could not be serialized: {error}")
+            }
+            Self::Save(error) => write!(formatter, "settings could not be saved: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SettingsPersistError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialize(error) => Some(error),
+            Self::Save(error) => Some(error),
+        }
+    }
+}
+
+/// The settings commands answer the frontend in strings, so this is what lets
+/// them `?` a write that never landed straight through to the row that asked.
+impl From<SettingsPersistError> for String {
+    fn from(error: SettingsPersistError) -> Self {
+        error.to_string()
+    }
+}
+
+/// The rest of the propagation table. A command whose error crosses the IPC
+/// boundary as a typed union cannot carry a message, so each of these names
+/// the variant that surface already reads as "the write did not land" - and
+/// the detail stays in the log the seam writes.
+impl From<SettingsPersistError> for PostProcessProviderConsentError {
+    fn from(_: SettingsPersistError) -> Self {
+        Self::NotSaved
+    }
+}
+
+impl From<SettingsPersistError> for CloudSttProviderSettingsError {
+    fn from(_: SettingsPersistError) -> Self {
+        Self::NotSaved
+    }
+}
+
+/// Serialize, hand over, and flush - the whole of what "the settings are
+/// saved" means. Split out from [`write_settings_locked`] because a store is
+/// the one part of the write a test can own outright.
+fn persist_settings_to_store<R: tauri::Runtime>(
+    store: &tauri_plugin_store::Store<R>,
+    settings: &AppSettings,
+) -> Result<(), SettingsPersistError> {
+    let raw_settings = store.get("settings");
+    let serialized = serialize_settings_preserving_legacy_secrets(
+        settings,
+        raw_settings.as_ref().map(LegacySettings),
+    )
+    .map_err(SettingsPersistError::Serialize)?;
+    store.set("settings", serialized.0);
+    store.save().map_err(SettingsPersistError::Save)
+}
+
+fn write_settings_locked(
+    app: &AppHandle,
+    settings: &mut AppSettings,
+) -> Result<(), SettingsPersistError> {
     let store = match app.store(crate::portable::store_path(SETTINGS_STORE_PATH)) {
         Ok(store) => store,
         Err(error) => {
@@ -2879,20 +2971,10 @@ fn write_settings_locked(app: &AppHandle, mut settings: AppSettings) -> AppSetti
         }
     };
 
-    ensure_cloud_stt_defaults(&mut settings);
-    ensure_mode_settings(&mut settings);
+    ensure_cloud_stt_defaults(settings);
+    ensure_mode_settings(settings);
 
-    let raw_settings = store.get("settings");
-    if let Ok(serialized) = serialize_settings_preserving_legacy_secrets(
-        &settings,
-        raw_settings.as_ref().map(LegacySettings),
-    ) {
-        store.set("settings", serialized.0);
-        if let Err(error) = store.save() {
-            warn!("Failed to persist settings: {}", error);
-        }
-    }
-    settings
+    persist_settings_to_store(&store, settings)
 }
 
 /// Atomically read, mutate, and write the typed settings document. The update
@@ -2901,16 +2983,24 @@ fn write_settings_locked(app: &AppHandle, mut settings: AppSettings) -> AppSetti
 fn try_update_settings_inner<R, E>(
     app: &AppHandle,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
-) -> Result<(R, u64), E> {
-    let (result, revision, settings) = {
+) -> Result<(R, u64), E>
+where
+    E: From<SettingsPersistError>,
+{
+    let (result, revision, settings, persisted) = {
         let _settings_lock = lock_settings_store();
         let mut settings = get_settings_locked(app);
         let result = update(&mut settings)?;
         settings.settings_revision = settings.settings_revision.saturating_add(1);
         let revision = settings.settings_revision;
-        let settings = write_settings_locked(app, settings);
-        (result, revision, settings)
+        let persisted = write_settings_locked(app, &mut settings);
+        (result, revision, settings, persisted)
     };
+    // The store's own memory took the mutation whether or not the disk did, and
+    // that memory is what the next read returns - so the runtime is brought
+    // into line with it before the failure is reported. A caller that hears
+    // the write did not land must not also be left with an app running on a
+    // value it can no longer read back.
     crate::modes::refresh_clipboard_context_watcher(&settings);
     if let Some(runtime) = app.try_state::<Arc<crate::meeting::detection::DetectionRuntime>>() {
         runtime.set_enabled(settings.detection_enabled);
@@ -2923,34 +3013,50 @@ fn try_update_settings_inner<R, E>(
     {
         manager.signal_idle_watcher();
     }
+    if let Err(error) = &persisted {
+        // The caller may only be able to say *that* the write failed, so the
+        // reason is recorded here once, where it still exists.
+        warn!("Failed to persist settings: {error}");
+    }
+    persisted?;
     Ok((result, revision))
 }
 
 pub(crate) fn try_update_settings_with_revision<R, E>(
     app: &AppHandle,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
-) -> Result<(R, u64), E> {
+) -> Result<(R, u64), E>
+where
+    E: From<SettingsPersistError>,
+{
     try_update_settings_inner(app, update)
 }
 
 pub fn try_update_settings<R, E>(
     app: &AppHandle,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
-) -> Result<R, E> {
+) -> Result<R, E>
+where
+    E: From<SettingsPersistError>,
+{
     try_update_settings_inner(app, update).map(|(result, _)| result)
 }
 
-pub fn update_settings<R>(app: &AppHandle, update: impl FnOnce(&mut AppSettings) -> R) -> R {
-    match try_update_settings(app, |settings| {
-        Ok::<R, std::convert::Infallible>(update(settings))
-    }) {
-        Ok(result) => result,
-        Err(never) => match never {},
-    }
+/// The write for a closure that cannot fail on its own. The store still can,
+/// so this reports whether the mutation reached the disk - a settings row that
+/// answers `Ok` is a row telling its reader the value survives a restart.
+pub fn update_settings<R>(
+    app: &AppHandle,
+    update: impl FnOnce(&mut AppSettings) -> R,
+) -> Result<R, SettingsPersistError> {
+    try_update_settings(app, |settings| {
+        Ok::<R, SettingsPersistError>(update(settings))
+    })
 }
 
 pub(crate) fn mark_post_process_secret_verified(app: &AppHandle, provider_id: &str) {
-    update_settings(app, |settings| {
+    // Nothing in this function's shape can report a store failure; the settings seam logs it.
+    let _ = update_settings(app, |settings| {
         let state = settings
             .post_process_secret_states
             .entry(provider_id.to_string())
@@ -3591,6 +3697,30 @@ mod tests {
         );
         drop(next_store);
         drop(next_app);
+    }
+
+    /// The whole of the settings write that a test can own: a store pointed at
+    /// a path it cannot write. Before this reported, the failure was a `warn!`
+    /// and every settings row above it answered `Ok`, so the app claimed a
+    /// value the next launch would not have.
+    #[test]
+    fn a_store_that_cannot_write_reports_the_failure() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let path = directory.path().join(SETTINGS_STORE_PATH);
+        let (app, store) = temporary_settings_store(&path);
+        // A directory where the store's file belongs: the save has somewhere to
+        // go and cannot go there.
+        std::fs::create_dir(&path).expect("a directory in the store file's place");
+
+        let error = persist_settings_to_store(&store, &get_default_settings())
+            .expect_err("a store that cannot write must not report a saved settings document");
+        assert!(
+            matches!(error, SettingsPersistError::Save(_)),
+            "the failure names the save, not the serialization: {error:?}"
+        );
+
+        drop(store);
+        drop(app);
     }
 
     #[test]

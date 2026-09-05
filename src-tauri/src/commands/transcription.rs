@@ -18,10 +18,11 @@ pub struct ModelLoadStatus {
 
 #[tauri::command]
 #[specta::specta]
-pub fn set_model_unload_timeout(app: AppHandle, timeout: ModelUnloadTimeout) {
+pub fn set_model_unload_timeout(app: AppHandle, timeout: ModelUnloadTimeout) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.model_unload_timeout = timeout;
-    });
+    })?;
+    Ok(())
 }
 
 #[tauri::command]

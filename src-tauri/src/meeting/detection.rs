@@ -1939,7 +1939,8 @@ impl DetectionRuntime {
         match action {
             MeetingRitualAction::RecordingStop => {}
             MeetingRitualAction::RecordingForgetApp => {
-                crate::settings::update_settings(&self.app, |settings| {
+                // Nothing in this function's shape can report a store failure; the settings seam logs it.
+                let _ = crate::settings::update_settings(&self.app, |settings| {
                     apps::revoke_auto_record(settings, &card.bundle_id);
                 });
                 self.wakeup.wake();
@@ -2349,7 +2350,8 @@ impl DetectionRuntime {
     /// deduplicated — because a typo in a settings-editable list is otherwise a
     /// silently dead entry.
     pub fn write_settings(&self, requested: DetectionSettings) -> DetectionStatus {
-        crate::settings::update_settings(&self.app, |settings| {
+        // Nothing in this function's shape can report a store failure; the settings seam logs it.
+        let _ = crate::settings::update_settings(&self.app, |settings| {
             settings.detection_enabled = requested.enabled;
             settings.detection_calendar_enabled = requested.calendar_enabled;
             settings.detection_any_mic_activity = requested.any_mic_activity;

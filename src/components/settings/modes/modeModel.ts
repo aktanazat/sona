@@ -140,6 +140,7 @@ export const MODE_MUTATION_ERROR_DEFAULTS = {
   frontmost_website_unavailable: "No browser website could be captured.",
   website_activation_secure_field:
     "Website rules cannot be captured from a secure field.",
+  not_persisted: "That change was not saved to disk. Try again.",
 } as const satisfies Record<ModeMutationError["kind"], string>;
 
 export const downloadedModelOptions = (

@@ -49,7 +49,7 @@ const REWRITE_UNAVAILABLE_ERROR: &str = "command_rewrite_unavailable";
 pub fn change_command_mode_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     crate::settings::update_settings(&app, |settings| {
         settings.command_mode_enabled = enabled;
-    });
+    })?;
     crate::shortcut::suspend_all_shortcuts(&app);
     crate::shortcut::resume_all_shortcuts(&app);
     Ok(())

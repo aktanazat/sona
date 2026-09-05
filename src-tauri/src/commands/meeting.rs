@@ -509,7 +509,10 @@ pub fn save_keyword_trackers(
             Some(KeywordTracker { name, patterns })
         })
         .collect();
-    crate::settings::update_settings(&app, |settings| {
+    // Nothing in this command's shape can carry a store failure back to the
+    // trackers screen. The list returned is what the running process reads,
+    // which is true whether or not the disk took it.
+    let _ = crate::settings::update_settings(&app, |settings| {
         settings.trackers_list = cleaned.clone();
     });
     cleaned

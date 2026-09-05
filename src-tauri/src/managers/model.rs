@@ -1919,7 +1919,7 @@ impl ModelManager {
                         settings.selected_model.clear();
                     }
                     settings.selected_model.clone()
-                });
+                })?;
             }
         }
 
@@ -1940,7 +1940,7 @@ impl ModelManager {
                 let cleared = Self::clear_uninstalled_mode_models(&mut settings.modes, &installed);
                 settings.modes_revision = settings.modes_revision.saturating_add(1);
                 cleared
-            });
+            })?;
             for (mode_id, model_id) in cleared {
                 info!(
                     "Mode '{mode_id}' named uninstalled model '{model_id}'; inheriting the selected model"
@@ -1969,7 +1969,7 @@ impl ModelManager {
             }
             settings.selected_model = model_id.clone();
             true
-        });
+        })?;
         if selected {
             info!("Successfully auto-selected model: {}", available_model.id);
         }

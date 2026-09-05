@@ -329,7 +329,7 @@ pub async fn update_history_limit(
 ) -> Result<(), String> {
     crate::settings::update_settings(&app, |settings| {
         settings.history_limit = limit;
-    });
+    })?;
 
     history_manager
         .cleanup_old_entries()
@@ -356,7 +356,7 @@ pub async fn update_recording_retention_period(
 
     crate::settings::update_settings(&app, |settings| {
         settings.recording_retention_period = retention_period;
-    });
+    })?;
 
     history_manager
         .cleanup_old_entries()

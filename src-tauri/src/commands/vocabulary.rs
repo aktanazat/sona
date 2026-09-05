@@ -374,7 +374,7 @@ pub fn update_emoji_replacements(
         .collect::<Result<Vec<_>, _>>()?;
     settings::update_settings(&app, |settings| {
         settings.emoji_replacements = replacements.clone();
-    });
+    })?;
     Ok(replacements)
 }
 
@@ -383,7 +383,7 @@ pub fn update_emoji_replacements(
 pub fn update_emoji_replacements_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.emoji_replacements_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -444,7 +444,7 @@ pub fn save_text_replacements(
     let normalized = normalize_replacement_rules(rules);
     settings::update_settings(&app, |settings| {
         settings.replacements_rules = normalized.clone();
-    });
+    })?;
     Ok(normalized)
 }
 
@@ -456,7 +456,7 @@ pub fn reset_text_replacements(app: AppHandle) -> Result<Vec<ReplacementRule>, S
     let defaults = crate::settings::default_replacement_rules();
     settings::update_settings(&app, |settings| {
         settings.replacements_rules = defaults.clone();
-    });
+    })?;
     Ok(defaults)
 }
 
@@ -465,7 +465,7 @@ pub fn reset_text_replacements(app: AppHandle) -> Result<Vec<ReplacementRule>, S
 pub fn update_text_replacements_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.replacements_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
@@ -474,7 +474,7 @@ pub fn update_text_replacements_enabled(app: AppHandle, enabled: bool) -> Result
 pub fn update_spoken_edits_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.spoken_edits_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 

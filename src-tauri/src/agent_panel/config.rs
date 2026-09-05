@@ -20,11 +20,20 @@ pub(crate) enum ConfigError {
     StaleRevision,
     InvalidProposal,
     InvalidSetting,
+    /// The settings store took the change in memory and would not write it
+    /// out. An agent that hears its proposal applied would be wrong.
+    NotPersisted,
 }
 
 impl From<ProposalValidationError> for ConfigError {
     fn from(_: ProposalValidationError) -> Self {
         Self::InvalidProposal
+    }
+}
+
+impl From<crate::settings::SettingsPersistError> for ConfigError {
+    fn from(_: crate::settings::SettingsPersistError) -> Self {
+        Self::NotPersisted
     }
 }
 

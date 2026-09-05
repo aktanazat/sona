@@ -19,7 +19,11 @@ export const useContextCapture = () => {
     setCeilingUpdating(true);
     setCeilingError(null);
     try {
-      await commands.changeContextPolicyCeilingSetting(ceiling);
+      const result = await commands.changeContextPolicyCeilingSetting(ceiling);
+      if (result.status === "error") {
+        setCeilingError(result.error);
+        return;
+      }
       await refreshSettings();
     } catch (error) {
       setCeilingError(String(error));
@@ -32,7 +36,12 @@ export const useContextCapture = () => {
     setUrlCaptureUpdating(true);
     setUrlCaptureError(null);
     try {
-      await commands.changeContextUrlCaptureEnabledSetting(enabled);
+      const result =
+        await commands.changeContextUrlCaptureEnabledSetting(enabled);
+      if (result.status === "error") {
+        setUrlCaptureError(t("settings.privacy.context.urlCapture.error"));
+        return;
+      }
       await refreshSettings();
     } catch {
       setUrlCaptureError(t("settings.privacy.context.urlCapture.error"));

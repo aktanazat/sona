@@ -99,6 +99,15 @@ pub enum UpstreamImportError {
     Internal,
 }
 
+/// An import whose settings write never reached the disk imported nothing.
+/// There is no narrower variant for it: every named failure above is a step of
+/// the import, and this one is the store underneath them all.
+impl From<crate::settings::SettingsPersistError> for UpstreamImportError {
+    fn from(_: crate::settings::SettingsPersistError) -> Self {
+        Self::Internal
+    }
+}
+
 impl std::fmt::Display for UpstreamImportError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{self:?}")
@@ -240,7 +249,7 @@ async fn import_settings(
             receipt.settings_backup_path = Some(backup_path_for_receipt);
             receipt.settings_backup_saved_at_ms = Some(saved_at_ms);
             write_receipt(&receipt_path, receipt)?;
-            Ok((snapshot, previous_bindings, current_bindings))
+            Ok::<_, UpstreamImportError>((snapshot, previous_bindings, current_bindings))
         })?;
 
     crate::shortcut::reconcile_mode_shortcuts(app, &previous_bindings, &current_bindings);
@@ -278,7 +287,7 @@ pub fn revert_upstream_import_settings(app: AppHandle) -> Result<(), UpstreamImp
             receipt.settings_backup_path = None;
             receipt.settings_backup_saved_at_ms = None;
             write_receipt(&receipt_path, &receipt)?;
-            Ok((snapshot, previous_bindings, current_bindings))
+            Ok::<_, UpstreamImportError>((snapshot, previous_bindings, current_bindings))
         })?;
 
     crate::shortcut::reconcile_mode_shortcuts(&app, &previous_bindings, &current_bindings);

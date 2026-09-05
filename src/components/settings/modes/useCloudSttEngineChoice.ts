@@ -147,7 +147,9 @@ export const useCloudSttEngineChoice = (
         selectCloudEngine(pendingConsent);
         setPendingConsent(null);
       } else {
-        setConsentError(result.error);
+        setConsentError(
+          result.error === "unknown_provider" ? "unknown_provider" : "backend",
+        );
       }
     } catch {
       setConsentError("backend");

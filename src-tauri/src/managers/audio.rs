@@ -762,13 +762,17 @@ impl AudioRecordingManager {
     /// lock, so recovery cannot clear a microphone selected concurrently while
     /// the stream was being rebuilt.
     fn persist_default_microphone_after_fallback(&self, unavailable_name: &str) {
+        // A refusing store is logged at the settings seam. The emit below only
+        // fires on a write that landed: without one there is no persisted
+        // change for the UI to read back.
         let reset = update_settings(&self.app_handle, |settings| {
             if settings.selected_microphone.as_deref() != Some(unavailable_name) {
                 return false;
             }
             settings.selected_microphone = None;
             true
-        });
+        })
+        .unwrap_or(false);
         if !reset {
             return;
         }

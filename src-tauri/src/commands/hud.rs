@@ -44,7 +44,7 @@ pub fn hud_pill_state(app: AppHandle) -> HudPillState {
 pub fn set_hud_pill_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.hud_pill_enabled = enabled;
-    });
+    })?;
     overlay::sync_hud_pill(&app);
     Ok(())
 }
@@ -54,7 +54,7 @@ pub fn set_hud_pill_enabled(app: AppHandle, enabled: bool) -> Result<(), String>
 pub fn set_hud_pill_position(app: AppHandle, position: OverlayPosition) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.hud_pill_position = position;
-    });
+    })?;
     overlay::sync_hud_pill(&app);
     Ok(())
 }

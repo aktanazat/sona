@@ -37,7 +37,7 @@ pub fn save_persona_samples(
     let normalized = normalize_persona_samples(samples);
     settings::update_settings(&app, |settings| {
         settings.persona_samples = normalized.clone();
-    });
+    })?;
     Ok(normalized)
 }
 

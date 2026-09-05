@@ -91,7 +91,7 @@ pub fn set_log_level(app: AppHandle, level: LogLevel) -> Result<(), String> {
 
     update_settings(&app, |settings| {
         settings.log_level = level;
-    });
+    })?;
 
     Ok(())
 }

@@ -943,7 +943,8 @@ fn persist_provider_state(
     provider_id: String,
     state: SecretState,
 ) {
-    settings::update_settings(app, |settings| match kind {
+    // Nothing in this function's shape can report a store failure; the settings seam logs it.
+    let _ = settings::update_settings(app, |settings| match kind {
         SecretKind::Llm => {
             settings
                 .post_process_secret_states

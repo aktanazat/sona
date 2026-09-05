@@ -214,13 +214,7 @@ const settingUpdaters: SettingUpdaters = {
     commands.changeMeetingDigestEnabledSetting(value),
   meeting_digest_minute_of_day: (value) =>
     commands.changeMeetingDigestMinuteOfDaySetting(value),
-  /* The one settings command generated without a `Result`: the backend cannot
-   * refuse a timeout it already validated as an enum, so only the transport
-   * can fail, and that arrives as a rejection. */
-  model_unload_timeout: async (value) => {
-    await commands.setModelUnloadTimeout(value);
-    return { status: "ok", data: null };
-  },
+  model_unload_timeout: (value) => commands.setModelUnloadTimeout(value),
 };
 
 /* The in-flight (then settled) first load. See `initialize` for why the latch

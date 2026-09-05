@@ -160,7 +160,7 @@ pub async fn update_microphone_mode(app: AppHandle, always_on: bool) -> Result<(
     // Update settings (fast, stays inline)
     update_settings(&app, |settings| {
         settings.always_on_microphone = always_on;
-    });
+    })?;
 
     // Update the audio manager mode. update_mode can stop/start the cpal stream
     // (blocking CoreAudio) and takes the manager std mutexes — run it on a
@@ -222,7 +222,7 @@ pub async fn set_selected_microphone(app: AppHandle, device_name: String) -> Res
     };
     update_settings(&app, |settings| {
         settings.selected_microphone = selected_microphone;
-    });
+    })?;
 
     // Update the audio manager to use the new device. update_selected_device
     // can restart the cpal stream (blocking CoreAudio) — run it on a blocking
@@ -279,7 +279,7 @@ pub fn set_selected_output_device(app: AppHandle, device_name: String) -> Result
     };
     update_settings(&app, |settings| {
         settings.selected_output_device = selected_output_device;
-    });
+    })?;
     Ok(())
 }
 
@@ -316,7 +316,7 @@ pub fn set_clamshell_microphone(app: AppHandle, device_name: String) -> Result<(
     };
     update_settings(&app, |settings| {
         settings.clamshell_microphone = clamshell_microphone;
-    });
+    })?;
     Ok(())
 }
 
@@ -378,6 +378,6 @@ pub async fn set_selected_channel(app: AppHandle, channel: Option<u16>) -> Resul
 
     update_settings(&app, |settings| {
         settings.selected_channel = channel;
-    });
+    })?;
     Ok(())
 }

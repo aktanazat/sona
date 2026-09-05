@@ -69,7 +69,8 @@ fn accept(app: &AppHandle, suggestion: &LearningSuggestion) -> Result<(), Meetin
                 if !already {
                     settings.replacements_rules.push(rule.clone());
                 }
-            });
+            })
+            .map_err(|_| MeetingCommandError::StorageUnavailable)?;
             Ok(())
         }
         LearningSuggestion::VocabularyCorrection { spoken, written } => {
@@ -86,7 +87,8 @@ fn accept(app: &AppHandle, suggestion: &LearningSuggestion) -> Result<(), Meetin
                     &mut settings.custom_words,
                     entry.clone(),
                 );
-            });
+            })
+            .map_err(|_| MeetingCommandError::StorageUnavailable)?;
             Ok(())
         }
         LearningSuggestion::ModeHabit { mode_id, .. } => {

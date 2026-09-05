@@ -78,7 +78,7 @@ pub async fn delete_model(
 
         update_settings(&app_handle, |settings| {
             settings.selected_model = String::new();
-        });
+        })?;
     }
 
     model_manager
@@ -121,7 +121,7 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
         settings.selected_model = model_id.to_string();
         settings.onboarding_completed = true;
         previous
-    });
+    })?;
 
     // Skip eager loading if unload is set to "Immediately" — the model
     // will be loaded on-demand during the next transcription.
@@ -149,7 +149,7 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
         update_settings(app, |settings| {
             settings.selected_model = old_model;
             settings.onboarding_completed = old_onboarding_completed;
-        });
+        })?;
         return Err(e.to_string());
     }
 

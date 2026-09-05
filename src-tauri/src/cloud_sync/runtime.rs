@@ -864,7 +864,7 @@ impl CloudSyncRuntime {
             settings.cloud_sync.paused = false;
             settings.cloud_sync.consent_version = Some(CLOUD_SYNC_CONSENT_VERSION);
             settings.cloud_sync.endpoint = Some(endpoint);
-        });
+        })?;
         let recovery_code = encode_recovery_code(&vault_id, &*keys.vault_root)
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
         let overview = self.overview().await?;
@@ -1140,7 +1140,7 @@ impl CloudSyncRuntime {
             settings.cloud_sync.paused = false;
             settings.cloud_sync.consent_version = Some(CLOUD_SYNC_CONSENT_VERSION);
             settings.cloud_sync.endpoint = Some(endpoint);
-        });
+        })?;
         self.emit_changed(None, None);
         self.overview().await
     }
@@ -1152,7 +1152,7 @@ impl CloudSyncRuntime {
             .await
             .map_err(|_| CloudRuntimeError::SetupRequired)?;
         store.set_cloud_paused(true).map_err(map_store_error)?;
-        settings::update_settings(&self.app, |settings| settings.cloud_sync.paused = true);
+        settings::update_settings(&self.app, |settings| settings.cloud_sync.paused = true)?;
         self.emit_changed(None, None);
         self.overview().await
     }
@@ -1168,7 +1168,7 @@ impl CloudSyncRuntime {
             return Err(CloudRuntimeError::SetupRequired);
         }
         store.set_cloud_paused(false).map_err(map_store_error)?;
-        settings::update_settings(&self.app, |settings| settings.cloud_sync.paused = false);
+        settings::update_settings(&self.app, |settings| settings.cloud_sync.paused = false)?;
         self.emit_changed(None, None);
         self.overview().await
     }
@@ -3345,6 +3345,15 @@ fn canonical_endpoint(raw: &str) -> Result<String, CloudRuntimeError> {
     .ok_or(CloudRuntimeError::SetupRequired)
 }
 
+/// A settings write that never reached the disk is the same failure as a
+/// meetings-store write that never did - see [`map_store_error`] - so cloud
+/// sync reports it the same way instead of claiming the pairing landed.
+impl From<crate::settings::SettingsPersistError> for CloudRuntimeError {
+    fn from(_: crate::settings::SettingsPersistError) -> Self {
+        Self::Storage
+    }
+}
+
 fn map_store_error(_error: StoreError) -> CloudRuntimeError {
     CloudRuntimeError::Storage
 }
@@ -4036,7 +4045,7 @@ fn worker_share_transport(
                 sha256: chunk.sha256.clone(),
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, CloudRuntimeError>>()?;
     let header = serde_json::to_vec(&WorkerShareTransport {
         format: "sona-encrypted-share-v1",
         version: PROTOCOL_VERSION,

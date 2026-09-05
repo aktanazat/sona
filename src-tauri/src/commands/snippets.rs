@@ -126,7 +126,7 @@ pub fn set_snippet_enabled(
 pub fn set_snippets_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.snippets_enabled = enabled;
-    });
+    })?;
     Ok(())
 }
 
