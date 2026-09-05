@@ -862,7 +862,9 @@
         "preview": "시작음과 정지음 미리듣기"
       },
       "wordCorrectionThreshold": {
-        "title": "단어 수정 임계값"
+        "title": "단어 수정 임계값",
+        "notApplied": "적용되지 않음",
+        "promptedHint": "Whisper 모델은 디코더 프롬프트로 어휘를 전달받으므로 이 임계값은 Parakeet과 Moonshine에 적용됩니다."
       },
       "historyLimit": {
         "title": "히스토리 제한",

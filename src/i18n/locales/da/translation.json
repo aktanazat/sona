@@ -863,7 +863,9 @@
         "preview": "Lyt til start- og stoplydene"
       },
       "wordCorrectionThreshold": {
-        "title": "Tærskel for ordkorrektion"
+        "title": "Tærskel for ordkorrektion",
+        "notApplied": "Anvendes ikke",
+        "promptedHint": "Whisper-modeller får dit ordforråd i dekoderens prompt, så denne tærskel gælder for Parakeet og Moonshine."
       },
       "historyLimit": {
         "title": "Historikgrænse",

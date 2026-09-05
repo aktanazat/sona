@@ -864,7 +864,9 @@
         "preview": "Ouça uma amostra dos sons de início e de parada"
       },
       "wordCorrectionThreshold": {
-        "title": "Limite de Correção de Palavras"
+        "title": "Limite de Correção de Palavras",
+        "notApplied": "Não aplicado",
+        "promptedHint": "Os modelos Whisper recebem seu vocabulário no prompt do decodificador, então este limite se aplica ao Parakeet e ao Moonshine."
       },
       "historyLimit": {
         "title": "Limite de Histórico",

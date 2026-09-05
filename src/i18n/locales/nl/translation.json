@@ -863,7 +863,9 @@
         "preview": "Beluister de start- en stopgeluiden"
       },
       "wordCorrectionThreshold": {
-        "title": "Drempelwaarde woordcorrectie"
+        "title": "Drempelwaarde woordcorrectie",
+        "notApplied": "Niet van toepassing",
+        "promptedHint": "Whisper-modellen krijgen je woordenschat mee in de prompt van de decoder, dus deze drempelwaarde geldt voor Parakeet en Moonshine."
       },
       "historyLimit": {
         "title": "Geschiedenislimiet",

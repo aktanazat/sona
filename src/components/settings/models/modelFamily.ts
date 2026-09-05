@@ -60,19 +60,42 @@ export interface FallbackFamilyLabels {
   other: string;
 }
 
+const familyRuleFor = (model: ModelInfo): FamilyRule | undefined => {
+  const haystack = `${model.id} ${model.name}`.toLowerCase();
+  return FAMILY_RULES.find((rule) =>
+    rule.needles.some((needle) => haystack.includes(needle)),
+  );
+};
+
 export const familyOf = (
   model: ModelInfo,
   fallbacks: FallbackFamilyLabels,
 ): ModelFamily => {
-  const haystack = `${model.id} ${model.name}`.toLowerCase();
-  for (const rule of FAMILY_RULES) {
-    if (rule.needles.some((needle) => haystack.includes(needle))) {
-      return { key: rule.key, label: rule.label };
-    }
-  }
+  const rule = familyRuleFor(model);
+  if (rule) return { key: rule.key, label: rule.label };
   return model.is_custom
     ? { key: CUSTOM_FAMILY_KEY, label: fallbacks.custom }
     : { key: OTHER_FAMILY_KEY, label: fallbacks.other };
+};
+
+/**
+ * Whether this model's decoder is handed the user's vocabulary as a decode
+ * prompt, which is what makes fuzzy correction afterwards a second guess at
+ * words the decoder was already told about. `managers/transcription.rs` gates
+ * that on `model.arch() == "whisper"`.
+ *
+ * Breeze ASR answers true while wearing its own product family: Breeze-ASR-25
+ * is a Whisper fine-tune, `architecture: "whisper"` in the catalog, and the
+ * models page still lists it under its own name.
+ *
+ * Read off the id and the name for the same reason `familyOf` is — `ModelInfo`
+ * carries no architecture. A user-dropped GGUF whose filename says nothing
+ * about its architecture therefore reads as false, which is the conservative
+ * answer: a control stays live rather than dimming on a guess.
+ */
+export const takesVocabularyAsPrompt = (model: ModelInfo): boolean => {
+  const key = familyRuleFor(model)?.key;
+  return key === "whisper" || key === "breeze";
 };
 
 export interface ModelFamilyGroup extends ModelFamily {

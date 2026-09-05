@@ -862,7 +862,9 @@
         "preview": "Nghe thử âm thanh bắt đầu và dừng"
       },
       "wordCorrectionThreshold": {
-        "title": "Ngưỡng sửa từ"
+        "title": "Ngưỡng sửa từ",
+        "notApplied": "Không áp dụng",
+        "promptedHint": "Các mô hình Whisper nhận từ vựng của bạn trong prompt của bộ giải mã, nên ngưỡng này áp dụng cho Parakeet và Moonshine."
       },
       "historyLimit": {
         "title": "Giới hạn lịch sử",

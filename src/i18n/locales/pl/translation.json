@@ -865,7 +865,9 @@
         "preview": "Odsłuchaj dźwięki rozpoczęcia i zatrzymania"
       },
       "wordCorrectionThreshold": {
-        "title": "Próg korekty słów"
+        "title": "Próg korekty słów",
+        "notApplied": "Nie jest stosowany",
+        "promptedHint": "Modele Whisper otrzymują Twój słownik w prompcie dekodera, więc ten próg dotyczy modeli Parakeet i Moonshine."
       },
       "historyLimit": {
         "title": "Limit historii",

@@ -864,7 +864,9 @@
         "preview": "Ascolta un'anteprima dei suoni di avvio e arresto"
       },
       "wordCorrectionThreshold": {
-        "title": "Soglia di Correzione Parole"
+        "title": "Soglia di Correzione Parole",
+        "notApplied": "Non applicata",
+        "promptedHint": "I modelli Whisper ricevono il tuo vocabolario nel prompt del decoder, quindi questa soglia si applica a Parakeet e Moonshine."
       },
       "historyLimit": {
         "title": "Limite della Cronologia",

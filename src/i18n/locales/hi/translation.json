@@ -863,7 +863,9 @@
         "preview": "शुरू और बंद होने की आवाज़ें सुनें"
       },
       "wordCorrectionThreshold": {
-        "title": "शब्द सुधार की सीमा"
+        "title": "शब्द सुधार की सीमा",
+        "notApplied": "लागू नहीं",
+        "promptedHint": "Whisper मॉडल आपकी शब्दावली को डिकोडर के प्रॉम्प्ट में पाते हैं, इसलिए यह सीमा Parakeet और Moonshine पर लागू होती है।"
       },
       "historyLimit": {
         "title": "इतिहास की सीमा",

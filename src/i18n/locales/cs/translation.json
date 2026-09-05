@@ -865,7 +865,9 @@
         "preview": "Přehrát zvuky spuštění a zastavení"
       },
       "wordCorrectionThreshold": {
-        "title": "Práh korekce slov"
+        "title": "Práh korekce slov",
+        "notApplied": "Neuplatňuje se",
+        "promptedHint": "Modely Whisper dostávají váš slovník v promptu dekodéru, takže tento práh se uplatní u modelů Parakeet a Moonshine."
       },
       "historyLimit": {
         "title": "Limit historie",

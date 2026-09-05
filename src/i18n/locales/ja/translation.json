@@ -862,7 +862,9 @@
         "preview": "開始音と停止音をプレビュー"
       },
       "wordCorrectionThreshold": {
-        "title": "単語修正しきい値"
+        "title": "単語修正しきい値",
+        "notApplied": "適用されません",
+        "promptedHint": "Whisper モデルは語彙をデコーダーのプロンプトで受け取るため、このしきい値は Parakeet と Moonshine に適用されます。"
       },
       "historyLimit": {
         "title": "履歴上限",

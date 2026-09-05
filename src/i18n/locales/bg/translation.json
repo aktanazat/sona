@@ -863,7 +863,9 @@
         "preview": "Прослушай звуците за начало и спиране"
       },
       "wordCorrectionThreshold": {
-        "title": "Праг за корекция на думи"
+        "title": "Праг за корекция на думи",
+        "notApplied": "Не се прилага",
+        "promptedHint": "Моделите Whisper получават речника ви в промпта на декодера, затова този праг се прилага за Parakeet и Moonshine."
       },
       "historyLimit": {
         "title": "Лимит на историята",

@@ -863,7 +863,9 @@
         "preview": "Lyssna på start- och stoppljuden"
       },
       "wordCorrectionThreshold": {
-        "title": "Tröskelvärde för ordkorrigering"
+        "title": "Tröskelvärde för ordkorrigering",
+        "notApplied": "Används inte",
+        "promptedHint": "Whisper-modeller får ditt ordförråd i avkodarens prompt, så det här tröskelvärdet gäller för Parakeet och Moonshine."
       },
       "historyLimit": {
         "title": "Historikgräns",

@@ -864,7 +864,9 @@
         "preview": "האזן לצלילי ההתחלה והעצירה"
       },
       "wordCorrectionThreshold": {
-        "title": "סף תיקון מילים"
+        "title": "סף תיקון מילים",
+        "notApplied": "לא בשימוש",
+        "promptedHint": "מודלי Whisper מקבלים את אוצר המילים שלך בפרומפט של המפענח, ולכן הסף הזה חל על Parakeet ועל Moonshine."
       },
       "historyLimit": {
         "title": "מגבלת היסטוריה",

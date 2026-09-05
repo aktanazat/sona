@@ -863,7 +863,9 @@
         "preview": "Başlangıç ve bitiş seslerini dinle"
       },
       "wordCorrectionThreshold": {
-        "title": "Kelime Düzeltme Eşiği"
+        "title": "Kelime Düzeltme Eşiği",
+        "notApplied": "Uygulanmıyor",
+        "promptedHint": "Whisper modelleri sözcük dağarcığınızı kod çözücü isteminde alır, bu yüzden bu eşik Parakeet ve Moonshine için geçerlidir."
       },
       "historyLimit": {
         "title": "Geçmiş Limiti",

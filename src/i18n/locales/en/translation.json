@@ -863,7 +863,9 @@
         "preview": "Preview the start and stop sounds"
       },
       "wordCorrectionThreshold": {
-        "title": "Word correction threshold"
+        "title": "Word correction threshold",
+        "notApplied": "Not applied",
+        "promptedHint": "Whisper models receive your vocabulary in the decoder's prompt, so this threshold applies to Parakeet and Moonshine instead."
       },
       "historyLimit": {
         "title": "History limit",

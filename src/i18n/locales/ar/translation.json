@@ -867,7 +867,9 @@
         "preview": "معاينة أصوات البدء والتوقف"
       },
       "wordCorrectionThreshold": {
-        "title": "عتبة تصحيح الكلمات"
+        "title": "عتبة تصحيح الكلمات",
+        "notApplied": "غير مطبق",
+        "promptedHint": "تتلقى نماذج Whisper مفرداتك في مُوجّه فك التشفير، لذا ينطبق هذا الحد على Parakeet وMoonshine."
       },
       "historyLimit": {
         "title": "حد السجل",

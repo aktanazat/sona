@@ -862,7 +862,9 @@
         "preview": "試聽開始與停止提示音"
       },
       "wordCorrectionThreshold": {
-        "title": "詞彙修正閾值"
+        "title": "詞彙修正閾值",
+        "notApplied": "不適用",
+        "promptedHint": "Whisper 模型透過解碼器提示詞接收你的詞彙，因此此閾值適用於 Parakeet 與 Moonshine。"
       },
       "historyLimit": {
         "title": "歷史紀錄上限",

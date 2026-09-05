@@ -864,7 +864,9 @@
         "preview": "Escucha una muestra de los sonidos de inicio y parada"
       },
       "wordCorrectionThreshold": {
-        "title": "Umbral de corrección de palabras"
+        "title": "Umbral de corrección de palabras",
+        "notApplied": "No se aplica",
+        "promptedHint": "Los modelos Whisper reciben tu vocabulario en el prompt del decodificador, así que este umbral se aplica a Parakeet y Moonshine."
       },
       "historyLimit": {
         "title": "Límite de historial",

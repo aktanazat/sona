@@ -865,7 +865,9 @@
         "preview": "Прослухати звуки початку та зупинки"
       },
       "wordCorrectionThreshold": {
-        "title": "Поріг корекції слів"
+        "title": "Поріг корекції слів",
+        "notApplied": "Не застосовується",
+        "promptedHint": "Моделі Whisper отримують ваш словник у промпті декодера, тому цей поріг діє для Parakeet і Moonshine."
       },
       "historyLimit": {
         "title": "Ліміт історії",

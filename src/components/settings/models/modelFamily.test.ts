@@ -5,6 +5,7 @@ import {
   groupModelsByFamily,
   isLegacyModel,
   quantLabelOf,
+  takesVocabularyAsPrompt,
 } from "./modelFamily";
 
 const FALLBACKS = { custom: "Added by you", other: "Other models" };
@@ -93,6 +94,33 @@ describe("familyOf", () => {
     const unknown = model({ id: "someone/mystery-gguf", name: "Mystery" });
     expect(familyOf(unknown, FALLBACKS).label).toBe("Other models");
   });
+});
+
+/* Which models read the word-correction threshold, asked from the other side:
+ * a whisper-family decoder gets the vocabulary as a decode prompt and the
+ * backend then corrects exact repeats only, so the threshold governs nothing
+ * there (`vocabulary_already_prompted`, managers/transcription.rs). The row
+ * that dims on this answer names Parakeet and Moonshine as the models it does
+ * govern, so a needle added to the wrong side turns that copy into a lie. */
+describe("takesVocabularyAsPrompt", () => {
+  const cases: [string, string, boolean][] = [
+    [
+      "handy-computer/whisper-large-v3-gguf/whisper-large-v3-Q5_K_M.gguf",
+      "Whisper Large v3",
+      true,
+    ],
+    // A Whisper fine-tune under its own product name: architecture "whisper"
+    // in the catalog, so the decoder takes the prompt.
+    ["handy-computer/Breeze-ASR-25-gguf", "Breeze ASR", true],
+    ["parakeet-tdt-0.6b-v3", "Parakeet V3", false],
+    ["handy-computer/moonshine-base-gguf", "Moonshine Base", false],
+    ["canary-180m-flash", "Canary 180M Flash", false],
+  ];
+  for (const [id, name, prompted] of cases) {
+    test(`${name} ${prompted ? "takes" : "does not take"} the vocabulary as a prompt`, () => {
+      expect(takesVocabularyAsPrompt(model({ id, name }))).toBe(prompted);
+    });
+  }
 });
 
 describe("groupModelsByFamily", () => {

@@ -864,7 +864,9 @@
         "preview": "Écouter un aperçu des sons de démarrage et d'arrêt"
       },
       "wordCorrectionThreshold": {
-        "title": "Seuil de correction des mots"
+        "title": "Seuil de correction des mots",
+        "notApplied": "Non appliqué",
+        "promptedHint": "Les modèles Whisper reçoivent votre vocabulaire dans le prompt du décodeur ; ce seuil s'applique donc à Parakeet et Moonshine."
       },
       "historyLimit": {
         "title": "Limite d'historique",

@@ -863,7 +863,9 @@
         "preview": "Start- und Stopp-Sounds anhören"
       },
       "wordCorrectionThreshold": {
-        "title": "Wortkorrektur-Schwelle"
+        "title": "Wortkorrektur-Schwelle",
+        "notApplied": "Nicht angewendet",
+        "promptedHint": "Whisper-Modelle bekommen dein Vokabular im Prompt des Decoders, deshalb gilt diese Schwelle für Parakeet und Moonshine."
       },
       "historyLimit": {
         "title": "Verlaufslimit",
