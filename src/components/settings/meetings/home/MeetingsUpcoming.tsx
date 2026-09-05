@@ -2,17 +2,11 @@ import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import type {
-  CalendarAccess,
   MeetingNotesTemplate,
-  MeetingUpcomingAttendee,
   MeetingUpcomingRow,
   SourceKind,
 } from "@/bindings";
-import {
-  Microlabel,
-  SETTINGS_SURFACE,
-  SettingsCard,
-} from "@/components/settings/rows";
+import { Microlabel, SETTINGS_SURFACE } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { Skeleton } from "@/components/vg/skeleton";
 import {
@@ -30,7 +24,6 @@ import {
   localDayHeading,
 } from "@/lib/utils/localDay";
 import { MEETING_NOTES_TEMPLATES } from "../meetingAnalytics";
-import { PersonDetailDialog } from "@/components/people/PersonDetailDialog";
 import {
   useUpcomingEvents,
   type UpcomingEventsState,
@@ -39,10 +32,18 @@ import {
 /* D28: the week ahead, above the log of what already happened.
  *
  * Quiet rows, read by day, in the same grammar meeting history is written in —
- * the same day bucketer, the same headings, the same hairline surface. What is
- * different is that these rows are not history: they carry the three decisions
- * their series has made, and the only controls on the page that can change
- * them.
+ * the same day bucketer, the same headings, one surface for the whole list and
+ * the same 62px gutter of clock times, so the two lists line up down the page.
+ * What is different is that these rows are not history: they carry the three
+ * decisions their series has made, and the only controls on the page that can
+ * change them.
+ *
+ * Round 7 emptied the row down to what a person scanning the week asks for:
+ * when, what it is called, and whose calendar it is on. The attendee names and
+ * the "+3" count went with it — a row is not the place to read a guest list,
+ * and the names were also the only reason this section mounted the People
+ * dialog. "Repeats" stays as grey meta, because it is what explains the
+ * chevron beside it.
  *
  * The section adds no scroll container. It is one more child of the page's
  * column, which is the pane's single scroll owner, because a fixed 900x800
@@ -50,8 +51,8 @@ import {
  *
  * The "no calendar" state is deliberately not an error. Sona reads the calendar
  * macOS already holds — the Google, iCloud and Outlook accounts signed in
- * there — so the fix is a grant, stated in one line, and the section says so
- * once rather than apologizing per row. */
+ * there — so the fix is a grant, said in one bronze line with the one place
+ * that grants it as a link. */
 
 /** The sentinel the picker uses for "no choice", since a Select has no empty. */
 const APP_DEFAULT = "app-default";
@@ -66,72 +67,8 @@ const templateValue = (template: MeetingNotesTemplate | null): string =>
 const templateChoice = (value: string): MeetingNotesTemplate | null =>
   MEETING_NOTES_TEMPLATES.find((template) => template === value) ?? null;
 
-interface AttendeeNamesProps {
-  attendees: MeetingUpcomingAttendee[];
-  /** Participants EventKit would not name, shown as a count and nothing else. */
-  unnamed: number;
-  onOpenPerson: (personId: string) => void;
-}
-
-/* The named participants, as one run of type on the row's quiet line. A name
- * is a button only when the address book already knows that address: a name
- * that navigates nowhere would teach the reader that names do not navigate.
- *
- * Round 6 took the pills off. Five bordered capsules under a title made the
- * row a cluster of controls rather than a line to read, and the border said
- * nothing the name did not. */
-const AttendeeNames: React.FC<AttendeeNamesProps> = ({
-  attendees,
-  unnamed,
-  onOpenPerson,
-}) => {
-  const { t } = useTranslation();
-  if (attendees.length === 0 && unnamed <= 0) return null;
-
-  return (
-    <span
-      data-slot="upcoming-attendees"
-      role="group"
-      aria-label={t("meetings.upcoming.attendees", "Attendees")}
-      className="min-w-0 truncate"
-    >
-      {attendees.map((attendee, index) => (
-        <React.Fragment key={`${attendee.name}-${index}`}>
-          {index === 0 ? null : <span aria-hidden="true">, </span>}
-          {attendee.person_id === null ? (
-            <span>
-              {attendee.is_self
-                ? t("meetings.upcoming.you", "You")
-                : attendee.name}
-            </span>
-          ) : (
-            <button
-              type="button"
-              data-slot="upcoming-attendee-link"
-              onClick={() => onOpenPerson(attendee.person_id ?? "")}
-              className="rounded-md text-accent-strong transition-colors motion-reduce:transition-none hover:underline"
-            >
-              {attendee.name}
-            </button>
-          )}
-        </React.Fragment>
-      ))}
-      {unnamed > 0 ? (
-        <span className="tabular-nums">
-          {attendees.length === 0 ? null : <span aria-hidden="true">, </span>}
-          {t("meetings.upcoming.attendeesMore", "+{{count}}", {
-            count: unnamed,
-          })}
-        </span>
-      ) : null}
-    </span>
-  );
-};
-
 export interface SeriesControlsProps {
   row: MeetingUpcomingRow;
-  /** Capture sources selected on this page — the grant's acknowledgement. */
-  sources: SourceKind[];
   saving: boolean;
   onAlwaysRecord: (seriesKey: string, alwaysRecord: boolean) => void;
   onTemplate: (
@@ -147,7 +84,6 @@ export interface SeriesControlsProps {
  * it. */
 export const SeriesControls: React.FC<SeriesControlsProps> = ({
   row,
-  sources,
   saving,
   onAlwaysRecord,
   onTemplate,
@@ -156,10 +92,6 @@ export const SeriesControls: React.FC<SeriesControlsProps> = ({
   const { t } = useTranslation();
   const series = row.series;
   if (series === null) return null;
-  /* A standing grant records the sources the operator acknowledged. With none
-   * selected there is nothing to acknowledge, so the switch states why rather
-   * than writing a grant that names nothing. */
-  const canGrant = sources.length > 0 || series.always_record;
 
   return (
     <div
@@ -167,33 +99,20 @@ export const SeriesControls: React.FC<SeriesControlsProps> = ({
       className="flex flex-col gap-3 border-t border-gray-alpha-400 px-6 py-3.5"
     >
       <div className="flex items-center justify-between gap-6">
-        <span className="flex min-w-0 flex-col gap-0.5">
-          <span className="text-[14px] leading-[21px] text-gray-1000">
-            {t("meetings.upcoming.alwaysRecord", "Always record this series")}
-          </span>
-          {canGrant ? null : (
-            <Microlabel className="text-amber-900">
-              {t(
-                "meetings.upcoming.alwaysRecordNeedsSource",
-                "Choose a capture source above first.",
-              )}
-            </Microlabel>
-          )}
+        <span className="text-[14px] leading-[21px] text-gray-1000">
+          {t("meetings.upcoming.alwaysRecord")}
         </span>
         <Switch
-          aria-label={t(
-            "meetings.upcoming.alwaysRecord",
-            "Always record this series",
-          )}
+          aria-label={t("meetings.upcoming.alwaysRecord")}
           checked={series.always_record}
-          disabled={saving || !canGrant}
+          disabled={saving}
           onCheckedChange={(next) => onAlwaysRecord(series.series_key, next)}
         />
       </div>
 
       <div className="flex items-center justify-between gap-6">
         <span className="text-[14px] leading-[21px] text-gray-1000">
-          {t("meetings.upcoming.template", "Notes template")}
+          {t("meetings.upcoming.template")}
         </span>
         <Select
           value={templateValue(series.template)}
@@ -205,13 +124,13 @@ export const SeriesControls: React.FC<SeriesControlsProps> = ({
           <SelectTrigger
             size="sm"
             className="w-auto"
-            aria-label={t("meetings.upcoming.template", "Notes template")}
+            aria-label={t("meetings.upcoming.template")}
           >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={APP_DEFAULT}>
-              {t("meetings.upcoming.templateDefault", "App default")}
+              {t("meetings.upcoming.templateDefault")}
             </SelectItem>
             {MEETING_NOTES_TEMPLATES.map((template) => (
               <SelectItem key={template} value={template}>
@@ -224,13 +143,10 @@ export const SeriesControls: React.FC<SeriesControlsProps> = ({
 
       <div className="flex items-center justify-between gap-6">
         <span className="text-[14px] leading-[21px] text-gray-1000">
-          {t("meetings.upcoming.digest", "Include in the evening digest")}
+          {t("meetings.upcoming.digest")}
         </span>
         <Switch
-          aria-label={t(
-            "meetings.upcoming.digest",
-            "Include in the evening digest",
-          )}
+          aria-label={t("meetings.upcoming.digest")}
           checked={series.digest_included}
           disabled={saving}
           onCheckedChange={(next) => onDigest(series.series_key, next)}
@@ -240,82 +156,69 @@ export const SeriesControls: React.FC<SeriesControlsProps> = ({
   );
 };
 
-interface UpcomingRowProps extends Omit<SeriesControlsProps, "row"> {
-  row: MeetingUpcomingRow;
+interface UpcomingRowProps extends SeriesControlsProps {
   expanded: boolean;
   onToggleExpanded: () => void;
-  onOpenPerson: (personId: string) => void;
 }
 
 const UpcomingRow: React.FC<UpcomingRowProps> = ({
   row,
   expanded,
   onToggleExpanded,
-  onOpenPerson,
   ...controls
 }) => {
   const { t } = useTranslation();
-  const unnamed = Math.max(0, row.attendee_count - row.attendees.length);
 
   return (
-    <li data-slot="upcoming-row" className="flex flex-col">
-      <div className="flex items-start gap-5 px-6 py-3.5">
+    <li data-slot="upcoming-row" className="group flex flex-col">
+      <div className="flex items-baseline gap-5 px-6 py-3.5">
         {/* When, in its own gutter. Tabular so a column of clock times keeps
-         * one right edge instead of jittering with the digits. */}
-        <span className="flex w-[62px] flex-none flex-col pt-px text-end">
-          <Microlabel className="tabular-nums">
-            {formatTimeOfDay(row.start_utc_ms)}
-          </Microlabel>
-          <Microlabel className="tabular-nums text-gray-800">
-            {formatTimeOfDay(row.end_utc_ms)}
-          </Microlabel>
-        </span>
+         * one right edge instead of jittering with the digits, and 62px wide
+         * so the recorded list below lines up with it. */}
+        <Microlabel className="w-[62px] flex-none text-end tabular-nums">
+          {formatTimeOfDay(row.start_utc_ms)}
+        </Microlabel>
 
-        <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="flex min-w-0 items-baseline gap-2">
-            <span className="truncate text-[14px] leading-[21px] font-medium text-gray-1000">
-              {row.title}
+        <span className="flex min-w-0 flex-1 items-baseline gap-2">
+          <span className="truncate text-[14px] leading-[21px] font-medium text-gray-1000">
+            {row.title}
+          </span>
+          {row.calendar_name === null ? null : (
+            <span
+              data-slot="upcoming-calendar"
+              className="truncate text-[13px] leading-[18px] text-gray-800"
+            >
+              {row.calendar_name}
             </span>
-            {row.series === null ? null : (
-              <span
-                data-slot="upcoming-series-chip"
-                className="flex-none text-[13px] leading-[18px] text-gray-900"
-              >
-                {t("meetings.upcoming.recurring", "Repeats")}
-              </span>
-            )}
-          </span>
-          {/* One quiet line under the title: whose calendar it is, and who is
-           * coming. Two lines of the same size read as two facts of equal
-           * weight, which is what the row spent its second line saying. */}
-          <span className="flex min-w-0 items-baseline text-[13px] leading-[18px] text-gray-900">
-            {row.calendar_name === null ? null : (
-              <span className="flex-none">{row.calendar_name}</span>
-            )}
-            {row.calendar_name === null ||
-            (row.attendees.length === 0 && unnamed <= 0) ? null : (
-              <span aria-hidden="true" className="flex-none px-1.5">
-                ·
-              </span>
-            )}
-            <AttendeeNames
-              attendees={row.attendees}
-              unnamed={unnamed}
-              onOpenPerson={onOpenPerson}
-            />
-          </span>
+          )}
+          {row.series === null ? null : (
+            <span
+              data-slot="upcoming-series-chip"
+              className="flex-none text-[13px] leading-[18px] text-gray-800"
+            >
+              {t("meetings.upcoming.recurring")}
+            </span>
+          )}
         </span>
 
+        {/* The disclosure, on the rows that have something to disclose. It
+         * appears on hover, on keyboard focus anywhere in the row and while
+         * the row is open, so a week of calendar rows is not also a column of
+         * chevrons. */}
         {row.series === null ? null : (
           <Button
             type="button"
             variant="ghost"
             size="icon-sm"
-            className="-me-1.5 flex-none text-gray-900"
+            className={cn(
+              "-me-1.5 flex-none self-center text-gray-800 opacity-0 transition-opacity",
+              "group-hover:opacity-100 group-focus-within:opacity-100",
+              "focus-visible:opacity-100 aria-expanded:opacity-100",
+              "motion-reduce:transition-none",
+            )}
             aria-expanded={expanded}
             aria-label={t("meetings.upcoming.seriesOptions", {
               title: row.title,
-              defaultValue: "Series options for {{title}}",
             })}
             onClick={onToggleExpanded}
           >
@@ -345,40 +248,6 @@ const UpcomingSkeleton: React.FC<{ label: string }> = ({ label }) => (
   </div>
 );
 
-/** What the section says when there are no rows to show, and why. */
-interface AccessCopy {
-  /** The catalog key for the line. */
-  line: string;
-  /** The English the line falls back to, so the state is never blank. */
-  fallback: string;
-  /** Whether the line is followed by the sentence naming the grant. */
-  hint: boolean;
-}
-
-/** The one calm line each state of a calendar Sona cannot read says. */
-const accessCopy = (access: CalendarAccess): AccessCopy => {
-  switch (access) {
-    case "authorized":
-      return {
-        line: "meetings.upcoming.empty",
-        fallback: "Nothing scheduled for the next week.",
-        hint: false,
-      };
-    case "unavailable":
-      return {
-        line: "meetings.upcoming.unavailable",
-        fallback: "This system has no calendar Sona can read.",
-        hint: false,
-      };
-    default:
-      return {
-        line: "meetings.upcoming.noAccess",
-        fallback: "Sona cannot see your calendar.",
-        hint: true,
-      };
-  }
-};
-
 export interface MeetingsUpcomingViewProps
   extends Pick<
     UpcomingEventsState,
@@ -389,7 +258,8 @@ export interface MeetingsUpcomingViewProps
     | "setTemplate"
     | "setDigestIncluded"
   > {
-  sources: SourceKind[];
+  /** The shell's route setter, so a missing grant can name where it is given. */
+  onOpenSettings?: () => void;
 }
 
 /** The section, rendered from state alone, so every one of its states is one
@@ -398,70 +268,74 @@ export const MeetingsUpcomingView: React.FC<MeetingsUpcomingViewProps> = ({
   events,
   loading,
   saving,
-  sources,
+  onOpenSettings,
   setAlwaysRecord,
   setTemplate,
   setDigestIncluded,
 }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [personId, setPersonId] = useState<string | null>(null);
 
-  const title = t("meetings.upcoming.title", "Upcoming");
+  const title = t("meetings.upcoming.title");
   const rows = events?.rows ?? [];
   const days = groupByLocalDay(rows, (row) => row.start_utc_ms);
-
   /* A read that failed and a calendar that cannot be read are the same thing
    * to a reader: the section cannot say what is next. It says so once. */
-  const copy = accessCopy(events?.access ?? "denied");
+  const access = events?.access ?? "denied";
 
   return (
     <section data-slot="meetings-upcoming" className="flex flex-col gap-2">
-      <h2 className="min-h-5">
+      <h2 className="min-h-8 content-center">
         <Microlabel>{title}</Microlabel>
       </h2>
 
       {loading ? (
-        <UpcomingSkeleton
-          label={t("meetings.upcoming.loading", "Reading your calendar…")}
-        />
+        <UpcomingSkeleton label={t("meetings.upcoming.loading")} />
       ) : rows.length === 0 ? (
-        <SettingsCard className="flex flex-col gap-1 px-6 py-5">
-          <p className="text-[14px] leading-[21px] text-pretty text-gray-1000">
-            {t(copy.line, copy.fallback)}
+        access === "authorized" || access === "unavailable" ? (
+          <p className="text-[13px] leading-5 text-gray-800">
+            {access === "authorized"
+              ? t("meetings.upcoming.empty")
+              : t("meetings.upcoming.unavailable")}
           </p>
-          {copy.hint ? (
-            <Microlabel className="max-w-[62ch] text-pretty">
-              {t(
-                "meetings.upcoming.noAccessHint",
-                'Turn on "Use my calendar" in Meetings settings, then allow full access when macOS asks. Whatever macOS Calendar already shows — Google, iCloud, Outlook — comes with it.',
-              )}
-            </Microlabel>
-          ) : null}
-        </SettingsCard>
+        ) : (
+          /* One bronze line. It names the fix in words either way - a region
+           * that cannot say what is next still owes the reader the next
+           * action - and wraps them in a press only where this mount was
+           * given a route to Settings. */
+          <p className="text-[13px] leading-5 text-accent-strong">
+            {t("meetings.upcoming.noAccess")}{" "}
+            {onOpenSettings === undefined ? (
+              t("meetings.upcoming.noAccessFix")
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="rounded-md underline underline-offset-2 hover:text-gray-1000"
+              >
+                {t("meetings.upcoming.noAccessFix")}
+              </button>
+            )}
+          </p>
+        )
       ) : (
-        <div className="flex flex-col gap-5">
+        <div className={SETTINGS_SURFACE}>
           {days.map((day) => {
             const heading = localDayHeading(day.startOfDayMs, t);
             return (
-              <section
-                key={day.startOfDayMs}
-                data-slot="upcoming-day"
-                className="flex flex-col gap-2"
-              >
-                <h3 className="pt-2 text-[13px] leading-[18px] text-gray-900">
-                  {heading}
+              <React.Fragment key={day.startOfDayMs}>
+                <h3 data-slot="upcoming-day" className="px-6 pt-2.5 pb-2">
+                  <Microlabel>{heading}</Microlabel>
                 </h3>
                 <ul
                   role="list"
                   aria-label={heading}
-                  className={SETTINGS_SURFACE}
+                  className="divide-y divide-gray-alpha-400"
                 >
                   {day.items.map((row) => (
                     <UpcomingRow
                       key={row.event_key}
                       row={row}
-                      sources={sources}
                       saving={saving === row.series?.series_key}
                       expanded={expanded === row.event_key}
                       onToggleExpanded={() =>
@@ -469,7 +343,6 @@ export const MeetingsUpcomingView: React.FC<MeetingsUpcomingViewProps> = ({
                           current === row.event_key ? null : row.event_key,
                         )
                       }
-                      onOpenPerson={setPersonId}
                       onAlwaysRecord={(seriesKey, next) =>
                         void setAlwaysRecord(seriesKey, next)
                       }
@@ -482,25 +355,21 @@ export const MeetingsUpcomingView: React.FC<MeetingsUpcomingViewProps> = ({
                     />
                   ))}
                 </ul>
-              </section>
+              </React.Fragment>
             );
           })}
         </div>
       )}
-
-      <PersonDetailDialog
-        personId={personId}
-        onPersonChange={setPersonId}
-        onClose={() => setPersonId(null)}
-      />
     </section>
   );
 };
 
-/** The connected section Meetings home mounts. */
-export const MeetingsUpcoming: React.FC<{ sources: SourceKind[] }> = ({
-  sources,
-}) => {
+/** The connected section Meetings home mounts. `sources` is not rendered here:
+ *  it is the acknowledgement a standing always-record grant has to name. */
+export const MeetingsUpcoming: React.FC<{
+  sources: SourceKind[];
+  onOpenSettings?: () => void;
+}> = ({ sources, onOpenSettings }) => {
   const state = useUpcomingEvents(sources);
-  return <MeetingsUpcomingView sources={sources} {...state} />;
+  return <MeetingsUpcomingView onOpenSettings={onOpenSettings} {...state} />;
 };

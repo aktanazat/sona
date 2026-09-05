@@ -126,7 +126,6 @@ const view = (
       events={events([RECURRING, ONE_OFF])}
       loading={false}
       saving={null}
-      sources={["microphone"]}
       setAlwaysRecord={noop}
       setTemplate={noop}
       setDigestIncluded={noop}
@@ -135,7 +134,7 @@ const view = (
   );
 
 describe("Upcoming section", () => {
-  test("groups rows by day and states time, title, attendees and calendar", () => {
+  test("groups rows by day and states time, title and calendar", () => {
     const markup = view();
 
     expect(occurrences(markup, 'data-slot="upcoming-day"')).toBe(2);
@@ -148,15 +147,17 @@ describe("Upcoming section", () => {
     expect(markup).toContain("Personal");
   });
 
-  test("links a chip only when the address book knows that attendee", () => {
+  /* A row answers "what is next", and a guest list is not that. The names and
+   * the "+2" count were also the only reason this section reached the People
+   * store, so a row that prints them is a row that fetches people to render a
+   * calendar. */
+  test("a row names no attendees and counts none", () => {
     const markup = view();
 
-    expect(occurrences(markup, 'data-slot="upcoming-attendee-link"')).toBe(1);
-    expect(markup).toContain("Steven");
-    /* Dana has no person page yet, so her chip is text, not a button. */
-    expect(markup).toContain("Dana");
-    /* Two participants EventKit would not name, counted and not invented. */
-    expect(markup).toContain("+2");
+    expect(markup).not.toContain("Steven");
+    expect(markup).not.toContain(">Dana<");
+    expect(markup).not.toContain("+2");
+    expect(markup).not.toContain('data-slot="upcoming-attendee-link"');
   });
 
   test("marks only the recurring row as a series and offers only it controls", () => {
@@ -174,17 +175,33 @@ describe("Upcoming section", () => {
   test("an empty authorized week says so without asking for a permission", () => {
     const markup = view({ events: events([]) });
 
-    expect(markup).toContain("Nothing scheduled for the next week.");
+    expect(markup).toContain("Nothing scheduled for the next 7 days.");
     expect(markup).not.toContain("Use my calendar");
   });
 
-  test("no calendar access is one calm line plus the macOS guidance", () => {
+  /* One bronze line, and it names the fix in words whether or not this mount
+   * can route anywhere: a region that cannot say what is next still owes the
+   * reader the next action. The paragraph this replaced carried the whole
+   * macOS grant procedure, which is Settings' subject, not the calendar's. */
+  test("no calendar access is one line that names the fix", () => {
     const markup = view({ events: events([], "not_determined") });
 
     expect(markup).toContain("Sona cannot see your calendar.");
-    expect(markup).toContain("Use my calendar");
-    expect(markup).toContain("macOS");
+    expect(markup).toContain("Turn on “Use my calendar” in Settings");
     expect(markup).not.toContain('data-slot="upcoming-row"');
+    // The words do not claim to be pressable where nothing can be pressed.
+    expect(markup).not.toContain("<button");
+  });
+
+  test("the fix is pressable where the shell can route to Settings", () => {
+    const markup = view({
+      events: events([], "not_determined"),
+      onOpenSettings: () => {},
+    });
+
+    expect(markup).toMatch(
+      /<button[^>]*>Turn on “Use my calendar” in Settings<\/button>/,
+    );
   });
 
   test("a system with no calendar at all does not ask for a grant", () => {
@@ -215,7 +232,6 @@ describe("Upcoming series controls, rendered", () => {
     render(
       <SeriesControls
         row={RECURRING}
-        sources={["microphone"]}
         saving={false}
         onAlwaysRecord={() => {}}
         onTemplate={() => {}}
@@ -271,35 +287,6 @@ describe("Upcoming series controls, rendered", () => {
     expect(
       occurrences(controls({ saving: true }), "data-disabled"),
     ).toBeGreaterThan(0);
-  });
-
-  /* A standing grant records the sources the operator acknowledged. With none
-   * selected there is nothing to acknowledge, so the switch says why instead
-   * of writing a grant that names nothing. */
-  test("always record is unavailable while no capture source is selected", () => {
-    const markup = controls({ sources: [] });
-
-    expect(markup).toContain("Choose a capture source above first.");
-    expect(markup).toContain("disabled");
-  });
-
-  /* Revoking needs no acknowledgement, so a series already recording can
-   * always be turned off — even with every source deselected. */
-  test("a series already recording can be turned off with no source selected", () => {
-    const markup = controls({
-      sources: [],
-      row: {
-        ...RECURRING,
-        series: {
-          series_key: "weekly-sync",
-          always_record: true,
-          template: null,
-          digest_included: true,
-        },
-      },
-    });
-
-    expect(markup).not.toContain("Choose a capture source above first.");
   });
 
   test("a row with no series renders no controls at all", () => {
