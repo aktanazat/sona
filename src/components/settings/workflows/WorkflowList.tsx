@@ -1,5 +1,4 @@
 import React from "react";
-import { Minus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { WorkflowId, WorkflowsListResult } from "@/bindings";
 import { formatRelativeTime } from "@/lib/utils/format";
@@ -53,13 +52,6 @@ export const WorkflowList: React.FC<WorkflowListProps> = ({
           <Button type="button" size="sm" variant="outline" onClick={onRetry}>
             {t("common.retry")}
           </Button>
-        </div>
-      ) : data?.entries.length === 0 ? (
-        <div role="status" className="flex items-center gap-3 px-6 py-3">
-          <Minus aria-hidden="true" className="size-4 text-gray-700" />
-          <span className="text-[14px] text-gray-700">
-            {t("settings.workflows.empty")}
-          </span>
         </div>
       ) : (
         <ul role="list" className="divide-y divide-gray-alpha-400">

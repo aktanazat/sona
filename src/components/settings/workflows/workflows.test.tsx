@@ -110,7 +110,6 @@ describe("Workflows settings", () => {
       />,
     );
 
-    expect(markup).toContain("What Sona does after a meeting");
     /* The label names the outcome, not the subsystem: "Person linking" was a
      * module name that happened to be printed at a user. */
     expect(markup).toContain("Remember people");
