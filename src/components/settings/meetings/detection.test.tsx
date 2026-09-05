@@ -146,7 +146,7 @@ describe("first paint", () => {
     expect(markup).not.toContain('data-slot="settings-row"');
   });
 
-  test("the app picker offers the six known apps and says browsers are automatic", () => {
+  test("the app picker is one closed row that still names the six apps", () => {
     const markup = paint(<MeetingAppsPicker />);
 
     for (const name of [
@@ -159,16 +159,15 @@ describe("first paint", () => {
     ]) {
       expect(markup).toContain(name);
     }
-    expect(markup).toContain("browser");
-    /* Consent law is the one thing the auto-record switch cannot say for
-     * itself, so the list says it once. What the switch spends is said on the
-     * same screen: the standing-app receipt acknowledges both sources, and it
-     * may claim only what was readable when the switch was flipped. */
+    /* A third of Essentials for a decision made on install day: the list is
+     * behind a summary now, and nothing opens it on first paint. */
+    expect(markup).toContain("<details");
+    expect(markup).not.toContain("open=");
+    /* What the auto-record switch spends is the one thing in here a reader
+     * cannot get from the labels, and it is the sentence the standing-app
+     * receipt claims was on screen. The other two paragraphs are gone. */
     expect(markup).toContain("Record automatically");
     expect(markup).toContain("captures your microphone and this Mac");
-    expect(markup).toContain(
-      "Some places require everyone on a call to agree to recording.",
-    );
     /* The textarea this replaced is gone: no bundle identifier is printed for
      * an app the picker names. */
     expect(markup).not.toContain("us.zoom.xos");
@@ -218,11 +217,10 @@ describe("english catalogue", () => {
     "settingsV2.essentials.detectMeetings",
     "settingsV2.essentials.detectMeetingsHint",
     "settingsV2.apps.label",
-    "settingsV2.apps.browsersAutomatic",
+    "common.none",
     "settingsV2.apps.runningNow",
     "settingsV2.apps.autoRecord",
     "settingsV2.apps.autoRecordSources",
-    "settingsV2.apps.autoRecordConsent",
     "settingsV2.apps.add",
     "settingsV2.apps.addTitle",
     "settingsV2.apps.addDescription",

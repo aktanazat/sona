@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, Trash2 } from "lucide-react";
 import { Switch } from "@/components/vg/switch";
-import { Notice, SettingsField } from "@/components/settings/rows";
+import { Notice, SettingsDisclosure } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { Checkbox } from "@/components/vg/checkbox";
 import { Input } from "@/components/vg/input";
@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/vg/dialog";
 import { useDetectionEditor } from "./MeetingDetectionSettings";
+import { summarizeNames } from "./meetingUtils";
 
 /* The apps detection knows by name.
  *
@@ -189,7 +190,14 @@ const AddAppSheet: React.FC<AddAppSheetProps> = ({
  * The stored value is unchanged — `meetingApps` is still the array of
  * lowercased bundle IDs `detection_settings_set` takes, written whole through
  * the shared editor. What changed is that the five products Sona already
- * recognises are boxes, and an identifier is only ever typed for the sixth. */
+ * recognises are boxes, and an identifier is only ever typed for the sixth.
+ *
+ * A disclosure now, because this list is set once and then read never. The
+ * summary answers the only question a reader brings to it — is the app I call
+ * from covered — and the checklist is opened by whoever finds that answer
+ * wrong. Six checkboxes, two switches, three sentences and an Add button were
+ * a third of Essentials, in service of a decision most people make on the day
+ * they install Sona. */
 export const MeetingAppsPicker: React.FC = () => {
   const { t } = useTranslation();
   const { status, settings, saving, patch } = useDetectionEditor();
@@ -208,6 +216,26 @@ export const MeetingAppsPicker: React.FC = () => {
 
   const autoRecordApps = settings?.autoRecordApps ?? [];
 
+  /* What the summary says, in the order the list is drawn: the products that
+   * are ticked, then whatever was typed. How many of them fit beside a label
+   * is `summarizeNames`' business, and the tracker list's too. */
+  const listed = [
+    ...KNOWN_MEETING_APPS.filter((app) =>
+      app.matches.some((bundleId) => meetingApps.includes(bundleId)),
+    ).map((app) => t("settingsV2.apps.names." + app.id)),
+    ...custom,
+  ];
+  const fact =
+    /* Nothing read yet is not the same answer as nothing listed, so an
+     * unresolved editor states neither. */
+    settings === null ? undefined : listed.length === 0 ? (
+      /* An empty allowlist cannot ever match an app, and only the reader can
+       * fix that — which is the whole test for printing a word in bronze. */
+      <span className="text-accent-strong">{t("common.none")}</span>
+    ) : (
+      summarizeNames(listed)
+    );
+
   const write = (next: readonly string[]) =>
     void patch({ meetingApps: [...next] });
 
@@ -223,158 +251,154 @@ export const MeetingAppsPicker: React.FC = () => {
     });
 
   return (
-    /* No `controlId`: the control is a list of checkboxes, and a `<label for>`
-     * pointing at a `<ul>` names nothing. The list carries the name itself. */
-    <SettingsField
+    /* Not `lazy`: a closed disclosure costs a reader one line whether the
+     * checklist exists yet or not, and deferring it would put the one guard
+     * that matters here - an auto-record switch on call apps only - out of
+     * reach of a static render. */
+    <SettingsDisclosure
       label={label}
-      disabled={settings === null || !settings.enabled}
+      fact={fact}
+      disabled={settings !== null && !settings.enabled}
     >
-      <ul role="list" aria-label={label} className="flex flex-col gap-2">
-        {KNOWN_MEETING_APPS.map((app) => {
-          const checked = app.matches.some((bundleId) =>
-            meetingApps.includes(bundleId),
-          );
-          const isRunning = app.matches.some((bundleId) =>
-            running.includes(bundleId),
-          );
-          const name = t("settingsV2.apps.names." + app.id);
-          const autoRecord = app.matches.some((bundleId) =>
-            autoRecordApps.includes(bundleId),
-          );
-          return (
-            <li key={app.id} className="flex items-center gap-2.5">
+      <div className="flex flex-col gap-3 px-6 py-3.5">
+        <ul role="list" aria-label={label} className="flex flex-col gap-2">
+          {KNOWN_MEETING_APPS.map((app) => {
+            const checked = app.matches.some((bundleId) =>
+              meetingApps.includes(bundleId),
+            );
+            const isRunning = app.matches.some((bundleId) =>
+              running.includes(bundleId),
+            );
+            const name = t("settingsV2.apps.names." + app.id);
+            const autoRecord = app.matches.some((bundleId) =>
+              autoRecordApps.includes(bundleId),
+            );
+            return (
+              <li key={app.id} className="flex items-center gap-2.5">
+                <Checkbox
+                  id={"detection-app-" + app.id}
+                  checked={checked}
+                  disabled={disabled}
+                  onCheckedChange={(next) =>
+                    next === true
+                      ? write([
+                          ...meetingApps,
+                          ...app.writes.filter(
+                            (bundleId) => !meetingApps.includes(bundleId),
+                          ),
+                        ])
+                      : dropApp(app.matches)
+                  }
+                />
+                <label
+                  htmlFor={"detection-app-" + app.id}
+                  className="text-[14px] text-gray-1000"
+                >
+                  {name}
+                </label>
+                {/* The fact that keeps an allowlist honest: an entry only ever
+                 * becomes evidence while that application is running. Meta,
+                 * not body: it is a reading about the row, not the row. */}
+                {isRunning ? (
+                  <span className="text-[12px] leading-4 text-gray-900">
+                    {t("settingsV2.apps.runningNow")}
+                  </span>
+                ) : null}
+                {app.call ? (
+                  <>
+                    <label
+                      htmlFor={"detection-auto-" + app.id}
+                      className="ml-auto text-[14px] text-gray-900"
+                    >
+                      {t("settingsV2.apps.autoRecord")}
+                    </label>
+                    <Switch
+                      id={"detection-auto-" + app.id}
+                      checked={autoRecord}
+                      disabled={disabled || !checked}
+                      onCheckedChange={(next) =>
+                        void patch({
+                          autoRecordApps:
+                            next === true
+                              ? [
+                                  ...autoRecordApps,
+                                  ...app.writes.filter(
+                                    (bundleId) =>
+                                      !autoRecordApps.includes(bundleId),
+                                  ),
+                                ]
+                              : autoRecordApps.filter(
+                                  (bundleId) => !app.matches.includes(bundleId),
+                                ),
+                        })
+                      }
+                    />
+                  </>
+                ) : null}
+              </li>
+            );
+          })}
+          {custom.map((bundleId) => (
+            <li key={bundleId} className="flex items-center gap-2.5">
               <Checkbox
-                id={"detection-app-" + app.id}
-                checked={checked}
+                id={"detection-app-" + bundleId}
+                checked
                 disabled={disabled}
-                onCheckedChange={(next) =>
-                  next === true
-                    ? write([
-                        ...meetingApps,
-                        ...app.writes.filter(
-                          (bundleId) => !meetingApps.includes(bundleId),
-                        ),
-                      ])
-                    : dropApp(app.matches)
-                }
+                onCheckedChange={() => dropApp([bundleId])}
               />
               <label
-                htmlFor={"detection-app-" + app.id}
-                className="text-[14px] text-gray-1000"
+                htmlFor={"detection-app-" + bundleId}
+                className="min-w-0 truncate text-[14px] text-gray-1000"
               >
-                {name}
+                {bundleId}
               </label>
-              {/* The fact that keeps an allowlist honest: an entry only ever
-               * becomes evidence while that application is running. */}
-              {isRunning ? (
-                <span className="text-[14px] leading-[21px] text-gray-900">
+              {running.includes(bundleId) ? (
+                <span className="text-[12px] leading-4 text-gray-900">
                   {t("settingsV2.apps.runningNow")}
                 </span>
               ) : null}
-              {app.call ? (
-                <>
-                  <label
-                    htmlFor={"detection-auto-" + app.id}
-                    className="ml-auto text-[14px] text-gray-900"
-                  >
-                    {t("settingsV2.apps.autoRecord")}
-                  </label>
-                  <Switch
-                    id={"detection-auto-" + app.id}
-                    checked={autoRecord}
-                    disabled={disabled || !checked}
-                    onCheckedChange={(next) =>
-                      void patch({
-                        autoRecordApps:
-                          next === true
-                            ? [
-                                ...autoRecordApps,
-                                ...app.writes.filter(
-                                  (bundleId) =>
-                                    !autoRecordApps.includes(bundleId),
-                                ),
-                              ]
-                            : autoRecordApps.filter(
-                                (bundleId) => !app.matches.includes(bundleId),
-                              ),
-                      })
-                    }
-                  />
-                </>
-              ) : null}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="ml-auto text-red-900"
+                aria-label={t("settingsV2.apps.remove", { app: bundleId })}
+                disabled={disabled}
+                onClick={() => dropApp([bundleId])}
+              >
+                <Trash2 aria-hidden="true" />
+              </Button>
             </li>
-          );
-        })}
-        {custom.map((bundleId) => (
-          <li key={bundleId} className="flex items-center gap-2.5">
-            <Checkbox
-              id={"detection-app-" + bundleId}
-              checked
-              disabled={disabled}
-              onCheckedChange={() => dropApp([bundleId])}
-            />
-            <label
-              htmlFor={"detection-app-" + bundleId}
-              className="min-w-0 truncate text-[14px] text-gray-1000"
-            >
-              {bundleId}
-            </label>
-            {running.includes(bundleId) ? (
-              <span className="text-[14px] leading-[21px] text-gray-900">
-                {t("settingsV2.apps.runningNow")}
-              </span>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="ml-auto text-red-900"
-              aria-label={t("settingsV2.apps.remove", { app: bundleId })}
-              disabled={disabled}
-              onClick={() => dropApp([bundleId])}
-            >
-              <Trash2 aria-hidden="true" />
-            </Button>
-          </li>
-        ))}
-      </ul>
-      <div className="mt-3 flex flex-col gap-1.5">
-        {/* Said once, for the list: a call in a browser tab is noticed without
-         * anything being listed here, so its absence is not a gap. */}
-        <Notice tone="muted" live={false}>
-          {t("settingsV2.apps.browsersAutomatic")}
-        </Notice>
-        {/* What the switch spends. The consent receipt a standing app grant
+          ))}
+        </ul>
+        {/* One sentence, and it is about the switch rather than the list: what
+         * "Record automatically" spends is the only thing in here a reader
+         * cannot get from the labels. The consent receipt a standing app grant
          * writes (session.rs start_from_standing_app) acknowledges both
          * sources, and it may only claim what was on screen when the switch
          * was flipped: this sentence is that screen. */}
         <Notice tone="muted" live={false}>
           {t("settingsV2.apps.autoRecordSources")}
         </Notice>
-        {/* Consent law is the one thing a switch labelled "Record
-         * automatically" cannot say for itself. */}
-        <Notice tone="muted" live={false}>
-          {t("settingsV2.apps.autoRecordConsent")}
-        </Notice>
+        <div className="flex justify-end">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled}
+            onClick={() => setAdding(true)}
+          >
+            <Plus aria-hidden="true" />
+            {t("settingsV2.apps.add")}
+          </Button>
+        </div>
+        <AddAppSheet
+          open={adding}
+          onOpenChange={setAdding}
+          existing={meetingApps}
+          onAdd={(bundleId) => write([...meetingApps, bundleId])}
+        />
       </div>
-      <div className="mt-3 flex justify-end">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          onClick={() => setAdding(true)}
-        >
-          <Plus aria-hidden="true" />
-          {t("settingsV2.apps.add")}
-        </Button>
-      </div>
-      <AddAppSheet
-        open={adding}
-        onOpenChange={setAdding}
-        existing={meetingApps}
-        onAdd={(bundleId) => write([...meetingApps, bundleId])}
-      />
-    </SettingsField>
+    </SettingsDisclosure>
   );
 };

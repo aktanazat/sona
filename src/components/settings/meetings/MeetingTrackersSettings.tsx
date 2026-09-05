@@ -1,12 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Radar, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  Notice,
-  RowActions,
-  SettingsSection,
-} from "@/components/settings/rows";
+import { RowActions, SettingsDisclosure } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { Input } from "@/components/vg/input";
 import {
@@ -14,10 +10,16 @@ import {
   saveKeywordTrackers,
   type KeywordTracker,
 } from "./meetingAnalytics";
+import { summarizeNames } from "./meetingUtils";
 
 /* Watch lists for words that matter to you. Every finished meeting transcript
  * is scanned for them on this Mac, and the hits show up on the meeting's own
  * Insights tab.
+ *
+ * A closed row on Advanced, not a section: a list of phrases somebody typed
+ * once is the definition of a setting nobody reads again, and open it was a
+ * heading plus two text fields per phrase. The names ride on the summary, so
+ * the answer to "what am I watching for" needs no click.
  *
  * Patterns are literal phrases, not patterns in the regular-expression sense:
  * "is that your best price?" is a phrase somebody says, and typing it should
@@ -74,32 +76,36 @@ export const MeetingTrackersSettings: React.FC = () => {
     return null;
   }
 
+  /* What the summary says: the names, which are what a person recognises, and
+   * a count that covers every row. A tracker being edited has no name yet, so
+   * a roster of only-blank rows falls back to its size rather than claiming
+   * there is nothing here, and a half-named roster still counts the blanks in
+   * its "+N" instead of hiding them. */
+  const named = trackers
+    .map((tracker) => tracker.name.trim())
+    .filter((name) => name !== "");
+  const fact =
+    trackers.length === 0
+      ? t("common.none")
+      : named.length === 0
+        ? /* Mid-typing: rows exist, none of them have a name yet. The size is
+           * the only true thing to say, and it is a number in the same column
+           * the "+N" below lands in. */
+          String(trackers.length)
+        : summarizeNames(named, trackers.length);
+
   return (
-    <SettingsSection
-      label={t("meetings.analytics.trackersTitle", "Keyword trackers")}
-      action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setTrackers([...trackers, { name: "", patterns: [] }])}
-          disabled={saving}
-        >
-          <Plus aria-hidden="true" />
-          {t("meetings.analytics.addTracker", "Add tracker")}
-        </Button>
-      }
+    <SettingsDisclosure
+      label={t("meetings.analytics.trackersTitle")}
+      fact={fact}
     >
       {trackers.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 px-6 py-6 text-center">
-          <Radar aria-hidden="true" className="size-6 text-gray-700" />
-          <Notice tone="muted" live={false}>
-            {t(
-              "meetings.analytics.noTrackers",
-              "No trackers yet. Add one to start counting how often a phrase comes up.",
-            )}
-          </Notice>
-        </div>
+        /* What fills the list and how, in one line. It replaces a centred
+         * radar glyph over the same sentence: the icon said nothing the
+         * sentence did not. */
+        <p className="px-6 py-3.5 text-[13px] leading-5 text-gray-800">
+          {t("meetings.analytics.noTrackers")}
+        </p>
       ) : (
         <ul className="divide-y divide-gray-alpha-400">
           {trackers.map((tracker, index) => (
@@ -160,6 +166,18 @@ export const MeetingTrackersSettings: React.FC = () => {
           ))}
         </ul>
       )}
-    </SettingsSection>
+      <div className="flex justify-end px-6 py-3">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setTrackers([...trackers, { name: "", patterns: [] }])}
+          disabled={saving}
+        >
+          <Plus aria-hidden="true" />
+          {t("meetings.analytics.addTracker")}
+        </Button>
+      </div>
+    </SettingsDisclosure>
   );
 };

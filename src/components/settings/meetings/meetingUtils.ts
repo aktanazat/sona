@@ -42,6 +42,26 @@ export const formatMeetingOffset = (offsetNs: number | null | undefined) => {
 export const formatMeetingDate = (timestamp: number) =>
   MEETING_DATE_FORMATTER.format(timestamp);
 
+/** "Zoom, Webex, Slack +2" - the first three names, then how many rows are not
+ * in that list. What a settings disclosure has room for beside its label:
+ * three names answer "is the thing I care about in here", and the fourth name
+ * has never decided anything. `total` is the row count when some rows have no
+ * name to print - a tracker mid-typing is still a tracker, and a summary that
+ * left it out of both the list and the count would say the roster is smaller
+ * than it is. The app picker and the tracker list both print one of these into
+ * the same column of the same sheet, so they share the separator and the
+ * overflow wording rather than drifting apart one edit at a time. */
+export const summarizeNames = (
+  names: readonly string[],
+  total: number = names.length,
+) => {
+  const shown = names.slice(0, 3);
+
+  return (
+    shown.join(", ") + (total > shown.length ? ` +${total - shown.length}` : "")
+  );
+};
+
 export const meetingProviderKey = (provider: MeetingProvider) =>
   `meetings.providers.${provider}`;
 
