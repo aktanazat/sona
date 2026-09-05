@@ -49,9 +49,10 @@ import { PAGE_COLUMN } from "../rows";
  *   - a printed 0.0000 for an input level nobody measured;
  *   - a transcript line on a row whose receipt says there was no speech;
  *   - a `role="tablist"` on the two-segment view switch, with no tabpanel
- *     anywhere under it;
- *   - the toolbar controls (search, view switch, folder button) overlapping —
- *     the DOM order pinned here is what the honest flex wrap relies on;
+ *     anywhere under it — the switch is a checkable menu item now, and the
+ *     page's chrome must hold no segmented control at all;
+ *   - a full row per recording that holds no words: a title it does not have,
+ *     a count of zero and one sentence about why, thirty times over;
  *   - a page-split day appearing twice, one group per page.
  *
  * Static rendering runs no effects, so these are pure prop-to-markup checks and
@@ -654,9 +655,60 @@ describe("library feed", () => {
 
   test("an empty library states what it is and how to fill it", () => {
     const markup = feed({ entries: [] });
-    expect(markup).toContain("No recordings yet.");
-    expect(markup).toContain('data-testid="history-empty-import"');
+    expect(markup).toContain("Dictations you make appear here.");
     expect(markup).not.toContain('data-testid="history-day"');
+    /* One sentence, and nothing to press: the verb that fills the Library is
+     * the Import button on the title line, and a second copy of it inside the
+     * empty state is a second answer to the same question. */
+    expect(markup).not.toContain("<button");
+  });
+
+  test("a day's wordless recordings collapse into one line that opens", () => {
+    const silent = {
+      ...ENTRY,
+      transcription_text: "",
+      post_processed_text: null,
+    };
+    const markup = feed({
+      entries: [
+        { ...ENTRY, id: 3, timestamp: Math.floor(today / 1000) },
+        { ...silent, id: 8, timestamp: Math.floor(today / 1000) },
+        { ...silent, id: 9, timestamp: Math.floor(today / 1000) },
+      ],
+    });
+    expect(occurrences(markup, 'data-testid="history-empty-day"')).toBe(1);
+    expect(markup).toContain("2 empty recordings");
+    // Closed, and closed by default: the reader asked for the day, not for
+    // three rows two of which say nothing.
+    expect(markup).not.toMatch(/<details[^>]*\sopen/);
+    // The rows still exist, inside the line, and the one with words does not.
+    expect(occurrences(markup, 'data-testid="history-entry"')).toBe(3);
+    expect(markup.indexOf('data-history-id="3"')).toBeLessThan(
+      markup.indexOf('data-testid="history-empty-day"'),
+    );
+  });
+
+  test("the row a dictation link names is never collapsed out of reach", () => {
+    const silent = {
+      ...ENTRY,
+      transcription_text: "",
+      post_processed_text: null,
+    };
+    const markup = feed(
+      {
+        entries: [
+          { ...silent, id: 8, timestamp: Math.floor(today / 1000) },
+          { ...silent, id: 9, timestamp: Math.floor(today / 1000) },
+        ],
+      },
+      { historyId: 8, nonce: 1 },
+    );
+    // A row inside a closed `<details>` cannot be scrolled to or focused, so
+    // the linked row stays a row and only its neighbour collapses.
+    expect(markup).toContain("1 empty recording");
+    expect(markup.indexOf('data-deeplink-target="true"')).toBeLessThan(
+      markup.indexOf('data-testid="history-empty-day"'),
+    );
   });
 });
 
@@ -894,18 +946,29 @@ describe("library page chrome", () => {
     expect(markup).toContain("pb-[72px]");
   });
 
-  test("the title row carries exactly one action, and not the folder button", () => {
-    const header = markup.slice(
-      markup.indexOf("<h1"),
-      markup.indexOf('data-testid="history-toolbar"'),
+  test("the title line carries one filled verb and one menu, and no toolbar", () => {
+    const line = markup.slice(
+      markup.indexOf('data-testid="history-title-line"'),
+      markup.indexOf('data-testid="history-result-count"'),
     );
-    expect(header).toContain('data-testid="history-import"');
-    expect(header).not.toContain('data-testid="history-open-folder"');
-    // One destination, one name: the h1 answers to the rail's word, and the
-    // import action reuses the hero's label instead of coining a second one.
-    expect(header).toContain(">Library</h1>");
-    expect(header).toContain("Import audio");
-    expect(header).not.toContain("History");
+    // One destination, one name: the h1 answers to the rail's word.
+    expect(line).toContain(">Library</h1>");
+    expect(line).not.toContain("History");
+    expect(line).toContain('data-testid="history-search"');
+    /* Exactly two buttons at rest — the verb and the menu. The in-field clear
+     * appears only with a query, and everything else the old toolbar carried
+     * is behind the menu or gone. */
+    expect(occurrences(line, "<button")).toBe(2);
+    expect(line).toContain('data-testid="history-import"');
+    expect(line).toContain('data-testid="history-more"');
+    const importButton = line.slice(
+      line.lastIndexOf("<button", line.indexOf("history-import")),
+      line.indexOf("history-import"),
+    );
+    expect(importButton).toContain('data-variant="default"');
+    // The menu is the only quiet control on the line, and it is icon-only.
+    expect(occurrences(line, 'data-variant="ghost"')).toBe(1);
+    expect(line).toContain('aria-label="More"');
   });
 
   test("the totals sit against the title they describe", () => {
@@ -913,7 +976,7 @@ describe("library page chrome", () => {
     // title rather than a page gap below it.
     const header = markup.slice(
       markup.indexOf("<h1"),
-      markup.indexOf('data-testid="history-toolbar"'),
+      markup.indexOf('data-testid="history-loading"'),
     );
     expect(header).toContain('data-testid="history-summary-loading"');
   });
@@ -922,54 +985,19 @@ describe("library page chrome", () => {
    * is asserted where that primitive lives; pinning its class string from the
    * Library's test made a type-scale change fail in the wrong file. */
 
-  test("no text action is left invisible at rest", () => {
-    /* Secondary actions now carry a shared hairline. These standing text
-     * actions remain `outline` so their hierarchy is explicit. */
-    expect(markup).not.toContain('data-slot="button" data-variant="secondary"');
-    const toolbar = markup.slice(
-      markup.indexOf('data-testid="history-toolbar"'),
-      markup.indexOf('data-testid="history-loading"'),
-    );
-    const folder = toolbar.slice(
-      toolbar.lastIndexOf("<button", toolbar.indexOf("history-open-folder")),
-      toolbar.indexOf("history-open-folder"),
-    );
-    expect(folder).toContain('data-variant="outline"');
-    // The two ghosts that survive are icon-only: the in-field clear (absent
-    // with an empty query) and the row controls, which live in the row, not here.
-    expect(toolbar).not.toContain('data-variant="ghost"');
-  });
-
-  test("one toolbar owns search, the view switch and the folder button, in wrap order", () => {
-    const toolbar = markup.slice(
-      markup.indexOf('data-testid="history-toolbar"'),
-      markup.indexOf('data-testid="history-loading"'),
-    );
-    const search = toolbar.indexOf('data-testid="history-search"');
-    const view = toolbar.indexOf('data-testid="history-text-view"');
-    const folder = toolbar.indexOf('data-testid="history-open-folder"');
-    expect(search).toBeGreaterThan(-1);
-    expect(view).toBeGreaterThan(-1);
-    expect(folder).toBeGreaterThan(-1);
-    // The honest wrap depends on this order: the growing search field first,
-    // then the flex-none controls, folder last so it wraps first.
-    expect(search).toBeLessThan(view);
-    expect(view).toBeLessThan(folder);
-  });
-
-  test("the view switch is a two-segment control, Processed first, not a tablist", () => {
-    const control = markup.slice(
-      markup.indexOf('data-testid="history-text-view"'),
-      markup.indexOf('data-testid="history-open-folder"'),
-    );
-    expect(occurrences(control, 'data-slot="toggle-group-item"')).toBe(2);
-    expect(control.indexOf("Processed")).toBeLessThan(control.indexOf("Raw"));
-    // Two segments over one list is not a tab structure, and claiming one
-    // promises assistive tech a tabpanel that does not exist.
+  test("the view switch and the folder button are not in the page's chrome", () => {
+    /* Both moved into the one menu — the transcript view as a checkable item,
+     * because it is a state and not a command, and the folder as a verb. What
+     * this pins is that neither grows back into the chrome as a control: a
+     * two-segment switch for a preference touched once a month and a named
+     * button for a folder were half of the old toolbar. */
+    expect(markup).not.toContain('data-testid="history-text-view"');
+    expect(markup).not.toContain('data-testid="history-open-folder"');
+    expect(markup).not.toContain('data-slot="toggle-group-item"');
     expect(markup).not.toContain('role="tablist"');
     expect(markup).not.toContain('role="tab"');
-    // One control, not two buttons side by side.
-    expect(control).toContain('data-spacing="0"');
+    // Secondary actions carry a hairline; nothing on this page is secondary.
+    expect(markup).not.toContain('data-slot="button" data-variant="secondary"');
   });
 
   test("the loading list is a run of calm rows, not stacked two-line blocks", () => {

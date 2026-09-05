@@ -75,6 +75,11 @@ export const HistorySummary: React.FC<HistorySummaryProps> = ({
     );
   }
 
+  /* Nothing recorded, nothing to total: "0 recordings · 0s · 0 words" is the
+   * empty state written as machinery, and the list below already says it in a
+   * sentence. */
+  if (stats.entries === 0) return null;
+
   const cells = [
     t("libraryV2.recordings", { count: stats.entries }),
     formatDurationShort(stats.total_duration_ms / 1000),

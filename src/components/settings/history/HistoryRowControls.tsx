@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, Copy, Ellipsis, RotateCcw } from "lucide-react";
+import { Check, Copy, MoreHorizontal, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/vg/button";
 import {
@@ -85,10 +85,10 @@ export const HistoryRowControls: React.FC<HistoryRowControlsProps> = ({
             variant="ghost"
             size="icon-sm"
             className="text-gray-800 hover:text-gray-1000"
-            aria-label={t("libraryV2.actions.more")}
+            aria-label={t("common.more")}
             data-testid="history-entry-actions"
           >
-            <Ellipsis aria-hidden="true" className="size-4" />
+            <MoreHorizontal aria-hidden="true" className="size-4" />
           </Button>
         </DropdownMenuTrigger>
         {/* No fixed width. Several translated labels need more than 200px, and
