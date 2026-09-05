@@ -6,7 +6,7 @@ export interface Language {
 export const CHINESE_LANGUAGE_CODE = "zh";
 
 export const LANGUAGES: Language[] = [
-  { value: "auto", label: "Auto Detect" },
+  { value: "auto", label: "Auto detect" },
   { value: "en", label: "English" },
   { value: CHINESE_LANGUAGE_CODE, label: "Chinese" },
   { value: "zh-Hans", label: "Chinese (Simplified)" },
