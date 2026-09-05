@@ -1,9 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { RotateCcw } from "lucide-react";
 import { getKeyName, normalizeKey } from "../../lib/utils/keyboard";
-import { Button } from "@/components/vg/button";
-import { Notice, SettingsRow } from "./rows";
+import { Notice, RowReset, SettingsRow } from "./rows";
 import {
   ShortcutHoldHint,
   ShortcutRecorderField,
@@ -261,15 +259,12 @@ export const GlobalShortcutInput: React.FC<GlobalShortcutInputProps> = ({
         recordingRef={(node) => setShortcutRef(shortcutId, node)}
         bindingName={translatedName}
       />
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={t("common.resetSetting", { name: translatedName })}
-        onClick={() => resetBinding(shortcutId)}
+      <RowReset
+        name={translatedName}
+        changed={binding.current_binding !== binding.default_binding}
         disabled={disabled || isUpdating(`binding_${shortcutId}`)}
-      >
-        <RotateCcw aria-hidden="true" />
-      </Button>
+        onReset={() => resetBinding(shortcutId)}
+      />
     </SettingsRow>
   );
 };

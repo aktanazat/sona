@@ -1,8 +1,6 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { RotateCcw } from "lucide-react";
-import { SettingsRow } from "@/components/settings/rows";
-import { Button } from "@/components/vg/button";
+import { RowReset, SettingsRow } from "@/components/settings/rows";
 import { Slider } from "@/components/vg/slider";
 import { useSettings } from "../../../hooks/useSettings";
 
@@ -31,15 +29,12 @@ export const RecordingBuffer: React.FC = () => {
           void updateSetting("extra_recording_buffer_ms", next)
         }
       />
-      <Button
-        variant="ghost"
-        size="icon-sm"
+      <RowReset
+        name={label}
+        changed={value !== 0}
         disabled={busy}
-        aria-label={t("common.resetSetting", { name: label })}
-        onClick={() => void resetSetting("extra_recording_buffer_ms")}
-      >
-        <RotateCcw aria-hidden="true" />
-      </Button>
+        onReset={() => void resetSetting("extra_recording_buffer_ms")}
+      />
     </SettingsRow>
   );
 };

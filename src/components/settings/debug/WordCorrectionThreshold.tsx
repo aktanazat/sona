@@ -1,16 +1,19 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
-import { RotateCcw } from "lucide-react";
-import { SettingsRow } from "@/components/settings/rows";
-import { Button } from "@/components/vg/button";
+import { RowReset, SettingsRow } from "@/components/settings/rows";
 import { Slider } from "@/components/vg/slider";
 import { useSettings } from "../../../hooks/useSettings";
+
+/* The backend's own default (settings.rs). Written once, because it is now
+ * read twice: as the value an unread store shows, and as the comparison that
+ * decides whether this row has anything to reset. */
+const DEFAULT_THRESHOLD = 0.18;
 
 export const WordCorrectionThreshold: React.FC = () => {
   const { t } = useTranslation();
   const { settings, updateSetting, resetSetting, isUpdating } = useSettings();
   const label = t("settings.debug.wordCorrectionThreshold.title");
-  const value = settings?.word_correction_threshold ?? 0.18;
+  const value = settings?.word_correction_threshold ?? DEFAULT_THRESHOLD;
   const busy = isUpdating("word_correction_threshold");
 
   return (
@@ -27,15 +30,12 @@ export const WordCorrectionThreshold: React.FC = () => {
           void updateSetting("word_correction_threshold", next)
         }
       />
-      <Button
-        variant="ghost"
-        size="icon-sm"
+      <RowReset
+        name={label}
+        changed={value !== DEFAULT_THRESHOLD}
         disabled={busy}
-        aria-label={t("common.resetSetting", { name: label })}
-        onClick={() => void resetSetting("word_correction_threshold")}
-      >
-        <RotateCcw aria-hidden="true" />
-      </Button>
+        onReset={() => void resetSetting("word_correction_threshold")}
+      />
     </SettingsRow>
   );
 };

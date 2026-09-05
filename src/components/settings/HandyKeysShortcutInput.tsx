@@ -1,9 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
-import { RotateCcw } from "lucide-react";
-import { Button } from "@/components/vg/button";
-import { Notice, SettingsRow } from "./rows";
+import { Notice, RowReset, SettingsRow } from "./rows";
 import {
   ShortcutHoldHint,
   ShortcutRecorderField,
@@ -290,15 +288,12 @@ export const HandyKeysShortcutInput: React.FC<HandyKeysShortcutInputProps> = ({
         }}
         bindingName={translatedName}
       />
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={t("common.resetSetting", { name: translatedName })}
-        onClick={() => resetBinding(shortcutId)}
+      <RowReset
+        name={translatedName}
+        changed={binding.current_binding !== binding.default_binding}
         disabled={disabled || isUpdating(`binding_${shortcutId}`)}
-      >
-        <RotateCcw aria-hidden="true" />
-      </Button>
+        onReset={() => resetBinding(shortcutId)}
+      />
     </SettingsRow>
   );
 };

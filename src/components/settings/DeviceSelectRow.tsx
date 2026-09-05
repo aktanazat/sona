@@ -1,8 +1,6 @@
 import React, { useId } from "react";
 import { useTranslation } from "react-i18next";
-import { RotateCcw } from "lucide-react";
 import type { AudioDevice } from "@/bindings";
-import { Button } from "@/components/vg/button";
 import {
   Select,
   SelectContent,
@@ -10,7 +8,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/vg/select";
-import { FIELD_MAX_W, SettingsRow } from "./rows";
+import { FIELD_MAX_W, RowReset, SettingsRow } from "./rows";
 import { useSettings } from "../../hooks/useSettings";
 
 /* The settings whose value is the NAME of an audio device. Closed on purpose:
@@ -108,15 +106,14 @@ export const DeviceSelectRow: React.FC<{
           ))}
         </SelectContent>
       </Select>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={t("common.resetSetting", { name: label })}
-        onClick={() => void resetSetting(settingKey)}
+      <RowReset
+        name={label}
+        /* Unset and the sentinel both mean the default device, and `device`
+         * has already resolved both to its name. */
+        changed={device !== DEFAULT_DEVICE}
         disabled={disabled || busy || isLoading}
-      >
-        <RotateCcw aria-hidden="true" />
-      </Button>
+        onReset={() => void resetSetting(settingKey)}
+      />
     </SettingsRow>
   );
 };

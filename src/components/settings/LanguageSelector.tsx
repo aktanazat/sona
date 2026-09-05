@@ -1,6 +1,6 @@
 import React, { useId, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, ChevronDown, RotateCcw } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { Button } from "@/components/vg/button";
 import {
   Command,
@@ -14,7 +14,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/vg/popover";
-import { FIELD_MAX_W, SettingsRow } from "./rows";
+import { FIELD_MAX_W, RowReset, SettingsRow } from "./rows";
 import { useSettings } from "../../hooks/useSettings";
 import {
   getLanguageLabel,
@@ -143,15 +143,15 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
           </Command>
         </PopoverContent>
       </Popover>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={t("common.resetSetting", { name: label })}
-        onClick={() => void resetSetting("selected_language")}
+      <RowReset
+        name={label}
+        /* The persisted intent, not the language the model resolved it to:
+         * "auto" IS the default, however concrete a must-pick model renders
+         * it. */
+        changed={intent !== "auto"}
         disabled={busy}
-      >
-        <RotateCcw aria-hidden="true" />
-      </Button>
+        onReset={() => void resetSetting("selected_language")}
+      />
     </SettingsRow>
   );
 };
