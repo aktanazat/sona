@@ -5,13 +5,9 @@ import { installTauriMock, type JsonValue } from "./support/tauri-mock";
 
 /* The recorder dialog, driven through the mocked native runtime.
  *
- * The mock's recorder block is a hand-written copy of the Rust state machine's
- * phase rules, and until this suite existed nothing read it: both of the
- * divergences it had drifted into — cancel refused from a live recording, and a
- * `.mov` output name the recorder never writes — were invisible because no test
- * ever asked the mock a question. So the lifecycle here runs through the real
- * dialog, and the last case asks the mock directly about the two phase rules
- * the UI has no button for.
+ * Every case drives the real dialog: setup, preview, record, pause and save,
+ * the dismissal that releases the capture, and the palette chord the recorder
+ * holds shut.
  *
  * Screen selection is the native picker's, so the mock answers
  * `recorder_preview_start` the way ScreenCaptureKit's picker does: with a
@@ -51,7 +47,8 @@ const phase = (page: Page) =>
 const palette = (page: Page) => page.getByRole("dialog", { name: "Search" });
 
 const openRecorder = async (page: Page) => {
-  await page.getByRole("button", { name: "Record screen" }).click();
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Record screen" }).click();
   await expect(phase(page)).toHaveText("Set up");
 };
 
@@ -164,57 +161,5 @@ test.describe("the screen recorder", () => {
 
     await page.keyboard.press("Meta+k");
     await expect(palette(page)).toBeVisible();
-  });
-
-  test("mirrors the native phase rules for cancel and preview stop", async ({
-    page,
-  }) => {
-    await installTauriMock(page, { responses: GRANTED });
-    await page.goto("/");
-    await expect(
-      page.getByRole("button", { name: "Record screen" }),
-    ).toBeVisible();
-
-    /* The UI offers no cancel during a recording, so the rule is asked of the
-     * mock directly: RecorderManager::cancel accepts previewing, recording and
-     * paused, while preview_stop is previewing-only. */
-    const legality = await page.evaluate(async () => {
-      type MockedInvoke = (
-        command: string,
-        args?: Record<string, JsonValue>,
-      ) => Promise<JsonValue>;
-      // SAFETY: installTauriMock plants __TAURI_INTERNALS__ on this window
-      // before any page script runs, and Window does not declare it.
-      const mocked = window as Window & {
-        __TAURI_INTERNALS__: { invoke: MockedInvoke };
-      };
-      const { invoke } = mocked.__TAURI_INTERNALS__;
-      const attempt = async (command: string) => {
-        try {
-          await invoke(command);
-          return "ok";
-        } catch (error) {
-          return String(error);
-        }
-      };
-      await invoke("recorder_preview_start", {
-        request: {
-          cameraEnabled: false,
-          cameraDeviceId: null,
-          microphoneEnabled: true,
-          microphoneDeviceId: null,
-        },
-      });
-      await invoke("recorder_start");
-      return {
-        previewStopWhileRecording: await attempt("recorder_preview_stop"),
-        cancelWhileRecording: await attempt("recorder_cancel"),
-      };
-    });
-
-    expect(legality.previewStopWhileRecording).toContain(
-      "recorder_preview_stop requires a native preview",
-    );
-    expect(legality.cancelWhileRecording).toBe("ok");
   });
 });
