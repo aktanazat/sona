@@ -213,8 +213,8 @@ mod tests {
             "stub-engine"
         }
 
-        fn model_version(&self) -> &'static str {
-            "stub-1"
+        fn model_version(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("stub-1")
         }
 
         fn max_input_bytes(&self) -> usize {

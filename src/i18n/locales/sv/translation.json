@@ -1942,6 +1942,16 @@
       "running": "Bearbetning",
       "succeeded": "Klar",
       "cancelled": "Bearbetningen avbröts",
+      "cause": {
+        "storage": "Mötets uppgifter kunde inte läsas eller sparas",
+        "transcription": "Taligenkänningen avvisade en del av ljudet",
+        "voice_detection": "Röstidentifieringen avvisade en del av ett spår",
+        "evidence_pack": "Transkriptionen rymdes inte inom modellens gräns",
+        "model_refused": "Modellen returnerade inget användbart",
+        "reply_not_structured": "Modellens svar hade inte det förväntade formatet",
+        "reply_rejected": "Modellens svar citerade något som inte finns i transkriptionen",
+        "panicked": "Bearbetningen stoppades oväntat"
+      },
       "failed": {
         "local_model_unavailable": "Lokal modell är inte tillgänglig",
         "remote_unavailable": "Fjärrdestinationen är inte tillgänglig",

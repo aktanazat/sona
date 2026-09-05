@@ -14,7 +14,9 @@
 //! all three.
 
 use super::processing::{MeetingTextGenerationError, MeetingTextGenerator, ReplyShape};
+use crate::agent_panel::protocol::SONA_MODEL_ALIAS;
 use crate::agent_panel::{self, ChatTurnError};
+use std::borrow::Cow;
 use std::future::Future;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -25,15 +27,12 @@ use tauri::AppHandle;
 /// generation this engine has produced.
 const RELAY_MODEL_ID: &str = "sona-relay";
 
-/// The engine's own version, as far as an artifact is concerned.
-///
-/// A generation key has to be known *before* the call that produces the text,
-/// so this cannot be read out of a response. The relay's job envelope carries
-/// no brain version either — its only model identity is the pinned `ultra`
-/// alias, which is a routing constant rather than a version. So `v1` is this
-/// client's turn shape: it bumps when the question this engine asks changes,
+/// This client's turn shape: the part of the engine's identity that is known
+/// at compile time. It bumps when the question this engine asks changes,
 /// which is exactly when a cached generation should be retired.
-const RELAY_MODEL_VERSION: &str = "v1";
+///
+/// It is only a part — [`relay_model_version`] is the whole of it.
+const RELAY_TURN_SHAPE: &str = "v1";
 
 /// The largest serialized model input this engine may send, in bytes.
 ///
@@ -167,6 +166,44 @@ impl RelayTextGenerator {
     pub(crate) fn new(app: Option<AppHandle>) -> Self {
         Self { app }
     }
+
+    /// The relay a generation would be sent to, read at the moment it is
+    /// asked for: the operator can repair or repoint a pairing between two
+    /// generations of the same meeting.
+    fn relay_url(&self) -> Option<String> {
+        let app = self.app.as_ref()?;
+        crate::settings::get_settings(app).agent_panel_relay_url
+    }
+}
+
+/// The engine identity hashed into every generation key, for a relay reached
+/// at `relay_url`.
+///
+/// A generation key has to be known *before* the call that produces the text,
+/// so this cannot be read out of a response — and there is nothing in one to
+/// read. The worker answers `SonaAgentResponseV1`, whose properties are
+/// `kind`, `message` and `actions` and nothing else
+/// (`SONA_CHAT_RESPONSE_SCHEMA` in `omp_bridge/sona_chat.py`), and the model
+/// behind it is whatever the box's own headless `omp` is configured to run
+/// (`omp_bridge/worker/vps_sona.py`).
+///
+/// So the identity is the three things this side does know, all of which
+/// select the model rather than describe it: the turn shape it sends, the
+/// alias every submission must declare and the worker refuses to run without
+/// (`SONA_CHAT_MODEL_ALIAS = "ultra"`, checked as both `model` and
+/// `model_alias`), and the URL of the relay that ran it. Repointing Sona at
+/// another box is a different engine and retires the notes cached from the
+/// first one. A model swapped underneath one URL and one alias is invisible
+/// from here, and no string this side could build would honestly claim
+/// otherwise.
+fn relay_model_version(relay_url: Option<&str>) -> Cow<'static, str> {
+    match relay_url {
+        Some(url) => Cow::Owned(format!("{RELAY_TURN_SHAPE}+{SONA_MODEL_ALIAS}@{url}")),
+        // Unpaired, so `is_available` refuses selection and no generation key
+        // is built from this arm. A caller that names the engine anyway gets
+        // the half of the identity that is true without a relay.
+        None => Cow::Borrowed(RELAY_TURN_SHAPE),
+    }
 }
 
 impl MeetingTextGenerator for RelayTextGenerator {
@@ -180,8 +217,8 @@ impl MeetingTextGenerator for RelayTextGenerator {
         RELAY_MODEL_ID
     }
 
-    fn model_version(&self) -> &'static str {
-        RELAY_MODEL_VERSION
+    fn model_version(&self) -> Cow<'static, str> {
+        relay_model_version(self.relay_url().as_deref())
     }
 
     fn max_input_bytes(&self) -> usize {
@@ -324,15 +361,23 @@ mod tests {
         );
     }
 
-    /// The identity hashed into every generation key. Changing either string
-    /// retires every artifact this engine has written, so both are pinned here
-    /// rather than left to a rename.
+    /// The identity hashed into every generation key. `model_id` is the label
+    /// a stored artifact carries, so a rename orphans every row that has it.
+    /// The version is what makes two operators' boxes two engines: notes
+    /// cached from one may not be handed back for the other, and repointing
+    /// the pairing in settings is exactly that.
     #[test]
-    fn the_engine_names_itself_the_same_way_every_artifact_records() {
-        let generator = RelayTextGenerator::new(None);
+    fn the_engine_identity_names_the_relay_that_ran_the_generation() {
+        assert_eq!(RelayTextGenerator::new(None).model_id(), "sona-relay");
 
-        assert_eq!(generator.model_id(), "sona-relay");
-        assert_eq!(generator.model_version(), "v1");
+        let first = relay_model_version(Some("https://first.example"));
+
+        assert_eq!(first, relay_model_version(Some("https://first.example")));
+        assert_ne!(first, relay_model_version(Some("https://second.example")));
+        assert!(
+            first.contains(SONA_MODEL_ALIAS),
+            "the alias every submission declares belongs in the identity: {first}"
+        );
     }
 
     /// The pack budget has to sit inside the ceiling the wire enforces, with

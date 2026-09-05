@@ -242,6 +242,7 @@ mod tests {
                 storage: StorageAvailability::Available,
                 processing_status: ProcessingStatus::Failed {
                     reason: super::super::types::ProcessingFailure::LocalModelUnavailable,
+                    cause: None,
                 },
                 preflight_local_processing: None,
                 retention_deadline_utc_ms: None,

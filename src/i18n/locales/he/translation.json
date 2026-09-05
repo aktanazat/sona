@@ -1949,6 +1949,16 @@
       "running": "בעיבוד",
       "succeeded": "מוכן",
       "cancelled": "העיבוד בוטל",
+      "cause": {
+        "storage": "לא ניתן היה לקרוא או לשמור את רשומות הפגישה",
+        "transcription": "זיהוי הדיבור דחה חלק מהאודיו",
+        "voice_detection": "זיהוי הקול דחה חלק מאחד הערוצים",
+        "evidence_pack": "התמלול לא נכנס למגבלת המודל",
+        "model_refused": "המודל לא החזיר דבר שימושי",
+        "reply_not_structured": "תשובת המודל לא הייתה בפורמט הצפוי",
+        "reply_rejected": "תשובת המודל ציטטה דבר שאינו בתמלול",
+        "panicked": "העיבוד נעצר באופן בלתי צפוי"
+      },
       "failed": {
         "local_model_unavailable": "המודל המקומי אינו זמין",
         "remote_unavailable": "היעד המרוחק אינו זמין",

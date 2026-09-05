@@ -517,6 +517,7 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
             onRefresh={onRefresh}
             onAnalyticsRefresh={loadAnalytics}
             onOpenSettings={onOpenSettings}
+            onRegenerate={onRegenerate}
           />
         </TabsContent>
 

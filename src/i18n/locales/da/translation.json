@@ -1942,6 +1942,16 @@
       "running": "Behandling",
       "succeeded": "Klar",
       "cancelled": "Behandlingen blev annulleret",
+      "cause": {
+        "storage": "Mødets data kunne ikke læses eller gemmes",
+        "transcription": "Talegenkendelsen afviste en del af lyden",
+        "voice_detection": "Stemmeregistreringen afviste en del af et spor",
+        "evidence_pack": "Transskriptionen oversteg modellens grænse",
+        "model_refused": "Modellen returnerede intet brugbart",
+        "reply_not_structured": "Modellens svar var ikke i det forventede format",
+        "reply_rejected": "Modellens svar citerede noget, der ikke findes i transskriptionen",
+        "panicked": "Behandlingen stoppede uventet"
+      },
       "failed": {
         "local_model_unavailable": "Lokal model utilgængelig",
         "remote_unavailable": "Fjerndestination utilgængelig",

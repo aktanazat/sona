@@ -1935,6 +1935,16 @@
       "running": "处理中",
       "succeeded": "已完成",
       "cancelled": "处理已取消",
+      "cause": {
+        "storage": "无法读取或保存这场会议的记录",
+        "transcription": "语音识别拒绝了部分音频",
+        "voice_detection": "语音检测拒绝了某个音轨的一部分",
+        "evidence_pack": "转写内容超出了该模型的上限",
+        "model_refused": "模型没有返回可用的结果",
+        "reply_not_structured": "模型的回复不是预期的格式",
+        "reply_rejected": "模型的回复引用了转写中不存在的内容",
+        "panicked": "处理意外中止"
+      },
       "failed": {
         "local_model_unavailable": "本地模型不可用",
         "remote_unavailable": "远程目标不可用",

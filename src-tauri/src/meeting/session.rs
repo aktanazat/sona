@@ -5403,7 +5403,8 @@ pub(crate) mod tests {
         assert_eq!(
             snapshot.processing_status,
             ProcessingStatus::Failed {
-                reason: ProcessingFailure::LocalModelUnavailable
+                reason: ProcessingFailure::LocalModelUnavailable,
+                cause: None,
             }
         );
         assert_eq!(
@@ -5417,9 +5418,9 @@ pub(crate) mod tests {
             .is_empty());
     }
 
-    /// Matrix 13: a pipeline that panics still leaves the outcome written down.
-    /// Before, the thread died with it and the meeting read as processing until
-    /// the next launch.
+    /// Matrix 13: a pipeline that panics still leaves the outcome written down,
+    /// and says a panic is what happened. Before, the thread died with it and
+    /// the meeting read as processing until the next launch.
     #[test]
     fn a_panicking_pipeline_still_records_a_terminal_status() {
         let (_directory, manager, _backend) = mounted_manager();
@@ -5442,7 +5443,8 @@ pub(crate) mod tests {
         assert_eq!(
             snapshot.processing_status,
             ProcessingStatus::Failed {
-                reason: ProcessingFailure::EngineFailure
+                reason: ProcessingFailure::EngineFailure,
+                cause: Some(crate::meeting::types::EngineFailureCause::Panicked),
             }
         );
         assert_eq!(snapshot.phase, MeetingPhase::RecoveryRequired);
@@ -6059,8 +6061,8 @@ pub(crate) mod tests {
             "fixed"
         }
 
-        fn model_version(&self) -> &'static str {
-            "fixed-v1"
+        fn model_version(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("fixed-v1")
         }
 
         fn max_input_bytes(&self) -> usize {

@@ -1956,6 +1956,16 @@
       "running": "Przetwarzanie",
       "succeeded": "Gotowe",
       "cancelled": "Przetwarzanie anulowane",
+      "cause": {
+        "storage": "Nie udało się odczytać ani zapisać danych tego spotkania",
+        "transcription": "Rozpoznawanie mowy odrzuciło część nagrania",
+        "voice_detection": "Wykrywanie głosu odrzuciło część ścieżki",
+        "evidence_pack": "Transkrypcja nie zmieściła się w limicie tego modelu",
+        "model_refused": "Model nie zwrócił nic użytecznego",
+        "reply_not_structured": "Odpowiedź modelu nie miała oczekiwanego formatu",
+        "reply_rejected": "Odpowiedź modelu przytoczyła coś, czego nie ma w transkrypcji",
+        "panicked": "Przetwarzanie zatrzymało się nieoczekiwanie"
+      },
       "failed": {
         "local_model_unavailable": "Model lokalny niedostępny",
         "remote_unavailable": "Zdalne miejsce docelowe niedostępne",

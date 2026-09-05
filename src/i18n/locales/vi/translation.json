@@ -1935,6 +1935,16 @@
       "running": "Đang xử lý",
       "succeeded": "Sẵn sàng",
       "cancelled": "Đã hủy xử lý",
+      "cause": {
+        "storage": "Không thể đọc hoặc lưu dữ liệu của cuộc họp này",
+        "transcription": "Nhận dạng giọng nói đã từ chối một phần âm thanh",
+        "voice_detection": "Phát hiện giọng nói đã từ chối một phần của bản ghi",
+        "evidence_pack": "Bản chép lời vượt quá giới hạn của mô hình này",
+        "model_refused": "Mô hình không trả về kết quả dùng được",
+        "reply_not_structured": "Phản hồi của mô hình không đúng định dạng mong đợi",
+        "reply_rejected": "Phản hồi của mô hình dẫn nội dung không có trong bản chép lời",
+        "panicked": "Quá trình xử lý đã dừng bất ngờ"
+      },
       "failed": {
         "local_model_unavailable": "Mô hình cục bộ không khả dụng",
         "remote_unavailable": "Đích từ xa không khả dụng",

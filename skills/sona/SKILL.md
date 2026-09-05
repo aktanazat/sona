@@ -118,11 +118,33 @@ not a Sona noun, so it is `undefined` rather than `null`; identify one by
 processing_status
              {"kind":"pending"|"running"|"succeeded"|"cancelled"}
              | {"kind":"failed","reason":"local_model_unavailable"|
-                "remote_unavailable"|"engine_failure"|"cancelled"|"interrupted"}
+                "remote_unavailable"|"engine_failure"|"cancelled"|"interrupted",
+                "cause":"storage"|"transcription"|"voice_detection"|
+                "evidence_pack"|"model_refused"|"reply_not_structured"|
+                "reply_rejected"|"panicked"|null}
+             — `cause` names which part refused and is non-null only under
+               `engine_failure`.
 headline     {"kind":"none"} | {"kind":"words","words":int}
              | {"kind":"ledger","text":str} | {"kind":"summary","text":str}
              — `words` counts what was said when no prose exists yet.
 ```
+
+`reason` says what shaped an answer, when something other than the corpus did.
+`null` means every source behind the question was read and the rows are all
+there are. Each verb produces only its own values:
+
+- `--query`: `no_searchable_tokens` (the words held nothing to match),
+  `semantic_unavailable` (the recall model is not on this machine, so only
+  literal word matching ran; rows worded differently than the question are
+  unreachable whether or not this page came back full), `no_rows`.
+- `--loops`: `awaiting_continuity` (a meeting's continuity pass has not
+  succeeded, so its ledger rows are not reportable yet — ask again later),
+  `filtered_out` (`--status`, `--mine` or `--waiting` excluded every row),
+  `no_rows`.
+- `--people`: `people_index_empty` (diarization has not named anybody yet, so
+  no name can match), `no_rows`.
+
+`no_rows` is the only value that means asking again the same way is pointless.
 
 `calendar_access` applies only to `calendar_access_subject`. For a shell
 invocation on macOS, that is the TCC responsible process (usually the terminal),
@@ -133,7 +155,8 @@ the GUI's grant.
 A meeting can answer with `summary:null`, `headline:null`, `notes:[]` and
 `loops:[]` while its transcript is full. Those fields are processing output,
 not capture. Read `processing_status`: `failed` means generation broke and
-carries its reason; `pending` or `running` can still produce output; `succeeded`
+carries its reason, plus which part refused when that reason is
+`engine_failure`; `pending` or `running` can still produce output; `succeeded`
 means processing finished. `phase` tracks the review lifecycle, not whether an
 empty artifact result was broken. Read `--transcript` and quote it rather than
 calling the meeting empty.

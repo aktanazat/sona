@@ -1935,6 +1935,16 @@
       "running": "処理中",
       "succeeded": "完了",
       "cancelled": "処理をキャンセルしました",
+      "cause": {
+        "storage": "このミーティングの記録を読み込みも保存もできませんでした",
+        "transcription": "音声認識が音声の一部を処理できませんでした",
+        "voice_detection": "音声検出がトラックの一部を処理できませんでした",
+        "evidence_pack": "文字起こしがこのモデルの上限に収まりませんでした",
+        "model_refused": "モデルから使用できる結果が返りませんでした",
+        "reply_not_structured": "モデルの応答が想定した形式ではありませんでした",
+        "reply_rejected": "モデルの応答が文字起こしにない内容を引用しました",
+        "panicked": "処理が予期せず停止しました"
+      },
       "failed": {
         "local_model_unavailable": "ローカルモデルを利用できません",
         "remote_unavailable": "リモートの送信先を利用できません",

@@ -1942,6 +1942,16 @@
       "running": "İşleniyor",
       "succeeded": "Hazır",
       "cancelled": "İşleme iptal edildi",
+      "cause": {
+        "storage": "Bu toplantının kayıtları okunamadı veya kaydedilemedi",
+        "transcription": "Konuşma tanıma sesin bir bölümünü reddetti",
+        "voice_detection": "Ses algılama bir kaydın bir bölümünü reddetti",
+        "evidence_pack": "Döküm bu modelin sınırına sığmadı",
+        "model_refused": "Model kullanılabilir bir sonuç döndürmedi",
+        "reply_not_structured": "Modelin yanıtı beklenen biçimde değildi",
+        "reply_rejected": "Modelin yanıtı dökümde olmayan bir şeye atıfta bulundu",
+        "panicked": "İşleme beklenmedik şekilde durdu"
+      },
       "failed": {
         "local_model_unavailable": "Yerel model kullanılamıyor",
         "remote_unavailable": "Uzak hedef kullanılamıyor",

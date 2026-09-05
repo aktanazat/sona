@@ -1942,6 +1942,16 @@
       "running": "Verwerking",
       "succeeded": "Gereed",
       "cancelled": "Verwerking geannuleerd",
+      "cause": {
+        "storage": "De gegevens van deze vergadering konden niet worden gelezen of opgeslagen",
+        "transcription": "Spraakherkenning weigerde een deel van de audio",
+        "voice_detection": "Stemdetectie weigerde een deel van een spoor",
+        "evidence_pack": "Het transcript paste niet binnen de limiet van dit model",
+        "model_refused": "Het model gaf niets bruikbaars terug",
+        "reply_not_structured": "Het antwoord van het model had niet de verwachte indeling",
+        "reply_rejected": "Het antwoord van het model citeerde iets dat niet in het transcript staat",
+        "panicked": "De verwerking stopte onverwacht"
+      },
       "failed": {
         "local_model_unavailable": "Lokaal model niet beschikbaar",
         "remote_unavailable": "Externe bestemming niet beschikbaar",

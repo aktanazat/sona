@@ -1949,6 +1949,16 @@
       "running": "Elaborazione",
       "succeeded": "Pronta",
       "cancelled": "Elaborazione annullata",
+      "cause": {
+        "storage": "Non è stato possibile leggere o salvare i dati di questa riunione",
+        "transcription": "Il riconoscimento vocale ha rifiutato parte dell'audio",
+        "voice_detection": "Il rilevamento della voce ha rifiutato parte di una traccia",
+        "evidence_pack": "La trascrizione non rientrava nel limite di questo modello",
+        "model_refused": "Il modello non ha restituito nulla di utilizzabile",
+        "reply_not_structured": "La risposta del modello non era nel formato previsto",
+        "reply_rejected": "La risposta del modello citava qualcosa che non è nella trascrizione",
+        "panicked": "L'elaborazione si è interrotta in modo inatteso"
+      },
       "failed": {
         "local_model_unavailable": "Modello locale non disponibile",
         "remote_unavailable": "Destinazione remota non disponibile",

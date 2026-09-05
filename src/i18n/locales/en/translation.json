@@ -1942,6 +1942,16 @@
       "running": "Processing",
       "succeeded": "Ready",
       "cancelled": "Processing cancelled",
+      "cause": {
+        "storage": "Could not read or save this meeting's records",
+        "transcription": "Speech recognition refused part of the audio",
+        "voice_detection": "Voice detection refused part of a track",
+        "evidence_pack": "The transcript did not fit this model's limit",
+        "model_refused": "The model returned nothing usable",
+        "reply_not_structured": "The model's reply was not in the expected format",
+        "reply_rejected": "The model's reply cited something not in the transcript",
+        "panicked": "Processing stopped unexpectedly"
+      },
       "failed": {
         "local_model_unavailable": "Local model unavailable",
         "remote_unavailable": "Remote destination unavailable",

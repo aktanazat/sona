@@ -204,13 +204,66 @@ pub enum ProcessingFailure {
     /// what keeps an abandoned meeting out of the Processing filter.
     Interrupted,
 }
+
+/// Which part of a generation refused, for the one `ProcessingFailure` that
+/// covers more than one thing.
+///
+/// `EngineFailure` is every way a notes pass can end badly: a record that
+/// could not be read, a model that returned nothing usable, a reply in the
+/// wrong shape, a pack that would not fit. A reader offered one sentence for
+/// all of them learns only that something went wrong, and the one action that
+/// might help — press it again — is worth offering for a model that answered
+/// in prose and worth withholding for a disk that refused.
+///
+/// This rides beside the reason rather than inside it. `ProcessingFailure` is
+/// a token in every stored row and in every exhaustive table the frontend
+/// switches on, so giving it a payload would rewrite both. Every variant here
+/// is produced by a site that exists; a cause nothing writes would be a line
+/// of copy nobody can ever read.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineFailureCause {
+    /// A meeting record could not be read or written. Nothing to do with the
+    /// engine: the run could not reach the evidence, or could not keep the
+    /// result.
+    Storage,
+    /// The speech-to-text engine refused a chunk of audio it was handed.
+    Transcription,
+    /// The voice-activity detector refused a frame of a track, so the chunk it
+    /// was part of was never offered to transcription.
+    VoiceDetection,
+    /// The evidence could not be packed into a prompt this engine accepts: it
+    /// does not fit the engine's ceiling even with every citation dropped, or
+    /// it would not encode.
+    EvidencePack,
+    /// The engine ran and returned nothing usable.
+    ModelRefused,
+    /// The reply was not the JSON the prompt asked for — prose where an object
+    /// was required, or a first value that would not parse.
+    ReplyNotStructured,
+    /// The reply parsed and then failed its own checks: a summary line citing
+    /// a moment that is not in the transcript.
+    ReplyRejected,
+    /// The pipeline panicked. The status is written from outside the unwind,
+    /// which is what keeps the meeting from staying Pending forever.
+    Panicked,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProcessingStatus {
     Pending,
     Running,
     Succeeded,
-    Failed { reason: ProcessingFailure },
+    Failed {
+        reason: ProcessingFailure,
+        /// Which part refused, when `reason` is `EngineFailure` and the site
+        /// that produced it named one. `None` on every row written before
+        /// causes existed, and on a reason that already says everything about
+        /// itself.
+        #[serde(default)]
+        cause: Option<EngineFailureCause>,
+    },
     Cancelled,
 }
 
@@ -1383,5 +1436,41 @@ mod tests {
             }
             assert_eq!(window.days(), Some(days));
         }
+    }
+
+    /// Every failed row already on disk was written before a cause existed, so
+    /// the field has to be optional on the way in. Without the default, the
+    /// launch that sweeps recovery would fail to read the history it wrote
+    /// itself.
+    #[test]
+    fn a_failed_row_written_before_causes_existed_still_reads() {
+        let stored = serde_json::json!({ "kind": "failed", "reason": "engine_failure" });
+
+        assert_eq!(
+            serde_json::from_value::<ProcessingStatus>(stored).expect("stored failed row reads"),
+            ProcessingStatus::Failed {
+                reason: ProcessingFailure::EngineFailure,
+                cause: None,
+            }
+        );
+    }
+
+    /// The cause is a token on the row, and the review screen keys a line of
+    /// copy on each of these spellings in 24 languages. Renaming one silently
+    /// leaves that line untranslatable.
+    #[test]
+    fn a_cause_travels_as_the_token_the_review_screen_reads() {
+        assert_eq!(
+            serde_json::to_value(ProcessingStatus::Failed {
+                reason: ProcessingFailure::EngineFailure,
+                cause: Some(EngineFailureCause::ReplyNotStructured),
+            })
+            .expect("failed row serializes"),
+            serde_json::json!({
+                "kind": "failed",
+                "reason": "engine_failure",
+                "cause": "reply_not_structured",
+            })
+        );
     }
 }

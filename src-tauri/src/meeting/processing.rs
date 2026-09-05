@@ -41,6 +41,7 @@ use rustfft::num_traits::ToPrimitive;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -62,6 +63,12 @@ const DIARIZATION_MIN_VOICED_FRAMES: u32 = 10;
 const MAX_ARTIFACT_EVIDENCE_BYTES: usize = 96 * 1024;
 const MAX_CATCH_UP_EVIDENCE_BYTES: usize = 32 * 1024;
 const MAX_QA_EVIDENCE: usize = 24;
+/// The generated notes' output budget. One pass writes the summary, the
+/// outline and every topic, which is why it is the widest ask on the page.
+const ARTIFACT_MAX_TOKENS: i32 = 3_200;
+/// A mid-meeting recap's output budget: a recap is a handful of bullets, and
+/// `CATCH_UP_MAX_BULLETS` already says how many.
+const CATCH_UP_MAX_TOKENS: i32 = 900;
 /// A saved prompt's output budget. Wider than a question's, because a schema
 /// prompt is asked for a list rather than a paragraph, and narrower than the
 /// notes pass, which writes a whole document.
@@ -97,6 +104,46 @@ const TEMPLATE_VERSION: u32 = 7;
 /// page, which is why a bound here costs nothing a person cannot recover.
 const MAX_RELATIONSHIP_SUMMARIES_PER_ARTIFACT: usize = 8;
 const ARTIFACT_MODEL_VERSION: &str = "apple-intelligence-foundationmodels-v1";
+/// Apple Intelligence's whole context window, in tokens. The instructions,
+/// the evidence and the reply are all spent out of it, and a generation that
+/// goes over it throws `exceededContextWindowSize` rather than truncating —
+/// which is the whole failure this ceiling exists to prevent.
+///
+/// Read from the SDK rather than guessed at: `SystemLanguageModel.contextSize`
+/// is declared as `4096` in `FoundationModels.framework`'s
+/// `arm64e-apple-macos.swiftinterface`, and a Swift program that prints it on
+/// macOS 26.6.2 answers 4096.
+const ON_DEVICE_CONTEXT_TOKENS: usize = 4_096;
+/// Bytes per token, rounded down on purpose.
+///
+/// Foundation Models tokenizes English prose at roughly four bytes a token,
+/// and an evidence pack is not prose: every quote in it carries two uuids and
+/// two nanosecond offsets, and hex digits and punctuation tokenize far worse
+/// than words do. Three is below any rate a pack of that shape reaches, and
+/// the two ways of being wrong here are not equal — a budget that errs low
+/// costs a quote at the end of the pack, one that errs high costs the entire
+/// generation.
+///
+/// `SystemLanguageModel.tokenCount(for:)` would measure it exactly, but it
+/// needs Apple Intelligence switched on to answer at all, so it cannot settle
+/// this number for a build. Until a caller reports a real count, the estimate
+/// stays conservative.
+const ON_DEVICE_BYTES_PER_TOKEN: usize = 3;
+/// The most of that window an on-device reply may be left room for.
+///
+/// The app's output budgets were written for a model with room to spare:
+/// `ARTIFACT_MAX_TOKENS` is 3200, which is 78% of this whole window. Leaving
+/// that much for the answer leaves 130 bytes for the pack — the notes prompt
+/// measures 2558 bytes on its own — so honoring it would refuse every
+/// on-device notes pass instead of only the long ones. Reserving a quarter of
+/// the window leaves about 6.6 KiB of evidence, which is the size a pack is
+/// cut to for this engine.
+///
+/// This is room left, not a cap enforced: Apple's `maxTokens` trims the text
+/// after generation rather than bounding it, so a reply that outgrows this
+/// still throws `exceededContextWindowSize` — the throw an oversized pack
+/// already caused for a meeting a few minutes long.
+const ON_DEVICE_REPLY_TOKENS: usize = 1_024;
 
 const MEETING_PROMPT: &str = include_str!("../../resources/prompts/meeting.txt");
 
@@ -200,6 +247,17 @@ impl MeetingVadFactory for BundledVadFactory {
 pub enum MeetingTextGenerationError {
     /// The engine was reached and did not return usable text.
     Failed,
+    /// The engine was reached and answered in a shape its caller cannot read:
+    /// prose where one JSON object was required.
+    ///
+    /// A third outcome, because a reader can act on it. The two above are a
+    /// server that was not there and a model that had nothing to say; this one
+    /// is a model that said something in the wrong form, and pressing the
+    /// button again is a real chance at a usable answer rather than a second
+    /// helping of the same refusal. That is also why the comment on
+    /// `relay_generator::generation_error` no longer folds it into `Failed`:
+    /// something downstream branches on it now.
+    ReplyNotStructured,
     /// The engine was never reached: it is not configured, or its transport
     /// refused before anything was generated. Nothing ran, so nothing is
     /// recorded as having failed to run.
@@ -208,6 +266,96 @@ pub enum MeetingTextGenerationError {
     /// the narrow window where that changed underneath a generation — a relay
     /// unpaired, or a network dropped, between the choice and the call.
     Unreachable,
+}
+
+/// Why one processing run ended without what it was asked for.
+///
+/// The pipeline's own error type, and the reason it is not simply
+/// [`ProcessingFailure`]: `EngineFailure` is what thirty-odd unrelated sites
+/// return, from a disk that would not read to a model that answered in prose,
+/// and a reason that covers everything explains nothing. Naming the part that
+/// refused is not optional here — `Engine` cannot be built without one, so a
+/// new engine site has to say which it is.
+///
+/// [`Self::status`] is the only place this becomes a row, which is what keeps
+/// the wire-visible taxonomy in `types.rs` from having to grow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunFailure {
+    /// A reason that says everything about itself. `EngineFailure` reaches
+    /// this arm only from a boundary whose own error type carries no cause —
+    /// the transcriber and VAD traits, whose callers name the cause instead.
+    Reason(ProcessingFailure),
+    /// The engine path refused, and which part of it.
+    Engine(EngineFailureCause),
+}
+
+impl From<ProcessingFailure> for RunFailure {
+    fn from(reason: ProcessingFailure) -> Self {
+        Self::Reason(reason)
+    }
+}
+
+/// A store error is a storage failure and nothing else. The pipeline reads its
+/// evidence and writes its revisions through this one type, and every variant
+/// of it — a conflict, a row that is not there, a column that would not
+/// decode — is the same sentence to a person waiting for notes. This is what
+/// lets the twenty-odd store calls in this file stay `?` instead of naming the
+/// cause twenty times.
+impl From<StoreError> for RunFailure {
+    fn from(_: StoreError) -> Self {
+        Self::storage()
+    }
+}
+
+impl RunFailure {
+    /// The engine refused, and the part that did.
+    const fn engine(cause: EngineFailureCause) -> Self {
+        Self::Engine(cause)
+    }
+
+    /// A meeting record could not be read or written. The most common engine
+    /// failure by a wide margin, and the one that says least about the engine.
+    const fn storage() -> Self {
+        Self::Engine(EngineFailureCause::Storage)
+    }
+
+    /// A boundary error given the cause its own type could not name.
+    ///
+    /// The transcriber and the voice detector answer with a bare
+    /// [`ProcessingFailure`]: their traits are implemented by test doubles as
+    /// well as by the bundled engines, and a cause parameter on those traits
+    /// would be a second taxonomy for two of the eight causes. So the caller
+    /// names it, at the one place that knows which boundary refused — and a
+    /// reason that already says everything about itself, a model that is not
+    /// installed, passes through untouched.
+    const fn from_boundary(error: ProcessingFailure, cause: EngineFailureCause) -> Self {
+        match error {
+            ProcessingFailure::EngineFailure => Self::Engine(cause),
+            reason => Self::Reason(reason),
+        }
+    }
+
+    pub const fn reason(self) -> ProcessingFailure {
+        match self {
+            Self::Reason(reason) => reason,
+            Self::Engine(_) => ProcessingFailure::EngineFailure,
+        }
+    }
+
+    const fn cause(self) -> Option<EngineFailureCause> {
+        match self {
+            Self::Reason(_) => None,
+            Self::Engine(cause) => Some(cause),
+        }
+    }
+
+    /// The row this failure is written down as.
+    const fn status(self) -> ProcessingStatus {
+        ProcessingStatus::Failed {
+            reason: self.reason(),
+            cause: self.cause(),
+        }
+    }
 }
 
 /// The shape a caller reads its reply in, declared where the wire can hold
@@ -232,16 +380,35 @@ pub enum ReplyShape {
 pub trait MeetingTextGenerator: Send + Sync {
     fn is_available(&self) -> bool;
     fn model_id(&self) -> &'static str;
-    fn model_version(&self) -> &'static str;
-    /// The largest model input this engine accepts, in bytes of serialized
-    /// JSON. `usize::MAX` for an engine with no ceiling of its own.
+    /// Which build of that engine wrote a generation, hashed into every
+    /// generation key so that a swapped model retires the notes it wrote.
     ///
-    /// An on-device engine is bounded by its token window, which the evidence
-    /// budget already respects. A relayed engine is bounded by a wire it does
-    /// not control, and a pack one byte over that ceiling is refused rather
-    /// than trimmed for it — so the caller has to know the number before it
-    /// builds the pack.
+    /// Owned rather than static because an engine reached over a wire is
+    /// identified partly by the wire: see
+    /// [`relay_generator::relay_model_version`]. The engines that know their
+    /// version at compile time borrow it and allocate nothing.
+    fn model_version(&self) -> Cow<'static, str>;
+    /// The largest evidence pack this engine accepts on its own, in bytes of
+    /// serialized JSON. `usize::MAX` for an engine with no ceiling of that
+    /// kind.
+    ///
+    /// A relayed engine is bounded by a wire it does not control, and a pack
+    /// one byte over that ceiling is refused rather than trimmed for it — so
+    /// the caller has to know the number before it builds the pack.
     fn max_input_bytes(&self) -> usize;
+    /// The engine's context window in bytes, for an engine that spends one
+    /// window on the instructions, the evidence and the reply together.
+    /// `None` when there is no such window: a relayed model's own window is
+    /// its own business, bounded on this side by the submission ceiling
+    /// above.
+    ///
+    /// Kept apart from [`Self::max_input_bytes`] because the two numbers do
+    /// not mean the same thing and cannot be compared: one is what the pack
+    /// may weigh, the other is what the pack, the prompt and the answer weigh
+    /// between them. [`evidence_budget`] is where they meet.
+    fn context_window_bytes(&self) -> Option<usize> {
+        None
+    }
     fn generate(
         &self,
         system_prompt: &str,
@@ -269,14 +436,18 @@ impl MeetingTextGenerator for AppleIntelligenceGenerator {
         "apple-intelligence"
     }
 
-    fn model_version(&self) -> &'static str {
-        ARTIFACT_MODEL_VERSION
+    fn model_version(&self) -> Cow<'static, str> {
+        Cow::Borrowed(ARTIFACT_MODEL_VERSION)
     }
 
-    /// No wire between this engine and the evidence, so the only ceiling is
-    /// the evidence budget the caller already applied.
+    /// No wire between this engine and the evidence, so no submission ceiling
+    /// — but a window, which is the ceiling that matters here.
     fn max_input_bytes(&self) -> usize {
         usize::MAX
+    }
+
+    fn context_window_bytes(&self) -> Option<usize> {
+        Some(ON_DEVICE_CONTEXT_TOKENS * ON_DEVICE_BYTES_PER_TOKEN)
     }
 
     /// The shape is the prompt's to ask for here: nothing sits between this
@@ -688,6 +859,7 @@ impl MeetingProcessingService {
             return Err(ProcessingFailure::Cancelled);
         }
         self.generate_artifacts(store, session_id, expected_revision)
+            .map_err(RunFailure::reason)
             .map(|outcome| match outcome {
                 ArtifactGenerationOutcome::Generated { artifact, engine }
                 | ArtifactGenerationOutcome::Cached { artifact, engine } => Ok((artifact, engine)),
@@ -697,10 +869,12 @@ impl MeetingProcessingService {
                  * agree about what each outcome means and there is one place to
                  * change it. Silence is the single deliberate difference — a
                  * finished pass to the pipeline, an engine failure to a person
-                 * who pressed a button and got nothing. */
+                 * who pressed a button and got nothing. A command reply has no
+                 * field for the part that refused, so the cause the pipeline
+                 * would write on a row is dropped here rather than reshaped. */
                 other => {
-                    let reason =
-                        generation_shortfall(&other).unwrap_or(ProcessingFailure::EngineFailure);
+                    let reason = generation_shortfall(&other)
+                        .map_or(ProcessingFailure::EngineFailure, RunFailure::reason);
                     log::warn!(
                         "Meeting {session_id:?} regenerated no notes: {reason:?}. The reason \
                          travels to the caller; this line is so it is also written down."
@@ -770,7 +944,7 @@ impl MeetingProcessingService {
         let Ok(input) = prompt_model_input(store, self, &prompt, &scope, generator.as_ref()) else {
             return run(
                 generator.model_id(),
-                generator.model_version(),
+                &generator.model_version(),
                 failed(PromptRunFailure::NoEvidence),
             );
         };
@@ -789,8 +963,14 @@ impl MeetingProcessingService {
                 failed(PromptRunFailure::ModelUnreachable)
             }
             Err(MeetingTextGenerationError::Failed) => failed(PromptRunFailure::ModelFailed),
+            /* Answered in the wrong shape, which for a prompt is what
+             * `SchemaMismatch` already names: the same reason a reply that
+             * parsed and did not match this prompt's schema is given. */
+            Err(MeetingTextGenerationError::ReplyNotStructured) => {
+                failed(PromptRunFailure::SchemaMismatch)
+            }
         };
-        run(generator.model_id(), generator.model_version(), result)
+        run(generator.model_id(), &generator.model_version(), result)
     }
 
     fn run(
@@ -811,7 +991,7 @@ impl MeetingProcessingService {
         }))
         .unwrap_or_else(|_| {
             log::error!("Meeting processing panicked for session {session_id:?}");
-            Err(ProcessingFailure::EngineFailure)
+            Err(RunFailure::engine(EngineFailureCause::Panicked))
         });
         // A generation shortfall is not a failed run: the audio passes wrote
         // their revisions, and review is where this meeting belongs either
@@ -820,9 +1000,11 @@ impl MeetingProcessingService {
         // Succeeded, so it looked finished and held nothing.
         let (status, run_completed) = match outcome {
             Ok(None) => (ProcessingStatus::Succeeded, true),
-            Ok(Some(shortfall)) => (ProcessingStatus::Failed { reason: shortfall }, true),
-            Err(ProcessingFailure::Cancelled) => (ProcessingStatus::Cancelled, false),
-            Err(reason) => (ProcessingStatus::Failed { reason }, false),
+            Ok(Some(shortfall)) => (shortfall.status(), true),
+            Err(RunFailure::Reason(ProcessingFailure::Cancelled)) => {
+                (ProcessingStatus::Cancelled, false)
+            }
+            Err(failure) => (failure.status(), false),
         };
         /* No reason codes travel from here. This transition is the system's
          * own, so `store::transition` is given no operation id, and without one
@@ -940,12 +1122,10 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         cancelled: &AtomicBool,
         origin: ProcessingOrigin,
-    ) -> Result<Option<ProcessingFailure>, ProcessingFailure> {
-        let plan = store
-            .processing_plan(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+    ) -> Result<Option<RunFailure>, RunFailure> {
+        let plan = store.processing_plan(session_id)?;
         if !matches!(plan.destination, ProcessingDestination::Local) {
-            return Err(ProcessingFailure::RemoteUnavailable);
+            return Err(ProcessingFailure::RemoteUnavailable.into());
         }
         // An imported transcript arrives already written, with no audio behind
         // it, so this run starts below the two passes that need audio. One run
@@ -958,12 +1138,9 @@ impl MeetingProcessingService {
             self.transcribe_and_diarize(store, session_id, &plan, cancelled)?;
         }
         if cancelled.load(Ordering::Acquire) {
-            return Err(ProcessingFailure::Cancelled);
+            return Err(ProcessingFailure::Cancelled.into());
         }
-        let input_revision = store
-            .session_snapshot(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?
-            .revision;
+        let input_revision = store.session_snapshot(session_id)?.revision;
         // Metrics come from the transcript, not from the generated notes, so
         // they are derived before generation and survive a model that is
         // unavailable or fails.
@@ -992,10 +1169,12 @@ impl MeetingProcessingService {
                 }
                 shortfall
             }
-            /* The record behind the pass could not be read. The transcript
-             * landed regardless, so this is a meeting with no notes rather
-             * than a run that never happened. */
-            Err(_) => Some(ProcessingFailure::EngineFailure),
+            /* The pass could not be run to an answer: the evidence would not
+             * read, or would not fit a prompt this engine accepts. The
+             * transcript landed regardless, so this is a meeting with no notes
+             * rather than a run that never happened, and the part that refused
+             * travels to the row. */
+            Err(failure) => Some(failure),
         };
         Ok(shortfall)
     }
@@ -1008,7 +1187,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         plan: &MeetingRunPlan,
         cancelled: &AtomicBool,
-    ) -> Result<(), ProcessingFailure> {
+    ) -> Result<(), RunFailure> {
         let engine = self
             .transcript_engine
             .lock()
@@ -1033,13 +1212,11 @@ impl MeetingProcessingService {
                 source_set: &plan.requested_sources,
                 language: &plan.language,
             })
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
         let review = store
             .review_snapshot(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
-        let origin = store
-            .meeting_origin(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
+        let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
         let tracks = review.tracks;
         for source_kind in [SourceKind::Microphone, SourceKind::SystemAudio] {
             for track in tracks
@@ -1061,7 +1238,7 @@ impl MeetingProcessingService {
         self.wait_for_capture(cancelled)?;
         store
             .complete_transcript_revision(session_id, transcript_revision_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
         self.emit_current(store, "meeting:transcript-changed", session_id);
         self.run_diarization(
             store,
@@ -1085,7 +1262,7 @@ impl MeetingProcessingService {
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
         cancelled: &AtomicBool,
-    ) -> Result<(), ProcessingFailure> {
+    ) -> Result<(), RunFailure> {
         let detector = self
             .vad_factory
             .lock()
@@ -1093,10 +1270,14 @@ impl MeetingProcessingService {
             .open(source_kind)?;
         let mut chunker = SpeechChunker::new(detector);
         let mut frames = RecordFrameBuffer::new();
-        store
-            .visit_durable_track_records(session_id, track_id, None, |record| {
-                self.wait_for_capture(cancelled)
-                    .map_err(store_error_from_processing)?;
+        /* The visitor's error type is the store's, so a refusal that came from
+         * the detector or the transcriber has to be carried out beside it: a
+         * `StoreError` cannot say which part refused, and the row this run
+         * writes names one. */
+        let mut refused = None;
+        let visited = store.visit_durable_track_records(session_id, track_id, None, |record| {
+            let mut pass = || -> Result<(), RunFailure> {
+                self.wait_for_capture(cancelled)?;
                 if frames.starts_new_span(&record) {
                     if let Some(chunk) = chunker.finish(false) {
                         self.transcribe_chunk(
@@ -1108,8 +1289,7 @@ impl MeetingProcessingService {
                             engine,
                             asr_plan,
                             chunk,
-                        )
-                        .map_err(store_error_from_processing)?;
+                        )?;
                     }
                 }
                 process_record_frames(&record, &mut frames, &mut chunker, |chunk| {
@@ -1123,11 +1303,15 @@ impl MeetingProcessingService {
                         asr_plan,
                         chunk,
                     )
-                    .map_err(store_error_from_processing)
-                })?;
-                Ok(())
+                })
+            };
+            pass().map_err(|failure| {
+                let error = store_error_from_processing(failure.reason());
+                refused = Some(failure);
+                error
             })
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+        });
+        visited.map_err(|error| refused.unwrap_or_else(|| RunFailure::from(error)))?;
         if let Some(chunk) = chunker.finish(false) {
             self.transcribe_chunk(
                 store,
@@ -1154,8 +1338,10 @@ impl MeetingProcessingService {
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
         chunk: AudioChunk,
-    ) -> Result<(), ProcessingFailure> {
-        let text = engine.transcribe(asr_plan, &chunk.samples)?;
+    ) -> Result<(), RunFailure> {
+        let text = engine
+            .transcribe(asr_plan, &chunk.samples)
+            .map_err(|error| RunFailure::from_boundary(error, EngineFailureCause::Transcription))?;
         if text.trim().is_empty() {
             return Ok(());
         }
@@ -1173,7 +1359,7 @@ impl MeetingProcessingService {
                     speaker: None,
                 }],
             )
-            .map_err(|_| ProcessingFailure::EngineFailure)
+            .map_err(RunFailure::from)
     }
 
     fn run_diarization(
@@ -1383,8 +1569,12 @@ impl MeetingProcessingService {
                         collect_window_evidence,
                         window,
                     )
-                    .map_err(store_error_from_processing)
-                })?;
+                    .map_err(RunFailure::from)
+                })
+                // Nothing here reaches a row: `run_diarization` writes its own
+                // `DiarizationStatus` and returns nothing, so this failure
+                // stops the walk and never needs a cause.
+                .map_err(|failure| store_error_from_processing(failure.reason()))?;
                 contiguous_audio.observe(&record)?;
                 Ok(())
             });
@@ -1635,17 +1825,17 @@ impl MeetingProcessingService {
         store: &MeetingStore,
         session_id: MeetingSessionId,
         input_revision: u64,
-    ) -> Result<ArtifactGenerationOutcome, ProcessingFailure> {
+    ) -> Result<ArtifactGenerationOutcome, RunFailure> {
         let transcript_revision_id = store
             .current_transcript_revision_id(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
         let evidence = store
             .artifact_evidence(
                 session_id,
                 MAX_ARTIFACT_EVIDENCE_BYTES,
                 self.fallback_notes_template(store, session_id),
             )
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
         if evidence.transcript.is_empty() {
             return Ok(ArtifactGenerationOutcome::NoSpeech);
         }
@@ -1654,27 +1844,30 @@ impl MeetingProcessingService {
         };
         let template = evidence.template;
         let template_id = template.artifact_template_id();
+        let system_prompt = artifact_system_prompt(template, !evidence.user_notes.is_empty());
         let canonical_input = fit_model_input(
             &evidence.transcript,
-            generator.max_input_bytes(),
+            evidence_budget(generator.as_ref(), &system_prompt, ARTIFACT_MAX_TOKENS),
             |transcript| ArtifactPromptInput::from_parts(transcript, &evidence),
-        )
-        .map_err(|_| ProcessingFailure::EngineFailure)?;
-        // The engine is part of what a generation *is*, so it is hashed into
-        // the key beside the evidence and the template. Two consequences, both
-        // wanted: switching engines regenerates rather than showing the last
-        // engine's notes as this engine's, and a revision can always be traced
-        // back to the engine that wrote it.
+        )?;
+        // The engine and the prompt are both part of what a generation *is*,
+        // so both are hashed into the key beside the evidence and the
+        // template. Three consequences, all wanted: switching engines
+        // regenerates rather than showing the last engine's notes as this
+        // engine's, editing the wording regenerates rather than serving notes
+        // written to a prompt that no longer exists, and a revision can always
+        // be traced back to the engine that wrote it.
         let generation_key = generation_key(
             &canonical_input,
             input_revision,
             template_id,
+            &system_prompt,
             generator.model_id(),
-            generator.model_version(),
+            &generator.model_version(),
         );
         if let Some(existing) = store
             .artifact_by_generation_key(session_id, &generation_key)
-            .map_err(|_| ProcessingFailure::EngineFailure)?
+            .map_err(RunFailure::from)?
         {
             if existing.state == MeetingArtifactState::Current {
                 /* A key match means this engine, this evidence and this
@@ -1699,36 +1892,54 @@ impl MeetingProcessingService {
                 generated_at_utc_ms: utc_now_ms(),
             });
         };
-        let system_prompt = artifact_system_prompt(template, !evidence.user_notes.is_empty());
-        let model_output =
-            match generator.generate(&system_prompt, &canonical_input, 3_200, ReplyShape::Json) {
-                Ok(output) => output,
-                /* The engine was never reached, so nothing is recorded as having
-                 * failed to generate: a revision marked Failed would tell a reader
-                 * their notes were attempted and refused, when what happened is
-                 * that their server was not there. Nothing retries the other
-                 * engine — one engine per revision, and a quiet second attempt
-                 * elsewhere is the failure this whole path exists to prevent. */
-                Err(MeetingTextGenerationError::Unreachable) => {
-                    return Ok(ArtifactGenerationOutcome::Unreachable)
-                }
-                Err(MeetingTextGenerationError::Failed) => {
-                    record_failure();
-                    return Ok(ArtifactGenerationOutcome::Failed);
-                }
-            };
+        let model_output = match generator.generate(
+            &system_prompt,
+            &canonical_input,
+            ARTIFACT_MAX_TOKENS,
+            ReplyShape::Json,
+        ) {
+            Ok(output) => output,
+            /* The engine was never reached, so nothing is recorded as having
+             * failed to generate: a revision marked Failed would tell a reader
+             * their notes were attempted and refused, when what happened is
+             * that their server was not there. Nothing retries the other
+             * engine — one engine per revision, and a quiet second attempt
+             * elsewhere is the failure this whole path exists to prevent. */
+            Err(MeetingTextGenerationError::Unreachable) => {
+                return Ok(ArtifactGenerationOutcome::Unreachable)
+            }
+            Err(MeetingTextGenerationError::Failed) => {
+                record_failure();
+                return Ok(ArtifactGenerationOutcome::Failed(
+                    EngineFailureCause::ModelRefused,
+                ));
+            }
+            /* Answered in a shape this pass cannot read. Named apart from
+             * the refusal above because the retry a reader is offered is
+             * worth pressing here and not there. */
+            Err(MeetingTextGenerationError::ReplyNotStructured) => {
+                record_failure();
+                return Ok(ArtifactGenerationOutcome::Failed(
+                    EngineFailureCause::ReplyNotStructured,
+                ));
+            }
+        };
         let raw: RawArtifactOutput = match first_json_value(&model_output) {
             Ok(raw) => raw,
             Err(()) => {
                 record_failure();
-                return Ok(ArtifactGenerationOutcome::Failed);
+                return Ok(ArtifactGenerationOutcome::Failed(
+                    EngineFailureCause::ReplyNotStructured,
+                ));
             }
         };
         let mut content = match validate_artifact_output(&raw, &evidence.transcript) {
             Ok(content) => content,
             Err(_) => {
                 record_failure();
-                return Ok(ArtifactGenerationOutcome::Failed);
+                return Ok(ArtifactGenerationOutcome::Failed(
+                    EngineFailureCause::ReplyRejected,
+                ));
             }
         };
         // The ledger is a second reading of the same evidence, asked for
@@ -1738,7 +1949,7 @@ impl MeetingProcessingService {
         // because its checks are run on the page it would render as.
         let segments = store
             .analytics_segments(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
         content.ledger = generate_ledger(generator.as_ref(), &evidence, &segments, session_id);
         let artifact = store
             .store_artifact_revision(ArtifactRevisionInput {
@@ -1752,7 +1963,7 @@ impl MeetingProcessingService {
                 content: Some(&content),
                 generated_at_utc_ms: utc_now_ms(),
             })
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+            .map_err(RunFailure::from)?;
         // Two passes read the revision that just landed, in this order and
         // only here.
         //
@@ -1955,33 +2166,44 @@ impl MeetingProcessingService {
             .iter()
             .filter_map(|item| item.citation.end_offset_ns)
             .max();
-        let canonical_input = fit_model_input(&evidence, generator.max_input_bytes(), |evidence| {
-            QuestionPromptInput {
+        let system_prompt = catch_up_prompt();
+        let canonical_input = fit_model_input(
+            &evidence,
+            evidence_budget(generator.as_ref(), &system_prompt, CATCH_UP_MAX_TOKENS),
+            |evidence| QuestionPromptInput {
                 question: "What has happened so far?",
                 evidence: evidence.iter().map(PromptEvidence::from).collect(),
+            },
+        )
+        .map_err(RunFailure::reason)?;
+        let model_output = match generator.generate(
+            &system_prompt,
+            &canonical_input,
+            CATCH_UP_MAX_TOKENS,
+            ReplyShape::Json,
+        ) {
+            Ok(output) => output,
+            /* An engine nobody could reach is reported as an engine that is not
+             * there, which is what the recap surface already knows how to say. */
+            Err(MeetingTextGenerationError::Unreachable) => {
+                return Ok(MeetingCatchUp::empty(
+                    MeetingCatchUpState::ModelUnavailable,
+                    segment_count,
+                    provisional,
+                ))
             }
-        })
-        .map_err(|_| ProcessingFailure::EngineFailure)?;
-        let model_output =
-            match generator.generate(&catch_up_prompt(), &canonical_input, 900, ReplyShape::Json) {
-                Ok(output) => output,
-                /* An engine nobody could reach is reported as an engine that is not
-                 * there, which is what the recap surface already knows how to say. */
-                Err(MeetingTextGenerationError::Unreachable) => {
-                    return Ok(MeetingCatchUp::empty(
-                        MeetingCatchUpState::ModelUnavailable,
-                        segment_count,
-                        provisional,
-                    ))
-                }
-                Err(MeetingTextGenerationError::Failed) => {
-                    return Ok(MeetingCatchUp::empty(
-                        MeetingCatchUpState::Failed,
-                        segment_count,
-                        provisional,
-                    ))
-                }
-            };
+            /* A recap has one line of copy for a generation that came back
+             * unusable, and a shape it could not read is one of those. */
+            Err(
+                MeetingTextGenerationError::Failed | MeetingTextGenerationError::ReplyNotStructured,
+            ) => {
+                return Ok(MeetingCatchUp::empty(
+                    MeetingCatchUpState::Failed,
+                    segment_count,
+                    provisional,
+                ))
+            }
+        };
         let Ok(raw) = first_json_value::<RawCatchUpOutput>(&model_output) else {
             return Ok(MeetingCatchUp::empty(
                 MeetingCatchUpState::Failed,
@@ -2089,7 +2311,8 @@ impl MeetingProcessingService {
                             recognized.push(chunk);
                             Ok(())
                         },
-                    )?;
+                    )
+                    .map_err(|failure| store_error_from_processing(failure.reason()))?;
                     cursor.through_sequence = Some(record.sequence);
                     Ok(())
                 },
@@ -2751,10 +2974,10 @@ fn process_record_frames<C, F>(
     frames: &mut RecordFrameBuffer,
     consumer: &mut C,
     mut emit: F,
-) -> Result<(), StoreError>
+) -> Result<(), RunFailure>
 where
     C: FrameConsumer,
-    F: FnMut(AudioChunk) -> Result<(), StoreError>,
+    F: FnMut(AudioChunk) -> Result<(), RunFailure>,
 {
     let samples = downmix_and_resample(record)?;
     frames.append(record, &samples)?;
@@ -2778,12 +3001,12 @@ where
                     .ok_or(StoreError::Corrupt)?,
             )
             .ok_or(StoreError::Corrupt)?;
-        let voice = consumer
-            .is_voice(frame)
-            .map_err(store_error_from_processing)?;
+        let voice = consumer.is_voice(frame).map_err(|error| {
+            RunFailure::from_boundary(error, EngineFailureCause::VoiceDetection)
+        })?;
         if let Some(mut chunk) = consumer
             .push(voice, frame, frame_start)
-            .map_err(store_error_from_processing)?
+            .map_err(|error| RunFailure::from_boundary(error, EngineFailureCause::VoiceDetection))?
         {
             chunk.track_id = record.track_id;
             emit(chunk)?;
@@ -3051,15 +3274,54 @@ impl<'a> From<&'a ArtifactEvidence> for ArtifactPromptInput<'a> {
     }
 }
 
+/// The bytes of evidence one engine can be given, once everything else that
+/// shares its ceiling is out of the way.
+///
+/// Two engines, two ceilings, and they are not the same kind of number. A
+/// relayed engine caps the pack alone: the wire refuses a submission over its
+/// own size and knows nothing about the model's window behind it. An
+/// on-device engine has no wire and one window, and the instructions and the
+/// reply are spent out of that same window — so the pack's share is what is
+/// left of it after both.
+///
+/// `instructions` and `reserved_output_tokens` are the two the caller is
+/// about to spend: pass the same values to
+/// [`MeetingTextGenerator::generate`], or this is a budget for a generation
+/// that does not happen.
+fn evidence_budget(
+    generator: &dyn MeetingTextGenerator,
+    instructions: &str,
+    reserved_output_tokens: i32,
+) -> usize {
+    match generator.context_window_bytes() {
+        /* The pack is the whole submission, and the wire's ceiling is on the
+         * submission. */
+        None => generator.max_input_bytes(),
+        Some(window) => {
+            /* The caller's own output budget, or the most this window can
+             * leave for an answer, whichever is smaller: an ask larger than
+             * `ON_DEVICE_REPLY_TOKENS` cannot be honored here and reserving
+             * it would spend the pack's whole share on a reply this engine
+             * was never going to be allowed to write. */
+            let reply = (reserved_output_tokens.max(0) as usize).min(ON_DEVICE_REPLY_TOKENS)
+                * ON_DEVICE_BYTES_PER_TOKEN;
+            window
+                .saturating_sub(instructions.len())
+                .saturating_sub(reply)
+        }
+    }
+}
+
 /// Serialize a model input, cut to what the engine will accept.
 ///
-/// `artifact_evidence` already bounds evidence in bytes of quoted text, which
-/// is the right budget for an on-device engine. An engine on the far side of
-/// the relay is bounded by something else: the size of the *serialized* pack,
-/// where every quote carries a citation header several times its own length.
-/// A pack one byte over that ceiling is refused outright, so it has to be
+/// `artifact_evidence` bounds evidence in bytes of quoted text, which is not
+/// the number either engine enforces. What reaches a model is the
+/// *serialized* pack, where every quote carries a citation header several
+/// times its own length, and both ceilings are on that: the relay refuses a
+/// submission one byte over its own, and an on-device model throws rather
+/// than truncate a prompt too big for its window. So the pack has to be
 /// measured rather than estimated, and the only way to measure it is to build
-/// it.
+/// it. [`evidence_budget`] is where the ceiling itself comes from.
 ///
 /// Evidence lists arrive most-worth-keeping first — chronological for a
 /// transcript, by relevance for a search — so a list that does not fit is cut
@@ -3073,9 +3335,9 @@ fn fit_model_input<'evidence, T: Serialize>(
     evidence: &'evidence [MeetingEvidence],
     max_bytes: usize,
     build: impl Fn(&'evidence [MeetingEvidence]) -> T,
-) -> Result<String, ProcessingFailure> {
-    let whole =
-        serde_json::to_string(&build(evidence)).map_err(|_| ProcessingFailure::EngineFailure)?;
+) -> Result<String, RunFailure> {
+    let pack_failure = || RunFailure::engine(EngineFailureCause::EvidencePack);
+    let whole = serde_json::to_string(&build(evidence)).map_err(|_| pack_failure())?;
     if whole.len() <= max_bytes {
         return Ok(whole);
     }
@@ -3084,8 +3346,8 @@ fn fit_model_input<'evidence, T: Serialize>(
     let mut best: Option<String> = None;
     while low <= high {
         let kept = low + (high - low) / 2;
-        let candidate = serde_json::to_string(&build(&evidence[..kept]))
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
+        let candidate =
+            serde_json::to_string(&build(&evidence[..kept])).map_err(|_| pack_failure())?;
         if candidate.len() <= max_bytes {
             best = Some(candidate);
             low = kept + 1;
@@ -3097,7 +3359,7 @@ fn fit_model_input<'evidence, T: Serialize>(
     }
     /* Not even an empty pack fits, which means the ceiling is smaller than the
      * prompt's own scaffolding. Nothing to send. */
-    best.ok_or(ProcessingFailure::EngineFailure)
+    best.ok_or_else(pack_failure)
 }
 
 /// The ledger pass sees the transcript and nothing else. Manual notes and the
@@ -3179,7 +3441,10 @@ enum ArtifactGenerationOutcome {
     /// their Mac lacks a model, and distinct from `Failed` because nothing was
     /// generated and no revision was written.
     Unreachable,
-    Failed,
+    /// The engine answered and the pass kept nothing, with the part that
+    /// refused. A revision marked `Failed` is written, so this outcome is also
+    /// what a later pass reads back as "already tried, and here is why".
+    Failed(EngineFailureCause),
 }
 
 /// What one generation pass leaves on the meeting's own record.
@@ -3194,16 +3459,20 @@ enum ArtifactGenerationOutcome {
 /// and test on its own. Every one of these outcomes used to be reported as a
 /// success, which is how a Mac with no engine filled a corpus with meetings
 /// that read as processed and held nothing.
-const fn generation_shortfall(outcome: &ArtifactGenerationOutcome) -> Option<ProcessingFailure> {
+const fn generation_shortfall(outcome: &ArtifactGenerationOutcome) -> Option<RunFailure> {
     match outcome {
         ArtifactGenerationOutcome::Generated { .. }
         | ArtifactGenerationOutcome::Cached { .. }
         /* Silence is not a shortfall: there was nothing to write notes about,
          * and no engine would have found words that were never said. */
         | ArtifactGenerationOutcome::NoSpeech => None,
-        ArtifactGenerationOutcome::Unavailable => Some(ProcessingFailure::LocalModelUnavailable),
-        ArtifactGenerationOutcome::Unreachable => Some(ProcessingFailure::RemoteUnavailable),
-        ArtifactGenerationOutcome::Failed => Some(ProcessingFailure::EngineFailure),
+        ArtifactGenerationOutcome::Unavailable => {
+            Some(RunFailure::Reason(ProcessingFailure::LocalModelUnavailable))
+        }
+        ArtifactGenerationOutcome::Unreachable => {
+            Some(RunFailure::Reason(ProcessingFailure::RemoteUnavailable))
+        }
+        ArtifactGenerationOutcome::Failed(cause) => Some(RunFailure::engine(*cause)),
     }
 }
 
@@ -3368,7 +3637,7 @@ fn prompt_model_input(
     scope: &PromptEvidenceScope,
     generator: &dyn MeetingTextGenerator,
 ) -> Result<String, ProcessingFailure> {
-    let max_bytes = generator.max_input_bytes();
+    let max_bytes = evidence_budget(generator, &prompt_system_prompt(prompt), PROMPT_MAX_TOKENS);
     match scope {
         PromptEvidenceScope::Meeting(session_id) => {
             let evidence = store
@@ -3391,6 +3660,7 @@ fn prompt_model_input(
                         .collect(),
                 }
             })
+            .map_err(RunFailure::reason)
         }
         PromptEvidenceScope::Search(session_ids) => {
             let evidence = store
@@ -3403,6 +3673,7 @@ fn prompt_model_input(
                 instruction: &prompt.body,
                 evidence: evidence.iter().map(PromptEvidence::from).collect(),
             })
+            .map_err(RunFailure::reason)
         }
     }
 }
@@ -3468,10 +3739,19 @@ fn prompt_answer(output: &PromptOutput, model_output: &str) -> PromptRunResult {
     }
 }
 
+/// Everything a cached revision was generated from, in one string.
+///
+/// `template_id` and `TEMPLATE_VERSION` name the prompt the way a release
+/// names it. `system_prompt` is what the model actually read, and the two part
+/// company on every edit to `resources/prompts/meeting.txt` and every change
+/// to the assembly around it. A key that trusts the name alone hands back
+/// notes written to a prompt that no longer exists; hashing the text costs one
+/// pass over a few kilobytes per generation and no version bookkeeping.
 fn generation_key(
     canonical_input: &str,
     input_revision: u64,
     template_id: &str,
+    system_prompt: &str,
     model_id: &str,
     model_version: &str,
 ) -> String {
@@ -3479,6 +3759,7 @@ fn generation_key(
     hash.update(canonical_input.as_bytes());
     hash.update(input_revision.to_le_bytes());
     hash.update(template_id.as_bytes());
+    hash.update(system_prompt.as_bytes());
     hash.update(TEMPLATE_VERSION.to_le_bytes());
     hash.update(model_id.as_bytes());
     hash.update(model_version.as_bytes());
@@ -3804,7 +4085,7 @@ fn read_ledger(
     let prompt = ledger_system_prompt();
     let input = fit_model_input(
         &evidence.transcript,
-        generator.max_input_bytes(),
+        evidence_budget(generator, &prompt, LEDGER_MAX_TOKENS),
         |transcript| LedgerPromptInput {
             transcript: transcript.iter().map(PromptEvidence::from).collect(),
         },
@@ -4570,8 +4851,8 @@ mod tests {
             self.id
         }
 
-        fn model_version(&self) -> &'static str {
-            "stub-v1"
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("stub-v1")
         }
 
         fn max_input_bytes(&self) -> usize {
@@ -4761,13 +5042,166 @@ mod tests {
         );
     }
 
-    /// Every engine's serialized input is measured the same way, so an engine
-    /// with no wire of its own pays nothing for the check.
+    /// The overflow this ceiling exists to prevent. The trait's default
+    /// ceiling was `usize::MAX` and the on-device engine never named its own,
+    /// so a local notes pass submitted whatever the pack weighed — and
+    /// Foundation Models throws `exceededContextWindowSize` rather than
+    /// truncating, so meetings past a few minutes failed outright once the
+    /// operator switched local generation on.
+    ///
+    /// The other half of the fix is that a short meeting still generates: a
+    /// budget that reserved the app's whole 3200-token output ceiling would
+    /// leave 130 bytes for the pack and refuse every meeting instead.
     #[test]
-    fn an_engine_without_a_ceiling_sends_its_evidence_whole() {
-        let generator = StubGenerator::new("apple-intelligence", true);
+    fn an_on_device_pack_is_cut_to_what_is_left_of_the_window() {
+        let session_id = MeetingSessionId::new();
+        let evidence = ArtifactEvidence {
+            transcript: (0..400)
+                .map(|index| MeetingEvidence {
+                    citation: MeetingCitation {
+                        kind: CitationKind::Transcript,
+                        session_id,
+                        entity_id: TranscriptSegmentId::new().uuid().to_string(),
+                        start_offset_ns: Some(index),
+                        end_offset_ns: Some(index + 1),
+                    },
+                    text: format!("segment {index} said something worth quoting"),
+                })
+                .collect(),
+            manual_notes: Vec::new(),
+            user_notes: String::new(),
+            template: MeetingNotesTemplate::default(),
+        };
+        let system_prompt = artifact_system_prompt(evidence.template, false);
+        let window = AppleIntelligenceGenerator
+            .context_window_bytes()
+            .expect("the on-device engine spends one window");
+        let budget = evidence_budget(
+            &AppleIntelligenceGenerator,
+            &system_prompt,
+            ARTIFACT_MAX_TOKENS,
+        );
 
-        assert_eq!(generator.max_input_bytes(), usize::MAX);
+        let whole = fit_model_input(&evidence.transcript, usize::MAX, |transcript| {
+            ArtifactPromptInput::from_parts(transcript, &evidence)
+        })
+        .expect("an unbounded pack");
+        let fitted = fit_model_input(&evidence.transcript, budget, |transcript| {
+            ArtifactPromptInput::from_parts(transcript, &evidence)
+        })
+        .expect("a pack cut to the window");
+
+        assert!(
+            whole.len() > window,
+            "the meeting this test is about is one the window cannot hold"
+        );
+        assert!(
+            system_prompt.len() + fitted.len() + ON_DEVICE_REPLY_TOKENS * ON_DEVICE_BYTES_PER_TOKEN
+                <= window,
+            "the instructions, the pack and the answer are spent out of one window"
+        );
+        assert!(
+            fitted.contains("segment 0") && !fitted.contains("segment 399"),
+            "the cut takes the end of the meeting, not the pack"
+        );
+
+        let short = &evidence.transcript[..20];
+        let short_pack = fit_model_input(short, budget, |transcript| {
+            ArtifactPromptInput::from_parts(transcript, &evidence)
+        })
+        .expect("a short meeting fits");
+        assert!(
+            short_pack.contains("segment 19"),
+            "a meeting that fits the window is not cut for it"
+        );
+    }
+
+    /// An engine reached over a wire has a window of its own that this side
+    /// cannot see, and a submission ceiling that it can. Only the second one
+    /// bounds the pack.
+    #[test]
+    fn an_engine_without_a_window_spends_its_whole_submission_on_evidence() {
+        let generator = StubGenerator::new("sona-relay", true);
+
+        assert_eq!(
+            evidence_budget(&generator, "instructions", ARTIFACT_MAX_TOKENS),
+            generator.max_input_bytes()
+        );
+    }
+
+    /// Notes are handed back from the cache only to a caller asking the same
+    /// question. `template_id` and `TEMPLATE_VERSION` name the prompt the way
+    /// a release names it, and the pair below is the case that parts the name
+    /// from the text: one template, one version, two different sets of
+    /// instructions. A key built from the name alone answered both with the
+    /// notes written for the first.
+    #[test]
+    fn two_prompts_under_one_name_are_two_generations() {
+        let template = MeetingNotesTemplate::default();
+        let key = |system_prompt: &str| {
+            generation_key(
+                "the same pack",
+                7,
+                template.artifact_template_id(),
+                system_prompt,
+                "apple-intelligence",
+                ARTIFACT_MODEL_VERSION,
+            )
+        };
+        let without_notes = artifact_system_prompt(template, false);
+        let with_notes = artifact_system_prompt(template, true);
+
+        assert_eq!(
+            key(&without_notes),
+            key(&artifact_system_prompt(template, false)),
+            "the same pack read by the same instructions is the same generation"
+        );
+        assert_ne!(
+            key(&without_notes),
+            key(&with_notes),
+            "instructions the model actually read are part of what it wrote"
+        );
+    }
+
+    /// Two of the eight causes come from traits whose error type cannot name
+    /// one, so the caller names it at the boundary. A reason that already
+    /// says everything about itself has to survive that: a Mac with no local
+    /// model is not the transcriber refusing a chunk, and the review screen
+    /// has a different line for each.
+    #[test]
+    fn a_boundary_that_already_named_its_reason_keeps_it() {
+        assert_eq!(
+            RunFailure::from_boundary(
+                ProcessingFailure::EngineFailure,
+                EngineFailureCause::Transcription
+            )
+            .status(),
+            ProcessingStatus::Failed {
+                reason: ProcessingFailure::EngineFailure,
+                cause: Some(EngineFailureCause::Transcription),
+            },
+            "a boundary with nothing to say is named by the caller that knows"
+        );
+        assert_eq!(
+            RunFailure::from_boundary(
+                ProcessingFailure::LocalModelUnavailable,
+                EngineFailureCause::Transcription
+            )
+            .status(),
+            ProcessingStatus::Failed {
+                reason: ProcessingFailure::LocalModelUnavailable,
+                cause: None,
+            },
+            "a missing model is not a transcription refusal"
+        );
+        assert_eq!(
+            RunFailure::from(StoreError::Unavailable).status(),
+            ProcessingStatus::Failed {
+                reason: ProcessingFailure::EngineFailure,
+                cause: Some(EngineFailureCause::Storage),
+            },
+            "every store error is the one sentence about records"
+        );
     }
 
     /// The regression this rule exists for. Seven recordings on the author's
@@ -4779,17 +5213,20 @@ mod tests {
     fn a_generation_that_wrote_nothing_is_never_recorded_as_a_success() {
         assert_eq!(
             generation_shortfall(&ArtifactGenerationOutcome::Unavailable),
-            Some(ProcessingFailure::LocalModelUnavailable),
+            Some(ProcessingFailure::LocalModelUnavailable.into()),
             "no engine at all is the case that filled the corpus with blank meetings"
         );
         assert_eq!(
             generation_shortfall(&ArtifactGenerationOutcome::Unreachable),
-            Some(ProcessingFailure::RemoteUnavailable),
+            Some(ProcessingFailure::RemoteUnavailable.into()),
             "a relay nobody could reach is not a Mac without a model"
         );
         assert_eq!(
-            generation_shortfall(&ArtifactGenerationOutcome::Failed),
-            Some(ProcessingFailure::EngineFailure)
+            generation_shortfall(&ArtifactGenerationOutcome::Failed(
+                EngineFailureCause::ReplyNotStructured
+            )),
+            Some(RunFailure::engine(EngineFailureCause::ReplyNotStructured)),
+            "the part that refused travels with the outcome, so the row can name it"
         );
         assert_eq!(
             generation_shortfall(&ArtifactGenerationOutcome::NoSpeech),

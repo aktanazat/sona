@@ -1949,6 +1949,16 @@
       "running": "Traitement",
       "succeeded": "Prête",
       "cancelled": "Traitement annulé",
+      "cause": {
+        "storage": "Impossible de lire ou d'enregistrer les données de cette réunion",
+        "transcription": "La reconnaissance vocale a refusé une partie de l'audio",
+        "voice_detection": "La détection de voix a refusé une partie d'une piste",
+        "evidence_pack": "La transcription dépassait la limite de ce modèle",
+        "model_refused": "Le modèle n'a rien renvoyé d'exploitable",
+        "reply_not_structured": "La réponse du modèle n'avait pas le format attendu",
+        "reply_rejected": "La réponse du modèle citait un passage absent de la transcription",
+        "panicked": "Le traitement s'est arrêté de façon inattendue"
+      },
       "failed": {
         "local_model_unavailable": "Modèle local indisponible",
         "remote_unavailable": "Destination distante indisponible",

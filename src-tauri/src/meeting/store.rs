@@ -6313,6 +6313,7 @@ impl MeetingStore {
         drop(connection);
         let interrupted = encode_json(&ProcessingStatus::Failed {
             reason: ProcessingFailure::Interrupted,
+            cause: None,
         })?;
         let mut recovered = Vec::new();
         for value in ids {
@@ -6418,6 +6419,7 @@ impl MeetingStore {
             &format!("UPDATE meeting_sessions SET processing_status = ?1 WHERE {ABANDONED}"),
             params![encode_json(&ProcessingStatus::Failed {
                 reason: ProcessingFailure::Interrupted,
+                cause: None,
             })?],
         )?;
         Ok(ids)
@@ -12563,7 +12565,8 @@ mod tests {
         assert_eq!(
             snapshot.processing_status,
             ProcessingStatus::Failed {
-                reason: ProcessingFailure::Interrupted
+                reason: ProcessingFailure::Interrupted,
+                cause: None
             }
         );
         assert_eq!(snapshot.revision, before + 1);
@@ -12603,7 +12606,8 @@ mod tests {
         assert_eq!(
             snapshot.processing_status,
             ProcessingStatus::Failed {
-                reason: ProcessingFailure::Interrupted
+                reason: ProcessingFailure::Interrupted,
+                cause: None
             }
         );
         assert_eq!(
@@ -12635,7 +12639,8 @@ mod tests {
         assert_eq!(
             after.processing_status,
             ProcessingStatus::Failed {
-                reason: ProcessingFailure::Interrupted
+                reason: ProcessingFailure::Interrupted,
+                cause: None
             }
         );
         assert_eq!(after.phase, MeetingPhase::RecoveryRequired);
@@ -12663,6 +12668,7 @@ mod tests {
             "recovery_required",
             ProcessingStatus::Failed {
                 reason: ProcessingFailure::EngineFailure,
+                cause: Some(EngineFailureCause::ModelRefused),
             },
         );
         let before = store.session_snapshot(session_id).unwrap();

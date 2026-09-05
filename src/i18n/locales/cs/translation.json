@@ -1956,6 +1956,16 @@
       "running": "Zpracování",
       "succeeded": "Připraveno",
       "cancelled": "Zpracování zrušeno",
+      "cause": {
+        "storage": "Záznamy této schůzky nešlo přečíst ani uložit",
+        "transcription": "Rozpoznávání řeči odmítlo část zvuku",
+        "voice_detection": "Detekce hlasu odmítla část stopy",
+        "evidence_pack": "Přepis se nevešel do limitu tohoto modelu",
+        "model_refused": "Model nevrátil nic použitelného",
+        "reply_not_structured": "Odpověď modelu nebyla v očekávaném formátu",
+        "reply_rejected": "Odpověď modelu citovala něco, co v přepisu není",
+        "panicked": "Zpracování se neočekávaně zastavilo"
+      },
       "failed": {
         "local_model_unavailable": "Místní model není dostupný",
         "remote_unavailable": "Vzdálený cíl není dostupný",

@@ -540,6 +540,7 @@ fn an_artifactless_failed_meeting_names_its_processing_failure() {
             corpus.older_id,
             ProcessingStatus::Failed {
                 reason: ProcessingFailure::EngineFailure,
+                cause: None,
             },
         )
         .unwrap();
@@ -549,7 +550,7 @@ fn an_artifactless_failed_meeting_names_its_processing_failure() {
     assert_eq!(detail.summary, None, "there is no artifact to summarize");
     assert_eq!(
         value(&detail)["processing_status"],
-        json!({"kind": "failed", "reason": "engine_failure"}),
+        json!({"kind": "failed", "reason": "engine_failure", "cause": null}),
         "a failed generation must not look like an unfinished empty meeting"
     );
 }

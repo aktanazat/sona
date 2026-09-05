@@ -859,6 +859,7 @@ const insightsMarkup = (
       onRefresh={async () => {}}
       onAnalyticsRefresh={async () => {}}
       onOpenSettings={noop}
+      onRegenerate={noop}
       {...overrides}
     />,
   );

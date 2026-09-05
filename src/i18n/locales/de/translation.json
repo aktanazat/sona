@@ -1942,6 +1942,16 @@
       "running": "Verarbeitung",
       "succeeded": "Bereit",
       "cancelled": "Verarbeitung abgebrochen",
+      "cause": {
+        "storage": "Die Aufzeichnungen dieses Meetings konnten nicht gelesen oder gespeichert werden",
+        "transcription": "Die Spracherkennung hat einen Teil des Audios abgelehnt",
+        "voice_detection": "Die Stimmerkennung hat einen Teil einer Spur abgelehnt",
+        "evidence_pack": "Das Transkript passte nicht in das Limit dieses Modells",
+        "model_refused": "Das Modell hat nichts Verwertbares zurückgegeben",
+        "reply_not_structured": "Die Antwort des Modells hatte nicht das erwartete Format",
+        "reply_rejected": "Die Antwort des Modells zitierte etwas, das nicht im Transkript steht",
+        "panicked": "Die Verarbeitung wurde unerwartet beendet"
+      },
       "failed": {
         "local_model_unavailable": "Lokales Modell nicht verfügbar",
         "remote_unavailable": "Entferntes Ziel nicht verfügbar",

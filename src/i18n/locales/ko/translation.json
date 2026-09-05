@@ -1935,6 +1935,16 @@
       "running": "처리 중",
       "succeeded": "완료",
       "cancelled": "처리가 취소되었습니다",
+      "cause": {
+        "storage": "이 회의 기록을 읽거나 저장할 수 없습니다",
+        "transcription": "음성 인식이 오디오의 일부를 거부했습니다",
+        "voice_detection": "음성 감지가 트랙의 일부를 거부했습니다",
+        "evidence_pack": "전사가 이 모델의 한도에 맞지 않습니다",
+        "model_refused": "모델이 사용할 수 있는 결과를 반환하지 않았습니다",
+        "reply_not_structured": "모델의 응답이 예상한 형식이 아닙니다",
+        "reply_rejected": "모델의 응답이 전사에 없는 내용을 인용했습니다",
+        "panicked": "처리가 예기치 않게 중단되었습니다"
+      },
       "failed": {
         "local_model_unavailable": "로컬 모델 사용 불가",
         "remote_unavailable": "원격 대상 사용 불가",

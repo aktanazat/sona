@@ -3996,6 +3996,64 @@ export type EffectiveTranscriptSegment = { base: TranscriptSegment; replacement_
  * An opt-in exact-token replacement applied after vocabulary correction.
  */
 export type EmojiReplacement = { spoken: string; written: string }
+/**
+ * Which part of a generation refused, for the one `ProcessingFailure` that
+ * covers more than one thing.
+ *
+ * `EngineFailure` is every way a notes pass can end badly: a record that
+ * could not be read, a model that returned nothing usable, a reply in the
+ * wrong shape, a pack that would not fit. A reader offered one sentence for
+ * all of them learns only that something went wrong, and the one action that
+ * might help — press it again — is worth offering for a model that answered
+ * in prose and worth withholding for a disk that refused.
+ *
+ * This rides beside the reason rather than inside it. `ProcessingFailure` is
+ * a token in every stored row and in every exhaustive table the frontend
+ * switches on, so giving it a payload would rewrite both. Every variant here
+ * is produced by a site that exists; a cause nothing writes would be a line
+ * of copy nobody can ever read.
+ */
+export type EngineFailureCause =
+/**
+ * A meeting record could not be read or written. Nothing to do with the
+ * engine: the run could not reach the evidence, or could not keep the
+ * result.
+ */
+"storage" |
+/**
+ * The speech-to-text engine refused a chunk of audio it was handed.
+ */
+"transcription" |
+/**
+ * The voice-activity detector refused a frame of a track, so the chunk it
+ * was part of was never offered to transcription.
+ */
+"voice_detection" |
+/**
+ * The evidence could not be packed into a prompt this engine accepts: it
+ * does not fit the engine's ceiling even with every citation dropped, or
+ * it would not encode.
+ */
+"evidence_pack" |
+/**
+ * The engine ran and returned nothing usable.
+ */
+"model_refused" |
+/**
+ * The reply was not the JSON the prompt asked for — prose where an object
+ * was required, or a first value that would not parse.
+ */
+"reply_not_structured" |
+/**
+ * The reply parsed and then failed its own checks: a summary line citing
+ * a moment that is not in the transcript.
+ */
+"reply_rejected" |
+/**
+ * The pipeline panicked. The status is written from outside the unwind,
+ * which is what keeps the meeting from staying Pending forever.
+ */
+"panicked"
 export type EngineType =
 /**
  * Any GGML/GGUF model loaded through transcribe-cpp (Whisper, Parakeet,
@@ -5588,7 +5646,7 @@ export type ProcessingFailure = "local_model_unavailable" | "remote_unavailable"
  * what keeps an abandoned meeting out of the Processing filter.
  */
 "interrupted"
-export type ProcessingStatus = { kind: "pending" } | { kind: "running" } | { kind: "succeeded" } | { kind: "failed"; reason: ProcessingFailure } | { kind: "cancelled" }
+export type ProcessingStatus = { kind: "pending" } | { kind: "running" } | { kind: "succeeded" } | { kind: "failed"; reason: ProcessingFailure; cause?: EngineFailureCause | null } | { kind: "cancelled" }
 /**
  * What shape a prompt's answer takes.
  */

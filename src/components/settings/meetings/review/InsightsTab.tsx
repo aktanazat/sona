@@ -1,7 +1,11 @@
 import React, { useState } from "react";
 import { Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ManualNote, MeetingReviewSnapshot } from "@/bindings";
+import type {
+  EngineFailureCause,
+  ManualNote,
+  MeetingReviewSnapshot,
+} from "@/bindings";
 import { cn } from "@/lib/cn";
 import { CardBand, CardFooterAction } from "@/components/settings/CardBand";
 import {
@@ -23,6 +27,44 @@ import { committedEdit, inlineEditKeys } from "./inlineEdit";
 /** A note as it reads, and the field that corrects one, set in the same type
  * so opening the editor moves nothing on the page. */
 const NOTE_TEXT = "text-[14px] leading-[21px] text-pretty";
+
+/** The line each way of refusing gets, and whether pressing it again can
+ * change the answer.
+ *
+ * A cause the next run reproduces — a record that could not be read, a track
+ * the detector refused, a pack that does not fit — names itself and offers
+ * nothing: the same evidence reaches the same engine and ends the same way,
+ * so a Regenerate link here would be a button that lies. The three that come
+ * out of the model's own answer are worth pressing again, because the next
+ * answer is a different one. */
+const FAILURE_CAUSES = {
+  storage: { line: "meetings.processing.cause.storage", retry: false },
+  transcription: {
+    line: "meetings.processing.cause.transcription",
+    retry: false,
+  },
+  voice_detection: {
+    line: "meetings.processing.cause.voice_detection",
+    retry: false,
+  },
+  evidence_pack: {
+    line: "meetings.processing.cause.evidence_pack",
+    retry: false,
+  },
+  model_refused: {
+    line: "meetings.processing.cause.model_refused",
+    retry: true,
+  },
+  reply_not_structured: {
+    line: "meetings.processing.cause.reply_not_structured",
+    retry: true,
+  },
+  reply_rejected: {
+    line: "meetings.processing.cause.reply_rejected",
+    retry: true,
+  },
+  panicked: { line: "meetings.processing.cause.panicked", retry: false },
+} satisfies Record<EngineFailureCause, { line: string; retry: boolean }>;
 
 export interface InsightsTabProps {
   snapshot: MeetingReviewSnapshot;
@@ -47,6 +89,9 @@ export interface InsightsTabProps {
   onRefresh: () => Promise<void>;
   onAnalyticsRefresh: () => Promise<void>;
   onOpenSettings: () => void;
+  /** Runs the generation again. Offered only where a second run can answer
+   * differently; see [`FAILURE_CAUSES`]. */
+  onRegenerate: () => void;
 }
 
 export const InsightsTab: React.FC<InsightsTabProps> = ({
@@ -66,6 +111,7 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
   onRefresh,
   onAnalyticsRefresh,
   onOpenSettings,
+  onRegenerate,
 }) => {
   const { t } = useTranslation();
   const disabled = busy || !editable;
@@ -90,6 +136,19 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
     processingStatus.kind === "failed" ? processingStatus.reason : null;
   const hasSettingsRecovery =
     failure === "local_model_unavailable" || failure === "remote_unavailable";
+  /* Rows written before the cause existed carry nothing, and every reason
+   * other than `engine_failure` already names itself completely. Both read as
+   * the one sentence this line has always been. */
+  const causeCopy =
+    processingStatus.kind === "failed" && processingStatus.cause
+      ? FAILURE_CAUSES[processingStatus.cause]
+      : null;
+  /* Retry is offered where a second run can answer differently and the
+   * meeting still takes one. A closed row lists no `regenerate`, and a link
+   * that calls a command the store refuses is a link that lies. */
+  const canRetry =
+    causeCopy?.retry === true &&
+    snapshot.session.allowed_actions.includes("regenerate");
 
   return (
     <>
@@ -183,11 +242,23 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
                 ? t("meetings.review.processingDescription")
                 : failure === null
                   ? t("meetings.review.noGeneratedNotesDescription")
-                  : t("meetings.review.generationFailedDescription")}
+                  : causeCopy === null
+                    ? t("meetings.review.generationFailedDescription")
+                    : t(causeCopy.line)}
             </span>
             {hasSettingsRecovery ? (
               <Button variant="link" size="xs" onClick={onOpenSettings}>
                 {t("chat.openSettings")}
+              </Button>
+            ) : null}
+            {canRetry ? (
+              <Button
+                variant="link"
+                size="xs"
+                disabled={disabled}
+                onClick={onRegenerate}
+              >
+                {t("meetings.review.regenerate")}
               </Button>
             ) : null}
             {processing ? (

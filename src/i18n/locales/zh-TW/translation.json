@@ -1935,6 +1935,16 @@
       "running": "處理中",
       "succeeded": "已完成",
       "cancelled": "處理已取消",
+      "cause": {
+        "storage": "無法讀取或儲存這場會議的記錄",
+        "transcription": "語音辨識拒絕了部分音訊",
+        "voice_detection": "語音偵測拒絕了某個音軌的一部分",
+        "evidence_pack": "轉錄內容超出這個模型的上限",
+        "model_refused": "模型沒有傳回可用的結果",
+        "reply_not_structured": "模型的回覆不是預期的格式",
+        "reply_rejected": "模型的回覆引用了轉錄中不存在的內容",
+        "panicked": "處理意外中止"
+      },
       "failed": {
         "local_model_unavailable": "本機模型無法使用",
         "remote_unavailable": "遠端目的地無法使用",

@@ -732,8 +732,8 @@ impl MeetingTextGenerator for ChatEndpointGenerator {
         "ledger-eval-endpoint"
     }
 
-    fn model_version(&self) -> &'static str {
-        "v1"
+    fn model_version(&self) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("v1")
     }
 
     fn max_input_bytes(&self) -> usize {
@@ -814,7 +814,7 @@ impl MeetingTextGenerator for Recording<'_> {
         self.inner.model_id()
     }
 
-    fn model_version(&self) -> &'static str {
+    fn model_version(&self) -> std::borrow::Cow<'static, str> {
         self.inner.model_version()
     }
 
