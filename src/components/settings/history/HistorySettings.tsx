@@ -1,12 +1,9 @@
 import React from "react";
-import { FileAudio } from "lucide-react";
-import { useTranslation } from "react-i18next";
-import { PageTitle, SettingsPage } from "../rows";
-import { Button } from "@/components/vg/button";
+import { SettingsPage } from "../rows";
 import { HistoryAudioImportSection } from "./HistoryAudioImportSection";
 import { HistoryImportLive } from "./HistoryImportLive";
 import { HistoryFeed } from "./HistoryFeed";
-import { HistoryToolbar } from "./HistoryToolbar";
+import { HistoryTitleBar } from "./HistoryTitleBar";
 import { HistorySummary } from "./HistorySummary";
 import { useHistoryData } from "./useHistoryData";
 
@@ -20,7 +17,6 @@ export interface DictationRequest {
 export const HistorySettings: React.FC<{
   dictationRequest?: DictationRequest | null;
 }> = ({ dictationRequest = null }) => {
-  const { t } = useTranslation();
   const {
     state,
     query,
@@ -50,37 +46,32 @@ export const HistorySettings: React.FC<{
 
   return (
     /* The column and the type still come from the shared primitive, so Library
-     * cannot drift from every other settings page. The title line takes the
-     * primitive's `header` slot rather than its `title`/`actions` pair for one
-     * reason: the totals are a single line now, and a line that describes what
-     * the page holds belongs against the title it describes, not a page gap
-     * below it. The folder button stays on the list toolbar with the other
-     * quiet list controls, so the title row can never crowd it. */
+     * cannot drift from every other settings page. The whole of the page's
+     * chrome is the primitive's `header` slot: one title line, then one Meta
+     * line under it — the totals, or the match count while a search is
+     * running, because the page has one question open at a time. */
     <SettingsPage
       header={
         <div className="flex min-w-0 flex-col gap-2">
-          <div className="flex items-center justify-between gap-4">
-            {/* The rail names this destination Library, so the page answers to
-             * the same word — one destination, one name. `settings.history.*`
-             * keys keep their address; only the visible values moved to the
-             * rail's term. */}
-            <PageTitle>{t("topNav.library")}</PageTitle>
-            <Button
-              size="sm"
-              onClick={() => void startAudioImport()}
-              disabled={startingAudioImport}
-              data-testid="history-import"
-            >
-              <FileAudio aria-hidden="true" className="size-4" />
-              {t("overview.hero.importAudio")}
-            </Button>
-          </div>
-          <HistorySummary
-            stats={historyStats}
-            loading={statsLoading}
-            error={statsError}
-            onRetry={() => void refreshHistoryStats()}
+          <HistoryTitleBar
+            state={state}
+            query={query}
+            setQuery={setQuery}
+            view={view}
+            setView={setView}
+            activeQuery={activeQuery}
+            importing={startingAudioImport}
+            onImport={() => void startAudioImport()}
+            onOpenFolder={() => void openRecordingsFolder()}
           />
+          {activeQuery.trim() === "" ? (
+            <HistorySummary
+              stats={historyStats}
+              loading={statsLoading}
+              error={statsError}
+              onRetry={() => void refreshHistoryStats()}
+            />
+          ) : null}
           {/* Always mounted, and empty it takes no space: a live region that
            * appears with its first message loses that message. */}
           <HistoryImportLive jobs={audioImportJobs} />
@@ -93,35 +84,21 @@ export const HistorySettings: React.FC<{
         onCancel={cancelAudioImport}
       />
 
-      <div className="flex flex-col gap-4">
-        <HistoryToolbar
-          state={state}
-          query={query}
-          setQuery={setQuery}
-          view={view}
-          setView={setView}
-          activeQuery={activeQuery}
-          onOpenFolder={() => void openRecordingsFolder()}
-        />
-
-        <HistoryFeed
-          state={state}
-          setQuery={setQuery}
-          view={view}
-          activeQuery={activeQuery}
-          focusRequest={dictationRequest}
-          sentinelRef={sentinelRef}
-          receiptsByHistoryId={receiptsByHistoryId}
-          startingAudioImport={startingAudioImport}
-          toggleSaved={toggleSaved}
-          copyToClipboard={copyToClipboard}
-          getAudioBlob={getAudioBlob}
-          deleteEntry={deleteEntry}
-          retryHistoryEntry={retryHistoryEntry}
-          fetchPage={fetchPage}
-          onStartAudioImport={() => void startAudioImport()}
-        />
-      </div>
+      <HistoryFeed
+        state={state}
+        setQuery={setQuery}
+        view={view}
+        activeQuery={activeQuery}
+        focusRequest={dictationRequest}
+        sentinelRef={sentinelRef}
+        receiptsByHistoryId={receiptsByHistoryId}
+        toggleSaved={toggleSaved}
+        copyToClipboard={copyToClipboard}
+        getAudioBlob={getAudioBlob}
+        deleteEntry={deleteEntry}
+        retryHistoryEntry={retryHistoryEntry}
+        fetchPage={fetchPage}
+      />
     </SettingsPage>
   );
 };

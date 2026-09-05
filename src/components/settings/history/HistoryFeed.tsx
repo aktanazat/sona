@@ -5,11 +5,10 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { FileAudio } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { HistoryRunReceipt } from "@/bindings";
+import type { HistoryEntry, HistoryRunReceipt } from "@/bindings";
 import { AudioPlayerGroup } from "@/components/audio/AudioPlayer";
-import { SETTINGS_SURFACE, SettingsCard } from "../rows";
+import { SETTINGS_SURFACE, SettingsCard, SettingsDisclosure } from "../rows";
 import { Button } from "@/components/vg/button";
 import { Skeleton } from "@/components/vg/skeleton";
 import { groupByLocalDay, localDayHeading } from "@/lib/utils/localDay";
@@ -17,6 +16,14 @@ import { HistoryEntryComponent, type HistoryTextView } from "./HistoryEntry";
 import type { ListState } from "./historyListReducer";
 
 const SKELETON_ROWS = [0, 1, 2, 3, 4];
+
+/* A recording the run left no words on: no transcript, and no processed text
+ * either. A day's worth of these is one line the reader can open, not one
+ * full row each — the row would carry a title it does not have, a count of
+ * zero, and the same sentence about why there is nothing to read. */
+const isEmptyRecording = (entry: HistoryEntry) =>
+  entry.transcription_text.trim() === "" &&
+  (entry.post_processed_text ?? "").trim() === "";
 
 /* The feed's own empty and failed states: one sentence in the Meta tier inside
  * the surface the rows would have taken, carrying at most one action. No
@@ -46,14 +53,12 @@ interface HistoryFeedProps {
   focusRequest?: { historyId: number; nonce: number } | null;
   sentinelRef: React.RefObject<HTMLDivElement | null>;
   receiptsByHistoryId: Record<number, HistoryRunReceipt[] | null>;
-  startingAudioImport: boolean;
   toggleSaved: (id: number) => Promise<void>;
   copyToClipboard: (text: string) => Promise<void>;
   getAudioBlob: (historyId: number) => Promise<Blob | null>;
   deleteEntry: (id: number) => Promise<void>;
   retryHistoryEntry: (id: number) => Promise<void>;
   fetchPage: (query: string, cursor: number | null) => Promise<void>;
-  onStartAudioImport: () => void;
 }
 
 /* How far a dictation link will page before it gives up: six pages, or 180
@@ -151,14 +156,12 @@ export const HistoryFeed: React.FC<HistoryFeedProps> = ({
   focusRequest = null,
   sentinelRef,
   receiptsByHistoryId,
-  startingAudioImport,
   toggleSaved,
   copyToClipboard,
   getAudioBlob,
   deleteEntry,
   retryHistoryEntry,
   fetchPage,
-  onStartAudioImport,
 }) => {
   const { t } = useTranslation();
   const trimmedActiveQuery = activeQuery.trim();
@@ -260,33 +263,43 @@ export const HistoryFeed: React.FC<HistoryFeedProps> = ({
   }
 
   if (state.entries.length === 0) {
-    return searching ? (
+    return (
       <HistoryFeedState
-        title={t("settings.history.noResults", { query: trimmedActiveQuery })}
-      >
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setQuery("")}
-          data-testid="history-empty-clear"
-        >
-          {t("settings.history.clearSearch", "Clear search")}
-        </Button>
-      </HistoryFeedState>
-    ) : (
-      <HistoryFeedState title={t("settings.history.empty")}>
-        <Button
-          size="sm"
-          onClick={onStartAudioImport}
-          disabled={startingAudioImport}
-          data-testid="history-empty-import"
-        >
-          <FileAudio aria-hidden="true" className="size-4" />
-          {t("settings.history.audioImport.start")}
-        </Button>
-      </HistoryFeedState>
+        title={
+          searching
+            ? t("settings.history.noResults", { query: trimmedActiveQuery })
+            : t("settings.history.empty")
+        }
+      />
     );
   }
+
+  /* One row, wherever it is drawn: in the day's list, or inside that day's
+   * collapsed line of empty recordings. */
+  const row = (entry: HistoryEntry) => (
+    <HistoryEntryComponent
+      key={entry.id}
+      entry={entry}
+      receipts={receiptsByHistoryId[entry.id]}
+      view={view}
+      expanded={entry.id === expandedId}
+      focusNonce={
+        entry.id === focusRequest?.historyId ? focusRequest.nonce : undefined
+      }
+      onToggleExpanded={toggleExpanded}
+      onToggleSaved={toggleSaved}
+      onCopyText={copyToClipboard}
+      getAudioBlob={getAudioBlob}
+      deleteAudio={deleteEntry}
+      retryTranscription={retryHistoryEntry}
+    />
+  );
+
+  /* A dictation link names one row, and a row inside a closed `<details>`
+   * cannot be scrolled to or focused, so the row this feed was sent to stays
+   * a row of its own for as long as the link is live. */
+  const collapsible = (entry: HistoryEntry) =>
+    isEmptyRecording(entry) && entry.id !== focusRequest?.historyId;
 
   const showFooter =
     state.hasMore || state.phase === "paging" || state.phase === "paging-error";
@@ -302,6 +315,11 @@ export const HistoryFeed: React.FC<HistoryFeedProps> = ({
            * hairlines — which is why `SETTINGS_SURFACE` is exported as a class
            * string and not only as a component. */
           const heading = localDayHeading(group.startOfDayMs, t);
+          const collapsed = group.items.filter(collapsible);
+          const spoken = group.items.filter((entry) => !collapsible(entry));
+          const collapsedLabel = t("settings.history.emptyRecordings", {
+            count: collapsed.length,
+          });
           return (
             <section
               key={group.startOfDayMs}
@@ -315,26 +333,25 @@ export const HistoryFeed: React.FC<HistoryFeedProps> = ({
                 {heading}
               </h2>
               <ul role="list" aria-label={heading} className={SETTINGS_SURFACE}>
-                {group.items.map((entry) => (
-                  <HistoryEntryComponent
-                    key={entry.id}
-                    entry={entry}
-                    receipts={receiptsByHistoryId[entry.id]}
-                    view={view}
-                    expanded={entry.id === expandedId}
-                    focusNonce={
-                      entry.id === focusRequest?.historyId
-                        ? focusRequest.nonce
-                        : undefined
-                    }
-                    onToggleExpanded={toggleExpanded}
-                    onToggleSaved={toggleSaved}
-                    onCopyText={copyToClipboard}
-                    getAudioBlob={getAudioBlob}
-                    deleteAudio={deleteEntry}
-                    retryTranscription={retryHistoryEntry}
-                  />
-                ))}
+                {spoken.map(row)}
+                {collapsed.length === 0 ? null : (
+                  <li data-testid="history-empty-day">
+                    {/* A group, not a recording: the count reads in the meta
+                     * tone so the eye skips it on the way down the list. */}
+                    <SettingsDisclosure
+                      label={collapsedLabel}
+                      className="[&>summary]:text-gray-800"
+                    >
+                      <ul
+                        role="list"
+                        aria-label={collapsedLabel}
+                        className="divide-y divide-gray-alpha-400"
+                      >
+                        {collapsed.map(row)}
+                      </ul>
+                    </SettingsDisclosure>
+                  </li>
+                )}
               </ul>
             </section>
           );

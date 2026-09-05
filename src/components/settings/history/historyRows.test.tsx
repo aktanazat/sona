@@ -605,14 +605,12 @@ describe("library feed", () => {
         focusRequest={focusRequest}
         sentinelRef={{ current: null }}
         receiptsByHistoryId={{}}
-        startingAudioImport={false}
         toggleSaved={noop}
         copyToClipboard={noText}
         getAudioBlob={noBlob}
         deleteEntry={noop}
         retryHistoryEntry={noop}
         fetchPage={noop}
-        onStartAudioImport={() => undefined}
       />,
     );
 
