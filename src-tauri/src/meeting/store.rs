@@ -3875,21 +3875,7 @@ impl MeetingStore {
             "UPDATE meeting_source_tracks SET health = ?1 WHERE track_id = ?2 AND session_id = ?3",
             params![encode_json(&health)?, id(track_id), id(session_id)],
         )?;
-        let current = session_row(&transaction, session_id)?;
-        let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
-        transaction.execute(
-            "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
-            params![to_i64(next_revision)?, id(session_id)],
-        )?;
-        append_event(
-            &transaction,
-            session_id,
-            next_revision,
-            current.phase,
-            current.phase,
-            "source_health_changed",
-            None,
-        )?;
+        note_health_change(&transaction, session_id, health)?;
         transaction.commit()?;
         Ok(())
     }
@@ -3929,23 +3915,106 @@ impl MeetingStore {
         Ok(())
     }
 
+    /// A gap is an interval, not an event. A condition that persists reports
+    /// itself once per buffer - a format the bridge cannot read, a lane the
+    /// writer could not drain - and one autocommit insert per report is an
+    /// fsync per report on the connection both lanes share, which is what
+    /// starved the microphone writer. Extending the run's open row keeps the
+    /// interval and the frame total while holding the write rate at one row
+    /// per condition per epoch.
     pub fn record_gap(&self, gap: &SourceGap) -> Result<(), StoreError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "INSERT INTO meeting_source_gaps (
-                track_id, source_epoch, start_offset_ns, end_offset_ns, reason, dropped_frames,
-                observed_at_utc_ms, details_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}')",
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let extended = transaction.execute(
+            "UPDATE meeting_source_gaps SET
+                end_offset_ns = COALESCE(?1, ?2, end_offset_ns),
+                dropped_frames = CASE
+                    WHEN ?3 IS NULL THEN dropped_frames
+                    ELSE COALESCE(dropped_frames, 0) + ?3
+                END,
+                observed_at_utc_ms = ?4
+             WHERE gap_id = (
+                    SELECT gap_id FROM meeting_source_gaps
+                     WHERE track_id = ?5 ORDER BY gap_id DESC LIMIT 1
+                 )
+               AND source_epoch = ?6
+               AND reason = ?7",
             params![
-                id(gap.track_id),
-                to_i64(gap.epoch.get())?,
-                optional_i64(gap.start_offset_ns)?,
                 optional_i64(gap.end_offset_ns)?,
-                encode_json(&gap.reason)?,
+                optional_i64(gap.start_offset_ns)?,
                 optional_i64(gap.dropped_frames)?,
                 utc_now_ms(),
+                id(gap.track_id),
+                to_i64(gap.epoch.get())?,
+                encode_json(&gap.reason)?,
             ],
         )?;
+        if extended == 0 {
+            transaction.execute(
+                "INSERT INTO meeting_source_gaps (
+                    track_id, source_epoch, start_offset_ns, end_offset_ns, reason, dropped_frames,
+                    observed_at_utc_ms, details_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}')",
+                params![
+                    id(gap.track_id),
+                    to_i64(gap.epoch.get())?,
+                    optional_i64(gap.start_offset_ns)?,
+                    optional_i64(gap.end_offset_ns)?,
+                    encode_json(&gap.reason)?,
+                    optional_i64(gap.dropped_frames)?,
+                    utc_now_ms(),
+                ],
+            )?;
+        }
+        // A lane that lost audio is not healthy, and the health column is its
+        // own memo: the predicate matches only the first loss per track, so a
+        // condition that reports itself once per buffer still writes one
+        // verdict and one revision. A pause is the one gap nobody lost: the
+        // operator asked for that silence, so it stays on the ledger and
+        // leaves the verdict alone. The startup interval never comes through
+        // here - `commit_durable_records` writes it directly.
+        let degraded = if gap.reason == SourceGapReason::Paused {
+            0
+        } else {
+            transaction.execute(
+                "UPDATE meeting_source_tracks SET health = ?1
+                 WHERE track_id = ?2 AND health IN (?3, ?4)",
+                params![
+                    encode_json(&SourceHealth::Degraded)?,
+                    id(gap.track_id),
+                    encode_json(&SourceHealth::Starting)?,
+                    encode_json(&SourceHealth::Healthy)?,
+                ],
+            )?
+        };
+        if degraded > 0 {
+            let session_id = track_session(&transaction, gap.track_id)?;
+            note_health_change(&transaction, session_id, SourceHealth::Degraded)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The seal is where a lane's health stops being provisional. A track still
+    /// `starting` never committed a packet - `commit_durable_records` is the
+    /// only writer that grants `healthy` - so its audio does not exist, which
+    /// is a failure however cleanly its source shut down.
+    pub fn seal_source_health(&self, session_id: MeetingSessionId) -> Result<(), StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let failed = transaction.execute(
+            "UPDATE meeting_source_tracks SET health = ?1
+             WHERE session_id = ?2 AND health = ?3",
+            params![
+                encode_json(&SourceHealth::Failed)?,
+                id(session_id),
+                encode_json(&SourceHealth::Starting)?,
+            ],
+        )?;
+        if failed > 0 {
+            note_health_change(&transaction, session_id, SourceHealth::Failed)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -5261,6 +5330,31 @@ impl MeetingStore {
         )?;
         if current != transcript_revision {
             return Err(StoreError::Conflict);
+        }
+        // A generation that assigned nobody, over a transcript that has
+        // segments, is not a diarization result: it is the absence of one, and
+        // publishing it makes every segment speakerless. Both counts are taken
+        // in the publishing transaction, so neither can race an assignment
+        // write. The generation is left `failed` for the caller to report.
+        let assigned: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM meeting_diarization_assignments WHERE generation_id = ?1",
+            params![id(generation_id)],
+            |row| row.get(0),
+        )?;
+        let segments: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM meeting_transcript_segments WHERE transcript_revision_id = ?1",
+            params![&transcript_revision],
+            |row| row.get(0),
+        )?;
+        if assigned == 0 && segments > 0 {
+            transaction.execute(
+                "UPDATE meeting_diarization_generations
+                 SET state = 'failed', completed_at_utc_ms = ?1
+                 WHERE generation_id = ?2",
+                params![utc_now_ms(), id(generation_id)],
+            )?;
+            transaction.commit()?;
+            return Err(StoreError::Invalid);
         }
         let session = session_row(&transaction, session_id)?;
         let next_revision = session.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
@@ -7074,6 +7168,46 @@ impl MeetingStore {
                 id(track_id),
             ],
         )?;
+        // A track earns `Healthy` when its audio reaches the disk, and nothing
+        // else in this file can grant it: `create_track` writes `starting` and
+        // the only other writer records a failure. The promotion rides the same
+        // transaction as the records that earn it, so health can never disagree
+        // with the durable checkpoint, and the `starting` predicate makes it
+        // fire once per track without overwriting a recorded failure.
+        let promoted = transaction.execute(
+            "UPDATE meeting_source_tracks SET health = ?1
+             WHERE track_id = ?2 AND health = ?3",
+            params![
+                encode_json(&SourceHealth::Healthy)?,
+                id(track_id),
+                encode_json(&SourceHealth::Starting)?,
+            ],
+        )?;
+        if promoted > 0 {
+            // The session clock starts before any device does. This lane's
+            // audio begins at its first record, so the interval before it is
+            // missing from the meeting and the ledger should say so once, here,
+            // where that offset is first known. It is written directly rather
+            // than through `record_gap`: this row must not coalesce with a
+            // later loss, and startup latency is not a failing lane.
+            if let Some(start_offset_ns) = first.start_offset_ns.filter(|offset| *offset > 0) {
+                transaction.execute(
+                    "INSERT INTO meeting_source_gaps (
+                        track_id, source_epoch, start_offset_ns, end_offset_ns, reason,
+                        dropped_frames, observed_at_utc_ms, details_json
+                     ) VALUES (?1, ?2, 0, ?3, ?4, NULL, ?5, '{}')",
+                    params![
+                        id(track_id),
+                        to_i64(first.epoch)?,
+                        to_i64(start_offset_ns)?,
+                        encode_json(&SourceGapReason::SourceUnavailable)?,
+                        utc_now_ms(),
+                    ],
+                )?;
+            }
+            let session_id = track_session(&transaction, track_id)?;
+            note_health_change(&transaction, session_id, SourceHealth::Healthy)?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -7444,6 +7578,45 @@ fn insert_operation_receipt(
     Ok(())
 }
 
+/// One place that turns a health verdict into something a reader can see: the
+/// snapshot revision moves, so a poll notices, and the event log keeps the
+/// value. Three callers change health - the first committed packet, the first
+/// lost audio, and the seal - and each owes the session this note.
+fn note_health_change(
+    transaction: &Transaction<'_>,
+    session_id: MeetingSessionId,
+    health: SourceHealth,
+) -> Result<(), StoreError> {
+    let current = session_row(transaction, session_id)?;
+    let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
+    transaction.execute(
+        "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
+        params![to_i64(next_revision)?, id(session_id)],
+    )?;
+    append_event_with_details(
+        transaction,
+        session_id,
+        next_revision,
+        current.phase,
+        current.phase,
+        "source_health_changed",
+        None,
+        &format!("{{\"health\":{}}}", encode_json(&health)?),
+    )
+}
+
+fn track_session(
+    transaction: &Transaction<'_>,
+    track_id: SourceTrackId,
+) -> Result<MeetingSessionId, StoreError> {
+    let owner: String = transaction.query_row(
+        "SELECT session_id FROM meeting_source_tracks WHERE track_id = ?1",
+        params![id(track_id)],
+        |row| row.get(0),
+    )?;
+    Ok(MeetingSessionId::from_uuid(parse_uuid(&owner)?))
+}
+
 fn append_event(
     transaction: &Transaction<'_>,
     session_id: MeetingSessionId,
@@ -7762,13 +7935,39 @@ fn derive_completeness(
     if window_count == 0 {
         return Ok(CaptureCompleteness::NotStarted);
     }
+    // `Healthy` is granted by the packet that reached the disk and taken away
+    // by the first loss; nothing at the seal changes it, so a sealed meeting
+    // is as complete as it was live. `Degraded` and `Failed` are not, and
+    // neither is `Starting`, which means no audio ever landed.
     if sources.len() < SourceKind::ALL.len()
         || sources.iter().any(|source| {
-            source.health != SourceHealth::Healthy
-                || source.gap_count > 0
-                || source.last_durable_offset_ns.is_none()
+            source.health != SourceHealth::Healthy || source.last_durable_offset_ns.is_none()
         })
     {
+        return Ok(CaptureCompleteness::Partial);
+    }
+    // `gap_count` counts every interval a lane reported, including the one
+    // between the session's start and that lane's first buffer: two devices
+    // cannot be handed the same instant, so counting startup latency as lost
+    // audio would make `Complete` unreachable for every multi-source meeting
+    // and teach a reader to ignore the word. A gap that closes at or before a
+    // lane's first delivered audio is that latency and is already visible as a
+    // gap, and a pause is silence the operator asked for; anything else is
+    // audio the meeting was recording and lost.
+    let lost_gaps: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM meeting_source_gaps g
+           JOIN meeting_source_tracks t ON t.track_id = g.track_id
+          WHERE t.session_id = ?1
+            AND g.reason <> ?2
+            AND NOT (
+                 g.end_offset_ns IS NOT NULL
+                 AND t.first_offset_ns IS NOT NULL
+                 AND g.end_offset_ns <= t.first_offset_ns
+            )",
+        params![id(session_id), encode_json(&SourceGapReason::Paused)?],
+        |row| row.get(0),
+    )?;
+    if lost_gaps > 0 {
         return Ok(CaptureCompleteness::Partial);
     }
     let open_windows: i64 = connection.query_row(
@@ -13068,5 +13267,470 @@ mod tests {
             store.session_disclosure(session_id).expect("disclosure"),
             recorded
         );
+    }
+
+    /// A second lane on the session `microphone_track` opened, so a test can
+    /// ask what a whole meeting looks like rather than what one track does.
+    fn system_audio_track(
+        store: &Arc<MeetingStore>,
+        session_id: MeetingSessionId,
+        timestamp_bridge: TimestampBridge,
+    ) -> SourceTrackId {
+        let plan_id: String = store
+            .connection()
+            .expect("store connection")
+            .query_row(
+                "SELECT plan_id FROM meeting_source_tracks WHERE session_id = ?1 LIMIT 1",
+                params![id(session_id)],
+                |row| row.get(0),
+            )
+            .expect("existing lane plan");
+        let track_id = SourceTrackId::new();
+        store
+            .create_track(TrackCreation {
+                session_id,
+                plan_id: MeetingPlanId::from_uuid(parse_uuid(&plan_id).expect("plan uuid")),
+                source_kind: SourceKind::SystemAudio,
+                required: true,
+                requested: true,
+                descriptor_json: "{}",
+                report: SourceStartReport {
+                    track_id,
+                    source_kind: SourceKind::SystemAudio,
+                    format: AudioFormat {
+                        sample_rate_hz: 48_000,
+                        channels: 1,
+                    },
+                    epoch: SourceEpoch::new(0),
+                    format_epoch: 1,
+                    timestamp_bridge,
+                },
+            })
+            .expect("system audio lane");
+        track_id
+    }
+
+    fn test_bridge() -> TimestampBridge {
+        TimestampBridge {
+            native_anchor_value: 0,
+            native_timescale: 1_000_000_000,
+            host_monotonic_anchor_ns: 0,
+            session_offset_ns: 0,
+        }
+    }
+
+    fn lane(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        source_kind: SourceKind,
+    ) -> MeetingSourceSnapshot {
+        store
+            .session_snapshot(session_id)
+            .expect("session snapshot")
+            .sources
+            .into_iter()
+            .find(|source| source.source_kind == source_kind)
+            .expect("lane snapshot")
+    }
+
+    /// Commits one packet starting at `start_offset_ns` down the writer path a
+    /// live capture uses, which is the only way a lane earns its health.
+    fn deliver_audio(
+        store: &Arc<MeetingStore>,
+        session_id: MeetingSessionId,
+        track_id: SourceTrackId,
+        storage: MeetingStoragePlan,
+        start_offset_ns: i64,
+    ) {
+        let mut writer = store
+            .open_track_writer(session_id, track_id, storage)
+            .expect("track writer");
+        let samples = vec![0.25; usize::try_from(TEST_PACKET_FRAMES).unwrap()];
+        assert_eq!(
+            writer
+                .accept(
+                    captured_packet(track_id, 0, Some(start_offset_ns)),
+                    &samples
+                )
+                .expect("accept packet"),
+            PacketPushResult::Accepted
+        );
+        writer.seal().expect("seal track");
+    }
+
+    fn captured_meeting(store: &Arc<MeetingStore>, microphone_start_ns: i64) -> MeetingSessionId {
+        let (session_id, microphone_id, storage) = microphone_track(store, test_bridge());
+        let system_audio_id = system_audio_track(store, session_id, test_bridge());
+        store
+            .open_capture_window(session_id, 0)
+            .expect("open capture window");
+        deliver_audio(
+            store,
+            session_id,
+            microphone_id,
+            storage.clone(),
+            microphone_start_ns,
+        );
+        deliver_audio(store, session_id, system_audio_id, storage, 0);
+        store
+            .close_open_capture_window(session_id, 1_000_000_000, "stopped")
+            .expect("close capture window");
+        session_id
+    }
+
+    /// Every system-audio track in the owner's store held `starting` forever,
+    /// because `create_track` wrote it and only a failure ever overwrote it.
+    /// The packet that reaches the disk is what makes a lane healthy, and it is
+    /// the same transaction, so the column cannot disagree with the records.
+    #[test]
+    fn a_committed_packet_promotes_its_lane_to_healthy() {
+        let (_directory, store) = store();
+        let (session_id, track_id, storage) = microphone_track(&store, test_bridge());
+
+        assert_eq!(
+            lane(&store, session_id, SourceKind::Microphone).health,
+            SourceHealth::Starting,
+            "a lane that has not written a record yet is still provisional"
+        );
+
+        deliver_audio(&store, session_id, track_id, storage, 0);
+
+        assert_eq!(
+            lane(&store, session_id, SourceKind::Microphone).health,
+            SourceHealth::Healthy
+        );
+    }
+
+    /// `starting` at the seal is not a lane that is still coming up: it is a
+    /// lane whose audio never existed, however cleanly its source shut down.
+    #[test]
+    fn the_seal_fails_only_the_lane_that_never_delivered_audio() {
+        let (_directory, store) = store();
+        let (session_id, microphone_id, storage) = microphone_track(&store, test_bridge());
+        system_audio_track(&store, session_id, test_bridge());
+        deliver_audio(&store, session_id, microphone_id, storage, 0);
+
+        store
+            .seal_source_health(session_id)
+            .expect("seal source health");
+
+        assert_eq!(
+            lane(&store, session_id, SourceKind::Microphone).health,
+            SourceHealth::Healthy,
+            "the seal must not overwrite a lane that earned its health"
+        );
+        assert_eq!(
+            lane(&store, session_id, SourceKind::SystemAudio).health,
+            SourceHealth::Failed
+        );
+    }
+
+    /// No meeting in the owner's store had ever been `Complete`: the predicate
+    /// demanded `Healthy`, which nothing granted, and zero gaps, which the
+    /// unavoidable startup interval denies.
+    #[test]
+    fn a_meeting_whose_lanes_both_delivered_audio_is_complete() {
+        let (_directory, store) = store();
+        let session_id = captured_meeting(&store, 0);
+
+        assert_eq!(
+            store
+                .session_snapshot(session_id)
+                .expect("session snapshot")
+                .capture_completeness,
+            CaptureCompleteness::Complete
+        );
+    }
+
+    /// A pause is the one gap nobody lost: the operator asked for that
+    /// silence. It stays on the ledger for the timeline, and the lane that
+    /// honoured it is as healthy as it was, so the meeting is still complete.
+    #[test]
+    fn a_pause_is_a_gap_that_lost_nothing() {
+        let (_directory, store) = store();
+        let session_id = captured_meeting(&store, 0);
+        let track_id = lane(&store, session_id, SourceKind::Microphone)
+            .track_id
+            .expect("microphone lane");
+
+        store
+            .record_gap(&SourceGap {
+                track_id,
+                epoch: SourceEpoch::new(0),
+                start_offset_ns: Some(5_000_000_000),
+                end_offset_ns: Some(9_000_000_000),
+                reason: SourceGapReason::Paused,
+                dropped_frames: None,
+            })
+            .expect("record pause");
+
+        let microphone = lane(&store, session_id, SourceKind::Microphone);
+        assert_eq!(microphone.gap_count, 1, "the pause is still on the ledger");
+        assert_eq!(microphone.health, SourceHealth::Healthy);
+        assert_eq!(
+            store
+                .session_snapshot(session_id)
+                .expect("session snapshot")
+                .capture_completeness,
+            CaptureCompleteness::Complete
+        );
+    }
+
+    /// Two devices cannot be handed the same instant. The interval between the
+    /// session clock and a lane's first buffer is audio the meeting does not
+    /// have, so the ledger says so once, where that offset is first known - and
+    /// it is startup latency, not a lane losing audio it was recording.
+    #[test]
+    fn the_first_committed_record_records_the_interval_before_it() {
+        let (_directory, store) = store();
+        let (session_id, track_id, storage) = microphone_track(&store, test_bridge());
+
+        deliver_audio(&store, session_id, track_id, storage, 300_000_000);
+
+        let gaps = store
+            .review_snapshot(session_id)
+            .expect("review snapshot")
+            .gaps;
+        assert_eq!(gaps.len(), 1, "one startup interval, not one per record");
+        assert_eq!(gaps[0].start_offset_ns, Some(0));
+        assert_eq!(gaps[0].end_offset_ns, Some(300_000_000));
+        assert_eq!(gaps[0].reason, SourceGapReason::SourceUnavailable);
+        assert_eq!(
+            lane(&store, session_id, SourceKind::Microphone).health,
+            SourceHealth::Healthy,
+            "starting late is not a lane in trouble"
+        );
+    }
+
+    /// If startup latency counted as lost audio, `Complete` would be
+    /// unreachable for every meeting with two sources, and a reader would learn
+    /// to ignore the word.
+    #[test]
+    fn startup_latency_leaves_the_meeting_complete() {
+        let (_directory, store) = store();
+        let session_id = captured_meeting(&store, 300_000_000);
+
+        let snapshot = store
+            .session_snapshot(session_id)
+            .expect("session snapshot");
+        assert_eq!(
+            lane(&store, session_id, SourceKind::Microphone).gap_count,
+            1,
+            "the startup interval is still on the ledger"
+        );
+        assert_eq!(snapshot.capture_completeness, CaptureCompleteness::Complete);
+    }
+
+    /// Audio lost after a lane was running is the case the word `Partial` is
+    /// for, and the lane that lost it is no longer healthy.
+    #[test]
+    fn audio_lost_mid_meeting_makes_the_meeting_partial() {
+        let (_directory, store) = store();
+        let session_id = captured_meeting(&store, 0);
+        let track_id = lane(&store, session_id, SourceKind::Microphone)
+            .track_id
+            .expect("microphone lane");
+
+        store
+            .record_gap(&SourceGap {
+                track_id,
+                epoch: SourceEpoch::new(0),
+                start_offset_ns: Some(500_000_000),
+                end_offset_ns: Some(600_000_000),
+                reason: SourceGapReason::PacketDropped,
+                dropped_frames: Some(512),
+            })
+            .expect("record gap");
+
+        assert_eq!(
+            lane(&store, session_id, SourceKind::Microphone).health,
+            SourceHealth::Degraded
+        );
+        assert_eq!(
+            store
+                .session_snapshot(session_id)
+                .expect("session snapshot")
+                .capture_completeness,
+            CaptureCompleteness::Partial
+        );
+    }
+
+    /// A condition that persists reports itself once per buffer: 568,941 rows
+    /// for one unreadable format, two fsync'd autocommits each, on the
+    /// connection both lanes share. The interval and the frame total are worth
+    /// keeping; one row per buffer is not.
+    #[test]
+    fn consecutive_identical_gaps_extend_one_interval() {
+        let (_directory, store) = store();
+        let (session_id, track_id, _storage) = microphone_track(&store, test_bridge());
+
+        for step in 0..3 {
+            store
+                .record_gap(&SourceGap {
+                    track_id,
+                    epoch: SourceEpoch::new(0),
+                    start_offset_ns: Some(step * 20_000_000),
+                    end_offset_ns: Some((step + 1) * 20_000_000),
+                    reason: SourceGapReason::InvalidFormat,
+                    dropped_frames: Some(960),
+                })
+                .expect("record gap");
+        }
+
+        let gaps = store
+            .review_snapshot(session_id)
+            .expect("review snapshot")
+            .gaps;
+        assert_eq!(gaps.len(), 1, "one condition, one interval");
+        assert_eq!(gaps[0].start_offset_ns, Some(0));
+        assert_eq!(gaps[0].end_offset_ns, Some(60_000_000));
+        assert_eq!(gaps[0].dropped_frames, Some(2_880));
+    }
+
+    /// Coalescing is for a run of one condition. A different reason is a
+    /// different fault and owns its own interval, including when the first one
+    /// comes back.
+    #[test]
+    fn a_gap_with_another_reason_opens_its_own_interval() {
+        let (_directory, store) = store();
+        let (session_id, track_id, _storage) = microphone_track(&store, test_bridge());
+        let reasons = [
+            SourceGapReason::InvalidFormat,
+            SourceGapReason::PacketDropped,
+            SourceGapReason::InvalidFormat,
+        ];
+
+        for (step, reason) in reasons.into_iter().enumerate() {
+            let step = u64::try_from(step).expect("step offset");
+            store
+                .record_gap(&SourceGap {
+                    track_id,
+                    epoch: SourceEpoch::new(0),
+                    start_offset_ns: Some(step * 20_000_000),
+                    end_offset_ns: Some((step + 1) * 20_000_000),
+                    reason,
+                    dropped_frames: None,
+                })
+                .expect("record gap");
+        }
+
+        assert_eq!(
+            store
+                .review_snapshot(session_id)
+                .expect("review snapshot")
+                .gaps
+                .len(),
+            3
+        );
+    }
+
+    fn current_transcript(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+    ) -> TranscriptRevisionId {
+        let raw: String = store
+            .connection()
+            .expect("store connection")
+            .query_row(
+                "SELECT current_transcript_revision_id FROM meeting_sessions WHERE id = ?1",
+                params![id(session_id)],
+                |row| row.get(0),
+            )
+            .expect("current transcript revision");
+        TranscriptRevisionId::from_uuid(parse_uuid(&raw).expect("transcript revision uuid"))
+    }
+
+    fn transcript_segments(
+        store: &MeetingStore,
+        revision: TranscriptRevisionId,
+    ) -> Vec<TranscriptSegmentId> {
+        let connection = store.connection().expect("store connection");
+        let mut statement = connection
+            .prepare(
+                "SELECT segment_id FROM meeting_transcript_segments
+                  WHERE transcript_revision_id = ?1 ORDER BY ordinal",
+            )
+            .expect("segment query");
+        let ids = statement
+            .query_map(params![id(revision)], |row| row.get::<_, String>(0))
+            .expect("segment rows")
+            .map(|raw| {
+                TranscriptSegmentId::from_uuid(
+                    parse_uuid(&raw.expect("segment id")).expect("segment uuid"),
+                )
+            })
+            .collect();
+        ids
+    }
+
+    fn generation_state(
+        store: &MeetingStore,
+        generation_id: MeetingDiarizationGenerationId,
+    ) -> String {
+        store
+            .connection()
+            .expect("store connection")
+            .query_row(
+                "SELECT state FROM meeting_diarization_generations WHERE generation_id = ?1",
+                params![id(generation_id)],
+                |row| row.get(0),
+            )
+            .expect("generation state")
+    }
+
+    /// All four diarization generations in the owner's store completed having
+    /// assigned nobody, because they walked a system-audio track that held no
+    /// records. Publishing that is what took the speaker off every segment: it
+    /// is the absence of a result, not a result.
+    #[test]
+    fn a_generation_that_assigned_nobody_is_refused() {
+        let (_directory, store) = store();
+        let (session_id, _track_id, _storage) = microphone_track(&store, test_bridge());
+        list_transcript(&store, session_id, &["one", "two"]);
+        let transcript_revision_id = current_transcript(&store, session_id);
+        let generation_id = store
+            .begin_diarization_generation(session_id, transcript_revision_id, 0, "test", "1")
+            .expect("begin generation");
+
+        assert!(matches!(
+            store.publish_diarization_generation(session_id, generation_id),
+            Err(StoreError::Invalid)
+        ));
+        assert_eq!(
+            generation_state(&store, generation_id),
+            "failed",
+            "the refusal is on the record for the caller to report"
+        );
+    }
+
+    #[test]
+    fn a_generation_that_assigned_a_speaker_publishes() {
+        let (_directory, store) = store();
+        let (session_id, _track_id, _storage) = microphone_track(&store, test_bridge());
+        list_transcript(&store, session_id, &["one", "two"]);
+        let transcript_revision_id = current_transcript(&store, session_id);
+        let generation_id = store
+            .begin_diarization_generation(session_id, transcript_revision_id, 0, "test", "1")
+            .expect("begin generation");
+        let speaker_id = store
+            .diarization_speaker(session_id, 0)
+            .expect("diarized speaker");
+        let assignments = transcript_segments(&store, transcript_revision_id)
+            .into_iter()
+            .map(|segment_id| DiarizationAssignmentInput {
+                segment_id,
+                speaker_id,
+                assignment: SpeakerAssignmentKind::SystemSpeaker,
+            })
+            .collect::<Vec<_>>();
+        store
+            .write_diarization_assignments(generation_id, &assignments)
+            .expect("write assignments");
+
+        store
+            .publish_diarization_generation(session_id, generation_id)
+            .expect("publish generation");
+
+        assert_eq!(generation_state(&store, generation_id), "completed");
     }
 }
