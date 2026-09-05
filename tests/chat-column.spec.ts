@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { installTauriMock, type JsonValue } from "./support/tauri-mock";
 import {
@@ -763,10 +763,11 @@ test.describe("the pages at 512", () => {
 });
 
 /* What the column has to keep. It was a 420pt slide-over and is now a 340pt
- * column, and the whole surface — history, scope, composer, the states where
- * nothing would answer — has to arrive intact at the narrower width. */
+ * column, and the whole surface — the conversation, the one menu that carries
+ * everything done to it, the composer, the states where nothing would answer —
+ * has to arrive intact at the narrower width. */
 test.describe("the chat at 340", () => {
-  test("the header, the scope row and the composer are all there", async ({
+  test("the header is a name and two glyphs, the composer a field and one glyph", async ({
     page,
   }) => {
     await openApp(page);
@@ -774,29 +775,187 @@ test.describe("the chat at 340", () => {
 
     const chat = column(page);
     await expect(chat).toContainText(
-      "Ask what you said or agreed, or what to change.",
+      "Ask what was said, what you owe, or who someone is.",
     );
+
+    const header = chat.locator('[data-slot="chat-header"]');
+    await expect(header.getByRole("button")).toHaveCount(2);
     await expect(
-      chat.getByRole("button", { name: "Recent chats" }),
+      header.getByRole("button", { name: "Close chat" }),
     ).toBeVisible();
-    await expect(chat.getByRole("button", { name: "New chat" })).toBeVisible();
-    await expect(
-      chat.getByRole("radiogroup", { name: "Who answers" }),
-    ).toBeVisible();
-    await expect(chat.getByRole("radio")).toHaveCount(2);
+    await expect(header.getByRole("button", { name: "More" })).toBeVisible();
+
     await expect(chat.getByPlaceholder("Ask anything")).toBeVisible();
     await expect(chat.getByRole("button", { name: "Send" })).toBeVisible();
+    // The scope chips are in the menu now; the band is the question.
+    await expect(chat.getByRole("radio")).toHaveCount(0);
+
+    /* Opening puts the caret in the field, so the two glyphs are behind it in
+     * the tab order — and a header whose only controls need a pointer would
+     * have hidden the way out along with the menu. */
+    await page.keyboard.press("Shift+Tab");
+    await expect(header.getByRole("button", { name: "More" })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      header.getByRole("button", { name: "Close chat" }),
+    ).toBeFocused();
   });
 
-  test("the history popover still opens beside the column", async ({
+  /* Everything the header dropped is reachable from the one menu, and reachable
+   * without a pointer: the trigger takes Enter, and Radix's roving focus is
+   * what walks into the submenu holding the earlier chats. */
+  test("one menu carries the new chat, the earlier ones and the scope", async ({
     page,
   }) => {
     await openApp(page);
     await openChat(page);
 
-    await column(page).getByRole("button", { name: "Recent chats" }).click();
-    // Portalled, so it is read off the page rather than out of the column.
-    await expect(page.getByText("No earlier chats yet.")).toBeVisible();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Enter");
+
+    // Portalled, so the menu is read off the page rather than out of the column.
+    const menu = page.getByRole("menu").first();
+    await expect(
+      menu.getByRole("menuitem", { name: "New chat" }),
+    ).toBeVisible();
+    await expect(menu.getByRole("menuitemradio")).toHaveCount(2);
+    await expect(
+      menu.getByRole("menuitemradio", { name: "Ask" }),
+    ).toHaveAttribute("aria-checked", "true");
+
+    await menu.getByRole("menuitem", { name: "Recent chats" }).click();
+    await expect(page.getByText("Chats you start appear here.")).toBeVisible();
+  });
+
+  /* Two earlier chats, the second of them the one already in the column. The
+   * list is a place rather than a pile, so it has to say which row is where
+   * you already are; and a title is the first thing you said in that chat, so
+   * one of them is longer than any menu could be. Read through a browser
+   * because the rows live in a portal: `renderToStaticMarkup` has no
+   * document.body to portal into, which is why the unit suite cannot see
+   * them. */
+  const EARLIER = {
+    agent_chat_history_list: [
+      {
+        conversation_id: "conversation-1",
+        title:
+          "Where did we agree the trial converts on the annual tier rather than the monthly one?",
+        updated_at_utc_ms: 1_756_136_400_000,
+      },
+      {
+        conversation_id: "conversation-2",
+        title: "Turn off filler-word removal for Email",
+        updated_at_utc_ms: 1_756_136_100_000,
+      },
+    ],
+    agent_panel_status: {
+      invalidation_id: 2,
+      relay_status: "ready",
+      conversation_id: "conversation-2",
+      conversation: [
+        { role: "user", message: "Turn off filler-word removal for Email" },
+      ],
+      turn: null,
+      proposal: null,
+    },
+  };
+
+  const earlierChats = async (page: Page) => {
+    await column(page).getByRole("button", { name: "More" }).click();
+    await page
+      .getByRole("menu")
+      .first()
+      .getByRole("menuitem", { name: "Recent chats" })
+      .click();
+    return page.locator('[data-slot="dropdown-menu-sub-content"]');
+  };
+
+  test("the earlier chats are named, and the open one is marked", async ({
+    page,
+  }) => {
+    await openApp(page, EARLIER);
+    await openChat(page);
+
+    const list = await earlierChats(page);
+    const rows = list.getByRole("menuitem");
+    await expect(rows).toHaveCount(2);
+
+    /* The whole title is in the row, cut by CSS rather than in the DOM: a row
+     * shortened before it is rendered leaves a reader hunting for a chat by a
+     * sentence that no longer matches what they said. */
+    const open = rows.filter({ hasText: "Turn off filler-word removal" });
+    const other = rows.filter({ hasText: "Where did we agree the trial" });
+    await expect(other).toHaveText(
+      "Where did we agree the trial converts on the annual tier rather than the monthly one?",
+    );
+    await expect(open).toHaveText("Turn off filler-word removal for Email");
+    await expect(open).toHaveAttribute("aria-current", "true");
+    await expect(other).not.toHaveAttribute("aria-current", "true");
+
+    /* And the cut is what keeps a row to one line: twenty questions wrapped to
+     * three lines each is the page of reading this menu exists to replace, and
+     * the long title above is long enough to wrap if nothing stops it. */
+    const rowHeight = (row: Locator) =>
+      row.evaluate((node) => Math.round(node.getBoundingClientRect().height));
+    expect(await rowHeight(other)).toBe(await rowHeight(open));
+  });
+
+  test("picking an earlier chat opens that chat and closes the menu", async ({
+    page,
+  }) => {
+    await openApp(page, {
+      ...EARLIER,
+      agent_chat_open: {
+        invalidation_id: 3,
+        relay_status: "ready",
+        conversation_id: "conversation-1",
+        conversation: [
+          {
+            role: "user",
+            message:
+              "Where did we agree the trial converts on the annual tier rather than the monthly one?",
+          },
+          { role: "assistant", message: "In the pricing review, at the end." },
+        ],
+        turn: null,
+        proposal: null,
+      },
+    });
+    await openChat(page);
+
+    const list = await earlierChats(page);
+    await list
+      .getByRole("menuitem")
+      .filter({ hasText: "Where did we agree the trial" })
+      .click();
+
+    /* The row that was pressed is the chat that was asked for — the snapshot
+     * coming back is the same shape whichever row you press, so this is the
+     * only place the identity is visible. */
+    await expect
+      .poll(() =>
+        page.evaluate(() => localStorage.getItem("agent-chat-opened")),
+      )
+      .toBe("conversation-1");
+    // And it lands in the column, with the menu gone rather than left open.
+    await expect(column(page)).toContainText(
+      "In the pricing review, at the end.",
+    );
+    await expect(page.getByRole("menu")).toHaveCount(0);
+
+    /* And the other row is the other chat: a handler that sent whichever id it
+     * happened to hold — the first row's, or the one already open — would pass
+     * the press above and fail this one. */
+    const again = await earlierChats(page);
+    await again
+      .getByRole("menuitem")
+      .filter({ hasText: "Turn off filler-word removal" })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => localStorage.getItem("agent-chat-opened")),
+      )
+      .toBe("conversation-2");
   });
 
   /* A conversation with everything in it: a question, an answer carrying a

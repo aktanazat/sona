@@ -625,6 +625,15 @@ export function installMockedRuntime(payload: MockPayload): void {
     const invokeCountKey = `tauri-invoke:${command}`;
     const invokeCount = Number(localStorage.getItem(invokeCountKey) ?? "0");
     localStorage.setItem(invokeCountKey, String(invokeCount + 1));
+    /* Which chat the column asked for, recorded beside the counter because
+     * `agent_chat_open` is answered out of `responses` before any branch
+     * below runs, and one static snapshot cannot say which row was pressed. */
+    if (command === "agent_chat_open") {
+      localStorage.setItem(
+        "agent-chat-opened",
+        String(args?.conversationId ?? ""),
+      );
+    }
     if (command === "plugin:event|listen") {
       const eventName = String(args?.event ?? "");
       const callbackId = Number(args?.handler);
@@ -686,9 +695,9 @@ export function installMockedRuntime(payload: MockPayload): void {
       resetRecorder();
       return recorderSnapshot();
     }
-    /* Cancel is legal from previewing, recording and paused
-     * (recorder.rs:528-536); only preview_stop is previewing-only
-     * (recorder.rs:327-333). Folding the two into one branch taught the mock
+    /* Cancel is legal from previewing, recording and paused (`cancel_reaches`
+     * in recorder.rs); only preview_stop is previewing-only (`preview_stop`
+     * in the same file). Folding the two into one branch once taught the mock
      * a phase rule the backend does not have. */
     if (command === "recorder_cancel") {
       if (
