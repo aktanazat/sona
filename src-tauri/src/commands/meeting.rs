@@ -14,11 +14,10 @@ use crate::meeting::session::{
     ImportRecordingRequest, MeetingActionItemDoneRequest, MeetingConsentPanelSessionState,
     MeetingConsentPanelStartRequest, MeetingMutationRequest, MeetingMutationResult,
     MeetingNoteCreateRequest, MeetingNoteDeleteRequest, MeetingNoteUpdateRequest,
-    MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest, MeetingQuestionRequest,
-    MeetingQuestionResult, MeetingReenhanceRequest, MeetingRemovalResult,
-    MeetingSegmentEditRequest, MeetingSessionManager, MeetingSpeakerMergeRequest,
-    MeetingSpeakerRenameRequest, MeetingStartRequest, MeetingTitleSetRequest,
-    MeetingUserNotesSaveRequest,
+    MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest, MeetingReenhanceRequest,
+    MeetingRemovalResult, MeetingSegmentEditRequest, MeetingSessionManager,
+    MeetingSpeakerMergeRequest, MeetingSpeakerRenameRequest, MeetingStartRequest, MeetingStopCause,
+    MeetingStopSurface, MeetingTitleSetRequest, MeetingUserNotesSaveRequest,
 };
 use crate::meeting::suggestions::MeetingSuggestion;
 use crate::meeting::types::*;
@@ -391,15 +390,6 @@ pub async fn meeting_artifacts_regenerate(
     request: MeetingMutationRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
     manager.artifacts_regenerate(request).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn meeting_question_ask(
-    manager: State<'_, Arc<MeetingSessionManager>>,
-    request: MeetingQuestionRequest,
-) -> Result<MeetingQuestionResult, MeetingCommandError> {
-    manager.question_ask(request).await
 }
 
 #[tauri::command]

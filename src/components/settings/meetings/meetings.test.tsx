@@ -168,7 +168,7 @@ const SNAPSHOT: MeetingReviewSnapshot = {
     storage: "available",
     processing_status: { kind: "succeeded" },
     retention_deadline_utc_ms: null,
-    allowed_actions: ["edit", "regenerate", "ask_question", "export", "delete"],
+    allowed_actions: ["edit", "regenerate", "export", "delete"],
   },
   tracks: [],
   gaps: [

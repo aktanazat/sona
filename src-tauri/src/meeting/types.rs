@@ -761,7 +761,6 @@ pub enum AllowedMeetingAction {
     FinalizePartial,
     Edit,
     Regenerate,
-    AskQuestion,
     Export,
     Delete,
     CancelRemote,

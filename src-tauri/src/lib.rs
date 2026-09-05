@@ -1814,7 +1814,6 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_note_update,
             commands::meeting::meeting_note_delete,
             commands::meeting::meeting_artifacts_regenerate,
-            commands::meeting::meeting_question_ask,
             commands::meeting::meeting_question_forget,
             commands::meeting::meeting_export,
             commands::meeting::produce_ledger_html,

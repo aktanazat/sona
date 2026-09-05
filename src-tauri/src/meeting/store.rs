@@ -4904,54 +4904,6 @@ impl MeetingStore {
         })
     }
 
-    pub fn ask_question(
-        &self,
-        operation_id: MeetingOperationId,
-        requested_at_utc_ms: i64,
-        session_id: MeetingSessionId,
-        expected_revision: u64,
-        question_id: MeetingQuestionId,
-        question: String,
-    ) -> Result<(OperationReceipt, MeetingAnswer), StoreError> {
-        let answer_question = question.clone();
-        let receipt = self.edit_session(
-            StoreMutation {
-                operation_id,
-                requested_at_utc_ms,
-                session_id,
-                expected_revision,
-                command: MeetingCommandKind::QuestionAsk,
-            },
-            "question_asked",
-            |transaction| {
-                transaction.execute(
-                    "INSERT INTO meeting_questions (
-                        question_id, session_id, question_text, answer_state, answer_text, revision, created_at_utc_ms
-                     ) VALUES (?1, ?2, ?3, 'insufficient_evidence', NULL, 0, ?4)",
-                    params![id(question_id), id(session_id), question, utc_now_ms()],
-                )?;
-                Ok(())
-            },
-        )?;
-        Ok((
-            receipt,
-            MeetingAnswer {
-                question_id,
-                session_id,
-                scope: MeetingQuestionScope::ThisMeeting,
-                question: Some(answer_question),
-                state: MeetingAnswerState::InsufficientEvidence,
-                answer: None,
-                citations: Vec::new(),
-                input_revision: expected_revision,
-                revision: 0,
-                created_at_utc_ms: requested_at_utc_ms,
-                through_offset_ns: None,
-                provisional: false,
-            },
-        ))
-    }
-
     pub fn forget_question(
         &self,
         operation_id: MeetingOperationId,
@@ -5463,36 +5415,6 @@ impl MeetingStore {
         self.artifact_by_generation_key(input.session_id, input.generation_key)?
             .ok_or(StoreError::Corrupt)
     }
-    pub(crate) fn scoped_session_ids(
-        &self,
-        session_id: MeetingSessionId,
-        scope: &MeetingQuestionScope,
-    ) -> Result<Vec<MeetingSessionId>, StoreError> {
-        let mut session_ids = match scope {
-            MeetingQuestionScope::ThisMeeting => vec![session_id],
-            MeetingQuestionScope::ExplicitSeries { session_ids } => session_ids.clone(),
-        };
-        if session_ids.is_empty() || !session_ids.contains(&session_id) {
-            return Err(StoreError::Invalid);
-        }
-        session_ids.sort_by_key(|id| id.uuid());
-        session_ids.dedup();
-        let connection = self.connection()?;
-        for scoped_id in &session_ids {
-            let phase: String = connection
-                .query_row(
-                    "SELECT phase FROM meeting_sessions WHERE id = ?1",
-                    params![id(*scoped_id)],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or(StoreError::NotFound)?;
-            if phase_from_db(&phase)? == MeetingPhase::Deleting {
-                return Err(StoreError::NotFound);
-            }
-        }
-        Ok(session_ids)
-    }
 
     pub(crate) fn search_evidence(
         &self,
@@ -5575,102 +5497,6 @@ impl MeetingStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    pub(crate) fn record_question_answer(
-        &self,
-        operation_id: MeetingOperationId,
-        requested_at_utc_ms: i64,
-        session_id: MeetingSessionId,
-        expected_revision: u64,
-        answer: &MeetingAnswer,
-        save_history: bool,
-    ) -> Result<OperationReceipt, StoreError> {
-        if let Some(receipt) = self.operation_receipt(operation_id)? {
-            return Ok(receipt);
-        }
-        if answer.session_id != session_id {
-            return Err(StoreError::Invalid);
-        }
-        let mutation = StoreMutation {
-            operation_id,
-            requested_at_utc_ms,
-            session_id,
-            expected_revision,
-            command: MeetingCommandKind::QuestionAsk,
-        };
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        let current = session_row(&transaction, session_id)?;
-        if current.revision != expected_revision {
-            let receipt = rejected_receipt(
-                mutation,
-                current.phase,
-                current.revision,
-                MeetingReasonCode::StaleRevision,
-            );
-            insert_operation_receipt(&transaction, &receipt, requested_at_utc_ms)?;
-            transaction.commit()?;
-            return Ok(receipt);
-        }
-        // The transcript a saved answer cites has to be one that will still be
-        // there tomorrow, so history is only written for a meeting whose
-        // revision has landed. A question asked while capture is still running
-        // is answered from the provisional transcript and records its receipt
-        // and nothing else: its citations name segments no revision will keep.
-        if save_history
-            && !matches!(
-                current.phase,
-                MeetingPhase::ReviewReady | MeetingPhase::RecoveryRequired
-            )
-        {
-            return Err(StoreError::Conflict);
-        }
-        if save_history {
-            let question = answer.question.as_deref().ok_or(StoreError::Invalid)?;
-            transaction.execute(
-                "INSERT INTO meeting_questions (
-                    question_id, session_id, question_text, scope_json, answer_state, answer_text,
-                    input_revision, revision, created_at_utc_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    id(answer.question_id),
-                    id(session_id),
-                    question,
-                    encode_json(&answer.scope)?,
-                    meeting_answer_state_to_db(answer.state),
-                    answer.answer,
-                    to_i64(answer.input_revision)?,
-                    to_i64(answer.revision)?,
-                    answer.created_at_utc_ms,
-                ],
-            )?;
-            for (ordinal, citation) in answer.citations.iter().enumerate() {
-                transaction.execute(
-                    "INSERT INTO meeting_question_citations (question_id, ordinal, citation_json)
-                     VALUES (?1, ?2, ?3)",
-                    params![
-                        id(answer.question_id),
-                        i64::try_from(ordinal).map_err(|_| StoreError::Corrupt)?,
-                        encode_json(citation)?,
-                    ],
-                )?;
-            }
-        }
-        let receipt = committed_receipt(
-            mutation,
-            current.phase,
-            current.phase,
-            requested_at_utc_ms,
-            current.revision,
-            save_history
-                .then(|| id(answer.question_id))
-                .into_iter()
-                .collect(),
-        );
-        insert_operation_receipt(&transaction, &receipt, requested_at_utc_ms)?;
-        transaction.commit()?;
-        Ok(receipt)
     }
 
     pub(crate) fn artifact_evidence(
@@ -8006,7 +7832,6 @@ fn allowed_actions(phase: MeetingPhase) -> Vec<AllowedMeetingAction> {
         MeetingPhase::ReviewReady => vec![
             AllowedMeetingAction::Edit,
             AllowedMeetingAction::Regenerate,
-            AllowedMeetingAction::AskQuestion,
             AllowedMeetingAction::Export,
             AllowedMeetingAction::Delete,
         ],
@@ -11837,121 +11662,6 @@ mod tests {
                 .unwrap(),
             result
         );
-    }
-    #[test]
-    fn no_store_question_keeps_prompt_answer_and_citations_out_of_history() {
-        let (_directory, store) = store();
-        let session_id = MeetingSessionId::new();
-        let revision = review_ready_session(&store, session_id);
-        let answer = MeetingAnswer {
-            question_id: MeetingQuestionId::new(),
-            session_id,
-            scope: MeetingQuestionScope::ThisMeeting,
-            question: Some("What changed?".to_string()),
-            state: MeetingAnswerState::InsufficientEvidence,
-            answer: None,
-            citations: Vec::new(),
-            input_revision: revision,
-            revision: 0,
-            created_at_utc_ms: 3,
-            through_offset_ns: None,
-            provisional: false,
-        };
-        let receipt = store
-            .record_question_answer(
-                MeetingOperationId::new(),
-                3,
-                session_id,
-                revision,
-                &answer,
-                false,
-            )
-            .expect("no-store receipt");
-        assert_eq!(receipt.result, OperationResult::Committed);
-        assert!(store
-            .review_snapshot(session_id)
-            .expect("review")
-            .questions
-            .is_empty());
-        let connection = store.connection().expect("connection");
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM meeting_questions WHERE session_id = ?1",
-                params![id(session_id)],
-                |row| row.get(0),
-            )
-            .expect("question count");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn correction_marks_saved_question_out_of_date_and_rejects_stale_answer() {
-        let (_directory, store) = store();
-        let session_id = MeetingSessionId::new();
-        let revision = review_ready_session(&store, session_id);
-        let stale = MeetingAnswer {
-            question_id: MeetingQuestionId::new(),
-            session_id,
-            scope: MeetingQuestionScope::ThisMeeting,
-            question: Some("Stale?".to_string()),
-            state: MeetingAnswerState::InsufficientEvidence,
-            answer: None,
-            citations: Vec::new(),
-            input_revision: revision,
-            revision: 0,
-            created_at_utc_ms: 3,
-            through_offset_ns: None,
-            provisional: false,
-        };
-        let stale_receipt = store
-            .record_question_answer(
-                MeetingOperationId::new(),
-                3,
-                session_id,
-                revision.saturating_add(1),
-                &stale,
-                true,
-            )
-            .expect("stale receipt");
-        assert_eq!(stale_receipt.result, OperationResult::Rejected);
-
-        let answer = MeetingAnswer {
-            question_id: MeetingQuestionId::new(),
-            session_id,
-            scope: MeetingQuestionScope::ThisMeeting,
-            question: Some("Saved?".to_string()),
-            state: MeetingAnswerState::Supported,
-            answer: Some("A cited answer.".to_string()),
-            citations: Vec::new(),
-            input_revision: revision,
-            revision: 0,
-            created_at_utc_ms: 4,
-            through_offset_ns: None,
-            provisional: false,
-        };
-        store
-            .record_question_answer(
-                MeetingOperationId::new(),
-                4,
-                session_id,
-                revision,
-                &answer,
-                true,
-            )
-            .expect("saved answer");
-        let receipt = store
-            .set_title(
-                MeetingOperationId::new(),
-                5,
-                session_id,
-                revision,
-                "Corrected title".to_string(),
-            )
-            .expect("correction");
-        assert_eq!(receipt.result, OperationResult::Committed);
-        let questions = store.review_snapshot(session_id).expect("review").questions;
-        assert_eq!(questions.len(), 1);
-        assert_eq!(questions[0].state, MeetingAnswerState::OutOfDate);
     }
     #[test]
     fn cloud_migration_creates_non_cascading_durable_tables() {

@@ -21,7 +21,7 @@ use super::loop_types::{
 use super::people_types::{PersonDetailResult, PersonId, PersonLinkConfidence};
 use super::processing::{
     write_relationship_summary, LiveTranscript, LiveTranscriptWorker, MeetingProcessingService,
-    ProcessingOrigin, QuestionGenerationRequest, ReplyShape,
+    MeetingTextGenerationError, ProcessingOrigin, ReplyShape,
 };
 use super::store::{
     InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting, SegmentEdit,
@@ -346,19 +346,6 @@ pub struct MeetingNoteDeleteRequest {
     pub expected_note_revision: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Type)]
-pub struct MeetingQuestionRequest {
-    pub operation_id: MeetingOperationId,
-    pub session_id: MeetingSessionId,
-    pub expected_revision: u64,
-    pub question_id: MeetingQuestionId,
-    pub question: String,
-    #[serde(default)]
-    pub scope: MeetingQuestionScope,
-    #[serde(default)]
-    pub save_history: bool,
-}
-
 /// A save of the user's own notes layer. `expected_note_revision` guards the
 /// notes row alone: this path never touches the session revision, because it
 /// runs on an autosave timer while other edits may be in flight.
@@ -415,9 +402,35 @@ pub enum RecordingOrigin {
     PairedDevice { device_id: String },
 }
 
+/// Which of the app's own stop controls a press came from.
+///
+/// [`MeetingStopCause::Operator`] covered both of them until this existed, and
+/// the two are not the same event: the live meeting screen stops the capture
+/// the operator is watching, while the consent panel stops one from a floating
+/// window that may be the only surface open. A stop that loses its phase or
+/// revision race still answers with a receipt the pressing surface renders as
+/// done, so this is the field that says which button did nothing.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingStopSurface {
+    /// The stop control on the live meeting screen in the main window.
+    MeetingLive,
+    /// The stop control in the consent panel.
+    ConsentPanel,
+}
+
+impl MeetingStopSurface {
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::MeetingLive => "the live meeting screen",
+            Self::ConsentPanel => "the consent panel",
+        }
+    }
+}
+
 /// Which surface asked for a capture to stop.
 ///
-/// A stop is the one meeting command four unrelated surfaces issue, and until
+/// A stop is the one meeting command five unrelated surfaces issue, and until
 /// this existed a committed one was unattributable: `stop` logged nothing and
 /// filed every receipt under [`OperationActor::User`], including the auto-stops
 /// detection issues on its own. That made the corpus's own audit trail wrong in
@@ -460,13 +473,6 @@ impl MeetingStopCause {
 pub struct MeetingMutationResult {
     pub receipt: OperationReceipt,
     pub snapshot: MeetingSessionSnapshot,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, Type)]
-pub struct MeetingQuestionResult {
-    pub receipt: OperationReceipt,
-    pub snapshot: MeetingSessionSnapshot,
-    pub answer: MeetingAnswer,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -3212,71 +3218,6 @@ impl MeetingSessionManager {
             .map_err(|_| MeetingCommandError::ExportFailed)?
             .map_err(|_| MeetingCommandError::ExportFailed)?;
         Ok(written)
-    }
-
-    pub async fn question_ask(
-        &self,
-        request: MeetingQuestionRequest,
-    ) -> Result<MeetingQuestionResult, MeetingCommandError> {
-        let store = self.store().await?;
-        if let Some(receipt) = store
-            .operation_receipt(request.operation_id)
-            .map_err(map_store_error)?
-        {
-            let snapshot = store
-                .session_snapshot(request.session_id)
-                .map_err(map_store_error)?;
-            let review = store
-                .review_snapshot(request.session_id)
-                .map_err(map_store_error)?;
-            if let Some(answer) = review
-                .questions
-                .into_iter()
-                .find(|answer| answer.question_id == request.question_id)
-            {
-                return Ok(MeetingQuestionResult {
-                    receipt,
-                    snapshot,
-                    answer,
-                });
-            }
-            if request.save_history {
-                return Err(MeetingCommandError::NotFound);
-            }
-        }
-        let live = self.live_transcript(request.session_id);
-        /* Off the runtime, for the same reason as `artifacts_regenerate`: the
-         * engine may be the relay, and its wait belongs on a blocking thread
-         * rather than on a worker this command shares with everything else. */
-        let (receipt, answer) = {
-            let processing = Arc::clone(&self.processing);
-            let store = Arc::clone(&store);
-            let generation = QuestionGenerationRequest {
-                operation_id: request.operation_id,
-                requested_at_utc_ms: utc_now_ms(),
-                session_id: request.session_id,
-                expected_revision: request.expected_revision,
-                question_id: request.question_id,
-                question: request.question,
-                scope: request.scope,
-                save_history: request.save_history,
-            };
-            tauri::async_runtime::spawn_blocking(move || {
-                processing.ask_question(&store, generation, live.as_deref())
-            })
-            .await
-            .map_err(|_| map_processing_error(ProcessingFailure::EngineFailure))?
-            .map_err(map_processing_error)?
-        };
-        let snapshot = store
-            .session_snapshot(request.session_id)
-            .map_err(map_store_error)?;
-        self.emit_session_changed(&snapshot);
-        Ok(MeetingQuestionResult {
-            receipt,
-            snapshot,
-            answer,
-        })
     }
 
     pub async fn question_forget(
@@ -6456,73 +6397,6 @@ pub(crate) mod tests {
             calls.load(Ordering::Acquire),
             1,
             "the audio the skipped pass left behind is read by the next one"
-        );
-    }
-
-    /// A question asked while the meeting runs is answered from the same
-    /// provisional transcript, and is not written into question history: its
-    /// citations name a reading no revision keeps. The receipt still records
-    /// that it was asked, which is what makes the asking auditable.
-    #[test]
-    fn a_question_during_capture_is_answered_provisionally_and_not_saved() {
-        let busy = Arc::new(AtomicBool::new(false));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (_directory, manager, session_id, lane) = capturing_meeting(
-            line_engine(&busy, &calls),
-            Arc::new(FixedGenerator {
-                available: true,
-                output: String::new(),
-            }),
-        );
-        capture_audio(&lane, &manager, session_id);
-        manager.processing.set_text_generators(
-            Arc::new(FixedGenerator {
-                available: true,
-                output: format!(
-                    r#"{{"sentences":[{{"text":"Pricing is still open.","citations":[{{"kind":"transcript","session_id":"{}","entity_id":"provisional-0"}}]}}]}}"#,
-                    session_id.uuid()
-                ),
-            }),
-            Arc::new(FixedGenerator {
-                available: false,
-                output: String::new(),
-            }),
-        );
-        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
-        let revision = store.session_snapshot(session_id).unwrap().revision;
-
-        let result = tauri::async_runtime::block_on(manager.question_ask(MeetingQuestionRequest {
-            operation_id: MeetingOperationId::new(),
-            session_id,
-            expected_revision: revision,
-            question_id: MeetingQuestionId::new(),
-            question: "Where did we land on pricing?".to_string(),
-            scope: MeetingQuestionScope::ThisMeeting,
-            save_history: true,
-        }))
-        .unwrap();
-
-        assert_eq!(result.answer.state, MeetingAnswerState::Supported);
-        assert_eq!(
-            result.answer.answer.as_deref(),
-            Some("Pricing is still open.")
-        );
-        assert!(
-            result.answer.provisional,
-            "an answer read from a running capture says so"
-        );
-        assert!(result
-            .answer
-            .through_offset_ns
-            .is_some_and(|offset| offset > 0));
-        assert_eq!(result.receipt.result, OperationResult::Committed);
-        assert!(
-            store
-                .review_snapshot(session_id)
-                .unwrap()
-                .questions
-                .is_empty(),
-            "a provisional answer is returned, not kept as history"
         );
     }
 

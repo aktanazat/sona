@@ -1996,14 +1996,6 @@ async meetingArtifactsRegenerate(request: MeetingMutationRequest) : Promise<Resu
     else return { status: "error", error: e  as any };
 }
 },
-async meetingQuestionAsk(request: MeetingQuestionRequest) : Promise<Result<MeetingQuestionResult, MeetingCommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("meeting_question_ask", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async meetingQuestionForget(request: MeetingMutationRequest, questionId: MeetingQuestionId) : Promise<Result<MeetingMutationResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_question_forget", { request, questionId }) };
@@ -3219,7 +3211,7 @@ export type AgentPanelUndoChangeRequestV1 = { receipt_id: string; expected_revis
  * than either job needs.
  */
 export type AgentPanelWorkspaceV1 = "sona_chat" | "sona_config"
-export type AllowedMeetingAction = "refresh_preflight" | "cancel_preflight" | "start" | "pause" | "resume" | "stop" | "discard" | "finalize_partial" | "edit" | "regenerate" | "ask_question" | "export" | "delete" | "cancel_remote"
+export type AllowedMeetingAction = "refresh_preflight" | "cancel_preflight" | "start" | "pause" | "resume" | "stop" | "discard" | "finalize_partial" | "edit" | "regenerate" | "export" | "delete" | "cancel_remote"
 /**
  * The container-level `serde(default)` (backed by the `Default` impl below)
  * guarantees every field — including ones added in the future — falls back to
@@ -4819,8 +4811,6 @@ export type MeetingPrepCard = { eventKey: string; seriesKey: string; title: stri
 export type MeetingPrepParticipant = { name: string; meetingsCount: number; organization: string | null }
 export type MeetingProvider = "zoom" | "google_meet" | "microsoft_teams" | "webex" | "slack_huddle" | "face_time" | "configured_app"
 export type MeetingQuestionId = string
-export type MeetingQuestionRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; question_id: MeetingQuestionId; question: string; scope?: MeetingQuestionScope; save_history?: boolean }
-export type MeetingQuestionResult = { receipt: OperationReceipt; snapshot: MeetingSessionSnapshot; answer: MeetingAnswer }
 export type MeetingQuestionScope = { kind: "this_meeting" } | { kind: "explicit_series"; session_ids: MeetingSessionId[] }
 export type MeetingReasonCode = "consent_missing" | "consent_stale" | "stale_revision" | "capture_lease_busy" | "source_unavailable" | "source_start_failed" | "source_gap" | "storage_unavailable" | "storage_failure" | "local_model_unavailable" | "recovery_required" | "deleted" | "invalid_transition" | "duplicate_operation"
 /**
