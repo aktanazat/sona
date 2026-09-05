@@ -15,6 +15,7 @@
 
 use super::processing::{MeetingTextGenerationError, MeetingTextGenerator, ReplyShape};
 use crate::agent_panel::{self, ChatTurnError};
+use std::future::Future;
 use std::sync::mpsc;
 use std::time::Duration;
 use tauri::AppHandle;
@@ -190,11 +191,11 @@ impl MeetingTextGenerator for RelayTextGenerator {
     /// One turn, submitted and waited for.
     ///
     /// The trait is synchronous and its callers are the meeting job thread and
-    /// two Tauri commands, so this cannot be a `block_on`: a command already
-    /// runs on the async runtime, and entering the runtime from inside it
-    /// deadlocks the one path the operator explicitly asked for. The turn is
-    /// handed to the runtime and this thread waits on a channel instead, which
-    /// is correct from a job thread and from a runtime worker alike.
+    /// Tauri commands, so this cannot be a `block_on`: a command already runs
+    /// on the async runtime, and entering the runtime from inside it deadlocks
+    /// the one path the operator explicitly asked for. The turn is handed to
+    /// the runtime and this thread waits on a channel instead; [`join_turn`]
+    /// owns why that wait is safe from a runtime worker.
     ///
     /// `max_tokens` is dropped deliberately: the relay's turn carries no output
     /// budget, and the workspace's own response ceiling is what bounds the
@@ -219,27 +220,45 @@ impl MeetingTextGenerator for RelayTextGenerator {
         let prompt = relay_prompt(system_prompt, shape);
         let pack = evidence.to_string();
         let reply_is_json = shape == ReplyShape::Json;
-        let (sender, receiver) = mpsc::channel();
-        tauri::async_runtime::spawn(async move {
-            let answer = agent_panel::run_chat_turn(
+        let turn = async move {
+            agent_panel::run_chat_turn(
                 &app,
                 &prompt,
                 Some(pack),
                 RELAY_TURN_DEADLINE,
                 reply_is_json,
             )
-            .await;
-            /* The receiver is gone only if this thread stopped waiting, which
-             * it does only after the join timeout. Nothing to report to. */
-            let _ = sender.send(answer);
-        });
-        match receiver.recv_timeout(RELAY_JOIN_TIMEOUT) {
-            Ok(answer) => answer.map_err(generation_error),
-            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
-                Err(MeetingTextGenerationError::Unreachable)
-            }
+            .await
+        };
+        match join_turn(turn, RELAY_JOIN_TIMEOUT) {
+            Some(answer) => answer.map_err(generation_error),
+            None => Err(MeetingTextGenerationError::Unreachable),
         }
     }
+}
+
+/// Hands one turn to the runtime and waits for its answer from any thread.
+///
+/// A task spawned from a runtime worker lands in that worker's LIFO slot,
+/// which no other worker can steal. Block the worker on the channel and the
+/// turn never starts: a follow-up draft pressed from a command sat at
+/// `Drafting...` with no relay request ever made. `block_in_place` moves the
+/// worker's queue, LIFO slot included, to a fresh thread before this one
+/// blocks. From a thread outside the runtime it is a plain call, which is what
+/// the meeting job thread gets.
+///
+/// `None` is a turn that did not report within `timeout`. The receiver is gone
+/// only if this thread stopped waiting, so the turn's own send has nothing to
+/// report to and drops its result.
+fn join_turn<T: Send + 'static>(
+    turn: impl Future<Output = T> + Send + 'static,
+    timeout: Duration,
+) -> Option<T> {
+    let (sender, receiver) = mpsc::channel();
+    tauri::async_runtime::spawn(async move {
+        let _ = sender.send(turn.await);
+    });
+    tokio::task::block_in_place(|| receiver.recv_timeout(timeout)).ok()
 }
 
 /// A relay turn's failures, in the meeting layer's own words.
@@ -284,6 +303,24 @@ mod tests {
         assert_eq!(
             generator.generate("prompt", "{}", 100, ReplyShape::Json),
             Err(MeetingTextGenerationError::Unreachable)
+        );
+    }
+
+    /// A Tauri command is a runtime worker. Without the hand-off in
+    /// `join_turn`, the turn it spawns waits in the worker's LIFO slot for
+    /// the worker that is blocked on its answer, and only the timeout ends
+    /// it.
+    #[test]
+    fn a_turn_joined_from_a_runtime_worker_still_runs() {
+        let (sender, receiver) = mpsc::channel();
+        tauri::async_runtime::spawn(async move {
+            let _ = sender.send(join_turn(async { 7 }, Duration::from_secs(1)));
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)),
+            Ok(Some(7)),
+            "the turn never ran while its worker waited for it"
         );
     }
 
