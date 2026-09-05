@@ -559,6 +559,22 @@ impl RelayJobWire {
             RelayJobStateV1::UnverifiedExternal => Some(RelayJobFailure::Failed),
             _ => None,
         };
+        if let Some(failure) = failure {
+            /* The only place all three facts are in hand at once. Two of
+             * these refusals are one word by the time a reader sees them -
+             * deliberately, because a reader is told the same thing either
+             * way - so without this line the log cannot tell a model that
+             * declined from a model that answered in the wrong shape. The
+             * code is printed as the relay sent it, including one this build
+             * has no name for. */
+            log::warn!(
+                "Relay job {} came back {:?} as {:?}, relay error_code {}",
+                self.id,
+                state,
+                failure,
+                failed_job_error_code(result.as_ref()).unwrap_or("(none sent)")
+            );
+        }
         let response = if state == RelayJobStateV1::Succeeded {
             let result = result.ok_or(RelayError::ResponseMalformed)?;
             let serialized =
@@ -587,14 +603,23 @@ impl RelayJobWire {
 /// the message held prose, and the parse failed here with nothing written down
 /// anywhere about why. Everything else stays the blanket refusal it was.
 fn failed_job_reason(result: Option<&serde_json::Value>) -> RelayJobFailure {
-    match result
-        .and_then(|value| value.get("error_code"))
-        .and_then(serde_json::Value::as_str)
-    {
+    match failed_job_error_code(result) {
         Some("sona_reply_not_structured") => RelayJobFailure::ReplyNotStructured,
         Some("sona_response_rejected") => RelayJobFailure::Refused,
         _ => RelayJobFailure::Failed,
     }
+}
+
+/// The relay's own word for why, verbatim, if it sent one.
+///
+/// Read twice on a failing job: once to type it, once to log it. A code this
+/// build has no meaning for still belongs in the log, because it is the only
+/// thing on either side naming the cause and the mapping above turns three of
+/// them into the same word.
+fn failed_job_error_code(result: Option<&serde_json::Value>) -> Option<&str> {
+    result
+        .and_then(|value| value.get("error_code"))
+        .and_then(serde_json::Value::as_str)
 }
 
 #[derive(Deserialize)]
