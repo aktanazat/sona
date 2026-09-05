@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { platform } from "@tauri-apps/plugin-os";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -11,7 +11,6 @@ import {
 import { toast } from "sonner";
 import { commands } from "@/bindings";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { Badge } from "@/components/vg/badge";
 import { Button } from "@/components/vg/button";
 import { SonaMark } from "../icons/SonaMark";
 import { SonaWordmark } from "../icons/SonaWordmark";
@@ -48,7 +47,8 @@ const MACOS_SETTINGS_PANE = {
 interface PermissionRowProps {
   title: string;
   description: string;
-  status: PermissionStatus;
+  /** Never "granted": a granted permission has no row to be in. */
+  status: Exclude<PermissionStatus, "granted">;
   grantLabel: string;
   onGrant: () => void;
   onOpenSettings: () => void;
@@ -56,12 +56,16 @@ interface PermissionRowProps {
 }
 
 /**
- * One permission, as a flat section.
+ * One permission, as a flat section: what it is, why it is needed, and the one
+ * button that grants it. A granted permission is not rendered at all, and the
+ * prop type says so rather than the two call sites saying so twice: the screen
+ * asks for what is still missing, and the last grant advances it.
  *
  * `waiting` is the state this screen used to get stuck in: a spinner with
- * nothing to click. It now always carries two live affordances — the exact
- * System Settings pane, and a re-check that restarts the poll — so the row is
- * never a dead end.
+ * nothing to click. It keeps two buttons rather than one against the round-7
+ * rule, because after a macOS denial the consent dialog never appears again:
+ * the exact System Settings pane and a re-check that restarts the poll are the
+ * only two ways out, and MAX_POLLING_ERRORS can stop the poll for good.
  */
 const PermissionRow: React.FC<PermissionRowProps> = ({
   title,
@@ -73,42 +77,37 @@ const PermissionRow: React.FC<PermissionRowProps> = ({
   onRecheck,
 }) => {
   const { t } = useTranslation();
-  const granted = status === "granted";
+  const waiting = status === "waiting";
+  /* Both rows say "Grant permission", because the row's own title is what the
+   * button is granting. Tab lands on the button without reading the row, so
+   * the group carries the title to anyone who arrives that way. */
+  const titleId = useId();
 
   return (
-    <div className="ob-row">
+    <div className="ob-row" role="group" aria-labelledby={titleId}>
       <div className="ob-row-head">
-        <h3 className="ob-row-title">{title}</h3>
-        {/* The semaphore law: a granted state keeps the plain chip and carries
-         * its meaning in the word. Tinted fills and borders are reserved for
-         * the status indicators a person has to act on. */}
-        <Badge
-          variant="secondary"
-          className={granted ? "text-[var(--green-900)]" : undefined}
-        >
-          {granted
-            ? t("onboarding.permissions.granted")
-            : t("onboarding.permissions.waiting")}
-        </Badge>
+        <h3 className="ob-row-title" id={titleId}>
+          {title}
+        </h3>
+        {/* A word, not a chip, and only while the reader still has something to
+         * do about it: the grant is happening somewhere else, in a window this
+         * app does not own. */}
+        {waiting && (
+          <span className="ob-row-state" role="status">
+            {t("onboarding.permissions.waiting")}
+          </span>
+        )}
       </div>
       <p className="ob-row-description">{description}</p>
-      {granted ? null : status === "waiting" ? (
-        <>
-          <div className="ob-row-actions">
-            <Button variant="outline" size="sm" onClick={onOpenSettings}>
-              {t("accessibility.openSettings")}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={onRecheck}>
-              {t("onboarding.permissions.recheck", "Re-check")}
-            </Button>
-          </div>
-          <div className="ob-row-actions">
-            <span className="ob-waiting" role="status">
-              <span className="ob-spinner" aria-hidden="true" />
-              {t("onboarding.permissions.waiting")}
-            </span>
-          </div>
-        </>
+      {waiting ? (
+        <div className="ob-row-actions">
+          <Button variant="outline" size="sm" onClick={onOpenSettings}>
+            {t("accessibility.openSettings")}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onRecheck}>
+            {t("onboarding.permissions.recheck")}
+          </Button>
+        </div>
       ) : (
         <div className="ob-row-actions">
           <Button size="sm" onClick={onGrant}>
@@ -174,7 +173,7 @@ const PermissionOnboardingContent: React.FC<
           <OnboardingBrand />
           <span className="ob-checking" role="status">
             <span className="ob-spinner" aria-hidden="true" />
-            {t("onboarding.permissions.checking", "Checking permissions")}
+            {t("onboarding.permissions.checking")}
           </span>
         </div>
       </div>
@@ -198,18 +197,11 @@ const PermissionOnboardingContent: React.FC<
     <div className="onboarding-shell ob-stage">
       <div className="ob-column">
         <OnboardingBrand />
-        <h1 className="ob-headline">
-          {t("onboarding.permissions.headline", "One-time setup")}
-        </h1>
-        <p className="ob-subhead">
-          {t(
-            "onboarding.permissions.subhead",
-            "Your system asks before any app can listen or type.",
-          )}
-        </p>
+        <h1 className="ob-headline">{t("onboarding.permissions.headline")}</h1>
+        <p className="ob-subhead">{t("onboarding.permissions.subhead")}</p>
 
         <div className="ob-rows">
-          {showMicrophonePermission && (
+          {showMicrophonePermission && microphoneStatus !== "granted" && (
             <PermissionRow
               title={t("onboarding.permissions.microphone.title")}
               description={t("onboarding.permissions.microphone.description")}
@@ -225,7 +217,7 @@ const PermissionOnboardingContent: React.FC<
             />
           )}
 
-          {showAccessibilityPermission && (
+          {showAccessibilityPermission && accessibilityStatus !== "granted" && (
             <PermissionRow
               title={t("onboarding.permissions.accessibility.title")}
               description={t(
@@ -278,10 +270,25 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
       ? permissions.microphone === "granted"
       : true;
 
+  /* The mount probe below must not re-run because a parent re-rendered. App
+   * builds a fresh `onComplete` on every one of its own renders, and this
+   * screen's completion writes the device lists into the settings store -
+   * which re-renders App. Depending on the prop's identity made those two
+   * facts a loop on the granted path: probe, complete, store write, new prop,
+   * probe again, until React stopped it with "Maximum update depth exceeded"
+   * and the probe's own catch blamed the permission check for it - a new
+   * install landed on the model step under "Couldn't check permissions". The
+   * ref carries the latest callback without making its identity a reason to
+   * run, which also holds the poll and its re-check still. */
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+
   const completeOnboarding = useCallback(async () => {
     await Promise.all([refreshAudioDevices(), refreshOutputDevices()]);
-    timeoutRef.current = setTimeout(() => onComplete(), 300);
-  }, [onComplete, refreshAudioDevices, refreshOutputDevices]);
+    timeoutRef.current = setTimeout(() => onCompleteRef.current(), 300);
+  }, [refreshAudioDevices, refreshOutputDevices]);
 
   const hasWindowsMicrophoneAccess = useCallback(async (): Promise<boolean> => {
     const microphoneStatus =
@@ -332,7 +339,7 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
 
     // Skip immediately on unsupported platforms
     if (nextPlatform === "other") {
-      onComplete();
+      onCompleteRef.current();
       return;
     }
 
@@ -402,7 +409,6 @@ const AccessibilityOnboarding: React.FC<AccessibilityOnboardingProps> = ({
   }, [
     completeOnboarding,
     hasWindowsMicrophoneAccess,
-    onComplete,
     syncAccessibilityGrant,
     t,
   ]);
