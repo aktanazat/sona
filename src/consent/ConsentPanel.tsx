@@ -665,11 +665,14 @@ export default function ConsentPanel() {
 
   const stop = async () => {
     if (active === null) return;
-    const result = await commands.meetingStop({
-      operation_id: crypto.randomUUID(),
-      session_id: active.snapshot.session_id,
-      expected_revision: active.snapshot.revision,
-    });
+    const result = await commands.meetingStop(
+      {
+        operation_id: crypto.randomUUID(),
+        session_id: active.snapshot.session_id,
+        expected_revision: active.snapshot.revision,
+      },
+      "consent_panel",
+    );
     if (result.status === "error") {
       console.error("Could not stop the meeting", result.error);
       return;

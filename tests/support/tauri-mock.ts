@@ -820,6 +820,15 @@ export function installMockedRuntime(payload: MockPayload): void {
       ) {
         throw new Error("meeting_stop received an invalid request");
       }
+      // The surface is the whole point of the argument: a caller that leaves
+      // it out files its press as an anonymous operator stop, which is the
+      // state this replaced.
+      if (
+        args?.surface !== "meeting_live" &&
+        args?.surface !== "consent_panel"
+      ) {
+        throw new Error("meeting_stop requires the pressing surface");
+      }
       state.stopped += 1;
       state.phase = "review_ready";
       localStorage.setItem("meeting-stopped", String(state.stopped));

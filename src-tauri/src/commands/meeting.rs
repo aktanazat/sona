@@ -200,16 +200,22 @@ pub async fn meeting_resume(
     manager.resume(request).await
 }
 
+/// Stop a capture from one of the app's own windows.
+///
+/// The surface is the caller's to name because a stop is the one command two
+/// unrelated windows issue, and a receipt that says only "an operator press"
+/// cannot tell them apart afterwards.
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_stop(
     manager: State<'_, Arc<MeetingSessionManager>>,
     detection: State<'_, Arc<DetectionRuntime>>,
     request: MeetingMutationRequest,
+    surface: MeetingStopSurface,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
     let session_id = request.session_id;
     let result = manager
-        .stop(request, crate::meeting::session::MeetingStopCause::Operator)
+        .stop(request, MeetingStopCause::Operator(surface))
         .await;
     if result.is_ok() {
         detection.track_ended(session_id);

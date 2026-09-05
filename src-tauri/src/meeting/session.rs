@@ -438,8 +438,9 @@ impl MeetingStopSurface {
 /// eleven seconds took a day to notice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MeetingStopCause {
-    /// A press on a stop control in the app's own windows.
-    Operator,
+    /// A press on a stop control in one of the app's own windows, named by
+    /// which window it was.
+    Operator(MeetingStopSurface),
     /// The tray's Stop Meeting Notes item.
     Tray,
     /// A press on the auto-record card detection put on the panel. An operator
@@ -454,14 +455,14 @@ impl MeetingStopCause {
     /// Who the receipt says did it. Only detection acts without a press.
     const fn actor(self) -> OperationActor {
         match self {
-            Self::Operator | Self::Tray | Self::RecordingCard => OperationActor::User,
+            Self::Operator(_) | Self::Tray | Self::RecordingCard => OperationActor::User,
             Self::Detection(_) => OperationActor::System,
         }
     }
 
     fn describe(self) -> String {
         match self {
-            Self::Operator => "an operator press".to_string(),
+            Self::Operator(surface) => surface.describe().to_string(),
             Self::Tray => "the tray".to_string(),
             Self::RecordingCard => "the recording card".to_string(),
             Self::Detection(trigger) => format!("detection on {}", trigger.as_str()),
@@ -1990,6 +1991,17 @@ impl MeetingSessionManager {
         )?;
         if receipt.result != OperationResult::Committed {
             drop(actor);
+            // A stop that loses the phase or revision gate answers with a
+            // receipt the pressing surface renders as done, so this line is
+            // the only trace that a press did nothing - and, since the surface
+            // rides on the cause, which press it was.
+            log::warn!(
+                "Meeting capture {} was not stopped by {}: {:?} {:?}",
+                request.session_id.uuid(),
+                cause.describe(),
+                receipt.result,
+                receipt.reason_codes,
+            );
             return self.result_for_receipt(store, receipt, request.session_id);
         }
         // After the fence, so this names a stop that happened rather than one
@@ -4618,7 +4630,7 @@ pub(crate) mod tests {
                     session_id: active.snapshot.session_id,
                     expected_revision: active.snapshot.revision,
                 },
-                MeetingStopCause::Operator,
+                MeetingStopCause::Operator(MeetingStopSurface::MeetingLive),
             ))
             .unwrap()
             .snapshot
@@ -6261,7 +6273,7 @@ pub(crate) mod tests {
                 session_id,
                 expected_revision: revision,
             },
-            MeetingStopCause::Operator,
+            MeetingStopCause::Operator(MeetingStopSurface::MeetingLive),
         ))
         .unwrap();
         let after_processing = calls.load(Ordering::Acquire);
@@ -6327,7 +6339,7 @@ pub(crate) mod tests {
         };
 
         assert_eq!(
-            actor_for(MeetingStopCause::Operator),
+            actor_for(MeetingStopCause::Operator(MeetingStopSurface::MeetingLive)),
             OperationActor::User,
             "a press is still a person"
         );
@@ -6338,6 +6350,83 @@ pub(crate) mod tests {
             OperationActor::System,
             "an auto-stop nobody asked for must not be recorded as the user's"
         );
+    }
+
+    /// The two stop buttons in the app's own windows are different presses,
+    /// and a stop that loses its phase or revision race renders as done on
+    /// whichever one was pressed. Until the surface rode on the request, the
+    /// log said `Operator` for both and said nothing at all for the press
+    /// that changed nothing, so the one question a reader has afterwards -
+    /// which button did nothing - had no answer anywhere.
+    #[test]
+    fn a_stop_names_the_surface_that_pressed_it() {
+        assert_eq!(
+            MeetingStopCause::Operator(MeetingStopSurface::MeetingLive).describe(),
+            "the live meeting screen"
+        );
+        assert_eq!(
+            MeetingStopCause::Operator(MeetingStopSurface::ConsentPanel).describe(),
+            "the consent panel"
+        );
+        assert_eq!(MeetingStopCause::Tray.describe(), "the tray");
+        assert_eq!(
+            MeetingStopCause::RecordingCard.describe(),
+            "the recording card"
+        );
+        assert_eq!(
+            MeetingStopCause::Detection(
+                crate::meeting::detection::machine::StopTrigger::SleepBoundary
+            )
+            .describe(),
+            "detection on sleep_boundary"
+        );
+    }
+
+    /// A press that arrives against a revision the meeting has already moved
+    /// past stops nothing, and the pressing surface still renders done. The
+    /// receipt is the only place that disagreement is visible, so it has to
+    /// carry the refusal and the reason rather than an empty commit.
+    #[test]
+    fn a_stop_that_loses_the_revision_gate_is_refused_rather_than_committed() {
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (_directory, manager, session_id, _lane) = capturing_meeting(
+            line_engine(&busy, &calls),
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+        );
+        let revision = tauri::async_runtime::block_on(async {
+            manager
+                .store()
+                .await
+                .unwrap()
+                .session_snapshot(session_id)
+                .unwrap()
+                .revision
+        });
+
+        let refused = tauri::async_runtime::block_on(manager.stop(
+            MeetingMutationRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id,
+                expected_revision: revision + 1,
+            },
+            MeetingStopCause::Operator(MeetingStopSurface::ConsentPanel),
+        ))
+        .unwrap();
+
+        assert_eq!(refused.receipt.result, OperationResult::Rejected);
+        assert!(
+            refused
+                .receipt
+                .reason_codes
+                .contains(&MeetingReasonCode::StaleRevision),
+            "the refusal has to name the gate that lost: {:?}",
+            refused.receipt.reason_codes
+        );
+        assert_eq!(refused.snapshot.phase, MeetingPhase::CapturingRecording);
     }
 
     /// A Mac with no engine to write text says so, mid-meeting as anywhere

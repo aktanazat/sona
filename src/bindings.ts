@@ -1835,9 +1835,16 @@ async meetingResume(request: MeetingMutationRequest) : Promise<Result<MeetingMut
     else return { status: "error", error: e  as any };
 }
 },
-async meetingStop(request: MeetingMutationRequest) : Promise<Result<MeetingMutationResult, MeetingCommandError>> {
+/**
+ * Stop a capture from one of the app's own windows.
+ *
+ * The surface is the caller's to name because a stop is the one command two
+ * unrelated windows issue, and a receipt that says only "an operator press"
+ * cannot tell them apart afterwards.
+ */
+async meetingStop(request: MeetingMutationRequest, surface: MeetingStopSurface) : Promise<Result<MeetingMutationResult, MeetingCommandError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("meeting_stop", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("meeting_stop", { request, surface }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -5037,6 +5044,25 @@ export type MeetingStatusFilter = "any" |
  * Processing failed or was cancelled, or capture needs recovery.
  */
 "failed"
+/**
+ * Which of the app's own stop controls a press came from.
+ *
+ * [`MeetingStopCause::Operator`] covered both of them until this existed, and
+ * the two are not the same event: the live meeting screen stops the capture
+ * the operator is watching, while the consent panel stops one from a floating
+ * window that may be the only surface open. A stop that loses its phase or
+ * revision race still answers with a receipt the pressing surface renders as
+ * done, so this is the field that says which button did nothing.
+ */
+export type MeetingStopSurface =
+/**
+ * The stop control on the live meeting screen in the main window.
+ */
+"meeting_live" |
+/**
+ * The stop control in the consent panel.
+ */
+"consent_panel"
 export type MeetingSuggestion = { offer_id: MeetingSuggestionId; provider: MeetingProvider; app_bundle_id: string; evidence_flags: MeetingEvidenceFlags; observed_at_ns: number; expires_at_ns: number }
 export type MeetingSuggestionChangedEvent = MeetingEventPayload
 export type MeetingSuggestionId = string

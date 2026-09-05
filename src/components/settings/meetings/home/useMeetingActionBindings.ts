@@ -77,11 +77,14 @@ export const useMeetingActionBindings = (
   const stop = useCallback(
     (snapshot: MeetingReviewSnapshot) =>
       mutations.mutateSession("stop", snapshot, (operationId) =>
-        commands.meetingStop({
-          operation_id: operationId,
-          session_id: snapshot.session.session_id,
-          expected_revision: snapshot.session.revision,
-        }),
+        commands.meetingStop(
+          {
+            operation_id: operationId,
+            session_id: snapshot.session.session_id,
+            expected_revision: snapshot.session.revision,
+          },
+          "meeting_live",
+        ),
       ),
     [mutations],
   );
