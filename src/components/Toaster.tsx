@@ -6,13 +6,19 @@ import { getLanguageDirection } from "@/lib/utils/rtl";
 /* The app's single toast surface. Mount once at the shell root; raise
  * messages with `toast` from sonner.
  *
- * Copy rules, because a toast is mostly its sentence:
+ * Copy rules, because a toast is its sentence:
+ *   - one sentence, and never a title with a restatement under it: two type
+ *     sizes saying one thing is the shape this surface used to have, and the
+ *     sentence was always the one that said it. A second line is for what the
+ *     first cannot carry - a backend failure's own words, or what a decision
+ *     would do - never for saying the first line again. A short form belongs
+ *     on the recording HUD, where two words is all the pill can hold;
  *   - pick the method by how the event was experienced, not by status code —
  *     a cancel is .message(), a partial success is .warning();
  *   - completions are "{Noun} {past-participle}" — "Snippet saved", never
  *     "Snippet saved successfully";
- *   - errors are two sentences and the second one is the way out —
- *     "Couldn't transcribe. Try again.";
+ *   - an error names the cause, then the way out — "Couldn't transcribe. Try
+ *     again.";
  *   - sentence case, and no trailing period on a single-sentence toast.
  *
  * Raised as a raised surface rather than a card: it floats over the page, so
@@ -47,8 +53,13 @@ export const Toaster: React.FC = () => {
           toast:
             "glass-surface toast-surface flex items-center gap-3 rounded-panel border border-gray-alpha-400 bg-surface-raised px-4 py-3 text-[14px] leading-[21px] shadow-[var(--shadow-popover)] [--glass-tint:var(--glass-tint-dense)]",
           title: "font-medium text-text-primary",
-          /* A second line is a note, so it takes the note size. */
-          description: "text-[13px] leading-[18px] text-text-secondary",
+          /* The second line, when there is one: a failed model load prints the
+             backend's reason under it, and the detection prompt puts what Sona
+             would do under the app it saw. `unstyled` turns off sonner's own
+             `[data-description]` rule too, so without this the second line
+             reads at the same weight as the first. Secondary type is the same
+             13/18 gray the rows use. */
+          description: "text-[13px] leading-[18px] text-gray-900",
           /* Ghost text buttons, not filled ones. A toast is one line that
              leaves on its own; a filled bronze button on it competes with
              whatever the reader was actually doing, and two filled buttons

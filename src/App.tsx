@@ -528,21 +528,24 @@ const AppEventListeners: React.FC = () => {
     const unlisten = listen<RecordingErrorEvent>("recording-error", (event) => {
       const { error_type, detail } = event.payload;
 
+      /* One sentence each: the cause, then the way out. These five used to
+         pass a short title with the sentence under it, and the sentence was
+         the whole message every time — "No microphone found" over "No audio
+         input device was detected. Connect a microphone and try again."
+         reads the same fact twice at two sizes. The short forms are still
+         the HUD's, where the pill has room for two words and nothing more
+         (see overlay/RecordingOverlayContent.tsx). */
       if (error_type === "microphone_permission_denied") {
-        const currentPlatform = platform();
-        const platformKey = `errors.micPermissionDenied.${currentPlatform}`;
-        const description = t(platformKey, {
-          defaultValue: t("errors.micPermissionDenied.generic"),
-        });
-        toast.error(t("errors.micPermissionDeniedTitle"), { description });
+        const platformKey = `errors.micPermissionDenied.${platform()}`;
+        toast.error(
+          t(platformKey, {
+            defaultValue: t("errors.micPermissionDenied.generic"),
+          }),
+        );
       } else if (error_type === "no_input_device") {
-        toast.error(t("errors.noInputDeviceTitle"), {
-          description: t("errors.noInputDevice"),
-        });
+        toast.error(t("errors.noInputDevice"));
       } else if (error_type === "no_speech_detected") {
-        toast.info(t("errors.noSpeechDetectedTitle"), {
-          description: t("errors.noSpeechDetected"),
-        });
+        toast.info(t("errors.noSpeechDetected"));
       } else if (error_type === "no_model_selected") {
         toast.error(
           t(
@@ -589,9 +592,7 @@ const AppEventListeners: React.FC = () => {
   // so we show a localized, user-friendly message here instead of the raw error.
   useEffect(() => {
     const unlisten = listen("paste-error", () => {
-      toast.error(t("errors.pasteFailedTitle"), {
-        description: t("errors.pasteFailed"),
-      });
+      toast.error(t("errors.pasteFailed"));
     });
     return () => {
       unlisten.then((fn) => fn());
@@ -615,13 +616,13 @@ const AppEventListeners: React.FC = () => {
     };
   }, [t]);
 
-  // Listen for transcription failures and show a toast.
-  // The payload is the backend error message (also logged to sona.log).
+  /* Listen for transcription failures and show a toast. The payload is a
+     fixed English string from the Rust side ("Transcription failed",
+     actions.rs), which is the title again in the backend's words rather than
+     a detail worth reading; the real detail is in sona.log. */
   useEffect(() => {
-    const unlisten = listen<string>("transcription-error", (event) => {
-      toast.error(t("errors.transcriptionFailedTitle"), {
-        description: event.payload,
-      });
+    const unlisten = listen("transcription-error", () => {
+      toast.error(t("errors.transcriptionFailed"));
     });
     return () => {
       unlisten.then((fn) => fn());
