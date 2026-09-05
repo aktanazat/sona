@@ -3,17 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ArrowUp, Square } from "lucide-react";
 import type { AgentPanelWorkspaceV1 } from "@/bindings";
 import { Textarea } from "@/components/vg/textarea";
-import { cn } from "@/lib/cn";
 import { composerKeys } from "./chatModel";
-
-/* The two scopes, in the order the chip row reads them. They are not two moods
- * of one brain: one answers questions from your own corpus, the other proposes
- * settings changes and can change nothing without a card and a click. Which
- * one a question goes to is the reader's to say, because a client-side guess
- * that misroutes sends a private question to the wrong sandbox, and there is
- * no honest heuristic for the difference between "what did I say about the
- * theme" and "change the theme". */
-const SCOPES = ["sona_chat", "sona_config"] as const;
 
 export interface ChatComposerProps {
   workspace: AgentPanelWorkspaceV1;
@@ -24,15 +14,19 @@ export interface ChatComposerProps {
   running: boolean;
   /** Nothing would answer, or a command is mid-flight. */
   disabled: boolean;
-  onWorkspaceChange: (workspace: AgentPanelWorkspaceV1) => void;
   onDraftChange: (draft: string) => void;
   onSend: () => void;
   onStop: () => void;
 }
 
 /**
- * The scope row and the field, which are one control read top to bottom: who
- * you are asking, then what you are asking.
+ * The field, and the one glyph that sends it.
+ *
+ * The scope chips moved into the header's menu, so the only thing this band
+ * carries is the question being written. Which sandbox is listening is said by
+ * the placeholder — "Change a setting" while Configure is chosen — because a
+ * label naming a control that is no longer here would be a second copy of a
+ * datum the menu already holds.
  *
  * The field is a textarea and not a one-line input for exactly one reason:
  * Shift+Enter has to be able to put a newline in a question. Enter alone sends.
@@ -43,7 +37,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   fieldRef,
   running,
   disabled,
-  onWorkspaceChange,
   onDraftChange,
   onSend,
   onStop,
@@ -59,47 +52,12 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
        ends rather than as one flat strip. */
     <form
       data-slot="chat-composer"
-      className="flex flex-none flex-col gap-2 border-t border-gray-alpha-400 bg-surface-raised p-3"
+      className="flex flex-none flex-col border-t border-gray-alpha-400 bg-surface-raised p-3"
       onSubmit={(event) => {
         event.preventDefault();
         onSend();
       }}
     >
-      <div className="flex items-center gap-2">
-        <span className="shrink-0 text-[12px] text-gray-900">
-          {t("chat.scopeLabel")}
-        </span>
-        <div
-          className="flex items-center gap-1"
-          role="radiogroup"
-          aria-label={t("chat.scopeLabel")}
-        >
-          {SCOPES.map((scope) => (
-            <button
-              key={scope}
-              type="button"
-              role="radio"
-              aria-checked={workspace === scope}
-              disabled={inert}
-              onClick={() => onWorkspaceChange(scope)}
-              /* The chosen scope is filled, not merely outlined a step darker.
-                 One alpha step between the two states is the difference
-                 between "Ask" and "Settings" on a control that decides which
-                 sandbox a private question is sent to, and at 12px that step
-                 is not a difference a reader can see. `aria-checked` already
-                 says it out loud; this says it on screen. */
-              className={cn(
-                "rounded-full border px-2.5 py-1 text-[13px] leading-[18px] transition-colors disabled:pointer-events-none disabled:opacity-50 motion-reduce:transition-none",
-                workspace === scope
-                  ? "border-gray-alpha-600 bg-gray-alpha-200 font-medium text-gray-1000"
-                  : "border-gray-alpha-400 text-gray-900 hover:text-gray-1000",
-              )}
-            >
-              {t(`chat.scope.${scope}`)}
-            </button>
-          ))}
-        </div>
-      </div>
       {/* `items-end` so a question grown to three lines pushes the field up and
           leaves the send glyph on the baseline it started on. */}
       <div className="flex items-end gap-1.5 rounded-[20px] border border-gray-alpha-400 bg-background-100 p-1 ps-3 focus-within:border-gray-alpha-600">
@@ -110,7 +68,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={composerKeys(onSend)}
-          placeholder={t("chat.placeholder")}
+          placeholder={
+            workspace === "sona_config"
+              ? t("chat.placeholderConfig")
+              : t("chat.placeholder")
+          }
           aria-label={t("chat.inputLabel")}
           disabled={inert}
         />

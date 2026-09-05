@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, Plus, X } from "lucide-react";
+import { Loader2, MoreHorizontal, X } from "lucide-react";
 import type {
   AgentChatConversationSummaryV1,
   AgentPanelCommandErrorV1,
@@ -10,9 +10,19 @@ import type {
   SonaAgentChatTurnV1,
 } from "@/bindings";
 import { Button } from "@/components/vg/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/vg/dropdown-menu";
 import { cn } from "@/lib/cn";
 import { ChatComposer } from "./ChatComposer";
-import { ChatHistoryMenu } from "./ChatHistoryMenu";
+import { ChatHistorySubmenu } from "./ChatHistoryMenu";
 import { ChatTurns } from "./ChatTurns";
 import { CHAT_NOTICE_PHASES, isTurnRunning, sheetKeys } from "./chatModel";
 import type { ChatPhase } from "./chatModel";
@@ -78,38 +88,52 @@ export const CHAT_ERROR_KEYS = {
   not_undoable: "chat.error.failed",
 } satisfies Record<AgentPanelCommandErrorV1 | "link_failed", string>;
 
+/* The two scopes, in the order the menu reads them. They are not two moods of
+ * one brain: one answers questions from your own corpus, the other proposes
+ * settings changes and can change nothing without a card and a click. Which
+ * one a question goes to is the reader's to say, because a client-side guess
+ * that misroutes sends a private question to the wrong sandbox, and there is
+ * no honest heuristic for the difference between "what did I say about the
+ * theme" and "change the theme". */
+const SCOPES = ["sona_chat", "sona_config"] as const;
+
 interface ChatSheetHeaderProps {
   history: readonly AgentChatConversationSummaryV1[];
   currentId: string | null;
   historyOpen: boolean;
   busy: boolean;
+  workspace: AgentPanelWorkspaceV1;
   /** Where focus lands when the column opens with nothing typeable in it. */
   closeRef: React.RefObject<HTMLButtonElement | null>;
   onClose: () => void;
   onHistoryOpenChange: (open: boolean) => void;
   onSelectConversation: (conversationId: string) => void;
   onNewChat: () => void;
+  onWorkspaceChange: (workspace: AgentPanelWorkspaceV1) => void;
 }
 
-/* The title names the independent chat surface; the hairline beneath it keeps
- * its controls from merging into the conversation.
+/* The header is the title, the way out, and one menu.
  *
- * No focus classes of its own: base.css paints the shell's --focus-outline on
- * every button's :focus-visible, and the kit's 3px translucent ring was one of
- * the last two glows in the chrome. The pill dropped its copy already. */
-const ROUND_BUTTON =
-  "grid size-7 place-items-center rounded-full border border-gray-alpha-400 text-gray-900 transition-colors hover:bg-gray-alpha-100 hover:text-gray-1000 disabled:pointer-events-none disabled:opacity-50 motion-reduce:transition-none";
-
+ * Everything a reader does to the conversation rather than in it — start a new
+ * one, reopen an earlier one, choose which sandbox answers — hangs off that one
+ * menu, because three glyphs on a 340pt header is three decisions offered to
+ * somebody who came here to type a question. The two that survive on screen are
+ * the two the column cannot be used without: its name and its exit.
+ *
+ * The chosen scope leaves the screen with the chip row, so the composer's
+ * placeholder says which sandbox is listening instead. */
 const ChatSheetHeader: React.FC<ChatSheetHeaderProps> = ({
   history,
   currentId,
   historyOpen,
   busy,
+  workspace,
   closeRef,
   onClose,
   onHistoryOpenChange,
   onSelectConversation,
   onNewChat,
+  onWorkspaceChange,
 }) => {
   const { t } = useTranslation();
   return (
@@ -119,44 +143,68 @@ const ChatSheetHeader: React.FC<ChatSheetHeaderProps> = ({
        styles/shell.css swaps it for --glass-tint-dense under Glass. */
     <header
       data-slot="chat-header"
-      className="grid flex-none grid-cols-[64px_minmax(0,1fr)_64px] items-center border-b border-gray-alpha-400 bg-surface-raised px-3 py-2.5"
+      className="flex flex-none items-center gap-1 border-b border-gray-alpha-400 bg-surface-raised py-2.5 ps-2 pe-2"
     >
-      <div>
-        <button
-          type="button"
-          ref={closeRef}
-          data-slot="chat-close"
-          onClick={onClose}
-          aria-label={t("chat.close")}
-          title={t("chat.close")}
-          className={ROUND_BUTTON}
-        >
-          <X aria-hidden="true" className="size-3.5" />
-        </button>
-      </div>
-      <h2 className="truncate text-center text-[14px] leading-[21px] font-medium text-gray-1000">
+      <Button
+        ref={closeRef}
+        variant="ghost"
+        size="icon-sm"
+        data-slot="chat-close"
+        onClick={onClose}
+        aria-label={t("chat.close")}
+        title={t("chat.close")}
+        className="text-gray-900"
+      >
+        <X aria-hidden="true" className="size-3.5" />
+      </Button>
+      <h2 className="min-w-0 flex-1 truncate text-[14px] leading-[21px] font-medium text-gray-1000">
         {t("chat.title")}
       </h2>
-      <div className="flex items-center justify-end gap-1.5">
-        <ChatHistoryMenu
-          conversations={history}
-          currentId={currentId}
-          open={historyOpen}
-          onOpenChange={onHistoryOpenChange}
-          onSelect={onSelectConversation}
-        />
-        <button
-          type="button"
-          data-slot="chat-new"
-          onClick={onNewChat}
-          disabled={busy}
-          aria-label={t("chat.newChat")}
-          title={t("chat.newChat")}
-          className={ROUND_BUTTON}
-        >
-          <Plus aria-hidden="true" className="size-4" />
-        </button>
-      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            data-slot="chat-more"
+            aria-label={t("common.more")}
+            className="text-gray-900"
+          >
+            <MoreHorizontal aria-hidden="true" className="size-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-60">
+          <DropdownMenuItem
+            data-slot="chat-new"
+            disabled={busy}
+            onSelect={onNewChat}
+          >
+            {t("chat.newChat")}
+          </DropdownMenuItem>
+          <ChatHistorySubmenu
+            conversations={history}
+            currentId={currentId}
+            open={historyOpen}
+            onOpenChange={onHistoryOpenChange}
+            onSelect={onSelectConversation}
+          />
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>{t("chat.scopeLabel")}</DropdownMenuLabel>
+          <DropdownMenuRadioGroup
+            value={workspace}
+            // SAFETY: every radio item's value comes from SCOPES, which is the
+            // workspace union itself, so the group can only report one of them.
+            onValueChange={(next) =>
+              onWorkspaceChange(next as AgentPanelWorkspaceV1)
+            }
+          >
+            {SCOPES.map((scope) => (
+              <DropdownMenuRadioItem key={scope} value={scope} disabled={busy}>
+                {t(`chat.scope.${scope}`)}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </header>
   );
 };
@@ -400,6 +448,8 @@ export const ChatSheet: React.FC<ChatSheetProps> = ({
           onHistoryOpenChange={onHistoryOpenChange}
           onSelectConversation={onSelectConversation}
           onNewChat={onNewChat}
+          workspace={workspace}
+          onWorkspaceChange={onWorkspaceChange}
         />
         <div
           data-slot="chat-scroll"
@@ -481,7 +531,6 @@ export const ChatSheet: React.FC<ChatSheetProps> = ({
           fieldRef={fieldRef}
           running={running}
           disabled={composerDisabled}
-          onWorkspaceChange={onWorkspaceChange}
           onDraftChange={onDraftChange}
           onSend={onSend}
           onStop={onStop}

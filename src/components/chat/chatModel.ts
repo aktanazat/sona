@@ -56,7 +56,7 @@ export const actionLine = (
 /**
  * What the relay is doing, as the sheet needs to know it.
  *
- * Nine relay statuses collapse onto six, because the sheet acts on exactly six
+ * Ten relay statuses collapse onto six, because the sheet acts on exactly six
  * things: it has not asked yet, the agent is off, it is unpaired, the relay is
  * away, something else went wrong, or it works. Whether a turn is running and
  * whether a proposal is on screen are separate facts read from the status
@@ -90,10 +90,11 @@ export const chatPhase = (status: AgentPanelStatusV1 | null): ChatPhase => {
       return "offline";
     case "ready":
       return "ready";
-    /* Invalid pairing, a missing secret, an answer that failed verification, a
-     * rejection from the far side: all of them mean the same thing to someone
-     * looking at a chat window — it is not going to answer, and Settings is
-     * where the pairing lives. */
+    /* Invalid pairing, a missing secret, an answer that failed verification or
+     * came back for the workspace that did not ask, a rejection from the far
+     * side: all of them mean the same thing to someone looking at a chat
+     * window — it is not going to answer, and Settings is where the pairing
+     * lives. */
     default:
       return "error";
   }

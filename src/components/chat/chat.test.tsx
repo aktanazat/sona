@@ -20,7 +20,6 @@ import type {
   SonaAgentChatTurnV1,
 } from "@/bindings";
 import { askSona } from "@/components/commandPaletteSearch";
-import { ChatHistoryList } from "./ChatHistoryMenu";
 import { CHAT_ERROR_KEYS, ChatSheet } from "./ChatSheet";
 import { sendSheetTurn } from "./ChatSheetHost";
 import type { ChatPhase } from "./chatModel";
@@ -62,6 +61,7 @@ const localeFile = path.join(
 const en = JSON.parse(fs.readFileSync(localeFile, "utf8")) as {
   common: {
     open: string;
+    more: string;
   };
   settings: {
     agents: {
@@ -79,16 +79,13 @@ const en = JSON.parse(fs.readFileSync(localeFile, "utf8")) as {
     empty: string;
     title: string;
     close: string;
-    history: string;
-    historyEmpty: string;
     newChat: string;
     placeholder: string;
-    scopeLabel: string;
+    placeholderConfig: string;
     send: string;
     stop: string;
     retry: string;
     openSettings: string;
-    scope: Record<"sona_chat" | "sona_config", string>;
     workedFor: string;
     error: Record<
       "unreachable" | "refused" | "failed" | "too_many_lookups",
@@ -301,42 +298,65 @@ describe("the column's shape", () => {
     expect(occurrences(markup, "w-[340px]")).toBe(2);
   });
 
-  test("the header names the chat between one X and two round controls", () => {
+  /* Two glyphs and a name. Every other verb the column carries — a new chat,
+   * an earlier one, which sandbox answers — is inside the one menu, and the
+   * menu's own contents are portalled, so what is checkable here is that the
+   * header offers exactly two presses. */
+  test("the header is the title, the way out, and one menu", () => {
     const markup = sheet();
+    const header = markup.slice(
+      markup.indexOf('data-slot="chat-header"'),
+      markup.indexOf("</header>"),
+    );
 
-    expect(occurrences(markup, 'data-slot="chat-close"')).toBe(1);
-    expect(occurrences(markup, 'data-slot="chat-history"')).toBe(1);
-    expect(occurrences(markup, 'data-slot="chat-new"')).toBe(1);
-    expect(markup).toContain(`aria-label="${en.chat.close}"`);
-    expect(markup).toContain(`aria-label="${en.chat.history}"`);
-    expect(markup).toContain(`aria-label="${en.chat.newChat}"`);
-    expect(markup).toContain(`<h2`);
-    expect(markup).toContain(en.chat.title);
+    expect(occurrences(header, "<button")).toBe(2);
+    expect(occurrences(header, 'data-slot="chat-close"')).toBe(1);
+    expect(occurrences(header, 'data-slot="chat-more"')).toBe(1);
+    expect(header).toContain(`aria-label="${en.chat.close}"`);
+    expect(header).toContain(`aria-label="${en.common.more}"`);
+    expect(header).toContain(`<h2`);
+    expect(header).toContain(en.chat.title);
     expect(markup).toContain("border-b border-gray-alpha-400");
   });
 
-  test("empty: one invitation, a named scope row and a composer", () => {
+  test("empty: one invitation, and a composer that is a field and a glyph", () => {
     const markup = sheet();
 
     expect(markup).toContain(escaped(en.chat.empty));
-    expect(markup).toContain(en.chat.scopeLabel);
-    expect(occurrences(markup, 'role="radio"')).toBe(2);
     expect(markup).toContain(`placeholder="${en.chat.placeholder}"`);
     expect(markup).toContain(`aria-label="${en.chat.send}"`);
     expect(markup).not.toContain('data-slot="chat-stop"');
+    // The scope chips went into the header's menu; the band is the question.
+    expect(markup).not.toContain('role="radio"');
   });
 
-  test("the Configure workspace is distinct from the Settings destination", () => {
-    const markup = sheet({ phase: "unpaired", workspace: "sona_config" });
+  /* The chosen sandbox is no longer a chip on screen, so the field is what
+   * says it: a reader mid-sentence in Configure would otherwise have nothing
+   * telling them this question proposes a settings change. */
+  test("each scope names itself in the field", () => {
+    const cases = [
+      ["sona_chat", "placeholder"],
+      ["sona_config", "placeholderConfig"],
+    ] as const;
 
-    expect(en.chat.scope.sona_config).not.toBe(en.chat.openSettings);
-    expect(markup).toContain(en.chat.scope.sona_config);
-    expect(markup).toContain(en.chat.openSettings);
+    for (const [workspace, key] of cases)
+      expect(sheet({ phase: "unpaired", workspace })).toContain(
+        `placeholder="${en.chat[key]}"`,
+      );
+  });
+
+  /* Settings is a destination, Configure is a sandbox; one column shows both
+   * words, so they may not be the same word. */
+  test("the Configure scope is distinct from the Settings destination", () => {
+    expect(en.chat.placeholderConfig).not.toBe(en.chat.openSettings);
+    expect(sheet({ phase: "unpaired", workspace: "sona_config" })).toContain(
+      en.chat.openSettings,
+    );
   });
 
   /* One sentence for both scopes. The empty state is keyed on an absent
    * conversation and nothing else, so a sentence that is only true of Ask is
-   * a sentence that lies to whoever has Settings selected. */
+   * a sentence that lies to whoever has Configure selected. */
   test("empty: the same invitation under either scope", () => {
     for (const workspace of ["sona_chat", "sona_config"] as const)
       expect(sheet({ workspace })).toContain(escaped(en.chat.empty));
@@ -896,66 +916,8 @@ describe("the states where nothing would answer", () => {
   });
 });
 
-describe("the history popover", () => {
-  /* Radix portals the popover's content to the document body, which server
-   * rendering has none of — so what a press on the clock shows is checked
-   * through the list itself. */
-  const list = (
-    conversations: readonly AgentChatConversationSummaryV1[],
-    currentId: string | null = null,
-  ): string =>
-    paint(
-      <ChatHistoryList
-        conversations={conversations}
-        currentId={currentId}
-        onSelect={noop}
-      />,
-    );
-
-  test("no history: one sentence, not an empty box", () => {
-    expect(list([])).toContain(escaped(en.chat.historyEmpty));
-  });
-
-  test("with history: one row per conversation, by its title", () => {
-    const markup = list([
-      {
-        conversation_id: "c1",
-        title: "What did we decide about pricing?",
-        updated_at_utc_ms: 1,
-      },
-      {
-        conversation_id: "c2",
-        title: "Who owes the deck?",
-        updated_at_utc_ms: 2,
-      },
-    ]);
-
-    expect(occurrences(markup, "<button")).toBe(2);
-    expect(markup).toContain("What did we decide about pricing?");
-    expect(markup).toContain("Who owes the deck?");
-    expect(markup).not.toContain(escaped(en.chat.historyEmpty));
-  });
-
-  /* Picking one loads it, so the list has to say which one you are already in
-   * — otherwise twenty rows include the one you are reading and nothing marks
-   * it. */
-  test("the conversation on screen is marked as current", () => {
-    const markup = list(
-      [{ conversation_id: "c1", title: "Pricing", updated_at_utc_ms: 1 }],
-      "c1",
-    );
-
-    expect(markup).toContain('aria-current="true"');
-  });
-
-  /* The trigger lives in the sheet's header whether or not it is pressed. */
-  test("the clock is in the sheet's header", () => {
-    expect(sheet()).toContain('data-slot="chat-history"');
-  });
-});
-
 describe("the model behind the sheet", () => {
-  test("nine relay statuses collapse onto the six the sheet acts on", () => {
+  test("ten relay statuses collapse onto the six the sheet acts on", () => {
     const status = (
       relay: AgentPanelStatusV1["relay_status"],
     ): AgentPanelStatusV1 => ({
@@ -976,6 +938,7 @@ describe("the model behind the sheet", () => {
       "invalid_configuration",
       "secret_unavailable",
       "untrusted_response",
+      "workspace_mismatch",
       "remote_rejected",
       "ownership_rejected",
     ] as const) {
