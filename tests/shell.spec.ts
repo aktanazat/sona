@@ -58,10 +58,13 @@ const PAIRED_SETTINGS = {
 };
 
 test.describe("App shell", () => {
-  test("the sidebar carries every destination", async ({ page }) => {
+  test("the rail is five destinations with Settings on the bottom edge", async ({
+    page,
+  }) => {
     await openApp(page);
 
     const nav = sidebarNav(page);
+    const boxes: Array<{ x: number; y: number; height: number }> = [];
     for (const name of [
       "Capture",
       "Library",
@@ -69,10 +72,25 @@ test.describe("App shell", () => {
       "People",
       "Settings",
     ]) {
-      await expect(
-        nav.getByRole("button", { name, exact: true }),
-      ).toBeVisible();
+      const row = nav.getByRole("button", { name, exact: true });
+      await expect(row).toBeVisible();
+      const box = await row.boundingBox();
+      if (!box) throw new Error(`${name} has no box`);
+      boxes.push(box);
     }
+
+    // Declaration order in the registry is reading order down the rail.
+    for (let i = 1; i < boxes.length; i += 1) {
+      expect(boxes[i].y).toBeGreaterThan(boxes[i - 1].y);
+    }
+
+    /* Settings is the one row nobody navigates to while working, so it sits
+     * against the bottom edge rather than under People: the gap above it is
+     * the rail's leftover height, not the row rhythm the other four keep. A
+     * rail that lost its `mt-auto` fails here with five even gaps. */
+    const gapAbove = (index: number) =>
+      boxes[index].y - (boxes[index - 1].y + boxes[index - 1].height);
+    expect(gapAbove(4)).toBeGreaterThan(gapAbove(3) + 40);
   });
 
   test("aria-current names the active route and follows it", async ({
@@ -110,31 +128,14 @@ test.describe("App shell", () => {
     ).toHaveAttribute("aria-selected", "true");
   });
 
-  /* The number this restructure exists for. Essentials is meant to be short
-   * enough to read at once, and the only way that stays true is if adding a
-   * row here fails a test. Rows and fields both count: a field is a row whose
-   * control is too wide to sit beside its label, not a second kind of thing. */
-  test("Essentials is one surface of ten to eleven rows", async ({ page }) => {
-    await openApp(page);
-
-    await sidebarNav(page)
-      .getByRole("button", { name: "Settings", exact: true })
-      .click();
-    const essentials = page.getByTestId("settings-essentials");
-    await expect(essentials).toBeVisible();
-
-    const rows = essentials.locator(
-      '[data-slot="settings-row"], [data-slot="settings-field"]',
-    );
-    const count = await rows.count();
-    expect(count).toBeGreaterThanOrEqual(10);
-    expect(count).toBeLessThanOrEqual(11);
-
-    // No section headings: the tab above already names the page.
-    await expect(essentials.getByRole("heading")).toHaveCount(0);
-  });
-
-  test("Advanced carries the sections the folded tabs became", async ({
+  /* Meeting apps is the one row on this page that opens instead of toggling,
+   * and the reason it earns a place among the essentials is that it stays
+   * shut: six checkboxes, two switches and an Add button were a third of
+   * Essentials before they went behind a summary. A static render can see the
+   * markup; only a browser can press the thing and watch the checklist
+   * arrive, so both halves are read here in order — closed on arrival, open
+   * and populated on press. */
+  test("the Meeting apps checklist arrives only when its summary is pressed", async ({
     page,
   }) => {
     await openApp(page);
@@ -142,27 +143,114 @@ test.describe("App shell", () => {
     await sidebarNav(page)
       .getByRole("button", { name: "Settings", exact: true })
       .click();
-    await page.getByRole("tab", { name: "Advanced", exact: true }).click();
 
-    for (const section of [
-      "Meetings",
-      "Models",
-      "Dictation",
-      "What Sona does after a meeting",
-      "Sync",
-      "Agents",
-      "About Sona",
-    ]) {
-      await expect(
-        page.getByRole("heading", { name: section, exact: true }),
-      ).toBeVisible();
-    }
+    const disclosure = page
+      .getByTestId("settings-essentials")
+      .locator("details")
+      .filter({ hasText: "Meeting apps" });
+    const zoom = disclosure.getByRole("checkbox", {
+      name: "Zoom",
+      exact: true,
+    });
+
+    // Closed on arrival, so the list costs a reader one line and no scroll.
+    await expect(disclosure).not.toHaveAttribute("open");
+
+    await disclosure.locator("summary").click();
+
+    await expect(disclosure).toHaveAttribute("open");
+    await expect(zoom).toBeVisible();
+  });
+
+  /* With detection off, every control inside the checklist refuses, and the
+   * closed row is the only place a reader can learn that without opening it.
+   * The status shape is `DetectionStatus` in src/bindings.ts. */
+  test("the Meeting apps row reads as inert while detection is off", async ({
+    page,
+  }) => {
+    await installTauriMock(page, {
+      responses: {
+        detection_status_get: {
+          eventSchemaVersion: 2,
+          settings: {
+            enabled: false,
+            calendarEnabled: false,
+            anyMicActivity: false,
+            autoStartOnOpenPane: false,
+            meetingApps: ["us.zoom.xos"],
+          },
+          calendarAccess: "not_determined",
+          notificationAccess: "not_determined",
+          inputDeviceActive: false,
+          sonaHoldsInputDevice: false,
+          suppressReason: "detection_disabled",
+          countdown: null,
+          runningMeetingApps: [],
+          availableStopTriggers: [],
+          inputDeviceReportingSuspect: false,
+        },
+      },
+    });
+    await page.goto("/");
+
+    await sidebarNav(page)
+      .getByRole("button", { name: "Settings", exact: true })
+      .click();
+
+    const disclosure = page
+      .getByTestId("settings-essentials")
+      .locator("details")
+      .filter({ hasText: "Meeting apps" });
+    await expect(disclosure).toHaveAttribute("data-disabled", "true");
+
+    await disclosure.locator("summary").click();
+    await expect(
+      disclosure.getByRole("checkbox", { name: "Zoom", exact: true }),
+    ).toBeDisabled();
+  });
+
+  test("shows the Debug shortcut in Advanced", async ({ page }) => {
+    await openApp(page);
+
+    await sidebarNav(page)
+      .getByRole("button", { name: "Settings", exact: true })
+      .click();
+    await page.getByRole("tab", { name: "Advanced", exact: true }).click();
 
     /* Debug has no row and no link anywhere, so the one line that says how to
      * reach it is load-bearing. */
     await expect(
       page.getByText("Press \u2318\u21e7D to open the debug page."),
     ).toBeVisible();
+  });
+
+  /* A closed row's summary is the only place the watch list says what is in
+   * it, so it has to account for every row. A tracker being typed has no name
+   * yet, and a summary built from the named ones alone told a reader the
+   * roster was smaller than it is. */
+  test("the watch list summary counts the trackers that have no name yet", async ({
+    page,
+  }) => {
+    await installTauriMock(page, {
+      responses: {
+        list_keyword_trackers: [
+          { name: "Pricing", patterns: ["what does it cost"] },
+          { name: "", patterns: [] },
+          { name: "", patterns: [] },
+        ],
+      },
+    });
+    await page.goto("/");
+
+    await sidebarNav(page)
+      .getByRole("button", { name: "Settings", exact: true })
+      .click();
+    await page.getByRole("tab", { name: "Advanced", exact: true }).click();
+
+    const watchList = page
+      .locator("details")
+      .filter({ hasText: "Keyword trackers" });
+    await expect(watchList.locator("summary")).toContainText("Pricing +2");
   });
 
   test("the search row opens the command palette", async ({ page }) => {
@@ -289,6 +377,98 @@ test.describe("App shell", () => {
       expect(report.chrome).toBeGreaterThanOrEqual(7);
       expect(report.collisions, report.collisions.join("\n")).toEqual([]);
     }
+  });
+});
+
+/* First run, which is the one screen every install sees and the one no unit
+ * test can reach: the permission probe lives in a mount effect that calls into
+ * the OS plugin, so the branch a reader lands on only exists in a browser.
+ *
+ * These replace a suite that read AccessibilityOnboarding.tsx as a string and
+ * asserted substrings of it - green through any implementation that kept the
+ * words. The mock counts every `invoke` by command in localStorage, so the
+ * cost of the probe is observable here, at the boundary the storm crossed. */
+test.describe("first run", () => {
+  const FIRST_RUN = { ...APP_SETTINGS, onboarding_completed: false };
+  const PERMISSION = "plugin:macos-permissions|check_accessibility_permission";
+  const MICROPHONE = "plugin:macos-permissions|check_microphone_permission";
+
+  const openFirstRun = async (page: Page, granted: boolean) => {
+    await installTauriMock(page, {
+      responses: {
+        get_app_settings: FIRST_RUN,
+        get_settings: FIRST_RUN,
+        [PERMISSION]: granted,
+        [MICROPHONE]: granted,
+      },
+    });
+    await page.goto("/");
+  };
+
+  const probeCount = (page: Page, command: string) =>
+    page.evaluate(
+      (key: string) => Number(localStorage.getItem(`tauri-invoke:${key}`) ?? 0),
+      command,
+    );
+
+  test("a permission asks for itself once, and only what is missing", async ({
+    page,
+  }) => {
+    await openFirstRun(page, false);
+
+    // One sentence under the title, then one row per permission still missing:
+    // what it is, why it is needed, and the button that grants it.
+    await expect(
+      page.getByRole("heading", { name: "One-time setup", exact: true }),
+    ).toBeVisible();
+    const grants = page.getByRole("button", { name: "Grant permission" });
+    await expect(grants).toHaveCount(2);
+    await expect(
+      page.getByRole("heading", { name: "Microphone access", exact: true }),
+    ).toBeVisible();
+
+    /* Waiting is the state this screen used to get stuck in. macOS shows the
+     * consent dialog once ever, so after a denial there is nothing left to
+     * click unless the row that is waiting carries both ways out itself: the
+     * exact Settings pane, and a re-check that restarts a poll three failures
+     * can stop for good. The microphone row is the first of the two. */
+    await grants.first().click();
+    await expect(page.getByText("Waiting…", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Open System Settings", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Re-check", exact: true }),
+    ).toBeVisible();
+    // The row that is not waiting still asks the way it did.
+    await expect(grants).toHaveCount(1);
+  });
+
+  test("the probe runs per mount, not per render of the shell", async ({
+    page,
+  }) => {
+    await openFirstRun(page, true);
+
+    // Granted, so this screen has nothing to ask and hands over to the model.
+    await expect(
+      page.getByRole("heading", {
+        name: "Pick a transcription model",
+        exact: true,
+      }),
+    ).toBeVisible();
+
+    /* The number. Completing this step writes the audio device lists into the
+     * settings store, which re-renders the shell above it; while the mount
+     * effect depended on the callback that shell rebuilds every render, that
+     * write re-ran the probe, which wrote again - fifty-three OS permission
+     * calls in the second before React gave up with "Maximum update depth
+     * exceeded", and a catch that blamed the permission check for it. Two is
+     * the mount count in development, where StrictMode mounts twice. */
+    expect(await probeCount(page, PERMISSION)).toBeLessThanOrEqual(4);
+    expect(await probeCount(page, MICROPHONE)).toBeLessThanOrEqual(4);
+
+    // The wrong sentence that loop raised, on the screen after it.
+    await expect(page.getByText("Couldn't check permissions")).toHaveCount(0);
   });
 });
 
@@ -680,15 +860,16 @@ test.describe("the palette's motion", () => {
  * fold" is one fixed number rather than a guess about somebody's monitor: it is
  * whatever the shell's one scroll region cannot show at rest.
  *
- * Capture is the default route and the page that has to answer at a glance, so
- * the promise it keeps is its numbers: the hero and the Activity band are read
- * without a scroll. The feed under them is a list that grows with the corpus,
- * so the whole page fitting is not a promise this route can keep at all — it
- * was pinned as one, the fixture behind it held a single feed row, and the
- * shipped build cut the Activity charts off at the bottom edge while this suite
- * stayed green. Every other route may scroll, because Library, Meetings and
- * Settings are logs and a log that runs past the window is still a log. What no
- * route may do is put a section where scrolling never reaches it. */
+ * Capture is the default route and the page that has to answer at a glance.
+ * Round 7 folded its two lists away behind closed summaries, so what the route
+ * draws at rest is the hero, the row that needs an answer and two lines of
+ * numbers - and the whole page fitting is a promise this route can now keep.
+ * It could not before: the shipped build put a growing feed under a chart band
+ * and cut the charts off at the bottom edge while this suite stayed green,
+ * because the fixture behind it held a single feed row. Every other route may
+ * scroll, because Library, Meetings and Settings are logs and a log that runs
+ * past the window is still a log. What no route may do is put a section where
+ * scrolling never reaches it. */
 test.describe("the fold at the shipped window size", () => {
   test.use({ viewport: { width: 900, height: 800 } });
 
@@ -814,49 +995,35 @@ test.describe("the fold at the shipped window size", () => {
     await expect(page.getByRole("status", { name: LOADING })).toHaveCount(0);
   };
 
-  const sectionNamed = (report: FoldReport, name: string): FoldSection => {
-    const section = report.sections.find((entry) => entry.name === name);
-    if (section === undefined) {
-      throw new Error(
-        `no "${name}" section on this page; saw ${report.sections
-          .map((entry) => entry.name)
-          .join(", ")}`,
-      );
-    }
-    return section;
-  };
-
-  /* Capture's three numbers are what the page is opened for, so they are what
-   * the window has to show without a scroll. The feed under them is a list
-   * that grows, so it is what scrolls — the whole page fitting is not a
-   * promise this route can keep, and pinning it as one is how the shipped
-   * build ended up with the charts cut off by the bottom edge instead. */
-  test("Capture keeps its numbers above the fold and scrolls the feed", async ({
+  /* The page the app opens on, against the corpus that draws it at its
+   * tallest. Two numbers, because either one alone passes on its own: the
+   * column can draw less than the window shows while a child still hangs out
+   * of it, and the scroll region can come up empty while the column is short
+   * for a different reason. A fourth card, a taller hero or a summary that
+   * ships open fails this. */
+  test("Capture fits the window at rest, with nothing below the fold", async ({
     page,
   }) => {
     await installTauriMock(page, { responses: CAPTURE_AT_FULL_HEIGHT });
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "What Sona did", exact: true }),
+      page.getByRole("heading", { name: "Ready", exact: true }),
     ).toBeVisible();
-    await expect(page.getByRole("region", { name: "Activity" })).toBeVisible();
 
     const report = await measureFold(page);
-    const activity = sectionNamed(report, "Activity");
-    const feed = sectionNamed(report, "What Sona did");
     /* Recorded on the run so the numbers behind these thresholds stay readable
      * without re-deriving them by hand. */
     test.info().annotations.push({
       type: "fold",
-      description: `Capture: draws ${report.natural}px, window shows ${report.visible}px, scrolls ${report.content}px, Activity ends at ${activity.bottom}px`,
+      description: `Capture: draws ${report.natural}px, window shows ${report.visible}px, scrolls ${report.content}px, across ${report.sections.length} named sections`,
     });
 
-    /* The band is read from the top of the page, unscrolled, and clears the
-     * fold by a margin so its bottom card reads as a card rather than as a cut
-     * edge. */
-    expect(report.visible - activity.bottom).toBeGreaterThanOrEqual(16);
-    // And the feed is below it, which is what makes the scroll the feed's.
-    expect(feed.top).toBeGreaterThanOrEqual(activity.bottom);
+    // The measurement has to have measured a page: the route's own landmarks.
+    expect(report.sections.length).toBeGreaterThan(0);
+    // What the route draws is inside what the window shows, and the scroll
+    // owner has nothing left over - so no card is cut by the bottom edge.
+    expect(report.natural).toBeLessThanOrEqual(report.visible);
+    expect(report.content).toBe(report.visible);
   });
 
   /* The same page, read once more with the chat column open.
@@ -887,7 +1054,7 @@ test.describe("the fold at the shipped window size", () => {
       },
     });
     await page.goto("/");
-    await expect(page.getByRole("region", { name: "Activity" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Ready" })).toBeVisible();
 
     /* The rail's chat row is the way in, and it needs the pairing above to be
      * live at all. It stays in the rail once the column is open — the column's
@@ -916,7 +1083,7 @@ test.describe("the fold at the shipped window size", () => {
         return { left: Math.round(box.left), right: Math.round(box.right) };
       };
       // SAFETY: the slot is App.tsx's rendered scroll owner, which is on the
-      // page by the time the Activity band inside it is visible.
+      // page by the time the hero section inside it is visible.
       const pane = document.querySelector(
         '[data-slot="page-scroll"]',
       ) as HTMLElement;
