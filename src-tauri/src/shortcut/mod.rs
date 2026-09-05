@@ -437,10 +437,12 @@ pub fn change_keyboard_implementation_setting(
     // Unregister all shortcuts from the current implementation
     unregister_all_shortcuts(&app, current_impl);
 
-    // Update the setting
-    settings::update_settings(&app, |settings| {
+    // The store's memory names the new implementation whether or not the disk
+    // takes it, and every registration below reads that memory, so the switch
+    // completes before a refused write is reported.
+    let persisted = settings::update_settings(&app, |settings| {
         settings.keyboard_implementation = new_impl;
-    })?;
+    });
 
     // Carbon fallback registrations use the Tauri plugin. Remove them before
     // registering the full Tauri implementation to avoid duplicate conflicts.
@@ -452,6 +454,7 @@ pub fn change_keyboard_implementation_setting(
     if new_impl == KeyboardImplementation::HandyKeys && initialize_handy_keys_with_rollback(&app)? {
         // Shortcuts already registered during init.
         crate::secure_input::reconcile_fallback(&app);
+        persisted?;
         return Ok(ImplementationChangeResult {
             success: true,
             reset_bindings: vec![],
@@ -474,6 +477,7 @@ pub fn change_keyboard_implementation_setting(
 
     info!("Keyboard implementation switched to {:?}", new_impl);
 
+    persisted?;
     Ok(ImplementationChangeResult {
         success: true,
         reset_bindings,
@@ -607,10 +611,11 @@ fn initialize_handy_keys_with_rollback(app: &AppHandle) -> Result<bool, String> 
 
     if let Err(e) = handy_keys::init_shortcuts(app) {
         error!("Failed to initialize HandyKeys: {}", e);
-        // Rollback to Tauri
-        settings::update_settings(app, |settings| {
+        // Rollback to Tauri. The fallback below must run even when the store
+        // refuses the write; the settings seam logs that failure.
+        let _ = settings::update_settings(app, |settings| {
             settings.keyboard_implementation = KeyboardImplementation::Tauri;
-        })?;
+        });
         crate::secure_input::reconcile_fallback(app);
         tauri_impl::init_shortcuts(app);
         return Err(format!(
@@ -1575,17 +1580,20 @@ fn reload_model_on_next_use(app: &AppHandle) {
     tm.reload_model_on_next_use();
 }
 
+// The accelerator in the store's memory is the one the next model load reads,
+// whether or not the disk took it, so the reload is flagged before a refused
+// write is reported.
 #[tauri::command]
 #[specta::specta]
 pub fn change_transcribe_accelerator_setting(
     app: AppHandle,
     accelerator: settings::TranscribeAcceleratorSetting,
 ) -> Result<(), String> {
-    settings::update_settings(&app, |settings| {
+    let persisted = settings::update_settings(&app, |settings| {
         settings.transcribe_accelerator = accelerator;
-    })?;
+    });
     reload_model_on_next_use(&app);
-    Ok(())
+    Ok(persisted?)
 }
 
 #[tauri::command]
@@ -1594,21 +1602,21 @@ pub fn change_ort_accelerator_setting(
     app: AppHandle,
     accelerator: settings::OrtAcceleratorSetting,
 ) -> Result<(), String> {
-    settings::update_settings(&app, |settings| {
+    let persisted = settings::update_settings(&app, |settings| {
         settings.ort_accelerator = accelerator;
-    })?;
+    });
     reload_model_on_next_use(&app);
-    Ok(())
+    Ok(persisted?)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn change_transcribe_gpu_device(app: AppHandle, device: Option<String>) -> Result<(), String> {
-    settings::update_settings(&app, |settings| {
+    let persisted = settings::update_settings(&app, |settings| {
         settings.transcribe_gpu_device = device;
-    })?;
+    });
     reload_model_on_next_use(&app);
-    Ok(())
+    Ok(persisted?)
 }
 
 /// Return which accelerators and GPU devices are available for this build.

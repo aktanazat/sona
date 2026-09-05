@@ -982,15 +982,20 @@ fn commit_mode_mutation<E>(
 where
     E: From<crate::settings::SettingsPersistError>,
 {
-    let (result, old_bindings, new_bindings) = settings::try_update_settings(app, |settings| {
-        let old_bindings = settings.bindings.clone();
-        apply(settings)?;
-        let result = mode_settings_snapshot(settings);
-        Ok::<_, E>((result, old_bindings, settings.bindings.clone()))
-    })?;
+    let ((result, old_bindings, new_bindings), persisted) =
+        settings::try_update_settings_committed(app, |settings| {
+            let old_bindings = settings.bindings.clone();
+            apply(settings)?;
+            let result = mode_settings_snapshot(settings);
+            Ok::<_, E>((result, old_bindings, settings.bindings.clone()))
+        })?;
 
+    // The store's memory holds the new bindings whether or not the disk took
+    // them, so the registered chords follow that memory before a refused write
+    // is reported.
     crate::shortcut::reconcile_mode_shortcuts(app, &old_bindings, &new_bindings);
     emit_modes_changed(app, &result);
+    persisted?;
     Ok(result)
 }
 

@@ -2980,13 +2980,15 @@ fn write_settings_locked(
 /// Atomically read, mutate, and write the typed settings document. The update
 /// closure must not call another settings function because it runs under the
 /// settings-store lock.
+///
+/// The closure's answer comes back beside the write's own outcome rather than
+/// being dropped with a refused write: the store's memory takes the mutation
+/// whether or not the disk does, and the wrappers below decide who needs to
+/// hear about the memory before the refusal.
 fn try_update_settings_inner<R, E>(
     app: &AppHandle,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
-) -> Result<(R, u64), E>
-where
-    E: From<SettingsPersistError>,
-{
+) -> Result<(R, u64, Result<(), SettingsPersistError>), E> {
     let (result, revision, settings, persisted) = {
         let _settings_lock = lock_settings_store();
         let mut settings = get_settings_locked(app);
@@ -3018,8 +3020,7 @@ where
         // reason is recorded here once, where it still exists.
         warn!("Failed to persist settings: {error}");
     }
-    persisted?;
-    Ok((result, revision))
+    Ok((result, revision, persisted))
 }
 
 pub(crate) fn try_update_settings_with_revision<R, E>(
@@ -3029,7 +3030,21 @@ pub(crate) fn try_update_settings_with_revision<R, E>(
 where
     E: From<SettingsPersistError>,
 {
-    try_update_settings_inner(app, update)
+    let (result, revision, persisted) = try_update_settings_inner(app, update)?;
+    persisted?;
+    Ok((result, revision))
+}
+
+/// The write for a mutation the runtime has to follow. A refused disk write
+/// still hands back the closure's answer, because the store's memory already
+/// took the mutation and whatever tracks that memory - a registered shortcut,
+/// a window listening for the change - has to be brought into line before the
+/// refusal is reported.
+pub(crate) fn try_update_settings_committed<R, E>(
+    app: &AppHandle,
+    update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
+) -> Result<(R, Result<(), SettingsPersistError>), E> {
+    try_update_settings_inner(app, update).map(|(result, _, persisted)| (result, persisted))
 }
 
 pub fn try_update_settings<R, E>(
@@ -3039,7 +3054,9 @@ pub fn try_update_settings<R, E>(
 where
     E: From<SettingsPersistError>,
 {
-    try_update_settings_inner(app, update).map(|(result, _)| result)
+    let (result, persisted) = try_update_settings_committed(app, update)?;
+    persisted?;
+    Ok(result)
 }
 
 /// The write for a closure that cannot fail on its own. The store still can,

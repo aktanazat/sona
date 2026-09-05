@@ -47,11 +47,15 @@ const REWRITE_UNAVAILABLE_ERROR: &str = "command_rewrite_unavailable";
 #[tauri::command]
 #[specta::specta]
 pub fn change_command_mode_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
-    crate::settings::update_settings(&app, |settings| {
+    // The flag is in the store's memory whether or not the disk took it, and
+    // registration reads that memory, so the chord follows it before a refused
+    // write is reported.
+    let persisted = crate::settings::update_settings(&app, |settings| {
         settings.command_mode_enabled = enabled;
-    })?;
+    });
     crate::shortcut::suspend_all_shortcuts(&app);
     crate::shortcut::resume_all_shortcuts(&app);
+    persisted?;
     Ok(())
 }
 
