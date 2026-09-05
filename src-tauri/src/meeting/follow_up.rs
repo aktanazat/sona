@@ -350,6 +350,7 @@ mod tests {
             status,
             resolved_at_utc_ms: None,
             resolving_operation_id: None,
+            resolved_by: None,
             carried_into_loop_id: None,
             carried_since_at_utc_ms: None,
             at_ms: 0,

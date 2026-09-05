@@ -2239,6 +2239,7 @@
       "ownerUnassigned": "暫無",
       "instead": "實際情況：{{instead}}",
       "carriedForward": "從上次會議順延而來",
+      "closedExternally": "由其他程式關閉",
       "stale": "其他操作先生效了，清單已重新載入。"
     },
     "transcript": {

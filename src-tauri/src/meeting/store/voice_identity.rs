@@ -13,7 +13,7 @@ use crate::meeting::people_types::{
 };
 use crate::meeting::types::{
     MeetingCommandKind, MeetingDiarizationGenerationId, MeetingOperationId, MeetingOrigin,
-    MeetingPhase, MeetingSessionId, OperationReceipt, SourceTrackId, SpeakerId,
+    MeetingPhase, MeetingSessionId, OperationActor, OperationReceipt, SourceTrackId, SpeakerId,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::HashSet;
@@ -858,6 +858,7 @@ impl MeetingStore {
         let receipt = committed_receipt(
             StoreMutation {
                 operation_id: request.operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms: request.requested_at_utc_ms,
                 session_id: request.session_id,
                 expected_revision: request.expected_meeting_revision,

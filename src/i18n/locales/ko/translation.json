@@ -2239,6 +2239,7 @@
       "ownerUnassigned": "아직 없음",
       "instead": "대신: {{instead}}",
       "carriedForward": "이전 미팅에서 이월됨",
+      "closedExternally": "다른 프로그램이 닫았습니다",
       "stale": "다른 변경이 먼저 반영되어 목록을 새로 불러왔습니다."
     },
     "transcript": {

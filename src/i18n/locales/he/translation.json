@@ -2255,6 +2255,7 @@
       "ownerUnassigned": "עדיין אף אחד",
       "instead": "במקום זאת: {{instead}}",
       "carriedForward": "הועבר מפגישה קודמת",
+      "closedExternally": "נסגר על ידי תוכנה אחרת",
       "stale": "מישהו אחר שינה את הנושא הזה לפניך, לכן הרשימה רועננה."
     },
     "transcript": {

@@ -1281,7 +1281,7 @@ fn loops_result(
     let mut facts = HashMap::new();
     let mut scanned = 0usize;
     let mut more = false;
-    'corpus: for meeting in store.corpus_loops().map_err(store_refusal)? {
+    'corpus: for meeting in store.corpus_loops().map_err(store_refusal)?.meetings {
         for row in meeting.rows {
             scanned += 1;
             if scanned > LOOP_SCAN_DEPTH {

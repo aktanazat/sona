@@ -2239,6 +2239,7 @@
       "ownerUnassigned": "未定",
       "instead": "代わりに: {{instead}}",
       "carriedForward": "前回のミーティングから引き継ぎ",
+      "closedExternally": "別のプログラムが閉じました",
       "stale": "別の操作が先に反映されたため、一覧を更新しました。"
     },
     "transcript": {

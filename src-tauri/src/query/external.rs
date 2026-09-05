@@ -49,7 +49,8 @@ use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{
     CaptureCompleteness, EffectiveTranscriptSegment, MeetingCommandError, MeetingCommandKind,
     MeetingHistoryHeadline, MeetingHistorySummary, MeetingListFilter, MeetingOperationId,
-    MeetingPhase, MeetingReviewSnapshot, MeetingSessionId, OperationReceipt, OperationResult,
+    MeetingPhase, MeetingReviewSnapshot, MeetingSessionId, OperationActor, OperationReceipt,
+    OperationResult,
 };
 use crate::meeting::upcoming::{upcoming_window, UPCOMING_DEFAULT_DAYS};
 use crate::meeting::upcoming_types::MeetingUpcomingRow;
@@ -957,12 +958,15 @@ pub(crate) async fn resolve_loop(
         });
     }
     let result = meetings
-        .loop_resolve(MeetingLoopResolveRequest {
-            operation_id: external_loop_resolve_operation_id(loop_id, row.revision),
-            loop_id: loop_id.clone(),
-            expected_revision: row.revision,
-            resolution: MeetingLoopResolution::Done,
-        })
+        .loop_resolve_as(
+            OperationActor::External,
+            MeetingLoopResolveRequest {
+                operation_id: external_loop_resolve_operation_id(loop_id, row.revision),
+                loop_id: loop_id.clone(),
+                expected_revision: row.revision,
+                resolution: MeetingLoopResolution::Done,
+            },
+        )
         .await
         .map_err(command_error(session_id.uuid()))?;
     Ok(ExternalReceipt {
@@ -1203,7 +1207,8 @@ pub(crate) fn loops_page(
     let mut last_scanned_id = None;
     let mut next_cursor = None;
     let mut scanned = 0usize;
-    'corpus: for meeting in store.corpus_loops().map_err(QueryError::from)? {
+    let corpus = store.corpus_loops().map_err(QueryError::from)?;
+    'corpus: for meeting in corpus.meetings {
         for row in meeting.rows {
             if !found_cursor {
                 found_cursor = after_id == Some(row.loop_id.as_str());

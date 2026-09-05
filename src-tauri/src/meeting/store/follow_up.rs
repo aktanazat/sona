@@ -15,7 +15,8 @@ use super::{
     StoreMutation,
 };
 use crate::meeting::types::{
-    MeetingCommandKind, MeetingOperationId, MeetingPhase, MeetingSessionId, OperationReceipt,
+    MeetingCommandKind, MeetingOperationId, MeetingPhase, MeetingSessionId, OperationActor,
+    OperationReceipt,
 };
 use rusqlite::TransactionBehavior;
 
@@ -48,6 +49,7 @@ impl MeetingStore {
         let receipt = committed_receipt(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms: now,
                 session_id,
                 expected_revision: session.revision,

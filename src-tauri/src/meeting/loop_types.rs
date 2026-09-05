@@ -14,7 +14,7 @@
 
 use super::ledger::LedgerFirmness;
 use super::people_types::PersonId;
-use super::types::{ArtifactCitation, MeetingSessionId};
+use super::types::{ArtifactCitation, MeetingSessionId, OperationActor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
@@ -280,6 +280,11 @@ pub struct MeetingLoopRow {
     /// The operation that put this row in its current state, so a caller can
     /// look the receipt back up.
     pub resolving_operation_id: Option<String>,
+    /// Who put the row in the state it is in, read off the receipt
+    /// `resolving_operation_id` names: the person at the keyboard, this app
+    /// acting on its own, or `sona --loop-resolve` from outside it. `None`
+    /// while the row is open, and for a resolution whose receipt is gone.
+    pub resolved_by: Option<OperationActor>,
     /// The successor this loop ran into, when it was carried forward.
     pub carried_into_loop_id: Option<MeetingLoopId>,
     /// The occurrence this loop was first raised at, when it is itself a

@@ -2279,6 +2279,7 @@
       "ownerUnassigned": "لا أحد بعد",
       "instead": "بدلاً من ذلك: {{instead}}",
       "carriedForward": "مُرحّلة من اجتماع سابق",
+      "closedExternally": "أغلقه برنامج آخر",
       "stale": "غيّر شخص آخر هذه الحلقة قبلك، لذا تم تحديث القائمة."
     },
     "transcript": {

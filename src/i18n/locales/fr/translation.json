@@ -2255,6 +2255,7 @@
       "ownerUnassigned": "Personne pour l'instant",
       "instead": "À la place : {{instead}}",
       "carriedForward": "Reporté d'une réunion précédente",
+      "closedExternally": "Fermé par un autre programme",
       "stale": "Quelqu'un a modifié ce point avant vous, la liste a été actualisée."
     },
     "transcript": {

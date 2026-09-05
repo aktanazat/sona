@@ -4751,6 +4751,13 @@ direction: MeetingLoopDirection; status: MeetingLoopStatus; resolved_at_utc_ms: 
  */
 resolving_operation_id: string | null;
 /**
+ * Who put the row in the state it is in, read off the receipt
+ * `resolving_operation_id` names: the person at the keyboard, this app
+ * acting on its own, or `sona --loop-resolve` from outside it. `None`
+ * while the row is open, and for a resolution whose receipt is gone.
+ */
+resolved_by: OperationActor | null;
+/**
  * The successor this loop ran into, when it was carried forward.
  */
 carried_into_loop_id: MeetingLoopId | null;
@@ -5400,7 +5407,15 @@ export type NotificationAccess = "not_determined" | "authorized" | "denied" |
  */
 "unavailable"
 export type OpenLoopsInboxResult = { schema_version: number; revision: number; entries: PersonOpenLoop[] }
-export type OperationActor = "user" | "system"
+export type OperationActor = "user" | "system" |
+/**
+ * A write an outside caller made with the user's consent: `sona
+ * --loop-resolve`, or an MCP client shelling out to it. Neither of the
+ * other two is true of it — nobody pressed anything in the app, and the
+ * app did not decide this on its own — and filing it under `User` made
+ * the corpus's own audit trail wrong in the one field a reader trusts.
+ */
+"external"
 export type OperationReceipt = { schema_version: number; operation_id: MeetingOperationId; session_id: MeetingSessionId | null; actor: OperationActor; command: MeetingCommandKind; expected_revision: number; from_phase: MeetingPhase | null; to_phase: MeetingPhase | null; requested_at_utc_ms: number; committed_at_utc_ms: number | null; result: OperationResult; reason_codes: MeetingReasonCode[]; new_revision: number | null; effect_ids: string[] }
 export type OperationResult = "committed" | "rejected" | "failed"
 /**

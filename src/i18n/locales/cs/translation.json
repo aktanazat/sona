@@ -2263,6 +2263,7 @@
       "ownerUnassigned": "Ještě nikdo",
       "instead": "Místo toho: {{instead}}",
       "carriedForward": "Přeneseno z dřívější schůzky",
+      "closedExternally": "Uzavřeno jiným programem",
       "stale": "Někdo jiný tento bod změnil dřív, seznam byl obnoven."
     },
     "transcript": {

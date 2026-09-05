@@ -2239,6 +2239,7 @@
       "ownerUnassigned": "Chưa có ai",
       "instead": "Thay vào đó: {{instead}}",
       "carriedForward": "Chuyển tiếp từ buổi họp trước",
+      "closedExternally": "Được một chương trình khác đóng",
       "stale": "Người khác đã thay đổi việc này trước, nên danh sách đã được làm mới."
     },
     "transcript": {

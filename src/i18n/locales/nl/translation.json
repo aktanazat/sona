@@ -2247,6 +2247,7 @@
       "ownerUnassigned": "Nog niemand",
       "instead": "In plaats daarvan: {{instead}}",
       "carriedForward": "Meegenomen uit een eerdere vergadering",
+      "closedExternally": "Gesloten door een ander programma",
       "stale": "Iemand anders heeft dit punt eerder verplaatst, dus de lijst is vernieuwd."
     },
     "transcript": {

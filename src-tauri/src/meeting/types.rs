@@ -746,6 +746,12 @@ pub struct MeetingRetentionMutationResult {
 pub enum OperationActor {
     User,
     System,
+    /// A write an outside caller made with the user's consent: `sona
+    /// --loop-resolve`, or an MCP client shelling out to it. Neither of the
+    /// other two is true of it — nobody pressed anything in the app, and the
+    /// app did not decide this on its own — and filing it under `User` made
+    /// the corpus's own audit trail wrong in the one field a reader trusts.
+    External,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

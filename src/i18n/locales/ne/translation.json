@@ -2247,6 +2247,7 @@
       "ownerUnassigned": "अझै कोही छैन",
       "instead": "बरु: {{instead}}",
       "carriedForward": "अघिल्लो बैठकबाट सारिएको",
+      "closedExternally": "अर्को प्रोग्रामले बन्द गरेको",
       "stale": "अरू कसैले यो विषय पहिले सार्‍यो, त्यसैले सूची ताजा गरियो।"
     },
     "transcript": {

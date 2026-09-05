@@ -16,7 +16,7 @@ use crate::meeting::loop_types::{
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
     GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId, MeetingReasonCode,
-    MeetingSessionId, OperationResult,
+    MeetingSessionId, OperationActor, OperationResult,
 };
 use rusqlite::params;
 use std::sync::Arc;
@@ -226,6 +226,7 @@ fn resolving_commits_a_receipt_and_moves_the_row() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();
@@ -252,6 +253,83 @@ fn resolving_commits_a_receipt_and_moves_the_row() {
     );
 }
 
+/// Who closed a row, on the row. Two things close a loop — a press in the app
+/// and `sona --loop-resolve` from outside it — and this field is the only way
+/// a reader can tell which one it was looking at.
+#[test]
+fn a_row_names_the_actor_that_closed_it() {
+    let (_directory, store, session_id) = review_ready_meeting_with_ledger();
+    let question = loop_id(session_id, MeetingLoopKind::Loop, "Trial conversion tier");
+    let commitment = loop_id(
+        session_id,
+        MeetingLoopKind::Commitment,
+        "Send the tier comparison",
+    );
+
+    let untouched = store.meeting_loops(session_id).unwrap();
+    assert_eq!(
+        row_for(&untouched.rows, &question).resolved_by,
+        None,
+        "an open row was closed by nobody"
+    );
+
+    let outside = store
+        .resolve_loop(
+            MeetingLoopResolveRequest {
+                operation_id: MeetingOperationId::new(),
+                loop_id: question.clone(),
+                expected_revision: 0,
+                resolution: MeetingLoopResolution::Done,
+            },
+            OperationActor::External,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        row_for(&outside.loops.rows, &question).resolved_by,
+        Some(OperationActor::External),
+        "an outside write closed this one, and the row says so"
+    );
+    assert_eq!(
+        row_for(&outside.loops.rows, &commitment).resolved_by,
+        None,
+        "the row nobody touched still names nobody"
+    );
+
+    let pressed = store
+        .resolve_loop(
+            MeetingLoopResolveRequest {
+                operation_id: MeetingOperationId::new(),
+                loop_id: commitment.clone(),
+                expected_revision: 0,
+                resolution: MeetingLoopResolution::Done,
+            },
+            OperationActor::User,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        row_for(&pressed.loops.rows, &commitment).resolved_by,
+        Some(OperationActor::User)
+    );
+
+    let reopened = store
+        .reopen_loop(
+            MeetingLoopReopenRequest {
+                operation_id: MeetingOperationId::new(),
+                loop_id: question.clone(),
+                expected_revision: 1,
+            },
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        row_for(&reopened.loops.rows, &question).resolved_by,
+        None,
+        "a reopened row is closed by nobody again"
+    );
+}
+
 #[test]
 fn dropping_is_a_resolution_and_reopening_undoes_it() {
     let (_directory, store, session_id) = review_ready_meeting_with_ledger();
@@ -265,6 +343,7 @@ fn dropping_is_a_resolution_and_reopening_undoes_it() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Dropped,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();
@@ -306,6 +385,7 @@ fn a_stale_revision_is_rejected_with_a_receipt_and_changes_nothing() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();
@@ -318,6 +398,7 @@ fn a_stale_revision_is_rejected_with_a_receipt_and_changes_nothing() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Dropped,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();
@@ -353,8 +434,12 @@ fn replaying_one_operation_id_returns_the_first_receipt() {
         resolution: MeetingLoopResolution::Done,
     };
 
-    let first = store.resolve_loop(request.clone(), NOW).unwrap();
-    let replay = store.resolve_loop(request, NOW).unwrap();
+    let first = store
+        .resolve_loop(request.clone(), OperationActor::User, NOW)
+        .unwrap();
+    let replay = store
+        .resolve_loop(request, OperationActor::User, NOW)
+        .unwrap();
 
     assert_eq!(first.receipt, replay.receipt);
     assert_eq!(
@@ -381,6 +466,7 @@ fn assigning_an_owner_keeps_the_status_and_names_the_person() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();
@@ -460,6 +546,7 @@ fn a_loop_id_the_current_ledger_does_not_hold_is_not_found() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap_err();
@@ -479,6 +566,7 @@ fn an_id_from_another_store_is_invalid_rather_than_a_panic() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap_err();
@@ -539,6 +627,7 @@ fn a_resolved_loop_is_not_carried_forward() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();
@@ -727,6 +816,7 @@ fn the_digest_counts_rows_others_have_owed_for_over_a_week() {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();

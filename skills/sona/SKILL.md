@@ -141,7 +141,9 @@ calling the meeting empty.
 it needs both consent rows. An immediate replay returns the stored receipt
 without another revision; after a real reopen, a later resolve may commit again.
 `result: "rejected"` means the meeting changed in between — re-read `--loops`
-and decide again rather than retrying blindly.
+and decide again rather than retrying blindly. The receipt records
+`actor:"external"`: a write that arrived through this surface is nobody's own
+click, and the corpus's audit trail says so.
 
 ## MCP
 

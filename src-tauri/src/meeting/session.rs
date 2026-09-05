@@ -1015,6 +1015,7 @@ impl MeetingSessionManager {
             .create_preflight(
                 StoreMutation {
                     operation_id: request.operation_id,
+                    actor: OperationActor::User,
                     requested_at_utc_ms: utc_now_ms(),
                     session_id,
                     expected_revision: request.expected_revision,
@@ -2236,6 +2237,7 @@ impl MeetingSessionManager {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: utc_now_ms(),
                     session_id,
                     expected_revision: 0,
@@ -2810,11 +2812,24 @@ impl MeetingSessionManager {
         &self,
         request: MeetingLoopResolveRequest,
     ) -> Result<MeetingLoopMutationResult, MeetingCommandError> {
+        self.loop_resolve_as(OperationActor::User, request).await
+    }
+
+    /// The same resolution from an outside caller: `sona --loop-resolve`, and
+    /// the MCP tool that shells out to it. Split the way
+    /// [`Self::recovery_finalize`] is, and for the same reason - a receipt
+    /// that files an outside write under the person who never pressed
+    /// anything is wrong in the one field a reader would trust.
+    pub(crate) async fn loop_resolve_as(
+        &self,
+        actor: OperationActor,
+        request: MeetingLoopResolveRequest,
+    ) -> Result<MeetingLoopMutationResult, MeetingCommandError> {
         let session_id = request.loop_id.session_id();
         let result = self
             .store()
             .await?
-            .resolve_loop(request, utc_now_ms())
+            .resolve_loop(request, actor, utc_now_ms())
             .map_err(map_store_error)?;
         self.emit_artifact_changed(session_id, result.loops.revision);
         Ok(result)
@@ -2937,6 +2952,7 @@ impl MeetingSessionManager {
             .edit_segment(SegmentEdit {
                 mutation: StoreMutation {
                     operation_id: request.operation_id,
+                    actor: OperationActor::User,
                     requested_at_utc_ms: utc_now_ms(),
                     session_id: request.session_id,
                     expected_revision: request.expected_revision,
@@ -4399,6 +4415,7 @@ pub(crate) mod tests {
                 .create_preflight(
                     StoreMutation {
                         operation_id: request.operation_id,
+                        actor: OperationActor::User,
                         requested_at_utc_ms: 0,
                         session_id,
                         expected_revision: request.expected_revision,
@@ -5199,6 +5216,7 @@ pub(crate) mod tests {
                 .create_preflight(
                     StoreMutation {
                         operation_id: request.operation_id,
+                        actor: OperationActor::User,
                         requested_at_utc_ms: 0,
                         session_id,
                         expected_revision: 0,

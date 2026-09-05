@@ -2239,6 +2239,7 @@
       "ownerUnassigned": "暂无",
       "instead": "实际情况：{{instead}}",
       "carriedForward": "从上次会议顺延而来",
+      "closedExternally": "由其他程序关闭",
       "stale": "其他操作先生效了，列表已刷新。"
     },
     "transcript": {

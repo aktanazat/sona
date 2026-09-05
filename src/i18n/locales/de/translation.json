@@ -2247,6 +2247,7 @@
       "ownerUnassigned": "Noch niemand",
       "instead": "Stattdessen: {{instead}}",
       "carriedForward": "Aus einer früheren Besprechung übernommen",
+      "closedExternally": "Von einem anderen Programm geschlossen",
       "stale": "Jemand anderes hat diesen Punkt zuerst geändert, die Liste wurde aktualisiert."
     },
     "transcript": {

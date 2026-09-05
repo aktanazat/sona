@@ -27,7 +27,7 @@ use crate::meeting::people_types::PersonId;
 use crate::meeting::session::{MeetingSessionManager, NoCaptureSources};
 use crate::meeting::types::{
     ManualNote, ManualNoteId, MeetingCommandKind, MeetingOperationId, MeetingSessionId,
-    OperationResult, ProcessingFailure, ProcessingStatus, SourceKind, SpeakerId,
+    OperationActor, OperationResult, ProcessingFailure, ProcessingStatus, SourceKind, SpeakerId,
 };
 use crate::meeting::workflow_types::WorkflowEventKind;
 use crate::query::external::{
@@ -106,6 +106,7 @@ fn corpus() -> Corpus {
                 expected_revision: 0,
                 resolution: MeetingLoopResolution::Done,
             },
+            OperationActor::User,
             NOW,
         )
         .unwrap();

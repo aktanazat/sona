@@ -2247,6 +2247,7 @@
       "ownerUnassigned": "Ingen ännu",
       "instead": "I stället: {{instead}}",
       "carriedForward": "Överförd från ett tidigare möte",
+      "closedExternally": "Stängd av ett annat program",
       "stale": "Någon annan flyttade den här punkten först, så listan har uppdaterats."
     },
     "transcript": {

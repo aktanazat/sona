@@ -2247,6 +2247,7 @@
       "ownerUnassigned": "Nobody yet",
       "instead": "Instead: {{instead}}",
       "carriedForward": "Carried forward from an earlier meeting",
+      "closedExternally": "Closed by another program",
       "stale": "Somebody else moved this loop first, so the list has been refreshed."
     },
     "transcript": {

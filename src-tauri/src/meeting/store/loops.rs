@@ -29,7 +29,8 @@ use crate::meeting::loop_types::{
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
     ArtifactCitation, GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId,
-    MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationReceipt, SourceKind,
+    MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationActor, OperationReceipt,
+    SourceKind,
 };
 use crate::meeting::workflow_types::WorkflowId;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -106,7 +107,8 @@ impl MeetingStore {
         loops_in(&connection, session_id)
     }
 
-    /// Every actionable row in the corpus, newest meeting first.
+    /// Every actionable row in the corpus, newest meeting first, beside what
+    /// the gate below held back.
     ///
     /// The corpus-wide counterpart of [`Self::meeting_loops`], gated the way
     /// the open-loops inbox is: until a meeting's continuity pass has
@@ -116,9 +118,14 @@ impl MeetingStore {
     /// "what got done" and "what did somebody commit to" are three questions
     /// about one set of rows — which is what the read-only external plane
     /// asks, and why it asks the store rather than opening ledger JSON itself.
-    pub(crate) fn corpus_loops(&self) -> Result<Vec<MeetingLedgerRows>, StoreError> {
+    ///
+    /// The gate reports itself because a reader cannot tell one empty list
+    /// from another: a corpus with no commitments in it and a corpus whose
+    /// ledgers are all waiting on their continuity pass both scan to nothing.
+    pub(crate) fn corpus_loops(&self) -> Result<CorpusLoops, StoreError> {
         let connection = self.connection()?;
         let mut meetings = Vec::new();
+        let mut awaiting_continuity = false;
         for meeting in ledger_rows_in(&connection)? {
             if super::workflows::workflow_succeeded_for_session_in(
                 &connection,
@@ -126,18 +133,25 @@ impl MeetingStore {
                 meeting.session_id,
             )? {
                 meetings.push(meeting);
+            } else {
+                awaiting_continuity |= !meeting.rows.is_empty();
             }
         }
-        Ok(meetings)
+        Ok(CorpusLoops {
+            meetings,
+            awaiting_continuity,
+        })
     }
 
     pub(crate) fn resolve_loop(
         &self,
         request: MeetingLoopResolveRequest,
+        actor: OperationActor,
         requested_at_utc_ms: i64,
     ) -> Result<MeetingLoopMutationResult, StoreError> {
         self.mutate_loop(
             request.operation_id,
+            actor,
             requested_at_utc_ms,
             MeetingCommandKind::LoopResolve,
             &request.loop_id,
@@ -153,6 +167,7 @@ impl MeetingStore {
     ) -> Result<MeetingLoopMutationResult, StoreError> {
         self.mutate_loop(
             request.operation_id,
+            OperationActor::User,
             requested_at_utc_ms,
             MeetingCommandKind::LoopReopen,
             &request.loop_id,
@@ -168,6 +183,7 @@ impl MeetingStore {
     ) -> Result<MeetingLoopMutationResult, StoreError> {
         self.mutate_loop(
             request.operation_id,
+            OperationActor::User,
             requested_at_utc_ms,
             MeetingCommandKind::LoopAssign,
             &request.loop_id,
@@ -240,6 +256,9 @@ impl MeetingStore {
             let receipt = committed_receipt(
                 StoreMutation {
                     operation_id,
+                    // Nobody pressed anything: this pass runs itself once a
+                    // new occurrence's artifacts land.
+                    actor: OperationActor::System,
                     requested_at_utc_ms: now,
                     session_id: previous,
                     expected_revision: state.revision,
@@ -261,6 +280,7 @@ impl MeetingStore {
     fn mutate_loop(
         &self,
         operation_id: MeetingOperationId,
+        actor: OperationActor,
         requested_at_utc_ms: i64,
         command: MeetingCommandKind,
         loop_id: &MeetingLoopId,
@@ -285,6 +305,7 @@ impl MeetingStore {
         let state = state_in(&transaction, loop_id)?.unwrap_or_default();
         let mutation = StoreMutation {
             operation_id,
+            actor,
             requested_at_utc_ms,
             session_id,
             expected_revision,
@@ -349,6 +370,14 @@ pub(crate) struct MeetingLedgerRows {
     /// never started.
     pub at_utc_ms: i64,
     pub rows: Vec<MeetingLoopRow>,
+}
+
+/// One corpus-wide ledger read: the rows a reader may have, and the one fact
+/// about the rows it may not that an empty list cannot carry.
+pub(crate) struct CorpusLoops {
+    pub meetings: Vec<MeetingLedgerRows>,
+    /// Whether some meeting holds rows the continuity gate has not released.
+    pub awaiting_continuity: bool,
 }
 
 /// Every retained meeting that has a current ledger, newest first, with its
@@ -563,6 +592,7 @@ pub(crate) fn rows_from_seeds_in(
             seed.speaker.as_deref(),
             &mine,
         );
+        let resolved_by = resolved_by_in(connection, state.resolving_operation_id.as_deref())?;
         rows.push(MeetingLoopRow {
             loop_id: seed.loop_id,
             session_id,
@@ -575,6 +605,7 @@ pub(crate) fn rows_from_seeds_in(
             status: state.status,
             resolved_at_utc_ms: state.resolved_at_utc_ms,
             resolving_operation_id: state.resolving_operation_id,
+            resolved_by,
             carried_into_loop_id: state.carried_into_loop_id,
             carried_since_at_utc_ms,
             at_ms: seed.at_ms,
@@ -779,6 +810,33 @@ pub(crate) fn carried_since_in(
         current = MeetingLoopId(predecessor_id);
     }
     Ok(earliest)
+}
+
+/// Who the operation that closed this row was run by, off the receipt it
+/// already points at.
+///
+/// A lookup rather than a column on `meeting_loop_states`, because the answer
+/// is written down once when the mutation commits and a second copy would be
+/// a second thing to keep true. A resolution whose receipt row is gone is a
+/// row that does not say who closed it, not a ledger read that fails: the
+/// words and the state are both still honest without it.
+fn resolved_by_in(
+    connection: &Connection,
+    resolving_operation_id: Option<&str>,
+) -> Result<Option<OperationActor>, StoreError> {
+    let Some(operation_id) = resolving_operation_id else {
+        return Ok(None);
+    };
+    let receipt: Option<String> = connection
+        .query_row(
+            "SELECT receipt_json FROM meeting_operation_receipts WHERE operation_id = ?1",
+            params![operation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    receipt
+        .map(|value| decode_json::<OperationReceipt>(&value).map(|receipt| receipt.actor))
+        .transpose()
 }
 
 /// The session immediately before this one in the same calendar series, or

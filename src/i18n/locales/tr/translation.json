@@ -2247,6 +2247,7 @@
       "ownerUnassigned": "Henüz kimse",
       "instead": "Bunun yerine: {{instead}}",
       "carriedForward": "Önceki bir toplantıdan devredildi",
+      "closedExternally": "Başka bir program tarafından kapatıldı",
       "stale": "Bu konuyu başka biri sizden önce taşıdı, liste yenilendi."
     },
     "transcript": {

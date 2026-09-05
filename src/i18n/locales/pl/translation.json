@@ -2263,6 +2263,7 @@
       "ownerUnassigned": "Jeszcze nikt",
       "instead": "Zamiast tego: {{instead}}",
       "carriedForward": "Przeniesione z wcześniejszego spotkania",
+      "closedExternally": "Zamknięte przez inny program",
       "stale": "Ktoś inny zmienił tę sprawę pierwszy, więc lista została odświeżona."
     },
     "transcript": {

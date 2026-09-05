@@ -75,6 +75,7 @@ const row = (
   status,
   resolved_at_utc_ms: null,
   resolving_operation_id: null,
+  resolved_by: null,
   carried_into_loop_id: null,
   carried_since_at_utc_ms: null,
   at_ms: 30_000,

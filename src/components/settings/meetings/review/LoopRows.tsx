@@ -136,6 +136,11 @@ export const LoopRows: React.FC<LoopRowsProps> = ({
                     {t("meetings.loops.carriedForward")}
                   </span>
                 )}
+                {row.resolved_by === "external" ? (
+                  <span className="text-[13px] leading-[18px] text-gray-900">
+                    {t("meetings.loops.closedExternally")}
+                  </span>
+                ) : null}
                 <div className="flex flex-wrap items-center gap-2">
                   {/* The row says who owns it in text. A combobox states its
                    * value only once opened, and who a loop belongs to is the

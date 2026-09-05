@@ -1704,6 +1704,10 @@ pub struct InterruptedRecovery {
 #[derive(Clone, Copy)]
 pub(crate) struct StoreMutation {
     pub operation_id: MeetingOperationId,
+    /// Who asked for this. Almost always a person at this keyboard, and the
+    /// receipt said exactly that unconditionally until `sona --loop-resolve`
+    /// gave an outside program a way in.
+    pub actor: OperationActor,
     pub requested_at_utc_ms: i64,
     pub session_id: MeetingSessionId,
     pub expected_revision: u64,
@@ -3310,6 +3314,7 @@ impl MeetingStore {
 
         let mutation = StoreMutation {
             operation_id,
+            actor: OperationActor::User,
             requested_at_utc_ms,
             session_id,
             expected_revision,
@@ -3478,6 +3483,7 @@ impl MeetingStore {
         }
         let mutation = StoreMutation {
             operation_id,
+            actor: OperationActor::User,
             requested_at_utc_ms,
             session_id,
             expected_revision,
@@ -3536,6 +3542,7 @@ impl MeetingStore {
         }
         let mutation = StoreMutation {
             operation_id,
+            actor: OperationActor::User,
             requested_at_utc_ms,
             session_id,
             expected_revision,
@@ -3589,6 +3596,7 @@ impl MeetingStore {
         }
         let mutation = StoreMutation {
             operation_id,
+            actor: OperationActor::User,
             requested_at_utc_ms,
             session_id: plan.session_id,
             expected_revision,
@@ -3729,6 +3737,7 @@ impl MeetingStore {
         if let Some(operation_id) = operation_id {
             let mutation = StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id,
                 expected_revision,
@@ -3785,6 +3794,7 @@ impl MeetingStore {
             let mut receipt = committed_receipt(
                 StoreMutation {
                     operation_id,
+                    actor: OperationActor::User,
                     requested_at_utc_ms,
                     session_id,
                     expected_revision,
@@ -4583,6 +4593,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id,
                 expected_revision,
@@ -4684,6 +4695,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id: note.session_id,
                 expected_revision,
@@ -4724,6 +4736,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id: note.session_id,
                 expected_revision: expected_session_revision,
@@ -4768,6 +4781,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id,
                 expected_revision: expected_session_revision,
@@ -4800,6 +4814,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id,
                 expected_revision,
@@ -4836,6 +4851,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id,
                 expected_revision,
@@ -4915,6 +4931,7 @@ impl MeetingStore {
         self.edit_session(
             StoreMutation {
                 operation_id,
+                actor: OperationActor::User,
                 requested_at_utc_ms,
                 session_id,
                 expected_revision,
@@ -5860,6 +5877,7 @@ impl MeetingStore {
         }
         let mutation = StoreMutation {
             operation_id,
+            actor: OperationActor::User,
             requested_at_utc_ms,
             session_id,
             expected_revision,
@@ -5917,6 +5935,7 @@ impl MeetingStore {
         }
         let mutation = StoreMutation {
             operation_id,
+            actor: OperationActor::User,
             requested_at_utc_ms,
             session_id,
             expected_revision,
@@ -7244,7 +7263,7 @@ fn committed_receipt(
         schema_version: STORE_SCHEMA_VERSION,
         operation_id: mutation.operation_id,
         session_id: Some(mutation.session_id),
-        actor: OperationActor::User,
+        actor: mutation.actor,
         command: mutation.command,
         expected_revision: mutation.expected_revision,
         from_phase: Some(from_phase),
@@ -7372,7 +7391,7 @@ fn rejected_receipt(
         schema_version: STORE_SCHEMA_VERSION,
         operation_id: mutation.operation_id,
         session_id: Some(mutation.session_id),
-        actor: OperationActor::User,
+        actor: mutation.actor,
         command: mutation.command,
         expected_revision: mutation.expected_revision,
         from_phase: Some(phase),
@@ -10606,6 +10625,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -10729,6 +10749,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -10999,6 +11020,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -11236,6 +11258,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id,
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -11252,6 +11275,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id,
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 2,
                     session_id: duplicate_session_id,
                     expected_revision: 0,
@@ -11439,6 +11463,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id,
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -11600,6 +11625,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -12414,6 +12440,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
@@ -12485,6 +12512,7 @@ mod tests {
             .create_preflight(
                 StoreMutation {
                     operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
                     requested_at_utc_ms: 1,
                     session_id,
                     expected_revision: 0,
