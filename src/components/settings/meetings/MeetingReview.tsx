@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ArrowLeft, FileJson, FileText, MoreHorizontal } from "lucide-react";
+import { ChevronLeft, MoreHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
   commands,
@@ -12,12 +12,7 @@ import {
   type OperationReceipt,
   type SpeakerId,
 } from "@/bindings";
-import {
-  Notice,
-  PageTitle,
-  SettingsPage,
-  SettingsSection,
-} from "@/components/settings/rows";
+import { Notice, PageTitle, SettingsPage } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import {
   Dialog,
@@ -31,19 +26,20 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/vg/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/vg/tabs";
 import { CloudMeetingActions } from "../../cloud-sync/CloudMeetingActions";
 import type { SegmentJump } from "./review/Citations";
 import { InsightsTab } from "./review/InsightsTab";
-import { TalkTimeRow } from "./review/TalkTimeRow";
 import { TranscriptTab } from "./review/TranscriptTab";
 import { SpeakerIdentityDialog } from "./review/SpeakerIdentityDialog";
+import { FollowUpAgentItem } from "./review/FollowUpAgentAction";
+import { FollowUpDraftDialog } from "./review/FollowUpDraftAction";
 import { useVoiceIdentity } from "./review/useVoiceIdentity";
 import { MeetingLedgerSection } from "./MeetingLedgerSection";
 import { currentLedger } from "./meetingLedger";
-import { MeetingPhaseText } from "./MeetingStatus";
 import { type LoopChange } from "./review/LoopRows";
 import { committedEdit, inlineEditKeys } from "./review/inlineEdit";
 import {
@@ -51,21 +47,22 @@ import {
   formatMeetingOffset,
   meetingErrorKey,
   meetingReasonKey,
+  sourceKey,
 } from "./meetingUtils";
 import {
   actionItemKey,
   getMeetingAnalytics,
   setActionItemDone,
-  type MeetingAnalytics,
   type MeetingAnalyticsSnapshot,
 } from "./meetingAnalytics";
 import { useOpenPromptTarget } from "./promptTargets";
 
 /* The review surface holds four jobs: read the transcript, fix it, read what
- * was generated from it, and get the record out. They are three tabs plus a
- * persistent export bar, because a person doing one of them is never doing
- * the others at the same time. Asking the meeting a question is the chat
- * column's job, with every meeting in reach rather than one.
+ * was generated from it, and get the record out. The first three are tabs,
+ * because a person doing one of them is never doing the others at the same
+ * time; the fourth is a verb like every other verb on this page, so it lives
+ * with them in the one menu on the title line. Asking the meeting a question
+ * is the chat column's job, with every meeting in reach rather than one.
  *
  * A citation is a jump: every generated claim and search hit that points at
  * a transcript segment scrolls that segment into view and marks it, which is
@@ -431,14 +428,20 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
         <MeetingReviewHeader
           snapshot={snapshot}
           lastReceipt={lastReceipt}
-          analytics={analytics?.analytics ?? null}
-          speakerNames={speakerNames}
           busy={busy}
           editable={editable}
+          canRegenerate={canRegenerate}
+          canExport={canExport}
+          canDelete={canDelete}
+          hasLedger={currentLedger(snapshot.artifacts) !== null}
           unresolvedSpeakerCount={voiceIdentity.unresolvedSpeakerCount}
           onBack={onBack}
           onTitleSet={onTitleSet}
           onLabelSpeaker={voiceIdentity.openNextUnresolved}
+          onRegenerate={onRegenerate}
+          onExport={onExport}
+          onExportLedger={() => void exportLedger()}
+          onDelete={onDelete}
         />
       }
     >
@@ -529,14 +532,12 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
         </TabsContent>
       </Tabs>
 
-      <MeetingExportBar
-        snapshot={snapshot}
-        busy={busy}
-        canExport={canExport}
-        canDelete={canDelete}
-        onExport={onExport}
-        onDelete={onDelete}
-      />
+      {/* Sharing a meeting is a task, not a setting, and not one of the verbs
+       * the menu holds: it has state of its own — how many shares exist,
+       * whether a retry is scheduled — and that state is what a reader opens
+       * it for. One closed row at the foot of the page, with the fact on its
+       * summary. */}
+      <CloudMeetingActions sessionId={snapshot.session.session_id} />
 
       <SpeakerIdentityDialog
         open={voiceIdentity.dialog !== null}
@@ -563,103 +564,139 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
 interface MeetingReviewHeaderProps {
   snapshot: MeetingReviewSnapshot;
   lastReceipt: OperationReceipt | null;
-  /** Conversation metrics, or null until the first read lands. */
-  analytics: MeetingAnalytics | null;
-  speakerNames: Record<string, string>;
   busy: boolean;
   editable: boolean;
+  canRegenerate: boolean;
+  canExport: boolean;
+  canDelete: boolean;
+  /** Whether the current revision carries a ledger to draft or export from. */
+  hasLedger: boolean;
   unresolvedSpeakerCount: number | null;
   onBack: () => void;
   onTitleSet: (title: string) => void;
   onLabelSpeaker: () => void;
+  onRegenerate: () => void;
+  onExport: (format: MeetingExportFormat) => void;
+  onExportLedger: () => void;
+  onDelete: () => void;
 }
 
+/* The head of a document: the way back, its name, one line of facts about it,
+ * and one menu holding every verb. Round 7 took the state words off that line
+ * — "Ready for review" beside a screen you are already reviewing is the
+ * machine describing itself — and left the three facts a reader checks
+ * against their own memory of the meeting: when it was, how long it ran, and
+ * what recorded it. */
 const MeetingReviewHeader: React.FC<MeetingReviewHeaderProps> = ({
   snapshot,
   lastReceipt,
-  analytics,
-  speakerNames,
   busy,
   editable,
+  canRegenerate,
+  canExport,
+  canDelete,
+  hasLedger,
   unresolvedSpeakerCount,
   onBack,
   onTitleSet,
   onLabelSpeaker,
+  onRegenerate,
+  onExport,
+  onExportLedger,
+  onDelete,
 }) => {
   const { t } = useTranslation();
+  /* Renaming is the menu's job to start and the title's job to do, so the
+   * state that connects them is the head's. */
+  const [renaming, setRenaming] = useState(false);
   const startedAtUtcMs = snapshot.session.started_at_utc_ms;
   const elapsedOffsetNs = snapshot.session.elapsed_offset_ns;
-  /* When it started and how long it ran are one sentence, because they are one
-   * fact about the recording. A labelled ELAPSED chip made a measurement out
-   * of the second half of it. */
+  /* What recorded this, from the sources that were actually there to record
+   * it. `health` never leaves "starting" on a live track, so availability is
+   * the field that answers the question; a source that was not available is
+   * why the completeness word beside this says "Partial recording". */
+  const sources = [
+    ...new Set(
+      snapshot.session.sources
+        .filter((source) => source.availability === "available")
+        .map((source) => t(sourceKey(source.source_kind))),
+    ),
+  ].join(", ");
   const metadata = [
     startedAtUtcMs === null
       ? t("meetings.review.noStartTime")
-      : t("meetings.review.started", {
-          date: formatMeetingDate(startedAtUtcMs),
-        }),
+      : formatMeetingDate(startedAtUtcMs),
     elapsedOffsetNs === null ? null : formatMeetingOffset(elapsedOffsetNs),
+    sources.length === 0 ? null : sources,
   ]
     .filter((fact): fact is string => fact !== null)
     .join(" · ");
 
   return (
     <header className="flex flex-col gap-3">
-      {/* Bordered, not ghost: a lone text action with no box reads as a
-       * caption. A bordered control aligns its box, so no optical nudge. */}
+      {/* Quiet text, no box: the way back out of a document is not a control
+       * competing with the document's own name, and it names where it goes. */}
       <Button
         type="button"
-        variant="outline"
+        variant="ghost"
         size="sm"
-        className="self-start"
+        className="-ms-2 self-start ps-1.5 text-gray-900"
         onClick={onBack}
       >
-        <ArrowLeft aria-hidden="true" className="size-3.5" />
-        {t("meetings.actions.back")}
+        <ChevronLeft aria-hidden="true" className="size-3.5" />
+        {t("meetings.review.backToList")}
       </Button>
       {/* The title and the facts under it are one block, set tight: a
-       * document's name and its date are read together. */}
+       * document's name and its date are read together. The menu is on the
+       * title's own line, right-aligned, because it acts on the document. */}
       <div className="flex min-w-0 flex-col gap-1.5">
-        <MeetingTitleEditor
-          key={
-            snapshot.session.session_id +
-            ":" +
-            snapshot.session.revision +
-            ":" +
-            snapshot.session.title
-          }
-          title={snapshot.session.title}
-          disabled={busy || !editable}
-          onTitleSet={onTitleSet}
-        />
-        {/* One line of facts about the recording, and the state it is in, all
-         * in the page's meta type. The completeness word only appears when it
-         * changes what the record can be trusted for: "Complete" beside
-         * "Ready for review" says nothing twice, and a partial recording has
-         * to say so in words. */}
+        <div className="flex items-start justify-between gap-3">
+          <MeetingTitleEditor
+            key={
+              snapshot.session.session_id +
+              ":" +
+              snapshot.session.revision +
+              ":" +
+              snapshot.session.title
+            }
+            title={snapshot.session.title}
+            disabled={busy || !editable}
+            editing={renaming}
+            onEditingChange={setRenaming}
+            onTitleSet={onTitleSet}
+          />
+          <MeetingActionsMenu
+            snapshot={snapshot}
+            busy={busy}
+            editable={editable}
+            canRegenerate={canRegenerate}
+            canExport={canExport}
+            canDelete={canDelete}
+            hasLedger={hasLedger}
+            onRename={() => setRenaming(true)}
+            onRegenerate={onRegenerate}
+            onExport={onExport}
+            onExportLedger={onExportLedger}
+            onDelete={onDelete}
+          />
+        </div>
+        {/* One line of facts about the recording. The completeness word only
+         * appears when it changes what the record can be trusted for, and a
+         * partial recording has to say so in words. */}
         <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <span className="text-[13px] leading-[18px] tabular-nums text-gray-900">
             {metadata}
           </span>
-          <MeetingPhaseText phase={snapshot.session.phase} />
           {snapshot.session.capture_completeness === "partial" ? (
-            /* `StatusWord`'s warning tone; the copy is this surface's own. */
-            <span className="text-[13px] leading-[18px] text-amber-900">
+            <span className="text-[13px] leading-[18px] text-accent-strong">
               {t("meetings.review.partialRecording")}
             </span>
           ) : null}
         </p>
       </div>
-      {/* Talk share sits under the facts line, not among them: it is a shape,
-       * and the facts beside it are single values. */}
-      <TalkTimeRow
-        diarization={snapshot.diarization}
-        analytics={analytics}
-        speakerNames={speakerNames}
-      />
       {/* Voices nobody has named yet: one quiet line and the one press that
-       * answers it. It used to sit beside the title, where it competed with
-       * the page's own name for the top-right corner. */}
+       * answers it. The only verb left outside the menu, because it is the
+       * answer to a question the line beside it just asked. */}
       {unresolvedSpeakerCount !== null && unresolvedSpeakerCount > 0 ? (
         <p className="flex flex-wrap items-center gap-3">
           <span className="text-[13px] leading-[18px] text-gray-900">
@@ -685,26 +722,199 @@ const MeetingReviewHeader: React.FC<MeetingReviewHeaderProps> = ({
   );
 };
 
+interface MeetingActionsMenuProps {
+  snapshot: MeetingReviewSnapshot;
+  busy: boolean;
+  editable: boolean;
+  canRegenerate: boolean;
+  canExport: boolean;
+  canDelete: boolean;
+  hasLedger: boolean;
+  onRename: () => void;
+  onRegenerate: () => void;
+  onExport: (format: MeetingExportFormat) => void;
+  onExportLedger: () => void;
+  onDelete: () => void;
+}
+
+/* Every verb this page has, in one place. They used to be seven bordered
+ * buttons parked on three reading surfaces — two on the ledger's label line,
+ * two on the generated-notes line, three in an export bar under everything —
+ * which put a row of controls between the reader and each thing they came to
+ * read. A verb is not the page's subject, so none of them is on the page.
+ *
+ * Delete is last and separated, and it keeps the confirmation it always had:
+ * the sheet cannot open from a mis-aimed press, and the dialogs live out here
+ * rather than inside the menu, which unmounts its own children on select. */
+const MeetingActionsMenu: React.FC<MeetingActionsMenuProps> = ({
+  snapshot,
+  busy,
+  editable,
+  canRegenerate,
+  canExport,
+  canDelete,
+  hasLedger,
+  onRename,
+  onRegenerate,
+  onExport,
+  onExportLedger,
+  onDelete,
+}) => {
+  const { t } = useTranslation();
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [draftOpen, setDraftOpen] = useState(false);
+  /* Rename is the only verb here that takes the keyboard: it opens the title
+   * field, which claims the caret as it mounts. An open menu traps focus, and
+   * the trap outlives the press by the length of the menu's exit animation, so
+   * a field opened on the press loses the caret to the menu that is leaving
+   * and then to the menu's own focus restore. So the press records the verb
+   * and the close runs it: by then the trap is gone, the restore is declined,
+   * and the field is the only thing asking for the keyboard. Every other verb
+   * leaves the keyboard alone and keeps the ordinary restore. */
+  const renameOnClose = useRef(false);
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="flex-none text-gray-900"
+            aria-label={t("common.more")}
+          >
+            <MoreHorizontal aria-hidden="true" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          onCloseAutoFocus={(event) => {
+            if (!renameOnClose.current) return;
+            renameOnClose.current = false;
+            event.preventDefault();
+            onRename();
+          }}
+        >
+          <DropdownMenuItem
+            disabled={busy || !editable}
+            onSelect={() => {
+              renameOnClose.current = true;
+            }}
+          >
+            {t("meetings.review.rename")}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={busy || !canRegenerate}
+            onSelect={onRegenerate}
+          >
+            {t("meetings.review.regenerate")}
+          </DropdownMenuItem>
+          {hasLedger ? (
+            <DropdownMenuItem
+              disabled={busy}
+              onSelect={() => setDraftOpen(true)}
+            >
+              {t("meetings.followUp.draft")}
+            </DropdownMenuItem>
+          ) : null}
+          <FollowUpAgentItem snapshot={snapshot} />
+          <DropdownMenuItem
+            disabled={busy || !canExport}
+            onSelect={() => onExport("markdown")}
+          >
+            {t("meetings.review.exportMarkdown")}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={busy || !canExport}
+            onSelect={() => onExport("json")}
+          >
+            {t("meetings.review.exportJson")}
+          </DropdownMenuItem>
+          {hasLedger ? (
+            <DropdownMenuItem
+              disabled={busy || !canExport}
+              onSelect={onExportLedger}
+            >
+              {t("meetings.ledger.exportHtml")}
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            variant="destructive"
+            disabled={busy || !canDelete}
+            onSelect={() => setDeleteOpen(true)}
+          >
+            {t("meetings.actions.delete")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <FollowUpDraftDialog
+        sessionId={snapshot.session.session_id}
+        open={draftOpen}
+        onOpenChange={setDraftOpen}
+      />
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>{t("meetings.delete.title")}</DialogTitle>
+            <DialogDescription>
+              {t("meetings.delete.explainsData")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                setDeleteOpen(false);
+                onDelete();
+              }}
+            >
+              {t("meetings.actions.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+};
+
 interface MeetingTitleEditorProps {
   title: string;
   disabled: boolean;
+  /** Open, because the words were pressed or Rename was chosen from the menu. */
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
   onTitleSet: (title: string) => void;
 }
 
 /* The meeting's title is the page's title, so it is the page's title: an H1
  * that reads as one. D19 writes it from the meeting's own content, which makes
  * editing the exception rather than the expected first act — so there is no
- * field and no Save button until somebody presses the words themselves. */
+ * field and no Save button until somebody asks for one. Two things ask: the
+ * words themselves, and Rename in the menu, which is why the open state is
+ * the head's rather than this component's. */
 const MeetingTitleEditor: React.FC<MeetingTitleEditorProps> = ({
   title,
   disabled,
+  editing,
+  onEditingChange,
   onTitleSet,
 }) => {
   const { t } = useTranslation();
-  const [editing, setEditing] = useState(false);
 
   const commit = (draft: string) => {
-    setEditing(false);
+    onEditingChange(false);
     const next = committedEdit(draft, title);
     if (next !== null) onTitleSet(next);
   };
@@ -718,21 +928,21 @@ const MeetingTitleEditor: React.FC<MeetingTitleEditorProps> = ({
         defaultValue={title}
         aria-label={t("meetings.review.meetingTitle")}
         onBlur={(event) => commit(event.target.value)}
-        onKeyDown={inlineEditKeys(commit, () => setEditing(false))}
+        onKeyDown={inlineEditKeys(commit, () => onEditingChange(false))}
         className="w-full border-0 border-b border-ring bg-transparent pb-px text-[24px] leading-[30px] font-semibold tracking-[-0.01em] text-gray-1000 outline-none"
       />
     );
   }
 
   return (
-    <PageTitle>
+    <PageTitle className="min-w-0">
       {disabled ? (
         title
       ) : (
         <button
           type="button"
           title={t("meetings.review.editTitle")}
-          onClick={() => setEditing(true)}
+          onClick={() => onEditingChange(true)}
           className="cursor-pointer rounded-md text-start transition-colors hover:text-gray-900 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
         >
           {title}
@@ -766,113 +976,5 @@ const MeetingReceipt: React.FC<MeetingReceiptProps> = ({ receipt }) => {
           })}
       {reasons.length > 0 ? ` ${reasons}` : ""}
     </p>
-  );
-};
-
-interface MeetingExportBarProps {
-  snapshot: MeetingReviewSnapshot;
-  busy: boolean;
-  canExport: boolean;
-  canDelete: boolean;
-  onExport: (format: MeetingExportFormat) => void;
-  onDelete: () => void;
-}
-
-const MeetingExportBar: React.FC<MeetingExportBarProps> = ({
-  snapshot,
-  busy,
-  canExport,
-  canDelete,
-  onExport,
-  onDelete,
-}) => {
-  const { t } = useTranslation();
-  const [deleteOpen, setDeleteOpen] = useState(false);
-
-  return (
-    <SettingsSection label={t("meetings.review.export")}>
-      <div className="flex flex-wrap items-center gap-2 px-6 py-3.5">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => onExport("markdown")}
-          disabled={busy || !canExport}
-        >
-          <FileText aria-hidden="true" className="size-3.5" />
-          {t("meetings.review.exportMarkdown")}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => onExport("json")}
-          disabled={busy || !canExport}
-        >
-          <FileJson aria-hidden="true" className="size-3.5" />
-          {t("meetings.review.exportJson")}
-        </Button>
-        {/* Deleting a meeting is not something a reader should be able to do
-         * by mis-aiming at Export. It keeps its confirmation, and it now
-         * keeps a menu in front of that: one press to find it, and the
-         * reading surface carries no red button of its own. */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="ms-auto"
-              aria-label={t("meetings.list.rowActions")}
-              disabled={busy || !canDelete}
-            >
-              <MoreHorizontal aria-hidden="true" className="size-3.5" />
-              {t("meetings.review.moreActions")}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem
-              variant="destructive"
-              onSelect={() => setDeleteOpen(true)}
-            >
-              {t("meetings.actions.delete")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-      <div className="px-6 py-3.5">
-        <CloudMeetingActions sessionId={snapshot.session.session_id} />
-      </div>
-
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>{t("meetings.delete.title")}</DialogTitle>
-            <DialogDescription>
-              {t("meetings.delete.explainsData")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setDeleteOpen(false)}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => {
-                setDeleteOpen(false);
-                onDelete();
-              }}
-            >
-              {t("meetings.actions.delete")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </SettingsSection>
   );
 };
