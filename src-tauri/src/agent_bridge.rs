@@ -1034,6 +1034,53 @@ struct BridgeWorker {
     join: std::thread::JoinHandle<()>,
 }
 
+/// The app's end of the wake socket. A hook that lands a request or an ack
+/// sends one datagram here, so the worker sleeps until there is something to
+/// read instead of walking the session tree on a timer. The hook's half is
+/// [`wire::send_wake`]; only the app binds.
+struct WakeListener {
+    #[cfg(unix)]
+    socket: std::os::unix::net::UnixDatagram,
+    #[cfg(not(unix))]
+    fallback: std::time::Duration,
+}
+
+impl WakeListener {
+    #[cfg(unix)]
+    fn bind(path: &Path, fallback: std::time::Duration) -> io::Result<Self> {
+        // A killed app leaves its socket file behind; the lease already
+        // proves nobody else is listening, so the stale entry is replaced.
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let socket = std::os::unix::net::UnixDatagram::bind(path)?;
+        socket.set_read_timeout(Some(fallback))?;
+        Ok(Self { socket })
+    }
+
+    #[cfg(not(unix))]
+    fn bind(_path: &Path, fallback: std::time::Duration) -> io::Result<Self> {
+        Ok(Self { fallback })
+    }
+
+    /// Blocks until a writer wakes the listener or the fallback interval
+    /// elapses, and says which one happened.
+    fn wait(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let mut byte = [0u8; 1];
+            self.socket.recv(&mut byte).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            std::thread::sleep(self.fallback);
+            false
+        }
+    }
+}
+
 pub struct AgentBridgeManager {
     app: tauri::AppHandle,
     core: std::sync::Arc<std::sync::Mutex<AgentBridgeCore>>,
@@ -1071,7 +1118,7 @@ impl AgentBridgeManager {
             let mut core = lock_recover(&self.core);
             core.start(&settings, now_ms())
                 .map_err(|error| error.to_string())?;
-            match core.paths.bind_wake_listener(IDLE_FALLBACK) {
+            match WakeListener::bind(&core.paths.wake_path(), IDLE_FALLBACK) {
                 Ok(listener) => listener,
                 Err(error) => {
                     core.stop();
@@ -1156,7 +1203,7 @@ impl AgentBridgeManager {
         let worker = lock_recover(&self.worker).take();
         if let Some(worker) = worker {
             worker.stop.store(true, Ordering::Release);
-            lock_recover(&self.core).paths.wake_app();
+            wire::send_wake(&lock_recover(&self.core).paths.wake_path());
             let _ = worker.join.join();
         }
     }
@@ -1753,6 +1800,36 @@ mod tests {
             settings.policy_generation
         );
         core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A hook that writes a request must wake the worker at once; the timer
+    /// is only the fallback for a socket the hook could not reach.
+    #[cfg(unix)]
+    #[test]
+    fn persisting_a_request_wakes_the_worker_before_its_fallback() -> Result<(), Box<dyn Error>> {
+        let root = test_root("wake")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let fallback = std::time::Duration::from_secs(30);
+        let listener = WakeListener::bind(&paths.wake_path(), fallback)?;
+        let started = std::time::Instant::now();
+        persist_event(
+            &paths,
+            &opaque_hash(&[b"wake-app"]),
+            binding(&root)?,
+            event(CanonicalEventKind::SessionStart, &root, None),
+            b"payload",
+            1_000,
+        )?;
+        assert!(
+            listener.wait(),
+            "the request write did not wake the listener"
+        );
+        assert!(started.elapsed() < fallback);
+        // Nothing else was written, so the next wait is the plain timeout.
+        let quiet = WakeListener::bind(&paths.wake_path(), std::time::Duration::from_millis(20))?;
+        assert!(!quiet.wait());
         fs::remove_dir_all(root)?;
         Ok(())
     }
