@@ -116,7 +116,6 @@ describe("first paint", () => {
         <PreMeetingCountdownCard
           sources={["microphone"]}
           starting={false}
-          onSourcesChange={() => {}}
           onStartEvent={() => {}}
         />,
       ),

@@ -8,27 +8,24 @@ import type {
   MeetingLoadingScreenModel,
 } from "../meetingTypes";
 
-/* The detail view loads a whole snapshot. The skeleton keeps the header and
- * first rows in place so the swap does not jump. */
+/* The detail view loads a whole snapshot. Both pages behind it open the same
+ * way now - a title line, then lines of text - so the skeleton is that shape
+ * and the swap does not jump. */
 const MeetingDetailSkeleton: React.FC<{ label: string }> = ({ label }) => (
   <SettingsPage
     role="status"
     aria-label={label}
     header={
-      <div className="flex flex-col gap-2">
-        <Skeleton className="h-4 w-16" />
+      <div className="flex items-center justify-between gap-4">
         <Skeleton className="h-8 w-72" />
-        <Skeleton className="h-4 w-56" />
+        <Skeleton className="h-8 w-20" />
       </div>
     }
   >
     <div className="flex flex-col gap-3">
-      <Skeleton className="h-3 w-24" />
-      <Skeleton className="h-[120px] w-full rounded-card" />
-    </div>
-    <div className="flex flex-col gap-3">
-      <Skeleton className="h-3 w-20" />
-      <Skeleton className="h-[88px] w-full rounded-card" />
+      {["w-full", "w-11/12", "w-3/4"].map((width) => (
+        <Skeleton key={width} className={`h-3.5 ${width}`} />
+      ))}
     </div>
   </SettingsPage>
 );

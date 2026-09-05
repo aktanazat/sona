@@ -74,15 +74,12 @@ export const useMeetingsController = ({
         hasMore: feed.hasMore,
         page: feed.page,
         filter: feed.filter,
-        retention: feed.retention,
         error: feed.homeError,
         sources: setup.sources,
         starting: pendingAction === "start",
-        importing: meetingImport.importing,
         focusStart: startRequest > 0,
       },
       actions: {
-        onSourcesChange: setup.setSources,
         onStart: () => {
           void startFlow.startMeeting(setup.startOptions("manual"));
         },

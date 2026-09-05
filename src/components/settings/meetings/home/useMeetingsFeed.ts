@@ -5,7 +5,6 @@ import {
   type MeetingCommandError,
   type MeetingHistorySummary,
   type MeetingListFilter,
-  type MeetingRetentionPolicy,
   type MeetingSuggestion,
 } from "@/bindings";
 import { NO_MEETING_FILTER, meetingErrorKey } from "../meetingUtils";
@@ -23,7 +22,6 @@ export interface MeetingsFeed {
   listLoading: boolean;
   page: number;
   filter: MeetingListFilter;
-  retention: MeetingRetentionPolicy | null;
   homeError: string | null;
   refreshHome: () => Promise<void>;
   applyMeetingFilter: (nextFilter: MeetingListFilter) => void;
@@ -49,9 +47,6 @@ export const useMeetingsFeed = (): MeetingsFeed => {
   const [listLoading, setListLoading] = useState(true);
   const [listRevision, setListRevision] = useState(0);
   const [filter, setFilter] = useState<MeetingListFilter>(NO_MEETING_FILTER);
-  const [retention, setRetention] = useState<MeetingRetentionPolicy | null>(
-    null,
-  );
   const [homeError, setHomeError] = useState<string | null>(null);
   const homeRequestRef = useRef(0);
   const listRequestRef = useRef(0);
@@ -116,21 +111,19 @@ export const useMeetingsFeed = (): MeetingsFeed => {
   }, []);
 
   /* Everything on this page that is not the meetings list: what needs
-   * recovering, what is being offered, and the retention policy the list
-   * echoes. The list itself belongs to the position effect above, so a refresh
-   * bumps `listRevision` and lets that one owner re-read it. */
+   * recovering and what is being offered. The list itself belongs to the
+   * position effect above, so a refresh bumps `listRevision` and lets that
+   * one owner re-read it. */
   const refreshHome = useCallback(async () => {
     const requestId = homeRequestRef.current + 1;
     homeRequestRef.current = requestId;
     setListRevision((current) => current + 1);
 
     try {
-      const [recoveryResult, suggestionsResult, retentionResult] =
-        await Promise.allSettled([
-          commands.meetingRecoveryList(),
-          commands.meetingSuggestionsList(),
-          commands.meetingRetentionGet(),
-        ]);
+      const [recoveryResult, suggestionsResult] = await Promise.allSettled([
+        commands.meetingRecoveryList(),
+        commands.meetingSuggestionsList(),
+      ]);
 
       if (homeRequestRef.current !== requestId) return;
 
@@ -145,14 +138,6 @@ export const useMeetingsFeed = (): MeetingsFeed => {
       if (suggestionsResult.status === "fulfilled") {
         setSuggestions(suggestionsResult.value);
       }
-      // The policy itself belongs to Settings, Privacy. The list only echoes
-      // it, so a failed read drops the hint instead of raising an error.
-      setRetention(
-        retentionResult.status === "fulfilled" &&
-          retentionResult.value.status === "ok"
-          ? retentionResult.value.data.policy
-          : null,
-      );
 
       if (errors.length > 0) {
         setHomeError(t(meetingErrorKey(errors[0])));
@@ -181,7 +166,6 @@ export const useMeetingsFeed = (): MeetingsFeed => {
     listLoading,
     page: pageCursors.length + 1,
     filter,
-    retention,
     homeError,
     refreshHome,
     applyMeetingFilter,

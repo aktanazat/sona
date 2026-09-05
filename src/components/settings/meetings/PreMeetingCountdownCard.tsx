@@ -32,13 +32,13 @@ import { useSeriesTemplate } from "./seriesTemplate";
  * A prompt is an object with an answer attached, so it gets a surface. The
  * pane carries no sentence of its own: the countdown chip states when, the
  * card's own Start states that nothing happens until it is pressed, and the
- * page's one assurance sentence sits on the start card above. */
+ * page's one assurance sentence sits under its title. */
 
 export interface PreMeetingCountdownCardProps {
-  /** Sources the next capture will request, owned by the page. */
+  /** What the next capture will request. Read-only here: the page has one
+   * answer to that question and Settings owns it. */
   sources: SourceKind[];
   starting: boolean;
-  onSourcesChange: (sources: SourceKind[]) => void;
   /** Routes a calendar event into the page's existing start path, which
    * creates a preflight and puts the consent screen in front of the
    * operator. */
@@ -63,7 +63,7 @@ const promptAppName = (prompt: DetectionPromptKind): string | null => {
 
 export const PreMeetingCountdownCard: React.FC<
   PreMeetingCountdownCardProps
-> = ({ sources, starting, onSourcesChange, onStartEvent }) => {
+> = ({ sources, starting, onStartEvent }) => {
   const { t } = useTranslation();
   const status = useDetectionStore((state) => state.status);
   const prompts = useDetectionStore((state) => state.prompts);
@@ -83,18 +83,7 @@ export const PreMeetingCountdownCard: React.FC<
   const countdownTemplate = seriesTemplate?.template ?? notesTemplate;
   if (countdown === null && prompts.length === 0) return null;
 
-  const toggleSource = (source: SourceKind) =>
-    onSourcesChange(
-      sources.includes(source)
-        ? sources.filter((candidate) => candidate !== source)
-        : [...sources, source],
-    );
-
-  const recording = {
-    armed: sources,
-    onToggle: toggleSource,
-    disabled: starting,
-  };
+  const recording = { armed: sources };
 
   /* The same whole-struct write the detection rows use, so this switch cannot
    * revert one of theirs — or be reverted by it — while both are on screen. */

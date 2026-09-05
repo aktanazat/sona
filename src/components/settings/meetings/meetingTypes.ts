@@ -7,7 +7,6 @@ import type {
   MeetingListFilter,
   MeetingNavigationPayload,
   MeetingOrigin,
-  MeetingRetentionPolicy,
   MeetingReviewSnapshot,
   MeetingSuggestion,
   MeetingSuggestionId,
@@ -84,16 +83,14 @@ export interface MeetingsHomeScreenModel {
   hasMore: boolean;
   page: number;
   filter: MeetingListFilter;
-  retention: MeetingRetentionPolicy | null;
   error: string | null;
   sources: SourceKind[];
   starting: boolean;
-  importing: boolean;
+  /** The shell asked for a recording, so the page moves focus to Record. */
   focusStart: boolean;
 }
 
 export interface MeetingsHomeScreenActions {
-  onSourcesChange: (sources: SourceKind[]) => void;
   onStart: () => void;
   onImport: () => void;
   onStartSuggestion: (suggestion: MeetingSuggestion) => void;

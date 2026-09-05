@@ -20,7 +20,7 @@ import type {
   ProcessingFailure,
   ProcessingStatus,
 } from "@/bindings";
-import { meetingCardStatus } from "./home/MeetingStatusChip";
+import { meetingCardStatus } from "./home/meetingCardStatus";
 import { MeetingLive } from "./MeetingLive";
 import { MeetingStartGate } from "./MeetingStartGate";
 import { InsightsTab } from "./review/InsightsTab";
@@ -328,13 +328,10 @@ const homeMarkup = (
       hasMore={false}
       page={1}
       filter={NO_MEETING_FILTER}
-      retention={null}
       error={null}
       sources={["microphone", "system_audio"]}
       starting={false}
-      importing={false}
       focusStart={false}
-      onSourcesChange={noop}
       onStart={noop}
       onImport={noop}
       onStartSuggestion={noop}
@@ -365,60 +362,55 @@ describe("meetings section", () => {
     const markup = render(<MeetingsSettings onOpenSettings={noop} />);
     expect(markup).toContain('aria-label="Loading meeting history…"');
     expect(markup).toContain(">Meetings</h1>");
-    expect(markup).toContain(">Start recording<");
+    expect(markup).toContain(">Record</button>");
   });
 });
 
 describe("starting a meeting", () => {
-  test("one press starts capture, with the assurance beside the button", () => {
+  /* One press, on the title line, and one sentence under it. The card this
+   * replaced carried three things that were not the press: two source chips
+   * answering a question that has one answer, a retention sentence only
+   * Settings can change, and an Import competing for the same corner. */
+  test("the page is Record, and the sentence that says what Record does", () => {
     const markup = homeMarkup({});
-    // Exactly one Start control on an empty page: the block at the top.
-    expect(occurrences(markup, ">Start recording</button>")).toBe(1);
-    expect(markup).toContain(ASSURANCE);
-    // The wizard is gone: no setup screen and no acknowledgement to tick
-    // before the press that is itself the acknowledgement.
+
+    expect(occurrences(markup, ">Record</button>")).toBe(1);
+    expect(occurrences(markup, ASSURANCE)).toBe(1);
+    expect(markup).not.toContain("Microphone");
+    expect(markup).not.toContain("System audio");
+    expect(markup).not.toContain("Kept 30 days");
+    // The shell's shortcut and the palette both move focus to this press.
+    expect(markup).toContain('id="meeting-start-button"');
+  });
+
+  test("a press in flight cannot be pressed twice", () => {
+    const markup = homeMarkup({ starting: true });
+
+    expect(buttonTag(markup, "Starting…")).toContain('disabled=""');
+    expect(occurrences(markup, ">Record</button>")).toBe(0);
+  });
+
+  /* Import, the recordings folder and the bin are one menu beside Record. A
+   * static render never mounts a menu's portal, so what this proves is that
+   * all three left the page's surface for the one trigger that owns them. */
+  test("the verbs nobody performs weekly are behind the page's one menu", () => {
+    const markup = homeMarkup({});
+
+    expect(occurrences(markup, 'aria-label="More"')).toBe(1);
+    expect(markup).not.toContain(">Import</button>");
+    expect(markup).not.toContain("Open recordings folder");
+    expect(markup).not.toContain("Recently deleted");
+  });
+
+  // The wizard is gone: no setup screen, and no acknowledgement to tick
+  // before the press that is itself the acknowledgement.
+  test("nothing stands between the press and the recording", () => {
+    const markup = homeMarkup({});
+
     expect(occurrences(markup, "Check recording setup")).toBe(0);
     expect(
       occurrences(markup, "I have permission to capture this meeting."),
     ).toBe(0);
-  });
-
-  test("both default sources are on and selectable in place", () => {
-    const markup = homeMarkup({});
-    expect(occurrences(markup, 'aria-pressed="true"')).toBe(2);
-    expect(markup).toContain("Microphone");
-    expect(markup).toContain("System audio");
-  });
-
-  test("Start is unavailable, and says why, with no source chosen", () => {
-    const markup = homeMarkup({ sources: [] });
-    expect(buttonTag(markup, "Start recording")).toContain("disabled");
-    expect(markup).toContain("Choose at least one source.");
-  });
-
-  /* Importing is the second way a meeting begins, so it sits in the same row as
-   * the press that records one — not behind a menu, and not as a second card
-   * repeating the promise the first one already makes. */
-  test("importing a file is offered beside the press that records", () => {
-    const markup = homeMarkup({});
-    expect(markup).toContain('data-slot="meeting-import"');
-    expect(occurrences(markup, ">Import</button>")).toBe(1);
-    // Still one assurance sentence and one Start: the row grew a control, not
-    // a second call to action.
-    expect(occurrences(markup, ASSURANCE)).toBe(1);
-    expect(occurrences(markup, ">Start recording</button>")).toBe(1);
-  });
-
-  /* The import dialog opens in front of this button, so the button cannot be
-   * pressed again while it stands there — and Start still can be, because a
-   * dialog nobody has filled in is not a meeting being imported. The label
-   * holds still: the dialog reports what each file is doing, and this control
-   * went back to being the door it always was. */
-  test("the open import dialog closes its own door, not Start's", () => {
-    const markup = homeMarkup({ importing: true });
-    expect(buttonTag(markup, "Import")).toContain('disabled=""');
-    expect(buttonTag(markup, "Start recording")).not.toContain('disabled=""');
-    expect(markup).not.toContain("Importing…");
   });
 });
 
@@ -568,64 +560,78 @@ describe("meetings list", () => {
     expect(occurrences(markup, "Partial")).toBe(0);
   });
 
-  test("keeps row actions behind one shared menu trigger", () => {
+  /* One menu per row, and no column of chrome down the list: the trigger
+   * appears on hover, on keyboard focus anywhere in the row, and while its
+   * own menu is open - and it stays in the tab order the whole time, for the
+   * reader who never touches a mouse. */
+  test("each row keeps its actions behind one menu that is not always shown", () => {
     const ledger = row({
       headline: { kind: "ledger", text: "Pricing is open again." },
     });
-    const words = row({ headline: { kind: "words", words: 12 } });
 
-    expect(occurrences(ledger, 'data-slot="dropdown-menu-trigger"')).toBe(1);
-    expect(occurrences(words, 'data-slot="dropdown-menu-trigger"')).toBe(1);
+    expect(occurrences(ledger, 'aria-label="Meeting actions"')).toBe(1);
+    expect(ledger).toContain("opacity-0");
+    expect(ledger).toContain("group-focus-within:opacity-100");
     expect(ledger).not.toContain("Export ledger page");
-    expect(words).not.toContain("Export ledger page");
   });
 
-  test("the filter bar states the whole query in KEY VALUE pairs", () => {
+  test("the list keeps one control: the title the reader typed", () => {
     const markup = homeMarkup({
       meetings: [SUMMARY],
-      retention: { kind: "delete_after_days", days: 30 },
-      filter: { status: "failed", window: "last_7_days", title_query: "sync" },
+      filter: { ...NO_MEETING_FILTER, title_query: "sync" },
     });
-    /* Retention is stated once, on the start card, as a quiet line whose one
-     * link is the page that can change it. The list repeats neither the fact
-     * nor the control: the same datum twice on one screen is what this
-     * replaced, and the policy now lives in Settings alone. */
-    expect(occurrences(markup, "Kept 30 days")).toBe(1);
-    expect(occurrences(markup, ">change in Settings</button>")).toBe(1);
-    expect(occurrences(markup, "Delete after 30 days")).toBe(0);
+
     expect(markup).toContain('aria-label="Search meetings"');
-    expect(markup).toContain("Status");
-    expect(markup).toContain("Failed");
-    expect(markup).toContain("Time");
-    expect(markup).toContain("7 days");
-    // A narrowed list offers the way back out.
-    expect(markup).toContain("Clear filters");
+    expect(markup).toContain('value="sync"');
+    /* The status picker, the window picker and Clear are gone: a status the
+     * reader cannot change and a window they can read off the day headings
+     * were three controls asking about one list. Retention went with them, to
+     * the one page that can change it. */
+    expect(markup).not.toContain("Clear filters");
+    expect(markup).not.toContain(">Status<");
+    expect(markup).not.toContain(">Time<");
+    expect(markup).not.toContain("Kept 30 days");
   });
 
-  test("an unfiltered list offers no Clear, and a filtered empty one explains", () => {
-    expect(occurrences(homeMarkup({}), "Clear filters")).toBe(0);
+  test("a search that matches nothing says so with what was typed", () => {
     const empty = homeMarkup({
-      filter: { ...NO_MEETING_FILTER, status: "failed" },
+      filter: { ...NO_MEETING_FILTER, title_query: "sync" },
     });
-    expect(empty).toContain("No meetings match");
-    expect(empty).toContain("Sona looked through every meeting it has kept");
-    expect(occurrences(empty, "No meetings yet")).toBe(0);
+
+    expect(empty).toContain("No meeting title matches “sync”.");
+    expect(empty).not.toContain("Meetings you record appear here.");
   });
 
-  /* §2b rule 2: a page you read does not print an irreversible verb on every
-   * line. Finishing the save is the answer this row is asking for and stays
-   * named; throwing the recording away is behind the row's own menu, which is
-   * a portal a static render never mounts — so the trigger is what proves it
-   * left the row. */
-  test("an unfinished meeting offers the save inline and the discard behind its menu", () => {
+  /* An interrupted launch used to leave its meetings in a section of their
+   * own above the log, which printed the same rows the log prints - the same
+   * meeting, twice on one screen. They are the first group of the one list
+   * now, which also settles what paging used to decide: a meeting stranded
+   * behind fifty newer ones was on page three, where nobody looked. */
+  test("an unfinished meeting is pinned to the top of the one list, once", () => {
     const markup = homeMarkup({
-      recovery: [{ ...SUMMARY, session_id: "meeting-recovery" }],
+      recovery: [STRANDED],
+      meetings: [STRANDED, SUMMARY],
     });
 
     expect(markup).toContain("Unfinished meetings");
-    expect(markup).toContain(">Finish saving</button>");
-    expect(markup).not.toContain(">Discard</button>");
-    expect(occurrences(markup, 'aria-label="Meeting actions"')).toBe(1);
+    expect(occurrences(markup, 'data-slot="meeting-entry"')).toBe(2);
+    expect(markup.indexOf("Yesterday&#x27;s standup")).toBeLessThan(
+      markup.indexOf("Weekly planning"),
+    );
+  });
+
+  /* A typed query is the reader's ordering, not the page's: pinning rows
+   * nobody searched for above the store's answer would be the page arguing
+   * with its own search box. */
+  test("a search drops the pin, so the answer is only what matched", () => {
+    const markup = homeMarkup({
+      recovery: [STRANDED],
+      meetings: [SUMMARY],
+      filter: { ...NO_MEETING_FILTER, title_query: "planning" },
+    });
+
+    expect(markup).not.toContain("Unfinished meetings");
+    expect(occurrences(markup, 'data-slot="meeting-entry"')).toBe(1);
   });
 
   /* `disabled=""` and not "disabled": the Button primitive carries

@@ -1,17 +1,19 @@
-import {
-  useCallback,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-} from "react";
+import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { SourceKind } from "@/bindings";
 import type { MeetingStartOptions } from "../meetingTypes";
 
-const DEFAULT_MEETING_SOURCES: SourceKind[] = ["microphone", "system_audio"];
+/* What every press of Start records. Round 7 took the two capture chips off
+ * Meetings home, and with them the only control that ever changed this: a
+ * page-local answer to "which sources" that reset on every mount was a
+ * setting pretending to be a decision, and one press with both sources armed
+ * is the answer the page had anyway. A source that is unavailable is the start
+ * gate's subject, not this list's - it names the one that failed and offers
+ * the two ways out. */
+const MEETING_SOURCES: SourceKind[] = ["microphone", "system_audio"];
 
 /** Fills in everything a press of Start records that the press itself does not
- *  say: the sources on the page, and the defaults that never change. */
+ *  say: the sources it will ask for, and the defaults that never change. */
 export type MeetingStartOptionsBuilder = (
   origin: MeetingStartOptions["origin"],
   suggestionId?: MeetingStartOptions["suggestionId"],
@@ -22,15 +24,11 @@ export type MeetingStartOptionsBuilder = (
 
 export interface MeetingStartSetup {
   sources: SourceKind[];
-  setSources: Dispatch<SetStateAction<SourceKind[]>>;
   startOptions: MeetingStartOptionsBuilder;
 }
 
 export const useMeetingStartSetup = (): MeetingStartSetup => {
   const { t } = useTranslation();
-  /* What the next press of Start will record. Sources are the only part of
-   * setup a person changes often enough to keep on the page. */
-  const [sources, setSources] = useState<SourceKind[]>(DEFAULT_MEETING_SOURCES);
 
   const startOptions = useCallback(
     (
@@ -43,14 +41,14 @@ export const useMeetingStartSetup = (): MeetingStartSetup => {
       title,
       origin,
       suggestionId,
-      sources,
+      sources: MEETING_SOURCES,
       calendarEventKey,
       degradedStartPolicy: "abort_if_required_source_fails",
       destination: { kind: "local" },
       preview,
     }),
-    [sources, t],
+    [t],
   );
 
-  return { sources, setSources, startOptions };
+  return { sources: MEETING_SOURCES, startOptions };
 };

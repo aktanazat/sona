@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { MeetingSuggestion, SourceKind } from "@/bindings";
-import { Notice } from "@/components/settings/rows";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
   MeetingPreviewCard,
@@ -20,31 +19,25 @@ import {
  *
  * The section carries no description: "Sona noticed a meeting app in use" was
  * the heading again in a longer form, and the card underneath already names
- * the app it noticed.
- *
- * Skip is local, and the one sentence here says so. The backend has no
- * dismissal for an offer: an offer expires on its own clock and no offer
- * starts anything, so hiding one here changes nothing but this list. That is a
- * consequence of the control, not a restatement of it, which is why it is the
- * one line of prose this section keeps. */
+ * the app it noticed. Round 7 took the footnote about Skip with it — that an
+ * offer expires on its own clock is true of every offer here, and a sentence
+ * explaining a control the reader has not pressed is the page talking about
+ * itself. Skip is local either way: no offer starts anything, and hiding one
+ * changes nothing but this list.
+ */
 
 export interface MeetingSuggestionPreviewsProps {
   suggestions: MeetingSuggestion[];
+  /** What the next press will record. Read-only here: the page has one
+   *  answer to that question and Settings owns it. */
   sources: SourceKind[];
   starting: boolean;
-  onSourcesChange: (sources: SourceKind[]) => void;
   onStartSuggestion: (suggestion: MeetingSuggestion) => void;
 }
 
 export const MeetingSuggestionPreviews: React.FC<
   MeetingSuggestionPreviewsProps
-> = ({
-  suggestions,
-  sources,
-  starting,
-  onSourcesChange,
-  onStartSuggestion,
-}) => {
+> = ({ suggestions, sources, starting, onStartSuggestion }) => {
   const { t } = useTranslation();
   const [skipped, setSkipped] = useState<string[]>([]);
   const notesTemplate = useSettingsStore(
@@ -56,42 +49,13 @@ export const MeetingSuggestionPreviews: React.FC<
   );
   if (visible.length === 0) return null;
 
-  const toggleSource = (source: SourceKind) =>
-    onSourcesChange(
-      sources.includes(source)
-        ? sources.filter((candidate) => candidate !== source)
-        : [...sources, source],
-    );
-
   return (
-    <MeetingPreviewList
-      label={t("meetings.detected.title")}
-      /* Stated before the press, not after it: skipping the last offer takes
-       * this whole section with it, so a footnote that only appeared once
-       * something had been skipped was unreadable in the common case of a
-       * single offer. */
-      footer={
-        <Notice
-          tone="muted"
-          live={false}
-          className="text-[13px] leading-[18px] text-gray-900"
-        >
-          {t(
-            "meetings.preview.skippedNote",
-            "Skipping hides an offer here. Sona keeps seeing the call until the offer expires.",
-          )}
-        </Notice>
-      }
-    >
+    <MeetingPreviewList label={t("meetings.detected.title")}>
       {visible.map((suggestion) => (
         <MeetingPreviewCard
           key={suggestion.offer_id}
           facts={suggestionFacts(suggestion, t)}
-          recording={{
-            armed: sources,
-            onToggle: toggleSource,
-            disabled: starting,
-          }}
+          recording={{ armed: sources }}
           notesTemplate={notesTemplate}
           starting={starting}
           onStart={() => onStartSuggestion(suggestion)}

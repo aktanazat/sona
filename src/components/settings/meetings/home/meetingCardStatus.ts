@@ -1,26 +1,10 @@
-import React from "react";
-import { useTranslation } from "react-i18next";
 import type { MeetingPhase, ProcessingStatus } from "@/bindings";
-import { cn } from "@/lib/cn";
 
 export type MeetingCardStatus =
   | "live"
   | "processing"
   | "ready"
   | "needs_attention";
-
-/* The state as a word on the row's quiet line, never a plate.
- *
- * Round 6 took the capsule off it: a bordered, uppercase, letter-spaced pill
- * beside every unfinished title was a second typeface on a page that has one,
- * and the dot beside "Live" was a status light doing what the word already
- * did. Colour survives only where the state is exceptional. */
-const STATUS_CLASSES = {
-  live: "text-accent-strong",
-  processing: "text-gray-900",
-  ready: "text-gray-900",
-  needs_attention: "text-red-900",
-} as const satisfies Record<MeetingCardStatus, string>;
 
 /**
  * One meeting's state, read from its phase and its recorded processing status
@@ -39,6 +23,11 @@ const STATUS_CLASSES = {
  * "processing" is the shape of the original bug — anything unrecognised read
  * as work in flight — so a new phase has to be classified here rather than
  * inheriting that answer.
+ *
+ * Round 7 took the last chip off the rows: only `needs_attention` prints a
+ * word now, because it is the only state that asks the reader for something.
+ * "Live", "Processing" and "Ready" were the machinery reporting on itself, so
+ * this function's remaining job is to decide whether a row speaks at all.
  */
 export const meetingCardStatus = (
   phase: MeetingPhase,
@@ -64,30 +53,4 @@ export const meetingCardStatus = (
     case "recovery_required":
       return "needs_attention";
   }
-};
-
-interface MeetingStatusChipProps {
-  phase: MeetingPhase;
-  processing: ProcessingStatus;
-}
-
-export const MeetingStatusChip: React.FC<MeetingStatusChipProps> = ({
-  phase,
-  processing,
-}) => {
-  const { t } = useTranslation();
-  const status = meetingCardStatus(phase, processing);
-
-  return (
-    <span
-      data-slot="meeting-status"
-      data-status={status}
-      className={cn(
-        "flex-none text-[13px] leading-[18px]",
-        STATUS_CLASSES[status],
-      )}
-    >
-      {t(`meetings.list.status.${status}`)}
-    </span>
-  );
 };

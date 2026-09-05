@@ -7,11 +7,8 @@ import type {
   MeetingSessionSnapshot,
   MeetingProvider,
   MeetingReasonCode,
-  MeetingStatusFilter,
-  MeetingTimeWindow,
   ProcessingStatus,
   SourceAvailability,
-  SourceHealth,
   SourceKind,
 } from "@/bindings";
 
@@ -55,9 +52,6 @@ export const sourceKey = (source: SourceKind) => `meetings.sources.${source}`;
 
 export const sourceAvailabilityKey = (availability: SourceAvailability) =>
   `meetings.availability.${availability}`;
-
-export const sourceHealthKey = (health: SourceHealth) =>
-  `meetings.health.${health}`;
 
 export const captureCompletenessKey = (completeness: CaptureCompleteness) =>
   `meetings.completeness.${completeness}`;
@@ -137,38 +131,12 @@ export const preflightAllowsAction = (
   isPreflightMeetingPhase(session.phase) &&
   session.allowed_actions.includes(action);
 
-/** Every status a list filter can ask the store for, in menu order. */
-export const MEETING_STATUS_FILTERS: MeetingStatusFilter[] = [
-  "any",
-  "ready",
-  "processing",
-  "failed",
-];
-
-/** Every window a list filter can ask the store for, in menu order. */
-export const MEETING_TIME_WINDOWS: MeetingTimeWindow[] = [
-  "any",
-  "today",
-  "last_7_days",
-  "last_30_days",
-];
-
-export const meetingStatusFilterKey = (status: MeetingStatusFilter) =>
-  `meetings.list.filters.status.${status}`;
-
-export const meetingTimeWindowKey = (window: MeetingTimeWindow) =>
-  `meetings.list.filters.time.${window}`;
-
-/** No filter at all: the whole list, newest first. */
+/* No filter at all: the whole list, newest first, which after round 7 is the
+ * only shape a filter takes besides a title the reader typed. The status and
+ * window pickers are gone, so `status` and `window` stay "any" for the life of
+ * the screen and the store keeps answering the query it always did. */
 export const NO_MEETING_FILTER: MeetingListFilter = {
   status: "any",
   window: "any",
   title_query: "",
 };
-
-/** True when `filter` narrows nothing, which is what the Clear control needs
- *  to know and what an empty result has to explain. */
-export const isUnfilteredMeetingList = (filter: MeetingListFilter) =>
-  (filter.status ?? "any") === "any" &&
-  (filter.window ?? "any") === "any" &&
-  (filter.title_query ?? "").trim().length === 0;
