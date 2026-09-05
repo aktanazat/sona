@@ -162,14 +162,21 @@ export const MeetingAutomations: React.FC = () => {
 
   return (
     <SettingsSection label={t("settings.meetings.automations.title")}>
-      <div className="px-6 py-3">
-        <Microlabel>
-          {t("settings.meetings.automations.description")}
-        </Microlabel>
-      </div>
+      {/* Empty is the common state on a Mac that has recorded nothing, and it
+       * needs one line, not a sentence about what automations are plus a row
+       * with a label and no control. Once a series exists, that sentence is
+       * the only statement of when any of this runs. */}
       {roster && roster.series.length === 0 ? (
-        <SettingsRow label={t("settings.meetings.automations.empty")} />
-      ) : null}
+        <p className="px-6 py-3.5 text-[13px] leading-5 text-gray-800">
+          {t("settings.meetings.automations.empty")}
+        </p>
+      ) : (
+        <div className="px-6 py-3">
+          <Microlabel>
+            {t("settings.meetings.automations.description")}
+          </Microlabel>
+        </div>
+      )}
       {roster?.series.map((series) => (
         <SettingsDisclosure
           key={series.series_key}

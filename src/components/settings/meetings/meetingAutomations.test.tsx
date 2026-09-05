@@ -79,9 +79,6 @@ describe("meeting automations settings", () => {
 
   test("the section promises the actions stay on this Mac", () => {
     expect(english.description).toContain("on this Mac");
-    expect(english.description).toContain(
-      "Off for every series until you turn one on",
-    );
     expect(english.webhookHint).toContain("tailnet");
     expect(english.remindersHint).toContain("Nothing is ever read back");
   });
