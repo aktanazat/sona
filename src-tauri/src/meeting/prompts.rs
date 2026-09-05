@@ -182,7 +182,9 @@ mod tests {
     };
     use crate::meeting::automations::{AutomationEffects, EffectOutcome, ReminderItem};
     use crate::meeting::detection::machine::CalendarEventSummary;
-    use crate::meeting::processing::{MeetingTextGenerationError, MeetingTextGenerator, ReplyShape};
+    use crate::meeting::processing::{
+        MeetingTextGenerationError, MeetingTextGenerator, ReplyShape,
+    };
     use crate::meeting::prompt_types::{
         PromptOutput, PromptRunFailure, PromptRunResult, PromptTarget,
     };

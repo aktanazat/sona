@@ -829,7 +829,9 @@ impl MeetingTextGenerator for Recording<'_> {
         max_tokens: i32,
         shape: ReplyShape,
     ) -> Result<String, MeetingTextGenerationError> {
-        let answer = self.inner.generate(system_prompt, evidence, max_tokens, shape)?;
+        let answer = self
+            .inner
+            .generate(system_prompt, evidence, max_tokens, shape)?;
         self.answers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
