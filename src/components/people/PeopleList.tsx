@@ -62,11 +62,11 @@ const OrganizationStrip: React.FC<{
   );
 };
 
-/* One person, one row: the name, one line of relationship facts — where they
- * are and how many meetings you have had — and, at the row's end, how long
- * ago the last one was. The elapsed phrasing is the fact somebody scans a
- * list of people for; the exact date is on the person's own page, which is
- * what the row opens, along with everything else about them. */
+/* One person, one row: the name, and one line of relationship facts under it
+ * — where they are, how many meetings you have had, and how long ago the last
+ * one was. The elapsed phrasing is the fact somebody scans a list of people
+ * for; the exact date is on the person's own page, which is what the row
+ * opens, along with everything else about them. */
 const PersonRow: React.FC<{
   entry: PersonListEntry;
   onOpen: () => void;
@@ -94,9 +94,11 @@ const PersonRow: React.FC<{
           <span className="min-w-0 truncate text-[14px] leading-[21px] font-medium text-gray-1000">
             {entry.person.display_name}
           </span>
-          {/* One line, in the order it is read: the place, then the count.
-           * Interpuncts join it rather than separate cells, because it is a
-           * sentence about a person and not a table of them. */}
+          {/* One line, in the order it is read: the place, the count, then the
+           * elapsed time. Interpuncts join it rather than separating cells,
+           * because it is a sentence about a person and not a table of them —
+           * and the last fact of that sentence is not a second column with an
+           * alignment of its own. */}
           <span className="snap-measured min-w-0 truncate text-[13px] leading-[18px] text-gray-900 tabular-nums">
             {entry.person.organization === null ? null : (
               <>
@@ -107,13 +109,9 @@ const PersonRow: React.FC<{
               </>
             )}
             {meetings}
+            {lastMet === null ? null : ` · ${lastMet}`}
           </span>
         </span>
-        {lastMet === null ? null : (
-          <span className="snap-measured flex-none text-end text-[13px] leading-[18px] text-gray-900 tabular-nums">
-            {lastMet}
-          </span>
-        )}
         <ChevronRight
           aria-hidden="true"
           className="size-3.5 flex-none text-gray-700 rtl:rotate-180"

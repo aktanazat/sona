@@ -10,18 +10,13 @@ import type {
 import { SettingsPage } from "@/components/settings/rows";
 import { ChartCard } from "@/components/charts";
 import { Bars } from "@/components/vg/chart";
-import { formatEntryTimestamp } from "@/lib/utils/format";
 import { PersonDocuments } from "./PersonDocuments";
 import { PersonEvidence } from "./PersonEvidence";
 import { PersonHeader } from "./PersonHeader";
 import { PersonCommitments, PersonOpenLoops } from "./PersonLedgerSections";
 import { PersonMeetings } from "./PersonMeetings";
 import { PersonSummarySection } from "./PersonSummarySection";
-import {
-  confirmedPersonLinks,
-  latestConfirmedMeetingAt,
-  monthlyMeetingCadence,
-} from "./peopleModel";
+import { confirmedPersonLinks, monthlyMeetingCadence } from "./peopleModel";
 
 export interface PersonDetailViewProps {
   detail: PersonDetail;
@@ -73,26 +68,18 @@ export const PersonDetailView: React.FC<PersonDetailViewProps> = ({
   const { t } = useTranslation();
   const confirmedLinks = confirmedPersonLinks(detail.links);
   const cadence = monthlyMeetingCadence(confirmedLinks);
-  const latestMeetingAt = latestConfirmedMeetingAt(confirmedLinks);
   const talkShare =
     detail.talk_share_avg_permille === null
       ? null
       : `${(detail.talk_share_avg_permille / 10).toLocaleString(undefined, {
           maximumFractionDigits: 1,
         })}%`;
-  const footerFacts = [
-    ...(latestMeetingAt === null
+  /* When you last met is the header's line now, so the chart's footer keeps
+   * only the fact the chart itself cannot draw. */
+  const footerFacts =
+    talkShare === null
       ? []
-      : [
-          {
-            label: t("people.detail.lastMeeting"),
-            value: formatEntryTimestamp(latestMeetingAt),
-          },
-        ]),
-    ...(talkShare === null
-      ? []
-      : [{ label: t("people.detail.talkShare"), value: talkShare }]),
-  ];
+      : [{ label: t("people.detail.talkShare"), value: talkShare }];
 
   return (
     <SettingsPage
@@ -115,20 +102,31 @@ export const PersonDetailView: React.FC<PersonDetailViewProps> = ({
           onDelete={onDelete}
           onSplit={onSplit}
           onOpenOrganization={onOpenOrganization}
+          onRegenerateSummary={onRegenerateSummary}
+          onImportDocument={onImportDocument}
           onRemoveVoiceProfile={onRemoveVoiceProfile}
         />
       }
     >
-      {/* The paragraph first: three sentences about who this is to you, which
-       * is what the rest of the page is evidence for. Then the catalogue — the
-       * meetings you have had, what is still open out of them, and how Sona
-       * connected this person to any of it. The measured summary and imported
-       * context sit after that, because a chart is not something you read
-       * aloud first. */}
-      <PersonSummarySection
-        summary={detail.person.summary}
-        pending={pending}
-        onRegenerate={onRegenerateSummary}
+      {/* The paragraph first, when there is one: three sentences about who
+       * this is to you. Then what the page is for - what is still open
+       * between you, in both directions - and only then the archive it came
+       * out of: the meetings, the chart drawn from them, the files, and last
+       * of all how Sona connected this person to any of it. Provenance is the
+       * line a reader checks once, so it reads last.
+       *
+       * Every one of these renders nothing at all when it holds nothing: an
+       * empty person is a name and a menu, not eight labelled absences. */}
+      <PersonSummarySection summary={detail.person.summary} />
+      <PersonOpenLoops
+        openLoops={detail.open_loops}
+        personName={detail.person.display_name}
+        onOpenMeeting={onOpenMeeting}
+      />
+      <PersonCommitments
+        commitments={detail.commitments}
+        personName={detail.person.display_name}
+        onOpenMeeting={onOpenMeeting}
       />
       <PersonMeetings
         links={detail.links}
@@ -136,23 +134,15 @@ export const PersonDetailView: React.FC<PersonDetailViewProps> = ({
         onConfirm={onConfirmLink}
         onUnlink={onUnlink}
       />
-      <PersonOpenLoops
-        openLoops={detail.open_loops}
-        personName={detail.person.display_name}
-        onOpenMeeting={onOpenMeeting}
-      />
-      <PersonEvidence links={detail.links} />
-      <PersonCommitments
-        commitments={detail.commitments}
-        personName={detail.person.display_name}
-        onOpenMeeting={onOpenMeeting}
-      />
 
       {confirmedLinks.length === 0 ? null : (
         <ChartCard
           data-slot="person-cadence"
           label={t("people.detail.cadence")}
-          metric={confirmedLinks.length}
+          /* A bare "12" over a chart labelled "Meeting cadence" reads as a
+           * cadence, which it is not: it is how many meetings the bars are
+           * drawn from. The noun costs nothing and answers it. */
+          metric={t("people.list.meetings", { count: confirmedLinks.length })}
           footerFacts={footerFacts}
         >
           <Bars
@@ -169,9 +159,9 @@ export const PersonDetailView: React.FC<PersonDetailViewProps> = ({
         documents={documents}
         loadFailed={documentsLoadFailed}
         pending={pending}
-        onImport={onImportDocument}
         onDelete={onDeleteDocument}
       />
+      <PersonEvidence person={detail.person} links={detail.links} />
     </SettingsPage>
   );
 };

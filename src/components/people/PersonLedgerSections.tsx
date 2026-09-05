@@ -10,7 +10,6 @@ import { LoopStatusChip } from "@/components/settings/meetings/review/LoopRows";
 import { Microlabel, SettingsSection } from "@/components/settings/rows";
 import { cn } from "@/lib/cn";
 import { formatEntryTimestamp } from "@/lib/utils/format";
-import { EmptyStateRow } from "./EmptyStateRow";
 import { groupByDirection } from "./loopDirection";
 
 /* The mark that carries a ledger line back to the meeting it was said in.
@@ -74,25 +73,19 @@ interface LedgerRow {
  * Two groups inside one section, not two sections: "I owe" and "waiting on
  * them" are the same register read from opposite ends, and splitting the card
  * would make a page of four headings out of a page of two. A group with
- * nothing in it says nothing; the section's own empty state covers the case
- * where neither has anything. */
+ * nothing in it says nothing, and with both of them empty there is no section
+ * at all: a heading over the sentence "no open loops" is a row spent saying
+ * that the row has nothing to say. */
 const LedgerSection: React.FC<{
   label: string;
-  emptyText: string;
   mine: LedgerRow[];
   waitingOn: LedgerRow[];
   waitingOnLabel: string;
   onOpenMeeting: (meetingId: string) => void;
-}> = ({ label, emptyText, mine, waitingOn, waitingOnLabel, onOpenMeeting }) => {
+}> = ({ label, mine, waitingOn, waitingOnLabel, onOpenMeeting }) => {
   const { t } = useTranslation();
 
-  if (mine.length === 0 && waitingOn.length === 0) {
-    return (
-      <SettingsSection label={label}>
-        <EmptyStateRow>{emptyText}</EmptyStateRow>
-      </SettingsSection>
-    );
-  }
+  if (mine.length === 0 && waitingOn.length === 0) return null;
 
   const groups = [
     { key: "mine", heading: t("people.waitingOn.iOwe"), rows: mine },
@@ -119,7 +112,13 @@ const LedgerSection: React.FC<{
                 </p>
                 <span className="snap-measured flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[13px] leading-[18px] text-gray-900 tabular-nums">
                   <span className="min-w-0 truncate">{row.title}</span>
-                  <LoopStatusChip status={row.status} />
+                  {/* "Open" under a heading that reads "Open loops" is the
+                   * heading said twice. Only a status that contradicts the
+                   * section it sits in - done, dropped, carried - is worth a
+                   * word; the one a reader must act on is the stale line. */}
+                  {row.status === "open" ? null : (
+                    <LoopStatusChip status={row.status} />
+                  )}
                   {row.stale ? (
                     <span
                       data-slot="loop-stale"
@@ -128,7 +127,12 @@ const LedgerSection: React.FC<{
                       {t("people.waitingOn.stale")}
                     </span>
                   ) : null}
-                  {row.carriedSinceUtcMs === null ? null : (
+                  {/* When the loop was raised in the meeting the sentence
+                   * already cites, "Open since" reprints that same clock
+                   * time one line lower. It earns the line only when the
+                   * loop has outlived the room it came from. */}
+                  {row.carriedSinceUtcMs === null ||
+                  row.carriedSinceUtcMs === row.atUtcMs ? null : (
                     <span>
                       {t("people.detail.carriedSince", {
                         date: formatEntryTimestamp(row.carriedSinceUtcMs),
@@ -167,7 +171,6 @@ export const PersonOpenLoops: React.FC<{
   return (
     <LedgerSection
       label={t("peopleV2.detail.openLoops")}
-      emptyText={t("people.detail.noOpenLoops")}
       mine={grouped.mine.map(asRow)}
       waitingOn={grouped.waitingOn.map(asRow)}
       waitingOnLabel={t("people.waitingOn.them", { name: personName })}
@@ -197,7 +200,6 @@ export const PersonCommitments: React.FC<{
   return (
     <LedgerSection
       label={t("people.detail.commitments")}
-      emptyText={t("people.detail.noCommitments")}
       mine={grouped.mine.map(asRow)}
       waitingOn={grouped.waitingOn.map(asRow)}
       waitingOnLabel={t("people.waitingOn.them", { name: personName })}

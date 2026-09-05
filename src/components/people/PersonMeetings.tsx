@@ -5,8 +5,6 @@ import { Microlabel, SettingsSection } from "@/components/settings/rows";
 import { MeetingSummaryRow } from "@/components/settings/meetings/home/MeetingCard";
 import { DropdownMenuItem } from "@/components/vg/dropdown-menu";
 import { formatEntryTimestamp } from "@/lib/utils/format";
-import { EmptyStateRow } from "./EmptyStateRow";
-import { EvidenceChip, SuggestedChip } from "./EvidenceChip";
 import { PeopleConfirmDialog } from "./PeopleConfirmDialog";
 
 interface PersonMeetingsProps {
@@ -25,73 +23,78 @@ export const PersonMeetings: React.FC<PersonMeetingsProps> = ({
   const { t } = useTranslation();
   const [unlinking, setUnlinking] = useState<PersonMeetingLink | null>(null);
 
+  /* No meetings together, no section. The row that used to say so was the
+   * only thing under the heading, and a heading with one sentence of nothing
+   * under it is two rows spent on an absence. */
+  if (links.length === 0) return null;
+
   return (
     <SettingsSection label={t("people.detail.meetingsTogether")}>
-      {links.length === 0 ? (
-        <EmptyStateRow>{t("people.detail.noMeetings")}</EmptyStateRow>
-      ) : (
-        <ul className="divide-y divide-gray-alpha-400">
-          {links.map((link) => {
-            const suggested = link.confidence === "suggested";
-            const metadata = [
-              ...(link.meeting.series_number < 2
-                ? []
-                : [
-                    <Microlabel key="series" className="tabular-nums">
-                      {t("people.detail.series", {
-                        number: link.meeting.series_number,
-                      })}
-                    </Microlabel>,
-                  ]),
-              <span key="timestamp" className="tabular-nums">
-                {formatEntryTimestamp(link.meeting.at_utc_ms)}
-              </span>,
-            ];
+      <ul className="divide-y divide-gray-alpha-400">
+        {links.map((link) => {
+          const suggested = link.confidence === "suggested";
+          /* Where the link came from is the page's evidence section now; what
+           * stays on the row is the one word that asks the reader for a
+           * decision, and it is a word, not a badge. */
+          const metadata = [
+            ...(suggested
+              ? [
+                  <span key="suggested" className="text-accent-strong">
+                    {t("people.source.suggested")}
+                  </span>,
+                ]
+              : []),
+            ...(link.meeting.series_number < 2
+              ? []
+              : [
+                  <Microlabel key="series" className="tabular-nums">
+                    {t("people.detail.series", {
+                      number: link.meeting.series_number,
+                    })}
+                  </Microlabel>,
+                ]),
+            <span key="timestamp" className="tabular-nums">
+              {formatEntryTimestamp(link.meeting.at_utc_ms)}
+            </span>,
+          ];
 
-            return (
-              <MeetingSummaryRow
-                key={link.meeting.id}
-                data-slot="person-meeting"
-                className="px-6 py-3.5"
-                title={link.meeting.title}
-                headline={link.meeting.headline}
-                footerLeading={
-                  <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <EvidenceChip source={link.source} />
-                    {suggested ? <SuggestedChip /> : null}
-                  </span>
-                }
-                metadata={metadata}
-                actionsLabel={t("people.detail.meetingActions")}
-                actions={
-                  <>
-                    {suggested ? (
-                      <DropdownMenuItem
-                        disabled={pending}
-                        onSelect={() => onConfirm(link)}
-                      >
-                        {t("people.list.confirm")}
-                      </DropdownMenuItem>
-                    ) : null}
+          return (
+            <MeetingSummaryRow
+              key={link.meeting.id}
+              data-slot="person-meeting"
+              className="px-6 py-3.5"
+              title={link.meeting.title}
+              headline={link.meeting.headline}
+              actionsLabel={t("common.more")}
+              metadata={metadata}
+              actions={
+                <>
+                  {suggested ? (
                     <DropdownMenuItem
                       disabled={pending}
-                      variant={suggested ? "default" : "destructive"}
-                      onSelect={() => {
-                        if (suggested) onUnlink(link);
-                        else setUnlinking(link);
-                      }}
+                      onSelect={() => onConfirm(link)}
                     >
-                      {suggested
-                        ? t("people.list.dismiss")
-                        : t("people.detail.unlink")}
+                      {t("people.list.confirm")}
                     </DropdownMenuItem>
-                  </>
-                }
-              />
-            );
-          })}
-        </ul>
-      )}
+                  ) : null}
+                  <DropdownMenuItem
+                    disabled={pending}
+                    variant={suggested ? "default" : "destructive"}
+                    onSelect={() => {
+                      if (suggested) onUnlink(link);
+                      else setUnlinking(link);
+                    }}
+                  >
+                    {suggested
+                      ? t("people.list.dismiss")
+                      : t("people.detail.unlink")}
+                  </DropdownMenuItem>
+                </>
+              }
+            />
+          );
+        })}
+      </ul>
 
       <PeopleConfirmDialog
         open={unlinking !== null}

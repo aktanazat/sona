@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronDown, FileText, Trash2 } from "lucide-react";
+import { ChevronDown, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { Document } from "@/bindings";
 import {
@@ -9,14 +9,12 @@ import {
 } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { formatEntryTimestamp } from "@/lib/utils/format";
-import { EmptyStateRow } from "./EmptyStateRow";
 import { PeopleConfirmDialog } from "./PeopleConfirmDialog";
 
 interface PersonDocumentsProps {
   documents: Document[];
   loadFailed: boolean;
   pending: boolean;
-  onImport: () => void;
   onDelete: (document: Document) => void;
 }
 
@@ -24,34 +22,22 @@ export const PersonDocuments: React.FC<PersonDocumentsProps> = ({
   documents,
   loadFailed,
   pending,
-  onImport,
   onDelete,
 }) => {
   const { t } = useTranslation();
   const [deleting, setDeleting] = useState<Document | null>(null);
 
+  /* Nothing imported, nothing here: the verb that imports the first document
+   * is in the page's menu, so this section is only ever the list of what came
+   * back. A failed load is not an absence, and still says so. */
+  if (!loadFailed && documents.length === 0) return null;
+
   return (
-    <SettingsSection
-      label={t("people.detail.documents")}
-      action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={pending}
-          onClick={onImport}
-        >
-          <FileText aria-hidden="true" />
-          {t("people.detail.importDocument")}
-        </Button>
-      }
-    >
+    <SettingsSection label={t("people.detail.documents")}>
       {loadFailed ? (
         <div className="px-6 py-3.5">
           <Notice tone="danger">{t("people.detail.documentsLoadError")}</Notice>
         </div>
-      ) : documents.length === 0 ? (
-        <EmptyStateRow>{t("people.detail.noDocuments")}</EmptyStateRow>
       ) : (
         <ul className="divide-y divide-gray-alpha-400">
           {documents.map((document) => (

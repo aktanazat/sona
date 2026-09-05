@@ -311,10 +311,11 @@ describe("organization detail", () => {
 });
 
 describe("person detail", () => {
-  test("keeps every empty section as one quiet row", () => {
+  test("an empty person is a name and a menu, not seven labelled absences", () => {
     const markup = detail(
       {
         ...DETAIL,
+        person: { ...PERSON, aliases: [], calendar_emails: [], summary: null },
         links: [],
         open_loops: [],
         commitments: [],
@@ -324,58 +325,76 @@ describe("person detail", () => {
     );
 
     expect(markup).toContain("max-w-[760px]");
-    /* Five sections, five one-line absences: meetings together, open loops,
-     * how Sona knows, commitments, imported documents. */
-    expect(occurrences(markup, 'data-slot="people-empty-row"')).toBe(5);
+    /* The name and the menu are the page; a section with nothing in it is not
+     * on it at all, so no heading stands over a sentence saying so. */
+    expect(markup).toContain("Dana Reyes");
+    expect(markup).toContain('aria-label="More"');
+    expect(occurrences(markup, 'data-slot="people-empty-row"')).toBe(0);
+    for (const heading of [
+      "About",
+      "Meetings together",
+      "Open loops",
+      "Why Sona links this person",
+      "Commitments",
+      "Meeting cadence",
+      "Documents",
+    ])
+      expect(markup).not.toContain(heading);
+    expect(markup).not.toContain('data-slot="person-summary"');
     expect(markup).not.toContain('data-slot="person-cadence"');
   });
 
-  test("reads as one catalogue: meetings, then what is open, then the evidence", () => {
+  test("reads from what is open, through the archive, down to the evidence", () => {
     const markup = detail(DETAIL, [DOCUMENT]);
 
-    expect(markup.indexOf("Meetings together")).toBeLessThan(
-      markup.indexOf("Open loops"),
-    );
     expect(markup.indexOf("Open loops")).toBeLessThan(
+      markup.indexOf("Meetings together"),
+    );
+    expect(markup.indexOf("Meetings together")).toBeLessThan(
       markup.indexOf("Why Sona links this person"),
     );
-    /* Three kinds of evidence across three links: an invite, a voice, a
-     * title. The section counts the links already on screen above it and asks
-     * the backend nothing. */
-    expect(occurrences(markup, 'data-slot="person-evidence-row"')).toBe(3);
-    expect(markup).toContain("Calendar");
-    expect(markup).toContain("Speaker");
-    expect(markup).toContain("Title");
+    /* Three kinds of evidence across three links, counted into one sentence
+     * rather than one row per kind - and under it what else this person is
+     * called and the address an invite reaches them at, which used to crowd
+     * the title. Nothing here is pressable, so nothing here is a chip. */
+    expect(occurrences(markup, 'data-slot="person-evidence-sources"')).toBe(1);
+    expect(markup).toContain(
+      "Calendar 1 meeting · Speaker 1 meeting · Title 1 meeting",
+    );
+    expect(markup).toContain("Also: Dana R.");
+    expect(markup).toContain("Invited as dana@example.com");
+    expect(markup).not.toContain('data-slot="person-evidence-row"');
   });
 
-  /* Three sentences under the name, with the engine that wrote them and a way
-   * to ask again. A person Sona has never had an engine for still gets the
-   * button, because it is the only way to ask for a first paragraph. */
-  test("shows the relationship paragraph with its engine and a regenerate action", () => {
+  /* Three sentences under the name, with the engine that wrote them and when.
+   * No paragraph, no card: the verb that asks for one is in the page's menu,
+   * so a card standing empty to hold a lone button is a card the page does
+   * not need. */
+  test("shows the relationship paragraph with its engine, and no card without one", () => {
     const written = detail(DETAIL, []);
 
     expect(written).toContain('data-slot="person-summary"');
     expect(written).toContain("Dana runs pricing at Acme.");
     expect(written).toContain("Written by apple-intelligence");
-    expect(written).toContain(">Regenerate</button>");
+    expect(written).not.toContain(">Regenerate</button>");
 
     const blank = detail(
       { ...DETAIL, person: { ...PERSON, summary: null } },
       [],
     );
 
-    expect(blank).toContain("No summary yet.");
-    expect(blank).toContain(">Regenerate</button>");
+    expect(blank).not.toContain('data-slot="person-summary"');
+    expect(blank).not.toContain("No summary yet.");
     expect(blank).not.toContain("Written by");
   });
 
   test("renders cadence, relationship facts, links, and imported context", () => {
     const markup = detail(DETAIL, [DOCUMENT]);
-    /* The organization is a link to its own page now, so the label is a
-     * control and the meeting count follows it as text. */
+    /* The organization is a link to its own page, and it shares the header's
+     * one Meta line with when you last met. */
     expect(markup).toContain('data-slot="person-organization"');
     expect(markup).toContain(">Acme</button>");
-    expect(markup).toContain("2 meetings");
+    expect(markup).toContain("Last met");
 
     const cadenceBars =
       markup.match(
@@ -389,14 +408,15 @@ describe("person detail", () => {
     expect(occurrences(markup, 'data-slot="person-meeting"')).toBe(3);
     expect(markup).toContain('data-slot="person-document"');
     expect(markup).toContain("Dana prefers a concise weekly update.");
-    /* The name is the control that renames it, so there is no Rename button
-     * beside the title — and split, merge and delete are operations on who
-     * this person is, so they wait behind one quiet trigger instead of a row
-     * of named buttons. Four triggers: three meeting rows and the header. */
+    /* Every verb about who this person is - rename, regenerate, import,
+     * merge, split, delete - waits behind the one trigger on the title line,
+     * so no named button for any of them stands on the page. Four triggers:
+     * three meeting rows and the header. */
     expect(markup).not.toContain(">Rename</button>");
     expect(markup).not.toContain(">Split person</button>");
-    expect(markup).toContain('title="Rename"');
-    expect(markup).toContain('aria-label="Person actions"');
+    expect(markup).not.toContain(">Import document</button>");
+    expect(markup).not.toContain('title="Rename"');
+    expect(markup).toContain('aria-label="More"');
     expect(occurrences(markup, 'data-slot="dropdown-menu-trigger"')).toBe(4);
     /* An open loop reaches the meeting it came from through the citation mark
      * at the end of its sentence, and the mark names that meeting for anyone
@@ -462,15 +482,29 @@ describe("person detail", () => {
   });
 
   /* D18: a person page reads the loop's live state, not a copy of the words.
-   * The status word is the whole point of the row — a commitment already
-   * settled on the review screen must not read the same as one still owed. */
-  test("states where each loop stands, and how long the open one has been open", () => {
+   * A commitment the review screen already settled must not read the same as
+   * one still owed - which is the only thing the status word is for. "Open"
+   * under a heading that says "Open loops" is the heading again, and a date
+   * the sentence above already cites is that date again. */
+  test("names a settled loop, and dates only one that outlived its meeting", () => {
     const markup = detail(DETAIL, []);
 
-    expect(occurrences(markup, 'data-slot="loop-status"')).toBe(2);
-    expect(markup).toContain(">Open<");
+    expect(occurrences(markup, 'data-slot="loop-status"')).toBe(1);
     expect(markup).toContain(">Done<");
-    expect(markup).toContain("Open since");
+    expect(markup).not.toContain(">Open<");
+    expect(markup).not.toContain("Open since");
+
+    const carried = detail(
+      {
+        ...DETAIL,
+        open_loops: DETAIL.open_loops.map((loop) => ({
+          ...loop,
+          carried_since_at_utc_ms: loop.at_utc_ms - 60_000,
+        })),
+      },
+      [],
+    );
+    expect(carried).toContain("Open since");
   });
 });
 
@@ -550,25 +584,44 @@ describe("follow-up agent prompt", () => {
       caveats: [],
       receipts: { status: "verified" },
     };
+    /* A regeneration leaves the revision it replaced in the list, ahead of
+     * the one that superseded it. The prompt is sent to a person, so a
+     * commitment the meeting no longer holds anyone to must not reach it. */
+    const superseded: MeetingLedger = {
+      ...ledger,
+      open_loops: [],
+      commitments: [
+        {
+          who: "Amir",
+          what: "Discount the annual plan",
+          firmness: "firm",
+          receipt: {
+            quote: "I will discount the annual plan.",
+            speaker: "Amir",
+            t_ms: 4_000,
+            citations: [],
+          },
+        },
+      ],
+    };
     /* The builder reads only the ledger; the other artifact fields satisfy
      * the generated shape with empty values production also starts from. */
     const emptyText = { text: "", citations: [] };
+    const content = (revision: MeetingLedger) => ({
+      summary: emptyText,
+      outline: [],
+      decisions: [],
+      action_items: [],
+      key_questions: [],
+      risks: [],
+      follow_up_draft: emptyText,
+      ledger: revision,
+    });
     const snapshot: FollowUpAgentMessageSource = {
       session: { title: "Pricing review" },
       artifacts: [
-        {
-          state: "current",
-          content: {
-            summary: emptyText,
-            outline: [],
-            decisions: [],
-            action_items: [],
-            key_questions: [],
-            risks: [],
-            follow_up_draft: emptyText,
-            ledger,
-          },
-        },
+        { state: "out_of_date", content: content(superseded) },
+        { state: "current", content: content(ledger) },
       ],
     };
     const message = buildFollowUpAgentMessage(snapshot, i18n.t.bind(i18n));
@@ -576,5 +629,6 @@ describe("follow-up agent prompt", () => {
     expect(message).toContain("Pricing review");
     expect(message).toContain("- Dana: Send the tier comparison");
     expect(message).toContain("- Which tier does the trial convert into?");
+    expect(message).not.toContain("Amir");
   });
 });
