@@ -29,15 +29,19 @@ export const LEDGER_OUTCOME = {
   dropped: "dropped",
 } satisfies Record<LedgerThreadState, LedgerOutcome>;
 
-/** The newest current revision that carries a ledger, or null. Revisions come
- *  newest first, and one generated before ledgers existed carries none. */
+/** The newest current revision's ledger, or null. Revisions come newest
+ *  first, and one generated before ledgers existed carries none.
+ *
+ *  Takes the two fields it reads rather than a whole revision, so the
+ *  follow-up agent's narrower message source can ask the review page's
+ *  question instead of spelling the same three conditions out again. */
 export const currentLedger = (
-  artifacts: MeetingArtifactRevision[],
-): { artifact: MeetingArtifactRevision; ledger: MeetingLedger } | null => {
+  artifacts: ReadonlyArray<Pick<MeetingArtifactRevision, "state" | "content">>,
+): MeetingLedger | null => {
   for (const artifact of artifacts) {
     if (artifact.state !== "current") continue;
     const ledger = artifact.content?.ledger;
-    if (ledger) return { artifact, ledger };
+    if (ledger) return ledger;
   }
   return null;
 };

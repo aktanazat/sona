@@ -1,14 +1,13 @@
 import React, { useState } from "react";
-import { Plus, RefreshCcw } from "lucide-react";
+import { Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ManualNote, MeetingReviewSnapshot } from "@/bindings";
 import { cn } from "@/lib/cn";
 import { CardBand, CardFooterAction } from "@/components/settings/CardBand";
 import {
   Microlabel,
-  Notice,
   SETTINGS_CARD,
-  SettingsSection,
+  SettingsSurface,
 } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { Textarea } from "@/components/vg/textarea";
@@ -17,7 +16,6 @@ import { MeetingNotesPane } from "../MeetingNotesPane";
 import type { MeetingAnalytics } from "../meetingAnalytics";
 import { formatMeetingOffset, processingStatusKey } from "../meetingUtils";
 import { MeetingArtifactPanel } from "./MeetingArtifactPanel";
-import { FollowUpAgentAction } from "./FollowUpAgentAction";
 import { PreviouslyTogetherBand } from "./PreviouslyTogetherBand";
 import { PromptResults } from "./PromptResults";
 import { committedEdit, inlineEditKeys } from "./inlineEdit";
@@ -30,7 +28,6 @@ export interface InsightsTabProps {
   snapshot: MeetingReviewSnapshot;
   busy: boolean;
   editable: boolean;
-  canRegenerate: boolean;
   newNote: string;
   /** Conversation metrics, or null until the first read lands. */
   analytics: MeetingAnalytics | null;
@@ -41,7 +38,6 @@ export interface InsightsTabProps {
   onCreateNote: () => void;
   onNoteUpdate: (note: ManualNote, body: string) => void;
   onNoteDelete: (note: ManualNote) => void;
-  onRegenerate: () => void;
   onJumpToSegment: (segmentId: string) => void;
   onActionItemToggle: (
     artifactId: string,
@@ -57,7 +53,6 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
   snapshot,
   busy,
   editable,
-  canRegenerate,
   newNote,
   analytics,
   speakerNames,
@@ -66,7 +61,6 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
   onCreateNote,
   onNoteUpdate,
   onNoteDelete,
-  onRegenerate,
   onJumpToSegment,
   onActionItemToggle,
   onRefresh,
@@ -161,87 +155,52 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
         />
       </div>
 
-      <SettingsSection
-        label={t("meetings.review.generatedNotes")}
-        action={
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <FollowUpAgentAction snapshot={snapshot} />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onRegenerate}
-              disabled={busy || !canRegenerate}
-            >
-              <RefreshCcw aria-hidden="true" className="size-3.5" />
-              {t("meetings.review.regenerate")}
-            </Button>
-          </div>
-        }
-      >
+      {/* No label over this surface: the tab reading "Insights" already names
+       * what these are, and the verbs that used to sit on that label line —
+       * Regenerate, and asking the meeting a question — are rows of the
+       * page's one menu now. */}
+      <SettingsSurface>
         {snapshot.artifacts.length === 0 ? (
-          <div className="flex flex-col items-start gap-2 px-6 py-5">
-            {/* The state word carries the colour and the sentence below it
-             * stays plain, which is what `MeetingArtifactPanel`'s state line
-             * and the ledger's outcome chips both do. `cancelled` is somebody
-             * stopping the pass rather than a fault, so it names itself
-             * without the alarm the other four earn. */}
-            <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
-              <h3
-                className={cn(
-                  "text-[14px] leading-[21px] font-medium",
-                  failure === null || failure === "cancelled"
-                    ? "text-gray-1000"
-                    : "text-red-900",
-                )}
+          /* One line for the whole empty case: what would fill this, and how.
+           * A failure names itself in red on that same line, because it is
+           * the only version of this the reader has to act on, and it stays
+           * announced — a failure arriving under an open review screen is
+           * worth saying out loud; "nothing here yet" is not. */
+          <p
+            role={failure === null ? undefined : "status"}
+            aria-live={failure === null ? undefined : "polite"}
+            className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1 px-6 py-5 text-[13px] leading-5 text-gray-800"
+          >
+            {failure === null ? null : (
+              <span
+                className={failure === "cancelled" ? undefined : "text-red-900"}
               >
-                {processing
-                  ? t(
-                      "meetings.review.processingTitle",
-                      "Sona is still processing this meeting",
-                    )
-                  : failure === null
-                    ? t("meetings.review.noGeneratedNotes")
-                    : t(processingStatusKey(processingStatus))}
-              </h3>
-              {hasSettingsRecovery ? (
-                <Button variant="link" size="xs" onClick={onOpenSettings}>
-                  {t("chat.openSettings")}
-                </Button>
-              ) : null}
-            </div>
-            {/* A failure that arrived under an open review screen is worth
-             * announcing; "nothing here yet" is not. */}
-            <Notice tone="muted" live={failure !== null}>
+                {t(processingStatusKey(processingStatus))}
+              </span>
+            )}
+            <span>
               {processing
-                ? t(
-                    "meetings.review.processingDescription",
-                    "Generated notes and local answers appear once the transcript is complete.",
-                  )
+                ? t("meetings.review.processingDescription")
                 : failure === null
-                  ? t(
-                      "meetings.review.noGeneratedNotesDescription",
-                      "Generated notes are derived from the transcript, so they can be rebuilt at any time.",
-                    )
-                  : t(
-                      "meetings.review.generationFailedDescription",
-                      "The transcript and your manual notes are unaffected. Regenerate once the cause is resolved.",
-                    )}
-            </Notice>
-            {/* Regenerate is already on the section label line; the wait is
-             * the only state with a control of its own. */}
+                  ? t("meetings.review.noGeneratedNotesDescription")
+                  : t("meetings.review.generationFailedDescription")}
+            </span>
+            {hasSettingsRecovery ? (
+              <Button variant="link" size="xs" onClick={onOpenSettings}>
+                {t("chat.openSettings")}
+              </Button>
+            ) : null}
             {processing ? (
               <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void onRefresh()}
+                variant="link"
+                size="xs"
                 disabled={busy}
+                onClick={() => void onRefresh()}
               >
                 {t("meetings.actions.refresh")}
               </Button>
             ) : null}
-          </div>
+          </p>
         ) : (
           snapshot.artifacts.map((artifact) => (
             <MeetingArtifactPanel
@@ -254,7 +213,7 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
             />
           ))
         )}
-      </SettingsSection>
+      </SettingsSurface>
 
       <PromptResults kind="meeting" id={snapshot.session.session_id} />
     </>

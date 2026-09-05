@@ -167,10 +167,7 @@ const openLink = async (url: string, failure: string) => {
 export const MeetingPreviewList: React.FC<{
   label: string;
   children: React.ReactNode;
-  /** A sentence about the list itself, which belongs inside its region and
-   *  cannot live in the `<ul>`. */
-  footer?: React.ReactNode;
-}> = ({ label, children, footer }) => (
+}> = ({ label, children }) => (
   <section className="flex flex-col gap-2">
     <h2 className="min-h-5">
       <Microlabel>{label}</Microlabel>
@@ -178,7 +175,6 @@ export const MeetingPreviewList: React.FC<{
     <ul aria-label={label} className={SETTINGS_SURFACE}>
       {children}
     </ul>
-    {footer}
   </section>
 );
 

@@ -499,7 +499,6 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
             snapshot={snapshot}
             busy={busy}
             editable={editable}
-            canRegenerate={canRegenerate}
             newNote={newNote}
             analytics={analytics?.analytics ?? null}
             speakerNames={speakerNames}
@@ -508,7 +507,6 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
             onCreateNote={createNote}
             onNoteUpdate={onNoteUpdate}
             onNoteDelete={onNoteDelete}
-            onRegenerate={onRegenerate}
             onJumpToSegment={jumpToSegment}
             onActionItemToggle={(artifactId, actionIndex, done) =>
               void toggleActionItem(artifactId, actionIndex, done)
@@ -523,9 +521,7 @@ export const MeetingReview: React.FC<MeetingReviewProps> = ({
           <MeetingLedgerSection
             snapshot={snapshot}
             busy={busy || exportingLedger || loopsBusy || !editable}
-            canExport={canExport}
             onJumpToSegment={jumpToSegment}
-            onExportLedger={() => void exportLedger()}
             loops={loops}
             people={voiceIdentity.people ?? []}
             onLoopChange={(row, change) => void changeLoop(row, change)}

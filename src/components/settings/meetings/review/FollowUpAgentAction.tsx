@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { TFunction } from "i18next";
-import { MessageSquare } from "lucide-react";
+import { DropdownMenuItem } from "@/components/vg/dropdown-menu";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { commands, events, type MeetingReviewSnapshot } from "@/bindings";
-import { Button } from "@/components/vg/button";
 import { useChatOpener } from "@/components/chat/ChatSheetHost";
+import { currentLedger } from "../meetingLedger";
 
 export interface FollowUpAgentMessageSource {
   session: Pick<MeetingReviewSnapshot["session"], "title">;
@@ -18,10 +18,8 @@ export const buildFollowUpAgentMessage = (
   snapshot: FollowUpAgentMessageSource,
   t: TFunction,
 ): string | null => {
-  const ledger = snapshot.artifacts.find(
-    (artifact) => artifact.state === "current" && artifact.content?.ledger,
-  )?.content?.ledger;
-  if (ledger === null || ledger === undefined) return null;
+  const ledger = currentLedger(snapshot.artifacts);
+  if (ledger === null) return null;
 
   const commitments = ledger.commitments
     .map((commitment) => `${commitment.who}: ${commitment.what}`)
@@ -49,7 +47,10 @@ export const buildFollowUpAgentMessage = (
   return sections.filter((section) => section !== null).join("\n\n");
 };
 
-export const FollowUpAgentAction: React.FC<{
+/* Asking the meeting a question is a verb like the rest of them, so it is a
+ * row of the review page's one menu — and a row that is not there at all when
+ * no relay is listening, because a disabled row explains nothing. */
+export const FollowUpAgentItem: React.FC<{
   snapshot: MeetingReviewSnapshot;
 }> = ({ snapshot }) => {
   const openChat = useChatOpener();
@@ -124,15 +125,8 @@ export const FollowUpAgentAction: React.FC<{
   };
 
   return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      disabled={sending}
-      onClick={() => void discuss()}
-    >
-      <MessageSquare aria-hidden="true" />
+    <DropdownMenuItem disabled={sending} onSelect={() => void discuss()}>
       {t("people.review.discussFollowUp")}
-    </Button>
+    </DropdownMenuItem>
   );
 };

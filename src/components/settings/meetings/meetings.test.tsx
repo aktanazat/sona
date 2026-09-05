@@ -809,7 +809,6 @@ const insightsMarkup = (
       snapshot={SNAPSHOT}
       busy={false}
       editable
-      canRegenerate
       newNote=""
       analytics={null}
       speakerNames={{}}
@@ -818,7 +817,6 @@ const insightsMarkup = (
       onCreateNote={noop}
       onNoteUpdate={noop}
       onNoteDelete={noop}
-      onRegenerate={noop}
       onJumpToSegment={noop}
       onActionItemToggle={noop}
       onRefresh={async () => {}}
@@ -1496,11 +1494,9 @@ describe("meeting ledger", () => {
       <MeetingLedgerSection
         snapshot={ledgerSnapshot(LEDGER)}
         busy={false}
-        canExport
         loops={LOOPS}
         people={[]}
         onJumpToSegment={noop}
-        onExportLedger={noop}
         onLoopChange={noop}
         {...overrides}
       />,
@@ -1554,19 +1550,17 @@ describe("meeting ledger", () => {
     expect(markup).toContain("2 threads and 1 commitments removed");
   });
 
-  test("offers the export, and no dead control when there is nothing to export", () => {
-    expect(ledgerMarkup({})).toContain(">Export ledger page<");
-    expect(
-      buttonTag(ledgerMarkup({ canExport: false }), "Export ledger page"),
-    ).toContain("disabled");
-
+  test("a meeting with no ledger says what would write one", () => {
     const withoutLedger = ledgerMarkup({
       snapshot: { ...SNAPSHOT, artifacts: [] },
     });
     expect(withoutLedger).toContain(
-      "No ledger has been read from this meeting yet",
+      "Regenerate the notes to read this conversation as threads.",
     );
-    expect(withoutLedger).not.toContain("Export ledger page");
+    /* One line, and nothing else: no heading over it, and no register
+     * headings standing open above rows that do not exist. */
+    expect(withoutLedger).not.toContain(">Threads<");
+    expect(withoutLedger).not.toContain(">Open loops<");
   });
 
   test("reads the ledger off the newest current revision that carries one", () => {
@@ -1575,7 +1569,7 @@ describe("meeting ledger", () => {
     const ledgerless = { ...SNAPSHOT.artifacts[0], artifact_id: "artifact-0" };
     expect(currentLedger([stale])).toBeNull();
     expect(currentLedger([ledgerless])).toBeNull();
-    expect(currentLedger([ledgerless, artifact])?.ledger.headline).toBe(
+    expect(currentLedger([ledgerless, artifact])?.headline).toBe(
       LEDGER.headline,
     );
   });

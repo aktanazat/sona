@@ -760,7 +760,6 @@ describe("english catalogue", () => {
     "meetings.preview.description.less",
     "meetings.preview.actions.skip",
     "meetings.preview.linkFailed",
-    "meetings.preview.skippedNote",
     "meetings.preview.untitled.calendar",
     "meetings.preview.untitled.app",
   ];

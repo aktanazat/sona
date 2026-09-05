@@ -1,5 +1,4 @@
 import React from "react";
-import { FileCode2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   MeetingLoopRow,
@@ -7,13 +6,10 @@ import type {
   PersonListEntry,
 } from "@/bindings";
 import {
-  FactChip,
   Microlabel,
   Notice,
-  SettingsSection,
+  SettingsSurface,
 } from "@/components/settings/rows";
-import { Button } from "@/components/vg/button";
-import { FollowUpDraftAction } from "./review/FollowUpDraftAction";
 import { LedgerReceiptRow } from "./review/LedgerReceiptRow";
 import { LoopRows, type LoopChange } from "./review/LoopRows";
 import { formatMeetingOffset } from "./meetingUtils";
@@ -36,21 +32,20 @@ import {
  * the citation jump — the same control the rest of the review uses, because a
  * citation is a jump wherever it appears.
  *
- * One card, hairline blocks, compact measurements. The only tally left is the
- * score: counting the commitments and the open loops above lists that print
- * every one of them was the same number said twice. */
+ * One card, hairline blocks, compact measurements. No tally line: counting
+ * the commitments and the open loops above lists that print every one of them
+ * was the same number said twice, and "Threads settled 0/1" was a score for a
+ * conversation nobody was scoring. A thread still waiting on an answer says
+ * so on its own row. */
 
-/** Colour is the second channel: the state word carries it either way. */
-const OUTCOME_CLASSES = {
-  landed: "text-gray-1000",
-  open: "text-amber-900",
+/* A landed thread prints no state word: the row, its quote and the fact that
+ * nothing is asked of the reader are the answer. The two states somebody
+ * still has to do something about say so, in the page's two status colours —
+ * colour is the second channel, the word says it either way. */
+const UNSETTLED_CLASSES = {
+  open: "text-accent-strong",
   dropped: "text-red-900",
-} as const satisfies Record<LedgerOutcome, string>;
-
-/* Upstream drew a filled, hollow or crossed circle beside every state. Three
- * circles down the end of a reading list is a status dot per row, and the word
- * beside each one already said it — in a colour, and in words, and in the two
- * channels that survive greyscale. */
+} as const satisfies Record<Exclude<LedgerOutcome, "landed">, string>;
 
 const COLUMN_CLASSES =
   "pb-1.5 pe-3 text-start text-[13px] leading-[18px] font-normal text-gray-900";
@@ -63,104 +58,46 @@ const offsetOf = (milliseconds: number) =>
 export interface MeetingLedgerSectionProps {
   snapshot: MeetingReviewSnapshot;
   busy: boolean;
-  canExport: boolean;
   /** Actionable rows for this meeting, or null until the first read lands. */
   loops: MeetingLoopRow[] | null;
   /** Everybody who could own a loop, for the owner picker. */
   people: PersonListEntry[];
   onJumpToSegment: (segmentId: string) => void;
-  onExportLedger: () => void;
   onLoopChange: (row: MeetingLoopRow, change: LoopChange) => void;
 }
 
 export const MeetingLedgerSection: React.FC<MeetingLedgerSectionProps> = ({
   snapshot,
   busy,
-  canExport,
   loops,
   people,
   onJumpToSegment,
-  onExportLedger,
   onLoopChange,
 }) => {
   const { t } = useTranslation();
-  const found = currentLedger(snapshot.artifacts);
+  const ledger = currentLedger(snapshot.artifacts);
 
-  if (found === null) {
+  if (ledger === null) {
     return (
-      <SettingsSection label={t("meetings.ledger.title")}>
-        <div className="flex flex-col gap-1 px-6 py-6">
-          <h3 className="text-[14px] leading-[21px] text-gray-1000">
-            {t("meetings.ledger.emptyTitle")}
-          </h3>
-          <Notice tone="muted" live={false}>
-            {t("meetings.ledger.emptyDescription")}
-          </Notice>
-        </div>
-      </SettingsSection>
+      <SettingsSurface>
+        <p className="px-6 py-6 text-[13px] leading-5 text-gray-800">
+          {t("meetings.ledger.emptyDescription")}
+        </p>
+      </SettingsSurface>
     );
   }
 
-  const { ledger } = found;
-  const substantive = ledger.threads.filter((thread) => thread.substantive);
-  const scored = substantive.length > 0 ? substantive : ledger.threads;
-  const landed = scored.filter(
-    (thread) => LEDGER_OUTCOME[thread.state] === "landed",
-  ).length;
-
   return (
-    <SettingsSection
-      label={t("meetings.ledger.title")}
-      action={
-        /* Two things to do with where we landed: send it to somebody, or keep
-         * it. Drafting reads the record and writes nothing to the meeting, so
-         * it is not gated on the export permission the page below is. */
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <FollowUpDraftAction
-            sessionId={snapshot.session.session_id}
-            disabled={busy}
-          />
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onExportLedger}
-            disabled={busy || !canExport}
-          >
-            <FileCode2 aria-hidden="true" className="size-3.5" />
-            {t("meetings.ledger.exportHtml")}
-          </Button>
-        </div>
-      }
-    >
-      <div className="flex flex-col gap-2 px-6 py-5">
-        <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1.5">
-          <FactChip
-            label={t("meetings.ledger.statThreads")}
-            value={`${landed}/${scored.length}`}
-          />
-          <FactChip
-            label={t("meetings.ledger.statReceipts")}
-            value={
-              ledger.receipts.status === "verified" ? (
-                t("meetings.ledger.receiptsVerified")
-              ) : (
-                <span className="text-amber-900">
-                  {t("meetings.ledger.receiptsDegraded", {
-                    threads: ledger.receipts.dropped_threads,
-                    commitments: ledger.receipts.dropped_commitments,
-                  })}
-                </span>
-              )
-            }
-          />
-        </div>
-        {/* The headline is what this document says, so it is set as its first
-         * paragraph rather than as another row of body text. */}
-        <p className="text-[16px] leading-[25px] text-pretty text-gray-1000">
-          {ledger.headline}
-        </p>
-      </div>
+    /* No label over this surface either: the tab reading "Ledger" named it,
+     * and the two verbs that sat on that label line — draft a follow-up,
+     * export the page — are rows of the review page's one menu now. */
+    <SettingsSurface>
+      {/* The headline is what this document says, so it is the first thing
+       * read on it and it is set as a paragraph, not as a row of body text
+       * under a row of counts. */}
+      <p className="px-6 py-5 text-[16px] leading-[25px] text-pretty text-gray-1000">
+        {ledger.headline}
+      </p>
 
       <LedgerBlock label={t("meetings.ledger.threads")}>
         <ul
@@ -188,11 +125,13 @@ export const MeetingLedgerSection: React.FC<MeetingLedgerSectionProps> = ({
                       </Microlabel>
                     )}
                   </span>
-                  <span
-                    className={`flex-none text-[13px] leading-[18px] whitespace-nowrap ${OUTCOME_CLASSES[outcome]}`}
-                  >
-                    {t(`meetings.ledger.states.${thread.state}`)}
-                  </span>
+                  {outcome === "landed" ? null : (
+                    <span
+                      className={`flex-none text-[13px] leading-[18px] whitespace-nowrap ${UNSETTLED_CLASSES[outcome]}`}
+                    >
+                      {t(`meetings.ledger.states.${thread.state}`)}
+                    </span>
+                  )}
                 </div>
                 <LedgerReceiptRow
                   quote={thread.receipt.quote}
@@ -273,7 +212,9 @@ export const MeetingLedgerSection: React.FC<MeetingLedgerSectionProps> = ({
                   <td
                     className={`${CELL_CLASSES} font-medium whitespace-nowrap text-gray-1000`}
                   >
-                    {`${stance.from} \u2192 ${stance.to}`}
+                    {stance.to === null
+                      ? stance.from
+                      : stance.from + " → " + stance.to}
                   </td>
                   <td className={`${CELL_CLASSES} text-gray-1000`}>
                     {stance.what}
@@ -291,6 +232,19 @@ export const MeetingLedgerSection: React.FC<MeetingLedgerSectionProps> = ({
           <li className="text-[14px] leading-[21px] text-pretty text-gray-900">
             {t("meetings.ledger.trustMeasured")}
           </li>
+          {/* What was thrown away for failing its own receipt check. It used
+           * to be half of a "Receipts verified" tally at the top of the page,
+           * which printed a word for the ordinary case nobody has to read.
+           * Kept here, in the block about what to trust, and only when
+           * something was actually dropped. */}
+          {ledger.receipts.status === "verified" ? null : (
+            <li className="text-[14px] leading-[21px] text-pretty text-accent-strong">
+              {t("meetings.ledger.receiptsDegraded", {
+                threads: ledger.receipts.dropped_threads,
+                commitments: ledger.receipts.dropped_commitments,
+              })}
+            </li>
+          )}
           {ledger.caveats.map((caveat, index) => (
             <li
               key={`caveat:${index}`}
@@ -301,7 +255,7 @@ export const MeetingLedgerSection: React.FC<MeetingLedgerSectionProps> = ({
           ))}
         </ul>
       </LedgerBlock>
-    </SettingsSection>
+    </SettingsSurface>
   );
 };
 

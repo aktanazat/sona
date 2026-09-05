@@ -1,5 +1,4 @@
-import React, { useState } from "react";
-import { Mail } from "lucide-react";
+import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -26,38 +25,56 @@ import {
  * plainly where the draft came from: a message an engine wrote is a rewrite of
  * the record and worth checking, and a draft assembled from the record is
  * verbatim and worth trusting. Those are different things to hand somebody,
- * so the sheet does not pretend they are the same. */
+ * so the sheet does not pretend they are the same.
+ *
+ * The press itself is one row of the review page's menu, so this is the sheet
+ * and nothing else: the menu owns whether it is open, and asking to open it
+ * is what asks the backend to write the draft. */
 
-interface FollowUpDraftActionProps {
+interface FollowUpDraftDialogProps {
   sessionId: string;
-  disabled: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
-export const FollowUpDraftAction: React.FC<FollowUpDraftActionProps> = ({
+export const FollowUpDraftDialog: React.FC<FollowUpDraftDialogProps> = ({
   sessionId,
-  disabled,
+  open,
+  onOpenChange,
 }) => {
   const { t } = useTranslation();
-  const [drafting, setDrafting] = useState(false);
   const [draft, setDraft] = useState<MeetingFollowUpDraft | null>(null);
 
-  const write = async () => {
-    setDrafting(true);
-    try {
-      setDraft(await meetingFollowUpDraft(crypto.randomUUID(), sessionId));
-    } catch {
-      toast.error(t("meetings.followUp.failed"));
-    } finally {
-      setDrafting(false);
+  /* Opening the sheet is the request. A draft is a read of one revision, so
+   * it is written afresh every time the sheet opens and dropped when it
+   * closes rather than cached into a later press. */
+  useEffect(() => {
+    if (!open) {
+      setDraft(null);
+      return;
     }
-  };
+    let disposed = false;
+    void (async () => {
+      try {
+        const next = await meetingFollowUpDraft(crypto.randomUUID(), sessionId);
+        if (!disposed) setDraft(next);
+      } catch {
+        if (disposed) return;
+        toast.error(t("meetings.followUp.failed"));
+        onOpenChange(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [open, sessionId, t, onOpenChange]);
 
   const body = draft === null ? "" : followUpDraftText(draft, t);
 
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(body);
-      setDraft(null);
+      onOpenChange(false);
       toast.success(t("meetings.followUp.copied"));
     } catch {
       toast.error(t("meetings.followUp.copyFailed"));
@@ -83,7 +100,7 @@ export const FollowUpDraftAction: React.FC<FollowUpDraftActionProps> = ({
         await navigator.clipboard.writeText(body);
       }
       await openUrl(mail.data.url);
-      setDraft(null);
+      onOpenChange(false);
       toast.success(
         mail.data.body === "clipboard"
           ? t("meetings.followUp.mailCopied")
@@ -95,63 +112,51 @@ export const FollowUpDraftAction: React.FC<FollowUpDraftActionProps> = ({
   };
 
   return (
-    <>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => void write()}
-        disabled={disabled || drafting}
-      >
-        <Mail aria-hidden="true" className="size-3.5" />
-        {drafting
-          ? t("meetings.followUp.drafting")
-          : t("meetings.followUp.draft")}
-      </Button>
-
-      <Dialog
-        open={draft !== null}
-        onOpenChange={(open) => {
-          if (!open) setDraft(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("meetings.followUp.title")}</DialogTitle>
-            <DialogDescription>
-              {draft?.source === "generated"
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t("meetings.followUp.title")}</DialogTitle>
+          <DialogDescription>
+            {draft === null
+              ? t("meetings.followUp.drafting")
+              : draft.source === "generated"
                 ? t("meetings.followUp.fromEngine")
                 : t("meetings.followUp.fromRecord")}
-            </DialogDescription>
-          </DialogHeader>
-          {/* The draft owns the scroll, so the sheet's own footer never leaves
-           * the window on a long meeting. */}
-          <div className="max-h-64 overflow-y-auto">
-            <p className="text-[14px] leading-[21px] whitespace-pre-wrap text-pretty text-gray-1000">
-              {body}
-            </p>
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setDraft(null)}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button type="button" variant="outline" onClick={() => void copy()}>
-              {t("meetings.followUp.copy")}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void openInMail()}
-            >
-              {t("meetings.followUp.openInMail")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+          </DialogDescription>
+        </DialogHeader>
+        {/* The draft owns the scroll, so the sheet's own footer never leaves
+         * the window on a long meeting. */}
+        <div className="max-h-64 overflow-y-auto">
+          <p className="text-[14px] leading-[21px] whitespace-pre-wrap text-pretty text-gray-1000">
+            {body}
+          </p>
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+          >
+            {t("common.cancel")}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={draft === null}
+            onClick={() => void copy()}
+          >
+            {t("meetings.followUp.copy")}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={draft === null}
+            onClick={() => void openInMail()}
+          >
+            {t("meetings.followUp.openInMail")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 };
