@@ -577,6 +577,33 @@ fn enrollment_accepts_the_current_manual_resolution_once() -> Result<(), StoreEr
     Ok(())
 }
 
+/// Removing a person's voice profile is the deletion half of the identity
+/// contract, and the samples behind it are retained speech. The mutation
+/// deletes `voice_profiles` and `voice_speaker_matches` and never names
+/// `voice_profile_samples`, which go with the profile only while the schema
+/// cascades them. So this asserts the retained rows and the matcher's own
+/// answer, not the status the call returns.
+#[test]
+fn removing_a_voice_profile_deletes_the_retained_samples_and_stops_matching(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let speaker_id = SpeakerId::new();
+    insert_speaker(&store, session_id, speaker_id);
+    let person_id = person(&store, "Ada Lovelace", &[], &[]);
+    enroll(&store, session_id, speaker_id, person_id)?;
+    assert_eq!(profile_sample_count(&store, person_id)?, 1);
+    assert!(store.has_compatible_local_voice_profiles(wespeaker_embedding_model_key())?);
+
+    let status = store.remove_voice_profile(person_id, people_revision(&store))?;
+
+    assert_eq!(status, VoiceProfileStatus::Unenrolled);
+    assert_eq!(profile_count(&store, person_id)?, 0);
+    assert_eq!(profile_sample_count(&store, person_id)?, 0);
+    assert!(!store.has_compatible_local_voice_profiles(wespeaker_embedding_model_key())?);
+    Ok(())
+}
+
 #[test]
 fn enrollment_rejects_a_person_without_the_current_manual_resolution() -> Result<(), StoreError> {
     let (_directory, store) = store();
