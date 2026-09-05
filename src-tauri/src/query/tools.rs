@@ -1052,7 +1052,7 @@ struct LedgerCommitmentJson<'a> {
 #[derive(Serialize)]
 struct LedgerStanceJson<'a> {
     from: &'a str,
-    to: &'a str,
+    to: Option<&'a str>,
     what: &'a str,
     note: Option<&'a str>,
     at_ms: u64,
@@ -1100,7 +1100,7 @@ fn ledger_json(ledger: &MeetingLedger) -> LedgerJson<'_> {
             .iter()
             .map(|stance| LedgerStanceJson {
                 from: &stance.from,
-                to: &stance.to,
+                to: stance.to.as_deref(),
                 what: &stance.what,
                 note: stance.note.as_deref(),
                 at_ms: stance.at_ms,
@@ -1579,16 +1579,23 @@ mod tests {
     const WHEN: i64 = 1_786_699_920_000;
     const DAY: i64 = 86_400_000;
 
-    fn call(tool: &str, args: Value) -> ToolCall {
+    fn call(tool: &str, args: impl serde::Serialize) -> ToolCall {
         ToolCall {
             id: "c1".to_string(),
             tool: tool.to_string(),
-            args,
+            args: serde_json::to_value(args).expect("test arguments serialize"),
         }
     }
 
-    fn parsed(value: &str) -> Value {
-        serde_json::from_str(value).unwrap()
+    fn parsed<T: serde::de::DeserializeOwned>(value: &str) -> T {
+        serde_json::from_str(value).expect("test result is JSON")
+    }
+
+    fn refused(tool: &str, args: impl serde::Serialize) -> String {
+        match parse(&call(tool, args)) {
+            Ok(_) => panic!("{tool} was accepted"),
+            Err(error) => error,
+        }
     }
 
     fn result_json(outcome: Outcome) -> (Value, Vec<QueryRow>) {
@@ -1820,10 +1827,6 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_and_a_bad_argument_are_refused_in_one_line() {
-        let refused = |tool: &str, args: Value| match parse(&call(tool, args)) {
-            Ok(_) => panic!("{tool} was accepted"),
-            Err(error) => error,
-        };
         assert_eq!(refused("summarize", json!({})), "unknown tool summarize");
         assert_eq!(
             refused("search", json!({"query": "deck", "limit": 26})),
@@ -2102,7 +2105,7 @@ mod tests {
             "{} bytes",
             result.result.len()
         );
-        let value = parsed(&result.result);
+        let value: Value = parsed(&result.result);
         assert_eq!(value["truncated"], true);
         assert!(
             value["notes"].as_array().unwrap().len() < 6,
@@ -2171,7 +2174,7 @@ mod tests {
             "{} bytes",
             result.result.len()
         );
-        let value = parsed(&result.result);
+        let value: Value = parsed(&result.result);
         assert_eq!(value["truncated"], true);
         assert_eq!(value["total"], 200);
         let kept = value["segments"].as_array().unwrap().len();
@@ -2442,7 +2445,7 @@ mod tests {
             "{} bytes",
             result.result.len()
         );
-        let value = parsed(&result.result);
+        let value: Value = parsed(&result.result);
         assert_eq!(value["truncated"], true);
         let kept = value["rows"].as_array().unwrap().len();
         assert!(kept > 0 && kept < 300, "{kept} rows");
@@ -2454,7 +2457,8 @@ mod tests {
             &call("search", Value::Null),
             search_result(&store, Vec::new(), false),
         );
-        assert!(parsed(&small.result).get("truncated").is_none());
+        let value: Value = parsed(&small.result);
+        assert!(value.get("truncated").is_none());
     }
 
     #[test]
@@ -2468,7 +2472,7 @@ mod tests {
 
         assert!(result.ok);
         assert!(result.result.len() <= TOOL_RESULT_MAX_BYTES);
-        let value = parsed(&result.result);
+        let value: Value = parsed(&result.result);
         assert_eq!(value["truncated"], true);
         let text = value["text"].as_str().unwrap();
         assert!(text.ends_with('…'));

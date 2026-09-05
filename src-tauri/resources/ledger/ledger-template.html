@@ -881,8 +881,8 @@
 
     /* ---------- 05 stances ---------- */
     var s5 = section(
-      "Stances — who agreed with whom",
-      "A reversal is a finding. So is a conversation with no disagreement in it at all.",
+      "Stances",
+      "Who took a position and, when known, whose position they took up.",
     );
     if (!D.stances.length) empty(s5, "No position was taken up or reversed.");
     else
@@ -893,7 +893,10 @@
         D.stances.map(function (s) {
           return [
             { cls: "tnum", text: s.at },
-            { cls: "hd", text: s.from + " \u2192 " + s.to },
+            {
+              cls: "hd",
+              text: s.to === null ? s.from : s.from + " \u2192 " + s.to,
+            },
             s.what,
             s.note,
           ];

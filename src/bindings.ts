@@ -4237,10 +4237,10 @@ export type LedgerReceipt = { quote: string; speaker: string | null; t_ms: numbe
  */
 export type LedgerReceiptState = { status: "verified" } | { status: "degraded"; dropped_threads: number; dropped_commitments: number }
 /**
- * Who took up whose position. A reversal is a finding; so is a meeting with
- * no disagreement in it at all.
+ * A position someone took or changed, and the counterpart it was taken up
+ * from when the evidence names one.
  */
-export type LedgerStance = { from: string; to: string; what: string; note: string | null; at_ms: number; citations: ArtifactCitation[] }
+export type LedgerStance = { from: string; to: string | null; what: string; note: string | null; at_ms: number; citations: ArtifactCitation[] }
 export type LedgerThread = { topic: string; state: LedgerThreadState;
 /**
  * Small talk, agenda-setting and sign-off stay on the timeline and drop

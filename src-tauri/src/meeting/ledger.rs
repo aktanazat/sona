@@ -167,12 +167,12 @@ pub struct LedgerCommitment {
     pub receipt: LedgerReceipt,
 }
 
-/// Who took up whose position. A reversal is a finding; so is a meeting with
-/// no disagreement in it at all.
+/// A position someone took or changed, and the counterpart it was taken up
+/// from when the evidence names one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct LedgerStance {
     pub from: String,
-    pub to: String,
+    pub to: Option<String>,
     pub what: String,
     pub note: Option<String>,
     pub at_ms: u64,
@@ -409,7 +409,7 @@ struct PageCommitment {
 struct PageStance {
     at: String,
     from: String,
-    to: String,
+    to: Option<String>,
     what: String,
     note: String,
 }
@@ -1241,7 +1241,7 @@ mod tests {
             }],
             stances: vec![LedgerStance {
                 from: "Amir".to_string(),
-                to: "Dana".to_string(),
+                to: Some("Dana".to_string()),
                 what: "Ship the annual plan first".to_string(),
                 note: Some("Taken up without pushback.".to_string()),
                 at_ms: 150_000,
