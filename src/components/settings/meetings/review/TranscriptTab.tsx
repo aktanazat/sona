@@ -12,6 +12,7 @@ import {
   Microlabel,
   Notice,
   SettingsSection,
+  SettingsSurface,
 } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import { Input } from "@/components/vg/input";
@@ -189,9 +190,10 @@ export const TranscriptTab: React.FC<TranscriptTabProps> = ({
         onCorrect={onSpeakerCorrect}
       />
 
-      <SettingsSection
-        label={t("meetings.review.transcript")}
-        action={
+      {/* No heading over this: the tab reading "Transcript" already named it.
+       * The search field keeps the line to itself. */}
+      <section className="flex flex-col gap-2">
+        <div className="flex min-h-5 items-center justify-end gap-4">
           <div className="relative min-w-40 flex-1 sm:max-w-72">
             <Search
               aria-hidden="true"
@@ -211,101 +213,102 @@ export const TranscriptTab: React.FC<TranscriptTabProps> = ({
               className="h-7 w-full ps-7 text-[14px] md:text-[14px]"
             />
           </div>
-        }
-      >
-        {snapshot.transcript.length === 0 ? (
-          <div className="px-6 py-3.5">
-            <Notice tone="muted" live={false}>
-              {t("meetings.review.noTranscript")}
-            </Notice>
-          </div>
-        ) : (
-          <>
-            {elsewhere.length === 0 ? null : (
-              <ul role="list" className="divide-y divide-gray-alpha-400">
-                {elsewhere.map((hit) => (
-                  <li
-                    key={`${hit.kind}:${hit.entity_id}`}
-                    data-slot="search-hit-elsewhere"
-                    className="flex flex-col gap-1 px-6 py-3.5"
-                  >
-                    <span className="flex items-baseline gap-2">
-                      <span className={cn(META, "tabular-nums")}>
-                        {formatMeetingOffset(hit.start_offset_ns)}
+        </div>
+        <SettingsSurface>
+          {snapshot.transcript.length === 0 ? (
+            <div className="px-6 py-3.5">
+              <Notice tone="muted" live={false}>
+                {t("meetings.review.noTranscript")}
+              </Notice>
+            </div>
+          ) : (
+            <>
+              {elsewhere.length === 0 ? null : (
+                <ul role="list" className="divide-y divide-gray-alpha-400">
+                  {elsewhere.map((hit) => (
+                    <li
+                      key={`${hit.kind}:${hit.entity_id}`}
+                      data-slot="search-hit-elsewhere"
+                      className="flex flex-col gap-1 px-6 py-3.5"
+                    >
+                      <span className="flex items-baseline gap-2">
+                        <span className={cn(META, "tabular-nums")}>
+                          {formatMeetingOffset(hit.start_offset_ns)}
+                        </span>
+                        <Microlabel>
+                          {hit.kind === "manual_note"
+                            ? t("meetings.review.hitKind.manualNote")
+                            : t("meetings.review.hitKind.title")}
+                        </Microlabel>
                       </span>
-                      <Microlabel>
-                        {hit.kind === "manual_note"
-                          ? t("meetings.review.hitKind.manualNote")
-                          : t("meetings.review.hitKind.title")}
-                      </Microlabel>
-                    </span>
-                    <span className="line-clamp-2 block text-[14px] leading-[21px] text-gray-1000">
-                      {hit.excerpt}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {turns.length > 0 ? (
-              <ol
-                role="list"
-                aria-label={t("meetings.review.transcript")}
-                className="flex flex-col gap-5 px-6 py-5"
-              >
-                {turns.map((turn) => {
-                  const first = turn.segments[0].base;
-                  return (
-                    <TranscriptTurn
-                      key={first.segment_id}
-                      speaker={
-                        speakerNames[turn.speakerId] ??
-                        t("meetings.review.unknownSpeaker")
-                      }
-                      time={formatMeetingOffset(first.start_offset_ns)}
-                      segments={turn.segments.map((segment) => {
-                        const segmentId = segment.base.segment_id;
-                        const landed = jump?.segmentId === segmentId;
-                        return {
-                          segmentId,
-                          time: formatMeetingOffset(
-                            segment.base.start_offset_ns,
-                          ),
-                          text: segment.replacement_text ?? segment.base.text,
-                          removed: segment.removed,
-                          landed,
-                          flashing:
-                            landed &&
-                            jump !== null &&
-                            settledJump !== jump.nonce,
-                          editing: editingSegmentId === segmentId,
-                        };
-                      })}
-                      query={query}
-                      disabled={disabled}
-                      onOpenEdit={setEditingSegmentId}
-                      onCommit={commitSegment}
-                      onCancel={() => setEditingSegmentId(null)}
-                      onRemove={(segmentId, current) => {
-                        setEditingSegmentId(null);
-                        onSegmentEdit(segmentId, current, true);
-                      }}
-                    />
-                  );
-                })}
-              </ol>
-            ) : elsewhere.length > 0 || searchHits === null ? null : (
-              /* The store's verdict, not the substring scan's: while its
-               * answer to the query in the field is still on the way, the
-               * surface says nothing rather than something untrue. */
-              <div className="px-6 py-3.5">
-                <Notice tone="muted" live={false}>
-                  {t("meetings.review.noSearchResults")}
-                </Notice>
-              </div>
-            )}
-          </>
-        )}
-      </SettingsSection>
+                      <span className="line-clamp-2 block text-[14px] leading-[21px] text-gray-1000">
+                        {hit.excerpt}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {turns.length > 0 ? (
+                <ol
+                  role="list"
+                  aria-label={t("meetings.review.transcript")}
+                  className="flex flex-col gap-5 px-6 py-5"
+                >
+                  {turns.map((turn) => {
+                    const first = turn.segments[0].base;
+                    return (
+                      <TranscriptTurn
+                        key={first.segment_id}
+                        speaker={
+                          speakerNames[turn.speakerId] ??
+                          t("meetings.review.unknownSpeaker")
+                        }
+                        time={formatMeetingOffset(first.start_offset_ns)}
+                        segments={turn.segments.map((segment) => {
+                          const segmentId = segment.base.segment_id;
+                          const landed = jump?.segmentId === segmentId;
+                          return {
+                            segmentId,
+                            time: formatMeetingOffset(
+                              segment.base.start_offset_ns,
+                            ),
+                            text: segment.replacement_text ?? segment.base.text,
+                            removed: segment.removed,
+                            landed,
+                            flashing:
+                              landed &&
+                              jump !== null &&
+                              settledJump !== jump.nonce,
+                            editing: editingSegmentId === segmentId,
+                          };
+                        })}
+                        query={query}
+                        disabled={disabled}
+                        onOpenEdit={setEditingSegmentId}
+                        onCommit={commitSegment}
+                        onCancel={() => setEditingSegmentId(null)}
+                        onRemove={(segmentId, current) => {
+                          setEditingSegmentId(null);
+                          onSegmentEdit(segmentId, current, true);
+                        }}
+                      />
+                    );
+                  })}
+                </ol>
+              ) : elsewhere.length > 0 || searchHits === null ? null : (
+                /* The store's verdict, not the substring scan's: while its
+                 * answer to the query in the field is still on the way, the
+                 * surface says nothing rather than something untrue. */
+                <div className="px-6 py-3.5">
+                  <Notice tone="muted" live={false}>
+                    {t("meetings.review.noSearchResults")}
+                  </Notice>
+                </div>
+              )}
+            </>
+          )}
+        </SettingsSurface>
+      </section>
 
       {/* How the audio came in, and where it did not. One section: a source
        * that lost audio and the moments it lost are the same fact, and the
