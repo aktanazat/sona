@@ -521,8 +521,8 @@ mod tests {
     use crate::meeting::workflow_types::WorkflowEventKind;
     use crate::query::{
         assemble, dictation_link, event_from_row, loop_link, meeting_link, person_link,
-        QueryEventResult, QueryEventSource, QueryRowKind, QueryScope, QuerySearchPage,
-        SearchRequest, QUERY_SCHEMA_VERSION,
+        QueryEventResult, QueryEventSource, QueryPageReason, QueryRowKind, QueryScope,
+        QuerySearchPage, SearchRequest, QUERY_SCHEMA_VERSION,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -892,6 +892,54 @@ mod tests {
 
         assert!(page.entries.is_empty(), "{:?}", page.entries);
         assert!(page.next_cursor.is_none());
+    }
+
+    /// An empty page is not one fact, and neither is a full one. Recall by
+    /// meaning is missing whenever the model is not on this machine, which is
+    /// worth saying even when literal matches came back — those are the rows
+    /// this corpus spells the way the reader did, and nothing else was
+    /// reachable. A scope that never asks the model gets to blame the corpus.
+    #[test]
+    fn a_page_says_whether_every_source_behind_it_was_read() {
+        let corpus = corpus();
+        let by_scope = |scope, query| {
+            assemble(
+                &corpus.store,
+                None,
+                Vec::new(),
+                SearchRequest {
+                    scope,
+                    query,
+                    limit: 25,
+                    cursor: None,
+                },
+            )
+            .unwrap()
+        };
+
+        let matched = search(&corpus.store, QueryScope::All, vec![dictation()]);
+        let missed = by_scope(QueryScope::All, "steven");
+        let people = by_scope(QueryScope::People, "steven");
+
+        assert!(!matched.entries.is_empty(), "the corpus answers {QUERY:?}");
+        assert_eq!(
+            matched.reason,
+            Some(QueryPageReason::SemanticUnavailable),
+            "a page of literal matches still missed everything phrased differently"
+        );
+        assert_eq!(
+            missed.reason,
+            Some(QueryPageReason::SemanticUnavailable),
+            "an unread source outranks an empty corpus: asking again in other \
+             words is worth something here, and `no_rows` would say it is not"
+        );
+        assert!(people.entries.is_empty());
+        assert_eq!(
+            people.reason,
+            Some(QueryPageReason::NoRows),
+            "the people index is matched literally, so no model was missing \
+             from this answer and the corpus is the whole of it"
+        );
     }
 
     /// The note that indexed the meeting is also the mutation the event stream

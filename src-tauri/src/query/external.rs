@@ -33,8 +33,8 @@
 //! rows and returns the store receipt verbatim.
 
 use super::{
-    loop_link, meeting_link, person_link, QueryError, QueryEventsPage, QueryScope, QuerySearchPage,
-    QUERY_SCHEMA_VERSION,
+    loop_link, meeting_link, person_link, QueryError, QueryEventsPage, QueryPageReason, QueryScope,
+    QuerySearchPage, QUERY_SCHEMA_VERSION,
 };
 use crate::cli::CliArgs;
 use crate::managers::history::HistoryManager;
@@ -662,6 +662,9 @@ pub struct ExternalLoopsPage {
     /// Pass to `--after` with the same filters to continue this scan.
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    /// Why this page reads the way it does: `awaiting_continuity`,
+    /// `filtered_out` or `no_rows`.
+    pub reason: Option<QueryPageReason>,
 }
 
 /// One person, as a profile lookup answers.
@@ -683,6 +686,8 @@ pub struct ExternalPeoplePage {
     pub schema_version: u32,
     pub entries: Vec<ExternalPersonRow>,
     pub has_more: bool,
+    /// Why this page reads the way it does: `people_index_empty` or `no_rows`.
+    pub reason: Option<QueryPageReason>,
 }
 
 /// One event in the week ahead.
@@ -1236,12 +1241,39 @@ pub(crate) fn loops_page(
             "That loop id is no longer in the corpus. Start again without --after.",
         ));
     }
+    let reason = loops_reason(&entries, scanned, corpus.awaiting_continuity);
     Ok(ExternalLoopsPage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries,
         has_more: next_cursor.is_some(),
         next_cursor,
+        reason,
     })
+}
+
+/// Why a loops page reads the way it does, from the scan that produced it.
+///
+/// Three different nothings reach the same empty array: a corpus with no
+/// commitments in it, one whose rows are all waiting on a continuity pass, and
+/// one where the filters excluded every row there was. Only the scan knows
+/// which, so it says.
+fn loops_reason(
+    entries: &[ExternalLoopRow],
+    scanned: usize,
+    awaiting_continuity: bool,
+) -> Option<QueryPageReason> {
+    if awaiting_continuity {
+        return Some(QueryPageReason::AwaitingContinuity);
+    }
+    if !entries.is_empty() {
+        return None;
+    }
+    // Every row that was scanned and not kept was excluded by a filter: with
+    // none passed, `keeps` is true for all of them.
+    if scanned > 0 {
+        return Some(QueryPageReason::FilteredOut);
+    }
+    Some(QueryPageReason::NoRows)
 }
 
 const fn keeps_status(filter: Option<ExternalLoopStatus>, status: MeetingLoopStatus) -> bool {
@@ -1287,7 +1319,9 @@ pub(crate) fn people_page(
     }
     let mut entries = Vec::new();
     let mut has_more = false;
-    for entry in store.people_list().map_err(QueryError::from)?.entries {
+    let people = store.people_list().map_err(QueryError::from)?.entries;
+    let indexed = people.len();
+    for entry in people {
         if !super::matches_every_token(&super::person_haystack(&entry), &tokens) {
             continue;
         }
@@ -1297,10 +1331,21 @@ pub(crate) fn people_page(
         }
         entries.push(person_row(entry));
     }
+    // A name that matched nobody and a corpus that has nobody are the same
+    // empty array, and only the second one means asking again differently is
+    // pointless: diarization has not named anybody yet.
+    let reason = if indexed == 0 {
+        Some(QueryPageReason::PeopleIndexEmpty)
+    } else if entries.is_empty() {
+        Some(QueryPageReason::NoRows)
+    } else {
+        None
+    };
     Ok(ExternalPeoplePage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries,
         has_more,
+        reason,
     })
 }
 

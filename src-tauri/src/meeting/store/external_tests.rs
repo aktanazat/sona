@@ -15,7 +15,7 @@
 //! `done` row got there through the same `resolve_loop` the review screen
 //! calls, rather than a hand-written state row claiming to be the result.
 
-use super::workflow_core_tests::{event, inputs, person};
+use super::workflow_core_tests::{event, inputs, person, store};
 use super::MeetingStore;
 use crate::cli::CliArgs;
 use crate::meeting::detection::machine::CalendarEventSummary;
@@ -36,7 +36,7 @@ use crate::query::external::{
     ExternalLoopSide, ExternalLoopStatus, ExternalRequest, ExternalResponse,
     EXTERNAL_ACCESS_SETTING_PATH, EXTERNAL_MUTATIONS_SETTING_PATH,
 };
-use crate::query::{QueryEventsPage, QuerySearchPage, QUERY_SCHEMA_VERSION};
+use crate::query::{QueryEventsPage, QueryPageReason, QuerySearchPage, QUERY_SCHEMA_VERSION};
 use crate::secrets::{MemorySecretBackend, SecretManager};
 use clap::Parser;
 use rusqlite::params;
@@ -621,6 +621,60 @@ fn the_corpus_loop_list_carries_the_meeting_each_row_came_from() {
     assert!(!page.has_more);
 }
 
+/// The filters emptied this page, not the corpus: the same store answers a
+/// filterless `--loops` with two rows. An agent told `no_rows` here would stop
+/// asking, having never seen the rows it was allowed to see.
+#[test]
+fn a_loop_list_its_filters_emptied_does_not_read_as_an_empty_corpus() {
+    let corpus = corpus();
+
+    let filtered = loops_page(
+        &corpus.store,
+        Some(ExternalLoopStatus::Open),
+        Some(ExternalLoopSide::Mine),
+        None,
+        25,
+    )
+    .unwrap();
+    let unfiltered = loops_page(&corpus.store, None, None, None, 25).unwrap();
+
+    assert!(filtered.entries.is_empty());
+    assert_eq!(filtered.reason, Some(QueryPageReason::FilteredOut));
+    assert_eq!(
+        unfiltered.reason, None,
+        "a page carrying its rows has nothing to explain"
+    );
+}
+
+/// Ledger rows exist and are deliberately not reportable yet: the continuity
+/// pass has not matched this meeting against the one before it, so a
+/// carried-forward loop would still read as open. A fresh corpus mid-workflow
+/// is the common case, and it is not an empty one.
+#[test]
+fn a_loop_list_waiting_on_continuity_says_so_rather_than_nothing() {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, TITLE, NOW);
+    transcript(&store, session_id, SEGMENT);
+    artifact(&store, session_id);
+
+    let page = loops_page(&store, None, None, None, 25).unwrap();
+
+    assert!(page.entries.is_empty());
+    assert_eq!(page.reason, Some(QueryPageReason::AwaitingContinuity));
+}
+
+/// The one answer that means the question was fully asked, and the only one an
+/// agent may stop on.
+#[test]
+fn a_corpus_with_no_meetings_in_it_answers_the_loop_list_with_no_rows() {
+    let (_directory, store) = store();
+
+    let page = loops_page(&store, None, None, None, 25).unwrap();
+
+    assert!(page.entries.is_empty());
+    assert_eq!(page.reason, Some(QueryPageReason::NoRows));
+}
+
 #[test]
 fn a_status_or_a_side_narrows_the_loop_list() {
     let corpus = corpus();
@@ -704,6 +758,7 @@ fn a_person_is_found_by_every_name_she_answers_to() {
             json!({
                 "schema_version": QUERY_SCHEMA_VERSION,
                 "has_more": false,
+                "reason": null,
                 "entries": [{
                     "id": corpus.person_id.uuid(),
                     "display_name": "Dana Reyes",
@@ -721,6 +776,9 @@ fn a_person_is_found_by_every_name_she_answers_to() {
     }
 }
 
+/// A name that matched nobody, against an index that holds somebody: the
+/// lookup was answered, and spelling the name differently is the only thing
+/// left to try.
 #[test]
 fn a_name_nobody_answers_to_finds_nobody() {
     let corpus = corpus();
@@ -729,6 +787,20 @@ fn a_name_nobody_answers_to_finds_nobody() {
 
     assert!(page.entries.is_empty());
     assert!(!page.has_more);
+    assert_eq!(page.reason, Some(QueryPageReason::NoRows));
+}
+
+/// Diarization is what names people. Until it has run there is no index for a
+/// name to miss, which is a fact about the corpus rather than about the name —
+/// and the difference is whether asking again could ever work.
+#[test]
+fn a_corpus_that_has_named_nobody_says_its_people_index_is_empty() {
+    let (_directory, store) = store();
+
+    let page = people_page(&store, "dana", 25).unwrap();
+
+    assert!(page.entries.is_empty());
+    assert_eq!(page.reason, Some(QueryPageReason::PeopleIndexEmpty));
 }
 
 #[test]
@@ -750,6 +822,7 @@ fn the_plane_pages_are_passed_through_unchanged() {
         schema_version: QUERY_SCHEMA_VERSION,
         entries: Vec::new(),
         next_cursor: None,
+        reason: None,
     };
     let events = QueryEventsPage {
         schema_version: QUERY_SCHEMA_VERSION,

@@ -160,6 +160,18 @@ describe("tool to argv", () => {
   test("upcoming names the TCC subject", () => {
     expect(tool("sona_upcoming").description).toContain("responsible_process");
   });
+
+  /* An empty array is two answers, and an agent that cannot tell them apart
+   * either retries a question that was fully answered or stops on one that was
+   * not. Each read that can hide a degraded source publishes the value that
+   * says which happened, so an agent reading the schema knows to look. */
+  test("every read that can come back short names why", () => {
+    expect(tool("sona_search").description).toContain("semantic_unavailable");
+    expect(tool("sona_action_items").description).toContain(
+      "awaiting_continuity",
+    );
+    expect(tool("sona_people").description).toContain("people_index_empty");
+  });
   /* The one tool that writes. Its loop id goes through verbatim, and its
    * schema says so is required, so a call without one never spawns anything. */
   test("resolving a loop carries the loop id and nothing else", () => {

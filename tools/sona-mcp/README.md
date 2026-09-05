@@ -66,6 +66,24 @@ occurrences have no `sona://` address. Other rows carry an address the app can
 open: `sona://meeting/<uuid>`, `sona://loop/<id>`, `sona://person/<uuid>`,
 `sona://dictation/<id>`.
 
+An empty array is two different answers, so the three reads that can hide a
+degraded source carry `reason` beside their rows. `null` means every source
+behind the question was read and the rows are all there are.
+
+| `reason`               | Means                                                                                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no_rows`              | Everything was read and nothing matched. Asking again the same way will not change that.                                                                  |
+| `no_searchable_tokens` | The query held no word to match.                                                                                                                          |
+| `semantic_unavailable` | The recall model is not on this machine, so only literal word matching ran. Rows worded differently than the question are missing and cannot be reported. |
+| `filtered_out`         | The corpus holds loops; `status` or `side` excluded every one of them.                                                                                    |
+| `awaiting_continuity`  | A meeting's continuity pass has not succeeded yet, so its ledger rows are not reportable. Ask again later.                                                |
+| `people_index_empty`   | Diarization has not named anybody yet, so no name can match.                                                                                              |
+
+Each read produces only its own values: `sona_search` produces
+`no_searchable_tokens`, `semantic_unavailable` and `no_rows`;
+`sona_action_items` produces `awaiting_continuity`, `filtered_out` and
+`no_rows`; `sona_people` produces `people_index_empty` and `no_rows`.
+
 ## Refusals
 
 Errors are MCP errors. The message leads with Sona's own token — `sona

@@ -60,7 +60,7 @@ use std::sync::Arc;
 /// Wire version of everything in this module, and of the read-only external
 /// surface in [`external`] that projects the same nouns out of the same
 /// corpus. Bumped whenever a public payload's bytes or interpretation changes.
-pub const QUERY_SCHEMA_VERSION: u32 = 2;
+pub const QUERY_SCHEMA_VERSION: u32 = 3;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;
@@ -173,6 +173,67 @@ pub struct QuerySearchPage {
     pub entries: Vec<QueryRow>,
     /// Absent when this page is the end of the result.
     pub next_cursor: Option<QueryCursor>,
+    /// Why this page reads the way it does. `no_searchable_tokens`,
+    /// `semantic_unavailable` or `no_rows` — never the loop and people values,
+    /// which no search path produces.
+    pub reason: Option<QueryPageReason>,
+}
+
+impl QuerySearchPage {
+    /// The answer to a query that is nothing but whitespace.
+    ///
+    /// Dictation search answers a blank query the same way rather than
+    /// matching everything, and a plane that handed back the whole corpus for
+    /// a stray space would be worse than one that hands back nothing. What it
+    /// must not do is look like a corpus with nothing in it, so the page names
+    /// which nothing this is.
+    fn nothing_searchable() -> Self {
+        Self {
+            schema_version: QUERY_SCHEMA_VERSION,
+            entries: Vec::new(),
+            next_cursor: None,
+            reason: Some(QueryPageReason::NoSearchableTokens),
+        }
+    }
+}
+
+/// Why a page of this plane reads the way it does, when something other than
+/// the corpus decided it.
+///
+/// `None` means every source the question reaches answered it, and the rows
+/// are all there are. `NoRows` is a corpus that legitimately holds nothing for
+/// the question. Every other value names something that stopped short of
+/// answering it, and outranks `NoRows` on an empty page: "not everywhere was
+/// read" is a different fact from "there is nothing".
+///
+/// One vocabulary across the plane and the external surface, the way
+/// [`external::ExternalErrorCode`] is one vocabulary across every verb. Each
+/// page documents the values it can produce; none produces all of them.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryPageReason {
+    /// Every source this question reaches was read, and nothing matched.
+    NoRows,
+    /// The query was whitespace, so it named no token for any index to match.
+    /// A word that simply appears nowhere is `NoRows` instead: it was looked
+    /// for.
+    NoSearchableTokens,
+    /// Recall by meaning was not available: the embedding model is not on this
+    /// machine yet, so only literal-word matching ran. Reported whether or not
+    /// rows came back, because a full page of literal matches is still a page
+    /// that missed everything phrased differently.
+    SemanticUnavailable,
+    /// The corpus holds rows of this kind, and the filters passed excluded
+    /// every one of them.
+    FilteredOut,
+    /// Rows exist and are not reportable yet: a meeting's continuity pass has
+    /// not succeeded, so its ledger has not been matched against the meeting
+    /// before it, and a carried-forward loop would still read as open.
+    AwaitingContinuity,
+    /// No person has been named in this corpus yet, so there is nothing for a
+    /// name to match. Diarization names people; until it has, this index is
+    /// empty however many meetings there are.
+    PeopleIndexEmpty,
 }
 
 /// Which ledger a row came out of.
@@ -377,14 +438,7 @@ pub async fn search(
 ) -> Result<QuerySearchPage, QueryError> {
     let limit = page_size(limit)?;
     if tokens(query).is_empty() {
-        // Nothing searchable was typed. Dictation search answers this the same
-        // way rather than matching everything, and a plane that returned the
-        // whole corpus for `?` would be worse than one that returns nothing.
-        return Ok(QuerySearchPage {
-            schema_version: QUERY_SCHEMA_VERSION,
-            entries: Vec::new(),
-            next_cursor: None,
-        });
+        return Ok(QuerySearchPage::nothing_searchable());
     }
     let store = meetings.store().await?;
     // Dictations are the one source behind an async API, and the only read the
@@ -514,11 +568,34 @@ pub(crate) fn assemble(
     }
 
     let (entries, next_cursor) = merge(candidates, cursor, limit);
+    let reason = search_reason(&entries, model, scope);
     Ok(QuerySearchPage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries,
         next_cursor,
+        reason,
     })
+}
+
+/// Why a search page reads the way it does, decided beside the rows it
+/// describes rather than by a caller looking at an empty array afterwards.
+///
+/// The model is the one source that can be missing without failing: recall by
+/// meaning is either loaded or it is not, and the reader is the only one who
+/// can decide whether a literal-only answer is good enough. A scope that
+/// reaches neither meetings nor dictations never asks it anything, so an empty
+/// people or loop page says nothing about it.
+fn search_reason(
+    entries: &[QueryRow],
+    model: Option<&SemanticModel>,
+    scope: QueryScope,
+) -> Option<QueryPageReason> {
+    let recalls_by_meaning =
+        scope.includes(QueryRowKind::Meeting) || scope.includes(QueryRowKind::Dictation);
+    if model.is_none() && recalls_by_meaning {
+        return Some(QueryPageReason::SemanticUnavailable);
+    }
+    entries.is_empty().then_some(QueryPageReason::NoRows)
 }
 
 fn meeting_row(candidate: MeetingQueryCandidate) -> QueryRow {

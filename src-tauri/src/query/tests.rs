@@ -336,3 +336,19 @@ fn links_have_one_shape_per_noun() {
         "sona://search?q=promised+Steven%3F"
     );
 }
+
+/// A blank query and a corpus with nothing in it are the same empty array, and
+/// an agent that cannot tell them apart asks the same question again. This is
+/// the page [`search`] hands back before it opens the store, so its token is
+/// the only thing that says which nothing it is.
+#[test]
+fn a_page_that_searched_for_nothing_says_so_rather_than_looking_empty() {
+    let page = QuerySearchPage::nothing_searchable();
+
+    assert!(page.entries.is_empty());
+    assert_eq!(
+        serde_json::to_value(&page).unwrap()["reason"],
+        "no_searchable_tokens",
+        "the token an outside reader parses"
+    );
+}

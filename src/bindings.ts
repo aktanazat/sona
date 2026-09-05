@@ -5783,6 +5783,55 @@ pack: string;
  */
 sources: QueryRow[] }
 /**
+ * Why a page of this plane reads the way it does, when something other than
+ * the corpus decided it.
+ *
+ * `None` means every source the question reaches answered it, and the rows
+ * are all there are. `NoRows` is a corpus that legitimately holds nothing for
+ * the question. Every other value names something that stopped short of
+ * answering it, and outranks `NoRows` on an empty page: "not everywhere was
+ * read" is a different fact from "there is nothing".
+ *
+ * One vocabulary across the plane and the external surface, the way
+ * [`external::ExternalErrorCode`] is one vocabulary across every verb. Each
+ * page documents the values it can produce; none produces all of them.
+ */
+export type QueryPageReason =
+/**
+ * Every source this question reaches was read, and nothing matched.
+ */
+"no_rows" |
+/**
+ * The query was whitespace, so it named no token for any index to match.
+ * A word that simply appears nowhere is `NoRows` instead: it was looked
+ * for.
+ */
+"no_searchable_tokens" |
+/**
+ * Recall by meaning was not available: the embedding model is not on this
+ * machine yet, so only literal-word matching ran. Reported whether or not
+ * rows came back, because a full page of literal matches is still a page
+ * that missed everything phrased differently.
+ */
+"semantic_unavailable" |
+/**
+ * The corpus holds rows of this kind, and the filters passed excluded
+ * every one of them.
+ */
+"filtered_out" |
+/**
+ * Rows exist and are not reportable yet: a meeting's continuity pass has
+ * not succeeded, so its ledger has not been matched against the meeting
+ * before it, and a carried-forward loop would still read as open.
+ */
+"awaiting_continuity" |
+/**
+ * No person has been named in this corpus yet, so there is nothing for a
+ * name to match. Diarization names people; until it has, this index is
+ * empty however many meetings there are.
+ */
+"people_index_empty"
+/**
  * One answer. `link` is always a `sona://` URL this app parses, so an agent
  * can cite it, a human can click it, and a test can assert it.
  */
@@ -5812,7 +5861,13 @@ export type QuerySearchPage = { schema_version: number; entries: QueryRow[];
 /**
  * Absent when this page is the end of the result.
  */
-next_cursor: QueryCursor | null }
+next_cursor: QueryCursor | null;
+/**
+ * Why this page reads the way it does. `no_searchable_tokens`,
+ * `semantic_unavailable` or `no_rows` — never the loop and people values,
+ * which no search path produces.
+ */
+reason: QueryPageReason | null }
 export type RecorderAvailability = "supported" | "unsupported"
 export type RecorderCommandError = "invalidState"
 export type RecorderDevice = { id: string; name: string }

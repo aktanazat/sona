@@ -533,6 +533,7 @@ describe("what the palette asks the backend", () => {
           schema_version: 1,
           entries: [queryRow("meeting", "m-1")],
           next_cursor: null,
+          reason: null,
         },
       };
     };

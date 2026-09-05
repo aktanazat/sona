@@ -18,7 +18,7 @@ Two settings rows, both off on install:
   `--loop-resolve`, the one write.
 
 With either needed row off, the request exits `1` and prints
-`{"schema_version":2,"error":"consent_required","message":"…","settings_path":"…"}`
+`{"schema_version":3,"error":"consent_required","message":"…","settings_path":"…"}`
 on stderr. Tell the user the `settings_path`; do not retry.
 
 ## CLI
@@ -44,7 +44,7 @@ accepts `--last`, which overrides `--limit`.
 
 ## JSON shapes
 
-Every payload carries `schema_version:2`. `--meetings`, `--people` and
+Every payload carries `schema_version:3`. `--meetings`, `--people` and
 `--upcoming` page with `has_more`. `--loops` returns both `has_more` and
 `next_cursor`: when the cursor is non-null, pass it to `--after` with the
 same filters. `has_more` is true exactly when that cursor is present.
@@ -60,53 +60,54 @@ not a Sona noun, so it is `undefined` rather than `null`; identify one by
 `event_key`. The `--loop-resolve` receipt carries no link either.
 
 ```
---query      {"schema_version":2,"entries":[{"kind":"meeting"|"dictation"|
+--query      {"schema_version":3,"entries":[{"kind":"meeting"|"dictation"|
               "person"|"loop","id":str,"title":str,"snippet":str,
               "when_utc_ms":int,"link":str}],
               "next_cursor":{"when_utc_ms":int,"kind":str,"id":str,
-              "dictation_id":int|null}|null}
+              "dictation_id":int|null}|null,"reason":str|null}
              — one page mixes kinds. A dictation row's `id` is digits in a
                string ("75"); the cursor's `dictation_id` is the same number
                as an integer.
---meetings   {"schema_version":2,"entries":[{"id":uuid,"title":str,"phase":str,
+--meetings   {"schema_version":3,"entries":[{"id":uuid,"title":str,"phase":str,
               "when_utc_ms":int,"recorded_duration_ms":int|null,
               "capture_completeness":"not_started"|"complete"|"partial",
               "speakers":[str],"headline":headline,"link":str}],"has_more":bool}
---meeting    {"schema_version":2,"id":uuid,"title":str,"phase":str,
+--meeting    {"schema_version":3,"id":uuid,"title":str,"phase":str,
               "processing_status":processing_status,"started_at_utc_ms":int|null,
               "speakers":[str],"summary":str|null,"headline":str|null,
               "notes":[str],"loops":[loop],"link":str}
---transcript {"schema_version":2,"meeting_id":uuid,"title":str,
+--transcript {"schema_version":3,"meeting_id":uuid,"title":str,
               "started_at_utc_ms":int|null,
               "lines":[{"speaker":str,"start_ms":int,"end_ms":int,"text":str}],"link":str}
---loops      {"schema_version":2,"entries":[loop],"next_cursor":str|null,
-              "has_more":bool}
+--loops      {"schema_version":3,"entries":[loop],"next_cursor":str|null,
+              "has_more":bool,"reason":str|null}
              loop: {"id":str,"meeting_id":uuid,"meeting_title":str,
               "kind":"loop"|"commitment","status":"open"|"done"|"dropped"|"carried",
               "direction":"mine"|"waiting_on"|"unattributed","text":str,
               "owner":str|null,"when_utc_ms":int,
               "resolved_at_utc_ms":int|null,"link":str}
---people     {"schema_version":2,"entries":[{"id":uuid,"display_name":str,
+--people     {"schema_version":3,"entries":[{"id":uuid,"display_name":str,
               "aliases":[str],"calendar_emails":[str],"meetings_count":int,
               "last_meeting_at_utc_ms":int|null,"last_meeting_title":str|null,
-              "last_meeting_headline":str|null,"link":str}],"has_more":bool}
---events     {"schema_version":2,"entries":[{"id":str,
+              "last_meeting_headline":str|null,"link":str}],"has_more":bool,
+              "reason":str|null}
+--events     {"schema_version":3,"entries":[{"id":str,
               "source":"workflow_run"|"operation_receipt","action":str,
               "result":str,"detail":str,"outcome_summary":str|null,
               "when_utc_ms":int,"link":str|null}],"next_cursor":str|null}
              — `detail` is always present. For a failed workflow run it is the
                error; `outcome_summary` retains that run's store-authored
                summary and is null for an operation receipt.
---upcoming   {"schema_version":2,"calendar_access_subject":"responsible_process",
+--upcoming   {"schema_version":3,"calendar_access_subject":"responsible_process",
               "calendar_access":"not_determined"|"authorized"|"denied"|"unavailable","window_start_utc_ms":int,
               "window_end_utc_ms":int,"entries":[{"event_key":str,"title":str,
               "start_utc_ms":int,"end_utc_ms":int,"attendees":[str],
               "attendee_count":int,"calendar_name":str|null,"join_url":str|null,
               "series_key":str|null,"always_record":bool}],"has_more":bool}
 --loop-resolve
-             {"schema_version":2,"receipt":{"schema_version":int,
+             {"schema_version":3,"receipt":{"schema_version":int,
               "operation_id":uuid,"session_id":uuid|null,
-              "actor":"user"|"system","command":"loop_resolve",
+              "actor":"user"|"system"|"external","command":"loop_resolve",
               "expected_revision":int,"from_phase":str|null,"to_phase":str|null,
               "requested_at_utc_ms":int,"committed_at_utc_ms":int|null,
               "result":"committed"|"rejected"|"failed","reason_codes":[str],

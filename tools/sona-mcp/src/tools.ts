@@ -119,7 +119,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_search",
     title: "Search Sona",
     description:
-      "Search everything Sona keeps — meetings, dictations, people and open loops — and get back the rows that matched, each with the text that matched it and a sona:// address. Newest first.",
+      "Search everything Sona keeps — meetings, dictations, people and open loops — and get back the rows that matched, each with the text that matched it and a sona:// address. Newest first. `reason` names whatever shaped the page other than the corpus: `no_searchable_tokens` when the query held no word to match, `semantic_unavailable` when the recall model is not on this machine and only literal word matching ran, `no_rows` when every source was read and nothing matched. Null means the rows are all there are.",
     inputSchema: {
       type: "object",
       properties: {
@@ -211,7 +211,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_action_items",
     title: "List Sona action items",
     description:
-      "List loops and commitments across every meeting. Pass next_cursor from an earlier result as after, with the same filters, to continue after that loop.",
+      "List loops and commitments across every meeting. Pass next_cursor from an earlier result as after, with the same filters, to continue after that loop. `reason` says why a page is empty: `awaiting_continuity` when a meeting's continuity pass has not run and its rows are not reportable yet, `filtered_out` when the status or side filter excluded every row, `no_rows` when the corpus holds none.",
     inputSchema: {
       type: "object",
       properties: {
@@ -251,7 +251,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_people",
     title: "Find people in Sona",
     description:
-      "Look somebody up by name, alias or calendar address, and get back their profile: how many meetings they were in, when the last one was, and what it left.",
+      "Look somebody up by name, alias or calendar address, and get back their profile: how many meetings they were in, when the last one was, and what it left. `reason` says why a lookup found nobody: `people_index_empty` when diarization has not named anybody yet, so no name can match, or `no_rows` when people are indexed and this name is not one of them.",
     inputSchema: {
       type: "object",
       properties: {
