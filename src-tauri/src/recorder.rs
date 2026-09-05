@@ -522,6 +522,11 @@ impl ScreenRecorderManager {
             return Ok(self.fail(RecorderFailureCode::OutputCommitFailed));
         }
         native_cancel(&mut native);
+        // Read the counter after `cancel_and_destroy`: past that point Swift is neither running
+        // the status callback nor able to start one, so this load is the final total and includes
+        // the drops raised since the last heartbeat and during finalization. The heartbeat refresh
+        // cannot cover them, because `state.native` was taken before this transaction runs.
+        let dropped_video_frames = native_dropped_video_frames(&native);
 
         let (lease, snapshot) = {
             let mut state = lock_recover(&self.state);
@@ -531,6 +536,7 @@ impl ScreenRecorderManager {
             state.output_path = Some(final_path);
             state.width = Some(report.width);
             state.height = Some(report.height);
+            state.dropped_video_frames = dropped_video_frames;
             state.active_since = None;
             state.elapsed_before_active = Duration::from_millis(report.duration_ms);
             state.failure = None;
