@@ -13,7 +13,7 @@ import { PrivacyUpstreamImport } from "../privacy/PrivacyUpstreamImport";
  * whether anything does.
  *
  * The Privacy tab is gone. Its controls went where the thing they govern is —
- * retention to Essentials, context capture to Dictation — and what is left is
+ * retention and context capture both sit under Dictation — and what is left is
  * what this section is for: read-only facts about egress, plus the one-time
  * setups that create it. The facts are collapsed because they are reassurance,
  * not a decision: an operator who wants them can open one row, and everyone

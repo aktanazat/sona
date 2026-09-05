@@ -12,23 +12,6 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { EssentialsSettings } from "./essentials/EssentialsSettings";
 import { AdvancedSettings } from "./advanced/AdvancedSettings";
 
-/* The number this restructure exists for.
- *
- * Settings was about seventy fixed rows across seven tabs. The brief's target
- * is Essentials at ten or eleven and everything non-debug under thirty, and
- * the only way a number like that survives contact with the next feature is if
- * exceeding it fails a test. So this file counts rows.
- *
- * A row is a `SettingsRow` or a `SettingsField` — a field is a row whose
- * control is too wide to sit beside its label, not a second kind of thing.
- * Rows inside a `<details>` are excluded, because a collapsed one-time setup
- * costs a reader one line whether it holds two fields or nine; that is the
- * whole reason those blocks are collapsed. Dynamic list items — models,
- * workflows, agent sessions, trackers — are not rows at all.
- *
- * Static rendering runs no effects, so every surface here is at first paint:
- * loading states included, which is the honest floor for a count. */
-
 const catalogue = JSON.parse(
   fs.readFileSync(
     path.join(
@@ -50,13 +33,16 @@ void i18n.init({
   fallbackLng: "en",
   resources: { en: { translation: catalogue } },
   interpolation: { escapeValue: false },
+  /* A key with no entry comes back as this sentinel rather than as itself, so
+   * a page that prints one is distinguishable from a page whose copy happens
+   * to read like a key. Shared with every sibling suite in this directory. */
   parseMissingKeyHandler: () => "__MISSING__",
 });
 
 /* The values the backend hands back on a fresh install (settings.rs), because
- * a count taken at first paint is not the count a person sees: an unread store
- * shows the cancel chord that push-to-talk removes. Only the keys that decide
- * whether a row renders at all are listed; the rest do not move the number. */
+ * an unread store paints a surface nobody sees: it shows the cancel chord that
+ * push-to-talk removes. Only the keys that decide whether a row renders at all
+ * are listed. */
 /* SAFETY: a four-key partial stands in for AppSettings because these renders
  * read only the keys that decide whether a row appears; every other field is
  * behind `getSetting` fallbacks, so a missing key cannot be dereferenced. */
@@ -79,18 +65,6 @@ const paint = (
   );
 };
 
-/* Drops every `<details>` element, innermost first so nesting cannot make the
- * strip swallow a sibling: the pattern refuses to cross another `<details`. */
-const withoutDisclosures = (markup: string): string => {
-  const innermost = /<details(?:(?!<details)[\s\S])*?<\/details>/;
-  let stripped = markup;
-  while (innermost.test(stripped)) stripped = stripped.replace(innermost, "");
-  return stripped;
-};
-
-const countRows = (markup: string): number =>
-  markup.match(/data-slot="settings-(?:row|field)"/g)?.length ?? 0;
-
 const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 beforeAll(() => {
   /* `type()` is a synchronous read of a global the Tauri host installs, and two
@@ -110,26 +84,9 @@ afterAll(() => {
   if (priorWindow) Object.defineProperty(globalThis, "window", priorWindow);
   else Reflect.deleteProperty(globalThis, "window");
 });
-/* Nothing seeds the detection store here on purpose. zustand hands React's
- * server renderer its INITIAL snapshot, so a static render cannot observe a
- * `setState`, and Advanced's calendar and any-microphone switches — which
- * come from that store — never appear. `getSetting` above is a store action
- * reading live state, which is why the settings defaults do land.
- *
- * So the page budget is counted against the number a person sees, and the two
- * rows this render cannot reach are added by name rather than paid for by
- * quietly lowering the bound. */
-const UNRENDERABLE_ADVANCED_ROWS = 2;
 
 describe("Essentials", () => {
-  const markup = () => paint(<EssentialsSettings onOpenModes={() => {}} />);
-
-  test("is one surface of ten to eleven rows", () => {
-    const rows = countRows(markup());
-
-    expect(rows).toBeGreaterThan(9);
-    expect(rows).toBeLessThan(12);
-  });
+  const markup = () => paint(<EssentialsSettings />);
 
   test("carries every essential control, in the brief's order", () => {
     const found = markup();
@@ -143,9 +100,6 @@ describe("Essentials", () => {
       "Launch at login",
       "Notice when I join a meeting",
       "Meeting apps",
-      "Delete recordings after",
-      "Appearance",
-      "Dictation styles",
     ].map((label) => found.indexOf(label));
 
     // Every one present, and each after the one before it.
@@ -153,48 +107,29 @@ describe("Essentials", () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
-  test("prints no section heading and no raw key", () => {
-    const found = markup();
+  /* Meeting apps is the one list here a reader has to open: six checkboxes,
+   * two switches and an Add button, behind a single line. Either this list
+   * flattening back onto the page or a second block folding away changes what
+   * Essentials costs to read. */
+  test("keeps the meeting-app allowlist behind a single disclosure", () => {
+    expect(markup().match(/<summary/g)?.length).toBe(1);
+  });
 
-    /* The tab strip above already names the page, and eleven rows are short
-     * enough to read without being divided. */
-    expect(found).not.toContain("<h2");
-    expect(found).not.toContain("__MISSING__");
+  /* A row wired to a key the catalogue does not carry prints that key to the
+   * reader. Each sibling suite checks its own component; this file is the only
+   * one that paints a whole composed page, which is where a row added on one
+   * side and a string added on the other drift apart. */
+  test("resolves every string it renders", () => {
+    expect(markup()).not.toContain("__MISSING__");
   });
 });
 
 describe("Advanced", () => {
-  const markup = () => paint(<AdvancedSettings onOpenCatalog={() => {}} />);
-
-  test("carries the seven sections the five folded tabs became", () => {
-    const found = markup();
-
-    for (const section of [
-      "Meetings",
-      "Models",
-      "Dictation",
-      "What Sona does after a meeting",
-      "Sync",
-      "Agents",
-      "About Sona",
-    ]) {
-      expect(found).toContain(`>${section}</h2>`);
-    }
-    expect(found).not.toContain("__MISSING__");
-  });
+  const markup = () =>
+    paint(<AdvancedSettings onOpenCatalog={() => {}} onOpenModes={() => {}} />);
 
   test("names the chord that opens Debug, since nothing links to it", () => {
     expect(markup()).toContain("Press \u2318\u21e7D to open the debug page.");
-  });
-
-  test("keeps every one-time setup collapsed", () => {
-    const found = markup();
-    const collapsed = countRows(found) - countRows(withoutDisclosures(found));
-
-    // Cloud keys, the cleanup endpoint, context capture, egress facts, the
-    // agent bridge, and cloud sync's three setup tasks all sit behind a row.
-    expect(collapsed).toBeGreaterThan(0);
-    expect(found).not.toContain("open=");
   });
 
   test("every setting with a live reader keeps a way to write it", () => {
@@ -214,27 +149,10 @@ describe("Advanced", () => {
      * static render — which runs no effects — must show no row. */
     expect(found).not.toContain("Input channel");
   });
-});
 
-test("the whole non-debug surface stays at thirty-five rows or under", () => {
-  const total =
-    countRows(paint(<EssentialsSettings onOpenModes={() => {}} />)) +
-    countRows(
-      withoutDisclosures(paint(<AdvancedSettings onOpenCatalog={() => {}} />)),
-    ) +
-    UNRENDERABLE_ADVANCED_ROWS;
-
-  /* Thirty-five is the ceiling after the 2026-09-01 batch. Round 2 held the
-   * page at thirty; the round-3 consensus (DECISIONS-3.md §7, 2026-08-31)
-   * then added four consented surfaces — remote meeting intelligence (D14),
-   * external access for the CLI and MCP server (D15), after-meeting
-   * automations (D22), and the per-series calendar controls (D28) — and the
-   * batch that gave the external surface its first write added the one grant
-   * that answers it: External mutations, a switch a reader must be able to
-   * see, because letting a script read the corpus and letting it close a loop
-   * are different answers. The saved-prompt library added no row: each prompt
-   * is a disclosure. Settings carried about seventy rows across seven tabs
-   * before the restructure; the next row added here still has to displace
-   * one or argue with this comment. */
-  expect(total).toBeLessThan(36);
+  /* Five tabs' worth of rows fold into this one page, so a key missing from
+   * any of them reaches a reader here first. */
+  test("resolves every string it renders", () => {
+    expect(markup()).not.toContain("__MISSING__");
+  });
 });

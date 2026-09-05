@@ -17,16 +17,17 @@ import { AdvancedWorkflows } from "./AdvancedWorkflows";
  * organised — meetings, then what recognises speech, then what happens to a
  * dictation, then what Sona does on its own, then what leaves this Mac, then
  * what talks to Sona, then what build this is. */
-export const AdvancedSettings: React.FC<{ onOpenCatalog: () => void }> = ({
-  onOpenCatalog,
-}) => {
+export const AdvancedSettings: React.FC<{
+  onOpenCatalog: () => void;
+  onOpenModes: () => void;
+}> = ({ onOpenCatalog, onOpenModes }) => {
   const { t } = useTranslation();
 
   return (
     <SettingsPage title={t("settingsV2.advanced.title")}>
       <AdvancedMeetings />
       <AdvancedModels onOpenCatalog={onOpenCatalog} />
-      <AdvancedDictation />
+      <AdvancedDictation onOpenModes={onOpenModes} />
       <AdvancedWorkflows />
       <AdvancedSync />
       <AdvancedAgents />

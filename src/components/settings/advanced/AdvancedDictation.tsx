@@ -1,6 +1,7 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { type } from "@tauri-apps/plugin-os";
+import type { RecordingRetentionPeriod } from "@/bindings";
 import { Input } from "@/components/vg/input";
 import {
   Select,
@@ -11,6 +12,7 @@ import {
 } from "@/components/vg/select";
 import {
   SettingsDisclosure,
+  SettingsLinkRow,
   SettingsRow,
   SettingsSection,
 } from "@/components/settings/rows";
@@ -32,6 +34,17 @@ import { useDataRetention } from "../useDataRetention";
 
 const SPELLING_ID = "advanced-english-spelling";
 const HISTORY_LIMIT_ID = "advanced-history-limit";
+const RETENTION_ID = "advanced-recording-retention";
+
+/* The periods the backend accepts, in the order a reader scans them: never,
+ * then the count-based limit, then the three clocks. */
+const RETENTION_OPTIONS = [
+  "never",
+  "preserve_limit",
+  "days_3",
+  "weeks_2",
+  "months_3",
+] as const satisfies readonly RecordingRetentionPeriod[];
 
 /* What happens to a dictation between the microphone and the text.
  *
@@ -40,14 +53,29 @@ const HISTORY_LIMIT_ID = "advanced-history-limit";
  * it sits on Essentials now. Experimental survives as a switch that visibly
  * extends this section rather than revealing one somewhere else.
  *
+ * Two things moved here in round 7, because both answer to this subject
+ * rather than to a decision made on the day Sona is installed: how long
+ * recordings survive, which is the pair of how many dictations are kept, and
+ * the door to the dictation-style editor, which is the transformation this
+ * whole section is about.
+ *
  * What Sona may read from other apps is behind a disclosure because it is a
  * ceiling, not a preference: it is set once, deliberately, and the default of
- * "nothing" is the one most people keep. */
-export const AdvancedDictation: React.FC = () => {
+ * "nothing" is the one most people keep. The level rides on the summary, so
+ * the answer is readable without opening it. */
+export const AdvancedDictation: React.FC<{ onOpenModes: () => void }> = ({
+  onOpenModes,
+}) => {
   const { t } = useTranslation();
   const { settings, updateSetting, getSetting } = useSettings();
-  const { errorNotice, dataUpdating, historyLimit, updateHistoryLimit } =
-    useDataRetention();
+  const {
+    errorNotice,
+    dataUpdating,
+    historyLimit,
+    updateHistoryLimit,
+    retentionPeriod,
+    updateRetentionPeriod,
+  } = useDataRetention();
   const currentModel = useModelStore((state) => state.currentModel);
   const models = useModelStore((state) => state.models);
 
@@ -55,6 +83,7 @@ export const AdvancedDictation: React.FC = () => {
   const englishSpelling = settings?.english_spelling ?? "as_spoken";
   const commandModeEnabled = getSetting("command_mode_enabled") ?? true;
   const pushToTalk = getSetting("push_to_talk");
+  const contextCeiling = getSetting("context_policy_ceiling") ?? "none";
   const supportsTranslation =
     models.find((model) => model.id === currentModel)?.supports_translation ??
     false;
@@ -103,6 +132,13 @@ export const AdvancedDictation: React.FC = () => {
         </Select>
       </SettingsRow>
       {supportsTranslation ? <TranslateToEnglish /> : null}
+      {/* The editor for the styles a dictation is written through: not a
+       * setting but a door, and this is the section its subject belongs to. */}
+      <SettingsLinkRow
+        label={t("settingsV2.essentials.dictationStyles")}
+        action={t("settingsV2.essentials.dictationStylesAction")}
+        onOpen={onOpenModes}
+      />
       <ShowOverlay />
       {/* Beside the recording overlay, because both are what Sona puts on
        * screen outside its own window. */}
@@ -125,9 +161,42 @@ export const AdvancedDictation: React.FC = () => {
           className="w-20"
         />
       </SettingsRow>
+      {/* The other half of the same question. One error line serves both
+       * writes, which is why they are adjacent and not in two places. */}
+      <SettingsRow
+        label={t("settingsV2.essentials.retention")}
+        controlId={RETENTION_ID}
+      >
+        <Select
+          value={retentionPeriod}
+          disabled={dataUpdating}
+          onValueChange={(period) => {
+            const next = RETENTION_OPTIONS.find(
+              (candidate) => candidate === period,
+            );
+            if (next) void updateRetentionPeriod(next);
+          }}
+        >
+          {/* No fixed width: the retention labels are long in several locales
+           * and a Select trigger clips them with no ellipsis. */}
+          <SelectTrigger id={RETENTION_ID} size="sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RETENTION_OPTIONS.map((period) => (
+              <SelectItem key={period} value={period}>
+                {t("settings.privacy.data.retention.values." + period)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </SettingsRow>
       {errorNotice}
 
-      <SettingsDisclosure label={t("settingsV2.advanced.readsFromOtherApps")}>
+      <SettingsDisclosure
+        label={t("settingsV2.advanced.readsFromOtherApps")}
+        fact={t("settings.privacy.context.ceiling.values." + contextCeiling)}
+      >
         <PrivacyContextSettings />
       </SettingsDisclosure>
 

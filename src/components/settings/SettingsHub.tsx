@@ -74,10 +74,13 @@ export const SettingsHub: React.FC<{
         </TabsList>
       </div>
       <TabsContent value="essentials">
-        <EssentialsSettings onOpenModes={() => onOpenSection?.("modes")} />
+        <EssentialsSettings />
       </TabsContent>
       <TabsContent value="advanced">
-        <AdvancedSettings onOpenCatalog={() => onOpenSection?.("models")} />
+        <AdvancedSettings
+          onOpenCatalog={() => onOpenSection?.("models")}
+          onOpenModes={() => onOpenSection?.("modes")}
+        />
       </TabsContent>
       {tabs.includes("debug") ? (
         <TabsContent value="debug">
