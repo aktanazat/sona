@@ -2744,6 +2744,64 @@ pub fn change_context_url_capture_enabled_setting(app: AppHandle, enabled: bool)
     });
 }
 
+/// The two consent rows on Settings > Agents and the three meeting rows
+/// beside them. Each writes the one field the row shows; a row with no write
+/// behind it is the worst kind of switch, one that reports a grant the corpus
+/// never received - or keeps one the operator believes withdrawn.
+#[tauri::command]
+#[specta::specta]
+pub fn change_external_query_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.external_query_enabled = enabled;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_external_mutations_enabled_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.external_mutations_enabled = enabled;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_remote_intelligence_enabled_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.meeting_remote_intelligence_enabled = enabled;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_digest_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.meeting_digest_enabled = enabled;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_digest_minute_of_day_setting(
+    app: AppHandle,
+    minute_of_day: u32,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.meeting_digest_minute_of_day = minute_of_day;
+    });
+    Ok(())
+}
+
 /// Record the complete, versioned cloud-transfer acknowledgement. Declining is
 /// intentionally a frontend no-op, so the mode keeps its prior local engine.
 #[tauri::command]
