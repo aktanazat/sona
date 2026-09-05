@@ -344,10 +344,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
+      {/* The destinations. The nav takes the rail's remaining height so the
+          last row can sit against the bottom edge rather than under People:
+          Settings is the one row nobody navigates to while working, and the
+          four above it are where the reading happens. Declaration order in
+          the registry is still the order — the gap is `mt-auto` on one row,
+          not a second list. */}
       <nav
         ref={nav.groupRef}
         onKeyDown={nav.onKeyDown}
-        className="flex flex-none flex-col gap-0.5"
+        className="flex min-h-0 flex-1 flex-col gap-0.5"
         aria-label={t("sidebar.navigation")}
       >
         {RAIL_SECTIONS.map((section) => {
@@ -364,6 +370,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   NAV_ROW,
                   collapsed ? NAV_ROW_GLYPH : NAV_ROW_NAMED,
                   current && NAV_ROW_CURRENT,
+                  section === "settings" && "mt-auto",
                 )}
                 onClick={() => onSectionChange(section)}
               >
