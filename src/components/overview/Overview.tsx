@@ -1,15 +1,25 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { MoreHorizontal } from "lucide-react";
 import { commands, events, type HistoryTrendProjection } from "@/bindings";
 import { useAudioImport } from "@/hooks/useAudioImport";
 import { useSettings } from "@/hooks/useSettings";
 import { useOsType } from "@/hooks/useOsType";
 import { formatKeyCombination, keyCapParts } from "@/lib/utils/keyboard";
 import { cn } from "@/lib/cn";
-import { PAGE_COLUMN, SettingsCard } from "@/components/settings/rows";
+import {
+  PAGE_COLUMN,
+  SETTINGS_SURFACE,
+  SettingsCard,
+} from "@/components/settings/rows";
 import { Aurora } from "@/components/Aurora";
 import { Button } from "@/components/vg/button";
-import { commandActionIcons } from "@/components/commandPaletteActions";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/vg/dropdown-menu";
 import { Kbd } from "@/components/vg/kbd";
 import {
   Tooltip,
@@ -18,23 +28,23 @@ import {
 } from "@/components/vg/tooltip";
 import { checkForUpdates, type UpdateCheckResult } from "@/lib/updateCheck";
 import { waitForFirstVisibleFrame } from "@/lib/launchTrace";
-import { UpdateBanner, UpdateCheckFailure } from "./UpdateNotice";
 import { ActivityBand } from "./ActivityBand";
 import { CaptureModeChip } from "./CaptureModeChip";
-import { OverviewWorkflowCards } from "./OverviewWorkflowCards";
-import { LearningSuggestionCard } from "./LearningSuggestionCard";
+import {
+  NeedsYou,
+  Recent,
+  useLearningRows,
+  useOverviewFeed,
+} from "./OverviewFeed";
 
-/* Capture stays the primary surface. The activity band below it reuses the
- * history trend projection the former Overview analytics read, now expressed
- * through the shared chart grammar instead of page-local chart markup. */
+/* Capture shows one thing: what dictation is doing, and what needs the reader.
+ * This week's numbers and what Sona did on its own are two closed rows under
+ * it, each carrying the measurement that decides whether to open it. */
 
 /* Recording is a command, not an event: the backend starts and stops on a
  * global chord this window never sees, so the status word is polled. One
  * boolean a second is the whole backend cost of this page while it is open. */
 const RECORDING_POLL_MS = 1000;
-const NewMeetingIcon = commandActionIcons.newMeeting;
-const ImportAudioIcon = commandActionIcons.importAudio;
-const RecordScreenIcon = commandActionIcons.recordScreen;
 
 const subscribeToActivityUpdates = (reload: () => void): (() => void) => {
   const subscription = events.historyUpdatePayload.listen((event) => {
@@ -64,7 +74,7 @@ export interface CaptureHeroProps {
  * The page's one surface. Everything it draws is passed in, because the state
  * behind it is polled, dialog-driven or read from the settings store — none of
  * which is what this card is: the state word, the chord drawn once, and its
- * direct actions.
+ * one direct action.
  */
 export const CaptureHero: React.FC<CaptureHeroProps> = ({
   isRecording,
@@ -86,10 +96,7 @@ export const CaptureHero: React.FC<CaptureHeroProps> = ({
   /* One click starts a meeting, so the promise sits with the button rather than
    * behind a wizard step nobody reads. The key lives in the meetings subtree,
    * which owns this sentence's exact wording in every locale. */
-  const assurance = t(
-    "meetings.start.assurance",
-    "Records your Mac's audio locally. Nothing joins the call.",
-  );
+  const assurance = t("meetings.start.assurance");
 
   return (
     <SettingsCard
@@ -134,7 +141,7 @@ export const CaptureHero: React.FC<CaptureHeroProps> = ({
                 onClick={onChangeShortcut}
                 data-testid="overview-shortcut"
               >
-                {t("overview.hero.setShortcutAction", "Set a shortcut")}
+                {t("overview.hero.setShortcutAction")}
               </Button>
             ) : (
               <>
@@ -143,10 +150,7 @@ export const CaptureHero: React.FC<CaptureHeroProps> = ({
                   onClick={onChangeShortcut}
                   /* The left/right qualifier the caps drop, one hover away. */
                   title={formatKeyCombination(binding ?? "", osType)}
-                  aria-label={t(
-                    "overview.hero.shortcutAction",
-                    "Change dictation shortcut",
-                  )}
+                  aria-label={t("overview.hero.shortcutAction")}
                   data-testid="overview-shortcut"
                   className="hover-fast -mx-1 inline-flex items-center gap-1 rounded-md px-1 py-0.5 hover:bg-gray-alpha-100 focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:outline-none"
                 >
@@ -159,9 +163,6 @@ export const CaptureHero: React.FC<CaptureHeroProps> = ({
                     pushToTalk
                       ? "overview.hero.gestureTapHold"
                       : "overview.hero.gestureTapOnly",
-                    pushToTalk
-                      ? "tap to toggle · hold to talk"
-                      : "tap to toggle",
                   )}
                 </span>
               </>
@@ -176,7 +177,7 @@ export const CaptureHero: React.FC<CaptureHeroProps> = ({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1">
           {/* The promise lives in the tooltip and nowhere else. Radix opens the
            * tooltip on focus and points the trigger's aria-describedby at the
            * content while it is open, so a keyboard or screen-reader user reaches
@@ -187,35 +188,36 @@ export const CaptureHero: React.FC<CaptureHeroProps> = ({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button type="button" size="sm" onClick={onNewMeeting}>
-                <NewMeetingIcon aria-hidden="true" className="size-4" />
                 {t("overview.hero.newMeeting")}
               </Button>
             </TooltipTrigger>
             <TooltipContent>{assurance}</TooltipContent>
           </Tooltip>
-          {osType === "macos" ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onRecordScreen}
-            >
-              <RecordScreenIcon aria-hidden="true" className="size-4" />
-              {t("recorder.open")}
-            </Button>
-          ) : null}
-          {/* The secondary capture actions keep a real hairline at rest so they
-           * remain legible beside the one filled primary action. */}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={importing}
-            onClick={onImportAudio}
-          >
-            <ImportAudioIcon aria-hidden="true" className="size-4" />
-            {t("overview.hero.importAudio")}
-          </Button>
+          {/* The other two ways to get audio in. They are not what this page is
+           * for, and a row of three equal buttons said they were. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t("common.more")}
+                data-testid="overview-more"
+              >
+                <MoreHorizontal aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              {osType === "macos" ? (
+                <DropdownMenuItem onSelect={onRecordScreen}>
+                  {t("recorder.open")}
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem disabled={importing} onSelect={onImportAudio}>
+                {t("overview.hero.importAudio")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </SettingsCard>
@@ -244,16 +246,21 @@ export const Overview: React.FC<OverviewProps> = ({
    * the shared action's toast. It used to swallow the error entirely and tell
    * the reader to go look in Library, which is not where they were. */
   const { start: startAudioImport, importing } = useAudioImport();
+  const { receipts, openLoops, refresh } = useOverviewFeed();
+  const learning = useLearningRows();
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(
     null,
   );
+  /* Separate from the result because a check that came back with nothing and a
+   * check still out are different answers, and only one of them lets the
+   * section below say nothing needs the reader. */
+  const [updateChecked, setUpdateChecked] = useState(false);
   const [updateDismissed, setUpdateDismissed] = useState(false);
-  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     let active = true;
     let interval: number | undefined;
-    const refresh = async () => {
+    const refreshRecording = async () => {
       try {
         const recording = await commands.isRecording();
         if (active) setIsRecording(recording);
@@ -269,8 +276,11 @@ export const Overview: React.FC<OverviewProps> = ({
         }
         return;
       }
-      void refresh();
-      interval ??= window.setInterval(() => void refresh(), RECORDING_POLL_MS);
+      void refreshRecording();
+      interval ??= window.setInterval(
+        () => void refreshRecording(),
+        RECORDING_POLL_MS,
+      );
     };
     syncPolling();
     document.addEventListener("visibilitychange", syncPolling);
@@ -284,7 +294,7 @@ export const Overview: React.FC<OverviewProps> = ({
   useEffect(() => {
     let active = true;
 
-    const refresh = async () => {
+    const refreshTrend = async () => {
       try {
         const result = await commands.getHistoryTrend({ range: "days_180" });
         if (active) {
@@ -295,8 +305,8 @@ export const Overview: React.FC<OverviewProps> = ({
       }
     };
 
-    void refresh();
-    const stopListening = subscribeToActivityUpdates(() => void refresh());
+    void refreshTrend();
+    const stopListening = subscribeToActivityUpdates(() => void refreshTrend());
 
     return () => {
       active = false;
@@ -304,21 +314,21 @@ export const Overview: React.FC<OverviewProps> = ({
     };
   }, []);
 
+  /* One check per visit, after the launch shell has composited. The backend
+   * still owns the preference decision; disabled checks make no request. A
+   * check that does not come back says nothing about the app in front of you,
+   * so nothing is drawn for it here — Settings > About owns that sentence and
+   * the button that asks again. */
   const runUpdateCheck = useCallback(async () => {
-    setCheckingUpdate(true);
     try {
       setUpdateResult(await checkForUpdates());
     } catch {
-      /* The command reports its own failures in `status`, so a rejected call
-       * means it is missing from this build. Nothing worth telling anyone. */
       setUpdateResult(null);
     } finally {
-      setCheckingUpdate(false);
+      setUpdateChecked(true);
     }
   }, []);
 
-  /* One check per visit, after the launch shell has composited. The backend
-   * still owns the preference decision; disabled checks make no request. */
   useEffect(() => {
     let cancelled = false;
     void waitForFirstVisibleFrame().then(() => {
@@ -330,28 +340,11 @@ export const Overview: React.FC<OverviewProps> = ({
   }, [runUpdateCheck]);
 
   return (
-    /* The hero and the activity cards share the settings-page measure. Order
-     * is glanceability: the hero, then the three numbers, then the feed. The
-     * band used to sit last, so at the shipped 900x800 a feed with anything in
-     * it pushed Dictations/Words/Streak off the bottom edge — the one part of
-     * this page you read without scrolling was the one part you had to scroll
-     * for. The feed is a list that grows; the band is three fixed cards, so
-     * the band is what can be promised above the fold. */
-    <div
-      className={cn(
-        PAGE_COLUMN,
-        "flex min-h-full flex-col justify-center gap-8 py-8",
-      )}
-    >
-      {updateResult !== null &&
-        updateResult.status === "update_available" &&
-        !updateDismissed && (
-          <UpdateBanner
-            result={updateResult}
-            onDismiss={() => setUpdateDismissed(true)}
-          />
-        )}
-
+    /* State, then what needs you, then the two closed rows. The page is read in
+     * that order, from the same origin every other page starts at: centering it
+     * would slide the whole column up the moment a disclosure grew past the
+     * window, moving the row under the pointer that opened it. */
+    <div className={cn(PAGE_COLUMN, "flex flex-col gap-8 pt-8 pb-[72px]")}>
       <CaptureHero
         isRecording={isRecording}
         binding={
@@ -366,23 +359,25 @@ export const Overview: React.FC<OverviewProps> = ({
         onOpenModes={() => onOpenSection?.("modes")}
       />
 
-      {activityTrend === null ? null : <ActivityBand trend={activityTrend} />}
-
-      <OverviewWorkflowCards
+      <NeedsYou
+        openLoops={openLoops}
+        learning={learning.entries}
+        update={updateDismissed ? null : updateResult}
+        updateChecked={updateChecked}
+        onAnswerLearning={learning.answer}
+        onDismissUpdate={() => setUpdateDismissed(true)}
         onOpenMeeting={(meetingId) => onOpenMeeting?.(meetingId)}
+        onRetry={refresh}
       />
 
-      {/* What Sona noticed, beside what Sona did: the same feed, and this half
-       * is the one that asks the reader a question. */}
-      <LearningSuggestionCard />
-
-      {updateResult !== null && updateResult.status === "check_failed" && (
-        <UpdateCheckFailure
-          result={updateResult}
-          onRetry={() => void runUpdateCheck()}
-          retrying={checkingUpdate}
+      <div className={SETTINGS_SURFACE}>
+        {activityTrend === null ? null : <ActivityBand trend={activityTrend} />}
+        <Recent
+          receipts={receipts}
+          onOpenMeeting={(meetingId) => onOpenMeeting?.(meetingId)}
+          onRetry={refresh}
         />
-      )}
+      </div>
     </div>
   );
 };

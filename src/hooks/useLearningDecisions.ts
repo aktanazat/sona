@@ -10,8 +10,9 @@ import {
 export type LearningCandidate = Omit<LearningDecisionRequest, "status">;
 
 interface LearningDecisions<T> {
-  /** What the surface should render right now. */
-  entries: readonly T[];
+  /** What the surface should render right now, or null until the first read
+   * answers: an empty list and an unread list are not the same claim. */
+  entries: readonly T[] | null;
   /** Re-reads the list, for a surface with its own reason to refresh. */
   refresh: () => Promise<void>;
   /** Records an answer, then shows what is left. */
@@ -39,10 +40,18 @@ interface LearningDecisions<T> {
 export const useLearningDecisions = <T>(
   load: () => Promise<readonly T[]>,
 ): LearningDecisions<T> => {
-  const [entries, setEntries] = useState<readonly T[]>([]);
+  const [entries, setEntries] = useState<readonly T[] | null>(null);
 
   const refresh = useCallback(async () => {
-    setEntries(await load());
+    try {
+      setEntries(await load());
+    } catch {
+      /* A read that threw has answered as far as these surfaces go: a list
+       * nobody could fetch offers nothing to decide. Leaving it unanswered
+       * would hold the section blank for the rest of the session, and drop
+       * the rejection on the floor besides. */
+      setEntries([]);
+    }
   }, [load]);
 
   useEffect(() => {

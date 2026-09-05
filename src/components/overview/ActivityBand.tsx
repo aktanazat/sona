@@ -2,8 +2,7 @@ import * as React from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { HistoryTrendPoint, HistoryTrendProjection } from "@/bindings";
-import { cn } from "@/lib/cn";
-import { Microlabel, SETTINGS_CARD } from "@/components/settings/rows";
+import { Microlabel, SettingsDisclosure } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
 import {
   ActivityBars,
@@ -34,25 +33,41 @@ const formatRange = (
   return `${formatter.format(parseLocalDate(first.local_date))}–${formatter.format(parseLocalDate(last.local_date))}`;
 };
 
-/* One measurement inside the band's shared surface: what it counts, the count,
- * and the week drawn under it. A column, not a card — the surface owns the
- * border, and `px-6 py-5` is the same box every card on every page uses. */
-const Measure: React.FC<{
-  label: string;
-  value: React.ReactNode;
-  children: React.ReactNode;
-}> = ({ label, value, children }) => (
-  <div className="flex min-w-0 flex-col gap-2 px-6 py-5">
+/* The charts and the summary fact add the same two fields over a list of days;
+ * only the span differs, so the addition itself lives in one place. */
+const sumDays = (points: readonly HistoryTrendPoint[]) => {
+  let recordings = 0;
+  let words = 0;
+  for (const point of points) {
+    recordings += point.recordings;
+    words += point.words;
+  }
+  return { recordings, words };
+};
+
+/* One chart inside the disclosure: what it counts, and the week drawn under it.
+ * The totals used to sit here at 24px each; they are the summary's fact now, so
+ * repeating them beside the shape they describe would say everything twice. */
+const Measure: React.FC<{ label: string; children: React.ReactNode }> = ({
+  label,
+  children,
+}) => (
+  <div className="flex min-w-0 flex-col gap-2">
     <h3 className="min-w-0">
       <Microlabel>{label}</Microlabel>
     </h3>
-    <div className="text-[24px] leading-[30px] font-semibold text-gray-1000 tabular-nums">
-      {value}
-    </div>
-    <div className="mt-1">{children}</div>
+    {children}
   </div>
 );
 
+/**
+ * This week, as one closed row until somebody wants the shape of it.
+ *
+ * The fact is always this week's numbers, never the paged week's: the label
+ * says "This week", and a summary that changed its numbers as you paged
+ * backwards would be describing a week its own label denies. The range caption
+ * inside says which week the charts are drawing.
+ */
 export function ActivityBand({ trend }: ActivityBandProps) {
   const { t, i18n } = useTranslation();
   const [pageIndex, setPageIndex] = React.useState(0);
@@ -60,12 +75,14 @@ export function ActivityBand({ trend }: ActivityBandProps) {
     () => activityPage(trend.points, pageIndex),
     [pageIndex, trend.points],
   );
+  /* Page 0 whatever the charts are drawing: the fact belongs to the label, not
+   * to the paged range. */
+  const currentWeek = React.useMemo(
+    () => activityPage(trend.points, 0).points,
+    [trend.points],
+  );
   const { page, start, points } = selection;
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const numberFormat = React.useMemo(
-    () => new Intl.NumberFormat(locale),
-    [locale],
-  );
   const dateFormat = React.useMemo(
     () =>
       new Intl.DateTimeFormat(locale, {
@@ -92,8 +109,7 @@ export function ActivityBand({ trend }: ActivityBandProps) {
   const week: ActivityWeekDay[] = [];
   const activeWeekdayNames: string[] = [];
   const today = new Date();
-  let dictationTotal = 0;
-  let wordTotal = 0;
+  const wordTotal = sumDays(points).words;
   let peakIndex = 0;
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index];
@@ -111,12 +127,12 @@ export function ActivityBand({ trend }: ActivityBandProps) {
     });
     if (active) activeWeekdayNames.push(weekdayFormat.format(localDate));
 
-    dictationTotal += point.recordings;
-    wordTotal += point.words;
     if (point.recordings > (points[peakIndex]?.recordings ?? -1)) {
       peakIndex = index;
     }
   }
+
+  const weekTotals = sumDays(currentWeek);
 
   const peak = points[peakIndex];
   const finalPoint = points[points.length - 1];
@@ -130,18 +146,17 @@ export function ActivityBand({ trend }: ActivityBandProps) {
   const nextLabel = t("overview.activity.rangeNext", "Next 7 days");
 
   return (
-    <section
-      aria-labelledby="overview-activity-heading"
-      className="flex flex-col gap-2"
+    <SettingsDisclosure
+      label={t("overview.week.title", "This week")}
+      fact={[
+        t("overview.week.dictations", { count: weekTotals.recordings }),
+        t("overview.week.words", { count: weekTotals.words }),
+        t("overview.week.streak", { count: trend.current_streak_days }),
+      ].join(" · ")}
     >
-      <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-1">
-        <h2 id="overview-activity-heading">
-          <Microlabel>{t("overview.activity.title", "Activity")}</Microlabel>
-        </h2>
-        {/* The week under the label, and the two steps that change it. The
-         * range is the caption of the surface below, so it reads as a date and
-         * not as a control with a value inside it. */}
-        <div className="flex shrink-0 items-center gap-0.5">
+      <div className="flex flex-col gap-4 px-6 py-5">
+        {/* Which week the charts are drawing, and the two steps that change it. */}
+        <div className="flex items-center gap-0.5">
           <Button
             type="button"
             variant="ghost"
@@ -166,71 +181,52 @@ export function ActivityBand({ trend }: ActivityBandProps) {
             <ChevronRight aria-hidden="true" />
           </Button>
         </div>
-      </div>
-      {/* One surface, three measurements, hairlines between them. Three
-       * separate cards drew three borders and three radii around numbers that
-       * are one week's reading, and the eye counted boxes before it read the
-       * figures. */}
-      <div
-        className={cn(
-          SETTINGS_CARD,
-          "grid divide-y divide-gray-alpha-400 overflow-hidden sm:grid-cols-3 sm:divide-x sm:divide-y-0",
-        )}
-      >
-        <Measure
-          label={t("overview.activity.dictations", "Dictations")}
-          value={numberFormat.format(dictationTotal)}
-        >
-          <ActivityBars
-            values={dictations}
-            weekdayLabels={week.map((day) => day.label)}
-            ariaLabel={t(
-              "overview.activity.dictationsAria",
-              "Dictations per day, highest {{count}} on {{day}}",
-              {
-                count: peak?.recordings ?? 0,
-                day: peakDay,
-              },
-            )}
-          />
-        </Measure>
 
-        <Measure
-          label={t("overview.activity.words", "Words")}
-          value={numberFormat.format(wordTotal)}
-        >
-          <ActivitySparkline
-            values={words}
-            ariaLabel={t(
-              "overview.activity.wordsAria",
-              "Words per day, {{count}} total, ending at {{last}}",
-              {
-                count: wordTotal,
-                last: finalPoint?.words ?? 0,
-              },
-            )}
-          />
-        </Measure>
+        <div className="grid gap-6 sm:grid-cols-3">
+          <Measure label={t("overview.activity.dictations", "Dictations")}>
+            <ActivityBars
+              values={dictations}
+              weekdayLabels={week.map((day) => day.label)}
+              ariaLabel={t(
+                "overview.activity.dictationsAria",
+                "Dictations per day, highest {{count}} on {{day}}",
+                {
+                  count: peak?.recordings ?? 0,
+                  day: peakDay,
+                },
+              )}
+            />
+          </Measure>
 
-        <Measure
-          label={t("overview.activity.streak", "Streak")}
-          value={t("overview.activity.days", "{{count}} days", {
-            count: trend.current_streak_days,
-          })}
-        >
-          <ActivityWeek
-            days={week}
-            ariaLabel={t(
-              "overview.activity.streakAria",
-              "Current streak, {{count}} days. Active days this week: {{days}}.",
-              {
-                count: trend.current_streak_days,
-                days: activeWeekdays,
-              },
-            )}
-          />
-        </Measure>
+          <Measure label={t("overview.activity.words", "Words")}>
+            <ActivitySparkline
+              values={words}
+              ariaLabel={t(
+                "overview.activity.wordsAria",
+                "Words per day, {{count}} total, ending at {{last}}",
+                {
+                  count: wordTotal,
+                  last: finalPoint?.words ?? 0,
+                },
+              )}
+            />
+          </Measure>
+
+          <Measure label={t("overview.activity.streak", "Streak")}>
+            <ActivityWeek
+              days={week}
+              ariaLabel={t(
+                "overview.activity.streakAria",
+                "Current streak, {{count}} days. Active days this week: {{days}}.",
+                {
+                  count: trend.current_streak_days,
+                  days: activeWeekdays,
+                },
+              )}
+            />
+          </Measure>
+        </div>
       </div>
-    </section>
+    </SettingsDisclosure>
   );
 }

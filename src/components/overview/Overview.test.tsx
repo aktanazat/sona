@@ -99,6 +99,7 @@ describe("the Capture hero", () => {
     const markup = hero();
 
     expect(markup).toContain('id="overview-status"');
+    expect(markup).toContain('aria-labelledby="overview-status"');
     expect(markup).toContain("Ready");
     expect(markup).toContain('aria-live="polite"');
     /* Not recording: the heading carries no marker at all — the attribute is
@@ -108,12 +109,6 @@ describe("the Capture hero", () => {
      * card. */
     expect(markup.match(/data-recording/g)?.length).toBe(1);
     expect(markup).toContain('data-recording="false"');
-    /* Written in px on purpose: `:root { font-size: 14px }` makes `text-2xl`
-     * 21px here. 24px/30px semibold is the round-6 document-title size, the
-     * one a meeting's own title is set in, so the app's default route states
-     * its state at the same weight every other page states its subject. */
-    expect(markup).toContain("text-[24px] leading-[30px] font-semibold");
-    expect(markup.includes("text-2xl")).toBe(false);
   });
 
   test("switches the state word while the backend is recording", () => {
@@ -153,60 +148,6 @@ describe("the Capture hero", () => {
     expect(markup.includes("<kbd")).toBe(false);
     expect(markup.includes("tap to toggle")).toBe(false);
   });
-
-  test("offers the native screen recorder beside Capture's existing actions", () => {
-    const markup = hero();
-
-    expect(markup).toContain("New meeting");
-    expect(markup).toContain("Import audio");
-    expect(markup).toContain("Record screen");
-    /* What is assertable here is the WIRING: New meeting is the tooltip's
-     * trigger. The sentence itself is not, and must not be — a closed Radix
-     * tooltip renders nothing, so the only way to see the copy in a static
-     * render would be to keep a second permanent copy of it in the markup,
-     * which is production code existing for a test. Radix opens the tooltip on
-     * focus and describes the trigger from the content, so the promise reaches
-     * keyboard and screen-reader users through the primitive. */
-    expect(markup).toContain('data-slot="tooltip-trigger"');
-    expect(markup.includes("Nothing joins the call.")).toBe(false);
-    expect(markup.includes("aria-describedby")).toBe(false);
-  });
-
-  /* Regression, caught by rendering the compiled sheet: a shadcn `ghost` button
-   * has no border and no fill at rest, so both of these read as prose — "Import
-   * audio" as a caption beside New meeting, "Set a shortcut" as a sentence
-   * fragment where it is the only control that fixes an unbound install. Every
-   * secondary control on this card is bordered. */
-  test("draws its secondary controls as buttons, never as borderless ghosts", () => {
-    expect(hero().includes('data-variant="ghost"')).toBe(false);
-    expect(hero({ binding: null }).includes('data-variant="ghost"')).toBe(
-      false,
-    );
-    expect(occurrences(hero(), 'data-variant="outline"')).toBe(2);
-    expect(occurrences(hero({ binding: null }), 'data-variant="outline"')).toBe(
-      3,
-    );
-  });
-
-  test("locks the import action while its dialog is open", () => {
-    expect(hero({ importing: true })).toContain('disabled=""');
-    expect(hero().includes('disabled=""')).toBe(false);
-  });
-
-  test("is one flat hero card", () => {
-    const markup = hero();
-    /* The card itself stays flat; floating surfaces own the only shadows. */
-    const card = markup.slice(0, markup.indexOf(">") + 1);
-
-    expect(card).toContain("rounded-card");
-    expect(card).toContain("border-gray-alpha-400");
-    expect(card).toContain("bg-surface-raised");
-    expect(card).toContain('aria-labelledby="overview-status"');
-    expect(card.includes("shadow")).toBe(false);
-    /* The hero remains one card, without nested surfaces. */
-    expect(occurrences(markup, "<section")).toBe(1);
-    expect(occurrences(markup, "rounded-card")).toBe(1);
-  });
 });
 
 /* The first paint contains the hero while the history trend loads. The
@@ -214,45 +155,23 @@ describe("the Capture hero", () => {
 describe("the Capture page", () => {
   const markup = render(<Overview onOpenRecorder={() => {}} />);
 
-  test("uses the shared settings-page measure", () => {
-    expect(markup).toContain("max-w-[760px]");
-    expect(markup).toContain("mx-auto");
-    expect(markup).toContain("min-h-full");
-    expect(markup).toContain("justify-center");
+  test("reads state first and keeps the closed rows under it", () => {
+    expect(markup).toContain('id="overview-status"');
+    expect(markup).toContain("Recent");
+    expect(markup).toContain("<details");
+    expect(markup.indexOf('id="overview-status"')).toBeLessThan(
+      markup.indexOf("Recent"),
+    );
   });
 
-  test("draws no instrument strip", () => {
-    expect(markup.includes("Capture instrument")).toBe(false);
-    expect(markup.includes("data-cell=")).toBe(false);
-    expect(markup.includes(">Engine</dt>")).toBe(false);
-    expect(markup.includes("not measured")).toBe(false);
-  });
-
-  test("does not invent activity values before the trend read settles", () => {
-    expect(markup.includes("Usage summary")).toBe(false);
-    expect(markup.includes("all time")).toBe(false);
-    expect(markup.includes("Current streak")).toBe(false);
+  test("claims nothing before any read has answered", () => {
+    /* Needs you draws nothing at all while its read is out, This week has no
+     * trend to draw, and neither the update sentence nor a stat exists yet. */
+    expect(markup.includes("Needs you")).toBe(false);
+    expect(markup.includes("Nothing needs you.")).toBe(false);
+    expect(markup.includes("This week")).toBe(false);
     expect(markup.includes("Dictations per day")).toBe(false);
-  });
-
-  test("draws no recent activity list and no empty-state pitch", () => {
-    expect(markup.includes("Recent activity")).toBe(false);
-    expect(markup.includes("See all")).toBe(false);
-    expect(markup.includes("No captures yet")).toBe(false);
-    expect(markup.includes("Open Library")).toBe(false);
-  });
-
-  test("has no page-local stylesheet classes and no legacy page shell", () => {
-    /* overview.css is deleted; Tailwind utilities are the only styling left. */
-    expect(markup.includes("ov-")).toBe(false);
-    expect(markup.includes("settings-page")).toBe(false);
-    expect(markup.includes("type-display")).toBe(false);
-    expect(markup.includes("snap-measured")).toBe(false);
-  });
-
-  test("shows no update notice before the check has answered", () => {
     expect(markup.includes("is available. This install is on")).toBe(false);
-    expect(markup.includes("Could not check for updates")).toBe(false);
   });
 });
 
@@ -334,20 +253,16 @@ const activityTrend: HistoryTrendProjection = {
   ],
 };
 
-describe("the Overview activity band", () => {
+describe("This week", () => {
   const markup = render(<ActivityBand trend={activityTrend} />);
 
-  test("names its three measurements on one shared surface", () => {
-    expect(markup).toContain("Activity");
-    expect(markup).toContain("Dictations");
-    expect(markup).toContain("Words");
-    expect(markup).toContain("Streak");
-    expect(markup).toContain("Aug 24–Aug 30");
-    /* One week, one reading: three separate cards drew three borders and three
-     * radii around numbers a reader takes in at once, so the eye counted boxes
-     * before it read the figures. Hairlines divide the columns instead. */
-    expect(occurrences(markup, "rounded-card")).toBe(1);
-    expect(markup).toContain("divide-x");
+  test("is one closed row whose summary carries the week's numbers", () => {
+    expect(markup).toContain("This week");
+    expect(markup).toContain("18 dictations · 180 words · 3-day streak");
+    expect(markup).toContain("<details");
+    /* Closed until somebody wants the shape of it: the summary is the reading,
+     * the charts are the second look. */
+    expect(markup.includes("<details open")).toBe(false);
   });
 
   test("pages backward through the retained trend in seven-day ranges", () => {
@@ -368,6 +283,36 @@ describe("the Overview activity band", () => {
     ]);
     expect(current.page).toBe(0);
     expect(previous.page).toBe(1);
+  });
+
+  test("sums one week into the summary, not the whole retained trend", () => {
+    /* The retained trend is months wide; the fact is one week of it. Both the
+     * existing fixture and this one end on 2026-08-30, but this one puts real
+     * numbers in a day the week excludes, so a fact that added up every point
+     * it was handed would read 23 dictations · 230 words.
+     *
+     * Static rendering always lands on page 0, where the paged week and this
+     * week are the same slice, so this is as far as the unit surface can see
+     * the distinction the label makes. */
+    const markup = render(
+      <ActivityBand
+        trend={{
+          ...activityTrend,
+          points: [
+            {
+              local_date: "2026-08-22",
+              recordings: 5,
+              duration_ms: 3000,
+              words: 50,
+              by_source: [],
+            },
+            ...activityTrend.points,
+          ],
+        }}
+      />,
+    );
+
+    expect(markup).toContain("18 dictations · 180 words · 3-day streak");
   });
 
   test("translates complete aria sentences for each chart", () => {
