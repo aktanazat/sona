@@ -774,8 +774,10 @@ describe("the start gate", () => {
 });
 
 describe("live capture", () => {
-  test("names the capture state in words and offers pause, stop and discard", () => {
-    const markup = render(
+  const liveMarkup = (
+    overrides: Partial<React.ComponentProps<typeof MeetingLive>> = {},
+  ) =>
+    render(
       <MeetingLive
         snapshot={LIVE_SNAPSHOT}
         pendingAction={null}
@@ -784,17 +786,52 @@ describe("live capture", () => {
         onStop={noop}
         onDiscard={noop}
         onCreateNote={noop}
+        {...overrides}
       />,
     );
-    /* One state word. The surface used to carry a badge reading "Active
-     * capture" beside the phase word, which is the same state said twice. */
-    expect(markup).toContain("Recording");
-    expect(markup).toContain(">Pause<");
-    expect(markup).toContain(">Stop<");
-    expect(markup).toContain(">Discard</button>");
-    expect(markup).toContain("Add timestamped note");
-    // Reduced motion has nothing to switch off: the mark never animates.
-    expect(occurrences(markup, "animate-")).toBe(0);
+
+  /* What a person in a meeting looks at: what is being recorded, how long it
+   * has been running, the one press that ends it, and the words arriving. */
+  test("the page is the title, the clock, Stop and the words", () => {
+    const markup = liveMarkup();
+
+    expect(markup).toContain(">Weekly planning</h1>");
+    expect(markup).toContain('aria-label="Elapsed"');
+    expect(markup).toContain(">Stop</button>");
+    expect(markup).toContain('data-slot="live-transcript"');
+    expect(markup).toContain("We ship the meetings redesign this week.");
+    /* The clock is the state while a capture runs, so the phase word does not
+     * repeat it - and the surface no longer carries a badge reading "Active
+     * capture" beside that word, which was the same state said three times. */
+    expect(markup).not.toContain(">Recording<");
+  });
+
+  /* Nothing that interrupts a recording sits under the thumb of somebody who
+   * is talking, and nothing on the page measures the pipeline: the words
+   * arriving are a better answer to "is this working" than an ASR lag, a
+   * transcript offset and a row that says storage is healthy. */
+  test("every control but Stop is behind the one menu, and no telemetry is on screen", () => {
+    const markup = liveMarkup();
+
+    expect(occurrences(markup, 'aria-label="More"')).toBe(1);
+    expect(markup).not.toContain(">Pause<");
+    expect(markup).not.toContain(">Discard</button>");
+    expect(markup).not.toContain("Add a note");
+    expect(markup).not.toContain("Transcript offset");
+    expect(markup).not.toContain(">Healthy<");
+    expect(markup).not.toContain("Saved to disk");
+  });
+
+  test("a paused capture says so, because the clock no longer does", () => {
+    const markup = liveMarkup({
+      snapshot: {
+        ...LIVE_SNAPSHOT,
+        session: { ...LIVE_SNAPSHOT.session, phase: "capturing_paused" },
+      },
+    });
+
+    expect(markup).toContain(">Paused<");
+    expect(markup).toContain(">Stop</button>");
   });
 });
 

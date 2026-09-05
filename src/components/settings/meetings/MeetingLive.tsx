@@ -1,18 +1,21 @@
-import React, { useId, useMemo, useState } from "react";
-import { Pause, Play, Square } from "lucide-react";
+import React, { useMemo, useState } from "react";
+import { MoreHorizontal, Square } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { MeetingReviewSnapshot } from "@/bindings";
-import { cn } from "@/lib/cn";
 import {
-  FactChip,
+  Microlabel,
   Notice,
-  SettingsCard,
-  SettingsField,
+  PageTitle,
   SettingsPage,
-  SettingsRow,
-  SettingsSection,
 } from "@/components/settings/rows";
 import { Button } from "@/components/vg/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/vg/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -22,24 +25,26 @@ import {
   DialogTitle,
 } from "@/components/vg/dialog";
 import { Textarea } from "@/components/vg/textarea";
-import {
-  MeetingPhaseText,
-  MeetingSourceList,
-  ProcessingStatusText,
-} from "./MeetingStatus";
+import { MeetingPhaseText } from "./MeetingStatus";
 import { formatMeetingOffset } from "./meetingUtils";
-import { MeetingNotesPane } from "./MeetingNotesPane";
 
 /* Capture, while it runs.
  *
- * The state is named once — the phase word on the title line — and the clock
- * is a measurement, not a sentence. Everything the old page said twice (a
- * badge and a phase word for the same state, the anchor time above the note
- * box and again on a chip inside it) is gone: what is left is the state, the
- * clock, what capture is hearing, and the three controls. */
-
-/** Tabular figures keep live measurements aligned as they update. */
-const MEASURED_VALUE = "text-[13px] tabular-nums text-gray-1000";
+ * Round 7 emptied this page down to the four things a person in a meeting
+ * looks at: what is being recorded, how long it has been going, the one press
+ * that ends it, and the words arriving. Everything else was the capture
+ * pipeline reporting on itself - a transcript offset, an ASR lag, a storage
+ * row that said "Healthy", an inputs section repeating what the start gate
+ * already cleared - and the words on screen are a better answer to "is this
+ * working" than four measurements of the machinery that produces them. Pause,
+ * Resume, the note box and Discard are behind the one menu on the title line,
+ * because a control that ends or interrupts a recording is not something to
+ * put under a reader's thumb while they are talking.
+ *
+ * The two lines that survive are the two the reader has to act on: a source
+ * that dropped out mid-capture, and storage that stopped accepting writes.
+ * Both are announced, because a person watching the call is not watching this
+ * page. */
 
 interface MeetingLiveProps {
   snapshot: MeetingReviewSnapshot;
@@ -62,22 +67,17 @@ export const MeetingLive: React.FC<MeetingLiveProps> = ({
 }) => {
   const { t } = useTranslation();
   const [noteBody, setNoteBody] = useState("");
-  const noteFieldId = useId();
+  const [noteOpen, setNoteOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
-  const latestTranscriptOffsetNs = useMemo(() => {
-    let latest = 0;
-    for (const segment of snapshot.transcript) {
-      if (!segment.removed) {
-        latest = Math.max(latest, segment.base.end_offset_ns);
-      }
-    }
-    return latest > 0 ? latest : null;
-  }, [snapshot.transcript]);
-  const elapsedOffsetNs = snapshot.session.elapsed_offset_ns;
-  const transcriptLagNs =
-    latestTranscriptOffsetNs === null || elapsedOffsetNs === null
-      ? null
-      : Math.max(0, elapsedOffsetNs - latestTranscriptOffsetNs);
+
+  /* What has actually been heard, in the order it was heard. A removed
+   * segment is one an editor took out; live, that is nearly always empty, and
+   * an edited segment shows the edit rather than the raw pass. */
+  const lines = useMemo(
+    () => snapshot.transcript.filter((segment) => !segment.removed),
+    [snapshot.transcript],
+  );
+
   const systemAudio = snapshot.session.sources.find(
     (source) => source.source_kind === "system_audio",
   );
@@ -96,166 +96,160 @@ export const MeetingLive: React.FC<MeetingLiveProps> = ({
 
   const addNote = () => {
     const body = noteBody.trim();
-    if (body.length === 0) {
-      return;
-    }
+    if (body.length === 0) return;
 
     onCreateNote(body);
     setNoteBody("");
+    setNoteOpen(false);
   };
 
   return (
     <SettingsPage
-      title={snapshot.session.title}
-      actions={
-        <div className="flex flex-none items-center gap-4">
-          <MeetingPhaseText phase={snapshot.session.phase} />
-          <FactChip
-            label={t("meetings.live.elapsed")}
-            value={formatMeetingOffset(elapsedOffsetNs)}
-          />
+      header={
+        <div className="flex items-center justify-between gap-4">
+          <PageTitle className="min-w-0 truncate">
+            {snapshot.session.title}
+          </PageTitle>
+          <div className="flex flex-none items-center gap-3">
+            {/* The clock is the state while a capture is running, so the
+             * phase word only appears when the state is not what the clock
+             * implies: paused, stopping, or already processing. */}
+            {snapshot.session.phase === "capturing_recording" ? null : (
+              <MeetingPhaseText phase={snapshot.session.phase} />
+            )}
+            <span
+              aria-label={t("meetings.live.elapsed")}
+              className="text-[13px] leading-[18px] text-gray-900 tabular-nums"
+            >
+              {formatMeetingOffset(snapshot.session.elapsed_offset_ns)}
+            </span>
+            <Button
+              type="button"
+              onClick={onStop}
+              disabled={!canStop || isMutating}
+            >
+              <Square aria-hidden="true" className="size-3" />
+              {t("meetings.actions.stop")}
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t("common.more")}
+                >
+                  <MoreHorizontal aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-52">
+                {isPaused ? (
+                  <DropdownMenuItem
+                    disabled={!canResume || isMutating}
+                    onSelect={onResume}
+                  >
+                    {t("meetings.actions.resume")}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    disabled={!canPause || isMutating}
+                    onSelect={onPause}
+                  >
+                    {t("meetings.actions.pause")}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  disabled={isMutating}
+                  onSelect={() => setNoteOpen(true)}
+                >
+                  {t("meetings.live.addNote")}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={!canDiscard || isMutating}
+                  onSelect={() => setDiscardOpen(true)}
+                >
+                  {t("meetings.actions.discard")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       }
     >
-      {/* One warning, and it is the consequence of the source state rather
-       * than a second reading of it: the inputs below name the source. */}
-      {systemAudioLimited ? (
-        <Notice tone="warning">
-          {t("meetings.live.microphoneOnlyPartial")}
+      {storageAvailable ? null : (
+        <Notice tone="danger" assertive>
+          {t("meetings.live.storageUnavailable")}
         </Notice>
+      )}
+
+      {systemAudioLimited ? (
+        <Notice tone="info">{t("meetings.live.microphoneOnlyPartial")}</Notice>
       ) : snapshot.session.capture_completeness === "partial" ? (
-        <Notice tone="warning">{t("meetings.live.partialCapture")}</Notice>
+        <Notice tone="info">{t("meetings.live.partialCapture")}</Notice>
       ) : null}
 
-      <SettingsSection label={t("meetings.live.inputs")}>
-        <MeetingSourceList
-          sources={snapshot.session.sources}
-          label={t("meetings.live.inputs")}
-          elapsedOffsetNs={elapsedOffsetNs}
-          showTelemetry
-        />
-      </SettingsSection>
-
-      <SettingsSection label={t("meetings.live.progress")}>
-        <SettingsRow label={t("meetings.live.transcript")}>
-          <span className={MEASURED_VALUE}>
-            {latestTranscriptOffsetNs === null
-              ? t("meetings.live.notReported")
-              : formatMeetingOffset(latestTranscriptOffsetNs)}
-          </span>
-        </SettingsRow>
-        <SettingsRow label={t("meetings.live.asrLag")}>
-          <span className={MEASURED_VALUE}>
-            {transcriptLagNs === null
-              ? t("meetings.live.notReported")
-              : formatMeetingOffset(transcriptLagNs)}
-          </span>
-        </SettingsRow>
-        <SettingsRow label={t("meetings.live.storage")}>
-          <span
-            className={cn(
-              "text-[13px] leading-[18px]",
-              storageAvailable ? "text-gray-900" : "text-red-900",
-            )}
-          >
-            {storageAvailable
-              ? t("meetings.live.storageHealthy")
-              : t("meetings.live.storageUnavailable")}
-          </span>
-        </SettingsRow>
-        <SettingsRow label={t("meetings.live.processing")}>
-          <ProcessingStatusText
-            status={snapshot.session.processing_status}
-            live="polite"
-          />
-        </SettingsRow>
-      </SettingsSection>
-
-      {/* One wide control on its own is a field in a card, not a section: the
-       * note box and the notes pane below it are the same shape. The note is
-       * anchored at the clock on the title line, which is why no timestamp is
-       * printed here — the button says what the press does. */}
-      <SettingsCard>
-        <SettingsField
-          label={t("meetings.live.manualNote")}
-          controlId={noteFieldId}
-          disabled={isMutating}
+      {lines.length === 0 ? (
+        <p className="text-[13px] leading-5 text-gray-800">
+          {t("meetings.live.transcriptEmpty")}
+        </p>
+      ) : (
+        <ol
+          data-slot="live-transcript"
+          aria-label={t("meetings.live.transcript")}
+          className="flex flex-col gap-2"
         >
+          {lines.map((segment) => (
+            <li
+              key={segment.base.segment_id}
+              className="flex items-baseline gap-5"
+            >
+              <Microlabel className="w-[62px] flex-none text-end tabular-nums">
+                {formatMeetingOffset(segment.base.start_offset_ns)}
+              </Microlabel>
+              <span className="min-w-0 flex-1 text-[14px] leading-[21px] text-gray-1000">
+                {segment.replacement_text ?? segment.base.text}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <Dialog open={noteOpen} onOpenChange={setNoteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            {/* The note is anchored at the clock when it is saved, which is
+             * why nothing here asks for a time. */}
+            <DialogTitle>{t("meetings.live.manualNote")}</DialogTitle>
+          </DialogHeader>
           <Textarea
-            id={noteFieldId}
             value={noteBody}
             onChange={(event) => setNoteBody(event.target.value)}
+            aria-label={t("meetings.live.manualNote")}
             placeholder={t("meetings.live.notePlaceholder")}
             disabled={isMutating}
-            rows={3}
+            rows={4}
             className="resize-none"
           />
-          <div className="mt-2 flex justify-end">
+          <DialogFooter>
             <Button
               type="button"
               variant="outline"
-              size="sm"
+              onClick={() => setNoteOpen(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="button"
               onClick={addNote}
               disabled={noteBody.trim().length === 0 || isMutating}
             >
               {t("meetings.live.addNote")}
             </Button>
-          </div>
-        </SettingsField>
-      </SettingsCard>
-
-      <MeetingNotesPane
-        sessionId={snapshot.session.session_id}
-        revision={snapshot.session.revision}
-        variant="live"
-        disabled={isMutating}
-      />
-
-      {/* Stop is the one filled control on the page. Discard is bordered and
-       * set in red: a text action with no border reads as a caption, and this
-       * one destroys the recording. */}
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          className="text-red-900 hover:text-red-900"
-          onClick={() => setDiscardOpen(true)}
-          disabled={!canDiscard || isMutating}
-        >
-          {t("meetings.actions.discard")}
-        </Button>
-        <div className="ms-auto flex items-center gap-2">
-          {isPaused ? (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onResume}
-              disabled={!canResume || isMutating}
-            >
-              <Play aria-hidden="true" className="size-3.5" />
-              {t("meetings.actions.resume")}
-            </Button>
-          ) : (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onPause}
-              disabled={!canPause || isMutating}
-            >
-              <Pause aria-hidden="true" className="size-3.5" />
-              {t("meetings.actions.pause")}
-            </Button>
-          )}
-          <Button
-            type="button"
-            onClick={onStop}
-            disabled={!canStop || isMutating}
-          >
-            <Square aria-hidden="true" className="size-3" />
-            {t("meetings.actions.stop")}
-          </Button>
-        </div>
-      </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={discardOpen} onOpenChange={setDiscardOpen}>
         <DialogContent showCloseButton={false}>
