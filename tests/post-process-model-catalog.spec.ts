@@ -74,6 +74,12 @@ const openModeEditor = async (page: Page) => {
   ).toBeVisible();
 };
 
+const cleanupProviderSummary = (page: Page) =>
+  page
+    .locator("details")
+    .filter({ hasText: /^Cleanup provider/ })
+    .locator("summary");
+
 test.describe("post-processing model catalog", () => {
   test("loads only after the cleanup disclosure and supports keyboard selection and manual IDs", async ({
     page,
@@ -98,7 +104,7 @@ test.describe("post-processing model catalog", () => {
       await invocationCount(page, "discover_post_process_model_catalog"),
     ).toBe(0);
 
-    await page.getByText("Cleanup provider", { exact: true }).click();
+    await cleanupProviderSummary(page).click();
     await expect
       .poll(() => invocationCount(page, "discover_post_process_model_catalog"))
       .toBe(1);
@@ -149,7 +155,7 @@ test.describe("post-processing model catalog", () => {
       .getByRole("button", { name: "Settings", exact: true })
       .click();
     await page.getByRole("tab", { name: "Advanced", exact: true }).click();
-    await page.getByText("Cleanup provider", { exact: true }).click();
+    await cleanupProviderSummary(page).click();
     await expect
       .poll(() => invocationCount(page, "discover_post_process_model_catalog"))
       .toBe(1);
@@ -184,7 +190,7 @@ test.describe("post-processing model catalog", () => {
       .getByRole("button", { name: "Settings", exact: true })
       .click();
     await page.getByRole("tab", { name: "Advanced", exact: true }).click();
-    await page.getByText("Cleanup provider", { exact: true }).click();
+    await cleanupProviderSummary(page).click();
 
     await page.getByRole("combobox", { name: "Model", exact: true }).click();
     await page
