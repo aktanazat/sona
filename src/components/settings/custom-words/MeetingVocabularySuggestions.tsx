@@ -107,7 +107,9 @@ export const MeetingVocabularySuggestions: React.FC<
     return terms;
   }, [entries]);
 
-  const visibleCandidates = candidates.filter(
+  /* An unread list and an empty list draw the same thing here - the list
+   * itself is what this surface offers, and there is no sentence to take back. */
+  const visibleCandidates = (candidates ?? []).filter(
     (candidate) => !knownTerms.has(spokenMatchKey(candidate.text)),
   );
 
