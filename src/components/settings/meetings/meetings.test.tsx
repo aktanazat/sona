@@ -35,7 +35,7 @@ import type { MeetingStartOptions } from "./meetingTypes";
 /* First paint of every meetings surface, and the shape of the start flow.
  *
  * Recording is one press. The strings pinned here are the ones that make that
- * true and safe: "Start recording", and the assurance sentence, which has to
+ * true and safe: "Record", and the assurance sentence, which has to
  * be on screen next to the button because pressing the button is what the
  * backend records as the operator's acknowledgment. There is no setup screen
  * and no consent checkbox to tick before it; a test that reintroduced either
@@ -313,7 +313,7 @@ const noop = () => {};
 /* The promise that has to be on screen wherever the consent flags can be
  * sent, in the form the renderer emits it. */
 const ASSURANCE =
-  "Records your Mac&#x27;s audio locally. Nothing joins the call.";
+  "Records this Mac&#x27;s audio locally. Nothing joins the call.";
 
 const homeMarkup = (
   overrides: Partial<React.ComponentProps<typeof MeetingsHome>>,
@@ -419,57 +419,56 @@ describe("meetings list", () => {
     const markup = homeMarkup({ loading: true });
     expect(markup).toContain('aria-label="Loading meeting history…"');
     expect(markup).toContain('data-slot="skeleton"');
-    expect(occurrences(markup, "No meetings yet")).toBe(0);
+    expect(occurrences(markup, "Meetings you record appear here.")).toBe(0);
   });
 
-  test("an empty history is absence, not a second call to action", () => {
+  /* Absence is the whole message: one line naming what fills the list, and
+   * no control over a list that does not exist - no card, no illustration,
+   * no search box, and no second Record under the one on the title line. */
+  test("an empty history is one line, and no controls", () => {
     const markup = homeMarkup({});
-    expect(markup).toContain("No meetings yet");
-    /* Absence is the whole message. The state used to add "Start local notes
-     * when you are ready to capture a meeting." under a heading that already
-     * says it, three rows below a Start button that already offers it. */
-    expect(markup).not.toContain("Start local notes when you are ready");
-    expect(occurrences(markup, ">Start recording</button>")).toBe(1);
+
+    expect(markup).toContain("Meetings you record appear here.");
+    expect(markup).not.toContain('aria-label="Search meetings"');
+    expect(occurrences(markup, ">Record</button>")).toBe(1);
   });
 
   test("a detected meeting starts from its own row, without repeating the promise", () => {
     const markup = homeMarkup({ suggestions: [SUGGESTION] });
+
     expect(markup).toContain("A meeting may be active in Zoom.");
-    expect(occurrences(markup, ">Start recording</button>")).toBe(2);
-    /* The assurance sentence lives beside the page's own Start and nowhere
+    /* The assurance sentence lives under the page's own Record and nowhere
      * else: one sentence never appears twice on one screen. */
     expect(occurrences(markup, ASSURANCE)).toBe(1);
-    /* And the evidence is shown as the measurement it is — an APP fact naming
-     * the app — rather than as "Sona noticed a meeting app in use.", which was
-     * the section heading written out a second time as prose. */
+    /* And an offer is the evidence it holds, not the section heading written
+     * out a second time as prose. */
     expect(markup).not.toContain("Sona noticed");
-    expect(markup).toContain(">App<");
-    expect(markup).toContain(">Zoom<");
   });
 
-  /* The row render matrix. A row in the day log says three things — what the
-   * meeting was called, how long it ran, and the time of day it started — and
+  /* The row render matrix. A row in the day log says three things - the clock
+   * time it started, what the meeting was called, and how long it ran - and
    * `data-headline` is the row stating its own provenance, which keeps these
    * assertions about behaviour rather than about prose. */
   const row = (overrides: Partial<MeetingHistorySummary>) =>
     homeMarkup({ meetings: [{ ...SUMMARY, ...overrides }] });
 
-  test("a finished row is its title, its length and its time, and no chip", () => {
+  test("a finished row is its time, its title and its length, and no more", () => {
     const markup = row({
       headline: { kind: "ledger", text: "Pricing is open again." },
       speaker_labels: ["Ada", "Grace"],
       sources: ["microphone", "system_audio"],
       recorded_duration_ms: 192_000,
     });
+
     expect(markup).toContain("Weekly planning");
     expect(markup).toContain('data-headline="ledger"');
     expect(markup).toContain("3m 12s");
     // The heading over the group carries the date, so the row carries a clock.
     expect(occurrences(markup, 'data-slot="meeting-day"')).toBe(1);
-    /* Nothing a finished meeting does not need: no status chip, no speaker
+    /* Nothing a finished meeting does not need: no state word, no speaker
      * bubbles, no source glyphs and no second line. The summary it used to
      * print is the row's hover title, and the meeting is one click away. */
-    expect(occurrences(markup, 'data-slot="meeting-status"')).toBe(0);
+    expect(occurrences(markup, 'data-slot="meeting-attention"')).toBe(0);
     expect(occurrences(markup, 'data-slot="meeting-person"')).toBe(0);
     expect(markup).not.toContain(">Ada, Grace<");
     expect(markup).not.toContain("Pricing is open again.</span>");
@@ -478,41 +477,45 @@ describe("meetings list", () => {
     );
   });
 
-  test("only an unfinished meeting wears a chip, and it names the state", () => {
-    const chip = (overrides: Partial<MeetingHistorySummary>) => {
+  /* A row says nothing about its own state until the reader has to act on
+   * it. "Live", "Ready" and "Processing" were the machinery's vocabulary, and
+   * the chip they sat in was a plate around a word: the one state worth
+   * saying is red text on the title's line, and it says what went wrong
+   * rather than that something did. */
+  test("a row is silent about its state unless the reader must act", () => {
+    const attention = (overrides: Partial<MeetingHistorySummary>) => {
       const markup = row(overrides);
-      const at = markup.indexOf('data-slot="meeting-status"');
+      const at = markup.indexOf('data-slot="meeting-attention"');
       return at === -1 ? "" : markup.slice(at, markup.indexOf("</span>", at));
     };
+
     expect(
-      chip({
+      attention({
         phase: "capturing_recording",
         processing_status: { kind: "pending" },
       }),
-    ).toContain('data-status="live"');
+    ).toBe("");
     expect(
-      chip({
-        phase: "starting",
-        processing_status: { kind: "pending" },
+      attention({
+        phase: "processing",
+        processing_status: { kind: "running" },
       }),
-    ).toContain('data-status="live"');
+    ).toBe("");
+    // A meeting that is ready to read says nothing about being ready.
+    expect(attention({})).toBe("");
+
+    const failed = attention({
+      processing_status: { kind: "failed", reason: "engine_failure" },
+    });
+    expect(failed).toContain(">Processing failed");
+    /* Recovery needs action before processing has reported anything, and the
+     * state word is all such a row has to offer. */
     expect(
-      chip({ phase: "processing", processing_status: { kind: "running" } }),
-    ).toContain('data-status="processing"');
-    expect(
-      chip({
-        processing_status: { kind: "failed", reason: "engine_failure" },
-      }),
-    ).toContain('data-status="needs_attention"');
-    // Recovery needs action even before processing reports a failure.
-    expect(
-      chip({
+      attention({
         phase: "recovery_required",
         processing_status: { kind: "pending" },
       }),
-    ).toContain('data-status="needs_attention"');
-    // A meeting that is ready to read says nothing about being ready.
-    expect(chip({})).toBe("");
+    ).toContain(">Needs attention");
   });
 
   test("the log is grouped by the day each meeting was recorded", () => {
@@ -666,25 +669,19 @@ describe("meetings list", () => {
     expect(buttonTag(markup, "Older")).toContain('disabled=""');
   });
 
-  /* The filters are the store's, not the view's. A row the current filter text
-   * would exclude still renders, because the page on screen is exactly what
-   * `meeting_list` answered with — this is the assertion that fails the moment
+  /* The filter is the store's, not the view's. A row the current query would
+   * exclude still renders, because the page on screen is exactly what
+   * `meeting_list` answered with - this is the assertion that fails the moment
    * anyone reintroduces client-side filtering over an already-fetched page.
-   * That the store honours each filter value is proved in Rust:
-   * meeting::store::tests::listed_status_filter_reads_stored_phase_and_processing_status,
-   * listed_time_window_counts_local_calendar_days_including_today, and
-   * listed_title_query_matches_a_substring_and_treats_wildcards_literally. */
+   * That the store honours the query is proved in Rust:
+   * meeting::store::tests::listed_title_query_matches_a_substring_and_treats_wildcards_literally. */
   test("the page on screen is the store's answer, not a view over it", () => {
     const markup = homeMarkup({
       meetings: [SUMMARY],
-      filter: {
-        status: "failed",
-        window: "today",
-        title_query: "nothing in this title",
-      },
+      filter: { ...NO_MEETING_FILTER, title_query: "nothing in this title" },
     });
     expect(markup).toContain("Weekly planning");
-    expect(occurrences(markup, "No meetings match")).toBe(0);
+    expect(occurrences(markup, "No meeting title matches")).toBe(0);
   });
 });
 
@@ -743,11 +740,14 @@ describe("the start gate", () => {
       },
     });
     expect(markup).toContain(">Ready to record</h1>");
-    expect(
-      occurrences(buttonTag(markup, "Start recording"), 'disabled=""'),
-    ).toBe(0);
+    expect(occurrences(buttonTag(markup, "Record"), 'disabled=""')).toBe(0);
     expect(occurrences(markup, "Record without it")).toBe(0);
-    expect(markup).toContain(">Available<");
+    /* Round 7 took the preflight's success report off this screen: a
+     * "Storage" row whose value read "available" and a "Local model" row
+     * reading "Available" are two checks announcing that they passed, on the
+     * one screen that exists because a check failed. */
+    expect(markup).not.toContain(">Available<");
+    expect(markup).not.toContain("Local model");
     expect(markup).not.toContain("Waiting for processing");
   });
 
@@ -766,7 +766,7 @@ describe("the start gate", () => {
         },
       },
     });
-    expect(buttonTag(markup, "Start recording")).toContain("disabled");
+    expect(buttonTag(markup, "Record")).toContain("disabled");
     expect(markup).toContain(
       "This action is not available in the current phase.",
     );
@@ -1013,7 +1013,7 @@ describe("meeting review", () => {
     expect(insights).not.toContain("Pricing tiers");
   });
 
-  test("the title is the page's heading, and the only way to a field", () => {
+  test("the title is the page's heading, and a field only when asked for", () => {
     expect(markup).toContain(">Weekly planning</button>");
     expect(markup).toContain('title="Rename this meeting"');
     /* No microlabel over it, no field, and no Save: D19 writes the title, so
@@ -1022,16 +1022,30 @@ describe("meeting review", () => {
     expect(markup).not.toContain('id="meeting-review-title"');
   });
 
-  test("the header states the recording once, and measures it in a sentence", () => {
-    expect(markup).toContain(">Ready for review<");
-    /* Sentence case, and the word that changes what the record can be trusted
-     * for. "Partial" on its own was a machine's shorthand for it. */
-    expect(markup).toContain(">Partial recording<");
-    /* When it started and how long it ran are one quiet line, not a labelled
-     * ELAPSED measurement beside the state. */
-    expect(markup).toContain("Started ");
-    expect(markup).toContain(" · 30:45");
+  test("the header is the meeting's name over one line of facts", () => {
+    /* The way out names where it goes, and it is text rather than a bordered
+     * control competing with the document's own name. */
+    expect(markup).toContain("Meetings</button>");
+    expect(markup).not.toContain(">Back<");
+    /* When it was, how long it ran, what recorded it: the three facts a
+     * reader checks against their own memory of the meeting. No machine
+     * state among them — "Ready for review" on a screen somebody is
+     * reviewing is the app describing itself, and the labelled ELAPSED
+     * measurement said the duration twice. */
+    expect(markup).toContain(" · 30:45 · Microphone");
+    expect(markup).not.toContain(">Ready for review<");
     expect(markup).not.toContain(">Elapsed<");
+    /* The one word on that line a reader has to act on, in sentence case,
+     * and only while it is true. "Partial" alone was a machine's shorthand. */
+    expect(markup).toContain(">Partial recording<");
+    expect(
+      reviewMarkup({
+        snapshot: {
+          ...SNAPSHOT,
+          session: { ...SNAPSHOT.session, capture_completeness: "complete" },
+        },
+      }),
+    ).not.toContain("Partial recording");
   });
 
   test("the transcript panel reads as prose, and still carries its coverage", () => {
@@ -1085,14 +1099,23 @@ describe("meeting review", () => {
     expect(onTranscript).not.toContain(">Search</button>");
   });
 
-  test("keeps the export actions on the record, and no delete beside them", () => {
-    expect(markup).toContain(">Export Markdown<");
-    expect(markup).toContain(">Export JSON<");
-    expect(markup).toContain(">More<");
-    /* The load-bearing half: a red delete button coming back to a surface
-     * somebody is reading fails here. Deleting a meeting lives behind the
-     * menu, which mounts nothing until it is opened. */
-    expect(markup).not.toContain(">Delete meeting<");
+  test("every verb this page has is behind one menu on the title line", () => {
+    /* Seven bordered buttons used to be parked on three reading surfaces:
+     * two on the ledger's label line, two on the generated notes', and three
+     * in an export bar under everything. One trigger replaces all of them,
+     * and it mounts nothing until it is opened. */
+    expect(occurrences(markup, 'data-slot="dropdown-menu-trigger"')).toBe(1);
+    expect(markup).toContain('aria-label="More"');
+    for (const verb of [
+      "Regenerate",
+      "Draft follow-up",
+      "Export notes (Markdown)",
+      "Export notes (JSON)",
+      "Export ledger page",
+      "Delete meeting",
+    ]) {
+      expect(markup).not.toContain(`>${verb}<`);
+    }
   });
 });
 
@@ -1145,7 +1168,6 @@ describe("insights panel", () => {
     expect(markup).toContain("The team agreed to ship this week.");
     expect(markup).toContain(">Owner: Aktan<");
     expect(markup).toContain(">0:12</button>");
-    expect(markup).toContain(">Regenerate<");
     // Manual notes stay separate from what was generated.
     expect(markup).toContain("Ask about the export format.");
     expect(markup).toContain(">0:30<");
@@ -1261,7 +1283,12 @@ describe("insights panel", () => {
         },
       },
     });
-    expect(markup).toContain("Sona is still processing this meeting");
+    expect(markup).toContain(
+      "Generated notes and local answers appear once the transcript is complete.",
+    );
+    /* One line, not a heading over it: "Sona is still processing this
+     * meeting" said the same thing the sentence under it already said. */
+    expect(markup).not.toContain("Sona is still processing");
     expect(markup).toContain(">Refresh<");
   });
 
@@ -1324,10 +1351,10 @@ describe("insights panel", () => {
       () => {
         const markup = failedMarkup(reason);
         expect(markup).toContain(GENERATION_FAILURES[reason].heading);
-        expect(markup).toContain(
-          "The transcript and your manual notes are unaffected.",
-        );
-        expect(markup).not.toContain("they can be rebuilt at any time");
+        /* One line: the reason, then the one thing to do about it. The
+         * rebuild sentence a finished-but-empty pass gets is not this. */
+        expect(markup).toContain("Regenerate once the cause is resolved.");
+        expect(markup).not.toContain("Regenerate writes notes");
       },
     );
   }
@@ -1336,9 +1363,7 @@ describe("insights panel", () => {
     (candidate) => GENERATION_FAILURES[candidate].settingsRoute,
   )) {
     test(
-      "no notes because of " +
-        reason +
-        " keeps Regenerate available and links to Settings",
+      "no notes because of " + reason + " routes to the setting that fixes it",
       () => {
         const markup = failedMarkup(reason);
         expect(markup).toContain(GENERATION_FAILURES[reason].heading);
@@ -1346,9 +1371,10 @@ describe("insights panel", () => {
         expect(buttonTag(markup, "Settings")).not.toMatch(
           /\sdisabled(?:="")?(?=\s|>)/,
         );
-        expect(buttonTag(markup, "Regenerate")).not.toMatch(
-          /\sdisabled(?:="")?(?=\s|>)/,
-        );
+        /* Regenerate is not on this surface at all now — it is a row of the
+         * review's one menu — so the only control on the empty line is the
+         * route to the setting that can clear the cause. */
+        expect(markup).not.toContain(">Regenerate<");
       },
     );
   }
@@ -1375,8 +1401,8 @@ describe("insights panel", () => {
         },
       },
     });
-    expect(markup).toContain("No generated notes are available yet.");
-    expect(markup).toContain("they can be rebuilt at any time");
+    expect(markup).toContain("Regenerate writes notes from this transcript.");
+    expect(markup).not.toContain("Regenerate once the cause is resolved");
   });
 });
 
@@ -1551,12 +1577,12 @@ describe("meeting ledger", () => {
      * a reader who cannot see it hears. */
     expect(markup).toContain(">0:12</button>");
     expect(markup).toContain('aria-label="Transcript 0:12"');
-    // Small talk stays on the record and out of the score: the sign-off is
-    // `closed`, which is a landed state, and the score is still 0 of 1 — one
-    // substantive thread, unanswered — rather than 1 of 2.
+    // Small talk stays on the record: the sign-off is `closed`, a landed
+    // state, so it prints no state word beside it — nothing is asked of the
+    // reader — while the unanswered thread above says "No reply".
     expect(markup).toContain("Sign-off");
     expect(markup).toContain(">aside<");
-    expect(markup).toContain(">0/1<");
+    expect(markup).not.toContain(">Closed<");
   });
 
   test("carries the four registers and the receipt verdict", () => {
@@ -1570,7 +1596,23 @@ describe("meeting ledger", () => {
     expect(markup).toContain(
       "Speaker labels came from diarization, not from names anyone said.",
     );
-    expect(markup).toContain(">verified<");
+    /* A receipt check that passed is the ordinary case, so it says nothing:
+     * "Receipts verified" was a word printed for every healthy ledger. */
+    expect(markup).not.toContain(">verified<");
+  });
+
+  test("shows an unaddressed stance without inventing a target", () => {
+    const markup = ledgerMarkup({
+      snapshot: ledgerSnapshot({
+        ...LEDGER,
+        stances: [{ ...LEDGER.stances[0], to: null }],
+      }),
+    });
+
+    expect(markup).toContain(">Amir</td>");
+    expect(markup).not.toContain("Amir →");
+    expect(markup).not.toContain("null");
+    expect(markup).not.toContain("Unknown");
   });
 
   test("names what a failed receipt check removed, with counts", () => {
@@ -1819,20 +1861,24 @@ describe("what a meeting row says about itself", () => {
 });
 
 describe("recovering a meeting from the list", () => {
-  test("the row says what happened and offers to run it again", () => {
+  test("the row says what stopped it and offers to run it again", () => {
     const markup = homeMarkup({ meetings: [STRANDED] });
-    expect(markup).toContain(">Needs attention</span>");
+
+    /* One line, and it is the reason: "Needs attention" is a state and not an
+     * explanation, so a row that has a reason prints the reason instead. The
+     * count, not a tag-shaped substring: a row that appends the state word to
+     * the reason inside one span reads as both and passes a `>Needs
+     * attention</span>` check. */
     expect(markup).toContain(">Interrupted before it finished</span>");
-    // "Needs attention" is a state, not an explanation, so the reason has to
-    // be on the row beside it.
+    expect(occurrences(markup, "Needs attention")).toBe(0);
     expect(occurrences(markup, ">Try again</button>")).toBe(1);
     expect(markup).not.toContain(">Processing</span>");
   });
 
-  test("a finished meeting gets no chip, no reason line and no retry", () => {
+  test("a finished meeting says nothing about its state and offers no retry", () => {
     const markup = homeMarkup({ meetings: [SUMMARY] });
     expect(markup).toContain(">Weekly planning</span>");
-    expect(markup).not.toContain(">Needs attention</span>");
+    expect(occurrences(markup, "Needs attention")).toBe(0);
     expect(markup).not.toContain(">Ready</span>");
     expect(occurrences(markup, ">Try again</button>")).toBe(0);
   });
