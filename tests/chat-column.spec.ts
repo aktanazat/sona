@@ -958,6 +958,38 @@ test.describe("the chat at 340", () => {
       .toBe("conversation-2");
   });
 
+  /* The composer is the one part of the sheet the switch does not answer with.
+   * Status, transcript and proposal all come back from the backend, and the
+   * draft is the app's own state, so unsent words stayed in the field over a
+   * chat that never saw them typed — and Send would then have filed them
+   * under that chat's transcript. Both doors are read, because they are two
+   * handlers: an earlier chat, and a new one. */
+  test("switching chats leaves the composer empty, either way", async ({
+    page,
+  }) => {
+    await openApp(page, EARLIER);
+    await openChat(page);
+
+    const field = column(page).getByRole("textbox", { name: "Ask about Sona" });
+    await field.fill("Which tier did the trial convert on?");
+
+    const list = await earlierChats(page);
+    await list
+      .getByRole("menuitem")
+      .filter({ hasText: "Where did we agree the trial" })
+      .click();
+    await expect(field).toHaveValue("");
+
+    await field.fill("And who owns the renewal?");
+    await column(page).getByRole("button", { name: "More" }).click();
+    await page
+      .getByRole("menu")
+      .first()
+      .getByRole("menuitem", { name: "New chat" })
+      .click();
+    await expect(field).toHaveValue("");
+  });
+
   /* A conversation with everything in it: a question, an answer carrying a
    * `sona://` address, a work disclosure with a step, and a settings card with
    * Apply on it. These are the four things the surface draws that were laid out

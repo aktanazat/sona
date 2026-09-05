@@ -252,15 +252,25 @@ export const ChatSheetHost: React.FC<ChatSheetHostProps> = ({
     setHistory(result.data);
   };
 
+  /* A switch replaces everything the sheet shows, and the composer is part of
+   * it: an unsent draft was written for the transcript that just went away,
+   * and pressing Send after the switch would have filed it under a
+   * conversation it was never meant for. Dropped on the same success that
+   * drops the corpus badge, and kept on a refusal, where the sheet is still
+   * the conversation the draft belongs to. */
   const selectConversation = async (conversationId: string) => {
     setHistoryOpen(false);
     if (await run(() => commands.agentChatOpen(conversationId))) {
       setSearchedCorpus(false);
+      setDraft("");
     }
   };
 
   const newConversation = async () => {
-    if (await run(commands.agentChatNew)) setSearchedCorpus(false);
+    if (await run(commands.agentChatNew)) {
+      setSearchedCorpus(false);
+      setDraft("");
+    }
   };
 
   const retryTurn = async () => {
