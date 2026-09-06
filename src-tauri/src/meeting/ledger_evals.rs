@@ -24,7 +24,7 @@
 //!   graded by the same rubric. Ignored by default because it asks a model:
 //!
 //!   ```text
-//!   cargo test --lib ledger_evals -- --ignored --nocapture
+//!   bun run test:backend ledger_evals -- --ignored --nocapture
 //!   ```
 //!
 //!   The engine is the one Sona would resolve for a meeting. A test has no
@@ -36,7 +36,7 @@
 //!   ```text
 //!   SONA_LEDGER_EVAL_BASE_URL=http://127.0.0.1:11434/v1 \
 //!   SONA_LEDGER_EVAL_MODEL=gemma4:12b-mlx \
-//!   cargo test --lib ledger_evals -- --ignored --nocapture
+//!   bun run test:backend ledger_evals -- --ignored --nocapture
 //!   ```
 //!
 //! Segment ids are `00000000-0000-0000-0000-000000000NNN`, `NNN` the 1-based
@@ -846,7 +846,7 @@ impl MeetingTextGenerator for Recording<'_> {
 /// goes through the same acceptance seam a meeting's does, checks and caveats
 /// included. The whole scorecard is printed before anything is asserted, so
 /// one failed line does not hide the rest.
-#[ignore = "asks a model: cargo test --lib ledger_evals -- --ignored --nocapture"]
+#[ignore = "asks a model: bun run test:backend ledger_evals -- --ignored --nocapture"]
 #[test]
 fn messy_two_party_with_model() {
     let (_directory, store) = super::store::workflow_core_tests::store();

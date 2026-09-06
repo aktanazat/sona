@@ -124,7 +124,7 @@ Install current Rust and Bun, then run:
 bun install
 bun run prepare:agent-hook
 bun run build
-cd src-tauri && cargo check --all-features
+cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo check --all-features
 ```
 
 The desktop development command is:

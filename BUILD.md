@@ -44,10 +44,15 @@ bun run lint:anti-slop
 bun run check:translations
 bun test
 cd cloudflare/sona-companion && bun run typecheck && bun run test
-cd src-tauri && cargo check --all-features
-cd src-tauri && cargo test --lib
-cd src-tauri && cargo test --bin sona-agent-hook
+cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo check --all-features
+cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo test --lib
+cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo test --bin sona-agent-hook
 ```
+
+`scripts/cargo-target-dir.ts` gives this checkout its own target directory
+beneath a `CARGO_TARGET_DIR` cache root, so a second checkout building at the
+same time cannot hand this one its artifacts. With `CARGO_TARGET_DIR` unset it
+runs the command unchanged, and plain `cargo` is equivalent.
 
 The package audit expects one executable `sona-agent-hook` sidecar and a `sona` main executable.
 

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { z } from "zod";
+import { resolveCargoTargetDirectory } from "./cargo-target-dir";
 
 const BINARY_NAME = "sona-agent-hook";
 const ROOT = resolve(import.meta.dirname, "..");
@@ -130,6 +131,12 @@ export function prepareAgentHook(targetTriple: string, root = ROOT): string {
   const cargoWorkingDirectory = join(root, "src-tauri");
   const buildProfile =
     process.env.TAURI_ENV_DEBUG === "true" ? "debug" : "release";
+  /* The build below and the lookup after it have to name one directory, so
+   * both take it from here - and it is the same value `bun run tauri` hands
+   * cargo, so a `tauri build` that comes back through this script stages the
+   * binary that build produced. */
+  const targetDirectory =
+    resolveCargoTargetDirectory(root) ?? join(cargoWorkingDirectory, "target");
   const cargoArguments = ["cargo", "build"];
   if (buildProfile === "release") cargoArguments.push("--release");
   cargoArguments.push("--bin", BINARY_NAME, "--target", target);
@@ -137,6 +144,7 @@ export function prepareAgentHook(targetTriple: string, root = ROOT): string {
     cwd: cargoWorkingDirectory,
     env: {
       ...process.env,
+      CARGO_TARGET_DIR: targetDirectory,
       TAURI_CONFIG: configWithoutExternalBinaries(process.env.TAURI_CONFIG),
     },
     stdio: ["inherit", "inherit", "inherit"],
@@ -145,10 +153,6 @@ export function prepareAgentHook(targetTriple: string, root = ROOT): string {
     throw new Error(`cargo failed to build sona-agent-hook for ${target}`);
   }
 
-  const targetDirectory = resolve(
-    cargoWorkingDirectory,
-    process.env.CARGO_TARGET_DIR || "target",
-  );
   const source = join(
     targetDirectory,
     target,

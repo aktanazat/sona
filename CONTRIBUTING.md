@@ -242,8 +242,8 @@ In your PR description, please include:
 
 **Rust:**
 
-- Follow standard Rust formatting (`cargo fmt`)
-- Run `cargo clippy` and address warnings
+- Follow standard Rust formatting (`bun run format:backend`)
+- Run `bun run lint:backend` (`cargo clippy`) and address warnings
 - Use descriptive variable and function names
 - Add doc comments for public APIs
 - Handle errors explicitly (avoid unwrap in production code)

@@ -117,7 +117,8 @@ mod tests {
     /// a real on-device generation, and the Swift side blocks on a semaphore
     /// with no timeout, so a wedged `LanguageModelSession` would hang
     /// `cargo test` indefinitely — libtest has no per-test deadline. Run it
-    /// with `cargo test --lib apple_intelligence -- --ignored --nocapture`.
+    /// with `bun run test:backend apple_intelligence -- --ignored
+    /// --nocapture`.
     ///
     /// Deliberately asserts nothing about status agreeing with the answer.
     /// Rust reads the status here, Swift re-reads availability inside the call,

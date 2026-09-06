@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -103,7 +104,7 @@ describe("prepare-agent-hook", () => {
     const directory = temporaryDirectory();
     const root = join(directory, "project");
     const target = "aarch64-apple-darwin";
-    const targetDirectory = join(root, "isolated-target");
+    const cacheRoot = join(root, "isolated-target");
     const bin = join(directory, "bin");
     const payload = `${profile} target helper`;
     mkdirSync(join(root, "src-tauri"), { recursive: true });
@@ -143,7 +144,7 @@ prepareAgentHook("${target}", process.argv[2]);
     const result = Bun.spawnSync([process.execPath, runner, root], {
       env: {
         ...process.env,
-        CARGO_TARGET_DIR: "../isolated-target",
+        CARGO_TARGET_DIR: "isolated-target",
         PATH: [bin, process.env.PATH].filter(Boolean).join(delimiter),
         SONA_HOOK_PAYLOAD: payload,
         TAURI_ENV_DEBUG: tauriDebug,
@@ -151,6 +152,13 @@ prepareAgentHook("${target}", process.argv[2]);
       stderr: "pipe",
       stdout: "pipe",
     });
+
+    /* Whatever directory the script handed cargo is the one the Tauri bundler
+     * will read the stripped copy from, so the assertions below start from
+     * cargo's own output rather than a path this fixture guessed. */
+    const children = existsSync(cacheRoot) ? readdirSync(cacheRoot) : [];
+    expect(children).toHaveLength(1);
+    const targetDirectory = join(cacheRoot, children[0] ?? "");
 
     return { payload, result, root, target, targetDirectory };
   }

@@ -1828,7 +1828,7 @@ mod tests {
     /// we send with no `Authorization` header at all.
     ///
     /// Ignored by default — it needs something listening on 11434. Run it with
-    /// `cargo test --lib ollama -- --ignored --nocapture`, and set
+    /// `bun run test:backend ollama -- --ignored --nocapture`, and set
     /// `SONA_LOCAL_MODEL` if the served model is not the one below.
     ///
     /// The provider fields are the shipped `custom` defaults verbatim
@@ -1896,7 +1896,8 @@ mod tests {
     /// is no timeout.
     ///
     /// Ignored by default because passing costs the full 20 seconds. Run it
-    /// with `cargo test --lib hangs -- --ignored --nocapture`. The elapsed
+    /// with `bun run test:backend hangs -- --ignored --nocapture`. The
+    /// elapsed
     /// assertion is the point: it fails if some other error path short-circuits
     /// instead, which would make the timeout untested while looking green.
     #[tokio::test]

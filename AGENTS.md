@@ -47,6 +47,58 @@ mkdir -p src-tauri/resources/models
 curl -o src-tauri/resources/models/silero_vad_v4.onnx https://blob.handy.computer/silero_vad_v4.onnx
 ```
 
+**Verifying a change against a running Sona:**
+
+Never verify against the installed app or a `cargo run` that uses the default
+data directory: both read and write the developer's own settings store, so a
+verification step lands on a daily preference. Microphone detection is the
+sharp case — flipping it to watch a prompt leaves the prompt answered and the
+preference moved. Give the run its own profile instead:
+
+```bash
+PROFILE=/private/var/tmp/sona-verify
+mkdir -p "$PROFILE" && cp src-tauri/target/debug/sona "$PROFILE/"
+printf 'Sona Portable Mode' > "$PROFILE/portable"
+cd "$PROFILE" && SONA_ALLOW_PORTABLE_DEV=1 ./sona --loops
+```
+
+`/private/var/tmp` rather than `/tmp`: a profile is worth keeping between
+commands and across a reboot, and macOS clears `/tmp` on boot.
+
+Portable mode moves the settings store, logs, models and recordings under the
+adjacent `Data/` directory, so seeding a preference there exercises the real
+code against a throwaway state. `SONA_ALLOW_PORTABLE_DEV=1` is required for a
+debug build, since a marker in `target/debug` is usually a mistake. Native
+credential storage stays off in portable mode, so keychain-backed features
+(the encrypted corpus) are not reachable this way — verify those against a
+profile you own and restore what you changed.
+
+A portable GUI is safe to launch beside the installed app: on macOS it stays
+off the bundle-wide single-instance socket and holds an OS lock on its own
+`Data/` directory, so it cannot be mistaken for a second copy of the install
+and cannot be handed the install's forwarded arguments.
+
+**Building and testing the Rust side:**
+
+```bash
+bun run test:backend      # cargo test --lib, in a target dir this checkout owns
+bun run tauri dev         # same, for the app
+bun run tauri build
+```
+
+Go through these rather than calling `cargo` directly, and a second checkout —
+a worktree for a comparison build, say — stays out of this one's way. Two
+checkouts pointed at one `CARGO_TARGET_DIR` resolve to the same cargo unit,
+and cargo decides that unit is fresh by comparing mtimes, so whichever tree
+has the older files silently inherits the other's compiled artifacts: Rust and
+the Swift bridges both. `scripts/cargo-target-dir.ts` keeps that from
+happening, and `scripts/prepare-agent-hook.ts` builds and stages the sidecar
+in the same directory it resolves, so a `tauri build` never bundles a copy
+from somewhere else. With `CARGO_TARGET_DIR` unset none of this changes
+anything, because cargo's default `src-tauri/target` is already
+per-checkout; with one set — a cache root on a faster disk is the reason to —
+each checkout builds in its own directory beneath it.
+
 For detailed platform-specific build setup, see [BUILD.md](BUILD.md).
 
 ## Architecture Overview
@@ -176,7 +228,8 @@ For translation contribution guidelines, see [CONTRIBUTING_TRANSLATIONS.md](CONT
 
 **Rust:**
 
-- Run `cargo fmt` and `cargo clippy` before committing
+- Run `bun run format:backend` and `bun run lint:backend` before committing —
+  `cargo fmt` and `cargo clippy` in a target directory this checkout owns
 - Handle errors explicitly (avoid unwrap in production)
 - Use descriptive names, add doc comments for public APIs
 
