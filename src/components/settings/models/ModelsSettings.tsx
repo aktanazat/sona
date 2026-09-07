@@ -6,6 +6,7 @@ import { Button } from "@/components/vg/button";
 import { Skeleton } from "@/components/vg/skeleton";
 import {
   Notice,
+  SettingsLinkRow,
   SettingsPage,
   SettingsSection,
   SettingsSurface,
@@ -14,7 +15,6 @@ import { useModelStore } from "@/stores/modelStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatModelSize } from "@/lib/utils/format";
 import { getTranslatedModelName } from "@/lib/utils/modelTranslation";
-import { PromptLibrary } from "../vocabulary/PromptLibrary";
 import { WritingSamplesPanel } from "../vocabulary/WritingSamplesPanel";
 import {
   ModelCatalogFilters,
@@ -35,7 +35,9 @@ import { useModelEngineState, useModelRowErrors } from "./useModelEngineState";
 
 const SKELETON_GROUPS = [3, 4];
 
-export const ModelsSettings: React.FC = () => {
+export const ModelsSettings: React.FC<{
+  onOpenPrompts?: () => void;
+}> = ({ onOpenPrompts }) => {
   const { t } = useTranslation();
   const [filters, setFilters] = useState<ModelCatalogFilterState>(NO_FILTERS);
   const {
@@ -166,6 +168,15 @@ export const ModelsSettings: React.FC = () => {
 
   /* A row already shows its own failure with a retry; repeating it at the top
    * of the page would say the same thing twice. */
+  const promptLibraryLink = (
+    <SettingsSection label={t("prompts.title")}>
+      <SettingsLinkRow
+        label={t("settings.postProcessing.prompts.libraryTitle")}
+        action={t("common.open")}
+        onOpen={() => onOpenPrompts?.()}
+      />
+    </SettingsSection>
+  );
   const pageError =
     error && !Object.values(rowErrorMessages).includes(error) ? error : null;
 
@@ -196,6 +207,7 @@ export const ModelsSettings: React.FC = () => {
             </div>
           ))}
         </div>
+        {promptLibraryLink}
       </SettingsPage>
     );
   }
@@ -304,10 +316,7 @@ export const ModelsSettings: React.FC = () => {
         ))
       )}
 
-      {/* Cloud transcription keys and the cleanup endpoint moved to
-       * Settings > Advanced > Models: they are one-time credential setups, not
-       * part of choosing a model, and this page is the catalog. */}
-      <PromptLibrary />
+      {promptLibraryLink}
       <WritingSamplesPanel />
     </SettingsPage>
   );

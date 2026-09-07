@@ -41,7 +41,9 @@ const BRIDGE_CONSOLES = [
  * Each console states its own answer on the summary - paired or not, which
  * agents are observed - so a reader learns whether anything is connected
  * without opening either one. */
-export const AdvancedAgents: React.FC = () => {
+export const AdvancedAgents: React.FC<{
+  revealSonaAgentRequest?: number;
+}> = ({ revealSonaAgentRequest }) => {
   const { t } = useTranslation();
   const { settings } = useSettings();
   const bridge = settings?.agent_bridge;
@@ -72,6 +74,7 @@ export const AdvancedAgents: React.FC = () => {
             : "settings.agents.sonaAgent.unpaired",
         )}
         lazy
+        revealRequest={revealSonaAgentRequest}
       >
         <SonaAgentPairing />
       </SettingsDisclosure>

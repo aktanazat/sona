@@ -46,6 +46,7 @@ const subscribeToAgentBridgeUpdates = (
  * without the page asking again. */
 export const useAgentBridgeObservations = (
   bridgeSettings: AgentBridgeSettings | undefined,
+  active = true,
 ) => {
   const { t, i18n } = useTranslation();
   const expiryTimeFormatter = useMemo(
@@ -79,6 +80,7 @@ export const useAgentBridgeObservations = (
   );
 
   const refreshObservations = useCallback(async () => {
+    if (!active) return;
     updateView({ loading: true });
     try {
       const [nextStatus, nextSessions, nextRequests, nextPendingMessages] =
@@ -107,21 +109,27 @@ export const useAgentBridgeObservations = (
     } finally {
       if (mountedRef.current) updateView({ loading: false });
     }
-  }, [t]);
+  }, [active, t]);
 
   useEffect(() => {
     refreshObservationsRef.current = refreshObservations;
   }, [refreshObservations]);
 
   useEffect(() => {
+    if (!active) {
+      mountedRef.current = false;
+      updateView({ loading: false });
+      return;
+    }
     mountedRef.current = true;
     void refreshObservations();
     return () => {
       mountedRef.current = false;
     };
-  }, [refreshObservations]);
+  }, [active, refreshObservations]);
 
   useEffect(() => {
+    if (!active) return;
     const unsubscribe = subscribeToAgentBridgeUpdates(
       (nextStatus) => {
         updateView({ status: nextStatus });
@@ -135,9 +143,10 @@ export const useAgentBridgeObservations = (
     return () => {
       unsubscribe();
     };
-  }, []);
+  }, [active]);
 
   useEffect(() => {
+    if (!active) return;
     let disposed = false;
     void commands
       .getAgentBridgeHookSnippet()
@@ -155,7 +164,7 @@ export const useAgentBridgeObservations = (
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     if (bridgeSettings) updateView({ bridge: bridgeSettings });

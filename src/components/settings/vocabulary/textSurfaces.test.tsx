@@ -9,7 +9,7 @@ import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 import { TooltipProvider } from "@/components/vg/tooltip";
 import { CustomWords } from "../CustomWords";
-import { PromptLibrary } from "./PromptLibrary";
+import { DictationPrompts } from "./PromptLibrary";
 
 /**
  * Mount checks for the two text-rule surfaces.
@@ -38,13 +38,19 @@ const render = async (node: React.ReactElement): Promise<string> => {
   );
 };
 
-describe("PromptLibrary", () => {
-  test("mounts with its own heading and a loading list", async () => {
-    const markup = await render(<PromptLibrary />);
+describe("DictationPrompts", () => {
+  test("mounts its loading list without a second create action", async () => {
+    const markup = await render(
+      <DictationPrompts
+        createRequest={null}
+        onCreateRequestHandled={() => {}}
+      />,
+    );
 
     expect(markup).toContain("Post-processing prompts");
     expect(markup).toContain('aria-label="Loading prompts"');
-    expect(markup).toContain('data-testid="prompt-library"');
+    expect(markup).toContain('data-testid="dictation-prompt-list"');
+    expect(markup).not.toContain('data-testid="prompt-create"');
   });
 });
 

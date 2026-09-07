@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import {
   commands,
@@ -11,7 +12,10 @@ import {
   type SonaAgentChatTurnV1,
 } from "@/bindings";
 import { useSettings } from "@/hooks/useSettings";
+import { AgentBridgeQueue } from "@/components/settings/agents/AgentBridgeQueue";
+import { useAgentBridgeSettings } from "@/components/settings/agents/useAgentBridgeSettings";
 import { ChatSheet } from "./ChatSheet";
+import { AgentRequestsSurface } from "./agentRequestsPanel";
 import {
   chatPhase,
   isTurnRunning,
@@ -137,7 +141,7 @@ export const ChatSheetHost: React.FC<ChatSheetHostProps> = ({
   const [draft, setDraft] = useState("");
   const [workspace, setWorkspace] =
     useState<AgentPanelWorkspaceV1>("sona_chat");
-  const { updateSetting } = useSettings();
+  const { settings, updateSetting } = useSettings();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<
     AgentPanelCommandErrorV1 | "link_failed" | null
@@ -145,6 +149,21 @@ export const ChatSheetHost: React.FC<ChatSheetHostProps> = ({
   const [now, setNow] = useState(() => Date.now());
   const [searchedCorpus, setSearchedCorpus] = useState(false);
   const requestRef = useRef(0);
+  const bridgeActive = open && settings?.agent_bridge?.master_enabled === true;
+  const bridgeModel = useAgentBridgeSettings(bridgeActive);
+  const [requestsOpen, setRequestsOpen] = useState(false);
+  const pendingCount = bridgeModel.pendingMessages.length;
+  /* The panel stays open while replies remain, whatever the queue does
+   * underneath it. Once it drains the surface unmounts, and the next arrival
+   * should offer the entry again rather than reopen the panel unasked. */
+  useEffect(() => {
+    if (pendingCount === 0) setRequestsOpen(false);
+  }, [pendingCount]);
+  const chatFrame = open
+    ? (globalThis.document?.querySelector<HTMLElement>(
+        '[data-slot="chat-frame"]',
+      ) ?? null)
+    : null;
 
   const refresh = useCallback(async () => {
     const requestId = requestRef.current + 1;
@@ -309,83 +328,99 @@ export const ChatSheetHost: React.FC<ChatSheetHostProps> = ({
   const proposal = status?.proposal ?? null;
 
   return (
-    <ChatSheet
-      open={open}
-      phase={chatPhase(status)}
-      conversationId={status?.conversation_id ?? null}
-      conversation={conversation}
-      turn={turn}
-      searchedCorpus={searchedCorpus}
-      proposal={proposal}
-      history={history}
-      historyOpen={historyOpen}
-      now={now}
-      draft={draft}
-      workspace={workspace}
-      consentNeeded={needsRemoteConsent(workspace, panel)}
-      busy={busy}
-      error={error}
-      onClose={onClose}
-      onHistoryOpenChange={(next) => void openHistory(next)}
-      onSelectConversation={(id) => void selectConversation(id)}
-      onNewChat={() => void newConversation()}
-      onDraftChange={setDraft}
-      onWorkspaceChange={setWorkspace}
-      onSend={() => void send()}
-      /* The one switch, thrown from where it bites. Settings is the row's
-       * home and stays the place it is explained; the gate prop follows the
-       * store, so the notice clears when the setting lands. */
-      onAllowRemote={() =>
-        void updateSetting("meeting_remote_intelligence_enabled", true)
-      }
-      onStop={() => {
-        if (turn === null) return;
-        void run(() =>
-          commands.agentPanelCancelTurn({ turn_id: turn.turn_id }),
-        );
-      }}
-      onApply={() => {
-        if (proposal === null) return;
-        void run(() =>
-          commands.agentPanelApplyChange({
-            proposal_id: proposal.proposal_id,
-            expected_revision: proposal.source_settings_revision,
-            /* The card is the confirmation. A reader who presses Apply under a
-             * subtitle naming the settings it moves has confirmed it; the
-             * classes exist so nothing applies itself, not so the same person
-             * is asked twice. */
-            confirmed: true,
-          }),
-        );
-      }}
-      onUndo={() => {
-        const receiptId = proposal?.receipt_id ?? null;
-        if (proposal === null || receiptId === null) return;
-        void run(() =>
-          commands.agentPanelUndoChange({
-            receipt_id: receiptId,
-            expected_revision:
-              proposal.applied_revision ?? proposal.source_settings_revision,
-          }),
-        );
-      }}
-      onApplyAction={(actionIndex) =>
-        void settleAction(commands.agentPanelApplyAction, actionIndex)
-      }
-      onDismissAction={(actionIndex) =>
-        void settleAction(commands.agentPanelDismissAction, actionIndex)
-      }
-      /* Routed through the backend, which owns what a `sona://` address means
-       * and which surface it wakes — the same path an address arriving from
-       * outside the app takes. */
-      onOpenLink={(link) =>
-        void commands.sonaOpenLink(link).then((opened) => {
-          if (!opened) setError("link_failed");
-        })
-      }
-      onOpenSettings={onOpenSettings}
-      onRetry={() => void refresh()}
-      onRetryTurn={() => void retryTurn()}
-    />
+    <>
+      <ChatSheet
+        open={open}
+        phase={chatPhase(status)}
+        conversationId={status?.conversation_id ?? null}
+        conversation={conversation}
+        turn={turn}
+        searchedCorpus={searchedCorpus}
+        proposal={proposal}
+        history={history}
+        historyOpen={historyOpen}
+        now={now}
+        draft={draft}
+        workspace={workspace}
+        consentNeeded={needsRemoteConsent(workspace, panel)}
+        busy={busy}
+        error={error}
+        onClose={onClose}
+        onHistoryOpenChange={(next) => void openHistory(next)}
+        onSelectConversation={(id) => void selectConversation(id)}
+        onNewChat={() => void newConversation()}
+        onDraftChange={setDraft}
+        onWorkspaceChange={setWorkspace}
+        onSend={() => void send()}
+        /* The one switch, thrown from where it bites. Settings is the row's
+         * home and stays the place it is explained; the gate prop follows the
+         * store, so the notice clears when the setting lands. */
+        onAllowRemote={() =>
+          void updateSetting("meeting_remote_intelligence_enabled", true)
+        }
+        onStop={() => {
+          if (turn === null) return;
+          void run(() =>
+            commands.agentPanelCancelTurn({ turn_id: turn.turn_id }),
+          );
+        }}
+        onApply={() => {
+          if (proposal === null) return;
+          void run(() =>
+            commands.agentPanelApplyChange({
+              proposal_id: proposal.proposal_id,
+              expected_revision: proposal.source_settings_revision,
+              /* The card is the confirmation. A reader who presses Apply under a
+               * subtitle naming the settings it moves has confirmed it; the
+               * classes exist so nothing applies itself, not so the same person
+               * is asked twice. */
+              confirmed: true,
+            }),
+          );
+        }}
+        onUndo={() => {
+          const receiptId = proposal?.receipt_id ?? null;
+          if (proposal === null || receiptId === null) return;
+          void run(() =>
+            commands.agentPanelUndoChange({
+              receipt_id: receiptId,
+              expected_revision:
+                proposal.applied_revision ?? proposal.source_settings_revision,
+            }),
+          );
+        }}
+        onApplyAction={(actionIndex) =>
+          void settleAction(commands.agentPanelApplyAction, actionIndex)
+        }
+        onDismissAction={(actionIndex) =>
+          void settleAction(commands.agentPanelDismissAction, actionIndex)
+        }
+        /* Routed through the backend, which owns what a `sona://` address means
+         * and which surface it wakes — the same path an address arriving from
+         * outside the app takes. */
+        onOpenLink={(link) =>
+          void commands.sonaOpenLink(link).then((opened) => {
+            if (!opened) setError("link_failed");
+          })
+        }
+        onOpenSettings={onOpenSettings}
+        onRetry={() => void refresh()}
+        onRetryTurn={() => void retryTurn()}
+      />
+      {chatFrame
+        ? createPortal(
+            <AgentRequestsSurface
+              bridgeEnabled={bridgeModel.bridge.master_enabled}
+              pendingCount={pendingCount}
+              open={requestsOpen}
+              onOpen={() => setRequestsOpen(true)}
+              onClose={() => setRequestsOpen(false)}
+            >
+              <AgentBridgeQueue model={bridgeModel} />
+            </AgentRequestsSurface>,
+            chatFrame,
+          )
+        : null}
+    </>
   );
 };

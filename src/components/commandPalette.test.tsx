@@ -7,6 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 import { TooltipProvider } from "@/components/vg/tooltip";
+import { buildCommandActions } from "@/App";
+import { usePromptShellStore } from "@/components/settings/meetings/promptTargets";
 import { destinationIcons } from "@/lib/navIcons";
 import {
   groupPaletteActions,
@@ -221,6 +223,34 @@ describe("the section registry", () => {
   test("every destination names a distinct shared glyph", () => {
     const icons = SECTION_ORDER.map((section) => destinationIcons[section]);
     expect(new Set(icons).size).toBe(icons.length);
+  });
+});
+describe("prompt palette action", () => {
+  test("routes to the prompt library and requests its editor", () => {
+    const destinations: unknown[] = [];
+    usePromptShellStore.setState({
+      newPromptRequest: 0,
+      handledNewPromptRequest: 0,
+    });
+    const actions = buildCommandActions({
+      t: (key) => key,
+      agentEnabled: false,
+      isMacos: false,
+      onNavigate: (section, target) => destinations.push({ section, target }),
+      onNewMeeting: () => {},
+      onImportAudio: () => {},
+      onImportMeeting: () => {},
+      onOpenRecordings: () => {},
+      onOpenAgent: () => {},
+      onOpenRecorder: () => {},
+    });
+
+    actions.find((item) => item.id === "action-new-prompt")?.run();
+
+    expect(destinations).toEqual([
+      { section: "settings", target: { tab: "prompts" } },
+    ]);
+    expect(usePromptShellStore.getState().newPromptRequest).toBe(1);
   });
 });
 

@@ -9,8 +9,13 @@ import { I18nextProvider } from "react-i18next";
 import { TooltipProvider } from "@/components/vg/tooltip";
 import type { AppSettings } from "@/bindings";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useModelStore } from "@/stores/modelStore";
 import { EssentialsSettings } from "./essentials/EssentialsSettings";
 import { AdvancedSettings } from "./advanced/AdvancedSettings";
+import { SettingsHub } from "./SettingsHub";
+import { ModelsSettings } from "./models/ModelsSettings";
+import { nextSettingsNavigationRequest } from "./navigation";
+import { PromptLibrary } from "./prompts/PromptLibrary";
 
 const catalogue = JSON.parse(
   fs.readFileSync(
@@ -63,6 +68,10 @@ const paint = (
       <TooltipProvider>{node}</TooltipProvider>
     </I18nextProvider>,
   );
+};
+const activeTab = (markup: string): string => {
+  const start = markup.indexOf('data-state="active"');
+  return markup.slice(start, markup.indexOf("</button>", start));
 };
 
 const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -126,7 +135,13 @@ describe("Essentials", () => {
 
 describe("Advanced", () => {
   const markup = () =>
-    paint(<AdvancedSettings onOpenCatalog={() => {}} onOpenModes={() => {}} />);
+    paint(
+      <AdvancedSettings
+        onOpenCatalog={() => {}}
+        onOpenModes={() => {}}
+        onOpenPrompts={() => {}}
+      />,
+    );
 
   test("names the chord that opens Debug, since nothing links to it", () => {
     expect(markup()).toContain("Press \u2318\u21e7D to open the debug page.");
@@ -154,5 +169,76 @@ describe("Advanced", () => {
    * any of them reaches a reader here first. */
   test("resolves every string it renders", () => {
     expect(markup()).not.toContain("__MISSING__");
+  });
+});
+describe("settings navigation requests", () => {
+  test("plain Settings opens Essentials", () => {
+    const found = paint(<SettingsHub />);
+
+    expect(activeTab(found)).toContain("Essentials");
+  });
+
+  test("the agent target selects Advanced and reveals pairing", () => {
+    const found = paint(
+      <SettingsHub
+        navigationRequest={{
+          target: { tab: "advanced", section: "sonaAgent" },
+          nonce: 4,
+        }}
+      />,
+    );
+
+    expect(activeTab(found)).toContain("Advanced");
+    const openDetailsStart = found.indexOf('<details open=""');
+    const openDetails = found.slice(
+      openDetailsStart,
+      found.indexOf("</details>", openDetailsStart),
+    );
+    expect(openDetails).toMatch(/<summary[^>]*>Sona agent/);
+  });
+
+  test("repeating one destination still creates a new request", () => {
+    const target = { tab: "advanced", section: "meetings" } as const;
+    const first = nextSettingsNavigationRequest(null, target);
+    const second = nextSettingsNavigationRequest(first, target);
+
+    expect(first).toEqual({ target, nonce: 1 });
+    expect(second).toEqual({ target, nonce: 2 });
+  });
+});
+
+describe("the single prompt library", () => {
+  test("owns both prompt stores and one create action", () => {
+    const found = paint(<PromptLibrary />);
+
+    expect(found).toContain("Prompts");
+    expect(found).toContain(">Meetings</button>");
+    expect(found).toContain(">Dictation</button>");
+    expect(found.match(/data-testid="prompt-create"/g) ?? []).toHaveLength(1);
+    expect(found.match(/data-testid="prompt-library"/g) ?? []).toHaveLength(1);
+  });
+
+  test("Advanced links to prompts without mounting an editor", () => {
+    const found = paint(
+      <AdvancedSettings
+        onOpenCatalog={() => {}}
+        onOpenModes={() => {}}
+        onOpenPrompts={() => {}}
+      />,
+    );
+
+    expect(found).toContain("Prompts");
+    expect(found).toContain("Open");
+    expect(found).not.toContain('data-testid="prompt-library"');
+    expect(found).not.toContain("Reading your prompts ");
+  });
+
+  test("Models links to prompts without mounting an editor", () => {
+    useModelStore.setState({ loading: false, models: [] });
+    const found = paint(<ModelsSettings onOpenPrompts={() => {}} />);
+
+    expect(found).toContain("Post-processing prompts");
+    expect(found).toContain("Open");
+    expect(found).not.toContain('data-testid="prompt-library"');
   });
 });

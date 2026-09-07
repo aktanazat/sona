@@ -34,7 +34,7 @@ import {
 } from "@/components/vg/select";
 import { Textarea } from "@/components/vg/textarea";
 import { meetingErrorKey } from "./meetingUtils";
-import { promptTargetKeys, usePromptShellStore } from "./promptTargets";
+import { promptTargetKeys } from "./promptTargets";
 
 /* The prompts this Mac keeps, and the editor that writes one.
  *
@@ -78,16 +78,21 @@ const outputOf = (draft: Draft): PromptOutput =>
     ? { kind: "text" }
     : { kind: "schema", json_schema: draft.schema };
 
-export const MeetingPrompts: React.FC = () => {
+interface MeetingPromptsProps {
+  createRequest: number | null;
+  onCreateRequestHandled: (nonce: number) => void;
+}
+
+export const MeetingPrompts: React.FC<MeetingPromptsProps> = ({
+  createRequest,
+  onCreateRequestHandled,
+}) => {
   const { t } = useTranslation();
   const [list, setList] = useState<SavedPromptList | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const newPromptRequest = usePromptShellStore(
-    (state) => state.newPromptRequest,
-  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -110,12 +115,11 @@ export const MeetingPrompts: React.FC = () => {
     void refresh();
   }, [refresh]);
 
-  /* ⌘K's "New prompt" lands here. The first render is not a request, which is
-   * why the nonce starts at zero and this ignores it. */
   useEffect(() => {
-    if (newPromptRequest === 0) return;
+    if (createRequest === null) return;
     setDraft(blankDraft());
-  }, [newPromptRequest]);
+    onCreateRequestHandled(createRequest);
+  }, [createRequest, onCreateRequestHandled]);
 
   const save = async (draft: Draft) => {
     if (!list) return;
@@ -190,19 +194,7 @@ export const MeetingPrompts: React.FC = () => {
   }
 
   return (
-    <SettingsSection
-      label={t("prompts.title")}
-      action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setDraft(blankDraft())}
-        >
-          {t("prompts.new")}
-        </Button>
-      }
-    >
+    <SettingsSection label={t("prompts.title")}>
       <div className="px-6 py-3">
         <Microlabel>{t("prompts.description")}</Microlabel>
       </div>

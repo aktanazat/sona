@@ -8,6 +8,7 @@ import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 import { TooltipProvider } from "@/components/vg/tooltip";
 import { AppContent, type AppContentProps } from "@/App";
+import { AgentRequestsSurface } from "./chat/agentRequestsPanel";
 
 /* The shell: the rail's two doors, the three columns they move, and the drag
  * band the pane keeps.
@@ -416,5 +417,45 @@ describe("the fixed-window page scroll owner", () => {
 
     expect(scrollOwner).toContain("min-h-0");
     expect(scrollOwner).toContain("overflow-y-auto");
+  });
+});
+describe("chat agent requests", () => {
+  const surface = (
+    bridgeEnabled: boolean,
+    pendingCount: number,
+    open: boolean,
+  ) =>
+    paint(
+      <AgentRequestsSurface
+        bridgeEnabled={bridgeEnabled}
+        pendingCount={pendingCount}
+        open={open}
+        onOpen={() => {}}
+        onClose={() => {}}
+      >
+        <span data-testid="agent-request-queue">Queue</span>
+      </AgentRequestsSurface>,
+    );
+
+  test("stays absent when the bridge is off or the queue is empty", () => {
+    expect(surface(false, 2, false)).toBe("");
+    expect(surface(true, 0, false)).toBe("");
+  });
+
+  test("shows the pending count before opening the queue", () => {
+    const found = surface(true, 2, false);
+
+    expect(found).toContain('data-slot="agent-requests-entry"');
+    expect(found).toContain("Pending replies");
+    expect(found).toContain(">2<");
+    expect(found).not.toContain('data-testid="agent-request-queue"');
+  });
+
+  test("replaces the entry with the reply queue after opening", () => {
+    const found = surface(true, 2, true);
+
+    expect(found).toContain('data-slot="agent-requests-panel"');
+    expect(found).toContain('data-testid="agent-request-queue"');
+    expect(found).not.toContain('data-slot="agent-requests-entry"');
   });
 });

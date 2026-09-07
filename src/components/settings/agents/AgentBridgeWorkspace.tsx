@@ -7,9 +7,8 @@ import { Notice } from "@/components/settings/rows";
 import { useAgentBridgeSettings } from "./useAgentBridgeSettings";
 import { AgentBridgeControls } from "./AgentBridgeControls";
 import { AgentBridgeHook } from "./AgentBridgeHook";
-import { AgentBridgePendingReplies } from "./AgentBridgePendingReplies";
+import { AgentBridgeQueue } from "./AgentBridgeQueue";
 import { AgentBridgeProjects } from "./AgentBridgeProjects";
-import { AgentBridgeReplyComposer } from "./AgentBridgeReplyComposer";
 import { AgentBridgeRequests } from "./AgentBridgeRequests";
 import { AgentBridgeRules } from "./AgentBridgeRules";
 import { AgentBridgeSessions } from "./AgentBridgeSessions";
@@ -111,19 +110,7 @@ export const AgentBridgeWorkspace: React.FC = () => {
           />
         </TabsContent>
         <TabsContent value="queue" className="flex flex-col gap-10 pt-8">
-          <AgentBridgeReplyComposer
-            replySessionId={model.replySessionId}
-            replyText={model.replyText}
-            replySessions={model.replySessions}
-            interactiveReady={model.interactiveReady}
-            updateView={model.updateView}
-            createReplyPreview={model.createReplyPreview}
-          />
-          <AgentBridgePendingReplies
-            pendingMessages={model.pendingMessages}
-            confirmPending={model.confirmPending}
-            cancelPending={model.cancelPending}
-          />
+          <AgentBridgeQueue model={model} />
         </TabsContent>
         <TabsContent value="rules" className="pt-8">
           <AgentBridgeRules

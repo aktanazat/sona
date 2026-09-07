@@ -4,7 +4,7 @@ import { useAgentBridgeObservations } from "./useAgentBridgeObservations";
 
 /* The whole page reads one model: the observed state, the values derived from
  * it, and the actions that write it. */
-export const useAgentBridgeSettings = () => {
+export const useAgentBridgeSettings = (active = true) => {
   const { refreshSettings, settings } = useSettings();
   const {
     view,
@@ -12,7 +12,7 @@ export const useAgentBridgeSettings = () => {
     replySessions,
     expiryTimeFormatter,
     refreshObservations,
-  } = useAgentBridgeObservations(settings?.agent_bridge);
+  } = useAgentBridgeObservations(settings?.agent_bridge, active);
   const actions = useAgentBridgeActions({
     view,
     updateView,

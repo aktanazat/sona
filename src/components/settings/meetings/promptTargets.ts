@@ -23,16 +23,34 @@ import {
 interface PromptShellState {
   target: PromptTargetRef | null;
   newPromptRequest: number;
+  handledNewPromptRequest: number;
   setTarget: (target: PromptTargetRef | null) => void;
   requestNewPrompt: () => void;
+  consumeNewPromptRequest: (request: number) => boolean;
 }
 
 export const usePromptShellStore = create<PromptShellState>()((set) => ({
   target: null,
   newPromptRequest: 0,
+  handledNewPromptRequest: 0,
   setTarget: (target) => set({ target }),
   requestNewPrompt: () =>
     set((state) => ({ newPromptRequest: state.newPromptRequest + 1 })),
+  consumeNewPromptRequest: (request) => {
+    let consumed = false;
+    set((state) => {
+      if (
+        request === 0 ||
+        request !== state.newPromptRequest ||
+        request <= state.handledNewPromptRequest
+      ) {
+        return state;
+      }
+      consumed = true;
+      return { handledNewPromptRequest: request };
+    });
+    return consumed;
+  },
 }));
 
 /** The wire shape for one noun, from the two primitives a surface has. */

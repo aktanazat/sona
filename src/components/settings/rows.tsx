@@ -148,21 +148,25 @@ export const FactChip: React.FC<{
   </span>
 );
 
-export const SettingsSection: React.FC<{
-  label: string;
-  /** A control that belongs to the whole section, right of its label. */
-  action?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
-}> = ({ label, action, children, className }) => (
-  <section className={cn("flex flex-col gap-2", className)}>
+export const SettingsSection = React.forwardRef<
+  HTMLElement,
+  {
+    label: string;
+    /** A control that belongs to the whole section, right of its label. */
+    action?: React.ReactNode;
+    children: React.ReactNode;
+    className?: string;
+  }
+>(({ label, action, children, className }, ref) => (
+  <section ref={ref} className={cn("flex flex-col gap-2", className)}>
     <div className="flex min-h-5 items-center justify-between gap-4">
       <h2 className="text-[13px] leading-[18px] text-gray-900">{label}</h2>
       {action}
     </div>
     <div className={SETTINGS_SURFACE}>{children}</div>
   </section>
-);
+));
+SettingsSection.displayName = "SettingsSection";
 
 /**
  * `SettingsSection`'s surface without its label, for the one surface per tab
@@ -412,6 +416,8 @@ export const SettingsDisclosure: React.FC<{
   fact?: React.ReactNode;
   /** Mount children on first open instead of eagerly. */
   lazy?: boolean;
+  /** A changed request reopens and reveals this row. */
+  revealRequest?: number;
   /** Dims the label the way a disabled `SettingsRow` does. The body still
    * opens: it is the controls inside that refuse, and a reader who cannot see
    * from the heading that the whole section is inert has to open it to find
@@ -419,13 +425,36 @@ export const SettingsDisclosure: React.FC<{
   disabled?: boolean;
   children: React.ReactNode;
   className?: string;
-}> = ({ label, fact, lazy = false, disabled = false, children, className }) => {
-  const [opened, setOpened] = React.useState(!lazy);
+}> = ({
+  label,
+  fact,
+  lazy = false,
+  revealRequest,
+  disabled = false,
+  children,
+  className,
+}) => {
+  const detailsRef = React.useRef<HTMLDetailsElement>(null);
+  const [opened, setOpened] = React.useState(
+    !lazy || revealRequest !== undefined,
+  );
+  const [expanded, setExpanded] = React.useState(revealRequest !== undefined);
+
+  React.useEffect(() => {
+    if (revealRequest === undefined || detailsRef.current === null) return;
+    setOpened(true);
+    setExpanded(true);
+    detailsRef.current.scrollIntoView({ block: "start" });
+  }, [revealRequest]);
+
   return (
     <details
+      ref={detailsRef}
+      open={expanded}
       className={cn("group", className)}
       data-disabled={disabled || undefined}
       onToggle={(event) => {
+        setExpanded(event.currentTarget.open);
         if (event.currentTarget.open) setOpened(true);
       }}
     >

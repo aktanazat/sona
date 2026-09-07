@@ -37,6 +37,12 @@ import {
   type SidebarSection,
 } from "./components/sidebarSections";
 import { usePromptShellStore } from "./components/settings/meetings/promptTargets";
+import {
+  DEFAULT_SETTINGS_TARGET,
+  nextSettingsNavigationRequest,
+  type SettingsNavigationRequest,
+  type SettingsNavigationTarget,
+} from "./components/settings/navigation";
 import type { DictationRequest } from "./components/settings/history/HistorySettings";
 import { WhatsNewGate } from "./components/whats-new";
 import { useAudioImport } from "./hooks/useAudioImport";
@@ -83,7 +89,11 @@ interface SettingsContentProps {
   personRequest: PersonRequest | null;
   organizationRequest: OrganizationRequest | null;
   dictationRequest: DictationRequest | null;
-  onSectionChange: (section: SidebarSection) => void;
+  settingsNavigationRequest?: SettingsNavigationRequest | null;
+  onSectionChange: (
+    section: SidebarSection,
+    target?: SettingsNavigationTarget,
+  ) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenRecorder: () => void;
 }
@@ -96,6 +106,7 @@ const renderSettingsContent = ({
   personRequest,
   organizationRequest,
   dictationRequest,
+  settingsNavigationRequest,
   onSectionChange,
   onOpenMeeting,
   onOpenRecorder,
@@ -123,7 +134,9 @@ const renderSettingsContent = ({
         invalidation={meetingInvalidation}
         navigationRequest={meetingNavigationRequest}
         startRequest={meetingStartRequest}
-        onOpenSettings={() => onSectionChange("settings")}
+        onOpenSettings={() =>
+          onSectionChange("settings", { tab: "advanced", section: "meetings" })
+        }
       />
     );
   }
@@ -139,13 +152,26 @@ const renderSettingsContent = ({
     );
   }
 
+  if (section === "models") {
+    const ModelsComponent = SECTIONS_CONFIG.models.component;
+    return (
+      <ModelsComponent
+        onOpenPrompts={() => onSectionChange("settings", { tab: "prompts" })}
+      />
+    );
+  }
   if (section === "settings") {
     const SettingsComponent = SECTIONS_CONFIG.settings.component;
     /* Essentials and Advanced each hold one link row — dictation styles and
      * the model catalog — and both are destinations the rail no longer lists.
      * Routing is this component's job, so the hub gets the same callback the
      * rail and the palette use rather than a second way to change the view. */
-    return <SettingsComponent onOpenSection={onSectionChange} />;
+    return (
+      <SettingsComponent
+        navigationRequest={settingsNavigationRequest}
+        onOpenSection={onSectionChange}
+      />
+    );
   }
 
   const ActiveComponent =
@@ -187,7 +213,10 @@ export interface AppContentProps {
   onModelSelected: () => void;
   direction: LanguageDirection;
   currentSection: SidebarSection;
-  onSectionChange: (section: SidebarSection) => void;
+  onSectionChange: (
+    section: SidebarSection,
+    target?: SettingsNavigationTarget,
+  ) => void;
   onOpenMeeting: (meetingId: string) => void;
   onOpenRecorder: () => void;
   loadingLabel: string;
@@ -197,6 +226,7 @@ export interface AppContentProps {
   personRequest: PersonRequest | null;
   organizationRequest: OrganizationRequest | null;
   dictationRequest: DictationRequest | null;
+  settingsNavigationRequest?: SettingsNavigationRequest | null;
   commandOpen: boolean;
   commandActions: CommandPaletteAction[];
   commandSeed: SearchRequest | null;
@@ -231,6 +261,7 @@ export const AppContent = ({
   personRequest,
   organizationRequest,
   dictationRequest,
+  settingsNavigationRequest,
   commandOpen,
   commandActions,
   commandSeed,
@@ -393,6 +424,7 @@ export const AppContent = ({
                   personRequest,
                   organizationRequest,
                   dictationRequest,
+                  settingsNavigationRequest,
                   onSectionChange,
                   onOpenMeeting,
                   onOpenRecorder,
@@ -410,7 +442,12 @@ export const AppContent = ({
           open={chatShowing}
           panel={agentPanel}
           onClose={() => onChatOpenChange(false)}
-          onOpenSettings={() => onSectionChange("settings")}
+          onOpenSettings={() =>
+            onSectionChange("settings", {
+              tab: "advanced",
+              section: "sonaAgent",
+            })
+          }
         />
         <CommandPalette
           open={commandOpen}
@@ -429,7 +466,10 @@ interface CommandActionDeps {
   t: (key: string) => string;
   isMacos: boolean;
   agentEnabled: boolean;
-  onNavigate: (section: SidebarSection) => void;
+  onNavigate: (
+    section: SidebarSection,
+    target?: SettingsNavigationTarget,
+  ) => void;
   onNewMeeting: () => void;
   onImportAudio: () => void;
   onImportMeeting: () => void;
@@ -438,7 +478,7 @@ interface CommandActionDeps {
   onOpenRecorder: () => void;
 }
 
-const buildCommandActions = ({
+export const buildCommandActions = ({
   t,
   agentEnabled,
   isMacos,
@@ -497,7 +537,7 @@ const buildCommandActions = ({
      * action named "New prompt" that only scrolled you near one would be a
      * second press before anything happened. */
     run: () => {
-      onNavigate("settings");
+      onNavigate("settings", { tab: "prompts" });
       usePromptShellStore.getState().requestNewPrompt();
     },
   },
@@ -701,6 +741,8 @@ function App() {
   const [meetingNavigationRequest, setMeetingNavigationRequest] =
     useState<MeetingNavigationPayload | null>(null);
   const [meetingStartRequest, setMeetingStartRequest] = useState(0);
+  const [settingsNavigationRequest, setSettingsNavigationRequest] =
+    useState<SettingsNavigationRequest | null>(null);
   /* One modal at a time. The palette and the recorder cannot both be up, so
    * which one is up is a single value rather than two booleans that five
    * guards kept in agreement. `setPalette` is then the only place that says
@@ -741,9 +783,25 @@ function App() {
    * Transitions API is for. The deep-link handler below deliberately keeps the
    * raw setter: it moves three pieces of state at once, and snapshotting a
    * partial update would tear. */
-  const navigateToSection = useCallback((section: SidebarSection) => {
-    runViewTransition(() => setCurrentSection(section));
-  }, []);
+  const navigateToSection = useCallback(
+    (section: SidebarSection, target?: SettingsNavigationTarget) => {
+      runViewTransition(() => {
+        if (
+          section === "settings" &&
+          (currentSection !== "settings" || target !== undefined)
+        ) {
+          setSettingsNavigationRequest((current) =>
+            nextSettingsNavigationRequest(
+              current,
+              target ?? DEFAULT_SETTINGS_TARGET,
+            ),
+          );
+        }
+        setCurrentSection(section);
+      });
+    },
+    [currentSection],
+  );
 
   /* Overview meeting links reuse the same navigation payload consumed by deep
    * links. The meetings controller reloads the authoritative snapshot, so zero
@@ -817,7 +875,7 @@ function App() {
     let unsubscribe: (() => void) | null = null;
     void events.traySettingsRequested
       .listen(() => {
-        if (!disposed) setCurrentSection("settings");
+        if (!disposed) navigateToSection("settings");
       })
       .then((cleanup) => {
         if (disposed) cleanup();
@@ -827,7 +885,7 @@ function App() {
       disposed = true;
       unsubscribe?.();
     };
-  }, []);
+  }, [navigateToSection]);
 
   /* The other half of `sona://`. Meetings and loops arrive on the meeting
    * navigation event above, because a meeting has a lifecycle to navigate; the
@@ -1085,6 +1143,7 @@ function App() {
         personRequest={personRequest}
         organizationRequest={organizationRequest}
         dictationRequest={dictationRequest}
+        settingsNavigationRequest={settingsNavigationRequest}
         chatOpen={chatOpen}
         onChatOpenChange={setChatOpen}
         commandOpen={commandOpen}

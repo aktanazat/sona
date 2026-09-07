@@ -1,5 +1,5 @@
-import React, { useId, useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import React, { useEffect, useId, useState } from "react";
+import { Pencil, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { commands, type LLMPrompt, type Result } from "@/bindings";
 import { Badge } from "@/components/vg/badge";
@@ -44,7 +44,15 @@ const EMPTY_PROMPTS: LLMPrompt[] = [];
  * Sona sends to the LLM after transcription. The selected prompt is the one a
  * mode without its own prompt starts from.
  */
-export const PromptLibrary: React.FC = () => {
+interface DictationPromptsProps {
+  createRequest: number | null;
+  onCreateRequestHandled: (nonce: number) => void;
+}
+
+export const DictationPrompts: React.FC<DictationPromptsProps> = ({
+  createRequest,
+  onCreateRequestHandled,
+}) => {
   const { t } = useTranslation();
   const { settings, isLoading, refreshSettings } = useSettings();
   const nameFieldId = useId();
@@ -55,6 +63,12 @@ export const PromptLibrary: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
+  useEffect(() => {
+    if (createRequest === null) return;
+    setDraftError(null);
+    setDraft({ id: "", name: "", prompt: "" });
+    onCreateRequestHandled(createRequest);
+  }, [createRequest, onCreateRequestHandled]);
 
   const prompts = settings?.post_process_prompts ?? EMPTY_PROMPTS;
   const selectedId = settings?.post_process_selected_prompt_id ?? null;
@@ -235,27 +249,10 @@ export const PromptLibrary: React.FC = () => {
 
   return (
     <>
-      <SettingsSection
-        label={sectionLabel}
-        action={
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() => {
-              setDraftError(null);
-              setDraft({ id: "", name: "", prompt: "" });
-            }}
-            data-testid="prompt-create"
-          >
-            <Plus aria-hidden="true" />
-            {t("settings.postProcessing.prompts.createNew")}
-          </Button>
-        }
-      >
+      <SettingsSection label={sectionLabel}>
         <div
           className="divide-y divide-gray-alpha-400"
-          data-testid="prompt-library"
+          data-testid="dictation-prompt-list"
         >
           {library()}
 

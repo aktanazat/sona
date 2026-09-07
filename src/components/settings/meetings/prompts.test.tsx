@@ -10,7 +10,11 @@ import type { PromptRun, PromptRunResult } from "@/bindings";
 import { TooltipProvider } from "@/components/vg/tooltip";
 import { MeetingPrompts } from "./MeetingPrompts";
 import { PromptRunBody } from "./review/PromptResults";
-import { promptFailureKeys, promptTargetRef } from "./promptTargets";
+import {
+  promptFailureKeys,
+  promptTargetRef,
+  usePromptShellStore,
+} from "./promptTargets";
 
 /* Saved prompts, at the three moments a reader meets them: the list before it
  * has read anything, an answer in each of its three shapes, and the ref a
@@ -63,7 +67,9 @@ const run = (result: PromptRunResult): PromptRun => ({
 
 describe("saved prompts", () => {
   test("the list says what it is before it has read anything", () => {
-    const markup = render(<MeetingPrompts />);
+    const markup = render(
+      <MeetingPrompts createRequest={null} onCreateRequestHandled={() => {}} />,
+    );
 
     expect(markup).toContain("Prompts");
     expect(markup).toContain("Reading your prompts…");
@@ -127,5 +133,27 @@ describe("saved prompts", () => {
       kind: "series",
       series_key: "weekly",
     });
+  });
+  test("each create request is consumed once", () => {
+    usePromptShellStore.setState({
+      newPromptRequest: 0,
+      handledNewPromptRequest: 0,
+    });
+    usePromptShellStore.getState().requestNewPrompt();
+    const first = usePromptShellStore.getState().newPromptRequest;
+
+    expect(usePromptShellStore.getState().consumeNewPromptRequest(first)).toBe(
+      true,
+    );
+    expect(usePromptShellStore.getState().consumeNewPromptRequest(first)).toBe(
+      false,
+    );
+
+    usePromptShellStore.getState().requestNewPrompt();
+    const second = usePromptShellStore.getState().newPromptRequest;
+    expect(second).toBe(first + 1);
+    expect(usePromptShellStore.getState().consumeNewPromptRequest(second)).toBe(
+      true,
+    );
   });
 });
