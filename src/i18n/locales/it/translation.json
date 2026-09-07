@@ -2414,6 +2414,7 @@
         "calendarDenied": "L'accesso al calendario non è stato concesso, quindi funziona solo la via del microfono.",
         "notificationsDenied": "Le notifiche sono disattivate per Sona, quindi gli avvisi appaiono solo nell'app.",
         "bluetoothCaveat": "Un'app di riunione è aperta ma nulla segnala l'uso del microfono. Le cuffie Bluetooth spesso non lo fanno, quindi avvia la riunione tu se ce n'è una in corso.",
+        "adoptedCall": "Questa registrazione si interrompe quando termina la chiamata su {{app}}.",
         "noSilenceStop": "La registrazione si interrompe quando l'evento termina, la chiamata finisce, l'app si chiude, il Mac va in stop o la fermi tu. Nulla la interrompe per il silenzio: servirebbe la trascrizione in tempo reale, che avviene solo dopo la fine di una riunione."
       },
       "why": {

@@ -2406,6 +2406,7 @@
         "calendarDenied": "Kalenderzugriff wurde nicht erteilt, daher läuft nur der Mikrofonweg.",
         "notificationsDenied": "Mitteilungen sind für Sona aus, Hinweise erscheinen daher nur in der App.",
         "bluetoothCaveat": "Eine Besprechungs-App ist offen, aber nichts meldet Mikrofonnutzung. Bluetooth-Headsets tun das oft nicht, starten Sie die Besprechung also selbst, wenn eine läuft.",
+        "adoptedCall": "Diese Aufnahme endet, wenn der Anruf in {{app}} endet.",
         "noSilenceStop": "Die Aufnahme endet, wenn der Termin endet, der Anruf endet, die App beendet wird, dein Mac in den Ruhezustand geht oder du sie selbst stoppst. Stille beendet sie nicht: Dafür wäre eine Live-Transkription nötig, die erst nach dem Ende eines Meetings läuft."
       },
       "why": {

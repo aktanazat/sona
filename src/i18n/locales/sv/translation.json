@@ -2406,6 +2406,7 @@
         "calendarDenied": "Kalenderåtkomst gavs inte, så bara mikrofonvägen körs.",
         "notificationsDenied": "Aviseringar är av för Sona, så frågor visas bara i appen.",
         "bluetoothCaveat": "En mötesapp är öppen men ingenting rapporterar mikrofonanvändning. Bluetooth-headset gör ofta inte det, så starta mötet själv om ett pågår.",
+        "adoptedCall": "Den här inspelningen stoppas när samtalet i {{app}} avslutas.",
         "noSilenceStop": "Inspelningen stoppas när händelsen slutar, samtalet avslutas, appen avslutas, din Mac går i vila eller du stoppar den själv. Inget stoppar den på grund av tystnad: det skulle kräva transkription i realtid, som bara körs efter att ett möte har avslutats."
       },
       "why": {

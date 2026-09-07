@@ -2422,6 +2422,7 @@
         "calendarDenied": "Přístup ke kalendáři nebyl udělen, běží tedy jen cesta přes mikrofon.",
         "notificationsDenied": "Oznámení jsou pro Sonu vypnutá, dotazy se proto objevují jen v aplikaci.",
         "bluetoothCaveat": "Aplikace pro schůzky je otevřená, ale nic nehlásí použití mikrofonu. Bluetooth sluchátka to často nehlásí, takže pokud schůzka běží, spusťte ji sami.",
+        "adoptedCall": "Toto nahrávání se zastaví, až hovor v aplikaci {{app}} skončí.",
         "noSilenceStop": "Nahrávání se zastaví, když skončí událost, skončí hovor, aplikace se ukončí, Mac se uspí nebo ho zastavíte sami. Ticho ho nezastaví: to by vyžadovalo živý přepis, který běží až po skončení schůzky."
       },
       "why": {

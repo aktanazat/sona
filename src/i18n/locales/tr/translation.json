@@ -2406,6 +2406,7 @@
         "calendarDenied": "Takvim erişimi verilmedi, bu yüzden yalnızca mikrofon yolu çalışıyor.",
         "notificationsDenied": "Sona için bildirimler kapalı, bu yüzden uyarılar yalnızca uygulamada görünür.",
         "bluetoothCaveat": "Bir toplantı uygulaması açık ama hiçbir şey mikrofon kullanımı bildirmiyor. Bluetooth kulaklıklar bunu sık sık bildirmez; bir toplantı sürüyorsa kaydı kendiniz başlatın.",
+        "adoptedCall": "Bu kayıt, {{app}} araması sona erdiğinde durur.",
         "noSilenceStop": "Kayıt; etkinlik bittiğinde, arama sona erdiğinde, uygulama kapandığında, Mac'iniz uykuya geçtiğinde ya da siz durdurduğunuzda durur. Sessizlik nedeniyle durmaz: bunun için canlı transkripsiyon gerekir, o da yalnızca toplantı bittikten sonra çalışır."
       },
       "why": {

@@ -2406,6 +2406,7 @@
         "calendarDenied": "Agendatoegang is niet gegeven, dus alleen de microfoonroute loopt.",
         "notificationsDenied": "Meldingen staan uit voor Sona, dus meldingen verschijnen alleen in de app.",
         "bluetoothCaveat": "Er staat een vergaderapp open maar niets meldt microfoongebruik. Bluetooth-headsets doen dat vaak niet, dus start de vergadering zelf als er een loopt.",
+        "adoptedCall": "Deze opname stopt wanneer het gesprek in {{app}} eindigt.",
         "noSilenceStop": "De opname stopt wanneer de afspraak eindigt, het gesprek eindigt, de app wordt afgesloten, je Mac in de sluimerstand gaat, of wanneer je hem zelf stopt. Niets stopt hem bij stilte: daarvoor zou live transcriptie nodig zijn, en die draait pas nadat een vergadering is afgelopen."
       },
       "why": {

@@ -178,6 +178,21 @@ pub enum CallSignal {
         frontmost: bool,
     },
 }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedCall {
+    pub bundle_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OperatorCapture {
+    Waiting,
+    Adopted {
+        call: AdoptedCall,
+        watch: CallOutputWatch,
+    },
+}
 
 /// State of the default input device, as reported by CoreAudio's
 /// `kAudioDevicePropertyDeviceIsRunningSomewhere`.
@@ -549,6 +564,30 @@ pub fn call_is_live(
     let other_meeting_app_running =
         matches!(app, AppSignal::Known { .. } | AppSignal::Present { .. });
     (mic == MicSignal::Active && !other_meeting_app_running) || output == OutputSignal::Active
+}
+
+/// The first live call seen by a hand-started capture. An adopted call is
+/// stable for the rest of that capture, even when another call becomes live.
+pub fn adopt_operator_call(
+    capture: &OperatorCapture,
+    call: &CallSignal,
+    call_live: bool,
+) -> Option<AdoptedCall> {
+    if !matches!(capture, OperatorCapture::Waiting) || !call_live {
+        return None;
+    }
+    let CallSignal::Running {
+        bundle_id,
+        display_name,
+        ..
+    } = call
+    else {
+        return None;
+    };
+    Some(AdoptedCall {
+        bundle_id: bundle_id.clone(),
+        display_name: display_name.clone(),
+    })
 }
 
 /// Whether the evidence for a call that was already attributed is still
@@ -1819,6 +1858,115 @@ mod tests {
 
         assert_eq!(trigger, Some(StopTrigger::SleepBoundary));
     }
+
+    #[test]
+    fn operator_capture_adopts_a_live_call_on_first_tick() {
+        let call = facetime(true);
+        let call_live = call_is_live(
+            &call,
+            &AppSignal::Absent,
+            MicSignal::Idle,
+            OutputSignal::Active,
+        );
+
+        assert_eq!(
+            adopt_operator_call(&OperatorCapture::Waiting, &call, call_live),
+            Some(AdoptedCall {
+                bundle_id: "com.apple.facetime".to_string(),
+                display_name: "FaceTime".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn operator_capture_adopts_first_later_call_once() {
+        let mut capture = OperatorCapture::Waiting;
+        assert_eq!(
+            adopt_operator_call(&capture, &CallSignal::Absent, false),
+            None
+        );
+
+        capture = OperatorCapture::Adopted {
+            call: adopt_operator_call(&capture, &facetime(true), true)
+                .expect("the first live call is adopted"),
+            watch: CallOutputWatch::default(),
+        };
+        let later_call = CallSignal::Running {
+            bundle_id: "com.apple.mobilephone".to_string(),
+            display_name: "Phone".to_string(),
+            frontmost: true,
+        };
+
+        assert_eq!(adopt_operator_call(&capture, &later_call, true), None);
+        assert!(matches!(
+            capture,
+            OperatorCapture::Adopted {
+                call: AdoptedCall { ref bundle_id, .. },
+                ..
+            } if bundle_id == "com.apple.facetime"
+        ));
+    }
+
+    #[test]
+    fn evaluate_stop_precedence_favors_the_earliest_trigger() {
+        let mut watch = CallOutputWatch::default();
+        watch.observe(OutputSignal::Active, NOW);
+        watch.observe(OutputSignal::Idle, NOW + 1_000);
+        let hung_up = StopInputs {
+            now_utc_ms: NOW + 1_000 + CALL_HANGUP_GRACE_MS,
+            linked_event_end_utc_ms: None,
+            self_holds_input_device: false,
+            device_running_somewhere: false,
+            microphone_lane: false,
+            call_output: Some(watch),
+            trigger_app_running: true,
+            slept_since_start: false,
+        };
+
+        assert_eq!(
+            evaluate_stop(&StopInputs {
+                slept_since_start: true,
+                linked_event_end_utc_ms: Some(NOW),
+                trigger_app_running: false,
+                ..hung_up
+            }),
+            Some(StopTrigger::SleepBoundary)
+        );
+        assert_eq!(
+            evaluate_stop(&StopInputs {
+                linked_event_end_utc_ms: Some(NOW),
+                trigger_app_running: false,
+                ..hung_up
+            }),
+            Some(StopTrigger::EventEnd)
+        );
+        assert_eq!(
+            evaluate_stop(&StopInputs {
+                trigger_app_running: false,
+                ..hung_up
+            }),
+            Some(StopTrigger::TriggerAppExited)
+        );
+        assert_eq!(evaluate_stop(&hung_up), Some(StopTrigger::CallEnded));
+    }
+
+    #[test]
+    fn operator_capture_does_not_adopt_a_background_call() {
+        let call = facetime(false);
+        let call_live = call_is_live(
+            &call,
+            &AppSignal::Absent,
+            MicSignal::Idle,
+            OutputSignal::Active,
+        );
+
+        assert!(!call_live);
+        assert_eq!(
+            adopt_operator_call(&OperatorCapture::Waiting, &call, call_live),
+            None
+        );
+    }
+
     #[test]
     fn a_call_is_live_on_the_output_signal_alone() {
         let outcome = evaluate(&granted_call_on_output_only(), &DetectionPolicy::default());

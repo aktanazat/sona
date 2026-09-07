@@ -2414,6 +2414,7 @@
         "calendarDenied": "O acesso ao calendário não foi concedido, então só o caminho do microfone funciona.",
         "notificationsDenied": "As notificações estão desativadas para o Sona, então os avisos aparecem apenas no app.",
         "bluetoothCaveat": "Um app de reunião está aberto mas nada relata uso do microfone. Fones Bluetooth muitas vezes não relatam, então inicie a reunião você mesmo se houver uma em andamento.",
+        "adoptedCall": "Esta gravação para quando a chamada no {{app}} termina.",
         "noSilenceStop": "A gravação para quando o evento termina, a chamada termina, a app é encerrada, o seu Mac entra em repouso ou quando a parar manualmente. Nada a para por silêncio: isso exigiria transcrição em direto, que só corre depois de uma reunião terminar."
       },
       "why": {

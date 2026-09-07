@@ -101,6 +101,11 @@ export interface DetectionCountdown {
   briefing: PersonBriefingRow[];
 }
 
+export interface AdoptedCall {
+  bundleId: string;
+  displayName: string;
+}
+
 export interface DetectionStatus {
   eventSchemaVersion: number;
   settings: DetectionSettings;
@@ -110,6 +115,7 @@ export interface DetectionStatus {
   sonaHoldsInputDevice: boolean;
   suppressReason: DetectionSuppressReason | null;
   countdown: DetectionCountdown | null;
+  adoptedCall: AdoptedCall | null;
   runningMeetingApps: string[];
   inputDeviceReportingSuspect: boolean;
 }

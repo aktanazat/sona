@@ -289,6 +289,8 @@ pub struct DetectionStatus {
     /// Why detection is quiet, when it is.
     pub suppress_reason: Option<SuppressReason>,
     pub countdown: Option<DetectionCountdown>,
+    /// The call a hand-started capture adopted as its stop trigger.
+    pub adopted_call: Option<machine::AdoptedCall>,
     /// Allowlisted bundle IDs whose application is running right now. Empty is a
     /// legitimate answer and the settings UI shows it as such.
     pub running_meeting_apps: Vec<String>,
@@ -372,24 +374,38 @@ impl PendingPanel {
         matches!(self, Self::Prompt(_))
     }
 }
-/// A capture detection started, and what stops it.
+/// A capture detection is watching, and what may stop it.
 #[derive(Clone, Debug)]
 struct TrackedCapture {
     session_id: MeetingSessionId,
-    trigger_bundle_id: Option<String>,
-    event_end_utc_ms: Option<i64>,
-    /// The lanes the session actually started, as its snapshot reported them.
-    /// A stop rule about a device applies only to a capture listening to it.
-    sources: Vec<SourceKind>,
-    /// What the default output device has done since a call app's trigger tied
-    /// this capture to a call. Only that trigger arms it, and only at start:
-    /// the output reading is device-wide, so what it does says nothing about a
-    /// capture no call app started.
-    call_output: Option<machine::CallOutputWatch>,
+    kind: TrackedCaptureKind,
+}
+
+#[derive(Clone, Debug)]
+enum TrackedCaptureKind {
+    Detection {
+        trigger_bundle_id: Option<String>,
+        event_end_utc_ms: Option<i64>,
+        /// The lanes the session actually started, as its snapshot reported them.
+        /// A stop rule about a device applies only to a capture listening to it.
+        sources: Vec<SourceKind>,
+        /// What the default output device has done since a call app's trigger tied
+        /// this capture to a call. Only that trigger arms it, and only at start.
+        call_output: Option<machine::CallOutputWatch>,
+    },
+    Operator(machine::OperatorCapture),
+}
+struct CaptureTick<'a> {
+    running: &'a [RunningApp],
+    mic: MicSignal,
+    output: OutputSignal,
+    sona_holds: bool,
+    call: &'a machine::CallSignal,
+    call_live: bool,
 }
 
 impl TrackedCapture {
-    fn new(
+    fn detection(
         snapshot: &MeetingSessionSnapshot,
         trigger_bundle_id: Option<String>,
         event_end_utc_ms: Option<i64>,
@@ -400,33 +416,55 @@ impl TrackedCapture {
             .then(machine::CallOutputWatch::default);
         Self {
             session_id: snapshot.session_id,
-            trigger_bundle_id,
-            event_end_utc_ms,
-            sources: snapshot
-                .sources
-                .iter()
-                .map(|source| source.source_kind)
-                .collect(),
-            call_output,
+            kind: TrackedCaptureKind::Detection {
+                trigger_bundle_id,
+                event_end_utc_ms,
+                sources: snapshot
+                    .sources
+                    .iter()
+                    .map(|source| source.source_kind)
+                    .collect(),
+                call_output,
+            },
         }
     }
 
-    /// Folds this tick's output level into the watch a call app's trigger armed
-    /// at start, and hands it back for the stop rule to read. `None` when this
-    /// capture was never tied to a call.
+    fn operator(snapshot: &MeetingSessionSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id,
+            kind: TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting),
+        }
+    }
+
+    fn keeps_runtime_active(&self) -> bool {
+        matches!(
+            self.kind,
+            TrackedCaptureKind::Detection { .. }
+                | TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted { .. })
+        )
+    }
+
     fn observe_call_output(
         &mut self,
         output: OutputSignal,
         now_utc_ms: i64,
     ) -> Option<machine::CallOutputWatch> {
-        let watch = self.call_output.as_mut()?;
+        let watch = match &mut self.kind {
+            TrackedCaptureKind::Detection { call_output, .. } => call_output.as_mut()?,
+            TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => return None,
+            TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted { watch, .. }) => watch,
+        };
         watch.observe(output, now_utc_ms);
         Some(*watch)
     }
 
-    /// True when this capture records the default input device itself.
     fn microphone_lane(&self) -> bool {
-        self.sources.contains(&SourceKind::Microphone)
+        match &self.kind {
+            TrackedCaptureKind::Detection { sources, .. } => {
+                sources.contains(&SourceKind::Microphone)
+            }
+            TrackedCaptureKind::Operator(_) => false,
+        }
     }
 }
 
@@ -501,6 +539,37 @@ impl RuntimeState {
             .as_mut()
             .filter(|tracked| tracked.session_id == session_id)?;
         tracked.observe_call_output(output, now_utc_ms)
+    }
+
+    fn adopt_operator_call(
+        &mut self,
+        session_id: MeetingSessionId,
+        call: &machine::CallSignal,
+        call_live: bool,
+    ) -> Option<machine::AdoptedCall> {
+        let tracked = self
+            .tracked
+            .as_mut()
+            .filter(|tracked| tracked.session_id == session_id)?;
+        let TrackedCaptureKind::Operator(capture) = &mut tracked.kind else {
+            return None;
+        };
+        let adopted = machine::adopt_operator_call(capture, call, call_live)?;
+        *capture = machine::OperatorCapture::Adopted {
+            call: adopted.clone(),
+            watch: machine::CallOutputWatch::default(),
+        };
+        self.slept = false;
+        Some(adopted)
+    }
+
+    fn adopted_call(&self) -> Option<machine::AdoptedCall> {
+        match self.tracked.as_ref().map(|tracked| &tracked.kind) {
+            Some(TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted {
+                call, ..
+            })) => Some(call.clone()),
+            _ => None,
+        }
     }
 
     /// Raises the recording card for the tracked capture into the panel slot.
@@ -739,10 +808,12 @@ impl DetectionRuntime {
         let mut previous_monotonic = Instant::now();
 
         while !self.stop.load(Ordering::Acquire) {
-            let interval = tick_interval(
-                self.enabled.load(Ordering::Acquire),
-                self.lock().tracked.is_some(),
-            );
+            let tracking_capture = self
+                .lock()
+                .tracked
+                .as_ref()
+                .is_some_and(TrackedCapture::keeps_runtime_active);
+            let interval = tick_interval(self.enabled.load(Ordering::Acquire), tracking_capture);
             let Some(interval) = interval else {
                 // Dropping the monitor unregisters its CoreAudio listener. The
                 // condition wait has no deadline, so disabled detection has no
@@ -764,12 +835,12 @@ impl DetectionRuntime {
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
-            if tick_interval(
-                self.enabled.load(Ordering::Acquire),
-                self.lock().tracked.is_some(),
-            )
-            .is_none()
-            {
+            let tracking_capture = self
+                .lock()
+                .tracked
+                .as_ref()
+                .is_some_and(TrackedCapture::keeps_runtime_active);
+            if tick_interval(self.enabled.load(Ordering::Acquire), tracking_capture).is_none() {
                 continue;
             }
 
@@ -873,14 +944,14 @@ impl DetectionRuntime {
         };
 
         let tracked = self.lock().tracked.clone();
-        // Level 1 of the retreat path is meant literally: with the master
-        // toggle off there is no calendar query, no application enumeration,
-        // and no store read. The single exception is a capture detection itself
-        // started — its stop triggers need to see whether the triggering app is
-        // still alive, and dropping that would leave a capture running that
-        // nothing is watching. `evaluate` short-circuits on `!enabled` before it
-        // reads any signal, so an empty list here cannot change an outcome.
-        let running = if policy.enabled || tracked.is_some() {
+        // With the master toggle off there is no calendar query, application
+        // enumeration, or store read. Detection-started captures and operator
+        // captures that already adopted a call stay alive so their stop triggers
+        // still fire; a waiting operator capture parks with the disabled loop.
+        let keeps_runtime_active = tracked
+            .as_ref()
+            .is_some_and(TrackedCapture::keeps_runtime_active);
+        let running = if policy.enabled || keeps_runtime_active {
             self.running_apps.running_apps()
         } else {
             Vec::new()
@@ -961,10 +1032,14 @@ impl DetectionRuntime {
             self.evaluate_running_capture(
                 &tracked,
                 active.as_ref(),
-                &running,
-                mic,
-                output,
-                sona_holds,
+                CaptureTick {
+                    running: &running,
+                    mic,
+                    output,
+                    sona_holds,
+                    call: &call,
+                    call_live,
+                },
             );
         }
 
@@ -2029,7 +2104,7 @@ impl DetectionRuntime {
         let trigger_bundle_id = context.trigger_bundle_id.clone();
         let mut state = self.lock();
         state.begin_tracked(
-            TrackedCapture::new(snapshot, trigger_bundle_id, context.event_end_utc_ms),
+            TrackedCapture::detection(snapshot, trigger_bundle_id, context.event_end_utc_ms),
             RecentCapture {
                 session_id: snapshot.session_id.uuid().to_string(),
                 started_utc_ms: utc_now_ms(),
@@ -2050,6 +2125,20 @@ impl DetectionRuntime {
             }
         }
         self.apply_panel_commands(&mut state, capture.commands);
+    }
+
+    pub fn track_started_by_operator(self: &Arc<Self>, snapshot: &MeetingSessionSnapshot) {
+        let settings = crate::settings::get_settings(&self.app);
+        if !policy_from_settings(&settings).enabled {
+            return;
+        }
+        self.lock().begin_tracked(
+            TrackedCapture::operator(snapshot),
+            RecentCapture {
+                session_id: snapshot.session_id.uuid().to_string(),
+                started_utc_ms: utc_now_ms(),
+            },
+        );
     }
 
     /// Raises the auto-record card into the panel `begin_capture` just took
@@ -2083,16 +2172,19 @@ impl DetectionRuntime {
 
     pub fn track_ended(self: &Arc<Self>, session_id: MeetingSessionId) {
         let mut state = self.lock();
-        if state.end_tracked(session_id).is_none() {
+        let Some(tracked) = state.end_tracked(session_id) else {
             return;
+        };
+        if matches!(tracked.kind, TrackedCaptureKind::Detection { .. }) {
+            let commands = state.panel.end_capture();
+            self.apply_panel_commands(&mut state, commands);
         }
-        let commands = state.panel.end_capture();
-        self.apply_panel_commands(&mut state, commands);
         let card = state.recording_card_id(session_id);
         drop(state);
         if let Some(ritual_id) = card {
             self.finish_ritual(&ritual_id);
         }
+        self.publish_adopted_call_status();
     }
 
     /// The one place detection touches capture, and it touches only the entry
@@ -2157,7 +2249,7 @@ impl DetectionRuntime {
             }
         }
         self.lock().begin_tracked(
-            TrackedCapture::new(&snapshot, trigger_bundle_id, event_end_utc_ms),
+            TrackedCapture::detection(&snapshot, trigger_bundle_id, event_end_utc_ms),
             RecentCapture {
                 session_id: snapshot.session_id.uuid().to_string(),
                 started_utc_ms: now_utc_ms,
@@ -2177,14 +2269,11 @@ impl DetectionRuntime {
         self: &Arc<Self>,
         tracked: &TrackedCapture,
         active: Option<&MeetingSessionSnapshot>,
-        running: &[RunningApp],
-        mic: MicSignal,
-        output: OutputSignal,
-        sona_holds: bool,
+        tick: CaptureTick<'_>,
     ) {
         let Some(active) = active else {
             // The capture ended by some other route. Stop tracking it, but keep
-            // `recent` so the cross-link window still applies.
+            // recent so the cross-link window still applies.
             self.track_ended(tracked.session_id);
             return;
         };
@@ -2193,30 +2282,74 @@ impl DetectionRuntime {
             return;
         }
         let now_utc_ms = utc_now_ms();
-        let (slept, call_output) = {
-            let mut state = self.lock();
-            let call_output = state.observe_call_output(tracked.session_id, output, now_utc_ms);
-            (state.slept, call_output)
+        let trigger = match &tracked.kind {
+            TrackedCaptureKind::Detection {
+                trigger_bundle_id,
+                event_end_utc_ms,
+                ..
+            } => {
+                let (slept, call_output) = {
+                    let mut state = self.lock();
+                    let call_output =
+                        state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
+                    (state.slept, call_output)
+                };
+                evaluate_stop(&StopInputs {
+                    now_utc_ms,
+                    linked_event_end_utc_ms: *event_end_utc_ms,
+                    self_holds_input_device: tick.sona_holds,
+                    device_running_somewhere: tick.mic == MicSignal::Active,
+                    microphone_lane: tracked.microphone_lane(),
+                    call_output,
+                    trigger_app_running: trigger_bundle_id
+                        .as_deref()
+                        .is_none_or(|bundle_id| apps::is_app_running(tick.running, bundle_id)),
+                    slept_since_start: slept,
+                })
+            }
+            TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => {
+                let adopted = {
+                    let mut state = self.lock();
+                    state.adopt_operator_call(tracked.session_id, tick.call, tick.call_live)
+                };
+                let Some(adopted) = adopted else {
+                    return;
+                };
+                log::info!(
+                    "Meeting capture {} adopted the {} call as its stop trigger",
+                    tracked.session_id.uuid(),
+                    adopted.display_name
+                );
+                self.publish_adopted_call_status();
+                return;
+            }
+            TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted {
+                call: adopted,
+                ..
+            }) => {
+                let (slept, call_output) = {
+                    let mut state = self.lock();
+                    let call_output =
+                        state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
+                    (state.slept, call_output)
+                };
+                evaluate_stop(&StopInputs {
+                    now_utc_ms,
+                    linked_event_end_utc_ms: None,
+                    self_holds_input_device: tick.sona_holds,
+                    device_running_somewhere: tick.mic == MicSignal::Active,
+                    microphone_lane: false,
+                    call_output,
+                    trigger_app_running: apps::is_app_running(tick.running, &adopted.bundle_id),
+                    slept_since_start: slept,
+                })
+            }
         };
-        let inputs = StopInputs {
-            now_utc_ms,
-            linked_event_end_utc_ms: tracked.event_end_utc_ms,
-            self_holds_input_device: sona_holds,
-            device_running_somewhere: mic == MicSignal::Active,
-            microphone_lane: tracked.microphone_lane(),
-            trigger_app_running: tracked
-                .trigger_bundle_id
-                .as_deref()
-                .is_none_or(|bundle_id| apps::is_app_running(running, bundle_id)),
-            slept_since_start: slept,
-            call_output,
-        };
-        let Some(trigger) = evaluate_stop(&inputs) else {
+        let Some(trigger) = trigger else {
             return;
         };
-        // `stop` logs the committed stop and its cause; this names the trigger
-        // at the instant the decision was taken, before the spawn that carries
-        // it out can fail.
+        // The session stop logs the committed stop and its cause. This names the
+        // trigger before the spawned task carries it out and can fail.
         log::info!("Meeting detection is stopping capture on {trigger:?}");
         let runtime = Arc::clone(self);
         let meetings = Arc::clone(&self.meetings);
@@ -2272,6 +2405,22 @@ impl DetectionRuntime {
             })
     }
 
+    fn publish_adopted_call_status(&self) {
+        let status = {
+            let mut state = self.lock();
+            let adopted_call = state.adopted_call();
+            let Some(status) = state.last_status.as_mut() else {
+                return;
+            };
+            if status.adopted_call == adopted_call {
+                return;
+            }
+            status.adopted_call = adopted_call;
+            status.clone()
+        };
+        let _ = status.emit(&self.app);
+    }
+
     fn publish_status(
         &self,
         settings: &AppSettings,
@@ -2296,6 +2445,7 @@ impl DetectionRuntime {
             && running_meeting_apps
                 .iter()
                 .any(|bundle_id| !apps::is_call_app_bundle_id(bundle_id));
+        let adopted_call = self.lock().adopted_call();
         let status = DetectionStatus {
             event_schema_version: DETECTION_EVENT_SCHEMA_VERSION,
             settings: DetectionSettings::from_app_settings(settings),
@@ -2305,6 +2455,7 @@ impl DetectionRuntime {
             sona_holds_input_device: sona_holds,
             suppress_reason,
             countdown,
+            adopted_call,
             running_meeting_apps,
             input_device_reporting_suspect,
         };
@@ -2327,21 +2478,25 @@ impl DetectionRuntime {
     /// The status the frontend reads on mount, before any tick has fired.
     pub fn status(&self) -> DetectionStatus {
         let settings = crate::settings::get_settings(&self.app);
-        self.lock()
-            .last_status
-            .clone()
-            .unwrap_or_else(|| DetectionStatus {
-                event_schema_version: DETECTION_EVENT_SCHEMA_VERSION,
-                settings: DetectionSettings::from_app_settings(&settings),
-                calendar_access: self.calendar.access(),
-                notification_access: self.prompts.access(),
-                input_device_active: self.input.mic_signal() == MicSignal::Active,
-                sona_holds_input_device: self.self_lease.is_held(),
-                suppress_reason: None,
-                countdown: None,
-                running_meeting_apps: Vec::new(),
-                input_device_reporting_suspect: false,
-            })
+        let (last_status, adopted_call) = {
+            let state = self.lock();
+            (state.last_status.clone(), state.adopted_call())
+        };
+        let mut status = last_status.unwrap_or_else(|| DetectionStatus {
+            event_schema_version: DETECTION_EVENT_SCHEMA_VERSION,
+            settings: DetectionSettings::from_app_settings(&settings),
+            calendar_access: self.calendar.access(),
+            notification_access: self.prompts.access(),
+            input_device_active: self.input.mic_signal() == MicSignal::Active,
+            sona_holds_input_device: self.self_lease.is_held(),
+            suppress_reason: None,
+            countdown: None,
+            adopted_call: None,
+            running_meeting_apps: Vec::new(),
+            input_device_reporting_suspect: false,
+        });
+        status.adopted_call = adopted_call;
+        status
     }
 
     /// Writes the operator's detection policy and returns the status it produces.
@@ -3074,7 +3229,7 @@ mod tests {
     }
 
     fn tracked_call(session_id: MeetingSessionId) -> TrackedCapture {
-        TrackedCapture::new(
+        TrackedCapture::detection(
             &capturing(session_id, &SourceKind::ALL),
             Some("com.apple.facetime".to_string()),
             None,
@@ -3096,7 +3251,7 @@ mod tests {
     fn a_capture_records_which_lanes_it_started() {
         let session_id = MeetingSessionId::new();
 
-        let system_audio_only = TrackedCapture::new(
+        let system_audio_only = TrackedCapture::detection(
             &capturing(session_id, &[SourceKind::SystemAudio]),
             Some("com.google.chrome".to_string()),
             None,
@@ -3113,7 +3268,7 @@ mod tests {
     fn only_a_call_capture_watches_the_output_device() {
         let session_id = MeetingSessionId::new();
         let mut state = RuntimeState::default();
-        state.tracked = Some(TrackedCapture::new(
+        state.tracked = Some(TrackedCapture::detection(
             &capturing(session_id, &SourceKind::ALL),
             Some("us.zoom.xos".to_string()),
             None,
@@ -3169,7 +3324,7 @@ mod tests {
         // by a call app, so neither may be handed the output device.
         for event_end_utc_ms in [None, Some(NOW + 2 * machine::CALL_HANGUP_GRACE_MS)] {
             let mut state = RuntimeState::default();
-            state.tracked = Some(TrackedCapture::new(
+            state.tracked = Some(TrackedCapture::detection(
                 &capturing(session_id, &SourceKind::ALL),
                 None,
                 event_end_utc_ms,

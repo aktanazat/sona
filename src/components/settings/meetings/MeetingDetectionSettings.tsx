@@ -64,6 +64,16 @@ export const suppressReasonLine = (
 ): string =>
   t(SUPPRESS_REASON_COPY[reason][0], SUPPRESS_REASON_COPY[reason][1]);
 
+export const adoptedCallLine = (
+  t: (key: string, fallback: string, options: { app: string }) => string,
+  displayName: string,
+): string =>
+  t(
+    "meetings.detection.state.adoptedCall",
+    "This recording stops when the {{app}} call ends.",
+    { app: displayName },
+  );
+
 /** One degraded path, named. `live` belongs only to the line that changes on a
  *  tick rather than on something the operator did. */
 interface DetectionStateLine {
@@ -286,6 +296,14 @@ export const MeetingDetectionState: React.FC = () => {
       tone: "muted",
       live: true,
       text: suppressReasonLine(t, status.suppressReason),
+    });
+  }
+  if (status.adoptedCall) {
+    stateLines.push({
+      id: "adoptedCall",
+      tone: "muted",
+      live: true,
+      text: adoptedCallLine(t, status.adoptedCall.displayName),
     });
   }
   stateLines.push({

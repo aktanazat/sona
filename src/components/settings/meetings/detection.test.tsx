@@ -11,6 +11,7 @@ import {
   MeetingDetectionAdvanced,
   MeetingDetectionState,
   MeetingDetectionToggle,
+  adoptedCallLine,
   suppressReasonLine,
 } from "./MeetingDetectionSettings";
 import { MeetingAppsPicker } from "./MeetingAppsPicker";
@@ -191,6 +192,54 @@ describe("first paint", () => {
   test("what detection can see costs the page nothing with no state", () => {
     expect(paint(<MeetingDetectionState />)).toBe("");
   });
+
+  test("the adopted-call line renders only when a call has been claimed", () => {
+    /* MeetingDetectionSettings.tsx's `if (status.adoptedCall)` gate is the
+     * only thing standing between an adopted call and the line naming it. A
+     * flipped condition would print the sentence when there is nothing to
+     * name, or stay silent while a call is stopping the capture.
+     *
+     * zustand hands React's *server* snapshot `getInitialState()`, so a
+     * store seeded through `setState` never reaches `renderToStaticMarkup`
+     * (WordCorrectionThreshold.test.tsx hit the same wall). Seeding the
+     * snapshot object in place is what a server render actually reads. */
+    const snapshot = useDetectionStore.getInitialState();
+    const original = snapshot.status;
+    const base: DetectionStatus = {
+      eventSchemaVersion: 1,
+      settings: {
+        enabled: true,
+        calendarEnabled: true,
+        anyMicActivity: false,
+        autoStartOnOpenPane: false,
+        meetingApps: [],
+        autoRecordApps: [],
+      },
+      calendarAccess: "authorized",
+      notificationAccess: "authorized",
+      inputDeviceActive: true,
+      sonaHoldsInputDevice: false,
+      suppressReason: null,
+      countdown: null,
+      adoptedCall: { bundleId: "com.apple.FaceTime", displayName: "FaceTime" },
+      runningMeetingApps: [],
+      inputDeviceReportingSuspect: false,
+    };
+
+    try {
+      Object.assign(snapshot, { status: base });
+      expect(paint(<MeetingDetectionState />)).toContain(
+        "This recording stops when the FaceTime call ends.",
+      );
+
+      Object.assign(snapshot, { status: { ...base, adoptedCall: null } });
+      expect(paint(<MeetingDetectionState />)).not.toContain(
+        "This recording stops when the FaceTime call ends.",
+      );
+    } finally {
+      Object.assign(snapshot, { status: original });
+    }
+  });
 });
 
 describe("english catalogue", () => {
@@ -241,6 +290,7 @@ describe("english catalogue", () => {
     "consentPanel.appCallTitle",
     "consentPanel.recordingStarted",
     "consentPanel.forgetApp",
+    "meetings.detection.state.adoptedCall",
     "meetings.detection.state.noSilenceStop",
     "meetings.detection.why.disabled",
     "meetings.detection.why.sonaHoldsMic",
@@ -262,6 +312,12 @@ describe("english catalogue", () => {
       expect(String(i18n.t(key)) === "__MISSING__").toBe(false);
     });
   }
+
+  test("the adopted call status names the app", () => {
+    expect(adoptedCallLine(i18n.t.bind(i18n), "FaceTime")).toBe(
+      "This recording stops when the FaceTime call ends.",
+    );
+  });
 
   test("every suppression reason the backend can send has copy", () => {
     /* Mirrors detection::machine::SuppressReason. A new variant with no entry
@@ -429,6 +485,7 @@ const status = (inputDeviceActive: boolean): DetectionStatus => ({
   sonaHoldsInputDevice: false,
   suppressReason: null,
   countdown: null,
+  adoptedCall: null,
   runningMeetingApps: [],
   inputDeviceReportingSuspect: false,
 });

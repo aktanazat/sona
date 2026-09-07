@@ -2406,6 +2406,7 @@
         "calendarDenied": "Calendar access was not granted, so only the microphone path runs.",
         "notificationsDenied": "Notifications are off for Sona, so prompts appear in the app only.",
         "bluetoothCaveat": "A meeting app is open but nothing reports using the microphone. Bluetooth headsets often do not, so start the meeting yourself if one is running.",
+        "adoptedCall": "This recording stops when the {{app}} call ends.",
         "noSilenceStop": "Recording stops when the event ends, the call ends, the app quits, your Mac sleeps, or you stop it yourself. Nothing stops it for silence: that would need live transcription, which only runs after a meeting ends."
       },
       "why": {

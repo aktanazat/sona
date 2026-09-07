@@ -76,9 +76,18 @@ pub async fn meeting_preflight_cancel(
 #[specta::specta]
 pub async fn meeting_start(
     manager: State<'_, Arc<MeetingSessionManager>>,
+    detection: State<'_, Arc<DetectionRuntime>>,
     request: MeetingStartRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
-    manager.start(request).await
+    let result = manager.start(request).await;
+    if let Ok(started) = &result {
+        if started.snapshot.phase == MeetingPhase::CapturingRecording {
+            // The active capture already suppresses new detection offers. A
+            // hand-started capture owns no detection panel or ritual to retract.
+            detection.track_started_by_operator(&started.snapshot);
+        }
+    }
+    result
 }
 
 #[tauri::command]

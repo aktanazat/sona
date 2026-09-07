@@ -2406,6 +2406,7 @@
         "calendarDenied": "Kalenderadgang blev ikke givet, så kun mikrofonvejen kører.",
         "notificationsDenied": "Notifikationer er slået fra for Sona, så beskeder vises kun i appen.",
         "bluetoothCaveat": "En mødeapp er åben, men intet melder om mikrofonbrug. Bluetooth-headset gør ofte ikke det, så start mødet selv, hvis et er i gang.",
+        "adoptedCall": "Denne optagelse stopper, når opkaldet i {{app}} slutter.",
         "noSilenceStop": "Optagelsen stopper, når begivenheden slutter, opkaldet slutter, appen afsluttes, din Mac går i dvale, eller du selv stopper den. Intet stopper den ved stilhed: det ville kræve live-transskription, som kun kører, efter et møde er slut."
       },
       "why": {

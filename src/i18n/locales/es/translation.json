@@ -2414,6 +2414,7 @@
         "calendarDenied": "No se concedió acceso al calendario, así que solo funciona la vía del micrófono.",
         "notificationsDenied": "Las notificaciones están desactivadas para Sona, así que los avisos aparecen solo en la app.",
         "bluetoothCaveat": "Hay una app de reunión abierta pero nada informa de uso del micrófono. Los auriculares Bluetooth a menudo no lo hacen, así que inicia la reunión tú mismo si hay una en marcha.",
+        "adoptedCall": "Esta grabación se detiene cuando termina la llamada de {{app}}.",
         "noSilenceStop": "La grabación se detiene cuando termina el evento, termina la llamada, se cierra la app, tu Mac entra en reposo o la detienes tú. Nada la detiene por silencio: eso requeriría transcripción en vivo, que solo se ejecuta después de que termina una reunión."
       },
       "why": {

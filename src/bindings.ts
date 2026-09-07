@@ -3000,6 +3000,7 @@ upstreamImportProgressEvent: "upstream-import-progress-event"
  * a non-prompting check — Sona never raises a permission dialog on its own.
  */
 export type AccessibilityAccess = "granted" | "denied" | "unsupported"
+export type AdoptedCall = { bundleId: string; displayName: string }
 /**
  * Agents known to the local hook bridge. This is deliberately a closed enum:
  * settings cannot turn a new provider into an interactive bridge by naming it.
@@ -3996,6 +3997,10 @@ sonaHoldsInputDevice: boolean;
  * Why detection is quiet, when it is.
  */
 suppressReason: SuppressReason | null; countdown: DetectionCountdown | null;
+/**
+ * The call a hand-started capture adopted as its stop trigger.
+ */
+adoptedCall: AdoptedCall | null;
 /**
  * Allowlisted bundle IDs whose application is running right now. Empty is a
  * legitimate answer and the settings UI shows it as such.

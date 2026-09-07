@@ -2422,6 +2422,7 @@
         "calendarDenied": "Nie udzielono dostępu do kalendarza, więc działa tylko ścieżka mikrofonu.",
         "notificationsDenied": "Powiadomienia dla Sona są wyłączone, więc komunikaty pojawiają się tylko w aplikacji.",
         "bluetoothCaveat": "Aplikacja do spotkań jest otwarta, ale nic nie zgłasza użycia mikrofonu. Zestawy Bluetooth często tego nie robią, więc zacznij spotkanie samodzielnie, jeśli jakieś trwa.",
+        "adoptedCall": "To nagranie zatrzyma się, gdy rozmowa w {{app}} dobiegnie końca.",
         "noSilenceStop": "Nagrywanie zatrzymuje się, gdy wydarzenie się kończy, połączenie się kończy, aplikacja zostaje zamknięta, Mac przechodzi w stan uśpienia albo gdy zatrzymasz je samodzielnie. Cisza go nie zatrzymuje: wymagałoby to transkrypcji na żywo, która działa dopiero po zakończeniu spotkania."
       },
       "why": {

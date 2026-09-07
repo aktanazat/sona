@@ -2398,6 +2398,7 @@
         "calendarDenied": "Quyền truy cập lịch chưa được cấp, nên chỉ có đường qua micrô hoạt động.",
         "notificationsDenied": "Thông báo của Sona đang tắt, nên các lời nhắc chỉ hiện trong ứng dụng.",
         "bluetoothCaveat": "Một ứng dụng họp đang mở nhưng không có gì báo là đang dùng micrô. Tai nghe Bluetooth thường không báo, nên hãy tự bắt đầu buổi họp nếu đang có một buổi.",
+        "adoptedCall": "Bản ghi này sẽ dừng khi cuộc gọi {{app}} kết thúc.",
         "noSilenceStop": "Việc ghi âm dừng khi sự kiện kết thúc, cuộc gọi kết thúc, ứng dụng thoát, máy Mac của bạn ngủ, hoặc khi bạn tự dừng. Không có gì dừng nó vì im lặng: điều đó cần chép lời trực tiếp, vốn chỉ chạy sau khi cuộc họp kết thúc."
       },
       "why": {
