@@ -17,7 +17,7 @@ use crate::fs_util::write_private_file;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::{Path, PathBuf};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager, Runtime};
 
 /// How many conversations survive. Past this the oldest is forgotten: the
 /// history button is a way back to this morning, not an archive, and an
@@ -143,11 +143,18 @@ pub(crate) fn write_at(
     write_private_file(path, &encode(conversations))
 }
 
-fn history_path(app: &AppHandle) -> Option<PathBuf> {
-    crate::portable::resolve_app_data(app, HISTORY_FILE_NAME).ok()
+fn history_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    if let Some(dir) = crate::portable::data_dir() {
+        Some(dir.join(HISTORY_FILE_NAME))
+    } else {
+        app.path()
+            .app_data_dir()
+            .ok()
+            .map(|dir| dir.join(HISTORY_FILE_NAME))
+    }
 }
 
-pub(crate) fn list(app: &AppHandle) -> Vec<AgentChatConversationSummaryV1> {
+pub(crate) fn list<R: Runtime>(app: &AppHandle<R>) -> Vec<AgentChatConversationSummaryV1> {
     let Some(path) = history_path(app) else {
         return Vec::new();
     };
@@ -161,7 +168,10 @@ pub(crate) fn list(app: &AppHandle) -> Vec<AgentChatConversationSummaryV1> {
         .collect()
 }
 
-pub(crate) fn turns_of(app: &AppHandle, conversation_id: &str) -> Option<Vec<SonaAgentChatTurnV1>> {
+pub(crate) fn turns_of<R: Runtime>(
+    app: &AppHandle<R>,
+    conversation_id: &str,
+) -> Option<Vec<SonaAgentChatTurnV1>> {
     let path = history_path(app)?;
     read_at(&path)
         .into_iter()
@@ -174,7 +184,11 @@ pub(crate) fn turns_of(app: &AppHandle, conversation_id: &str) -> Option<Vec<Son
 /// An empty exchange is not a conversation: `new chat` followed by nothing must
 /// not leave an untitled row in the popover, so nothing is written until the
 /// reader has actually said something.
-pub(crate) fn remember(app: &AppHandle, conversation_id: &str, turns: &[SonaAgentChatTurnV1]) {
+pub(crate) fn remember<R: Runtime>(
+    app: &AppHandle<R>,
+    conversation_id: &str,
+    turns: &[SonaAgentChatTurnV1],
+) {
     if turns.is_empty() {
         return;
     }
@@ -204,6 +218,7 @@ mod tests {
         SonaAgentChatTurnV1 {
             role: SonaAgentChatRoleV1::User,
             message: message.to_string(),
+            outcome: None,
         }
     }
 
@@ -211,6 +226,7 @@ mod tests {
         SonaAgentChatTurnV1 {
             role: SonaAgentChatRoleV1::Assistant,
             message: message.to_string(),
+            outcome: None,
         }
     }
 
@@ -318,6 +334,36 @@ mod tests {
 
         assert_eq!(entries, vec![HISTORY_FILE_NAME.to_string()]);
         assert_eq!(read_at(&path)[0].conversation_id, "c2");
+    }
+
+    #[test]
+    fn legacy_turns_without_an_outcome_still_load() {
+        let legacy = br#"{"schema_version":1,"conversations":[{"conversation_id":"legacy","title":"Question","turns":[{"role":"user","message":"Question"}],"updated_at_utc_ms":1700000000000}]}"#;
+
+        let conversations = decode(legacy);
+
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].turns, vec![user("Question")]);
+    }
+
+    #[test]
+    fn a_rate_limited_failure_survives_the_disk_round_trip() {
+        use crate::agent_panel::protocol::{AgentPanelTurnFailureV1, SonaAgentChatOutcomeV1};
+
+        let directory = tempfile::tempdir().expect("temporary history root");
+        let path = directory.path().join(HISTORY_FILE_NAME);
+        let mut question = user("Try the relay");
+        question.outcome = Some(SonaAgentChatOutcomeV1::Failure {
+            failure: AgentPanelTurnFailureV1::RateLimited,
+        });
+        let conversations = vec![conversation("rate-limited", vec![question])];
+
+        write_at(&path, &conversations).expect("write failed turn");
+
+        assert_eq!(read_at(&path), conversations);
+        assert!(std::fs::read_to_string(&path)
+            .expect("read history JSON")
+            .contains("rate_limited"));
     }
 
     #[test]

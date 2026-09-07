@@ -2568,7 +2568,8 @@
       "unreachable": "Sona nie mogła się połączyć.",
       "refused": "Sona nie mogła przyjąć tego pytania.",
       "failed": "Sona nie zdołała dokończyć tej odpowiedzi.",
-      "too_many_lookups": "Sona potrzebowała więcej niż trzech wyszukiwań, aby odpowiedzieć na to pytanie."
+      "too_many_lookups": "Sona potrzebowała więcej niż trzech wyszukiwań, aby odpowiedzieć na to pytanie.",
+      "rate_limited": "Żądania Sona zostały tymczasowo ograniczone."
     },
     "working": {
       "searchedCorpus": "Przejrzałam Twoje spotkania i notatki",
@@ -2592,6 +2593,7 @@
       "disabled": "Agent Sona jest wyłączony.",
       "unpaired": "Agent Sona nie jest sparowany z przekaźnikiem.",
       "offline": "Nie udało się połączyć z przekaźnikiem agenta Sona.",
+      "rate_limited": "Przekaźnik ograniczył żądania Sona. Ponawianie próby…",
       "error": "Agent Sona jest niedostępny."
     },
     "proposal": {

@@ -2544,7 +2544,8 @@
       "unreachable": "Sona không kết nối được.",
       "refused": "Sona không nhận được câu hỏi đó.",
       "failed": "Sona không hoàn thành được câu trả lời đó.",
-      "too_many_lookups": "Sona cần hơn ba lần tra cứu cho câu hỏi này."
+      "too_many_lookups": "Sona cần hơn ba lần tra cứu cho câu hỏi này.",
+      "rate_limited": "Các yêu cầu của Sona tạm thời bị giới hạn."
     },
     "working": {
       "searchedCorpus": "Đã xem qua các cuộc họp và ghi chú của bạn",
@@ -2568,6 +2569,7 @@
       "disabled": "Tác nhân Sona đang tắt.",
       "unpaired": "Tác nhân Sona chưa được ghép nối với relay.",
       "offline": "Không thể kết nối tới relay của tác nhân Sona.",
+      "rate_limited": "Relay đã giới hạn các yêu cầu của Sona. Đang thử lại…",
       "error": "Tác nhân Sona không khả dụng."
     },
     "proposal": {

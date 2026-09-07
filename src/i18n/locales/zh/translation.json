@@ -2544,7 +2544,8 @@
       "unreachable": "Sona 无法连接。",
       "refused": "Sona 无法接受这个问题。",
       "failed": "Sona 没能写完这个回答。",
-      "too_many_lookups": "Sona 回答此问题需要超过三次查询。"
+      "too_many_lookups": "Sona 回答此问题需要超过三次查询。",
+      "rate_limited": "Sona 的请求暂时受到速率限制。"
     },
     "working": {
       "searchedCorpus": "看过你的会议和笔记了",
@@ -2568,6 +2569,7 @@
       "disabled": "Sona 代理已关闭。",
       "unpaired": "Sona 代理尚未与中继配对。",
       "offline": "无法连接 Sona 代理的中继。",
+      "rate_limited": "中继限制了 Sona 的请求。正在重试…",
       "error": "Sona 代理不可用。"
     },
     "proposal": {

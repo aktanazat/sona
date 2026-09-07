@@ -2552,7 +2552,8 @@
       "unreachable": "Sona konnte keine Verbindung herstellen.",
       "refused": "Sona konnte diese Frage nicht annehmen.",
       "failed": "Sona konnte diese Antwort nicht zu Ende bringen.",
-      "too_many_lookups": "Sona hat für diese Frage mehr als drei Abfragen benötigt."
+      "too_many_lookups": "Sona hat für diese Frage mehr als drei Abfragen benötigt.",
+      "rate_limited": "Sona wurde vorübergehend gedrosselt."
     },
     "working": {
       "searchedCorpus": "Deine Meetings und Notizen durchgesehen",
@@ -2576,6 +2577,7 @@
       "disabled": "Der Sona-Agent ist ausgeschaltet.",
       "unpaired": "Der Sona-Agent ist mit keinem Relay gekoppelt.",
       "offline": "Das Relay des Sona-Agenten war nicht erreichbar.",
+      "rate_limited": "Das Relay hat Sona gedrosselt. Neuer Versuch…",
       "error": "Der Sona-Agent ist nicht verfügbar."
     },
     "proposal": {

@@ -2568,7 +2568,8 @@
       "unreachable": "Sona se nemohla připojit.",
       "refused": "Sona tuto otázku nemohla přijmout.",
       "failed": "Sona nedokázala tuto odpověď dokončit.",
-      "too_many_lookups": "Sona potřebovala pro tuto otázku více než tři vyhledávání."
+      "too_many_lookups": "Sona potřebovala pro tuto otázku více než tři vyhledávání.",
+      "rate_limited": "Počet požadavků Sona byl dočasně omezen."
     },
     "working": {
       "searchedCorpus": "Prošla jsem vaše schůzky a poznámky",
@@ -2592,6 +2593,7 @@
       "disabled": "Agent Sona je vypnutý.",
       "unpaired": "Agent Sona není spárovaný s relay.",
       "offline": "Relay agenta Sona je nedostupný.",
+      "rate_limited": "Relay omezilo požadavky Sona. Zkouší to znovu…",
       "error": "Agent Sona není k dispozici."
     },
     "proposal": {

@@ -56,18 +56,18 @@ export const actionLine = (
 /**
  * What the relay is doing, as the sheet needs to know it.
  *
- * Ten relay statuses collapse onto six, because the sheet acts on exactly six
- * things: it has not asked yet, the agent is off, it is unpaired, the relay is
- * away, something else went wrong, or it works. Whether a turn is running and
- * whether a proposal is on screen are separate facts read from the status
- * itself — folding them in here is how the old panel ended up with a "phase"
- * that meant three different kinds of thing at once.
+ * Eleven relay statuses collapse onto seven, because the sheet acts on exactly
+ * seven things: it has not asked yet, the agent is off, it is unpaired, the
+ * relay is away, the relay is asking it to slow down, something else went
+ * wrong, or it works. Whether a turn is running and whether a proposal is on
+ * screen are separate facts read from the status itself.
  */
 export type ChatPhase =
   | "loading"
   | "disabled"
   | "unpaired"
   | "offline"
+  | "rate_limited"
   | "error"
   | "ready";
 
@@ -76,6 +76,7 @@ export const CHAT_NOTICE_PHASES = {
   disabled: true,
   unpaired: true,
   offline: true,
+  rate_limited: true,
   error: true,
 } satisfies Partial<Record<ChatPhase, true>>;
 
@@ -88,6 +89,8 @@ export const chatPhase = (status: AgentPanelStatusV1 | null): ChatPhase => {
       return "unpaired";
     case "offline":
       return "offline";
+    case "rate_limited":
+      return "rate_limited";
     case "ready":
       return "ready";
     /* Invalid pairing, a missing secret, an answer that failed verification or
@@ -146,7 +149,8 @@ export type ChatTurnFailure =
   | "unreachable"
   | "refused"
   | "failed"
-  | "too_many_lookups";
+  | "too_many_lookups"
+  | "rate_limited";
 
 /** The durable, localized failure category carried by a terminal turn. */
 export const turnFailure = (
@@ -209,19 +213,6 @@ export const workRowIndex = (
   return last >= 0 && conversation[last].role === "assistant"
     ? last
     : conversation.length;
-};
-
-/** The failed turn's own question, for retrying it as a new turn. */
-export const retryMessage = (
-  conversation: readonly SonaAgentChatTurnV1[],
-  turn: AgentPanelTurnStatusV1 | null,
-): string | null => {
-  if (turnFailure(turn) === null) return null;
-  for (let index = conversation.length - 1; index >= 0; index -= 1) {
-    const row = conversation[index];
-    if (row.role === "user") return row.message;
-  }
-  return null;
 };
 
 /**

@@ -21,6 +21,7 @@ import type {
 } from "@/bindings";
 import { askSona } from "@/components/commandPaletteSearch";
 import { CHAT_ERROR_KEYS, ChatSheet } from "./ChatSheet";
+import { ChatTurns } from "./ChatTurns";
 import { sendSheetTurn } from "./ChatSheetHost";
 import type { ChatPhase } from "./chatModel";
 import {
@@ -30,7 +31,6 @@ import {
   linkifySona,
   needsRemoteConsent,
   proposalRowIndex,
-  retryMessage,
   sheetKeys,
   stepMs,
   turnFailure,
@@ -88,12 +88,19 @@ const en = JSON.parse(fs.readFileSync(localeFile, "utf8")) as {
     openSettings: string;
     workedFor: string;
     error: Record<
-      "unreachable" | "refused" | "failed" | "too_many_lookups",
+      | "unreachable"
+      | "refused"
+      | "failed"
+      | "too_many_lookups"
+      | "rate_limited",
       string
     >;
     working: Record<"searchedCorpus" | "stillWaiting" | "cancel", string>;
-    status: Record<"disabled" | "unpaired" | "offline" | "error", string>;
-    turnState: Record<"running", string>;
+    status: Record<
+      "disabled" | "unpaired" | "offline" | "rate_limited" | "error",
+      string
+    >;
+    turnState: Record<"running" | "canceled", string>;
     proposal: Record<"apply" | "applied" | "undo", string>;
     action: Record<
       | "resolve_loop"
@@ -402,6 +409,117 @@ describe("a turn on screen", () => {
       expect(markup).toContain(en.chat.retry);
       expect(markup).not.toContain('data-slot="chat-stop"');
     }
+  });
+  test("rate limited: the question stays retryable", () => {
+    const conversation: SonaAgentChatTurnV1[] = [
+      {
+        ...user("What did we decide?"),
+        outcome: { kind: "failure", failure: "rate_limited" },
+      },
+    ];
+    const turn = {
+      ...TURN,
+      state: "failed" as const,
+      completed_at_utc_ms: 4_000,
+      failure: "rate_limited" as const,
+    };
+    const markup = sheet({ conversation, turn });
+
+    expect(markup).toContain(escaped(en.chat.error.rate_limited));
+    expect(occurrences(markup, 'data-slot="chat-turn-error"')).toBe(1);
+    expect(markup).toContain(en.chat.retry);
+  });
+
+  test("retry handlers keep each failed row's own question", async () => {
+    const messages: string[] = [];
+    const rendered = await ChatTurns({
+      conversation: [
+        {
+          ...user("First question"),
+          outcome: { kind: "failure", failure: "rate_limited" },
+        },
+        user("Second question"),
+      ],
+      turn: {
+        ...TURN,
+        state: "failed" as const,
+        completed_at_utc_ms: 4_000,
+        failure: "unreachable" as const,
+      },
+      proposal: null,
+      now: 6_000,
+      searchedCorpus: false,
+      busy: false,
+      onStop: noop,
+      onRetry: (message) => messages.push(message),
+      onApply: noop,
+      onUndo: noop,
+      onApplyAction: noop,
+      onDismissAction: noop,
+      onOpenLink: noop,
+    });
+    type RetryProps = {
+      outcome?: NonNullable<SonaAgentChatTurnV1["outcome"]>;
+      message?: string;
+      retryMessage?: string | null;
+      onRetry: (message: string) => void;
+    };
+    const retries: Array<{
+      message: string;
+      onRetry: (message: string) => void;
+    }> = [];
+    const isRetryElement = (
+      node: React.ReactNode,
+    ): node is React.ReactElement<RetryProps> =>
+      React.isValidElement<RetryProps>(node) &&
+      "onRetry" in node.props &&
+      ("outcome" in node.props || "retryMessage" in node.props);
+    const visit = (node: React.ReactNode): void => {
+      if (Array.isArray(node)) {
+        node.forEach(visit);
+        return;
+      }
+      if (!React.isValidElement<{ children?: React.ReactNode }>(node)) return;
+      if (isRetryElement(node)) {
+        const message = node.props.message ?? node.props.retryMessage;
+        if (message !== undefined && message !== null) {
+          retries.push({ message, onRetry: node.props.onRetry });
+        }
+      }
+      visit(node.props.children);
+    };
+    visit(rendered);
+
+    expect(retries).toHaveLength(2);
+    retries.forEach(({ message, onRetry }) => onRetry(message));
+    expect(messages).toEqual(["First question", "Second question"]);
+  });
+
+  test("history: a failed question keeps its failure and retry", () => {
+    const conversation: SonaAgentChatTurnV1[] = [
+      {
+        ...user("Retry the saved question"),
+        outcome: { kind: "failure", failure: "rate_limited" },
+      },
+    ];
+    const markup = sheet({ conversation });
+
+    expect(markup).toContain(escaped(en.chat.error.rate_limited));
+    expect(markup).toContain(en.chat.retry);
+  });
+
+  test("history: a canceled question stays canceled and cannot retry", () => {
+    const conversation: SonaAgentChatTurnV1[] = [
+      {
+        ...user("Canceled question"),
+        outcome: { kind: "canceled" },
+      },
+    ];
+    const markup = sheet({ conversation });
+
+    expect(markup).toContain('data-slot="chat-turn-outcome"');
+    expect(markup).toContain(escaped(en.chat.turnState.canceled));
+    expect(markup).not.toContain('data-slot="chat-turn-error"');
   });
 
   test("waiting: offers the existing cancel action after thirty seconds", () => {
@@ -883,7 +1001,12 @@ describe("the states where nothing would answer", () => {
   });
 
   test("each broken phase says its own sentence, once", () => {
-    for (const phase of ["disabled", "offline", "error"] as const) {
+    for (const phase of [
+      "disabled",
+      "offline",
+      "rate_limited",
+      "error",
+    ] as const) {
       const markup = sheet({ phase });
       expect(occurrences(markup, escaped(en.chat.status[phase]))).toBe(1);
     }
@@ -910,6 +1033,14 @@ describe("the states where nothing would answer", () => {
       );
     }
   });
+  test("rate limiting reports the automatic retry without extra actions", () => {
+    const markup = sheet({ phase: "rate_limited" });
+    const start = markup.indexOf('data-slot="chat-notice"');
+    const line = markup.slice(start, markup.indexOf("</p>", start));
+
+    expect(line).toContain(escaped(en.chat.status.rate_limited));
+    expect(line).not.toContain("<button");
+  });
 
   test("ready says nothing about the relay at all", () => {
     expect(sheet()).not.toContain('data-slot="chat-notice"');
@@ -917,7 +1048,7 @@ describe("the states where nothing would answer", () => {
 });
 
 describe("the model behind the sheet", () => {
-  test("ten relay statuses collapse onto the six the sheet acts on", () => {
+  test("eleven relay statuses collapse onto the seven the sheet acts on", () => {
     const status = (
       relay: AgentPanelStatusV1["relay_status"],
     ): AgentPanelStatusV1 => ({
@@ -934,6 +1065,7 @@ describe("the model behind the sheet", () => {
     expect(chatPhase(status("disabled"))).toBe("disabled");
     expect(chatPhase(status("unpaired"))).toBe("unpaired");
     expect(chatPhase(status("offline"))).toBe("offline");
+    expect(chatPhase(status("rate_limited"))).toBe("rate_limited");
     for (const relay of [
       "invalid_configuration",
       "secret_unavailable",
@@ -994,8 +1126,6 @@ describe("the model behind the sheet", () => {
     ];
 
     expect(turnFailure(failed)).toBe("unreachable");
-    expect(retryMessage(conversation, failed)).toBe("Retry this question");
-    expect(retryMessage(conversation, TURN)).toBeNull();
     expect(workRowIndex(conversation, failed)).toBe(3);
   });
 

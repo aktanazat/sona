@@ -2560,7 +2560,8 @@
       "unreachable": "Sona n'a pas pu se connecter.",
       "refused": "Sona n'a pas pu accepter cette question.",
       "failed": "Sona n'a pas pu terminer cette réponse.",
-      "too_many_lookups": "Sona a eu besoin de plus de trois recherches pour cette question."
+      "too_many_lookups": "Sona a eu besoin de plus de trois recherches pour cette question.",
+      "rate_limited": "Sona a temporairement atteint la limite de requêtes."
     },
     "working": {
       "searchedCorpus": "J'ai parcouru vos réunions et vos notes",
@@ -2584,6 +2585,7 @@
       "disabled": "L'agent Sona est désactivé.",
       "unpaired": "L'agent Sona n'est associé à aucun relais.",
       "offline": "Le relais de l'agent Sona est injoignable.",
+      "rate_limited": "Le relais a limité les requêtes de Sona. Nouvelle tentative…",
       "error": "L'agent Sona est indisponible."
     },
     "proposal": {

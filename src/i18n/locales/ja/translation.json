@@ -2544,7 +2544,8 @@
       "unreachable": "Sona は接続できませんでした。",
       "refused": "Sona はこの質問を受け付けられませんでした。",
       "failed": "Sona はこの回答を最後まで書けませんでした。",
-      "too_many_lookups": "この質問には Sona の検索が 3 回を超えて必要でした。"
+      "too_many_lookups": "この質問には Sona の検索が 3 回を超えて必要でした。",
+      "rate_limited": "Sona は一時的にリクエスト制限を受けました。"
     },
     "working": {
       "searchedCorpus": "ミーティングとメモを見てきました",
@@ -2568,6 +2569,7 @@
       "disabled": "Sona エージェントはオフです。",
       "unpaired": "Sona エージェントはリレーとペアリングされていません。",
       "offline": "Sona エージェントのリレーに接続できませんでした。",
+      "rate_limited": "リレーが Sona のリクエストを制限しました。再試行中…",
       "error": "Sona エージェントを利用できません。"
     },
     "proposal": {

@@ -15,7 +15,7 @@ use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
@@ -2960,8 +2960,8 @@ fn persist_settings_to_store<R: tauri::Runtime>(
     store.save().map_err(SettingsPersistError::Save)
 }
 
-fn write_settings_locked(
-    app: &AppHandle,
+fn write_settings_locked<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     settings: &mut AppSettings,
 ) -> Result<(), SettingsPersistError> {
     let store = match app.store(crate::portable::store_path(SETTINGS_STORE_PATH)) {
@@ -3070,7 +3070,27 @@ pub fn update_settings<R>(
         Ok::<R, SettingsPersistError>(update(settings))
     })
 }
-
+/// Persist a connection receipt without changing the generation settings
+/// proposals compare against.
+pub(crate) fn set_agent_panel_last_successful_connection_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    timestamp_utc_ms: i64,
+) -> Result<(), SettingsPersistError> {
+    let persisted = {
+        let _settings_lock = lock_settings_store();
+        let mut settings = get_settings_locked(app);
+        settings.agent_panel_last_successful_connection_at = Some(timestamp_utc_ms);
+        write_settings_locked(app, &mut settings)
+    };
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "setting": "agent_panel" }),
+    );
+    if let Err(error) = &persisted {
+        warn!("Failed to persist settings: {error}");
+    }
+    persisted
+}
 pub(crate) fn mark_post_process_secret_verified(app: &AppHandle, provider_id: &str) {
     // Nothing in this function's shape can report a store failure; the settings seam logs it.
     let _ = update_settings(app, |settings| {

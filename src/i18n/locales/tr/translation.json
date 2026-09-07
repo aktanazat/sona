@@ -2552,7 +2552,8 @@
       "unreachable": "Sona bağlanamadı.",
       "refused": "Sona bu soruyu alamadı.",
       "failed": "Sona bu yanıtı tamamlayamadı.",
-      "too_many_lookups": "Sona bu soru için üçten fazla aramaya ihtiyaç duydu."
+      "too_many_lookups": "Sona bu soru için üçten fazla aramaya ihtiyaç duydu.",
+      "rate_limited": "Sona'nın istekleri geçici olarak sınırlandı."
     },
     "working": {
       "searchedCorpus": "Toplantılarınıza ve notlarınıza baktım",
@@ -2576,6 +2577,7 @@
       "disabled": "Sona aracısı kapalı.",
       "unpaired": "Sona aracısı bir röleyle eşleştirilmemiş.",
       "offline": "Sona aracısının rölesine ulaşılamadı.",
+      "rate_limited": "Röle Sona'nın isteklerini sınırladı. Yeniden deneniyor…",
       "error": "Sona aracısı kullanılamıyor."
     },
     "proposal": {

@@ -2552,7 +2552,8 @@
       "unreachable": "Sona kunne ikke oprette forbindelse.",
       "refused": "Sona kunne ikke tage imod det spørgsmål.",
       "failed": "Sona kunne ikke gøre det svar færdigt.",
-      "too_many_lookups": "Sona havde brug for mere end tre opslag til dette spørgsmål."
+      "too_many_lookups": "Sona havde brug for mere end tre opslag til dette spørgsmål.",
+      "rate_limited": "Sona blev midlertidigt hastighedsbegrænset."
     },
     "working": {
       "searchedCorpus": "Kiggede dine møder og noter igennem",
@@ -2576,6 +2577,7 @@
       "disabled": "Sona-agenten er slået fra.",
       "unpaired": "Sona-agenten er ikke parret med et relay.",
       "offline": "Sona-agentens relay kunne ikke nås.",
+      "rate_limited": "Relayet begrænsede Sona. Prøver igen…",
       "error": "Sona-agenten er utilgængelig."
     },
     "proposal": {

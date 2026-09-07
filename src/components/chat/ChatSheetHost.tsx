@@ -20,7 +20,6 @@ import {
   chatPhase,
   isTurnRunning,
   needsRemoteConsent,
-  retryMessage,
   shouldPackChatTurn,
 } from "./chatModel";
 import type { ChatPackGate } from "./chatModel";
@@ -292,9 +291,8 @@ export const ChatSheetHost: React.FC<ChatSheetHostProps> = ({
     }
   };
 
-  const retryTurn = async () => {
-    const message = retryMessage(conversation, turn);
-    if (message === null || busy) return;
+  const retryTurn = async (message: string) => {
+    if (busy) return;
     await sendTurn(message);
   };
 
@@ -405,7 +403,7 @@ export const ChatSheetHost: React.FC<ChatSheetHostProps> = ({
         }
         onOpenSettings={onOpenSettings}
         onRetry={() => void refresh()}
-        onRetryTurn={() => void retryTurn()}
+        onRetryTurn={(message) => void retryTurn(message)}
       />
       {chatFrame
         ? createPortal(

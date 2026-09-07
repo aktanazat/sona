@@ -2552,7 +2552,8 @@
       "unreachable": "Sona couldn't connect.",
       "refused": "Sona couldn't take that question.",
       "failed": "Sona couldn't finish that answer.",
-      "too_many_lookups": "Sona needed more than three lookups for this question."
+      "too_many_lookups": "Sona needed more than three lookups for this question.",
+      "rate_limited": "Sona was rate limited."
     },
     "working": {
       "searchedCorpus": "Looked through your meetings and notes",
@@ -2576,6 +2577,7 @@
       "disabled": "The Sona agent is switched off.",
       "unpaired": "The Sona agent is not paired with a relay.",
       "offline": "The Sona agent's relay could not be reached.",
+      "rate_limited": "The relay rate limited Sona. Retrying…",
       "error": "The Sona agent is unavailable."
     },
     "proposal": {

@@ -216,19 +216,12 @@ interface ChatNoticeProps {
 }
 
 /**
- * One line for the four phases where nothing would answer.
+ * One line for each relay state that needs an explanation.
  *
- * It sits above the composer rather than replacing the conversation, because
- * a relay that went away does not unsay what was already said — and the reader
- * who scrolls back to an answer while the network is down is doing the one
- * thing this surface can still do for them.
- *
- * Every one of the four ends in Settings, because that is where all four are
- * fixed: the switch, the pairing, the address and the pinned key all live on
- * one screen. Only `offline` and `error` also offer a retry, and it is the
- * lesser of the two actions — a re-read cannot repair an invalid pairing, a
- * missing secret or a reply that failed verification, which is most of what
- * `error` covers.
+ * A rate limit is temporary and the active turn is already retrying, so its
+ * line offers no second action. Configuration failures still point to the one
+ * Settings screen that owns the switch, pairing, address, and pinned key.
+ * Offline and other errors also offer a fresh read.
  */
 const ChatNotice: React.FC<ChatNoticeProps> = ({
   phase,
@@ -251,9 +244,11 @@ const ChatNotice: React.FC<ChatNoticeProps> = ({
           {t("chat.retry")}
         </Button>
       )}
-      <Button variant="link" size="xs" onClick={onOpenSettings}>
-        {t("chat.openSettings")}
-      </Button>
+      {phase !== "rate_limited" && (
+        <Button variant="link" size="xs" onClick={onOpenSettings}>
+          {t("chat.openSettings")}
+        </Button>
+      )}
     </p>
   );
 };
@@ -298,7 +293,7 @@ export interface ChatSheetProps {
   onOpenLink: (link: string) => void;
   onOpenSettings: () => void;
   onRetry: () => void;
-  onRetryTurn: () => void;
+  onRetryTurn: (message: string) => void;
 }
 
 /**

@@ -3126,7 +3126,7 @@ export type AgentPanelProposalChangedEvent = { invalidation_id: number; proposal
 export type AgentPanelProposalPreviewV1 = { proposal_id: string; summary: string; rationale: string; actions: SonaSettingChangeV1[]; follow_up_question: string | null; source_settings_revision: number; confirmation: SonaConfirmationClassV1; state: AgentPanelProposalStateV1; receipt_id: string | null; applied_revision: number | null }
 export type AgentPanelProposalStateV1 = "pending" | "applied" | "undone" | "rejected"
 export type AgentPanelPublicIdentityV1 = { key_id: string; public_key: string }
-export type AgentPanelRelayStatusV1 = "disabled" | "unpaired" | "ready" | "offline" | "invalid_configuration" | "secret_unavailable" | "untrusted_response" |
+export type AgentPanelRelayStatusV1 = "disabled" | "unpaired" | "ready" | "rate_limited" | "offline" | "invalid_configuration" | "secret_unavailable" | "untrusted_response" |
 /**
  * A signed answer that did not fit the turn it answered: a settings
  * proposal for an Ask turn, or prose for a Configure one. The signature
@@ -3173,14 +3173,8 @@ tool: string | null }
 export type AgentPanelTurnChangedEvent = { invalidation_id: number; turn_id: string | null; state: AgentPanelTurnStateV1 | null }
 /**
  * Why a turn ended with nothing to read.
- *
- * Relay errors and a relay-reported `FAILED` job collapse onto three reasons,
- * because each asks the reader to do something different. The relay's own
- * error text stays on the relay: it is not localized copy for this column.
- * `TooManyLookups` is the panel's own: the model asked for a fourth round of
- * Sona tools, and the turn ended here rather than on the relay.
  */
-export type AgentPanelTurnFailureV1 = "unreachable" | "refused" | "failed" | "too_many_lookups"
+export type AgentPanelTurnFailureV1 = "unreachable" | "refused" | "failed" | "too_many_lookups" | "rate_limited"
 export type AgentPanelTurnStateV1 = "submitting" | "queued" | "leased" | "running" | "waiting_user" | "waiting_approval" | "canceling" | "succeeded" | "failed" | "canceled" | "unverified_external"
 export type AgentPanelTurnStatusV1 = { turn_id: string; workspace: AgentPanelWorkspaceV1; state: AgentPanelTurnStateV1; event_cursor: number;
 /**
@@ -6061,8 +6055,12 @@ export type ShortcutBinding = { id: string; name: string; description: string; d
  * vocabulary correction; the expansion is inserted verbatim.
  */
 export type Snippet = { id: string; trigger: string; expansion: string; enabled: boolean; created_at: number; updated_at: number }
+/**
+ * The terminal result stored beside the user message that started a turn.
+ */
+export type SonaAgentChatOutcomeV1 = { kind: "failure"; failure: AgentPanelTurnFailureV1 } | { kind: "canceled" }
 export type SonaAgentChatRoleV1 = "user" | "assistant"
-export type SonaAgentChatTurnV1 = { role: SonaAgentChatRoleV1; message: string }
+export type SonaAgentChatTurnV1 = { role: SonaAgentChatRoleV1; message: string; outcome?: SonaAgentChatOutcomeV1 | null }
 export type SonaAgentStepStateV1 = "running" | "done" | "failed"
 /**
  * One corpus change the assistant is offering to make.

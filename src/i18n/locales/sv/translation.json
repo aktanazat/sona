@@ -2552,7 +2552,8 @@
       "unreachable": "Sona kunde inte ansluta.",
       "refused": "Sona kunde inte ta emot den frågan.",
       "failed": "Sona kunde inte slutföra det svaret.",
-      "too_many_lookups": "Sona behövde fler än tre uppslagningar för den här frågan."
+      "too_many_lookups": "Sona behövde fler än tre uppslagningar för den här frågan.",
+      "rate_limited": "Sona har tillfälligt begränsats."
     },
     "working": {
       "searchedCorpus": "Gick igenom dina möten och anteckningar",
@@ -2576,6 +2577,7 @@
       "disabled": "Sona-agenten är avstängd.",
       "unpaired": "Sona-agenten är inte parkopplad med något relä.",
       "offline": "Sona-agentens relä gick inte att nå.",
+      "rate_limited": "Reläet begränsade Sona. Försöker igen…",
       "error": "Sona-agenten är inte tillgänglig."
     },
     "proposal": {

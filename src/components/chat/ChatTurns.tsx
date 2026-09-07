@@ -65,7 +65,8 @@ interface TurnWorkProps {
   searchedCorpus: boolean;
   busy: boolean;
   onStop: () => void;
-  onRetry: () => void;
+  onRetry: (message: string) => void;
+  retryMessage: string | null;
 }
 
 const WORK_LINE =
@@ -85,6 +86,7 @@ const TurnWork: React.FC<TurnWorkProps> = ({
   busy,
   onStop,
   onRetry,
+  retryMessage,
 }) => {
   const { t } = useTranslation();
   /* The disclosure is a button and a list rather than <details>/<summary>.
@@ -221,12 +223,65 @@ const TurnWork: React.FC<TurnWorkProps> = ({
           className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] leading-[18px] text-red-900"
         >
           {t(`chat.error.${failure}`)}
-          <Button variant="link" size="xs" onClick={onRetry} disabled={busy}>
+          <Button
+            variant="link"
+            size="xs"
+            onClick={() => {
+              if (retryMessage !== null) onRetry(retryMessage);
+            }}
+            disabled={busy}
+          >
             {t("chat.retry")}
           </Button>
         </p>
       )}
     </div>
+  );
+};
+interface StoredOutcomeProps {
+  outcome: NonNullable<SonaAgentChatTurnV1["outcome"]>;
+  busy: boolean;
+  message: string;
+  onRetry: (message: string) => void;
+}
+
+/** The terminal result remembered with an earlier question. */
+const StoredOutcome: React.FC<StoredOutcomeProps> = ({
+  outcome,
+  busy,
+  message,
+  onRetry,
+}) => {
+  const { t } = useTranslation();
+
+  if (outcome.kind === "canceled") {
+    return (
+      <p
+        data-slot="chat-turn-outcome"
+        role="status"
+        className="text-[13px] leading-[18px] text-gray-900"
+      >
+        {t("chat.turnState.canceled")}
+      </p>
+    );
+  }
+
+  return (
+    <p
+      data-slot="chat-turn-error"
+      role="status"
+      className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] leading-[18px] text-red-900"
+    >
+      {t(`chat.error.${outcome.failure}`)}
+      <Button
+        variant="link"
+        size="xs"
+        onClick={() => onRetry(message)}
+        disabled={busy}
+      >
+        {t("chat.retry")}
+      </Button>
+    </p>
   );
 };
 
@@ -393,7 +448,7 @@ export interface ChatTurnsProps {
   searchedCorpus: boolean;
   busy: boolean;
   onStop: () => void;
-  onRetry: () => void;
+  onRetry: (message: string) => void;
   onApply: () => void;
   onUndo: () => void;
   onApplyAction: (actionIndex: number) => void;
@@ -433,6 +488,12 @@ export const ChatTurns: React.FC<ChatTurnsProps> = ({
   const rows = conversationRows(conversation);
   const workIndex = workRowIndex(conversation, turn, searchedCorpus);
   const cardIndex = proposalRowIndex(conversation, proposal);
+  const liveFailureIndex =
+    turnFailure(turn) !== null && rows[rows.length - 1]?.turn.role === "user"
+      ? rows.length - 1
+      : -1;
+  const liveFailureMessage =
+    liveFailureIndex >= 0 ? rows[liveFailureIndex].turn.message : null;
   const work = turn !== null && workIndex >= 0 && (
     <TurnWork
       turn={turn}
@@ -441,6 +502,7 @@ export const ChatTurns: React.FC<ChatTurnsProps> = ({
       busy={busy}
       onStop={onStop}
       onRetry={onRetry}
+      retryMessage={liveFailureMessage}
     />
   );
 
@@ -466,6 +528,18 @@ export const ChatTurns: React.FC<ChatTurnsProps> = ({
               <AssistantText message={row.message} onOpenLink={onOpenLink} />
             )}
           </li>
+          {row.outcome !== undefined &&
+            row.outcome !== null &&
+            index !== liveFailureIndex && (
+              <li>
+                <StoredOutcome
+                  outcome={row.outcome}
+                  busy={busy}
+                  message={row.message}
+                  onRetry={onRetry}
+                />
+              </li>
+            )}
         </React.Fragment>
       ))}
       {/* A turn still working has no answer to sit above, so its work goes

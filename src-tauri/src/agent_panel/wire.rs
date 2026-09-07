@@ -1,6 +1,6 @@
 use super::protocol::{
-    AgentPanelWorkspaceV1, SonaAgentChatTurnV1, SonaAgentStepStateV1, SonaChatActionV1,
-    SonaConfirmationClassV1, SonaSettingChangeV1,
+    AgentPanelTurnFailureV1, AgentPanelWorkspaceV1, SonaAgentChatTurnV1, SonaAgentStepStateV1,
+    SonaChatActionV1, SonaConfirmationClassV1, SonaSettingChangeV1,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -11,6 +11,7 @@ pub enum AgentPanelRelayStatusV1 {
     Disabled,
     Unpaired,
     Ready,
+    RateLimited,
     Offline,
     InvalidConfiguration,
     SecretUnavailable,
@@ -46,22 +47,6 @@ impl AgentPanelTurnStateV1 {
             Self::Succeeded | Self::Failed | Self::Canceled | Self::UnverifiedExternal
         )
     }
-}
-
-/// Why a turn ended with nothing to read.
-///
-/// Relay errors and a relay-reported `FAILED` job collapse onto three reasons,
-/// because each asks the reader to do something different. The relay's own
-/// error text stays on the relay: it is not localized copy for this column.
-/// `TooManyLookups` is the panel's own: the model asked for a fourth round of
-/// Sona tools, and the turn ended here rather than on the relay.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentPanelTurnFailureV1 {
-    Unreachable,
-    Refused,
-    Failed,
-    TooManyLookups,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

@@ -1,19 +1,20 @@
 use super::protocol::{
-    AgentPanelWorkspaceV1, PanelTurnV1, SonaAgentResponseV1, SonaSubmissionV1,
+    AgentPanelWorkspaceV1, PanelTurnV1, SonaAgentResponseV1, SonaModelCatalogV1, SonaSubmissionV1,
     MAX_CHAT_SUBMISSION_BYTES, MAX_PROPOSAL_BYTES, SONA_MODEL_ALIAS,
 };
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 use url::Url;
 
 const BRIDGE_VERSION: &str = "bridge-v1";
@@ -54,6 +55,8 @@ const MAX_RESPONSE_BYTES: usize = RELAY_JSON_INFLATION
     * (SUBMISSION_COPIES_IN_A_JOB_ROW * MAX_CHAT_SUBMISSION_BYTES + MAX_PROPOSAL_BYTES)
     + JOB_ENVELOPE_BYTES;
 const RESPONSE_NONCE_TTL: Duration = Duration::from_secs(MAX_SKEW_SECONDS * 2);
+const MAX_RATE_LIMIT_RETRIES: usize = 3;
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayError {
@@ -64,6 +67,7 @@ pub(crate) enum RelayError {
     SecretUnavailable,
     RandomUnavailable,
     RequestFailed,
+    RateLimited(Option<Duration>),
     ResponseTooLarge,
     ResponseSignatureInvalid,
     ResponseMalformed,
@@ -128,6 +132,7 @@ pub(crate) struct RelayJob {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RelayJobExpectation<'a> {
     pub(crate) workspace: AgentPanelWorkspaceV1,
+    pub(crate) model_alias: &'a str,
     pub(crate) job_id: Option<&'a str>,
     pub(crate) idempotency_key: Option<&'a str>,
 }
@@ -238,8 +243,8 @@ struct ResponseVerification<'a> {
 }
 
 impl RelayClient {
-    pub(crate) async fn from_settings(
-        app: &AppHandle,
+    pub(crate) async fn from_settings<R: Runtime>(
+        app: &AppHandle<R>,
         nonce_cache: Arc<ResponseNonceCache>,
     ) -> Result<Self, RelayError> {
         let settings = crate::settings::get_settings(app);
@@ -292,11 +297,12 @@ impl RelayClient {
         &self,
         idempotency_key: &str,
         turn: &PanelTurnV1,
+        model_alias: &str,
     ) -> Result<RelayJob, RelayError> {
         let workspace = turn.workspace();
         let body = SonaSubmissionV1 {
             workspace_id: workspace.id(),
-            model: SONA_MODEL_ALIAS,
+            model: model_alias,
             capability: workspace.capability(),
             idempotency_key,
             request: turn,
@@ -308,6 +314,7 @@ impl RelayClient {
             &self.client_key_id,
             RelayJobExpectation {
                 workspace,
+                model_alias,
                 job_id: None,
                 idempotency_key: Some(idempotency_key),
             },
@@ -318,6 +325,7 @@ impl RelayClient {
         &self,
         job_id: &str,
         workspace: AgentPanelWorkspaceV1,
+        model_alias: &str,
     ) -> Result<RelayJob, RelayError> {
         if !is_job_identifier(job_id) {
             return Err(RelayError::OwnershipRejected);
@@ -328,6 +336,7 @@ impl RelayClient {
             &self.client_key_id,
             RelayJobExpectation {
                 workspace,
+                model_alias,
                 job_id: Some(job_id),
                 idempotency_key: None,
             },
@@ -343,6 +352,14 @@ impl RelayClient {
             .request(Method::GET, "/v1/events?limit=1", None::<&()>)
             .await?;
         Ok(())
+    }
+
+    pub(crate) async fn preferred_model_alias(&self) -> String {
+        self.request::<SonaModelCatalogV1, _>(Method::GET, "/v1/models", None::<&()>)
+            .await
+            .ok()
+            .and_then(|catalog| choose_model_alias(&catalog))
+            .unwrap_or_else(|| SONA_MODEL_ALIAS.to_string())
     }
 
     pub(crate) async fn get_events(
@@ -372,6 +389,7 @@ impl RelayClient {
         &self,
         job_id: &str,
         workspace: AgentPanelWorkspaceV1,
+        model_alias: &str,
     ) -> Result<RelayJob, RelayError> {
         if !is_job_identifier(job_id) {
             return Err(RelayError::OwnershipRejected);
@@ -382,6 +400,7 @@ impl RelayClient {
             &self.client_key_id,
             RelayJobExpectation {
                 workspace,
+                model_alias,
                 job_id: Some(job_id),
                 idempotency_key: None,
             },
@@ -457,7 +476,7 @@ impl RelayClient {
          * status is the whole diagnosis and the body is dropped — so an
          * unsigned one has nothing to lie its way into. The 2xx this client
          * does parse is still verified first. */
-        if let Some(failure) = failure_for_status(status) {
+        if let Some(failure) = failure_for_status(status, &headers) {
             return Err(failure);
         }
         let response_verification = ResponseVerification {
@@ -477,7 +496,86 @@ impl RelayClient {
         serde_json::from_slice(&response_bytes).map_err(|_| RelayError::ResponseMalformed)
     }
 }
+fn choose_model_alias(catalog: &SonaModelCatalogV1) -> Option<String> {
+    let first = catalog.models.first()?;
+    let selected = catalog
+        .models
+        .iter()
+        .find(|model| model.default)
+        .or_else(|| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.alias == SONA_MODEL_ALIAS)
+        })
+        .unwrap_or(first);
+    (!selected.alias.is_empty()).then(|| selected.alias.clone())
+}
 
+pub(crate) const fn rate_limit_delay(
+    attempt: usize,
+    retry_after: Option<Duration>,
+) -> Option<Duration> {
+    if attempt >= MAX_RATE_LIMIT_RETRIES {
+        return None;
+    }
+    if let Some(retry_after) = retry_after {
+        if retry_after.as_secs() > MAX_RETRY_AFTER.as_secs() {
+            return None;
+        }
+        let backoff = Duration::from_secs(1 << attempt);
+        return Some(if retry_after.as_secs() > backoff.as_secs() {
+            retry_after
+        } else {
+            backoff
+        });
+    }
+    Some(Duration::from_secs(1 << attempt))
+}
+
+pub(crate) async fn retry_rate_limited<
+    T,
+    Operation,
+    OperationFuture,
+    Delay,
+    DelayFuture,
+    Notify,
+    ShouldRetry,
+>(
+    mut operation: Operation,
+    mut delay: Delay,
+    mut notify: Notify,
+    mut should_retry: ShouldRetry,
+) -> Result<T, RelayError>
+where
+    Operation: FnMut() -> OperationFuture,
+    OperationFuture: Future<Output = Result<T, RelayError>>,
+    Delay: FnMut(Duration) -> DelayFuture,
+    DelayFuture: Future<Output = ()>,
+    Notify: FnMut(Duration),
+    ShouldRetry: FnMut() -> bool,
+{
+    let mut attempt = 0;
+    loop {
+        match operation().await {
+            Err(RelayError::RateLimited(retry_after)) => {
+                let Some(wait) = rate_limit_delay(attempt, retry_after) else {
+                    return Err(RelayError::RateLimited(retry_after));
+                };
+                if !should_retry() {
+                    return Err(RelayError::RateLimited(retry_after));
+                }
+                notify(wait);
+                delay(wait).await;
+                if !should_retry() {
+                    return Err(RelayError::RateLimited(retry_after));
+                }
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
 pub(crate) async fn public_identity(
     enabled: bool,
     secrets: &crate::secrets::SecretManager,
@@ -565,7 +663,7 @@ impl RelayJobWire {
             .is_some_and(|expected| expected != self.external_ref)
             || self.kind != capability
             || self.workspace_id != expected.workspace.id()
-            || self.model_alias != SONA_MODEL_ALIAS
+            || self.model_alias != expected.model_alias
             || self.capabilities.len() != 1
             || self
                 .capabilities
@@ -816,26 +914,45 @@ fn sign_headers(
 /// The typed cause a response that is not an answer carries, or `None` for the
 /// 2xx this client goes on to parse.
 ///
-/// A 401 is the relay refusing this client rather than its request: nothing
-/// but the two envelope checks in `signed_v1_middleware` answers with one, so
-/// what it asks for is a pairing and never a retry. 502, 503 and 504 are what
-/// answers for a relay that is not there, which is the outage `RequestFailed`
-/// already stands for, down to being the one error a turn may retry. The
-/// relay's own refusals are 400, 403, 404, 409, 413 and 429.
-fn failure_for_status(status: StatusCode) -> Option<RelayError> {
+/// A 401 asks for pairing rather than a retry. 502, 503 and 504 are the outage
+/// `RequestFailed` already represents. A 429 carries its optional delay so
+/// the caller can retry it within one shared budget. Other relay refusals stay
+/// terminal.
+fn failure_for_status(status: StatusCode, headers: &HeaderMap) -> Option<RelayError> {
     if status.is_success() {
         return None;
     }
     Some(match status.as_u16() {
         401 => RelayError::Unauthorized,
         403 | 404 => RelayError::OwnershipRejected,
-        502 | 503 | 504 => RelayError::RequestFailed,
+        429 => RelayError::RateLimited(parse_retry_after(headers)),
+        502..=504 => RelayError::RequestFailed,
         _ if status.is_client_error() || status.is_server_error() => RelayError::RemoteRejected,
         /* Neither an answer nor a refusal: a redirect this client does not
          * follow, or a 1xx. Nothing the relay sends, and nothing to name it
          * with beyond "not the shape a reply has". */
         _ => RelayError::ResponseMalformed,
     })
+}
+
+fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    const HTTP_DATE_FORMATS: [&str; 3] = [
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%A, %d-%b-%y %H:%M:%S GMT",
+        "%a %b %e %H:%M:%S %Y",
+    ];
+    let retry_at = HTTP_DATE_FORMATS
+        .iter()
+        .find_map(|format| chrono::NaiveDateTime::parse_from_str(value, format).ok())?;
+    let seconds = retry_at
+        .and_utc()
+        .timestamp()
+        .saturating_sub(chrono::Utc::now().timestamp());
+    Some(Duration::from_secs(u64::try_from(seconds).unwrap_or(0)))
 }
 
 fn verify_response(
@@ -1006,13 +1123,14 @@ fn is_event_type(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::agent_panel::protocol::{
-        AgentPanelWorkspaceV1, DeviceNames, PanelTurnV1, SonaAgentResponseV1, SonaAgentTurnV1,
-        SonaAllowedValuesV1, SonaChatActionV1, SonaChatTurnV2, SonaConfigProposalV1,
-        SonaSettingChangeV1, SONA_AGENT_TURN_VERSION, SONA_CHAT_TURN_VERSION,
-        SONA_CONFIG_PROPOSAL_VERSION,
+        AgentPanelTurnFailureV1, AgentPanelWorkspaceV1, DeviceNames, PanelTurnV1,
+        SonaAgentChatOutcomeV1, SonaAgentChatRoleV1, SonaAgentChatTurnV1, SonaAgentResponseV1,
+        SonaAgentTurnV1, SonaAllowedValuesV1, SonaChatActionV1, SonaChatTurnV2,
+        SonaConfigProposalV1, SonaModelCatalogEntryV1, SonaSettingChangeV1,
+        SONA_AGENT_TURN_VERSION, SONA_CHAT_TURN_VERSION, SONA_CONFIG_PROPOSAL_VERSION,
     };
     use crate::agent_panel::{
-        accept_job_in_state, config, ActiveTurn, AgentPanelActionStateV1,
+        accept_job_in_state, config, ActiveTurn, AgentPanelActionStateV1, AgentPanelManager,
         AgentPanelProposalStateV1, AgentPanelRelayStatusV1, AgentPanelTurnStateV1, PanelState,
         Reversal, StoredActionState,
     };
@@ -1024,13 +1142,73 @@ mod tests {
     };
     use crate::secrets::{MemorySecretBackend, SecretManager};
     use crate::settings::Theme;
-    use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+    use tauri_plugin_store::StoreExt;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
         task::JoinHandle,
     };
     use uuid::Uuid;
+    fn paired_panel_app(
+        endpoint: &str,
+        relay_key: &SigningKey,
+    ) -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let store = app
+            .handle()
+            .store(crate::portable::store_path(
+                crate::settings::SETTINGS_STORE_PATH,
+            ))
+            .expect("settings store");
+        let mut settings = crate::settings::get_default_settings();
+        settings.agent_panel_enabled = true;
+        settings.agent_panel_paired = true;
+        settings.agent_panel_relay_url = Some(endpoint.to_string());
+        settings.agent_panel_relay_key_id = Some("relay-test".to_string());
+        settings.agent_panel_relay_public_key = Some(
+            base64::engine::general_purpose::STANDARD.encode(relay_key.verifying_key().to_bytes()),
+        );
+        store.set(
+            "settings",
+            serde_json::to_value(&settings).expect("serialize paired settings"),
+        );
+        (data_dir, app)
+    }
+
+    fn active_chat_state_for_manager(turn_id: &str, message: &str) -> PanelState {
+        let conversation_id = format!("conversation-{turn_id}");
+        let mut state = active_panel_state(
+            chat_turn(turn_id),
+            SonaAllowedValuesV1::default(),
+            &format!("{turn_id}-key"),
+        );
+        state.conversation_id = Some(conversation_id);
+        state.conversation = vec![SonaAgentChatTurnV1 {
+            role: SonaAgentChatRoleV1::User,
+            message: message.to_string(),
+            outcome: None,
+        }];
+        state
+            .turn
+            .as_mut()
+            .expect("active manager test turn")
+            .submitting = false;
+        state
+    }
 
     #[derive(Debug)]
     struct TestRequest {
@@ -1086,6 +1264,7 @@ mod tests {
             turn_id,
             workspace,
             idempotency_key: idempotency_key.to_string(),
+            model_alias: SONA_MODEL_ALIAS.to_string(),
             request: turn,
             allowed,
             job_id: None,
@@ -1127,9 +1306,8 @@ mod tests {
         }
         let body_len = headers
             .get("content-length")
-            .expect("content length")
-            .parse::<usize>()
-            .expect("numeric content length");
+            .map(|value| value.parse::<usize>().expect("numeric content length"))
+            .unwrap_or(0);
         while received.len() < headers_end + body_len {
             let count = stream.read(&mut buffer).await.expect("read request body");
             assert_ne!(count, 0, "request closed before body");
@@ -1150,8 +1328,13 @@ mod tests {
             .expect("signed request header")
     }
 
-    fn assert_request_signature(request: &TestRequest, client: &AgentPanelPublicIdentityV1) {
-        assert_eq!(request.line, "POST /v1/jobs/submit HTTP/1.1");
+    fn assert_request_signature(
+        request: &TestRequest,
+        client: &AgentPanelPublicIdentityV1,
+        method: &str,
+        path: &str,
+    ) {
+        assert_eq!(request.line, format!("{method} {path} HTTP/1.1"));
         assert_eq!(request_header(request, HEADER_KEY), client.key_id);
         assert_eq!(request_header(request, HEADER_DIRECTION), "request");
         let timestamp = request_header(request, HEADER_TIMESTAMP)
@@ -1163,8 +1346,7 @@ mod tests {
             .expect("request signature encoding");
         let signature = Signature::from_slice(&signature).expect("request signature");
         let client_key = verifying_key_from_base64(&client.public_key).expect("client public key");
-        let context =
-            SignatureContext::request("POST", "/v1/jobs/submit", &request.body, timestamp, nonce);
+        let context = SignatureContext::request(method, path, &request.body, timestamp, nonce);
         client_key
             .verify_strict(
                 &canonical_bytes(&context).expect("canonical request"),
@@ -1187,7 +1369,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept relay request");
             let request = read_request(&mut stream).await;
-            assert_request_signature(&request, &client);
+            assert_request_signature(&request, &client, "POST", "/v1/jobs/submit");
             let submission: serde_json::Value =
                 serde_json::from_slice(&request.body).expect("submission JSON");
             let workspace = submission["workspace_id"]
@@ -1278,6 +1460,118 @@ mod tests {
                 .write_all(body.as_bytes())
                 .await
                 .expect("write relay body");
+        })
+    }
+
+    enum ScriptedReply {
+        RateLimited { retry_after: Option<&'static str> },
+        NotFound,
+        Signed(serde_json::Value),
+    }
+
+    fn scripted_server(
+        listener: TcpListener,
+        signing_key: SigningKey,
+        replies: Vec<ScriptedReply>,
+    ) -> JoinHandle<Vec<TestRequest>> {
+        tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(replies.len());
+            for reply in replies {
+                let (mut stream, _) = listener.accept().await.expect("accept relay request");
+                let request = read_request(&mut stream).await;
+                let (status_line, body, retry_after, signed) = match reply {
+                    ScriptedReply::RateLimited { retry_after } => {
+                        ("429 Too Many Requests", Vec::new(), retry_after, false)
+                    }
+                    ScriptedReply::NotFound => ("404 Not Found", Vec::new(), None, false),
+                    ScriptedReply::Signed(body) => (
+                        "200 OK",
+                        serde_json::to_vec(&body).expect("relay response JSON"),
+                        None,
+                        true,
+                    ),
+                };
+                let mut head = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    body.len()
+                );
+                if let Some(retry_after) = retry_after {
+                    head.push_str("Retry-After: ");
+                    head.push_str(retry_after);
+                    head.push_str("\r\n");
+                }
+                if signed {
+                    let mut parts = request.line.split_whitespace();
+                    let method = parts.next().expect("request method");
+                    let path = parts.next().expect("request path");
+                    let response_nonce = format!("relay-{}", Uuid::new_v4());
+                    let context = SignatureContext::response(
+                        method,
+                        path,
+                        &body,
+                        chrono::Utc::now().timestamp(),
+                        &response_nonce,
+                        StatusCode::OK,
+                        request_header(&request, HEADER_NONCE),
+                    );
+                    for (name, value) in sign_headers(&signing_key, "relay-test", &context)
+                        .expect("relay response headers")
+                    {
+                        head.push_str(name.as_str());
+                        head.push_str(": ");
+                        head.push_str(value.to_str().expect("response header value"));
+                        head.push_str("\r\n");
+                    }
+                }
+                head.push_str("\r\n");
+                stream
+                    .write_all(head.as_bytes())
+                    .await
+                    .expect("write scripted response headers");
+                stream
+                    .write_all(&body)
+                    .await
+                    .expect("write scripted response body");
+                requests.push(request);
+            }
+            requests
+        })
+    }
+
+    fn successful_job(
+        client: &AgentPanelPublicIdentityV1,
+        idempotency_key: &str,
+        model_alias: &str,
+    ) -> ScriptedReply {
+        ScriptedReply::Signed(serde_json::json!({
+            "job": {
+                "id": "job-e2e",
+                "state": "SUCCEEDED",
+                "kind": "sona-chat",
+                "workspace_id": "sona-chat",
+                "model_alias": model_alias,
+                "capabilities": ["sona-chat"],
+                "tools": [],
+                "submitter_key_id": client.key_id,
+                "external_ref": idempotency_key,
+                "result": {"kind":"text","message":"Done."},
+            },
+            "created": true,
+        }))
+    }
+
+    fn chat_turn(turn_id: &str) -> PanelTurnV1 {
+        PanelTurnV1::Chat(SonaChatTurnV2 {
+            protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
+            conversation_id: format!("conversation-{turn_id}"),
+            turn_id: turn_id.to_string(),
+            user_message: "What did we decide?".to_string(),
+            recent_turns: Vec::new(),
+            context_pack: None,
+            tools_allowed: false,
+            locale: "en".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            reply_is_json: false,
         })
     }
 
@@ -1483,6 +1777,7 @@ mod tests {
         };
         let expectation = |workspace| RelayJobExpectation {
             workspace,
+            model_alias: SONA_MODEL_ALIAS,
             job_id: Some("job-1"),
             idempotency_key: None,
         };
@@ -1549,6 +1844,7 @@ mod tests {
                 "sona-me",
                 RelayJobExpectation {
                     workspace: AgentPanelWorkspaceV1::SonaChat,
+                    model_alias: SONA_MODEL_ALIAS,
                     job_id: Some("job-1"),
                     idempotency_key: None,
                 },
@@ -1629,7 +1925,7 @@ mod tests {
                 let (client, _) = relay_client(&secrets, &endpoint, &signing_key()).await;
                 assert_eq!(
                     client
-                        .cancel_job("job-e2e", AgentPanelWorkspaceV1::SonaChat)
+                        .cancel_job("job-e2e", AgentPanelWorkspaceV1::SonaChat, SONA_MODEL_ALIAS,)
                         .await
                         .err(),
                     Some(expected),
@@ -1638,6 +1934,602 @@ mod tests {
                 server.await.expect("relay server task");
             }
         });
+    }
+
+    #[test]
+    fn rate_limit_schedule_is_bounded_and_parses_retry_after() {
+        assert_eq!(
+            (0..=3)
+                .map(|attempt| rate_limit_delay(attempt, None))
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(4)),
+                None,
+            ]
+        );
+        assert_eq!(
+            (0..=3)
+                .map(|attempt| rate_limit_delay(attempt, Some(Duration::from_secs(3))))
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Duration::from_secs(3)),
+                Some(Duration::from_secs(3)),
+                Some(Duration::from_secs(4)),
+                None,
+            ]
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("later"));
+        assert_eq!(
+            failure_for_status(StatusCode::TOO_MANY_REQUESTS, &headers),
+            Some(RelayError::RateLimited(None))
+        );
+    }
+
+    #[test]
+    fn submit_retries_a_rate_limit_without_sleeping() {
+        tauri::async_runtime::block_on(async {
+            let secrets = memory_secrets();
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let (client, identity) = relay_client(&secrets, &endpoint(&listener), &relay_key).await;
+            let turn = chat_turn("retry-submit");
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::RateLimited {
+                        retry_after: Some("2"),
+                    },
+                    successful_job(&identity, "retry-submit-key", SONA_MODEL_ALIAS),
+                ],
+            );
+            let waits = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&waits);
+
+            let job = retry_rate_limited(
+                || client.submit_turn("retry-submit-key", &turn, SONA_MODEL_ALIAS),
+                move |duration| {
+                    observed.lock().expect("wait observations").push(duration);
+                    std::future::ready(())
+                },
+                |_| {},
+                || true,
+            )
+            .await
+            .expect("second submission succeeds");
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(job.state, RelayJobStateV1::Succeeded);
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                *waits.lock().expect("wait observations"),
+                vec![Duration::from_secs(2)]
+            );
+            for request in &requests {
+                assert_request_signature(request, &identity, "POST", "/v1/jobs/submit");
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("submission JSON");
+                assert_eq!(body["model"], SONA_MODEL_ALIAS);
+            }
+        });
+    }
+
+    #[test]
+    fn four_rate_limits_exhaust_the_retry_budget() {
+        tauri::async_runtime::block_on(async {
+            let secrets = memory_secrets();
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let endpoint = endpoint(&listener);
+            let server = scripted_server(
+                listener,
+                relay_key,
+                (0..4)
+                    .map(|_| ScriptedReply::RateLimited { retry_after: None })
+                    .collect(),
+            );
+            let (client, _) = relay_client(&secrets, &endpoint, &signing_key()).await;
+            let turn = chat_turn("retry-exhausted");
+            let waits = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&waits);
+
+            let result = retry_rate_limited(
+                || client.submit_turn("retry-exhausted-key", &turn, SONA_MODEL_ALIAS),
+                move |duration| {
+                    observed.lock().expect("wait observations").push(duration);
+                    std::future::ready(())
+                },
+                |_| {},
+                || true,
+            )
+            .await;
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(result.err(), Some(RelayError::RateLimited(None)));
+            assert_eq!(requests.len(), 4);
+            assert_eq!(
+                *waits.lock().expect("wait observations"),
+                vec![
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                    Duration::from_secs(4),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn retry_after_over_the_cap_fails_without_waiting() {
+        tauri::async_runtime::block_on(async {
+            let secrets = memory_secrets();
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let endpoint = endpoint(&listener);
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![ScriptedReply::RateLimited {
+                    retry_after: Some("45"),
+                }],
+            );
+            let (client, _) = relay_client(&secrets, &endpoint, &signing_key()).await;
+            let turn = chat_turn("retry-capped");
+            let waits = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&waits);
+
+            let result = retry_rate_limited(
+                || client.submit_turn("retry-capped-key", &turn, SONA_MODEL_ALIAS),
+                move |duration| {
+                    observed.lock().expect("wait observations").push(duration);
+                    std::future::ready(())
+                },
+                |_| {},
+                || true,
+            )
+            .await;
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(
+                result.err(),
+                Some(RelayError::RateLimited(Some(Duration::from_secs(45))))
+            );
+            assert_eq!(requests.len(), 1);
+            assert!(waits.lock().expect("wait observations").is_empty());
+        });
+    }
+
+    #[test]
+    fn retry_rate_limit_checks_cancellation_before_wait() {
+        tauri::async_runtime::block_on(async {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let waits = Arc::new(AtomicUsize::new(0));
+            let observed_calls = Arc::clone(&calls);
+            let observed_waits = Arc::clone(&waits);
+            let result = retry_rate_limited(
+                move || {
+                    observed_calls.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<(), RelayError>(RelayError::RateLimited(None)) }
+                },
+                move |_| {
+                    observed_waits.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(())
+                },
+                |_| {},
+                || false,
+            )
+            .await;
+
+            assert_eq!(result, Err(RelayError::RateLimited(None)));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(waits.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn retry_rate_limit_checks_cancellation_after_wait() {
+        tauri::async_runtime::block_on(async {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let waits = Arc::new(AtomicUsize::new(0));
+            let canceled = Arc::new(AtomicBool::new(false));
+            let observed_calls = Arc::clone(&calls);
+            let observed_waits = Arc::clone(&waits);
+            let canceled_during_wait = Arc::clone(&canceled);
+            let cancellation_check = Arc::clone(&canceled);
+            let result = retry_rate_limited(
+                move || {
+                    observed_calls.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<(), RelayError>(RelayError::RateLimited(None)) }
+                },
+                move |_| {
+                    observed_waits.fetch_add(1, Ordering::SeqCst);
+                    canceled_during_wait.store(true, Ordering::SeqCst);
+                    std::future::ready(())
+                },
+                |_| {},
+                move || !cancellation_check.load(Ordering::SeqCst),
+            )
+            .await;
+
+            assert_eq!(result, Err(RelayError::RateLimited(None)));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(waits.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn retry_rate_limit_stops_after_poll_generation_changes() {
+        tauri::async_runtime::block_on(async {
+            let generation = Arc::new(AtomicU64::new(7));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let generation_during_wait = Arc::clone(&generation);
+            let current_generation = Arc::clone(&generation);
+            let observed_calls = Arc::clone(&calls);
+            let result = retry_rate_limited(
+                move || {
+                    observed_calls.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<(), RelayError>(RelayError::RateLimited(None)) }
+                },
+                move |_| {
+                    generation_during_wait.store(8, Ordering::SeqCst);
+                    std::future::ready(())
+                },
+                |_| {},
+                move || current_generation.load(Ordering::SeqCst) == 7,
+            )
+            .await;
+
+            assert_eq!(result, Err(RelayError::RateLimited(None)));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(generation.load(Ordering::SeqCst), 8);
+        });
+    }
+
+    #[test]
+    fn polling_retries_a_rate_limit_without_sleeping() {
+        tauri::async_runtime::block_on(async {
+            let secrets = memory_secrets();
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let (client, identity) = relay_client(&secrets, &endpoint(&listener), &relay_key).await;
+            let ScriptedReply::Signed(submission) =
+                successful_job(&identity, "original-key", SONA_MODEL_ALIAS)
+            else {
+                unreachable!("a successful job helper always returns a signed response")
+            };
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::RateLimited { retry_after: None },
+                    ScriptedReply::Signed(serde_json::json!({
+                        "job": submission["job"].clone()
+                    })),
+                ],
+            );
+            let waits = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&waits);
+
+            let job = retry_rate_limited(
+                || client.get_job("job-e2e", AgentPanelWorkspaceV1::SonaChat, SONA_MODEL_ALIAS),
+                move |duration| {
+                    observed.lock().expect("wait observations").push(duration);
+                    std::future::ready(())
+                },
+                |_| {},
+                || true,
+            )
+            .await
+            .expect("second poll succeeds");
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(job.state, RelayJobStateV1::Succeeded);
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                *waits.lock().expect("wait observations"),
+                vec![Duration::from_secs(1)]
+            );
+            for request in &requests {
+                assert_request_signature(request, &identity, "GET", "/v1/jobs/job-e2e");
+            }
+        });
+    }
+
+    #[test]
+    fn catalog_selects_the_default_model_for_submission() {
+        tauri::async_runtime::block_on(async {
+            let secrets = memory_secrets();
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let (client, identity) = relay_client(&secrets, &endpoint(&listener), &relay_key).await;
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::Signed(serde_json::json!({
+                        "models": [
+                            {"alias": "fast", "default": true},
+                            {"alias": "ultra", "default": false}
+                        ]
+                    })),
+                    successful_job(&identity, "catalog-key", "fast"),
+                ],
+            );
+
+            let alias = client.preferred_model_alias().await;
+            let job = client
+                .submit_turn("catalog-key", &chat_turn("catalog"), &alias)
+                .await
+                .expect("catalog model job");
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(alias, "fast");
+            assert_eq!(job.state, RelayJobStateV1::Succeeded);
+            assert_request_signature(&requests[0], &identity, "GET", "/v1/models");
+            let submission: serde_json::Value =
+                serde_json::from_slice(&requests[1].body).expect("submission JSON");
+            assert_eq!(submission["model"], "fast");
+        });
+    }
+
+    #[test]
+    fn model_catalog_cache_respects_force_refresh_and_pairing_rotation() {
+        tauri::async_runtime::block_on(async {
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let relay_endpoint = endpoint(&listener);
+            let (_data_dir, app) = paired_panel_app(&relay_endpoint, &relay_key);
+            let manager = AgentPanelManager::new(app.handle());
+            let secrets = memory_secrets();
+            let (client, identity) =
+                relay_client(secrets.as_ref(), &relay_endpoint, &relay_key).await;
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::Signed(serde_json::json!({
+                        "models": [{"alias": "fast", "default": true}]
+                    })),
+                    ScriptedReply::Signed(serde_json::json!({
+                        "models": [{"alias": "ultra", "default": true}]
+                    })),
+                    ScriptedReply::Signed(serde_json::json!({
+                        "models": [{"alias": "first", "default": true}]
+                    })),
+                ],
+            );
+
+            let first = manager.model_alias(&client, false).await;
+            let cached = manager.model_alias(&client, false).await;
+            let forced = manager.model_alias(&client, true).await;
+
+            let store = app
+                .handle()
+                .store(crate::portable::store_path(
+                    crate::settings::SETTINGS_STORE_PATH,
+                ))
+                .expect("settings store");
+            let mut settings = crate::settings::get_settings(app.handle());
+            settings.agent_panel_relay_key_id = Some("relay-test-rotated".to_string());
+            store.set(
+                "settings",
+                serde_json::to_value(&settings).expect("serialize rotated settings"),
+            );
+            let rotated = manager.model_alias(&client, false).await;
+            assert_eq!(first, "fast");
+            assert_eq!(cached, "fast");
+            assert_eq!(forced, "ultra");
+            assert_eq!(rotated, "first");
+            let requests = server.await.expect("scripted relay task");
+            assert_eq!(requests.len(), 3);
+            for request in &requests {
+                assert_request_signature(&request, &identity, "GET", "/v1/models");
+            }
+        });
+    }
+
+    #[test]
+    fn submit_retry_stops_when_canceled_during_wait() {
+        tauri::async_runtime::block_on(async {
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let relay_endpoint = endpoint(&listener);
+            let (_data_dir, app) = paired_panel_app(&relay_endpoint, &relay_key);
+            let secrets = memory_secrets();
+            app.handle().manage(secrets.clone());
+            let manager = Arc::new(AgentPanelManager::new(app.handle()));
+            *manager.lock_state() =
+                active_chat_state_for_manager("submit-cancel", "Cancel this question");
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::Signed(serde_json::json!({
+                        "models": [{"alias": "fast", "default": true}]
+                    })),
+                    ScriptedReply::RateLimited { retry_after: None },
+                ],
+            );
+            let cancellation_manager = Arc::clone(&manager);
+            let result = manager
+                .submit_active_turn_with_delay("submit-cancel", move |_| {
+                    let manager = Arc::clone(&cancellation_manager);
+                    async move {
+                        let mut state = manager.lock_state();
+                        let active = state.turn.as_mut().expect("active canceled turn");
+                        active.cancel_requested = true;
+                        active.state = AgentPanelTurnStateV1::Canceling;
+                    }
+                })
+                .await;
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(result, Ok(()));
+            let status = manager.current_status();
+            assert_eq!(
+                status.turn.as_ref().expect("canceled turn").state,
+                AgentPanelTurnStateV1::Canceled
+            );
+            assert_eq!(
+                status.conversation[0].outcome,
+                Some(SonaAgentChatOutcomeV1::Canceled)
+            );
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].line, "GET /v1/models HTTP/1.1");
+            assert_eq!(requests[1].line, "POST /v1/jobs/submit HTTP/1.1");
+        });
+    }
+
+    #[test]
+    fn exhausted_submit_rate_limit_is_recorded_without_returning_error() {
+        tauri::async_runtime::block_on(async {
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let relay_endpoint = endpoint(&listener);
+            let (_data_dir, app) = paired_panel_app(&relay_endpoint, &relay_key);
+            let secrets = memory_secrets();
+            app.handle().manage(secrets.clone());
+            let manager = Arc::new(AgentPanelManager::new(app.handle()));
+            *manager.lock_state() =
+                active_chat_state_for_manager("submit-exhausted", "Try this question");
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::Signed(serde_json::json!({
+                        "models": [{"alias": "fast", "default": true}]
+                    })),
+                    ScriptedReply::RateLimited { retry_after: None },
+                    ScriptedReply::RateLimited { retry_after: None },
+                    ScriptedReply::RateLimited { retry_after: None },
+                    ScriptedReply::RateLimited { retry_after: None },
+                ],
+            );
+            let result = manager
+                .submit_active_turn_with_delay("submit-exhausted", |_| std::future::ready(()))
+                .await;
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(result, Ok(()));
+            let status = manager.current_status();
+            let turn = status.turn.as_ref().expect("failed turn");
+            assert_eq!(turn.state, AgentPanelTurnStateV1::Failed);
+            assert_eq!(turn.failure, Some(AgentPanelTurnFailureV1::RateLimited));
+            assert_eq!(
+                status.conversation[0].outcome,
+                Some(SonaAgentChatOutcomeV1::Failure {
+                    failure: AgentPanelTurnFailureV1::RateLimited,
+                })
+            );
+            assert_eq!(requests.len(), 5);
+            assert_eq!(requests[0].line, "GET /v1/models HTTP/1.1");
+            assert!(requests[1..]
+                .iter()
+                .all(|request| request.line == "POST /v1/jobs/submit HTTP/1.1"));
+        });
+    }
+
+    #[test]
+    fn missing_catalog_keeps_the_fallback_model() {
+        tauri::async_runtime::block_on(async {
+            let secrets = memory_secrets();
+            let relay_key = signing_key();
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay listener");
+            let (client, identity) = relay_client(&secrets, &endpoint(&listener), &relay_key).await;
+            let server = scripted_server(
+                listener,
+                relay_key,
+                vec![
+                    ScriptedReply::NotFound,
+                    successful_job(&identity, "fallback-key", SONA_MODEL_ALIAS),
+                ],
+            );
+
+            let alias = client.preferred_model_alias().await;
+            client
+                .submit_turn("fallback-key", &chat_turn("fallback"), &alias)
+                .await
+                .expect("fallback model job");
+            let requests = server.await.expect("scripted relay task");
+
+            assert_eq!(alias, SONA_MODEL_ALIAS);
+            let submission: serde_json::Value =
+                serde_json::from_slice(&requests[1].body).expect("submission JSON");
+            assert_eq!(submission["model"], SONA_MODEL_ALIAS);
+        });
+    }
+
+    #[test]
+    fn catalog_without_a_default_prefers_ultra_then_the_first_model() {
+        let catalog = |aliases: &[&str]| SonaModelCatalogV1 {
+            models: aliases
+                .iter()
+                .map(|alias| SonaModelCatalogEntryV1 {
+                    alias: (*alias).to_string(),
+                    default: false,
+                })
+                .collect(),
+        };
+
+        assert_eq!(
+            choose_model_alias(&catalog(&["fast", "ultra"])).as_deref(),
+            Some("ultra")
+        );
+        assert_eq!(
+            choose_model_alias(&catalog(&["fast", "slow"])).as_deref(),
+            Some("fast")
+        );
+        assert_eq!(choose_model_alias(&catalog(&[])), None);
+    }
+
+    #[test]
+    fn a_job_row_must_echo_the_model_that_was_submitted() {
+        let row = RelayJobWire {
+            id: "job-1".to_string(),
+            state: "SUCCEEDED".to_string(),
+            kind: "sona-chat".to_string(),
+            workspace_id: "sona-chat".to_string(),
+            model_alias: "ultra".to_string(),
+            capabilities: vec!["sona-chat".to_string()],
+            tools: Vec::new(),
+            submitter_key_id: "sona-me".to_string(),
+            external_ref: "model-key".to_string(),
+            result: Some(serde_json::json!({"kind":"text","message":"Done."})),
+        };
+
+        assert_eq!(
+            row.into_job(
+                "sona-me",
+                RelayJobExpectation {
+                    workspace: AgentPanelWorkspaceV1::SonaChat,
+                    model_alias: "fast",
+                    job_id: Some("job-1"),
+                    idempotency_key: None,
+                },
+            )
+            .err(),
+            Some(RelayError::ResponseMalformed)
+        );
     }
 
     #[test]
@@ -1692,7 +2584,7 @@ mod tests {
             );
 
             let job = client
-                .submit_turn(idempotency_key, &turn)
+                .submit_turn(idempotency_key, &turn, SONA_MODEL_ALIAS)
                 .await
                 .expect("accept signed relay response");
             let accepted = accept_job_in_state(&mut state, "config-e2e", job, false)
@@ -1809,7 +2701,7 @@ The deck was sent.",
             );
 
             let job = client
-                .submit_turn(idempotency_key, &turn)
+                .submit_turn(idempotency_key, &turn, SONA_MODEL_ALIAS)
                 .await
                 .expect("accept signed relay response");
             let accepted = accept_job_in_state(&mut state, "action-e2e", job, false)

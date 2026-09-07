@@ -25,9 +25,27 @@ pub(crate) const SONA_CONFIG_WORKSPACE_ID: &str = "sona-config";
 pub(crate) const SONA_CHAT_WORKSPACE_ID: &str = "sona-chat";
 pub(crate) const SONA_CONFIG_CAPABILITY: &str = "sona-config";
 pub(crate) const SONA_CHAT_CAPABILITY: &str = "sona-chat";
-/// The model tier every panel submission asks for. Mirrored by
-/// `SONA_CHAT_MODEL_ALIAS` in `omp_bridge/sona_chat.py`.
+/// The model tier used when the paired relay has no usable live catalog.
+/// Mirrored by `SONA_CHAT_MODEL_ALIAS` in `omp_bridge/sona_chat.py`.
+///
+/// A relay may additionally serve `GET /v1/models` through the signed request
+/// path as `{"models":[{"alias":"<string>","default":<bool>}]}`. A client
+/// that receives 404, an invalid response, or an empty list keeps using this
+/// alias, so relays without the endpoint behave exactly as they did before.
 pub(crate) const SONA_MODEL_ALIAS: &str = "ultra";
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SonaModelCatalogV1 {
+    pub(crate) models: Vec<SonaModelCatalogEntryV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SonaModelCatalogEntryV1 {
+    pub(crate) alias: String,
+    pub(crate) default: bool,
+}
 /// The largest context pack the panel accepts on the wire, in bytes.
 ///
 /// 128 KiB because a pack has to carry the evidence of a whole meeting rather
@@ -98,11 +116,32 @@ pub enum SonaAgentChatRoleV1 {
     Assistant,
 }
 
+/// Why a turn ended with nothing to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPanelTurnFailureV1 {
+    Unreachable,
+    Refused,
+    Failed,
+    TooManyLookups,
+    RateLimited,
+}
+
+/// The terminal result stored beside the user message that started a turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SonaAgentChatOutcomeV1 {
+    Failure { failure: AgentPanelTurnFailureV1 },
+    Canceled,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(deny_unknown_fields)]
 pub struct SonaAgentChatTurnV1 {
     pub role: SonaAgentChatRoleV1,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<SonaAgentChatOutcomeV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -339,7 +378,7 @@ pub(crate) enum PanelTurnV1 {
 #[derive(Serialize)]
 pub(crate) struct SonaSubmissionV1<'a> {
     pub(crate) workspace_id: &'static str,
-    pub(crate) model: &'static str,
+    pub(crate) model: &'a str,
     pub(crate) capability: &'static str,
     pub(crate) idempotency_key: &'a str,
     pub(crate) request: &'a PanelTurnV1,
@@ -1415,6 +1454,7 @@ mod tests {
                         "You said \"hold the deck\", and I said \"the pricing lands Thursday\". ",
                         MAX_RECENT_TURN_BYTES / MAX_RECENT_TURNS,
                     ),
+                    outcome: None,
                 })
                 .collect(),
             context_pack: Some(dense(PACK_ENTRY, MAX_CONTEXT_PACK_BYTES)),
@@ -1549,11 +1589,11 @@ mod tests {
         }
     }
 
-    fn lookup(id: &str, tool: &str, args: serde_json::Value) -> ToolCall {
+    fn lookup(id: &str, tool: &str, args: impl Serialize) -> ToolCall {
         ToolCall {
             id: id.to_string(),
             tool: tool.to_string(),
-            args,
+            args: serde_json::to_value(args).expect("tool arguments serialize"),
         }
     }
 

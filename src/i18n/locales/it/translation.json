@@ -2560,7 +2560,8 @@
       "unreachable": "Sona non è riuscita a connettersi.",
       "refused": "Sona non ha potuto accettare questa domanda.",
       "failed": "Sona non è riuscita a completare questa risposta.",
-      "too_many_lookups": "Sona ha avuto bisogno di più di tre ricerche per questa domanda."
+      "too_many_lookups": "Sona ha avuto bisogno di più di tre ricerche per questa domanda.",
+      "rate_limited": "Sona ha raggiunto temporaneamente il limite di richieste."
     },
     "working": {
       "searchedCorpus": "Ho esaminato le tue riunioni e le tue note",
@@ -2584,6 +2585,7 @@
       "disabled": "L'agente Sona è disattivato.",
       "unpaired": "L'agente Sona non è associato a un relay.",
       "offline": "Il relay dell'agente Sona non è raggiungibile.",
+      "rate_limited": "Il relay ha limitato le richieste di Sona. Nuovo tentativo…",
       "error": "L'agente Sona non è disponibile."
     },
     "proposal": {

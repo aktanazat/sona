@@ -2544,7 +2544,8 @@
       "unreachable": "Sona가 연결하지 못했습니다.",
       "refused": "Sona가 그 질문을 받지 못했습니다.",
       "failed": "Sona가 그 답변을 끝내지 못했습니다.",
-      "too_many_lookups": "Sona가 이 질문에 답하려면 조회가 3회 넘게 필요합니다."
+      "too_many_lookups": "Sona가 이 질문에 답하려면 조회가 3회 넘게 필요합니다.",
+      "rate_limited": "Sona의 요청이 일시적으로 제한되었습니다."
     },
     "working": {
       "searchedCorpus": "회의와 메모를 살펴봤습니다",
@@ -2568,6 +2569,7 @@
       "disabled": "Sona 에이전트가 꺼져 있습니다.",
       "unpaired": "Sona 에이전트가 릴레이와 페어링되지 않았습니다.",
       "offline": "Sona 에이전트의 릴레이에 연결할 수 없습니다.",
+      "rate_limited": "릴레이가 Sona의 요청을 제한했습니다. 다시 시도하는 중…",
       "error": "Sona 에이전트를 사용할 수 없습니다."
     },
     "proposal": {

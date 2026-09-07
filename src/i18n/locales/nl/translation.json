@@ -2552,7 +2552,8 @@
       "unreachable": "Sona kon geen verbinding maken.",
       "refused": "Sona kon die vraag niet aannemen.",
       "failed": "Sona kon dat antwoord niet afmaken.",
-      "too_many_lookups": "Sona had meer dan drie opzoekingen nodig voor deze vraag."
+      "too_many_lookups": "Sona had meer dan drie opzoekingen nodig voor deze vraag.",
+      "rate_limited": "Sona is tijdelijk beperkt wegens te veel verzoeken."
     },
     "working": {
       "searchedCorpus": "Je vergaderingen en notities doorgenomen",
@@ -2576,6 +2577,7 @@
       "disabled": "De Sona-agent staat uit.",
       "unpaired": "De Sona-agent is niet gekoppeld aan een relay.",
       "offline": "De relay van de Sona-agent was niet bereikbaar.",
+      "rate_limited": "De relay heeft Sona beperkt. Opnieuw proberen…",
       "error": "De Sona-agent is niet beschikbaar."
     },
     "proposal": {

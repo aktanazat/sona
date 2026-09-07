@@ -2544,7 +2544,8 @@
       "unreachable": "Sona 無法連線。",
       "refused": "Sona 無法接受這個問題。",
       "failed": "Sona 沒能寫完這個回答。",
-      "too_many_lookups": "Sona 為此問題查詢超過三次。"
+      "too_many_lookups": "Sona 為此問題查詢超過三次。",
+      "rate_limited": "Sona 的請求暫時受到速率限制。"
     },
     "working": {
       "searchedCorpus": "看過你的會議和筆記了",
@@ -2568,6 +2569,7 @@
       "disabled": "Sona 代理已關閉。",
       "unpaired": "Sona 代理尚未與中繼配對。",
       "offline": "無法連線 Sona 代理的中繼。",
+      "rate_limited": "中繼限制了 Sona 的請求。正在重試…",
       "error": "Sona 代理無法使用。"
     },
     "proposal": {
