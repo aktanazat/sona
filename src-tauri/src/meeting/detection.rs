@@ -403,6 +403,12 @@ struct CaptureTick<'a> {
     call: &'a machine::CallSignal,
     call_live: bool,
 }
+#[derive(Debug, Eq, PartialEq)]
+enum CaptureTransition {
+    Continue,
+    Adopted(machine::AdoptedCall),
+    Stop(machine::StopTrigger),
+}
 
 impl TrackedCapture {
     fn detection(
@@ -512,10 +518,12 @@ impl RuntimeState {
         self.acted_calls.insert(bundle_id.to_string())
     }
 
-    /// Releases every call claim. The tick calls this whenever no call is live,
-    /// which is what re-arms the path for the next one.
-    fn release_calls(&mut self) {
-        self.acted_calls.clear();
+    /// Re-arms the call path when no call evidence is present. A live call
+    /// keeps every claim so later ticks cannot act again.
+    fn rearm_call_claims(&mut self, call_evidence: bool) {
+        if !call_evidence {
+            self.acted_calls.clear();
+        }
     }
 
     /// The input-device episode is over. The next meeting in the same app is
@@ -633,6 +641,62 @@ impl RuntimeState {
             .take_if(|tracked| tracked.session_id == session_id)?;
         self.slept = false;
         Some(tracked)
+    }
+}
+
+fn evaluate_running_capture_transition(
+    state: &mut RuntimeState,
+    tracked: &TrackedCapture,
+    tick: CaptureTick<'_>,
+    now_utc_ms: i64,
+) -> CaptureTransition {
+    match &tracked.kind {
+        TrackedCaptureKind::Detection {
+            trigger_bundle_id,
+            event_end_utc_ms,
+            ..
+        } => {
+            let call_output =
+                state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
+            let trigger = evaluate_stop(&StopInputs {
+                now_utc_ms,
+                linked_event_end_utc_ms: *event_end_utc_ms,
+                self_holds_input_device: tick.sona_holds,
+                device_running_somewhere: tick.mic == MicSignal::Active,
+                microphone_lane: tracked.microphone_lane(),
+                call_output,
+                trigger_app_running: trigger_bundle_id
+                    .as_deref()
+                    .is_none_or(|bundle_id| apps::is_app_running(tick.running, bundle_id)),
+                slept_since_start: state.slept,
+            });
+            trigger.map_or(CaptureTransition::Continue, CaptureTransition::Stop)
+        }
+        TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => {
+            let Some(adopted) =
+                state.adopt_operator_call(tracked.session_id, tick.call, tick.call_live)
+            else {
+                return CaptureTransition::Continue;
+            };
+            CaptureTransition::Adopted(adopted)
+        }
+        TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted {
+            call: adopted, ..
+        }) => {
+            let call_output =
+                state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
+            let trigger = evaluate_stop(&StopInputs {
+                now_utc_ms,
+                linked_event_end_utc_ms: None,
+                self_holds_input_device: tick.sona_holds,
+                device_running_somewhere: tick.mic == MicSignal::Active,
+                microphone_lane: false,
+                call_output,
+                trigger_app_running: apps::is_app_running(tick.running, &adopted.bundle_id),
+                slept_since_start: state.slept,
+            });
+            trigger.map_or(CaptureTransition::Continue, CaptureTransition::Stop)
+        }
     }
 }
 
@@ -987,9 +1051,7 @@ impl DetectionRuntime {
         // not re-arm the claim or retract the prompt.
         let call_live = machine::call_is_live(&call, &app_signal, mic, output);
         let call_evidence = machine::call_evidence(&call, mic, output);
-        if !call_evidence {
-            self.lock().release_calls();
-        }
+        self.lock().rearm_call_claims(call_evidence);
 
         // Nothing to decide: skip the store reads entirely — the capture
         // snapshot, the suggestion list, and the decision table. This is the
@@ -1040,6 +1102,7 @@ impl DetectionRuntime {
                     call: &call,
                     call_live,
                 },
+                now_utc_ms,
             );
         }
 
@@ -2270,6 +2333,7 @@ impl DetectionRuntime {
         tracked: &TrackedCapture,
         active: Option<&MeetingSessionSnapshot>,
         tick: CaptureTick<'_>,
+        now_utc_ms: i64,
     ) {
         let Some(active) = active else {
             // The capture ended by some other route. Stop tracking it, but keep
@@ -2281,40 +2345,13 @@ impl DetectionRuntime {
             self.track_ended(tracked.session_id);
             return;
         }
-        let now_utc_ms = utc_now_ms();
-        let trigger = match &tracked.kind {
-            TrackedCaptureKind::Detection {
-                trigger_bundle_id,
-                event_end_utc_ms,
-                ..
-            } => {
-                let (slept, call_output) = {
-                    let mut state = self.lock();
-                    let call_output =
-                        state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
-                    (state.slept, call_output)
-                };
-                evaluate_stop(&StopInputs {
-                    now_utc_ms,
-                    linked_event_end_utc_ms: *event_end_utc_ms,
-                    self_holds_input_device: tick.sona_holds,
-                    device_running_somewhere: tick.mic == MicSignal::Active,
-                    microphone_lane: tracked.microphone_lane(),
-                    call_output,
-                    trigger_app_running: trigger_bundle_id
-                        .as_deref()
-                        .is_none_or(|bundle_id| apps::is_app_running(tick.running, bundle_id)),
-                    slept_since_start: slept,
-                })
-            }
-            TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => {
-                let adopted = {
-                    let mut state = self.lock();
-                    state.adopt_operator_call(tracked.session_id, tick.call, tick.call_live)
-                };
-                let Some(adopted) = adopted else {
-                    return;
-                };
+        let transition = {
+            let mut state = self.lock();
+            evaluate_running_capture_transition(&mut state, tracked, tick, now_utc_ms)
+        };
+        let trigger = match transition {
+            CaptureTransition::Continue => return,
+            CaptureTransition::Adopted(adopted) => {
                 log::info!(
                     "Meeting capture {} adopted the {} call as its stop trigger",
                     tracked.session_id.uuid(),
@@ -2323,30 +2360,7 @@ impl DetectionRuntime {
                 self.publish_adopted_call_status();
                 return;
             }
-            TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted {
-                call: adopted,
-                ..
-            }) => {
-                let (slept, call_output) = {
-                    let mut state = self.lock();
-                    let call_output =
-                        state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
-                    (state.slept, call_output)
-                };
-                evaluate_stop(&StopInputs {
-                    now_utc_ms,
-                    linked_event_end_utc_ms: None,
-                    self_holds_input_device: tick.sona_holds,
-                    device_running_somewhere: tick.mic == MicSignal::Active,
-                    microphone_lane: false,
-                    call_output,
-                    trigger_app_running: apps::is_app_running(tick.running, &adopted.bundle_id),
-                    slept_since_start: slept,
-                })
-            }
-        };
-        let Some(trigger) = trigger else {
-            return;
+            CaptureTransition::Stop(trigger) => trigger,
         };
         // The session stop logs the committed stop and its cause. This names the
         // trigger before the spawned task carries it out and can fail.
@@ -3402,6 +3416,54 @@ mod tests {
         }
     }
 
+    fn transition_at(
+        state: &mut RuntimeState,
+        tracked: &TrackedCapture,
+        now_utc_ms: i64,
+        running: &[RunningApp],
+        mic: MicSignal,
+        output: OutputSignal,
+        sona_holds: bool,
+        call: &machine::CallSignal,
+        call_live: bool,
+    ) -> CaptureTransition {
+        evaluate_running_capture_transition(
+            state,
+            tracked,
+            CaptureTick {
+                running,
+                mic,
+                output,
+                sona_holds,
+                call,
+                call_live,
+            },
+            now_utc_ms,
+        )
+    }
+
+    fn call_inputs(
+        call: machine::CallSignal,
+        mic: MicSignal,
+        output: OutputSignal,
+    ) -> DetectionInputs {
+        DetectionInputs {
+            now_utc_ms: NOW,
+            calendar: CalendarSignal::Absent,
+            app: machine::AppSignal::Absent,
+            call,
+            mic,
+            output,
+            browser_title: machine::BrowserTitleEvidence::NoMatch,
+            standing_series_consent: false,
+            standing_app_consent: true,
+            recent_capture: None,
+            self_holds_input_device: false,
+            self_mic_just_closed: false,
+            capture_active: false,
+        }
+    }
+
     /* The 15s tick is what makes this load-bearing: without the claim, a call
      * on the auto-record list would start a recording on every tick it stays
      * live. `prompted_apps` cannot carry it, because a call detected on the
@@ -3409,18 +3471,716 @@ mod tests {
     #[test]
     fn a_call_is_acted_on_once_and_re_arms_only_when_it_ends() {
         let mut state = RuntimeState::default();
+        let policy = DetectionPolicy::default();
+        let live = call_inputs(facetime(true), MicSignal::Active, OutputSignal::Idle);
+        // Each tick re-arms from its own evidence before it decides, in the
+        // order `tick` does, so a live call must keep the claim it made.
+        state.rearm_call_claims(machine::call_evidence(&live.call, live.mic, live.output));
+        let first = evaluate(&live, &policy);
+        let bundle_id = match first {
+            DetectionOutcome::AutoStartCall { bundle_id, .. } => bundle_id,
+            other => panic!("expected an auto-start call outcome, got {other:?}"),
+        };
 
-        assert!(state.claim_call("com.apple.facetime"));
+        assert!(state.claim_call(&bundle_id));
+        state.rearm_call_claims(machine::call_evidence(&live.call, live.mic, live.output));
+        let later = evaluate(&live, &policy);
+        let later_bundle_id = match later {
+            DetectionOutcome::AutoStartCall { bundle_id, .. } => bundle_id,
+            other => panic!("expected the live call on the next tick, got {other:?}"),
+        };
         assert!(
-            !state.claim_call("com.apple.facetime"),
+            !state.claim_call(&later_bundle_id),
             "a later tick inside the same call must not start a second recording"
         );
 
-        state.release_calls();
+        let ended = call_inputs(
+            machine::CallSignal::Absent,
+            MicSignal::Idle,
+            OutputSignal::Idle,
+        );
+        state.rearm_call_claims(machine::call_evidence(&ended.call, ended.mic, ended.output));
 
         assert!(
-            state.claim_call("com.apple.facetime"),
+            state.claim_call(&bundle_id),
             "the next call is a fresh decision"
+        );
+    }
+
+    #[test]
+    fn a_call_capture_stops_after_output_silence_grace_and_resets_before_it() {
+        let session_id = MeetingSessionId::new();
+        let tracked = tracked_call(session_id);
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        let call = facetime(true);
+        let running = [RunningApp {
+            bundle_id: "com.apple.facetime".to_string(),
+            display_name: "FaceTime".to_string(),
+            frontmost: true,
+        }];
+
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 1_000,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS - 1,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+        );
+
+        let resumed_id = MeetingSessionId::new();
+        let resumed = tracked_call(resumed_id);
+        let mut resumed_state = RuntimeState::default();
+        resumed_state.tracked = Some(resumed.clone());
+        assert_eq!(
+            transition_at(
+                &mut resumed_state,
+                &resumed,
+                NOW,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut resumed_state,
+                &resumed,
+                NOW + 1_000,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut resumed_state,
+                &resumed,
+                NOW + 3_000,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut resumed_state,
+                &resumed,
+                NOW + 4_000,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut resumed_state,
+                &resumed,
+                NOW + 4_000 + machine::CALL_HANGUP_GRACE_MS - 1,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut resumed_state,
+                &resumed,
+                NOW + 4_000 + machine::CALL_HANGUP_GRACE_MS,
+                &running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+        );
+    }
+
+    #[test]
+    fn a_tracked_capture_stops_when_its_triggering_app_quits() {
+        let call_id = MeetingSessionId::new();
+        let call_capture = tracked_call(call_id);
+        let mut call_state = RuntimeState::default();
+        call_state.tracked = Some(call_capture.clone());
+        let call = facetime(true);
+        let call_running = [RunningApp {
+            bundle_id: "com.apple.facetime".to_string(),
+            display_name: "FaceTime".to_string(),
+            frontmost: true,
+        }];
+
+        assert_eq!(
+            transition_at(
+                &mut call_state,
+                &call_capture,
+                NOW,
+                &call_running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut call_state,
+                &call_capture,
+                NOW + 1_000,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &machine::CallSignal::Absent,
+                false,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::TriggerAppExited)
+        );
+
+        let zoom_id = MeetingSessionId::new();
+        let zoom_capture = TrackedCapture::detection(
+            &capturing(zoom_id, &SourceKind::ALL),
+            Some("us.zoom.xos".to_string()),
+            None,
+        );
+        let mut zoom_state = RuntimeState::default();
+        zoom_state.tracked = Some(zoom_capture.clone());
+        let zoom_running = [RunningApp {
+            bundle_id: "us.zoom.xos".to_string(),
+            display_name: "Zoom".to_string(),
+            frontmost: true,
+        }];
+        assert_eq!(
+            transition_at(
+                &mut zoom_state,
+                &zoom_capture,
+                NOW,
+                &zoom_running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &machine::CallSignal::Absent,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut zoom_state,
+                &zoom_capture,
+                NOW + 1_000,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &machine::CallSignal::Absent,
+                false,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::TriggerAppExited)
+        );
+    }
+
+    #[test]
+    fn a_microphone_capture_stops_on_idle_but_held_and_system_audio_do_not() {
+        let session_id = MeetingSessionId::new();
+        let tracked =
+            TrackedCapture::detection(&capturing(session_id, &SourceKind::ALL), None, None);
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        let call = machine::CallSignal::Absent;
+
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Idle,
+                false,
+                &call,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 1_000,
+                &[],
+                MicSignal::Idle,
+                OutputSignal::Idle,
+                false,
+                &call,
+                false,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::InputDeviceIdle)
+        );
+
+        let held_id = MeetingSessionId::new();
+        let held = TrackedCapture::detection(&capturing(held_id, &SourceKind::ALL), None, None);
+        let mut held_state = RuntimeState::default();
+        held_state.tracked = Some(held.clone());
+        assert_eq!(
+            transition_at(
+                &mut held_state,
+                &held,
+                NOW,
+                &[],
+                MicSignal::Idle,
+                OutputSignal::Idle,
+                true,
+                &call,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+
+        let system_audio_id = MeetingSessionId::new();
+        let system_audio = TrackedCapture::detection(
+            &capturing(system_audio_id, &[SourceKind::SystemAudio]),
+            None,
+            None,
+        );
+        let mut system_audio_state = RuntimeState::default();
+        system_audio_state.tracked = Some(system_audio.clone());
+        assert_eq!(
+            transition_at(
+                &mut system_audio_state,
+                &system_audio,
+                NOW,
+                &[],
+                MicSignal::Idle,
+                OutputSignal::Idle,
+                false,
+                &call,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+    }
+
+    #[test]
+    fn an_operator_capture_adopts_once_then_uses_the_adopted_call_rules() {
+        let session_id = MeetingSessionId::new();
+        let mut tracked = TrackedCapture::operator(&capturing(session_id, &SourceKind::ALL));
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        let no_call = machine::CallSignal::Absent;
+        let zoom = [RunningApp {
+            bundle_id: "us.zoom.xos".to_string(),
+            display_name: "Zoom".to_string(),
+            frontmost: true,
+        }];
+
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW,
+                &zoom,
+                MicSignal::Idle,
+                OutputSignal::Idle,
+                false,
+                &no_call,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 1_000,
+                &[],
+                MicSignal::Idle,
+                OutputSignal::Idle,
+                false,
+                &no_call,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+
+        let facetime_call = facetime(true);
+        let facetime_running = [RunningApp {
+            bundle_id: "com.apple.facetime".to_string(),
+            display_name: "FaceTime".to_string(),
+            frontmost: true,
+        }];
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 1_500,
+                &facetime_running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &facetime(false),
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+        assert!(state.adopted_call().is_none());
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 2_000,
+                &facetime_running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &facetime_call,
+                true,
+            ),
+            CaptureTransition::Adopted(machine::AdoptedCall {
+                bundle_id: "com.apple.facetime".to_string(),
+                display_name: "FaceTime".to_string(),
+            })
+        );
+        tracked = state
+            .tracked
+            .clone()
+            .expect("adoption keeps the capture tracked");
+        assert_eq!(
+            state.adopted_call(),
+            Some(machine::AdoptedCall {
+                bundle_id: "com.apple.facetime".to_string(),
+                display_name: "FaceTime".to_string(),
+            })
+        );
+
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 2_500,
+                &facetime_running,
+                MicSignal::Idle,
+                OutputSignal::Active,
+                false,
+                &facetime_call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        let phone = machine::CallSignal::Running {
+            bundle_id: "com.apple.mobilephone".to_string(),
+            display_name: "Phone".to_string(),
+            frontmost: true,
+        };
+        let both_calls = [
+            facetime_running[0].clone(),
+            RunningApp {
+                bundle_id: "com.apple.mobilephone".to_string(),
+                display_name: "Phone".to_string(),
+                frontmost: true,
+            },
+        ];
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 3_000,
+                &both_calls,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &phone,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            state
+                .adopted_call()
+                .expect("adopted call remains stable")
+                .bundle_id,
+            "com.apple.facetime"
+        );
+
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 4_000,
+                &facetime_running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &facetime_call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                NOW + 4_000 + machine::CALL_HANGUP_GRACE_MS,
+                &facetime_running,
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &facetime_call,
+                true,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+        );
+
+        let quit_id = MeetingSessionId::new();
+        let mut quit_tracked = TrackedCapture::operator(&capturing(quit_id, &SourceKind::ALL));
+        let mut quit_state = RuntimeState::default();
+        quit_state.tracked = Some(quit_tracked.clone());
+        assert!(matches!(
+            transition_at(
+                &mut quit_state,
+                &quit_tracked,
+                NOW,
+                &facetime_running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &facetime_call,
+                true,
+            ),
+            CaptureTransition::Adopted(_)
+        ));
+        quit_tracked = quit_state
+            .tracked
+            .clone()
+            .expect("adopted capture remains tracked");
+        assert_eq!(
+            transition_at(
+                &mut quit_state,
+                &quit_tracked,
+                NOW + 1_000,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &machine::CallSignal::Absent,
+                false,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::TriggerAppExited)
+        );
+    }
+
+    #[test]
+    fn a_sleep_boundary_stops_every_tracked_capture_on_the_next_tick() {
+        let detection_id = MeetingSessionId::new();
+        let detection =
+            TrackedCapture::detection(&capturing(detection_id, &SourceKind::ALL), None, None);
+        let mut detection_state = RuntimeState::default();
+        detection_state.tracked = Some(detection.clone());
+
+        assert_eq!(
+            transition_at(
+                &mut detection_state,
+                &detection,
+                NOW,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &machine::CallSignal::Absent,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+        detection_state.slept = true;
+        assert_eq!(
+            transition_at(
+                &mut detection_state,
+                &detection,
+                NOW + 1_000,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &machine::CallSignal::Absent,
+                false,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::SleepBoundary)
+        );
+
+        let adopted_id = MeetingSessionId::new();
+        let mut adopted = TrackedCapture::operator(&capturing(adopted_id, &SourceKind::ALL));
+        let mut adopted_state = RuntimeState::default();
+        adopted_state.tracked = Some(adopted.clone());
+        let adopted_call = facetime(true);
+        let adopted_running = [RunningApp {
+            bundle_id: "com.apple.facetime".to_string(),
+            display_name: "FaceTime".to_string(),
+            frontmost: true,
+        }];
+        assert_eq!(
+            transition_at(
+                &mut adopted_state,
+                &adopted,
+                NOW,
+                &adopted_running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &adopted_call,
+                true,
+            ),
+            CaptureTransition::Adopted(machine::AdoptedCall {
+                bundle_id: "com.apple.facetime".to_string(),
+                display_name: "FaceTime".to_string(),
+            })
+        );
+        adopted = adopted_state
+            .tracked
+            .clone()
+            .expect("adopted capture remains tracked");
+        assert_eq!(
+            transition_at(
+                &mut adopted_state,
+                &adopted,
+                NOW + 1_000,
+                &adopted_running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &adopted_call,
+                true,
+            ),
+            CaptureTransition::Continue
+        );
+        adopted_state.slept = true;
+        assert_eq!(
+            transition_at(
+                &mut adopted_state,
+                &adopted,
+                NOW + 2_000,
+                &adopted_running,
+                MicSignal::Active,
+                OutputSignal::Active,
+                true,
+                &adopted_call,
+                true,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::SleepBoundary)
+        );
+    }
+
+    #[test]
+    fn a_linked_capture_stops_at_event_end_not_before_it() {
+        let session_id = MeetingSessionId::new();
+        let event_end = NOW + 1_000;
+        let tracked = TrackedCapture::detection(
+            &capturing(session_id, &SourceKind::ALL),
+            None,
+            Some(event_end),
+        );
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        let call = machine::CallSignal::Absent;
+
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                event_end - 1,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                false,
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            transition_at(
+                &mut state,
+                &tracked,
+                event_end,
+                &[],
+                MicSignal::Active,
+                OutputSignal::Idle,
+                true,
+                &call,
+                false,
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::EventEnd)
         );
     }
 
