@@ -1724,6 +1724,36 @@
         "invalid": "Sona לא ישלח לשם. השתמש ב-localhost או בכתובת tailnet.",
         "saveFailed": "זה לא נשמר."
       },
+      "localEngine": {
+        "title": "מנוע טקסט לפגישות",
+        "label": "כתיבת טקסט הפגישות אל",
+        "description": "בחרו היכן ליצור סיכומים, יומנים, סקירות ותשובות.",
+        "apple": "Apple Intelligence",
+        "endpoint": "נקודת קצה מקומית תואמת OpenAI",
+        "baseUrl": {
+          "label": "כתובת נקודת הקצה",
+          "hint": "Loopback בלבד. יש לכלול את הנתיב /v1."
+        },
+        "model": {
+          "label": "מודל",
+          "hint": "שם מודל מרשימת /v1/models של נקודת הקצה.",
+          "placeholder": "לדוגמה llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "בודק את המנוע המקומי…",
+          "appleAvailable": "Apple Intelligence זמין.",
+          "appleUnavailable": "Apple Intelligence אינו זמין ב-Mac הזה.",
+          "endpointReachable": "נקודת הקצה המקומית נגישה עם {{count}} מודלים.",
+          "endpointUnreachable": "נקודת הקצה המקומית אינה נגישה: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "שגיאה לא ידועה"
+        }
+      },
       "remoteIntelligence": {
         "title": "בינת פגישות",
         "label": "לכתוב את סיכומי הפגישות על השרת שלי",

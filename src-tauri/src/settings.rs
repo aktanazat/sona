@@ -244,6 +244,50 @@ pub struct PostProcessProvider {
     pub supports_structured_output: bool,
 }
 
+/// The local engine used for meeting text. Apple Intelligence never sends
+/// evidence over a network; the endpoint variant is restricted to a loopback
+/// OpenAI-compatible route.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MeetingLocalEngine {
+    AppleIntelligence,
+    LocalEndpoint {
+        base_url: String,
+        model: String,
+        #[serde(default)]
+        context_window_tokens: Option<usize>,
+    },
+}
+
+impl MeetingLocalEngine {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let MeetingLocalEngine::LocalEndpoint {
+            base_url,
+            context_window_tokens,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        if context_window_tokens.is_some_and(|tokens| tokens == 0) {
+            return Err(
+                "Meeting local engine context window must be greater than zero".to_string(),
+            );
+        }
+        let provider = PostProcessProvider {
+            id: "custom".to_string(),
+            label: "Custom".to_string(),
+            base_url: base_url.trim().to_string(),
+            allow_base_url_edit: true,
+            supports_structured_output: false,
+        };
+        let endpoint = provider.endpoint().map_err(|error| error.to_string())?;
+        if endpoint.is_remote() || !endpoint.base_url().trim_end_matches('/').ends_with("/v1") {
+            return Err("Meeting local engine requires a loopback /v1 endpoint".to_string());
+        }
+        Ok(())
+    }
+}
 /// Where one catalog entry came from. Only the provider can report an entry:
 /// a saved selection lives in settings and is merged by the caller for its own
 /// scope, so a failed refresh can never claim the provider still advertises it.
@@ -426,7 +470,13 @@ impl PostProcessProvider {
             });
         }
 
-        let loopback = is_loopback_host(host);
+        let loopback = host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .map_or(host, |value| value)
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+            || is_loopback_host(host);
         match url.scheme() {
             "https" => {}
             "http" if loopback => {}
@@ -1384,6 +1434,11 @@ pub struct AppSettings {
     /// a settings file can express.
     #[serde(default = "default_meeting_digest_minute_of_day")]
     pub meeting_digest_minute_of_day: u32,
+    /// D14. Where meeting text is generated when the remote relay is not chosen.
+    /// The endpoint variant is validated as loopback and takes effect on the next
+    /// artifact because the processing service resolves it at the artifact seam.
+    #[serde(default = "default_meeting_local_engine")]
+    pub meeting_local_engine: MeetingLocalEngine,
     /// D14. Whether the summaries, ledgers, recaps and answers for meetings are
     /// written on the operator's own server instead of on this Mac.
     ///
@@ -1416,6 +1471,20 @@ pub struct AppSettings {
     pub external_mutations_enabled: bool,
 }
 
+fn default_meeting_local_engine() -> MeetingLocalEngine {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        MeetingLocalEngine::AppleIntelligence
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        MeetingLocalEngine::LocalEndpoint {
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            model: String::new(),
+            context_window_tokens: None,
+        }
+    }
+}
 fn default_model() -> String {
     "".to_string()
 }
@@ -1607,7 +1676,14 @@ fn default_show_tray_icon() -> bool {
 }
 
 fn default_post_process_provider_id() -> String {
-    "openai".to_string()
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        APPLE_INTELLIGENCE_PROVIDER_ID.to_string()
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        "custom".to_string()
+    }
 }
 
 fn default_post_process_providers() -> Vec<PostProcessProvider> {
@@ -1993,6 +2069,7 @@ pub fn get_default_settings() -> AppSettings {
         detection_auto_record_apps: Vec::new(),
         meeting_digest_enabled: false,
         meeting_digest_minute_of_day: default_meeting_digest_minute_of_day(),
+        meeting_local_engine: default_meeting_local_engine(),
         meeting_remote_intelligence_enabled: false,
         external_query_enabled: false,
         external_mutations_enabled: false,
@@ -2819,6 +2896,18 @@ pub fn change_meeting_remote_intelligence_enabled_setting(
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_meeting_local_engine_setting(
+    app: AppHandle,
+    engine: MeetingLocalEngine,
+) -> Result<(), String> {
+    engine.validate()?;
+    update_settings(&app, |settings| {
+        settings.meeting_local_engine = engine;
+    })?;
+    Ok(())
+}
+#[tauri::command]
+#[specta::specta]
 pub fn change_meeting_digest_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.meeting_digest_enabled = enabled;
@@ -3151,6 +3240,90 @@ mod tests {
         assert!(settings.filler_word_removal_enabled);
         // Bindings default to empty; the load path merges the real defaults in.
         assert!(settings.bindings.is_empty());
+    }
+    #[test]
+    fn default_post_process_provider_matches_platform() {
+        let provider_id = default_post_process_provider_id();
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(provider_id, APPLE_INTELLIGENCE_PROVIDER_ID);
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert_eq!(provider_id, "custom");
+    }
+
+    #[test]
+    fn stored_openai_post_process_provider_remains_openai() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "post_process_provider_id": "openai"
+        }))
+        .expect("stored provider id decodes");
+        assert_eq!(settings.post_process_provider_id, "openai");
+    }
+
+    #[test]
+    fn meeting_local_engine_defaults_and_rejects_remote_endpoints() {
+        let settings: AppSettings =
+            serde_json::from_value(serde_json::json!({})).expect("meeting engine defaults decode");
+        assert_eq!(
+            settings.meeting_local_engine,
+            default_meeting_local_engine()
+        );
+
+        assert!(MeetingLocalEngine::LocalEndpoint {
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            model: "model".to_string(),
+            context_window_tokens: None,
+        }
+        .validate()
+        .is_ok());
+        assert!(MeetingLocalEngine::LocalEndpoint {
+            base_url: "http://[::1]/v1".to_string(),
+            model: "model".to_string(),
+            context_window_tokens: None,
+        }
+        .validate()
+        .is_ok());
+        assert!(MeetingLocalEngine::LocalEndpoint {
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            model: "model".to_string(),
+            context_window_tokens: Some(0),
+        }
+        .validate()
+        .is_err());
+        assert!(MeetingLocalEngine::LocalEndpoint {
+            base_url: "https://example.com/v1".to_string(),
+            model: "model".to_string(),
+            context_window_tokens: None,
+        }
+        .validate()
+        .is_err());
+    }
+    #[test]
+    fn meeting_local_engine_setting_selects_apple_or_loopback() {
+        let local: AppSettings = serde_json::from_value(serde_json::json!({
+            "meeting_local_engine": {
+                "kind": "local_endpoint",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "fixture-model"
+            }
+        }))
+        .expect("selected meeting engine decodes");
+        assert_eq!(
+            local.meeting_local_engine,
+            MeetingLocalEngine::LocalEndpoint {
+                base_url: "http://127.0.0.1:11434/v1".to_string(),
+                model: "fixture-model".to_string(),
+                context_window_tokens: None,
+            }
+        );
+
+        let apple: AppSettings = serde_json::from_value(serde_json::json!({
+            "meeting_local_engine": {"kind": "apple_intelligence"}
+        }))
+        .expect("Apple Intelligence selection decodes");
+        assert_eq!(
+            apple.meeting_local_engine,
+            MeetingLocalEngine::AppleIntelligence
+        );
     }
 
     /// The 1.1.0 note promises an upgrader that FaceTime and Phone detection
@@ -4190,6 +4363,7 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+        assert!(!settings.post_process_enabled);
         assert_eq!(
             settings.settings_schema_version,
             CURRENT_SETTINGS_SCHEMA_VERSION

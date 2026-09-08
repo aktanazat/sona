@@ -27,6 +27,7 @@ export type PostProcessProviderState = {
   model: string;
   modelOptions: ModelOption[];
   modelStatusKeys: string[];
+  localEndpointUnavailable: boolean;
   allowsManualModelId: boolean;
   isModelUpdating: boolean;
   isFetchingModels: boolean;
@@ -176,6 +177,11 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     selectedProviderId,
   ]);
 
+  const localEndpointUnavailable =
+    selectedProvider?.id === "custom" &&
+    modelCatalog.statusKeys.includes(
+      "settings.postProcessing.api.model.status.unreachable",
+    );
   return {
     providerOptions,
     selectedProviderId,
@@ -195,7 +201,13 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     isSecretUnavailable: secretState?.lastErrorKind === "unavailable",
     model,
     modelOptions: modelCatalog.modelOptions,
-    modelStatusKeys: modelCatalog.statusKeys,
+    localEndpointUnavailable,
+    modelStatusKeys: localEndpointUnavailable
+      ? modelCatalog.statusKeys.filter(
+          (key) =>
+            key !== "settings.postProcessing.api.model.status.unreachable",
+        )
+      : modelCatalog.statusKeys,
     allowsManualModelId: modelCatalog.allowsManualModelId,
     isModelUpdating: isUpdating(`post_process_model:${selectedProviderId}`),
     isFetchingModels: modelCatalog.isLoading,

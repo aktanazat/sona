@@ -1731,6 +1731,36 @@
         "invalid": "Sona туди не надішле. Використайте localhost або адресу tailnet.",
         "saveFailed": "Це не збереглося."
       },
+      "localEngine": {
+        "title": "Механізм тексту зустрічей",
+        "label": "Записувати текст зустрічей у",
+        "description": "Виберіть, де створювати підсумки, журнали, огляди та відповіді.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Локальна кінцева точка OpenAI",
+        "baseUrl": {
+          "label": "Адреса кінцевої точки",
+          "hint": "Лише loopback. Додайте шлях /v1."
+        },
+        "model": {
+          "label": "Модель",
+          "hint": "Назва моделі зі списку /v1/models кінцевої точки.",
+          "placeholder": "Наприклад, llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Перевіряємо локальний механізм…",
+          "appleAvailable": "Apple Intelligence доступна.",
+          "appleUnavailable": "Apple Intelligence недоступна на цьому Mac.",
+          "endpointReachable": "Локальна кінцева точка доступна; моделей: {{count}}.",
+          "endpointUnreachable": "Локальна кінцева точка недоступна: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "невідома помилка"
+        }
+      },
       "remoteIntelligence": {
         "title": "Інтелект для зустрічей",
         "label": "Писати нотатки зустрічей на моєму сервері",

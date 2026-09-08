@@ -1710,6 +1710,36 @@
         "invalid": "そこへは送信しません。localhost か tailnet のアドレスを使ってください。",
         "saveFailed": "保存できませんでした。"
       },
+      "localEngine": {
+        "title": "会議テキストエンジン",
+        "label": "会議テキストの保存先",
+        "description": "要約、台帳、振り返り、回答をどこで生成するか選択します。",
+        "apple": "Apple Intelligence",
+        "endpoint": "ローカル OpenAI 互換エンドポイント",
+        "baseUrl": {
+          "label": "エンドポイントアドレス",
+          "hint": "ループバックのみ。/v1 パスを含めてください。"
+        },
+        "model": {
+          "label": "モデル",
+          "hint": "エンドポイントの /v1/models にあるモデル名。",
+          "placeholder": "例: llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "ローカルエンジンを確認中…",
+          "appleAvailable": "Apple Intelligence は利用できます。",
+          "appleUnavailable": "この Mac では Apple Intelligence を利用できません。",
+          "endpointReachable": "ローカルエンドポイントに {{count}} 個のモデルがあります。",
+          "endpointUnreachable": "ローカルエンドポイントに接続できません: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "不明なエラー"
+        }
+      },
       "remoteIntelligence": {
         "title": "会議インテリジェンス",
         "label": "会議のノートを自分のサーバーで書く",

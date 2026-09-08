@@ -1717,6 +1717,36 @@
         "invalid": "Sona няма да изпрати там. Използвайте localhost или tailnet адрес.",
         "saveFailed": "Това не се запази."
       },
+      "localEngine": {
+        "title": "Енджин за текст на срещи",
+        "label": "Записване на текста на срещите в",
+        "description": "Изберете къде да се създават обобщения, дневници, прегледи и отговори.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Локална крайна точка, съвместима с OpenAI",
+        "baseUrl": {
+          "label": "Адрес на крайната точка",
+          "hint": "Само loopback. Включете пътя /v1."
+        },
+        "model": {
+          "label": "Модел",
+          "hint": "Име на модел от списъка /v1/models на крайната точка.",
+          "placeholder": "Например llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Проверка на локалния енджин…",
+          "appleAvailable": "Apple Intelligence е наличен.",
+          "appleUnavailable": "Apple Intelligence не е наличен на този Mac.",
+          "endpointReachable": "Локалната крайна точка е достъпна с {{count}} модела.",
+          "endpointUnreachable": "Локалната крайна точка не е достъпна: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "неизвестна грешка"
+        }
+      },
       "remoteIntelligence": {
         "title": "Интелигентност за срещи",
         "label": "Пиши бележките от срещи на моя сървър",

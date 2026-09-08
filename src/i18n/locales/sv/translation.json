@@ -1717,6 +1717,36 @@
         "invalid": "Sona skickar inte dit. Använd localhost eller en tailnet-adress.",
         "saveFailed": "Det sparades inte."
       },
+      "localEngine": {
+        "title": "Textmotor för möten",
+        "label": "Skriv mötestext till",
+        "description": "Välj var sammanfattningar, loggar, återblickar och svar ska skapas.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Lokal OpenAI-kompatibel slutpunkt",
+        "baseUrl": {
+          "label": "Slutpunktsadress",
+          "hint": "Endast loopback. Ta med sökvägen /v1."
+        },
+        "model": {
+          "label": "Modell",
+          "hint": "Namnet på en modell i slutpunktens /v1/models-lista.",
+          "placeholder": "Till exempel llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Kontrollerar lokal motor…",
+          "appleAvailable": "Apple Intelligence är tillgängligt.",
+          "appleUnavailable": "Apple Intelligence är inte tillgängligt på denna Mac.",
+          "endpointReachable": "Lokal slutpunkt är nåbar med {{count}} modell(er).",
+          "endpointUnreachable": "Lokal slutpunkt kan inte nås: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "okänt fel"
+        }
+      },
       "remoteIntelligence": {
         "title": "Mötesintelligens",
         "label": "Skriv mötesanteckningar på min server",

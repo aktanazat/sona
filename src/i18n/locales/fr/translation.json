@@ -1724,6 +1724,36 @@
         "invalid": "Sona n'enverra pas là. Utilise localhost ou une adresse tailnet.",
         "saveFailed": "Cela n'a pas été enregistré."
       },
+      "localEngine": {
+        "title": "Moteur de texte des réunions",
+        "label": "Écrire le texte des réunions sur",
+        "description": "Choisissez où générer les résumés, journaux, récapitulatifs et réponses.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Point de terminaison local compatible avec OpenAI",
+        "baseUrl": {
+          "label": "Adresse du point de terminaison",
+          "hint": "Loopback uniquement. Incluez le chemin /v1."
+        },
+        "model": {
+          "label": "Modèle",
+          "hint": "Nom d’un modèle de la liste /v1/models du point de terminaison.",
+          "placeholder": "Par exemple, llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Vérification du moteur local…",
+          "appleAvailable": "Apple Intelligence est disponible.",
+          "appleUnavailable": "Apple Intelligence n’est pas disponible sur ce Mac.",
+          "endpointReachable": "Le point de terminaison local est accessible avec {{count}} modèle(s).",
+          "endpointUnreachable": "Le point de terminaison local est inaccessible : {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "erreur inconnue"
+        }
+      },
       "remoteIntelligence": {
         "title": "Intelligence des réunions",
         "label": "Écrire les notes de réunion sur mon serveur",

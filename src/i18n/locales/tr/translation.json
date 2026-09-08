@@ -1717,6 +1717,36 @@
         "invalid": "Sona oraya göndermez. localhost ya da bir tailnet adresi kullan.",
         "saveFailed": "Bu kaydedilmedi."
       },
+      "localEngine": {
+        "title": "Toplantı metni motoru",
+        "label": "Toplantı metnini şuraya yaz",
+        "description": "Özetlerin, kayıtların, değerlendirmelerin ve yanıtların nerede oluşturulacağını seçin.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Yerel OpenAI uyumlu uç nokta",
+        "baseUrl": {
+          "label": "Uç nokta adresi",
+          "hint": "Yalnızca loopback. /v1 yolunu ekleyin."
+        },
+        "model": {
+          "label": "Model",
+          "hint": "Uç noktanın /v1/models listesindeki model adı.",
+          "placeholder": "Örneğin llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Yerel motor kontrol ediliyor…",
+          "appleAvailable": "Apple Intelligence kullanılabilir.",
+          "appleUnavailable": "Apple Intelligence bu Mac’te kullanılamıyor.",
+          "endpointReachable": "Yerel uç noktada {{count}} model kullanılabilir.",
+          "endpointUnreachable": "Yerel uç noktaya ulaşılamıyor: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "bilinmeyen hata"
+        }
+      },
       "remoteIntelligence": {
         "title": "Toplantı zekâsı",
         "label": "Toplantı notlarını kendi sunucumda yaz",

@@ -51,7 +51,16 @@ const paint = () =>
 describe("meeting intelligence", () => {
   test("names exactly what leaves the Mac, on the surface", () => {
     expect(paint()).toContain(
-      "Summaries and answers for meetings are written on your server over your private network.",
+      i18n.t("settings.meetings.remoteIntelligence.consent"),
+    );
+  });
+
+  test("shows the local engine choice and its availability line", () => {
+    const markup = paint();
+
+    expect(markup).toContain(i18n.t("settings.meetings.localEngine.label"));
+    expect(markup).toContain(
+      i18n.t("settings.meetings.localEngine.status.checking"),
     );
   });
 
@@ -59,14 +68,16 @@ describe("meeting intelligence", () => {
     const markup = paint();
 
     expect(markup).toContain(
-      "Pair Sona with your server under Agents to turn this on.",
+      i18n.t("settings.meetings.remoteIntelligence.unpaired"),
     );
-    expect(markup).toContain("disabled");
+    expect(markup).toMatch(/disabled/);
   });
 
   test("offers no per-series list while it is off", () => {
     const markup = paint();
 
-    expect(markup).not.toContain("Series that stay on this Mac");
+    expect(markup).not.toContain(
+      i18n.t("settings.meetings.remoteIntelligence.seriesTitle"),
+    );
   });
 });

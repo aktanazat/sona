@@ -154,16 +154,25 @@ pub(crate) struct ChatCompletionInput<'a> {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatMessageResponse,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatMessageResponse {
     content: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+struct ChatUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -332,7 +341,171 @@ pub async fn send_chat_completion(
     .await
 }
 
-/// Send a post-processing request through the protocol owned by its provider.
+const LOOPBACK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoopbackModel {
+    pub(crate) id: String,
+    pub(crate) context_window_tokens: Option<usize>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LoopbackChatCompletionError {
+    Unreachable,
+    Failed,
+}
+
+#[derive(Debug)]
+pub(crate) struct LoopbackChatCompletion {
+    pub(crate) content: Option<String>,
+    pub(crate) prompt_tokens: Option<u64>,
+    pub(crate) completion_tokens: Option<u64>,
+    pub(crate) finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoopbackResponseFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct LoopbackChatCompletionRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    max_tokens: i32,
+    reasoning_effort: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<LoopbackResponseFormat>,
+}
+
+fn loopback_provider(endpoint: &PostProcessEndpoint) -> PostProcessProvider {
+    PostProcessProvider {
+        id: "custom".to_string(),
+        label: "Custom".to_string(),
+        base_url: endpoint.base_url().to_string(),
+        allow_base_url_edit: true,
+        supports_structured_output: false,
+    }
+}
+
+fn create_loopback_client(
+    endpoint: &PostProcessEndpoint,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    let provider = loopback_provider(endpoint);
+    let headers = build_headers(&provider, None)?;
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .redirect(Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|error| report_reqwest_error("Failed to build loopback HTTP client", &error))
+}
+
+fn loopback_request_error(error: &reqwest::Error) -> LoopbackChatCompletionError {
+    if error.is_connect() {
+        LoopbackChatCompletionError::Unreachable
+    } else {
+        LoopbackChatCompletionError::Failed
+    }
+}
+
+pub(crate) async fn send_loopback_chat_completion(
+    endpoint: &PostProcessEndpoint,
+    model: &str,
+    system_prompt: &str,
+    evidence: &str,
+    max_tokens: i32,
+    timeout: Duration,
+    json_response: bool,
+) -> Result<LoopbackChatCompletion, LoopbackChatCompletionError> {
+    if endpoint.is_remote() {
+        return Err(LoopbackChatCompletionError::Failed);
+    }
+
+    let client = create_loopback_client(endpoint, timeout)
+        .map_err(|_| LoopbackChatCompletionError::Failed)?;
+    let request = LoopbackChatCompletionRequest {
+        model: model.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: evidence.to_string(),
+            },
+        ],
+        max_tokens,
+        reasoning_effort: "none",
+        response_format: json_response.then_some(LoopbackResponseFormat {
+            format_type: "json_object",
+        }),
+    };
+    let response = client
+        .post(endpoint.request_url("chat/completions"))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| loopback_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(LoopbackChatCompletionError::Failed);
+    }
+    let completion: ChatCompletionResponse = response
+        .json()
+        .await
+        .map_err(|_| LoopbackChatCompletionError::Failed)?;
+    let choice = completion.choices.first();
+    Ok(LoopbackChatCompletion {
+        content: choice.and_then(|choice| choice.message.content.clone()),
+        prompt_tokens: completion
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.prompt_tokens),
+        completion_tokens: completion
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.completion_tokens),
+        finish_reason: choice.and_then(|choice| choice.finish_reason.clone()),
+    })
+}
+
+pub(crate) async fn probe_loopback_model_info(
+    endpoint: &PostProcessEndpoint,
+) -> Result<Vec<LoopbackModel>, PostProcessModelDiscovery> {
+    if endpoint.is_remote() {
+        return Err(PostProcessModelDiscovery::InvalidDestination);
+    }
+    let client = create_loopback_client(endpoint, LOOPBACK_PROBE_TIMEOUT)
+        .map_err(|_| PostProcessModelDiscovery::InvalidResponse)?;
+    let response: OpenAiCatalogResponse =
+        get_loopback_catalog_json(client.get(endpoint.request_url("models"))).await?;
+    let mut models = Vec::new();
+    for entry in response.data {
+        if catalog_id_is_safe(&entry.id) {
+            models.push(LoopbackModel {
+                id: entry.id,
+                context_window_tokens: entry.context_window_tokens,
+            });
+            if models.len() == MAX_CATALOG_MODELS {
+                break;
+            }
+        }
+    }
+    Ok(models)
+}
+
+#[cfg(test)]
+pub(crate) async fn probe_loopback_models(
+    endpoint: &PostProcessEndpoint,
+) -> Result<Vec<String>, PostProcessModelDiscovery> {
+    Ok(probe_loopback_model_info(endpoint)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
+        .collect())
+}
 pub(crate) async fn send_chat_completion_with_schema(
     input: ChatCompletionInput<'_>,
 ) -> Result<Option<String>, String> {
@@ -543,6 +716,8 @@ struct OpenAiCatalogResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAiCatalogModel {
     id: String,
+    #[serde(default, alias = "context_length", alias = "max_context_length")]
+    context_window_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -746,6 +921,33 @@ async fn get_catalog_json<T: DeserializeOwned>(
     })
 }
 
+async fn get_loopback_catalog_json<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+) -> Result<T, PostProcessModelDiscovery> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| loopback_catalog_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(PostProcessModelDiscovery::InvalidResponse);
+    }
+
+    let bytes = read_limited_catalog_response(response)
+        .await
+        .map_err(|error| match error {
+            PostProcessModelDiscovery::Unreachable => PostProcessModelDiscovery::InvalidResponse,
+            other => other,
+        })?;
+    serde_json::from_slice(&bytes).map_err(|_| PostProcessModelDiscovery::InvalidResponse)
+}
+
+fn loopback_catalog_request_error(error: &reqwest::Error) -> PostProcessModelDiscovery {
+    if error.is_connect() {
+        PostProcessModelDiscovery::Unreachable
+    } else {
+        PostProcessModelDiscovery::InvalidResponse
+    }
+}
 async fn read_limited_catalog_response(
     response: reqwest::Response,
 ) -> Result<Vec<u8>, PostProcessModelDiscovery> {
@@ -1827,9 +2029,9 @@ mod tests {
     /// none of them can show that a real OpenAI-compatible server accepts what
     /// we send with no `Authorization` header at all.
     ///
-    /// Ignored by default — it needs something listening on 11434. Run it with
-    /// `bun run test:backend ollama -- --ignored --nocapture`, and set
-    /// `SONA_LOCAL_MODEL` if the served model is not the one below.
+    /// It probes first and prints one exact skip line when nothing is listening on
+    /// 11434. Run it with `bun run test:backend ollama -- --nocapture`, and set
+    /// `SONA_LOCAL_MODEL` if the served model is not the first catalog entry.
     ///
     /// The provider fields are the shipped `custom` defaults verbatim
     /// (`settings.rs` `default_post_process_providers`), the credential is
@@ -1839,16 +2041,26 @@ mod tests {
     /// command-mode pair concatenated the same way. So a pass here is a pass
     /// for the production path, not for a lookalike.
     #[tokio::test]
-    #[ignore = "requires a local OpenAI-compatible server on 127.0.0.1:11434"]
-    async fn a_keyless_loopback_endpoint_rewrites_a_selection() {
-        let provider = PostProcessProvider {
+    async fn a_keyless_loopback_endpoint_rewrites_a_selection_or_skips_without_a_local_server() {
+        let probe_provider = PostProcessProvider {
             id: "custom".to_string(),
             label: "Custom".to_string(),
-            base_url: "http://localhost:11434/v1".to_string(),
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
             allow_base_url_edit: true,
             supports_structured_output: false,
         };
-        let endpoint = endpoint(&provider);
+        let probe_endpoint = endpoint(&probe_provider);
+        let probe_models = match probe_loopback_models(&probe_endpoint).await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) => panic!("the local server returned no models"),
+            Err(PostProcessModelDiscovery::Unreachable) => {
+                println!("skipped: no OpenAI-compatible server on 127.0.0.1:11434; start ollama serve to run this");
+                return;
+            }
+            Err(error) => panic!("local endpoint model probe failed: {error:?}"),
+        };
+        let provider = probe_provider;
+        let endpoint = probe_endpoint;
         // The whole reason no key is needed: a loopback route is not remote, so
         // neither the consent gate nor the credential lookup applies.
         assert!(!endpoint.is_remote());
@@ -1864,7 +2076,7 @@ mod tests {
             .iter()
             .all(|model| { model.provenance == PostProcessModelProvenance::ProviderReported }));
 
-        let model = std::env::var("SONA_LOCAL_MODEL").unwrap_or_else(|_| "gemma4:12b-mlx".into());
+        let model = std::env::var("SONA_LOCAL_MODEL").unwrap_or_else(|_| probe_models[0].clone());
         let rendered = crate::prompt_renderer::render_instruction(
             crate::prompt_renderer::InstructionRenderInput {
                 instruction: "make that a question",

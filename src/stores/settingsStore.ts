@@ -210,6 +210,8 @@ const settingUpdaters: SettingUpdaters = {
     commands.changeExternalMutationsEnabledSetting(value),
   meeting_remote_intelligence_enabled: (value) =>
     commands.changeMeetingRemoteIntelligenceEnabledSetting(value),
+  meeting_local_engine: (value) =>
+    commands.changeMeetingLocalEngineSetting(value),
   meeting_digest_enabled: (value) =>
     commands.changeMeetingDigestEnabledSetting(value),
   meeting_digest_minute_of_day: (value) =>

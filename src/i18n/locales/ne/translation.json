@@ -1717,6 +1717,36 @@
         "invalid": "Sona त्यहाँ पठाउँदैन। localhost वा tailnet ठेगाना प्रयोग गर्नुहोस्।",
         "saveFailed": "त्यो सुरक्षित भएन।"
       },
+      "localEngine": {
+        "title": "बैठक पाठ इन्जिन",
+        "label": "बैठकको पाठ यहाँ लेख्नुहोस्",
+        "description": "सारांश, लग, पुनरावलोकन र उत्तरहरू कहाँ बनाउने छान्नुहोस्।",
+        "apple": "Apple Intelligence",
+        "endpoint": "स्थानीय OpenAI-संगत endpoint",
+        "baseUrl": {
+          "label": "Endpoint ठेगाना",
+          "hint": "Loopback मात्र। /v1 बाटो समावेश गर्नुहोस्।"
+        },
+        "model": {
+          "label": "मोडेल",
+          "hint": "Endpoint को /v1/models सूचीमा भएको मोडेलको नाम।",
+          "placeholder": "उदाहरण: llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "स्थानीय इन्जिन जाँच गर्दै…",
+          "appleAvailable": "Apple Intelligence उपलब्ध छ।",
+          "appleUnavailable": "यस Mac मा Apple Intelligence उपलब्ध छैन।",
+          "endpointReachable": "स्थानीय endpoint मा {{count}} मोडेल उपलब्ध छन्।",
+          "endpointUnreachable": "स्थानीय endpoint पहुँचयोग्य छैन: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "अज्ञात त्रुटि"
+        }
+      },
       "remoteIntelligence": {
         "title": "बैठक इन्टेलिजेन्स",
         "label": "बैठकका नोट मेरो सर्भरमा लेख",

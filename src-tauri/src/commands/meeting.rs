@@ -5,6 +5,7 @@ use crate::meeting::analytics::{
 };
 use crate::meeting::clock::host_monotonic_now_ns;
 use crate::meeting::detection::DetectionRuntime;
+use crate::meeting::local_generator::MeetingLocalEngineStatus;
 use crate::meeting::series_types::{
     MeetingSeriesAlwaysRecordSetRequest, MeetingSeriesDigestSetRequest,
     MeetingSeriesMutationResult, MeetingSeriesPreferences, MeetingSeriesRemoteOptOutSetRequest,
@@ -472,6 +473,13 @@ pub async fn meeting_remote_cancel(
     manager.remote_cancel(request).await
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn meeting_local_engine_status(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> MeetingLocalEngineStatus {
+    manager.meeting_local_engine_status()
+}
 /// Conversation metrics, tracker hits, action-item ticks and the user's notes
 /// for one meeting. Metrics are derived from the transcript on every call, so
 /// the answer always matches the transcript the caller can see.

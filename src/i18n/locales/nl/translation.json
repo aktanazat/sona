@@ -1717,6 +1717,36 @@
         "invalid": "Sona stuurt daar niet heen. Gebruik localhost of een tailnet-adres.",
         "saveFailed": "Dat is niet opgeslagen."
       },
+      "localEngine": {
+        "title": "Tekstengine voor vergaderingen",
+        "label": "Vergaderingstekst schrijven naar",
+        "description": "Kies waar samenvattingen, logboeken, terugblikken en antwoorden worden gemaakt.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Lokaal OpenAI-compatibel eindpunt",
+        "baseUrl": {
+          "label": "Adres van eindpunt",
+          "hint": "Alleen loopback. Neem het pad /v1 op."
+        },
+        "model": {
+          "label": "Model",
+          "hint": "Naam van een model uit de /v1/models-lijst van het eindpunt.",
+          "placeholder": "Bijvoorbeeld llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Lokale engine controleren…",
+          "appleAvailable": "Apple Intelligence is beschikbaar.",
+          "appleUnavailable": "Apple Intelligence is niet beschikbaar op deze Mac.",
+          "endpointReachable": "Lokaal eindpunt is bereikbaar met {{count}} model(len).",
+          "endpointUnreachable": "Lokaal eindpunt is niet bereikbaar: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "onbekende fout"
+        }
+      },
       "remoteIntelligence": {
         "title": "Vergaderintelligentie",
         "label": "Vergadernotities op mijn server schrijven",

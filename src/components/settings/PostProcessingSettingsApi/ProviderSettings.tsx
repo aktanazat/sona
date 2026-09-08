@@ -52,20 +52,29 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
       ) : (
         <>
           {state.isCustomProvider ? (
-            <SettingsField
-              label={t("settings.postProcessing.api.baseUrl.title")}
-              controlId={`${fieldId}-base-url`}
-            >
-              <BaseUrlField
-                id={`${fieldId}-base-url`}
-                value={state.baseUrl}
-                onBlur={handleBaseUrlChange}
-                placeholder={t(
-                  "settings.postProcessing.api.baseUrl.placeholder",
-                )}
-                disabled={state.isBaseUrlUpdating}
-              />
-            </SettingsField>
+            <>
+              <SettingsField
+                label={t("settings.postProcessing.api.baseUrl.title")}
+                controlId={`${fieldId}-base-url`}
+              >
+                <BaseUrlField
+                  id={`${fieldId}-base-url`}
+                  value={state.baseUrl}
+                  onBlur={handleBaseUrlChange}
+                  placeholder={t(
+                    "settings.postProcessing.api.baseUrl.placeholder",
+                  )}
+                  disabled={state.isBaseUrlUpdating}
+                />
+              </SettingsField>
+              {state.localEndpointUnavailable ? (
+                <div className="px-6 py-3">
+                  <Notice tone="warning">
+                    {t("settings.postProcessing.api.model.status.unreachable")}
+                  </Notice>
+                </div>
+              ) : null}
+            </>
           ) : null}
 
           <SettingsField

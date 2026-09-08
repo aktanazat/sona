@@ -1731,6 +1731,36 @@
         "invalid": "Sona tam nie wyśle. Użyj localhost albo adresu w tailnecie.",
         "saveFailed": "To się nie zapisało."
       },
+      "localEngine": {
+        "title": "Silnik tekstu spotkań",
+        "label": "Zapisuj tekst spotkań w",
+        "description": "Wybierz, gdzie tworzyć podsumowania, rejestry, podsumowania spotkań i odpowiedzi.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Lokalny punkt końcowy zgodny z OpenAI",
+        "baseUrl": {
+          "label": "Adres punktu końcowego",
+          "hint": "Tylko loopback. Dołącz ścieżkę /v1."
+        },
+        "model": {
+          "label": "Model",
+          "hint": "Nazwa modelu z listy /v1/models punktu końcowego.",
+          "placeholder": "Na przykład llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Sprawdzanie lokalnego silnika…",
+          "appleAvailable": "Apple Intelligence jest dostępne.",
+          "appleUnavailable": "Apple Intelligence nie jest dostępne na tym Macu.",
+          "endpointReachable": "Lokalny punkt końcowy jest dostępny; modeli: {{count}}.",
+          "endpointUnreachable": "Lokalny punkt końcowy jest niedostępny: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "nieznany błąd"
+        }
+      },
       "remoteIntelligence": {
         "title": "Inteligencja spotkań",
         "label": "Pisz notatki ze spotkań na moim serwerze",

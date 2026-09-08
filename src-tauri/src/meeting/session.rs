@@ -14,6 +14,7 @@ use super::follow_up::{
 use super::import_formats::{read_transcript_export, resolve_spans, ImportedSegment};
 use super::keep_awake::MeetingKeepAwake;
 use super::ledger;
+use super::local_generator::MeetingLocalEngineStatus;
 use super::loop_types::{
     MeetingLoopAssignRequest, MeetingLoopMutationResult, MeetingLoopReopenRequest,
     MeetingLoopResolveRequest, MeetingLoopsResult,
@@ -604,6 +605,9 @@ impl MeetingSessionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .acquire();
+    }
+    pub(crate) fn meeting_local_engine_status(&self) -> MeetingLocalEngineStatus {
+        self.processing.meeting_local_engine_status()
     }
 
     fn release_keep_awake(&self) {

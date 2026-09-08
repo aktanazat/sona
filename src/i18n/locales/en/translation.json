@@ -1717,6 +1717,36 @@
         "invalid": "Sona will not send there. Use localhost or a tailnet address.",
         "saveFailed": "That did not save."
       },
+      "localEngine": {
+        "title": "Meeting text engine",
+        "label": "Write meeting text on",
+        "description": "Choose where meeting summaries, ledgers, recaps and answers are generated.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Local OpenAI-compatible endpoint",
+        "baseUrl": {
+          "label": "Endpoint address",
+          "hint": "Loopback only. Include the /v1 path."
+        },
+        "model": {
+          "label": "Model",
+          "hint": "Name a model from the endpoint’s /v1/models list.",
+          "placeholder": "For example, llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Checking local engine…",
+          "appleAvailable": "Apple Intelligence is available.",
+          "appleUnavailable": "Apple Intelligence is not available on this Mac.",
+          "endpointReachable": "Local endpoint is reachable with {{count}} model(s).",
+          "endpointUnreachable": "Local endpoint is unreachable: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "unknown error"
+        }
+      },
       "remoteIntelligence": {
         "title": "Meeting intelligence",
         "label": "Write meeting notes on my server",

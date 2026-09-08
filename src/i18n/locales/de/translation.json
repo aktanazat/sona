@@ -1717,6 +1717,36 @@
         "invalid": "Sona sendet nicht dorthin. Nutze localhost oder eine Tailnet-Adresse.",
         "saveFailed": "Das wurde nicht gespeichert."
       },
+      "localEngine": {
+        "title": "Engine für Meeting-Texte",
+        "label": "Meeting-Texte schreiben auf",
+        "description": "Wähle, wo Zusammenfassungen, Ledgers, Rückblicke und Antworten erzeugt werden.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Lokaler OpenAI-kompatibler Endpunkt",
+        "baseUrl": {
+          "label": "Endpunktadresse",
+          "hint": "Nur Loopback. Der Pfad /v1 muss enthalten sein."
+        },
+        "model": {
+          "label": "Modell",
+          "hint": "Name eines Modells aus der /v1/models-Liste des Endpunkts.",
+          "placeholder": "Zum Beispiel llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Lokalen Engine wird geprüft…",
+          "appleAvailable": "Apple Intelligence ist verfügbar.",
+          "appleUnavailable": "Apple Intelligence ist auf diesem Mac nicht verfügbar.",
+          "endpointReachable": "Lokaler Endpunkt ist mit {{count}} Modell(en) erreichbar.",
+          "endpointUnreachable": "Lokaler Endpunkt ist nicht erreichbar: {{error}}",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "unknownError": "unbekannter Fehler"
+        }
+      },
       "remoteIntelligence": {
         "title": "Meeting-Intelligenz",
         "label": "Meeting-Notizen auf meinem Server schreiben",

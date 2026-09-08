@@ -5610,6 +5610,33 @@ impl MeetingStore {
         })
     }
 
+    /// Every unmerged speaker's display name for one meeting.
+    ///
+    /// The ledger pass needs the name twice: once in the pack, so the model
+    /// can attribute a receipt to the person who said it, and once on the
+    /// page its checks are run against, which otherwise labels everyone
+    /// `Speaker 1a2b3c4d`. `review_snapshot` carries the same names and a
+    /// whole meeting's transcript, notes and artifacts with them.
+    pub(crate) fn speaker_display_names(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<HashMap<SpeakerId, String>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT speaker_id, display_name FROM meeting_speakers
+             WHERE session_id = ?1 AND merged_into_speaker_id IS NULL",
+        )?;
+        let rows = statement.query_map(params![id(session_id)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut names = HashMap::new();
+        for row in rows {
+            let (speaker_id, display_name) = row?;
+            names.insert(SpeakerId::from_uuid(parse_uuid(&speaker_id)?), display_name);
+        }
+        Ok(names)
+    }
+
     /// The diarized transcript reduced to what conversation metrics and
     /// trackers need. Removed segments are excluded because they are not part
     /// of the meeting any more.
