@@ -1878,6 +1878,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Niveau d'entrée",
     "state": {
       "starting": "Démarrage",
       "listening": "À l'écoute",

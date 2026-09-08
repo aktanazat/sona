@@ -1878,6 +1878,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Nivel de entrada",
     "state": {
       "starting": "Iniciando",
       "listening": "Escuchando",

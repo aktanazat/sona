@@ -1885,6 +1885,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Рівень входу",
     "state": {
       "starting": "Запуск",
       "listening": "Слухає",

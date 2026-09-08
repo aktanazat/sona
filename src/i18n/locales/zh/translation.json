@@ -1864,6 +1864,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "输入电平",
     "state": {
       "starting": "正在启动",
       "listening": "正在聆听",

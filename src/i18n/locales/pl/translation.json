@@ -1885,6 +1885,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Poziom wejścia",
     "state": {
       "starting": "Uruchamianie",
       "listening": "Nasłuchuje",

@@ -1899,6 +1899,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "مستوى الإدخال",
     "state": {
       "starting": "جاري البدء",
       "listening": "يستمع",

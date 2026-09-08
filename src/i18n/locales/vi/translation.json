@@ -1864,6 +1864,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Mức đầu vào",
     "state": {
       "starting": "Đang bắt đầu",
       "listening": "Đang nghe",

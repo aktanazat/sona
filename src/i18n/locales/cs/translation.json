@@ -1885,6 +1885,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Úroveň vstupu",
     "state": {
       "starting": "Startuji",
       "listening": "Poslouchá",

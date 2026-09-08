@@ -20,14 +20,13 @@
        idle     OVERLAY_IDLE_WIDTH/HEIGHT         184 x 36  */
   --ov-card-max-w: 248px;
   --ov-stream-w: 392px;
-  /* The compact HUD is one fixed-width pill: a state word, an elapsed clock,
-     and the cancel button's slack. Fixed, not max-content, so the pill does
-     not resize under the reader as the word changes from Listening to
-     Transcribing. 176px is the width the idle pill already uses, which is what
-     makes the resting pill and the running one one shape; inside a 256px
-     window it leaves 40px of clearance a side for the shadow throw. A failure
-     is the one state allowed to grow past it, up to --ov-card-max-w. */
+  /* The compact HUD is one fixed-width pill. The waveform uses the same
+     card width and reserves the cancel button's 32px trailing slack. */
   --ov-pill-w: 176px;
+  --ov-meter-h: 20px;
+  --ov-wave-w: 112px;
+  --ov-bar-w: 4px;
+  --ov-speech: var(--accent);
   /* 40px + the card's 1px border box = 42px inside a 46px window. The 4px of
      slack is not decoration: it is the room the shadow throw needs, and a card
      sized to the window clips that throw on every side. */
@@ -244,21 +243,8 @@
 }
 
 /* ============================================================
-   The instrument row. One line, two readouts:
-
-     the state word on the leading edge · the elapsed clock on the trailing one
-
-   Label left, value right — the same line every settings row in this app
-   draws. What used to be here was a sixteen-bar level meter that carried the
-   state in animation alone: dim and pulsing for starting, accent for speech,
-   a travelling opacity crest for working. It was beautiful and it asked the
-   reader to infer three states from three motions, while the word that says
-   them outright sat in a visually-hidden span for screen readers only. The
-   word is on screen now, the meter is gone, and the clock is the one thing
-   this window knows that the app cannot show: how long it has been listening.
-
-   The row keeps --ov-base-h in every state, so nothing reflows as a run moves
-   from starting to working to failed.
+   Instrument row. Listening exposes the measured input level; every other
+   phase keeps its existing state word or failure message.
    ============================================================ */
 .sbase {
   position: relative;
@@ -267,22 +253,14 @@
   align-items: center;
   gap: var(--ov-gap-2-5);
   min-inline-size: 0;
-  /* 14px leads; 32px trails, because the cancel button parks in that slack and
-     an overlap between a control and a measurement is not acceptable. */
+  /* Keep the 32px trailing reservation for the cancel control. */
   padding-inline: 14px 32px;
 }
 
-/* A failed run has no cancel button, so the slack it was holding is not slack
-   any more — it is a lopsided end cap on a pill that is now pure text. */
 .hud-error .sbase {
   padding-inline-end: 14px;
 }
 
-/* The failure names its cause, in prose, in the one semantic colour that means
-   a run ended badly — red-900, the high-contrast step, because this text sits
-   on a surface and has to be read rather than noticed. `error_type` never
-   reaches the screen. Carries the row-title role (13px/19px, weight 500)
-   inline, for the same reason .stext-cap does. */
 .serror {
   min-inline-size: 0;
   font-size: 13px;
@@ -294,10 +272,6 @@
   white-space: nowrap;
 }
 
-/* The state word. Carries the row-title role inline for the same reason
-   .serror does, in primary ink: it is the sentence this window exists to say,
-   and it truncates before the clock does because a clipped clock is a wrong
-   number where a clipped word is still the right word. */
 .sstate {
   min-inline-size: 0;
   font-size: 13px;
@@ -309,18 +283,29 @@
   white-space: nowrap;
 }
 
-/* The elapsed clock, on the trailing edge. Tabular figures because the digits
-   change once a second and proportional ones would shuffle the whole readout
-   sideways on every tick. Secondary ink: it is the second thing read, and one
-   line with two primary-weight statements has no first thing. */
-.stime {
-  flex: none;
+/* Sixteen fixed bars show the latest producer frame without interpolation.
+   The transform changes the bar's scale, never its layout or its position. */
+.swave {
+  flex: 1 1 auto;
+  max-inline-size: var(--ov-wave-w);
   margin-inline-start: auto;
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 19px;
-  font-variant-numeric: tabular-nums;
-  color: var(--ov-ink-muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  block-size: var(--ov-meter-h);
+}
+.swave i {
+  flex: 1 1 0;
+  min-inline-size: 1px;
+  max-inline-size: var(--ov-bar-w);
+  block-size: 100%;
+  border-radius: var(--ov-radius-pill);
+  background: var(--ov-ink-muted);
+  transform-origin: center;
+}
+.swave.hearing i {
+  background: var(--ov-speech);
 }
 
 /* Cancel is the only control on the running HUD, and it is not part of the

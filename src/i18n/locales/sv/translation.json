@@ -1871,6 +1871,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Ingångsnivå",
     "state": {
       "starting": "Startar",
       "listening": "Lyssnar",

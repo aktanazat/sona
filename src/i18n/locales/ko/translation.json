@@ -1864,6 +1864,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "입력 레벨",
     "state": {
       "starting": "시작 중",
       "listening": "듣는 중",

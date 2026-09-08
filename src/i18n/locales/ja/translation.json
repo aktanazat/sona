@@ -1864,6 +1864,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "入力レベル",
     "state": {
       "starting": "起動中",
       "listening": "聴取中",

@@ -1878,6 +1878,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "עוצמת הקלט",
     "state": {
       "starting": "מתחיל",
       "listening": "מקשיב",

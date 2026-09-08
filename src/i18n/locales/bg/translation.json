@@ -1871,6 +1871,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Ниво на входа",
     "state": {
       "starting": "Стартира",
       "listening": "Слуша",

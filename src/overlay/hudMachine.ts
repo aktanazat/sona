@@ -47,18 +47,12 @@ export interface HudState {
   state: OverlayState;
   /** True once the input stream has delivered its first buffer. */
   captureReady: boolean;
+  /** The most recent backend level frame, while the microphone is listening. */
+  levels: readonly number[];
   streamText: StreamTextEvent;
   phase: StreamPhase;
   workKind: StreamWorkKind;
   engine: StreamEngine;
-  /** Wall clock at first captured buffer; null until the mic is actually live. */
-  readyAt: number | null;
-  /**
-   * Wall clock the elapsed readout is computed against. Stamped once when the
-   * capture ends, so the frozen number is the real capture length rather than
-   * whatever the last timer tick happened to catch.
-   */
-  nowMs: number;
   session: number;
   position: OverlayPosition;
   modeName: string | null;
@@ -73,12 +67,11 @@ export const INITIAL_HUD_STATE: HudState = {
   isVisible: false,
   state: "recording",
   captureReady: false,
+  levels: [],
   streamText: { committed: "", tentative: "" },
   phase: "listening",
   workKind: "transcribing",
   engine: "local",
-  readyAt: null,
-  nowMs: 0,
   session: 0,
   position: "bottom",
   modeName: null,
@@ -90,20 +83,10 @@ export const INITIAL_HUD_STATE: HudState = {
 const EMPTY_STREAM_TEXT: StreamTextEvent = { committed: "", tentative: "" };
 
 /**
- * Freeze the elapsed readout at the instant the capture stopped. A null
- * `readyAt` means nothing was ever measured, so there is nothing to freeze.
- */
-const captureEndPatch = (state: HudState): { nowMs: number } | null =>
-  state.readyAt === null ? null : { nowMs: Date.now() };
-
-/**
- * `starting` and `listening` are the split that matters, and it is decided by
- * `captureReady` alone — never by `StreamPhase`. `StreamPhase::Listening` is
- * documented as "receiving audio *or waiting for the stream to begin*" and Rust
- * never emits it; the frontend starts in it. Reading the word off `phase` would
- * print "Listening" from the instant the card mounts, through the whole
- * 140-215 ms of `build_input_stream` (unbounded on Bluetooth) during which
- * nothing is captured at all. That is the head loss this state exists to stop.
+ * The starting/listening split is decided by captureReady alone, never by
+ * StreamPhase. StreamPhase::Listening means receiving audio or waiting for
+ * the stream to begin, so reading that phase would print Listening before a
+ * captured buffer exists.
  */
 export const deriveHudPhase = (state: HudState): HudPhase => {
   if (state.error) return "error";
@@ -123,31 +106,30 @@ export const deriveHudFrame = (state: HudState): HudFrame =>
       ? "pill"
       : "compact";
 
-/** Null while nothing has been measured, which is what `starting` renders. */
-export const deriveElapsedSeconds = (state: HudState): number | null =>
-  state.readyAt === null ? null : (state.nowMs - state.readyAt) / 1000;
-
 /**
- * One second of wall clock, while the microphone is open.
- *
- * Only an open capture may advance: `captureEndPatch` freezes `nowMs` at the
- * instant the run stopped, and a tick landing after that would walk the frozen
- * capture length forward into a number no recorder ever measured. The overlay
- * only runs its interval while the phase is `listening`, but clearing an
- * interval races the state change that stopped the capture, so the refusal
- * lives here — in the machine that owns the readout — rather than in the one
- * caller that happens to schedule it.
+ * A level frame is meaningful only after the first captured buffer and while
+ * the visible HUD is still listening. The machine owns this gate so every
+ * event source follows the same lifecycle, including stale frames in flight
+ * while a recording is stopping or the window is being hidden.
  */
-export const hudTicked = (state: HudState): HudState => {
-  const capturing = state.state === "recording" || state.state === "streaming";
-  if (state.readyAt === null || !capturing) return state;
-  return { ...state, nowMs: Date.now() };
+export const hudLevelChanged = (
+  state: HudState,
+  levels: readonly number[],
+): HudState => {
+  if (
+    !state.isVisible ||
+    !state.captureReady ||
+    deriveHudPhase(state) !== "listening"
+  ) {
+    return state;
+  }
+  return { ...state, levels };
 };
 
 /**
- * `show-overlay`. A transient show resets everything about the previous run,
+ * show-overlay. A transient show resets everything about the previous run,
  * including readiness: the microphone is not open yet, and Rust queues
- * `recording-ready` onto the main thread *after* this event so the reset can
+ * recording-ready onto the main thread after this event so the reset can
  * never overtake it.
  */
 export const hudShown = (state: HudState, shown: OverlayState): HudState => {
@@ -157,6 +139,7 @@ export const hudShown = (state: HudState, shown: OverlayState): HudState => {
     ...state,
     isVisible: true,
     state: shown,
+    levels: [],
     // A new dictation retires a latched failure; resting does not, so the pill
     // can hold the failure until it has been read.
     error: resting ? state.error : null,
@@ -164,7 +147,6 @@ export const hudShown = (state: HudState, shown: OverlayState): HudState => {
     ...(transient
       ? {
           captureReady: false,
-          readyAt: null,
           streamText: EMPTY_STREAM_TEXT,
         }
       : null),
@@ -179,29 +161,24 @@ export const hudShown = (state: HudState, shown: OverlayState): HudState => {
           session: state.session + 1,
         }
       : null),
-    ...(shown === "transcribing" || shown === "processing"
-      ? captureEndPatch(state)
-      : null),
   };
 };
 
 /**
- * `hide-overlay`. Every terminal failure path in `actions.rs` emits
- * `recording-error` and then calls `hide_recording_overlay` back to back, so the
- * two arrive in the same tick. A hide therefore records where the HUD should
- * rest instead of tearing a latched failure down unread.
+ * hide-overlay. A terminal failure emits recording-error and then
+ * hide_recording_overlay back to back, so the two arrive in the same tick. A
+ * hide therefore records where the HUD should rest instead of tearing a
+ * latched failure down unread.
  */
 export const hudHidden = (state: HudState): HudState =>
   state.error
-    ? { ...state, restAfterError: "hide" }
-    : { ...state, isVisible: false, captureReady: false, readyAt: null };
+    ? { ...state, restAfterError: "hide", levels: [] }
+    : { ...state, isVisible: false, captureReady: false, levels: [] };
 
-/** `recording-ready` — the first captured buffer, and the clock's origin. */
-export const hudCaptureReady = (state: HudState, atMs: number): HudState => ({
+/** recording-ready — the first captured buffer. */
+export const hudCaptureReady = (state: HudState): HudState => ({
   ...state,
   captureReady: true,
-  readyAt: atMs,
-  nowMs: atMs,
 });
 
 export const hudStreamPhaseChanged = (
@@ -209,19 +186,19 @@ export const hudStreamPhaseChanged = (
   event: StreamPhaseEvent,
 ): HudState => ({
   ...state,
-  ...(event.phase === "working" ? captureEndPatch(state) : null),
+  levels: event.phase === "working" ? [] : state.levels,
   phase: event.phase,
   workKind: event.kind ?? state.workKind,
 });
 
-/** `recording-error`. The HUD names the failure on the surface the user was
+/** recording-error. The HUD names the failure on the surface the user was
  * already watching; the main window's toast stays the long-form explanation. */
 export const hudFailed = (
   state: HudState,
   error: RecordingErrorEvent,
 ): HudState => ({
   ...state,
-  ...captureEndPatch(state),
+  levels: [],
   isVisible: true,
   error,
   restAfterError: null,
@@ -236,7 +213,7 @@ export const hudRested = (state: HudState): HudState => ({
   isVisible: state.restAfterError !== "hide",
   state: state.restAfterError === "idle" ? "idle" : state.state,
   captureReady: false,
-  readyAt: null,
+  levels: [],
 });
 
 export const hudChromeRead = (

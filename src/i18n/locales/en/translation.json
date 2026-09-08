@@ -1871,6 +1871,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Input level",
     "state": {
       "starting": "Starting",
       "listening": "Listening",

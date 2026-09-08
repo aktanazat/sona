@@ -1871,6 +1871,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "इनपुट स्तर",
     "state": {
       "starting": "शुरू हो रहा है",
       "listening": "सुन रहा है",

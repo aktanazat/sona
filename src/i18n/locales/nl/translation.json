@@ -1871,6 +1871,7 @@
     }
   },
   "overlay": {
+    "inputLevel": "Ingangsniveau",
     "state": {
       "starting": "Starten",
       "listening": "Luistert",
