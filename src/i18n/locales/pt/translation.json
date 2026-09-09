@@ -1724,6 +1724,39 @@
         "invalid": "A Sona não envia para aí. Usa localhost ou um endereço tailnet.",
         "saveFailed": "Isso não foi guardado."
       },
+      "localEngine": {
+        "label": "Escrever o texto das reuniões em",
+        "description": "Escolha onde os resumos, registros, recapitulações e respostas são gerados.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Endpoint local compatível com OpenAI",
+        "baseUrl": {
+          "label": "Endereço do endpoint",
+          "hint": "Somente loopback. Inclua o caminho /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
+        },
+        "model": {
+          "label": "Modelo",
+          "hint": "Nome de um modelo da lista /v1/models do endpoint.",
+          "placeholder": "Por exemplo, llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Verificando o motor local…",
+          "appleAvailable": "O Apple Intelligence está disponível.",
+          "appleUnavailable": "O Apple Intelligence não está disponível neste Mac.",
+          "endpointReachable": "O endpoint local está acessível com {{count}} modelo(s).",
+          "endpointUnreachable": "O endpoint local está inacessível.",
+          "endpointInvalid": "O endereço do endpoint local é inválido.",
+          "endpointInvalidResponse": "O endpoint local retornou uma resposta inválida.",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointNotConfigured": "O endpoint local ainda não foi configurado.",
+          "endpointUnknown": "O status do endpoint local é desconhecido."
+        }
+      },
       "remoteIntelligence": {
         "title": "Inteligência de reuniões",
         "label": "Escrever as notas de reuniões no meu servidor",

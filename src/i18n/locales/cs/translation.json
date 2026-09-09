@@ -1731,6 +1731,39 @@
         "invalid": "Sona tam neodešle. Použijte localhost nebo adresu v tailnetu.",
         "saveFailed": "Neuložilo se to."
       },
+      "localEngine": {
+        "label": "Zapisovat text schůzek do",
+        "description": "Vyberte, kde se vytvářejí souhrny, záznamy, rekapitulace a odpovědi.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Lokální koncový bod kompatibilní s OpenAI",
+        "baseUrl": {
+          "label": "Adresa koncového bodu",
+          "hint": "Pouze loopback. Zahrňte cestu /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
+        },
+        "model": {
+          "label": "Model",
+          "hint": "Název modelu ze seznamu /v1/models koncového bodu.",
+          "placeholder": "Například llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Kontroluje se lokální engine…",
+          "appleAvailable": "Apple Intelligence je dostupná.",
+          "appleUnavailable": "Apple Intelligence není na tomto Macu dostupná.",
+          "endpointReachable": "Lokální koncový bod je dostupný s {{count}} modely.",
+          "endpointUnreachable": "Místní koncový bod není dostupný.",
+          "endpointInvalid": "Adresa místního koncového bodu je neplatná.",
+          "endpointInvalidResponse": "Místní koncový bod vrátil neplatnou odpověď.",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointNotConfigured": "Místní koncový bod zatím není nakonfigurován.",
+          "endpointUnknown": "Stav místního koncového bodu není znám."
+        }
+      },
       "remoteIntelligence": {
         "title": "Inteligence schůzek",
         "label": "Psát poznámky ze schůzek na mém serveru",

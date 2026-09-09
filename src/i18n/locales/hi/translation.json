@@ -1717,6 +1717,39 @@
         "invalid": "Sona वहाँ नहीं भेजेगा। localhost या tailnet पता इस्तेमाल करें।",
         "saveFailed": "वह सहेजा नहीं गया।"
       },
+      "localEngine": {
+        "label": "मीटिंग टेक्स्ट यहाँ लिखें",
+        "description": "चुनें कि सारांश, लॉग, पुनरावलोकन और उत्तर कहाँ बनाए जाएँ।",
+        "apple": "Apple Intelligence",
+        "endpoint": "स्थानीय OpenAI-संगत एंडपॉइंट",
+        "baseUrl": {
+          "label": "एंडपॉइंट पता",
+          "hint": "केवल लूपबैक। /v1 पथ शामिल करें।",
+          "placeholder": "http://127.0.0.1:11434/v1"
+        },
+        "model": {
+          "label": "मॉडल",
+          "hint": "एंडपॉइंट की /v1/models सूची में मॉडल का नाम।",
+          "placeholder": "उदाहरण: llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "स्थानीय इंजन जाँचा जा रहा है…",
+          "appleAvailable": "Apple Intelligence उपलब्ध है।",
+          "appleUnavailable": "इस Mac पर Apple Intelligence उपलब्ध नहीं है।",
+          "endpointReachable": "स्थानीय एंडपॉइंट {{count}} मॉडल के साथ उपलब्ध है।",
+          "endpointUnreachable": "स्थानीय एंडपॉइंट पहुंच योग्य नहीं है।",
+          "endpointInvalid": "स्थानीय एंडपॉइंट का पता अमान्य है।",
+          "endpointInvalidResponse": "स्थानीय एंडपॉइंट ने अमान्य प्रतिक्रिया दी।",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointNotConfigured": "स्थानीय एंडपॉइंट अभी कॉन्फ़िगर नहीं किया गया है।",
+          "endpointUnknown": "स्थानीय एंडपॉइंट की स्थिति अज्ञात है।"
+        }
+      },
       "remoteIntelligence": {
         "title": "मीटिंग इंटेलिजेंस",
         "label": "मीटिंग नोट्स मेरे सर्वर पर लिखें",

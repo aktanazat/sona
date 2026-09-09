@@ -1710,6 +1710,39 @@
         "invalid": "Sona 不会发到那里。请使用 localhost 或 tailnet 地址。",
         "saveFailed": "没有保存成功。"
       },
+      "localEngine": {
+        "label": "将会议文本写入",
+        "description": "选择在哪里生成摘要、记录、回顾和回答。",
+        "apple": "Apple Intelligence",
+        "endpoint": "本地 OpenAI 兼容端点",
+        "baseUrl": {
+          "label": "端点地址",
+          "hint": "仅限回环地址。请包含 /v1 路径。",
+          "placeholder": "http://127.0.0.1:11434/v1"
+        },
+        "model": {
+          "label": "模型",
+          "hint": "端点 /v1/models 列表中的模型名称。",
+          "placeholder": "例如 llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "正在检查本地引擎…",
+          "appleAvailable": "Apple Intelligence 可用。",
+          "appleUnavailable": "此 Mac 无法使用 Apple Intelligence。",
+          "endpointReachable": "本地端点可用，提供 {{count}} 个模型。",
+          "endpointUnreachable": "本地端点无法访问。",
+          "endpointInvalid": "本地端点地址无效。",
+          "endpointInvalidResponse": "本地端点返回了无效响应。",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointNotConfigured": "本地端点尚未配置。",
+          "endpointUnknown": "本地端点状态未知。"
+        }
+      },
       "remoteIntelligence": {
         "title": "会议智能",
         "label": "在我的服务器上撰写会议笔记",

@@ -1717,6 +1717,39 @@
         "invalid": "Sona skickar inte dit. Använd localhost eller en tailnet-adress.",
         "saveFailed": "Det sparades inte."
       },
+      "localEngine": {
+        "label": "Skriv mötestext till",
+        "description": "Välj var sammanfattningar, loggar, återblickar och svar ska skapas.",
+        "apple": "Apple Intelligence",
+        "endpoint": "Lokal OpenAI-kompatibel slutpunkt",
+        "baseUrl": {
+          "label": "Slutpunktsadress",
+          "hint": "Endast loopback. Ta med sökvägen /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
+        },
+        "model": {
+          "label": "Modell",
+          "hint": "Namnet på en modell i slutpunktens /v1/models-lista.",
+          "placeholder": "Till exempel llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "Kontrollerar lokal motor…",
+          "appleAvailable": "Apple Intelligence är tillgängligt.",
+          "appleUnavailable": "Apple Intelligence är inte tillgängligt på denna Mac.",
+          "endpointReachable": "Lokal slutpunkt är nåbar med {{count}} modell(er).",
+          "endpointUnreachable": "Den lokala slutpunkten kan inte nås.",
+          "endpointInvalid": "Adressen till den lokala slutpunkten är ogiltig.",
+          "endpointInvalidResponse": "Den lokala slutpunkten returnerade ett ogiltigt svar.",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointNotConfigured": "Den lokala slutpunkten är inte konfigurerad ännu.",
+          "endpointUnknown": "Statusen för den lokala slutpunkten är okänd."
+        }
+      },
       "remoteIntelligence": {
         "title": "Mötesintelligens",
         "label": "Skriv mötesanteckningar på min server",

@@ -1745,6 +1745,39 @@
         "invalid": "لن يرسل Sona إلى هناك. استخدم localhost أو عنوان tailnet.",
         "saveFailed": "لم يُحفظ ذلك."
       },
+      "localEngine": {
+        "label": "كتابة نص الاجتماع إلى",
+        "description": "اختر مكان إنشاء الملخصات والسجلات والمراجعات والإجابات.",
+        "apple": "Apple Intelligence",
+        "endpoint": "نقطة نهاية محلية متوافقة مع OpenAI",
+        "baseUrl": {
+          "label": "عنوان نقطة النهاية",
+          "hint": "Loopback فقط. أدرج المسار /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
+        },
+        "model": {
+          "label": "النموذج",
+          "hint": "اسم نموذج من قائمة /v1/models لنقطة النهاية.",
+          "placeholder": "مثال: llama3.2"
+        },
+        "contextWindow": {
+          "label": "Context window (tokens)",
+          "hint": "Required when /v1/models does not report a context size.",
+          "placeholder": "For example, 8192"
+        },
+        "status": {
+          "checking": "جارٍ التحقق من المحرك المحلي…",
+          "appleAvailable": "Apple Intelligence متاح.",
+          "appleUnavailable": "Apple Intelligence غير متاح على هذا الـ Mac.",
+          "endpointReachable": "نقطة النهاية المحلية متاحة مع {{count}} من النماذج.",
+          "endpointUnreachable": "يتعذر الوصول إلى نقطة النهاية المحلية.",
+          "endpointInvalid": "عنوان نقطة النهاية المحلية غير صالح.",
+          "endpointInvalidResponse": "أعادت نقطة النهاية المحلية استجابة غير صالحة.",
+          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointNotConfigured": "لم يتم إعداد نقطة النهاية المحلية بعد.",
+          "endpointUnknown": "حالة نقطة النهاية المحلية غير معروفة."
+        }
+      },
       "remoteIntelligence": {
         "title": "ذكاء الاجتماعات",
         "label": "اكتب ملاحظات الاجتماعات على سيرفري",

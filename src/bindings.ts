@@ -627,6 +627,14 @@ async changeExternalMutationsEnabledSetting(enabled: boolean) : Promise<Result<n
     else return { status: "error", error: e  as any };
 }
 },
+async changeMeetingLocalEngineSetting(engine: MeetingLocalEngine) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_meeting_local_engine_setting", { engine }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeMeetingRemoteIntelligenceEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_meeting_remote_intelligence_enabled_setting", { enabled }) };
@@ -2047,6 +2055,9 @@ async meetingRetentionGet() : Promise<Result<MeetingRetentionSnapshot, MeetingCo
     else return { status: "error", error: e  as any };
 }
 },
+async meetingLocalEngineStatus() : Promise<MeetingLocalEngineStatus> {
+    return await TAURI_INVOKE("meeting_local_engine_status");
+},
 async meetingRetentionSet(request: MeetingRetentionSetRequest) : Promise<Result<MeetingRetentionMutationResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_retention_set", { request }) };
@@ -3451,6 +3462,12 @@ meeting_digest_enabled?: boolean;
  */
 meeting_digest_minute_of_day?: number;
 /**
+ * D14. Where meeting text is generated when the remote relay is not chosen.
+ * The endpoint variant is validated as loopback and takes effect on the next
+ * artifact because the processing service resolves it at the artifact seam.
+ */
+meeting_local_engine?: MeetingLocalEngine;
+/**
  * D14. Whether the summaries, ledgers, recaps and answers for meetings are
  * written on the operator's own server instead of on this Mac.
  *
@@ -4746,6 +4763,13 @@ export type MeetingListFilter = { status?: MeetingStatusFilter; window?: Meeting
  * Case-insensitive substring of the title. Blank means no constraint.
  */
 title_query?: string }
+/**
+ * The local engine used for meeting text. Apple Intelligence never sends
+ * evidence over a network; the endpoint variant is restricted to a loopback
+ * OpenAI-compatible route.
+ */
+export type MeetingLocalEngine = { kind: "apple_intelligence" } | { kind: "local_endpoint"; base_url: string; model: string; context_window_tokens?: number | null }
+export type MeetingLocalEngineStatus = { kind: "apple_intelligence"; available: boolean } | { kind: "local_endpoint"; reachable: boolean; model_count: number; error: string | null }
 export type MeetingLoopAssignRequest = { operation_id: MeetingOperationId; loop_id: MeetingLoopId; expected_revision: number;
 /**
  * `None` clears the owner.

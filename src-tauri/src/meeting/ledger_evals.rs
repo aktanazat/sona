@@ -19,25 +19,18 @@
 //!   checks and every rubric line, and a ledger mutated in each of the ways
 //!   the checks exist for has to fail the one check that names it.
 //!
-//! * **Model-backed, opt-in.** The same transcript read by a real engine
-//!   through `generate_ledger`, the seam a meeting's ledger goes through, and
-//!   graded by the same rubric. Ignored by default because it asks a model:
+//! * **Model-backed, local.** The same transcript read by a real engine through
+//!   `generate_ledger`, the seam a meeting's ledger goes through, and graded by
+//!   the same rubric. It probes the loopback server first and prints one exact
+//!   skip line when no server is listening:
 //!
 //!   ```text
 //!   bun run test:backend ledger_evals -- --ignored --nocapture
 //!   ```
 //!
-//!   The engine is the one Sona would resolve for a meeting. A test has no
-//!   app handle, so remote intelligence reads as off and that leaves the
-//!   on-device engine, which needs Apple Intelligence switched on in System
-//!   Settings. Where it is off, name an OpenAI-compatible endpoint and the
-//!   model behind it instead:
-//!
-//!   ```text
-//!   SONA_LEDGER_EVAL_BASE_URL=http://127.0.0.1:11434/v1 \
-//!   SONA_LEDGER_EVAL_MODEL=gemma4:12b-mlx \
-//!   bun run test:backend ledger_evals -- --ignored --nocapture
-//!   ```
+//!   The server's first `/v1/models` entry is used unless `SONA_LOCAL_MODEL`
+//!   names another one. A server that is present but cannot list a model is a
+//!   failed test, not an offline skip.
 //!
 //! Segment ids are `00000000-0000-0000-0000-000000000NNN`, `NNN` the 1-based
 //! turn number in the transcript fixture, so a citation in the expected
@@ -49,9 +42,10 @@ use super::ledger::{
     self, fold, CheckFailure, LedgerFirmness, LedgerPage, LedgerPageInput, LedgerReceipt,
     LedgerThreadState, MeetingLedger,
 };
+use super::local_generator::{LocalEndpointError, LocalEndpointGenerator};
 use super::processing::{
-    generate_ledger, validate_ledger_output, MeetingProcessingService, MeetingTextGenerationError,
-    MeetingTextGenerator, RawLedgerOutput, ReplyShape,
+    generate_ledger, validate_ledger_output, MeetingTextGenerationError, MeetingTextGenerator,
+    RawLedgerOutput, ReplyShape,
 };
 use super::store::{ArtifactEvidence, MeetingEvidence};
 use super::types::{
@@ -212,7 +206,7 @@ struct Subject<'a> {
     haystack: &'a str,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rubric {
     Structural,
     LoopBack,
@@ -700,104 +694,6 @@ fn a_missing_headline_fails() {
     assert_eq!(failures, vec![CheckFailure::MissingHeadline]);
 }
 
-// ── model-backed ────────────────────────────────────────────────────────────
-
-/// An OpenAI-compatible chat endpoint, for a Mac whose test process has no
-/// engine of its own: Apple Intelligence switched off, and no app handle to
-/// reach a relay through. Used only when the operator names one, and never
-/// by the app.
-struct ChatEndpointGenerator {
-    base_url: String,
-    model: String,
-}
-
-impl ChatEndpointGenerator {
-    /// `SONA_LEDGER_EVAL_BASE_URL` names the endpoint, `/v1` included, and
-    /// `SONA_LEDGER_EVAL_MODEL` the model it should answer with.
-    fn from_env() -> Option<Self> {
-        let base_url = std::env::var("SONA_LEDGER_EVAL_BASE_URL").ok()?;
-        // PANIC: an endpoint without a model is a misconfigured run, not a reason to fall back.
-        let model = std::env::var("SONA_LEDGER_EVAL_MODEL")
-            .expect("SONA_LEDGER_EVAL_MODEL names the model at SONA_LEDGER_EVAL_BASE_URL");
-        Some(Self { base_url, model })
-    }
-}
-
-impl MeetingTextGenerator for ChatEndpointGenerator {
-    fn is_available(&self) -> bool {
-        true
-    }
-
-    fn model_id(&self) -> &'static str {
-        "ledger-eval-endpoint"
-    }
-
-    fn model_version(&self) -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("v1")
-    }
-
-    fn max_input_bytes(&self) -> usize {
-        usize::MAX
-    }
-
-    /// One chat turn, with Sona's own output budget on the wire: a model that
-    /// falls into a repetition loop otherwise runs until the operator kills
-    /// it. Reasoning is switched off for the same budget, because Ollama's
-    /// thinking models spend it on their reasoning and answer with nothing.
-    fn generate(
-        &self,
-        system_prompt: &str,
-        evidence: &str,
-        max_tokens: i32,
-        _shape: ReplyShape,
-    ) -> Result<String, MeetingTextGenerationError> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": evidence},
-            ],
-            "max_tokens": max_tokens,
-            "reasoning_effort": "none",
-            "response_format": {"type": "json_object"},
-        });
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        tauri::async_runtime::block_on(async {
-            let answer: serde_json::Value = reqwest::Client::new()
-                .post(url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| MeetingTextGenerationError::Unreachable)?
-                .json()
-                .await
-                .map_err(|_| MeetingTextGenerationError::Failed)?;
-            // Printed because a server-side context window shorter than the
-            // evidence truncates the prompt without saying so.
-            println!(
-                "{}: prompt {} tokens, answer {} tokens, finished by {}",
-                self.model,
-                answer["usage"]["prompt_tokens"],
-                answer["usage"]["completion_tokens"],
-                answer["choices"][0]["finish_reason"]
-            );
-            let Some(content) = answer["choices"][0]["message"]["content"].as_str() else {
-                println!("{}: no answer in {answer}", self.model);
-                return Err(MeetingTextGenerationError::Failed);
-            };
-            // A chat model fences its JSON whatever it is told, and not every
-            // engine behind Ollama enforces `response_format`. The object
-            // inside is what is graded; anything else is left for the seam
-            // to refuse and the test to print.
-            let object = match (content.find('{'), content.rfind('}')) {
-                (Some(open), Some(close)) if open < close => &content[open..=close],
-                _ => content,
-            };
-            Ok(object.to_string())
-        })
-    }
-}
-
 /// Keeps every answer the engine gave, so a run that produced no usable
 /// ledger can show what it did produce and where the seam refused it.
 struct Recording<'a> {
@@ -820,6 +716,9 @@ impl MeetingTextGenerator for Recording<'_> {
 
     fn max_input_bytes(&self) -> usize {
         self.inner.max_input_bytes()
+    }
+    fn context_window_bytes(&self) -> Option<usize> {
+        self.inner.context_window_bytes()
     }
 
     fn generate(
@@ -846,25 +745,43 @@ impl MeetingTextGenerator for Recording<'_> {
 /// goes through the same acceptance seam a meeting's does, checks and caveats
 /// included. The whole scorecard is printed before anything is asserted, so
 /// one failed line does not hide the rest.
-#[ignore = "asks a model: bun run test:backend ledger_evals -- --ignored --nocapture"]
+///
+/// What is asserted is the seam, not the reading: a real answer parsed, cited
+/// transcript ids, quoted the transcript, and reached a reader with every
+/// check it failed written on it as a caveat. The rubric's nine lines grade
+/// whichever model is installed, and the offline half already holds every one
+/// of them against a hand-written ledger, so a weaker local model scores
+/// lower here rather than failing a build over its reading comprehension.
 #[test]
-fn messy_two_party_with_model() {
+#[ignore = "requires an explicitly requested local OpenAI-compatible server"]
+fn messy_two_party_with_model_or_skips_without_a_local_server() {
+    let endpoint = LocalEndpointGenerator::new("http://127.0.0.1:11434/v1", "")
+        .expect("the loopback endpoint is valid");
+    let models = match endpoint.models() {
+        Ok(models) if !models.is_empty() => models,
+        Ok(_) => panic!("the local server returned no models"),
+        Err(LocalEndpointError::Unreachable) => {
+            println!("skipped: no OpenAI-compatible server on 127.0.0.1:11434; start ollama serve to run this");
+            return;
+        }
+        Err(error) => panic!("local endpoint model probe failed: {error}"),
+    };
+    let model = std::env::var("SONA_LOCAL_MODEL").unwrap_or_else(|_| models[0].clone());
+    let generator: Arc<dyn MeetingTextGenerator> = Arc::new(endpoint.with_model(model));
     let (_directory, store) = super::store::workflow_core_tests::store();
     let session_id = super::store::workflow_core_tests::meeting(&store, "Pricing sync", NOW);
     let fixture = fixture_with(session_id, |_| TranscriptSegmentId::new());
-    let generator: Arc<dyn MeetingTextGenerator> = match ChatEndpointGenerator::from_env() {
-        Some(endpoint) => Arc::new(endpoint),
-        None => MeetingProcessingService::new(None)
-            .text_generator_for_session(&store, session_id)
-            .expect(
-                "no text engine: Apple Intelligence is off on this Mac and a test has no relay; set SONA_LEDGER_EVAL_BASE_URL and SONA_LEDGER_EVAL_MODEL to an OpenAI-compatible endpoint",
-            ),
-    };
     let recording = Recording {
         inner: generator.as_ref(),
         answers: Mutex::new(Vec::new()),
     };
-    let ledger = generate_ledger(&recording, &fixture.evidence, &fixture.segments, session_id);
+    let ledger = generate_ledger(
+        &recording,
+        &fixture.evidence,
+        &fixture.segments,
+        &fixture.speaker_names,
+        session_id,
+    );
     let answers = recording
         .answers
         .into_inner()
@@ -915,5 +832,19 @@ fn messy_two_party_with_model() {
             }
         }
     }
-    assert!(failed.is_empty(), "rubric lines failed: {failed:?}");
+    println!(
+        "{} of {} rubric lines with {}",
+        Rubric::ALL.len() - failed.len(),
+        Rubric::ALL.len(),
+        generator.model_id()
+    );
+    let unrecorded: Vec<String> = ledger::check(&ledger, &page, &haystack)
+        .into_iter()
+        .filter_map(|failure| failure.caveat())
+        .filter(|caveat| !ledger.caveats.contains(caveat))
+        .collect();
+    assert!(
+        unrecorded.is_empty(),
+        "the accepted ledger reached a reader without saying what it failed: {unrecorded:?}"
+    );
 }

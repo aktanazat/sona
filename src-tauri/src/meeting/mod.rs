@@ -19,6 +19,7 @@ pub mod learning_types;
 pub mod ledger;
 #[cfg(test)]
 mod ledger_evals;
+pub(crate) mod local_generator;
 pub mod loop_types;
 pub mod people_types;
 pub mod processing;
