@@ -3,7 +3,7 @@ use crate::llm_client::{
     probe_loopback_model_info, send_loopback_chat_completion, LoopbackChatCompletionError,
     LoopbackModel,
 };
-use crate::settings::{MeetingLocalEngine, PostProcessEndpoint, PostProcessProvider};
+use crate::settings::{MeetingLocalEngine, PostProcessEndpoint};
 use serde::Serialize;
 use specta::Type;
 use std::borrow::Cow;
@@ -30,6 +30,16 @@ pub(crate) enum LocalEndpointError {
     InvalidEndpoint,
     Unreachable,
     InvalidResponse,
+}
+
+impl LocalEndpointError {
+    pub(crate) const fn reason_code(self) -> &'static str {
+        match self {
+            Self::InvalidEndpoint => "invalid_endpoint",
+            Self::Unreachable => "unreachable",
+            Self::InvalidResponse => "invalid_response",
+        }
+    }
 }
 
 impl std::fmt::Display for LocalEndpointError {
@@ -65,6 +75,7 @@ struct AvailabilityCache {
 pub(crate) struct LocalEndpointGenerator {
     endpoint: PostProcessEndpoint,
     model: String,
+    model_identity: String,
     configured_context_window_tokens: Option<usize>,
     availability: Mutex<Option<AvailabilityCache>>,
 }
@@ -80,21 +91,11 @@ impl LocalEndpointGenerator {
         model: &str,
         configured_context_window_tokens: Option<usize>,
     ) -> Result<Self, LocalEndpointError> {
-        let provider = PostProcessProvider {
-            id: "custom".to_string(),
-            label: "Custom".to_string(),
-            base_url: base_url.trim().to_string(),
-            allow_base_url_edit: true,
-            supports_structured_output: false,
-        };
-        let endpoint = provider
-            .endpoint()
+        let endpoint = PostProcessEndpoint::meeting_local(base_url)
             .map_err(|_| LocalEndpointError::InvalidEndpoint)?;
-        if endpoint.is_remote() || !endpoint.base_url().trim_end_matches('/').ends_with("/v1") {
-            return Err(LocalEndpointError::InvalidEndpoint);
-        }
         Ok(Self {
-            endpoint,
+            endpoint: endpoint.clone(),
+            model_identity: local_model_identity(&endpoint, model),
             model: model.to_string(),
             configured_context_window_tokens,
             availability: Mutex::new(None),
@@ -116,6 +117,7 @@ impl LocalEndpointGenerator {
 
     #[cfg(test)]
     pub(crate) fn with_model(mut self, model: String) -> Self {
+        self.model_identity = local_model_identity(&self.endpoint, &model);
         self.model = model;
         self
     }
@@ -175,12 +177,12 @@ impl LocalEndpointGenerator {
                 model_count: models.len(),
                 error: (!self.model.trim().is_empty()
                     && self.configured_context_window_bytes().is_none())
-                .then(|| "context window is not configured".to_string()),
+                .then(|| "context_window_not_configured".to_string()),
             },
             Err(error) => MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: !matches!(error, LocalEndpointError::Unreachable),
                 model_count: 0,
-                error: Some(error.to_string()),
+                error: Some(error.reason_code().to_string()),
             },
         }
     }
@@ -199,7 +201,7 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
     }
 
     fn model_version(&self) -> Cow<'static, str> {
-        Cow::Owned(self.model.clone())
+        Cow::Owned(self.model_identity.clone())
     }
 
     fn max_input_bytes(&self) -> usize {
@@ -210,7 +212,8 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
     }
 
     fn context_window_bytes(&self) -> Option<usize> {
-        self.configured_context_window_bytes()
+        // Unknown local context must refuse evidence, not remove the ceiling.
+        Some(self.configured_context_window_bytes().unwrap_or(0))
     }
 
     fn generate(
@@ -277,6 +280,10 @@ fn strip_code_fences(content: &str) -> String {
         .to_string()
 }
 
+fn local_model_identity(endpoint: &PostProcessEndpoint, model: &str) -> String {
+    format!("{}|{}", endpoint.base_url(), model)
+}
+
 fn run_async<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static) -> Option<T> {
     thread::spawn(move || tauri::async_runtime::block_on(future))
         .join()
@@ -284,44 +291,32 @@ fn run_async<T: Send + 'static>(future: impl Future<Output = T> + Send + 'static
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod test_support {
     use super::*;
-    use serde::Deserialize;
     use std::sync::mpsc::Receiver;
 
-    #[derive(Deserialize)]
-    struct RequestBody {
-        model: String,
-        max_tokens: i32,
-        reasoning_effort: String,
-        response_format: Option<ResponseFormat>,
-        messages: Vec<RequestMessage>,
+    pub(crate) fn expire_availability(generator: &LocalEndpointGenerator) {
+        generator
+            .availability
+            .lock()
+            .expect("availability cache")
+            .as_mut()
+            .expect("discovered context")
+            .checked_at -= AVAILABILITY_CACHE_TTL;
     }
 
-    #[derive(Deserialize)]
-    struct ResponseFormat {
-        #[serde(rename = "type")]
-        kind: String,
+    pub(crate) struct FixtureServer {
+        pub(crate) base_url: String,
+        pub(crate) requests: Receiver<String>,
+        pub(crate) connections: Arc<AtomicUsize>,
+        pub(crate) handle: thread::JoinHandle<()>,
     }
 
-    #[derive(Deserialize)]
-    struct RequestMessage {
-        role: String,
-        content: String,
-    }
-
-    struct FixtureServer {
-        base_url: String,
-        requests: Receiver<String>,
-        connections: Arc<AtomicUsize>,
-        handle: thread::JoinHandle<()>,
-    }
-
-    fn fixture_server(responses: Vec<String>) -> FixtureServer {
+    pub(crate) fn fixture_server(responses: Vec<String>) -> FixtureServer {
         fixture_server_with_status(responses.into_iter().map(|body| (200, body)).collect())
     }
 
-    fn fixture_server_with_status(responses: Vec<(u16, String)>) -> FixtureServer {
+    pub(crate) fn fixture_server_with_status(responses: Vec<(u16, String)>) -> FixtureServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fixture listener");
         let address = listener.local_addr().expect("fixture address");
         let (sender, requests) = mpsc::channel();
@@ -331,7 +326,7 @@ mod tests {
             for (status, body) in responses {
                 let (mut stream, _) = listener.accept().expect("fixture connection");
                 connection_count.fetch_add(1, Ordering::Relaxed);
-                let request = read_request(&mut stream);
+                let request = read_http_request(&mut stream);
                 sender.send(request).expect("fixture request receiver");
                 let status_line = if status == 200 {
                     "200 OK".to_string()
@@ -355,7 +350,7 @@ mod tests {
         }
     }
 
-    fn read_request(stream: &mut TcpStream) -> String {
+    pub(crate) fn read_http_request(stream: &mut impl Read) -> String {
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 4096];
         let header_end = loop {
@@ -369,8 +364,12 @@ mod tests {
         let headers = String::from_utf8_lossy(&bytes[..header_end]);
         let content_length = headers
             .lines()
-            .find_map(|line| line.strip_prefix("Content-Length: "))
-            .and_then(|length| length.trim().parse::<usize>().ok())
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
             .unwrap_or(0);
         while bytes.len() < header_end + content_length {
             let count = stream.read(&mut chunk).expect("fixture body read");
@@ -379,9 +378,70 @@ mod tests {
         }
         String::from_utf8(bytes).expect("fixture request utf8")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct RequestBody {
+        model: String,
+        max_tokens: i32,
+        reasoning_effort: String,
+        response_format: Option<ResponseFormat>,
+        messages: Vec<RequestMessage>,
+    }
+
+    #[derive(Deserialize)]
+    struct ResponseFormat {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    #[derive(Deserialize)]
+    struct RequestMessage {
+        role: String,
+        content: String,
+    }
+
     fn request_body(request: &str) -> RequestBody {
         serde_json::from_str(request.split_once("\r\n\r\n").expect("request body").1)
             .expect("request json")
+    }
+
+    #[test]
+    fn fixture_reads_fragmented_lowercase_content_length() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fragment listener");
+        let mut writer = TcpStream::connect(listener.local_addr().expect("fragment address"))
+            .expect("fragment writer");
+        let (stream, _) = listener.accept().expect("fragment reader");
+        let headers = b"POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 2\r\n\r\n";
+        writer.write_all(headers).expect("write lowercase headers");
+        writer.write_all(b"{").expect("write first body fragment");
+        writer.write_all(b"}").expect("write final body fragment");
+        // Cap reads even if TCP coalesces the controlled writes.
+        let mut fragments = (&stream)
+            .take(u64::try_from(headers.len()).expect("header length"))
+            .chain((&stream).take(1))
+            .chain(&stream);
+        let request = read_http_request(&mut fragments);
+        assert_eq!(request.split_once("\r\n\r\n").expect("HTTP body").1, "{}");
+    }
+
+    #[test]
+    fn fixture_framing_preserves_every_split_of_a_request() {
+        let request = b"POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 7\r\n\r\n{\"n\":1}";
+        for split in 1..request.len() {
+            let mut fragments = (&request[..split]).chain(&request[split..]);
+            assert_eq!(
+                read_http_request(&mut fragments).as_bytes(),
+                request,
+                "split at byte {split}"
+            );
+        }
     }
 
     #[test]
@@ -493,7 +553,7 @@ mod tests {
             MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: true,
                 model_count: 0,
-                error: Some("endpoint returned an invalid model list".to_string()),
+                error: Some("invalid_response".to_string()),
             }
         );
         assert_eq!(fixture.connections.load(Ordering::Relaxed), 1);

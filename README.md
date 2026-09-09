@@ -23,7 +23,7 @@ Sona is a local-first desktop app for spoken words: dictation delivered into any
 - Imports a recording or a Granola, Otter, or Circleback transcript export as a meeting.
 - Saved prompts with optional JSON-schema output, run by hand or after every meeting in a series.
 - Follow-up drafts that open in Mail, Reminders with due dates, an announce-in-chat line, and a thirty-day undo bin for deleted meetings.
-- Meeting intelligence runs on Apple Intelligence, or on your own server through the paired relay.
+- Meeting intelligence runs on Apple Intelligence by default. Settings > Advanced also offers a local OpenAI-compatible endpoint, such as Ollama, for summaries, ledgers, recaps, and answers. Supply its loopback URL (including /v1), model ID, and context window if its model catalog does not report one. Remote generation through the paired relay remains a separate opt-in.
 
 ### Screen recording
 

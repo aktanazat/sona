@@ -11,32 +11,47 @@ use reqwest::redirect::Policy;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::error::Error as StdError;
+use std::io::ErrorKind;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct ChatMessage {
     role: String,
     content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(transparent)]
 pub(crate) struct StructuredOutputSchema(pub(crate) serde_json::Value);
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct JsonSchema {
     name: String,
     strict: bool,
     schema: StructuredOutputSchema,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct ResponseFormat {
     #[serde(rename = "type")]
     format_type: String,
     json_schema: JsonSchema,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct LoopbackResponseFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(untagged)]
+enum ChatResponseFormat {
+    Schema(ResponseFormat),
+    JsonObject(LoopbackResponseFormat),
 }
 
 #[derive(Debug, Serialize, Clone, Default, PartialEq)]
@@ -136,7 +151,9 @@ struct ChatCompletionRequest {
     messages: Vec<ChatMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
+    max_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ChatResponseFormat>,
     #[serde(flatten)]
     reasoning: ReasoningParams,
 }
@@ -308,6 +325,17 @@ fn report_reqwest_error(context: &str, error: &reqwest::Error) -> String {
     details
 }
 
+fn report_json_decode_error(context: &str, error: &serde_json::Error) -> String {
+    let details = format!(
+        "{context} (kind: {:?}, line: {}, column: {})",
+        error.classify(),
+        error.line(),
+        error.column()
+    );
+    error!("{details}");
+    details
+}
+
 fn endpoint_matches_provider(
     provider: &PostProcessProvider,
     endpoint: &PostProcessEndpoint,
@@ -362,22 +390,6 @@ pub(crate) struct LoopbackChatCompletion {
     pub(crate) finish_reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct LoopbackResponseFormat {
-    #[serde(rename = "type")]
-    format_type: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct LoopbackChatCompletionRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    max_tokens: i32,
-    reasoning_effort: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<LoopbackResponseFormat>,
-}
-
 fn loopback_provider(endpoint: &PostProcessEndpoint) -> PostProcessProvider {
     PostProcessProvider {
         id: "custom".to_string(),
@@ -396,14 +408,32 @@ fn create_loopback_client(
     let headers = build_headers(&provider, None)?;
     reqwest::Client::builder()
         .default_headers(headers)
+        .no_proxy()
         .redirect(Policy::none())
         .timeout(timeout)
         .build()
         .map_err(|error| report_reqwest_error("Failed to build loopback HTTP client", &error))
 }
 
+fn is_connection_refused(error: &reqwest::Error) -> bool {
+    if !error.is_connect() {
+        return false;
+    }
+    let mut source = error.source();
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == ErrorKind::ConnectionRefused)
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
 fn loopback_request_error(error: &reqwest::Error) -> LoopbackChatCompletionError {
-    if error.is_connect() {
+    if is_connection_refused(error) {
         LoopbackChatCompletionError::Unreachable
     } else {
         LoopbackChatCompletionError::Failed
@@ -425,37 +455,47 @@ pub(crate) async fn send_loopback_chat_completion(
 
     let client = create_loopback_client(endpoint, timeout)
         .map_err(|_| LoopbackChatCompletionError::Failed)?;
-    let request = LoopbackChatCompletionRequest {
-        model: model.to_string(),
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt.to_string(),
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt.to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: evidence.to_string(),
+        },
+    ];
+    let completion = execute_openai_chat_completion(
+        &client,
+        &endpoint.request_url("chat/completions"),
+        model,
+        messages,
+        OpenAiChatCompletionOptions {
+            max_tokens: Some(max_tokens),
+            response_format: json_response.then_some(ChatResponseFormat::JsonObject(
+                LoopbackResponseFormat {
+                    format_type: "json_object",
+                },
+            )),
+            reasoning: ReasoningParams {
+                reasoning_effort: Some("none".to_string()),
+                ..Default::default()
             },
-            ChatMessage {
-                role: "user".to_string(),
-                content: evidence.to_string(),
-            },
-        ],
-        max_tokens,
-        reasoning_effort: "none",
-        response_format: json_response.then_some(LoopbackResponseFormat {
-            format_type: "json_object",
-        }),
-    };
-    let response = client
-        .post(endpoint.request_url("chat/completions"))
-        .json(&request)
-        .send()
-        .await
-        .map_err(|error| loopback_request_error(&error))?;
-    if !response.status().is_success() {
-        return Err(LoopbackChatCompletionError::Failed);
-    }
-    let completion: ChatCompletionResponse = response
-        .json()
-        .await
-        .map_err(|_| LoopbackChatCompletionError::Failed)?;
+            retry_reasoning: false,
+            rejection_key: None,
+            max_response_bytes: Some(MAX_COMPLETION_RESPONSE_BYTES),
+            response_log_context: "Loopback chat completion",
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        OpenAiChatCompletionError::Request(error) => loopback_request_error(&error),
+        OpenAiChatCompletionError::RetryRequest(_)
+        | OpenAiChatCompletionError::Status(_)
+        | OpenAiChatCompletionError::Body(_)
+        | OpenAiChatCompletionError::TooLarge
+        | OpenAiChatCompletionError::Decode(_) => LoopbackChatCompletionError::Failed,
+    })?;
     let choice = completion.choices.first();
     Ok(LoopbackChatCompletion {
         content: choice.and_then(|choice| choice.message.content.clone()),
@@ -535,10 +575,8 @@ async fn send_openai_chat_completion_with_schema(
     if !endpoint_matches_provider(provider, endpoint) {
         return Err("Post-processing destination changed".to_string());
     }
-    let url = endpoint.request_url("chat/completions");
 
     debug!("Sending OpenAI-compatible chat completion request");
-
     let client = create_client(provider, secret)?;
     let mut messages = Vec::new();
     if let Some(system) = system_prompt {
@@ -552,65 +590,126 @@ async fn send_openai_chat_completion_with_schema(
         content: user_content,
     });
 
-    let response_format = json_schema.map(|schema| ResponseFormat {
-        format_type: "json_schema".to_string(),
-        json_schema: JsonSchema {
-            name: "transcription_output".to_string(),
-            strict: true,
-            schema,
-        },
-    });
-
     let key = endpoint_key(endpoint, model);
     let reasoning = if disable_reasoning && !is_known_rejected(&key) {
         reasoning_disable_params(provider, endpoint)
     } else {
         ReasoningParams::default()
     };
+    let response_format = json_schema.map(|schema| {
+        ChatResponseFormat::Schema(ResponseFormat {
+            format_type: "json_schema".to_string(),
+            json_schema: JsonSchema {
+                name: "transcription_output".to_string(),
+                strict: true,
+                schema,
+            },
+        })
+    });
 
-    let mut request_body = ChatCompletionRequest {
-        model: model.to_string(),
+    let completion = execute_openai_chat_completion(
+        &client,
+        &endpoint.request_url("chat/completions"),
+        model,
         messages,
-        stream: false,
-        response_format,
-        reasoning,
-    };
+        OpenAiChatCompletionOptions {
+            max_tokens: None,
+            response_format,
+            reasoning,
+            retry_reasoning: disable_reasoning,
+            rejection_key: disable_reasoning.then_some(key),
+            max_response_bytes: None,
+            response_log_context: "Chat completion",
+        },
+    )
+    .await
+    .map_err(openai_completion_error)?;
 
+    Ok(completion
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content.clone()))
+}
+
+#[derive(Debug)]
+enum OpenAiChatCompletionError {
+    Request(reqwest::Error),
+    RetryRequest(reqwest::Error),
+    Status(reqwest::StatusCode),
+    Body(reqwest::Error),
+    TooLarge,
+    Decode(serde_json::Error),
+}
+
+struct OpenAiChatCompletionOptions {
+    max_tokens: Option<i32>,
+    response_format: Option<ChatResponseFormat>,
+    reasoning: ReasoningParams,
+    retry_reasoning: bool,
+    rejection_key: Option<String>,
+    max_response_bytes: Option<usize>,
+    response_log_context: &'static str,
+}
+
+fn openai_request(
+    model: &str,
+    messages: &[ChatMessage],
+    options: &OpenAiChatCompletionOptions,
+) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: model.to_string(),
+        messages: messages.to_vec(),
+        stream: false,
+        max_tokens: options.max_tokens,
+        response_format: options.response_format.clone(),
+        reasoning: options.reasoning.clone(),
+    }
+}
+
+async fn execute_openai_chat_completion(
+    client: &reqwest::Client,
+    url: &str,
+    model: &str,
+    messages: Vec<ChatMessage>,
+    mut options: OpenAiChatCompletionOptions,
+) -> Result<ChatCompletionResponse, OpenAiChatCompletionError> {
+    let mut request_body = openai_request(model, &messages, &options);
     let mut response = client
-        .post(&url)
+        .post(url)
         .json(&request_body)
         .send()
         .await
-        .map_err(|error| report_reqwest_error("HTTP request failed", &error))?;
+        .map_err(OpenAiChatCompletionError::Request)?;
     let mut status = response.status();
     debug!(
-        "Chat completion response received with status {} over {:?}",
+        "{} response received with status {} over {:?}",
+        options.response_log_context,
         status,
         response.version()
     );
 
     if !status.is_success()
         && matches!(status.as_u16(), 400 | 422)
+        && options.retry_reasoning
         && !request_body.reasoning.is_empty()
     {
-        // Provider bodies are not useful for this retry and may contain
-        // submitted text, so never materialize them.
         drop(response);
         info!(
             "Endpoint rejected reasoning-disable fields with status {}; retrying without them",
             status
         );
-
-        request_body.reasoning = ReasoningParams::default();
+        options.reasoning = ReasoningParams::default();
+        request_body = openai_request(model, &messages, &options);
         response = client
-            .post(&url)
+            .post(url)
             .json(&request_body)
             .send()
             .await
-            .map_err(|error| report_reqwest_error("HTTP retry failed", &error))?;
+            .map_err(OpenAiChatCompletionError::RetryRequest)?;
         status = response.status();
         debug!(
-            "Chat completion retry response received with status {} over {:?}",
+            "{} retry response received with status {} over {:?}",
+            options.response_log_context,
             status,
             response.version()
         );
@@ -619,23 +718,54 @@ async fn send_openai_chat_completion_with_schema(
             info!(
                 "Retry without reasoning fields succeeded; the frozen destination will skip them"
             );
-            remember_rejection(key);
+            if let Some(key) = options.rejection_key.take() {
+                remember_rejection(key);
+            }
         }
     }
 
     if !status.is_success() {
-        return Err(format!("API request failed with status {status}"));
+        return Err(OpenAiChatCompletionError::Status(status));
     }
 
-    let completion: ChatCompletionResponse = response
-        .json()
-        .await
-        .map_err(|error| report_reqwest_error("Failed to parse API response", &error))?;
+    let bytes = match options.max_response_bytes {
+        Some(limit) => read_limited_response_body(response, limit)
+            .await
+            .map_err(|error| match error {
+                LimitedResponseBodyError::TooLarge => OpenAiChatCompletionError::TooLarge,
+                LimitedResponseBodyError::Body(error) => OpenAiChatCompletionError::Body(error),
+            })?,
+        None => response
+            .bytes()
+            .await
+            .map_err(OpenAiChatCompletionError::Body)?
+            .to_vec(),
+    };
+    serde_json::from_slice(&bytes).map_err(OpenAiChatCompletionError::Decode)
+}
 
-    Ok(completion
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.clone()))
+fn openai_completion_error(error: OpenAiChatCompletionError) -> String {
+    match error {
+        OpenAiChatCompletionError::Request(error) => {
+            report_reqwest_error("HTTP request failed", &error)
+        }
+        OpenAiChatCompletionError::RetryRequest(error) => {
+            report_reqwest_error("HTTP retry failed", &error)
+        }
+        OpenAiChatCompletionError::Body(error) => {
+            report_reqwest_error("Failed to read API response", &error)
+        }
+        OpenAiChatCompletionError::Status(status) => {
+            format!("API request failed with status {status}")
+        }
+        OpenAiChatCompletionError::TooLarge => {
+            error!("API response exceeded the decoded response limit");
+            "API response exceeded the decoded response limit".to_string()
+        }
+        OpenAiChatCompletionError::Decode(error) => {
+            report_json_decode_error("Failed to parse API response", &error)
+        }
+    }
 }
 
 const ANTHROPIC_MAX_OUTPUT_TOKENS: u32 = 4096;
@@ -701,8 +831,11 @@ async fn send_anthropic_message(input: ChatCompletionInput<'_>) -> Result<Option
         .and_then(|block| block.text))
 }
 
-/// Cap decoded provider catalog bytes before JSON parsing. Reqwest's stream
-/// applies transparent gzip, brotli, and deflate decoding before this limit.
+/// Cap decoded OpenAI-compatible completion bytes before JSON parsing.
+/// Reqwest's stream applies transparent gzip, brotli, and deflate decoding.
+const MAX_COMPLETION_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Cap decoded provider catalog bytes before JSON parsing.
+/// Reqwest's stream applies transparent gzip, brotli, and deflate decoding.
 const MAX_CATALOG_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_CATALOG_MODEL_ID_BYTES: usize = 200;
 const MAX_CATALOG_MODELS: usize = 200;
@@ -914,7 +1047,19 @@ async fn get_catalog_json<T: DeserializeOwned>(
         return Err(catalog_status_error(status));
     }
 
-    let bytes = read_limited_catalog_response(response).await?;
+    let bytes = read_limited_response_body(response, MAX_CATALOG_RESPONSE_BYTES)
+        .await
+        .map_err(|error| match error {
+            LimitedResponseBodyError::TooLarge => PostProcessModelDiscovery::InvalidResponse,
+            LimitedResponseBodyError::Body(error) => {
+                let discovery = catalog_request_error(&error);
+                error!(
+                    "Post-processing model catalog body read failed (kind: {})",
+                    reqwest_error_kinds(&error)
+                );
+                discovery
+            }
+        })?;
     serde_json::from_slice(&bytes).map_err(|_| {
         error!("Failed to parse post-processing model catalog (kind: json)");
         PostProcessModelDiscovery::InvalidResponse
@@ -932,52 +1077,62 @@ async fn get_loopback_catalog_json<T: DeserializeOwned>(
         return Err(PostProcessModelDiscovery::InvalidResponse);
     }
 
-    let bytes = read_limited_catalog_response(response)
+    let bytes = read_limited_response_body(response, MAX_CATALOG_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
-            PostProcessModelDiscovery::Unreachable => PostProcessModelDiscovery::InvalidResponse,
-            other => other,
+            LimitedResponseBodyError::TooLarge => PostProcessModelDiscovery::InvalidResponse,
+            LimitedResponseBodyError::Body(error) => {
+                let discovery = loopback_catalog_request_error(&error);
+                error!(
+                    "Post-processing model catalog body read failed (kind: {})",
+                    reqwest_error_kinds(&error)
+                );
+                match discovery {
+                    PostProcessModelDiscovery::Unreachable => {
+                        PostProcessModelDiscovery::InvalidResponse
+                    }
+                    other => other,
+                }
+            }
         })?;
     serde_json::from_slice(&bytes).map_err(|_| PostProcessModelDiscovery::InvalidResponse)
 }
 
 fn loopback_catalog_request_error(error: &reqwest::Error) -> PostProcessModelDiscovery {
-    if error.is_connect() {
+    if is_connection_refused(error) {
         PostProcessModelDiscovery::Unreachable
     } else {
         PostProcessModelDiscovery::InvalidResponse
     }
 }
-async fn read_limited_catalog_response(
+#[derive(Debug)]
+enum LimitedResponseBodyError {
+    Body(reqwest::Error),
+    TooLarge,
+}
+
+async fn read_limited_response_body(
     response: reqwest::Response,
-) -> Result<Vec<u8>, PostProcessModelDiscovery> {
+    limit: usize,
+) -> Result<Vec<u8>, LimitedResponseBodyError> {
     let declared_length = response
         .content_length()
-        .map(|length| {
-            usize::try_from(length).map_err(|_| PostProcessModelDiscovery::InvalidResponse)
-        })
+        .map(|length| usize::try_from(length).map_err(|_| LimitedResponseBodyError::TooLarge))
         .transpose()?;
-    if declared_length.is_some_and(|length| length > MAX_CATALOG_RESPONSE_BYTES) {
-        return Err(PostProcessModelDiscovery::InvalidResponse);
+    if declared_length.is_some_and(|length| length > limit) {
+        return Err(LimitedResponseBodyError::TooLarge);
     }
 
-    let mut bytes = Vec::with_capacity(declared_length.unwrap_or_default());
+    let mut bytes = Vec::with_capacity(declared_length.unwrap_or_default().min(limit));
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| {
-            let discovery = catalog_request_error(&error);
-            error!(
-                "Post-processing model catalog body read failed (kind: {})",
-                reqwest_error_kinds(&error)
-            );
-            discovery
-        })?;
+        let chunk = chunk.map_err(LimitedResponseBodyError::Body)?;
         let next_length = bytes
             .len()
             .checked_add(chunk.len())
-            .ok_or(PostProcessModelDiscovery::InvalidResponse)?;
-        if next_length > MAX_CATALOG_RESPONSE_BYTES {
-            return Err(PostProcessModelDiscovery::InvalidResponse);
+            .ok_or(LimitedResponseBodyError::TooLarge)?;
+        if next_length > limit {
+            return Err(LimitedResponseBodyError::TooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -1157,6 +1312,7 @@ mod tests {
                 content: "hi".to_string(),
             }],
             stream: false,
+            max_tokens: None,
             response_format: None,
             reasoning,
         };
@@ -1212,15 +1368,25 @@ mod tests {
 
         let decode_url =
             serve_one_response("200 OK", &format!(r#"{{"choices":"{CANARY}"}}"#)).await;
-        let decode_error = reqwest::get(decode_url)
-            .await
-            .expect("request")
-            .json::<ChatCompletionResponse>()
-            .await
-            .expect_err("malformed response");
-        let decode_details = report_reqwest_error("Failed to parse API response", &decode_error);
-        assert!(decode_details.contains("kind: decode"));
+        let decode_provider = provider("custom", &decode_url);
+        let decode_endpoint = endpoint(&decode_provider);
+        let decode_details = send_chat_completion_with_schema(ChatCompletionInput {
+            provider: &decode_provider,
+            endpoint: &decode_endpoint,
+            secret: None,
+            model: "test-model",
+            user_content: "transcript".to_string(),
+            system_prompt: None,
+            json_schema: None,
+            disable_reasoning: false,
+        })
+        .await
+        .expect_err("malformed response");
+        assert!(decode_details.contains("kind: Data"));
+        assert!(decode_details.contains("line: 1"));
+        assert!(decode_details.contains("column:"));
         assert!(!decode_details.contains(CANARY));
+        assert!(!decode_details.contains(&decode_url));
     }
 
     /// A rejected reasoning request is retried even when the server closes its
@@ -1542,6 +1708,222 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn loopback_evidence_bypasses_proxies_but_remote_requests_use_them() {
+        const CHILD_ENDPOINT: &str = "SONA_PROXY_REGRESSION_ENDPOINT";
+        const EVIDENCE: &str = "proxy-regression-meeting-evidence";
+        if let Ok(base_url) = std::env::var(CHILD_ENDPOINT) {
+            let local = PostProcessEndpoint::meeting_local(&base_url).expect("local endpoint");
+            let completion = send_loopback_chat_completion(
+                &local,
+                "fixture",
+                "system",
+                EVIDENCE,
+                16,
+                Duration::from_secs(5),
+                false,
+            )
+            .await
+            .expect("local completion");
+            assert_eq!(completion.content.as_deref(), Some("local answer"));
+
+            let remote = provider("custom", "http://provider.invalid/v1");
+            let response = create_client(&remote, None)
+                .expect("remote client")
+                .post("http://provider.invalid/v1/chat/completions")
+                .body(r#"{"probe":"remote"}"#)
+                .send()
+                .await
+                .expect("remote request through proxy");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            return;
+        }
+
+        let (local_url, local_server) = serve_one_completion("local answer").await;
+        let (proxy_url, proxy_server) = serve_one_completion("proxy answer").await;
+        let output = tokio::task::spawn_blocking(move || {
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+            child
+                .args([
+                    "--exact",
+                    "llm_client::tests::loopback_evidence_bypasses_proxies_but_remote_requests_use_them",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENDPOINT, format!("{local_url}/v1"))
+                .env_remove("REQUEST_METHOD");
+            for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+                child.env(name, &proxy_url);
+            }
+            for name in ["NO_PROXY", "no_proxy"] {
+                child.env(name, "");
+            }
+            child.output().expect("isolated proxy regression")
+        })
+        .await
+        .expect("proxy regression child");
+        println!(
+            "child status: {}\n{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            local_server.abort();
+            proxy_server.abort();
+            panic!("isolated proxy regression failed");
+        }
+        let local_request = local_server.await.expect("local endpoint request");
+        let proxy_request = proxy_server.await.expect("remote proxy request");
+        let local_body: serde_json::Value =
+            serde_json::from_slice(request_body(&local_request)).expect("local completion JSON");
+        assert_eq!(local_body["messages"][1]["content"], EVIDENCE);
+        assert!(String::from_utf8_lossy(&local_request).starts_with("POST /v1/chat/completions "));
+        assert!(String::from_utf8_lossy(&proxy_request)
+            .starts_with("POST http://provider.invalid/v1/chat/completions "));
+        assert_eq!(request_body(&proxy_request), br#"{"probe":"remote"}"#);
+        assert!(!String::from_utf8_lossy(&proxy_request).contains(EVIDENCE));
+    }
+
+    #[tokio::test]
+    async fn loopback_connection_reset_is_failed_not_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reset fixture");
+        let address = listener.local_addr().expect("reset fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("loopback request");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            drop(stream);
+        });
+        let provider = provider("custom", &format!("http://{address}/v1"));
+        let endpoint = endpoint(&provider);
+
+        let result = send_loopback_chat_completion(
+            &endpoint,
+            "model",
+            "system",
+            "evidence",
+            16,
+            Duration::from_secs(2),
+            false,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LoopbackChatCompletionError::Failed)));
+        server.await.expect("reset fixture completed");
+    }
+    #[tokio::test]
+    async fn loopback_catalog_connection_reset_is_invalid_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind catalog reset fixture");
+        let address = listener
+            .local_addr()
+            .expect("catalog reset fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog request");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            drop(stream);
+        });
+        let provider = provider("custom", &format!("http://{address}/v1"));
+        let endpoint = endpoint(&provider);
+
+        assert!(matches!(
+            probe_loopback_model_info(&endpoint).await,
+            Err(PostProcessModelDiscovery::InvalidResponse)
+        ));
+        server.await.expect("catalog reset fixture completed");
+    }
+
+    /// Only a refused connection means "no server is listening here". The
+    /// live ledger eval skips on `Unreachable` and the settings row says the
+    /// same thing to the operator, so a connect attempt that fails any other
+    /// way has to stay a reported failure on both loopback paths.
+    #[tokio::test]
+    async fn a_refused_connection_is_unreachable_while_another_connect_failure_is_not() {
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind closed-port fixture");
+            listener.local_addr().expect("closed-port fixture address")
+        };
+        let refused = reqwest::Client::new()
+            .get(format!("http://{closed}/v1/models"))
+            .send()
+            .await
+            .expect_err("nothing is listening on the closed port");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind plaintext fixture");
+        let address = listener.local_addr().expect("plaintext fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("handshake attempt");
+            let mut hello = [0_u8; 512];
+            let _ = stream.read(&mut hello).await;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+            drop(stream);
+        });
+        let handshake_failed = reqwest::Client::new()
+            .get(format!("https://{address}/v1/models"))
+            .send()
+            .await
+            .expect_err("a plaintext server cannot complete a TLS handshake");
+        server.await.expect("plaintext fixture completed");
+
+        assert!(refused.is_connect(), "the refusal fails during connect");
+        assert!(
+            handshake_failed.is_connect(),
+            "the failed handshake also fails during connect"
+        );
+        assert!(matches!(
+            loopback_request_error(&refused),
+            LoopbackChatCompletionError::Unreachable
+        ));
+        assert!(matches!(
+            loopback_request_error(&handshake_failed),
+            LoopbackChatCompletionError::Failed
+        ));
+        assert!(matches!(
+            loopback_catalog_request_error(&refused),
+            PostProcessModelDiscovery::Unreachable
+        ));
+        assert!(matches!(
+            loopback_catalog_request_error(&handshake_failed),
+            PostProcessModelDiscovery::InvalidResponse
+        ));
+    }
+
+    #[tokio::test]
+    async fn loopback_completion_rejects_chunked_body_over_decoded_limit() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "choices": [{"message": {"content": "x".repeat(MAX_COMPLETION_RESPONSE_BYTES)}}],
+        }))
+        .expect("oversized completion serializes");
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:X}\r\n", body.len()).as_bytes());
+        response.extend_from_slice(&body);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let base_url = serve_raw_response(response).await;
+        let provider = provider("custom", &format!("{base_url}/v1"));
+        let endpoint = endpoint(&provider);
+
+        let result = send_loopback_chat_completion(
+            &endpoint,
+            "model",
+            "system",
+            "evidence",
+            16,
+            Duration::from_secs(2),
+            false,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LoopbackChatCompletionError::Failed)));
+    }
+
     /// Anthropic is not OpenAI-compatible at this boundary: the transport
     /// route, request shape, and text response block are its native protocol.
     #[tokio::test]
@@ -1774,7 +2156,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("catalog request");
             let mut request = [0_u8; 2048];
-            stream
+            let _ = stream
                 .read(&mut request)
                 .await
                 .expect("read catalog request");
@@ -2041,6 +2423,7 @@ mod tests {
     /// command-mode pair concatenated the same way. So a pass here is a pass
     /// for the production path, not for a lookalike.
     #[tokio::test]
+    #[ignore = "requires an explicitly requested local OpenAI-compatible server"]
     async fn a_keyless_loopback_endpoint_rewrites_a_selection_or_skips_without_a_local_server() {
         let probe_provider = PostProcessProvider {
             id: "custom".to_string(),

@@ -1711,14 +1711,14 @@
         "saveFailed": "没有保存成功。"
       },
       "localEngine": {
-        "title": "会议文本引擎",
         "label": "将会议文本写入",
         "description": "选择在哪里生成摘要、记录、回顾和回答。",
         "apple": "Apple Intelligence",
         "endpoint": "本地 OpenAI 兼容端点",
         "baseUrl": {
           "label": "端点地址",
-          "hint": "仅限回环地址。请包含 /v1 路径。"
+          "hint": "仅限回环地址。请包含 /v1 路径。",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "模型",
@@ -1735,9 +1735,12 @@
           "appleAvailable": "Apple Intelligence 可用。",
           "appleUnavailable": "此 Mac 无法使用 Apple Intelligence。",
           "endpointReachable": "本地端点可用，提供 {{count}} 个模型。",
-          "endpointUnreachable": "无法连接到本地端点：{{error}}",
+          "endpointUnreachable": "本地端点无法访问。",
+          "endpointInvalid": "本地端点地址无效。",
+          "endpointInvalidResponse": "本地端点返回了无效响应。",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "未知错误"
+          "endpointNotConfigured": "本地端点尚未配置。",
+          "endpointUnknown": "本地端点状态未知。"
         }
       },
       "remoteIntelligence": {

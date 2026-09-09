@@ -1725,14 +1725,14 @@
         "saveFailed": "Isso não foi guardado."
       },
       "localEngine": {
-        "title": "Motor de texto de reuniões",
         "label": "Escrever o texto das reuniões em",
         "description": "Escolha onde os resumos, registros, recapitulações e respostas são gerados.",
         "apple": "Apple Intelligence",
         "endpoint": "Endpoint local compatível com OpenAI",
         "baseUrl": {
           "label": "Endereço do endpoint",
-          "hint": "Somente loopback. Inclua o caminho /v1."
+          "hint": "Somente loopback. Inclua o caminho /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Modelo",
@@ -1749,9 +1749,12 @@
           "appleAvailable": "O Apple Intelligence está disponível.",
           "appleUnavailable": "O Apple Intelligence não está disponível neste Mac.",
           "endpointReachable": "O endpoint local está acessível com {{count}} modelo(s).",
-          "endpointUnreachable": "O endpoint local está inacessível: {{error}}",
+          "endpointUnreachable": "O endpoint local está inacessível.",
+          "endpointInvalid": "O endereço do endpoint local é inválido.",
+          "endpointInvalidResponse": "O endpoint local retornou uma resposta inválida.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "erro desconhecido"
+          "endpointNotConfigured": "O endpoint local ainda não foi configurado.",
+          "endpointUnknown": "O status do endpoint local é desconhecido."
         }
       },
       "remoteIntelligence": {

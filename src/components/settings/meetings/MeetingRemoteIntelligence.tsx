@@ -36,42 +36,170 @@ import { useSettings } from "@/hooks/useSettings";
  * server that does not exist would be a setting that claims something untrue,
  * and the backend's own selection reads the same four settings fields this row
  * does, so the two cannot disagree about whether remote work is possible. */
-const DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434/v1";
+type LocalEndpointEngine = Extract<
+  MeetingLocalEngine,
+  { kind: "local_endpoint" }
+>;
+
+type LocalEndpointDraftFields = {
+  baseUrl: string;
+  model: string;
+  contextWindow: string | number | null;
+};
+
+type LocalEngineSelection = LocalEndpointDraftFields & {
+  engineKind: "apple_intelligence" | "local_endpoint";
+  draft: boolean;
+};
+
+const selectMeetingLocalEngine = (
+  value: LocalEngineSelection["engineKind"],
+  persistedEngine: MeetingLocalEngine | undefined,
+  defaultLocalEngine: LocalEndpointEngine | undefined,
+  persist: (engine: MeetingLocalEngine) => void,
+): LocalEngineSelection => {
+  if (value === "apple_intelligence") {
+    persist({ kind: "apple_intelligence" });
+    return {
+      engineKind: value,
+      draft: false,
+      baseUrl: "",
+      model: "",
+      contextWindow: "",
+    };
+  }
+
+  const localEngine =
+    persistedEngine?.kind === "local_endpoint"
+      ? persistedEngine
+      : defaultLocalEngine;
+  if (localEngine) {
+    persist(localEngine);
+  }
+  return {
+    engineKind: value,
+    draft: true,
+    baseUrl: localEngine?.base_url ?? "",
+    model: localEngine?.model ?? "",
+    contextWindow: localEngine?.context_window_tokens?.toString() ?? "",
+  };
+};
+
+const commitMeetingLocalEndpoint = (
+  fields: LocalEndpointDraftFields,
+  persistedEngine: LocalEndpointEngine | undefined,
+  persist: (engine: LocalEndpointEngine) => void,
+): boolean => {
+  const baseUrl = fields.baseUrl.trim();
+  if (!baseUrl) return false;
+  const model = fields.model.trim();
+  const rawContextWindow =
+    fields.contextWindow === null || String(fields.contextWindow).trim() === ""
+      ? null
+      : Number(fields.contextWindow);
+  if (
+    rawContextWindow !== null &&
+    (!Number.isSafeInteger(rawContextWindow) || rawContextWindow < 1)
+  ) {
+    return false;
+  }
+
+  const next: LocalEndpointEngine = {
+    kind: "local_endpoint",
+    base_url: baseUrl,
+    model,
+    context_window_tokens: rawContextWindow,
+  };
+  if (
+    persistedEngine &&
+    next.base_url === persistedEngine.base_url &&
+    next.model === persistedEngine.model &&
+    next.context_window_tokens ===
+      (persistedEngine.context_window_tokens ?? null)
+  ) {
+    return false;
+  }
+  persist(next);
+  return true;
+};
+
+const meetingLocalEngineStatusKey = (error: string | null): string => {
+  switch (error) {
+    case "context_window_not_configured":
+      return "settings.meetings.localEngine.status.endpointContextUnknown";
+    case "invalid_endpoint":
+      return "settings.meetings.localEngine.status.endpointInvalid";
+    case "invalid_response":
+      return "settings.meetings.localEngine.status.endpointInvalidResponse";
+    case "unreachable":
+      return "settings.meetings.localEngine.status.endpointUnreachable";
+    default:
+      return "settings.meetings.localEngine.status.endpointUnknown";
+  }
+};
+
 const MeetingLocalEngineSettings: React.FC = () => {
   const { t } = useTranslation();
-  const { getSetting, updateSetting, isUpdating } = useSettings();
+  const { getSetting, getDefaultSetting, updateSetting, isUpdating } =
+    useSettings();
   const engineId = useId();
   const baseUrlId = useId();
   const modelId = useId();
   const statusRequest = useRef(0);
   const contextWindowId = useId();
-  const engine =
-    getSetting("meeting_local_engine") ??
-    ({ kind: "apple_intelligence" } satisfies MeetingLocalEngine);
+  const defaultEngine = getDefaultSetting("meeting_local_engine");
+  const defaultLocalEngine =
+    defaultEngine?.kind === "local_endpoint" ? defaultEngine : undefined;
+  const persistedEngine = getSetting("meeting_local_engine") ?? defaultEngine;
+  const persistedLocalEngine =
+    persistedEngine?.kind === "local_endpoint" ? persistedEngine : undefined;
   const saving = isUpdating("meeting_local_engine");
   const [status, setStatus] = useState<MeetingLocalEngineStatus | null>(null);
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_LOCAL_ENDPOINT);
-  const [model, setModel] = useState("");
-  const [contextWindow, setContextWindow] = useState("");
+  const [localDraft, setLocalDraft] = useState(false);
+  const engineKind =
+    localDraft || persistedLocalEngine
+      ? "local_endpoint"
+      : (persistedEngine?.kind ?? "");
+  const hasLocalDraft = localDraft;
+  const [baseUrl, setBaseUrl] = useState(persistedLocalEngine?.base_url ?? "");
+  const [model, setModel] = useState(persistedLocalEngine?.model ?? "");
+  const [contextWindow, setContextWindow] = useState(
+    persistedLocalEngine?.context_window_tokens?.toString() ?? "",
+  );
 
   useEffect(() => {
-    if (engine.kind !== "local_endpoint") return;
-    setBaseUrl(engine.base_url);
-    setModel(engine.model);
-    setContextWindow(engine.context_window_tokens?.toString() ?? "");
+    if (saving || persistedLocalEngine === undefined) return;
+    const draftContextWindow =
+      contextWindow.trim() === "" ? null : Number(contextWindow);
+    if (
+      localDraft &&
+      (baseUrl.trim() !== persistedLocalEngine.base_url ||
+        model.trim() !== persistedLocalEngine.model ||
+        draftContextWindow !==
+          (persistedLocalEngine.context_window_tokens ?? null))
+    ) {
+      return;
+    }
+    setLocalDraft(false);
+    setBaseUrl(persistedLocalEngine.base_url);
+    setModel(persistedLocalEngine.model);
+    setContextWindow(
+      persistedLocalEngine.context_window_tokens?.toString() ?? "",
+    );
   }, [
-    engine.kind,
-    engine.kind === "local_endpoint" ? engine.base_url : "",
-    engine.kind === "local_endpoint" ? engine.model : "",
-    engine.kind === "local_endpoint"
-      ? (engine.context_window_tokens ?? null)
-      : null,
+    baseUrl,
+    contextWindow,
+    localDraft,
+    model,
+    persistedLocalEngine?.base_url,
+    persistedLocalEngine?.model,
+    persistedLocalEngine?.context_window_tokens,
+    saving,
   ]);
-
   useEffect(() => {
     const request = ++statusRequest.current;
     setStatus(null);
-    if (saving) return;
+    if (hasLocalDraft || saving) return;
 
     void (async () => {
       try {
@@ -82,78 +210,77 @@ const MeetingLocalEngineSettings: React.FC = () => {
       }
     })();
   }, [
-    engine.kind,
-    engine.kind === "local_endpoint" ? engine.base_url : "",
-    engine.kind === "local_endpoint" ? engine.model : "",
-    engine.kind === "local_endpoint"
-      ? (engine.context_window_tokens ?? null)
-      : null,
+    persistedEngine?.kind,
+    persistedLocalEngine?.base_url,
+    persistedLocalEngine?.model,
+    persistedLocalEngine?.context_window_tokens,
+    hasLocalDraft,
     saving,
   ]);
+
+  const updateLocalEngine = (overrides: Partial<LocalEndpointEngine>) => {
+    if (engineKind !== "local_endpoint") return;
+    const contextWindowValue =
+      "context_window_tokens" in overrides
+        ? (overrides.context_window_tokens ?? null)
+        : contextWindow;
+    commitMeetingLocalEndpoint(
+      {
+        baseUrl: overrides.base_url ?? baseUrl,
+        model: overrides.model ?? model,
+        contextWindow: contextWindowValue,
+      },
+      persistedLocalEngine,
+      (next) => {
+        setLocalDraft(true);
+        void updateSetting("meeting_local_engine", next);
+      },
+    );
+  };
+
   const selectEngine = (value: string) => {
-    if (value === engine.kind) return;
-    if (value === "apple_intelligence") {
-      void updateSetting("meeting_local_engine", {
-        kind: "apple_intelligence",
-      });
+    if (
+      (value !== "apple_intelligence" && value !== "local_endpoint") ||
+      value === engineKind ||
+      saving
+    ) {
       return;
     }
-    void updateSetting("meeting_local_engine", {
-      kind: "local_endpoint",
-      base_url:
-        engine.kind === "local_endpoint"
-          ? engine.base_url
-          : DEFAULT_LOCAL_ENDPOINT,
-      model: engine.kind === "local_endpoint" ? engine.model : "",
-      context_window_tokens:
-        engine.kind === "local_endpoint"
-          ? (engine.context_window_tokens ?? null)
-          : null,
-    });
+    const selection = selectMeetingLocalEngine(
+      value,
+      persistedEngine,
+      defaultLocalEngine,
+      (next) => void updateSetting("meeting_local_engine", next),
+    );
+    setLocalDraft(selection.draft);
+    setBaseUrl(selection.baseUrl);
+    setModel(selection.model);
+    setContextWindow(selection.contextWindow?.toString() ?? "");
   };
 
   const commitBaseUrl = () => {
-    if (engine.kind !== "local_endpoint") return;
     const next = baseUrl.trim();
-    if (!next || next === engine.base_url) return;
-    void updateSetting("meeting_local_engine", {
-      kind: "local_endpoint",
-      base_url: next,
-      model: engine.model,
-      context_window_tokens: engine.context_window_tokens ?? null,
-    });
+    if (!next) return;
+    updateLocalEngine({ base_url: next });
   };
 
   const commitModel = () => {
-    if (engine.kind !== "local_endpoint") return;
-    const next = model.trim();
-    if (next === engine.model) return;
-    void updateSetting("meeting_local_engine", {
-      kind: "local_endpoint",
-      base_url: engine.base_url,
-      model: next,
-      context_window_tokens: engine.context_window_tokens ?? null,
-    });
+    updateLocalEngine({ model: model.trim() });
   };
 
   const commitContextWindow = () => {
-    if (engine.kind !== "local_endpoint") return;
     const next = contextWindow.trim();
-    const value = next === "" ? null : Number(next);
-    if (value !== null && (!Number.isSafeInteger(value) || value < 1)) {
-      return;
-    }
-    if (value === (engine.context_window_tokens ?? null)) return;
-    void updateSetting("meeting_local_engine", {
-      kind: "local_endpoint",
-      base_url: engine.base_url,
-      model: engine.model,
-      context_window_tokens: value,
+    updateLocalEngine({
+      context_window_tokens: next === "" ? null : Number(next),
     });
   };
 
-  const statusTone =
-    status?.kind === "apple_intelligence"
+  const endpointStatusText = (error: string | null) =>
+    t(meetingLocalEngineStatusKey(error));
+
+  const statusTone = hasLocalDraft
+    ? "warning"
+    : status?.kind === "apple_intelligence"
       ? status.available
         ? "muted"
         : "warning"
@@ -162,25 +289,18 @@ const MeetingLocalEngineSettings: React.FC = () => {
           ? "muted"
           : "warning"
         : "muted";
-  const statusText =
-    status === null
+  const statusText = hasLocalDraft
+    ? t("settings.meetings.localEngine.status.endpointNotConfigured")
+    : status === null
       ? t("settings.meetings.localEngine.status.checking")
       : status.kind === "apple_intelligence"
         ? status.available
           ? t("settings.meetings.localEngine.status.appleAvailable")
           : t("settings.meetings.localEngine.status.appleUnavailable")
-        : status.reachable
-          ? status.error
-            ? status.model_count > 0
-              ? t("settings.meetings.localEngine.status.endpointContextUnknown")
-              : status.error
-            : t("settings.meetings.localEngine.status.endpointReachable", {
-                count: status.model_count,
-              })
-          : t("settings.meetings.localEngine.status.endpointUnreachable", {
-              error:
-                status.error ??
-                t("settings.meetings.localEngine.status.unknownError"),
+        : status.error
+          ? endpointStatusText(status.error)
+          : t("settings.meetings.localEngine.status.endpointReachable", {
+              count: status.model_count,
             });
 
   return (
@@ -189,18 +309,20 @@ const MeetingLocalEngineSettings: React.FC = () => {
         label={t("settings.meetings.localEngine.label")}
         hint={t("settings.meetings.localEngine.description")}
         controlId={engineId}
-        disabled={saving}
+        disabled={saving || (persistedEngine === undefined && !hasLocalDraft)}
       >
         <Select
-          value={engine.kind}
+          value={engineKind}
           onValueChange={selectEngine}
-          disabled={saving}
+          disabled={saving || (persistedEngine === undefined && !hasLocalDraft)}
         >
           <SelectTrigger id={engineId} size="sm" className="w-full">
             <SelectValue>
-              {engine.kind === "apple_intelligence"
+              {engineKind === "apple_intelligence"
                 ? t("settings.meetings.localEngine.apple")
-                : t("settings.meetings.localEngine.endpoint")}
+                : engineKind === "local_endpoint"
+                  ? t("settings.meetings.localEngine.endpoint")
+                  : t("settings.meetings.localEngine.status.checking")}
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
@@ -213,7 +335,7 @@ const MeetingLocalEngineSettings: React.FC = () => {
           </SelectContent>
         </Select>
       </SettingsRow>
-      {engine.kind === "local_endpoint" ? (
+      {engineKind === "local_endpoint" ? (
         <>
           <SettingsField
             label={t("settings.meetings.localEngine.baseUrl.label")}
@@ -223,10 +345,15 @@ const MeetingLocalEngineSettings: React.FC = () => {
             <Input
               id={baseUrlId}
               value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
+              onChange={(event) => {
+                setLocalDraft(true);
+                setBaseUrl(event.target.value);
+              }}
               onBlur={commitBaseUrl}
               disabled={saving}
-              placeholder={DEFAULT_LOCAL_ENDPOINT}
+              placeholder={t(
+                "settings.meetings.localEngine.baseUrl.placeholder",
+              )}
             />
           </SettingsField>
           <SettingsField
@@ -237,7 +364,10 @@ const MeetingLocalEngineSettings: React.FC = () => {
             <Input
               id={modelId}
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onChange={(event) => {
+                setLocalDraft(true);
+                setModel(event.target.value);
+              }}
               onBlur={commitModel}
               disabled={saving}
               placeholder={t("settings.meetings.localEngine.model.placeholder")}
@@ -254,7 +384,10 @@ const MeetingLocalEngineSettings: React.FC = () => {
               min={1}
               step={1}
               value={contextWindow}
-              onChange={(event) => setContextWindow(event.target.value)}
+              onChange={(event) => {
+                setLocalDraft(true);
+                setContextWindow(event.target.value);
+              }}
               onBlur={commitContextWindow}
               disabled={saving}
               placeholder={t(
@@ -270,7 +403,6 @@ const MeetingLocalEngineSettings: React.FC = () => {
     </>
   );
 };
-
 const SeriesRow: React.FC<{
   row: MeetingSeriesRemoteRow;
   locale: string;

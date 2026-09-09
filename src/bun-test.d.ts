@@ -36,6 +36,11 @@ declare module "bun:test" {
 
   export function describe(name: string, fn: () => void): void;
   export function test(name: string, fn: () => void | Promise<void>): void;
+  export namespace test {
+    function each<Case>(
+      cases: readonly Case[],
+    ): (name: string, fn: (value: Case) => void | Promise<void>) => void;
+  }
   /* File-scoped lifecycle hooks; Bun also accepts async setup functions. */
   export function beforeAll(fn: () => void | Promise<void>): void;
   export function afterAll(fn: () => void | Promise<void>): void;

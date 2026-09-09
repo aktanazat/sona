@@ -11,6 +11,7 @@ import type { AppSettings as Settings, AudioDevice } from "@/bindings";
 interface UseSettingsReturn {
   // State
   settings: Settings | null;
+  defaultSettings: Settings | null;
   isLoading: boolean;
   isUpdating: (key: string) => boolean;
   audioDevices: AudioDevice[];
@@ -34,6 +35,9 @@ interface UseSettingsReturn {
 
   // Convenience getters
   getSetting: <K extends keyof Settings>(key: K) => Settings[K] | undefined;
+  getDefaultSetting: <K extends keyof Settings>(
+    key: K,
+  ) => Settings[K] | undefined;
 
   // Post-processing helpers
   setPostProcessProvider: (providerId: string) => Promise<void>;
@@ -57,9 +61,8 @@ interface UseSettingsReturn {
 /* Exactly the slices this hook hands back, named one by one, so the list below
  * is the whole truth about what wakes a consumer.
  *
- * The store also holds `defaultSettings` and `customSounds`, which nothing here
- * exposes; under the previous whole-store subscription a write to either woke
- * every consumer to re-read values none of them can see.
+ * The store also holds customSounds, which nothing here exposes; a write to it
+ * no longer wakes every settings consumer to re-read a value none of them can see.
  *
  * `isUpdating` names the record, not the `isUpdatingKey` getter callers invoke:
  * the getter reads through `get()`, so the subscription that makes a control's
@@ -72,6 +75,7 @@ interface UseSettingsReturn {
  * comparison without ever moving it. */
 const selectExposed = (state: SettingsStore) => ({
   settings: state.settings,
+  defaultSettings: state.defaultSettings,
   isLoading: state.isLoading,
   isUpdating: state.isUpdating,
   audioDevices: state.audioDevices,
@@ -79,6 +83,7 @@ const selectExposed = (state: SettingsStore) => ({
   postProcessModelCatalogs: state.postProcessModelCatalogs,
   isUpdatingKey: state.isUpdatingKey,
   getSetting: state.getSetting,
+  getDefaultSetting: state.getDefaultSetting,
   initialize: state.initialize,
   updateSetting: state.updateSetting,
   resetSetting: state.resetSetting,
@@ -109,6 +114,7 @@ export const useSettings = (): UseSettingsReturn => {
 
   return {
     settings: store.settings,
+    defaultSettings: store.defaultSettings,
     isLoading: store.isLoading,
     isUpdating: store.isUpdatingKey,
     audioDevices: store.audioDevices,
@@ -123,6 +129,7 @@ export const useSettings = (): UseSettingsReturn => {
     updateBinding: store.updateBinding,
     resetBinding: store.resetBinding,
     getSetting: store.getSetting,
+    getDefaultSetting: store.getDefaultSetting,
     setPostProcessProvider: store.setPostProcessProvider,
     updatePostProcessBaseUrl: store.updatePostProcessBaseUrl,
     replacePostProcessSecret: store.replacePostProcessSecret,

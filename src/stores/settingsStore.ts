@@ -72,6 +72,9 @@ export interface SettingsStore {
   updateBinding: (id: string, binding: string) => Promise<void>;
   resetBinding: (id: string) => Promise<void>;
   getSetting: <K extends keyof Settings>(key: K) => Settings[K] | undefined;
+  getDefaultSetting: <K extends keyof Settings>(
+    key: K,
+  ) => Settings[K] | undefined;
   isUpdatingKey: (key: string) => boolean;
   playTestSound: (soundType: "start" | "stop") => Promise<void>;
   checkCustomSounds: () => Promise<void>;
@@ -248,6 +251,7 @@ export const useSettingsStore = create<SettingsStore>()(
 
     // Getters
     getSetting: (key) => get().settings?.[key],
+    getDefaultSetting: (key) => get().defaultSettings?.[key],
     isUpdatingKey: (key) => get().isUpdating[key] || false,
 
     // Load settings from store
@@ -367,8 +371,22 @@ export const useSettingsStore = create<SettingsStore>()(
         if (result.status === "error") throw new Error(result.error);
       } catch (error) {
         console.error(`Failed to update setting ${String(key)}:`, error);
-        if (settings) {
-          set({ settings: { ...settings, [key]: originalValue } });
+        set((state) => ({
+          settings: state.settings
+            ? { ...state.settings, [key]: originalValue }
+            : null,
+        }));
+        // A failed disk save can still change the backend's in-memory settings.
+        try {
+          const result = await commands.getAppSettings();
+          if (result.status === "error") throw new Error(result.error);
+          set((state) => ({
+            settings: state.settings
+              ? { ...state.settings, [key]: result.data[key] }
+              : null,
+          }));
+        } catch (readError) {
+          console.error(`Failed to reload setting ${String(key)}:`, readError);
         }
       } finally {
         setUpdating(updateKey, false);

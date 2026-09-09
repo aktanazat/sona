@@ -473,13 +473,14 @@ pub async fn meeting_remote_cancel(
     manager.remote_cancel(request).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 #[specta::specta]
 pub fn meeting_local_engine_status(
     manager: State<'_, Arc<MeetingSessionManager>>,
 ) -> MeetingLocalEngineStatus {
     manager.meeting_local_engine_status()
 }
+
 /// Conversation metrics, tracker hits, action-item ticks and the user's notes
 /// for one meeting. Metrics are derived from the transcript on every call, so
 /// the answer always matches the transcript the caller can see.
@@ -660,4 +661,94 @@ pub async fn meeting_series_remote_roster(
     manager: State<'_, Arc<MeetingSessionManager>>,
 ) -> Result<MeetingSeriesRemoteRoster, MeetingCommandError> {
     manager.series_remote_roster().await
+}
+
+#[cfg(test)]
+mod local_status_tests {
+    use super::*;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    struct DiscoveryLatch {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    fn held_status(manager: State<'_, DiscoveryLatch>) -> MeetingLocalEngineStatus {
+        manager.entered.send(()).expect("discovery entered");
+        manager
+            .release
+            .lock()
+            .expect("discovery latch")
+            .recv()
+            .expect("release discovery");
+        MeetingLocalEngineStatus::LocalEndpoint {
+            reachable: true,
+            model_count: 1,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn local_status_dispatch_returns_while_discovery_is_pending() {
+        let (entered, started) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let app = tauri::test::mock_builder()
+            .manage(DiscoveryLatch {
+                entered,
+                release: Mutex::new(resume),
+            })
+            // Exercise the production command's generated wrapper with a held probe.
+            .invoke_handler(|invoke| __cmd__meeting_local_engine_status!(held_status, invoke))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "status", Default::default())
+            .build()
+            .expect("mock webview");
+        let (returned, dispatch) = mpsc::channel();
+        let (answered, response) = mpsc::channel();
+        let invocation = std::thread::spawn(move || {
+            webview.on_message(
+                tauri::webview::InvokeRequest {
+                    cmd: "meeting_local_engine_status".into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: if cfg!(any(windows, target_os = "android")) {
+                        "http://tauri.localhost"
+                    } else {
+                        "tauri://localhost"
+                    }
+                    .parse()
+                    .expect("mock origin"),
+                    body: tauri::ipc::InvokeBody::default(),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+                Box::new(move |_, _, result, _, _| answered.send(result).expect("status response")),
+            );
+            returned.send(()).expect("dispatch returned");
+        });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("discovery starts");
+        let returned_before_release = dispatch.recv_timeout(Duration::from_secs(1));
+        release.send(()).expect("release held discovery");
+        let answer = response
+            .recv_timeout(Duration::from_secs(5))
+            .expect("status answer");
+        invocation.join().expect("invocation thread");
+        assert_eq!(
+            returned_before_release,
+            Ok(()),
+            "status blocked command dispatch"
+        );
+        let tauri::ipc::InvokeResponse::Ok(body) = answer else {
+            panic!("status command refused")
+        };
+        assert_eq!(
+            body.deserialize::<serde_json::Value>()
+                .expect("status JSON"),
+            serde_json::json!({"kind":"local_endpoint","reachable":true,"model_count":1,"error":null})
+        );
+    }
 }

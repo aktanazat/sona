@@ -1732,14 +1732,14 @@
         "saveFailed": "Це не збереглося."
       },
       "localEngine": {
-        "title": "Механізм тексту зустрічей",
         "label": "Записувати текст зустрічей у",
         "description": "Виберіть, де створювати підсумки, журнали, огляди та відповіді.",
         "apple": "Apple Intelligence",
         "endpoint": "Локальна кінцева точка OpenAI",
         "baseUrl": {
           "label": "Адреса кінцевої точки",
-          "hint": "Лише loopback. Додайте шлях /v1."
+          "hint": "Лише loopback. Додайте шлях /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Модель",
@@ -1756,9 +1756,12 @@
           "appleAvailable": "Apple Intelligence доступна.",
           "appleUnavailable": "Apple Intelligence недоступна на цьому Mac.",
           "endpointReachable": "Локальна кінцева точка доступна; моделей: {{count}}.",
-          "endpointUnreachable": "Локальна кінцева точка недоступна: {{error}}",
+          "endpointUnreachable": "Локальна кінцева точка недоступна.",
+          "endpointInvalid": "Адреса локальної кінцевої точки недійсна.",
+          "endpointInvalidResponse": "Локальна кінцева точка повернула недійсну відповідь.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "невідома помилка"
+          "endpointNotConfigured": "Локальну кінцеву точку ще не налаштовано.",
+          "endpointUnknown": "Стан локальної кінцевої точки невідомий."
         }
       },
       "remoteIntelligence": {

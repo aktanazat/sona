@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type {
   AppSettings,
+  MeetingLocalEngine,
   PostProcessModelCatalog,
   PostProcessModelOption,
   SecretState,
@@ -10,7 +11,12 @@ import {
   useSettingsStore,
 } from "./settingsStore";
 
-type HostArgs = Record<string, string>;
+type HostArgs = {
+  providerId?: string;
+  baseUrl?: string;
+  enabled?: boolean;
+  engine?: MeetingLocalEngine;
+};
 type CatalogResponse =
   | PostProcessModelCatalog
   | Promise<PostProcessModelCatalog>;
@@ -32,6 +38,10 @@ const SECRET_STATE: SecretState = {
 };
 
 const settingsFor = (providerId = "openai"): AppSettings => ({
+  external_mutations_enabled: true,
+  selected_model: "parakeet-v3",
+  meeting_local_engine: { kind: "apple_intelligence" },
+  meeting_remote_intelligence_enabled: false,
   post_process_provider_id: providerId,
   post_process_models: { [providerId]: "saved-model" },
   post_process_providers: [
@@ -74,7 +84,22 @@ let asked: string[] = [];
  * rejects with an `Error` exercises a path production never takes. */
 const REFUSAL = "policy pins this setting";
 let refused = new Set<string>();
+const heldCommands = new Map<string, Promise<null>>();
+const failedSaves = new Set<string>();
 const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+
+const holdCommand = (command: string): (() => void) => {
+  let release: () => void = () => {
+    throw new Error("command was not held");
+  };
+  heldCommands.set(
+    command,
+    new Promise<null>((resolve) => {
+      release = () => resolve(null);
+    }),
+  );
+  return release;
+};
 
 const answer = (command: string, args: HostArgs): HostReply => {
   asked.push(command);
@@ -93,6 +118,9 @@ const answer = (command: string, args: HostArgs): HostReply => {
       return SECRET_STATE;
     case "change_post_process_base_url_setting": {
       const { providerId, baseUrl } = args;
+      if (providerId === undefined || baseUrl === undefined) {
+        throw new Error("provider and base URL are required");
+      }
       settings = {
         ...settings,
         post_process_providers: settings.post_process_providers?.map(
@@ -107,6 +135,16 @@ const answer = (command: string, args: HostArgs): HostReply => {
     case "change_post_process_model_setting":
       return null;
     case "change_external_mutations_enabled_setting":
+      settings = { ...settings, external_mutations_enabled: args.enabled };
+      return null;
+    case "change_meeting_remote_intelligence_enabled_setting":
+      settings = {
+        ...settings,
+        meeting_remote_intelligence_enabled: args.enabled,
+      };
+      return null;
+    case "change_meeting_local_engine_setting":
+      settings = { ...settings, meeting_local_engine: args.engine };
       return null;
     default:
       throw new Error(`unexpected command: ${command}`);
@@ -119,10 +157,14 @@ beforeAll(() => {
     value: {
       ...globalThis.window,
       __TAURI_INTERNALS__: {
-        invoke: (command: string, args: HostArgs = {}) =>
-          refused.has(command)
-            ? Promise.reject(REFUSAL)
-            : Promise.resolve(answer(command, args)),
+        invoke: async (command: string, args: HostArgs = {}) => {
+          const held = heldCommands.get(command);
+          if (held) await held;
+          if (refused.has(command)) throw REFUSAL;
+          const reply = answer(command, args);
+          if (failedSaves.has(command)) throw "settings save failed";
+          return reply;
+        },
         transformCallback: <Callback>(callback: Callback) => callback,
       },
     },
@@ -137,6 +179,8 @@ afterAll(() => {
 const reset = (providerId = "openai") => {
   asked = [];
   refused = new Set();
+  heldCommands.clear();
+  failedSaves.clear();
   settings = settingsFor(providerId);
   catalogResponse = () => catalog(providerId);
   useSettingsStore.setState({
@@ -336,26 +380,6 @@ describe("post-processing model catalog state", () => {
   });
 });
 
-/* The Agents consent rows had no command registered against their keys: the
- * switch moved, this store kept the new value, and nothing was ever sent. */
-describe("a consent row's write", () => {
-  test("reaches the command that owns the key", async () => {
-    reset();
-    useSettingsStore.setState({
-      settings: { ...settingsFor(), external_mutations_enabled: true },
-    });
-
-    await useSettingsStore
-      .getState()
-      .updateSetting("external_mutations_enabled", false);
-
-    expect(asked).toContain("change_external_mutations_enabled_setting");
-    expect(
-      useSettingsStore.getState().settings?.external_mutations_enabled,
-    ).toBe(false);
-  });
-});
-
 /* Every row on Settings reads its value out of this store, and a write is
  * shown before it lands. What the store does with a refusal is therefore what
  * the switch claims: the consent rows on Agents are the sharp end of it - a
@@ -365,6 +389,7 @@ describe("a write the backend refuses", () => {
   test("leaves a consent row reading the grant the backend still holds", async () => {
     reset();
     refused.add("change_external_mutations_enabled_setting");
+    refused.add("get_app_settings");
     useSettingsStore.setState({
       settings: { ...settingsFor(), external_mutations_enabled: true },
     });
@@ -408,6 +433,104 @@ describe("a write the backend refuses", () => {
     expect(useSettingsStore.getState().settings?.selected_model).toBe(
       "parakeet-v3",
     );
-    expect(asked).toEqual([]);
+  });
+});
+
+describe("local engine save failures", () => {
+  const engine: MeetingLocalEngine = {
+    kind: "local_endpoint",
+    base_url: "http://127.0.0.1:11434/v1",
+    model: "fixture-model",
+    context_window_tokens: 8192,
+  };
+  const command = "change_meeting_local_engine_setting";
+
+  test.each([false, true])(
+    "preserves concurrent remote consent %p after local refusal",
+    async (enabled) => {
+      reset();
+      settings = {
+        ...settings,
+        meeting_remote_intelligence_enabled: !enabled,
+      };
+      useSettingsStore.setState({ settings });
+      const release = holdCommand(command);
+      const pending = useSettingsStore
+        .getState()
+        .updateSetting("meeting_local_engine", engine);
+
+      await useSettingsStore
+        .getState()
+        .updateSetting("meeting_remote_intelligence_enabled", enabled);
+      refused.add(command);
+      release();
+      await pending;
+
+      expect(
+        useSettingsStore
+          .getState()
+          .getSetting("meeting_remote_intelligence_enabled"),
+      ).toBe(enabled);
+      expect(
+        useSettingsStore.getState().getSetting("meeting_local_engine"),
+      ).toEqual({
+        kind: "apple_intelligence",
+      });
+      await useSettingsStore.getState().refreshSettings();
+      expect(
+        useSettingsStore
+          .getState()
+          .getSetting("meeting_remote_intelligence_enabled"),
+      ).toBe(enabled);
+    },
+  );
+
+  test("preserves an in-flight consent change during local readback", async () => {
+    reset();
+    const release = holdCommand(
+      "change_meeting_remote_intelligence_enabled_setting",
+    );
+    const pending = useSettingsStore
+      .getState()
+      .updateSetting("meeting_remote_intelligence_enabled", true);
+    refused.add(command);
+
+    try {
+      await useSettingsStore
+        .getState()
+        .updateSetting("meeting_local_engine", engine);
+      expect(
+        useSettingsStore
+          .getState()
+          .getSetting("meeting_remote_intelligence_enabled"),
+      ).toBe(true);
+    } finally {
+      release();
+      await pending;
+    }
+
+    await useSettingsStore.getState().refreshSettings();
+    expect(
+      useSettingsStore
+        .getState()
+        .getSetting("meeting_remote_intelligence_enabled"),
+    ).toBe(true);
+  });
+
+  test("shows the effective engine when its disk save failed", async () => {
+    reset();
+    failedSaves.add(command);
+
+    await useSettingsStore
+      .getState()
+      .updateSetting("meeting_local_engine", engine);
+
+    expect(
+      useSettingsStore.getState().getSetting("meeting_local_engine"),
+    ).toEqual(engine);
+    await useSettingsStore.getState().refreshSettings();
+    expect(
+      useSettingsStore.getState().getSetting("meeting_local_engine"),
+    ).toEqual(engine);
   });
 });

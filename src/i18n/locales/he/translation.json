@@ -1725,14 +1725,14 @@
         "saveFailed": "זה לא נשמר."
       },
       "localEngine": {
-        "title": "מנוע טקסט לפגישות",
         "label": "כתיבת טקסט הפגישות אל",
         "description": "בחרו היכן ליצור סיכומים, יומנים, סקירות ותשובות.",
         "apple": "Apple Intelligence",
         "endpoint": "נקודת קצה מקומית תואמת OpenAI",
         "baseUrl": {
           "label": "כתובת נקודת הקצה",
-          "hint": "Loopback בלבד. יש לכלול את הנתיב /v1."
+          "hint": "Loopback בלבד. יש לכלול את הנתיב /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "מודל",
@@ -1749,9 +1749,12 @@
           "appleAvailable": "Apple Intelligence זמין.",
           "appleUnavailable": "Apple Intelligence אינו זמין ב-Mac הזה.",
           "endpointReachable": "נקודת הקצה המקומית נגישה עם {{count}} מודלים.",
-          "endpointUnreachable": "נקודת הקצה המקומית אינה נגישה: {{error}}",
+          "endpointUnreachable": "נקודת הקצה המקומית אינה נגישה.",
+          "endpointInvalid": "כתובת נקודת הקצה המקומית אינה חוקית.",
+          "endpointInvalidResponse": "נקודת הקצה המקומית החזירה תגובה לא חוקית.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "שגיאה לא ידועה"
+          "endpointNotConfigured": "נקודת הקצה המקומית עדיין לא מוגדרת.",
+          "endpointUnknown": "מצב נקודת הקצה המקומית אינו ידוע."
         }
       },
       "remoteIntelligence": {

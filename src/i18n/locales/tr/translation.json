@@ -1718,14 +1718,14 @@
         "saveFailed": "Bu kaydedilmedi."
       },
       "localEngine": {
-        "title": "Toplantı metni motoru",
         "label": "Toplantı metnini şuraya yaz",
         "description": "Özetlerin, kayıtların, değerlendirmelerin ve yanıtların nerede oluşturulacağını seçin.",
         "apple": "Apple Intelligence",
         "endpoint": "Yerel OpenAI uyumlu uç nokta",
         "baseUrl": {
           "label": "Uç nokta adresi",
-          "hint": "Yalnızca loopback. /v1 yolunu ekleyin."
+          "hint": "Yalnızca loopback. /v1 yolunu ekleyin.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Model",
@@ -1742,9 +1742,12 @@
           "appleAvailable": "Apple Intelligence kullanılabilir.",
           "appleUnavailable": "Apple Intelligence bu Mac’te kullanılamıyor.",
           "endpointReachable": "Yerel uç noktada {{count}} model kullanılabilir.",
-          "endpointUnreachable": "Yerel uç noktaya ulaşılamıyor: {{error}}",
+          "endpointUnreachable": "Yerel uç noktaya ulaşılamıyor.",
+          "endpointInvalid": "Yerel uç nokta adresi geçersiz.",
+          "endpointInvalidResponse": "Yerel uç nokta geçersiz bir yanıt döndürdü.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "bilinmeyen hata"
+          "endpointNotConfigured": "Yerel uç nokta henüz yapılandırılmadı.",
+          "endpointUnknown": "Yerel uç noktanın durumu bilinmiyor."
         }
       },
       "remoteIntelligence": {

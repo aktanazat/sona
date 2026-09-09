@@ -135,20 +135,10 @@ const ON_DEVICE_CONTEXT_TOKENS: usize = 4_096;
 /// this number for a build. Until a caller reports a real count, the estimate
 /// stays conservative.
 const ON_DEVICE_BYTES_PER_TOKEN: usize = 3;
-/// The most of that window an on-device reply may be left room for.
-///
-/// The app's output budgets were written for a model with room to spare:
-/// `ARTIFACT_MAX_TOKENS` is 3200, which is 78% of this whole window. Leaving
-/// that much for the answer leaves 130 bytes for the pack — the notes prompt
-/// measures 2558 bytes on its own — so honoring it would refuse every
-/// on-device notes pass instead of only the long ones. Reserving a quarter of
-/// the window leaves about 6.6 KiB of evidence, which is the size a pack is
-/// cut to for this engine.
-///
-/// This is room left, not a cap enforced: Apple's `maxTokens` trims the text
-/// after generation rather than bounding it, so a reply that outgrows this
-/// still throws `exceededContextWindowSize` — the throw an oversized pack
-/// already caused for a meeting a few minutes long.
+/// Apple Intelligence's context window has no separate wire-side output
+/// ceiling. Reserve a deliberate reply share at that engine boundary rather
+/// than asking the shared artifact budget to spend the local endpoint's wire
+/// request.
 const ON_DEVICE_REPLY_TOKENS: usize = 1_024;
 
 const MEETING_PROMPT: &str = include_str!("../../resources/prompts/meeting.txt");
@@ -415,6 +405,13 @@ pub trait MeetingTextGenerator: Send + Sync {
     fn context_window_bytes(&self) -> Option<usize> {
         None
     }
+    /// Output room belongs to the engine that owns the context window. The
+    /// default reserves the caller's full request; a bounded engine may choose
+    /// a smaller deliberate reservation at its own boundary.
+    fn reserved_output_tokens(&self, requested_output_tokens: i32) -> usize {
+        usize::try_from(requested_output_tokens).unwrap_or(0)
+    }
+
     fn generate(
         &self,
         system_prompt: &str,
@@ -454,6 +451,10 @@ impl MeetingTextGenerator for AppleIntelligenceGenerator {
 
     fn context_window_bytes(&self) -> Option<usize> {
         Some(ON_DEVICE_CONTEXT_TOKENS * ON_DEVICE_BYTES_PER_TOKEN)
+    }
+
+    fn reserved_output_tokens(&self, _requested_output_tokens: i32) -> usize {
+        ON_DEVICE_REPLY_TOKENS
     }
 
     /// The shape is the prompt's to ask for here: nothing sits between this
@@ -785,13 +786,14 @@ impl MeetingProcessingService {
                     |error| MeetingLocalEngineStatus::LocalEndpoint {
                         reachable: false,
                         model_count: 0,
-                        error: Some(error.to_string()),
+                        error: Some(error.reason_code().to_string()),
                     },
                     |generator| generator.status(),
                 )
             }
         }
     }
+
     /// Whether the operator has routed meeting intelligence to their own
     /// server. Off on install, and off for a build with no app handle, which is
     /// every test that has not been given one.
@@ -3384,13 +3386,9 @@ fn evidence_budget(
          * submission. */
         None => generator.max_input_bytes(),
         Some(window) => {
-            /* The caller's own output budget, or the most this window can
-             * leave for an answer, whichever is smaller: an ask larger than
-             * `ON_DEVICE_REPLY_TOKENS` cannot be honored here and reserving
-             * it would spend the pack's whole share on a reply this engine
-             * was never going to be allowed to write. */
-            let reply = (reserved_output_tokens.max(0) as usize).min(ON_DEVICE_REPLY_TOKENS)
-                * ON_DEVICE_BYTES_PER_TOKEN;
+            let reply = generator
+                .reserved_output_tokens(reserved_output_tokens)
+                .saturating_mul(ON_DEVICE_BYTES_PER_TOKEN);
             window
                 .saturating_sub(instructions.len())
                 .saturating_sub(reply)
@@ -4401,7 +4399,15 @@ fn utc_now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::local_generator::test_support::read_http_request;
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    };
+    use std::thread;
 
     struct EnergyVad;
 
@@ -5114,35 +5120,563 @@ mod tests {
 
         assert!(!service.remote_intelligence_enabled());
     }
+    struct CatalogFixture {
+        base_url: String,
+        connections: Arc<AtomicUsize>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    fn catalog_response(stream: &mut impl Read, completion_text: &str) -> String {
+        let request = read_http_request(stream);
+        if request.contains("GET /v1/models") {
+            r#"{"data":[{"id":"fixture-model","context_window_tokens":8192}]}"#.to_string()
+        } else {
+            format!(
+                r#"{{"choices":[{{"message":{{"content":"{}"}}}}]}}"#,
+                completion_text
+            )
+        }
+    }
 
     #[test]
-    fn local_endpoint_cache_is_keyed_by_persisted_settings() {
-        let service = MeetingProcessingService::new(None);
-        let engine = crate::settings::MeetingLocalEngine::LocalEndpoint {
-            base_url: "http://127.0.0.1:11434/v1".to_string(),
-            model: "model-a".to_string(),
-            context_window_tokens: Some(4096),
-        };
-        let same_engine = engine.clone();
-        let changed_engine = crate::settings::MeetingLocalEngine::LocalEndpoint {
-            base_url: "http://127.0.0.1:11434/v1".to_string(),
-            model: "model-b".to_string(),
-            context_window_tokens: Some(4096),
-        };
-
-        let first = service
-            .cached_local_endpoint_generator(&engine)
-            .expect("valid local endpoint");
-        let same = service
-            .cached_local_endpoint_generator(&same_engine)
-            .expect("same endpoint stays valid");
-        let changed = service
-            .cached_local_endpoint_generator(&changed_engine)
-            .expect("changed model stays valid");
-
-        assert!(Arc::ptr_eq(&first, &same));
-        assert!(!Arc::ptr_eq(&first, &changed));
+    fn catalog_fixture_reads_a_fragmented_request_line() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fragment listener");
+        let mut writer = TcpStream::connect(listener.local_addr().expect("fragment address"))
+            .expect("fragment writer");
+        let (stream, _) = listener.accept().expect("fragment reader");
+        writer
+            .write_all(b"GET /v1/mo")
+            .expect("write request prefix");
+        writer
+            .write_all(b"dels HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("finish request");
+        let mut fragments = (&stream).take(10).chain(&stream);
+        assert_eq!(
+            catalog_response(&mut fragments, "completion"),
+            r#"{"data":[{"id":"fixture-model","context_window_tokens":8192}]}"#
+        );
     }
+
+    fn catalog_fixture(connection_count: usize, completion_text: &str) -> CatalogFixture {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("catalog fixture listener");
+        let address = listener.local_addr().expect("catalog fixture address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let fixture_connections = Arc::clone(&connections);
+        let completion_text = completion_text.to_string();
+        let handle = thread::spawn(move || {
+            for _ in 0..connection_count {
+                let (mut stream, _) = listener.accept().expect("catalog fixture connection");
+                fixture_connections.fetch_add(1, Ordering::SeqCst);
+                let body = catalog_response(&mut stream, &completion_text);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("catalog fixture response");
+            }
+        });
+        CatalogFixture {
+            base_url: format!("http://{address}/v1"),
+            connections,
+            handle,
+        }
+    }
+    const GENERATION_FIXTURE_TRANSCRIPT: &str = "The fixture transcript has one sentence.";
+
+    struct ArtifactStoreFixture {
+        _directory: tempfile::TempDir,
+        store: Arc<MeetingStore>,
+        session_id: MeetingSessionId,
+        segment_id: String,
+    }
+
+    fn artifact_store_fixture() -> ArtifactStoreFixture {
+        let (directory, store) = crate::meeting::store::workflow_core_tests::store();
+        let session_id =
+            crate::meeting::store::workflow_core_tests::meeting(&store, "Generation fixture", 1);
+        crate::meeting::store::workflow_core_tests::transcript(
+            &store,
+            session_id,
+            GENERATION_FIXTURE_TRANSCRIPT,
+        );
+        let segment_id = store
+            .analytics_segments(session_id)
+            .expect("fixture analytics segment")
+            .into_iter()
+            .next()
+            .expect("fixture segment")
+            .segment_id
+            .uuid()
+            .to_string();
+        ArtifactStoreFixture {
+            _directory: directory,
+            store,
+            session_id,
+            segment_id,
+        }
+    }
+
+    struct GenerationFixture {
+        base_url: String,
+        requests: mpsc::Receiver<String>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    fn openai_fixture_response(content: String) -> String {
+        serde_json::json!({
+            "choices": [{"message": {"content": content}}]
+        })
+        .to_string()
+    }
+
+    fn generation_fixture(segment_id: &str, transcript: &str) -> GenerationFixture {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("generation fixture listener");
+        let address = listener.local_addr().expect("generation fixture address");
+        let (sender, requests) = mpsc::channel();
+        let segment_id = segment_id.to_string();
+        let transcript = transcript.to_string();
+        let artifact = openai_fixture_response(
+            serde_json::json!({
+                "summary": [{
+                    "text": transcript,
+                    "citations": [segment_id]
+                }],
+                "outline": [],
+                "decisions": [],
+                "action_items": [],
+                "key_questions": [],
+                "risks": [],
+                "follow_up_draft": {
+                    "text": "No follow-up requested.",
+                    "citations": [segment_id]
+                }
+            })
+            .to_string(),
+        );
+        let ledger = openai_fixture_response(
+            serde_json::json!({
+                "headline": "The fixture transcript has one sentence.",
+                "threads": [{
+                    "topic": "Fixture transcript",
+                    "state": "closed",
+                    "substantive": false,
+                    "receipt": {
+                        "quote": transcript,
+                        "speaker": serde_json::Value::Null,
+                        "citations": [segment_id]
+                    },
+                    "owner": serde_json::Value::Null
+                }],
+                "open_loops": [],
+                "commitments": [],
+                "stances": [],
+                "caveats": []
+            })
+            .to_string(),
+        );
+        let handle = thread::spawn(move || {
+            let mut completion = 0;
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("generation fixture connection");
+                let request = read_http_request(&mut stream);
+                sender
+                    .send(request.clone())
+                    .expect("generation fixture request");
+                let body = if request.starts_with("GET /v1/models") {
+                    r#"{"data":[{"id":"fixture-model","context_window_tokens":16384}]}"#.to_string()
+                } else {
+                    let body = if completion == 0 {
+                        artifact.as_str()
+                    } else {
+                        ledger.as_str()
+                    };
+                    completion += 1;
+                    body.to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("generation fixture response");
+            }
+        });
+        GenerationFixture {
+            base_url: format!("http://{address}/v1"),
+            requests,
+            handle,
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CompletionRequest {
+        max_tokens: i32,
+    }
+
+    fn completion_request(request: &str) -> CompletionRequest {
+        serde_json::from_str(request.split_once("\r\n\r\n").expect("request body").1)
+            .expect("request json")
+    }
+    #[test]
+    fn missing_local_context_refuses_an_evidence_pack() {
+        use super::super::local_generator::test_support::fixture_server;
+        let server = fixture_server(vec![r#"{"data":[{"id":"fixture-model"}]}"#.to_string()]);
+        let generator = LocalEndpointGenerator::new(&server.base_url, "fixture-model")
+            .expect("local generator");
+        let input = fit_model_input(
+            &[],
+            evidence_budget(&generator, "system", 16),
+            |_: &[MeetingEvidence]| LedgerPromptInput {
+                transcript: Vec::new(),
+            },
+        );
+        assert_eq!(
+            input,
+            Err(RunFailure::engine(EngineFailureCause::EvidencePack))
+        );
+        server.handle.join().expect("missing context fixture");
+    }
+
+    #[test]
+    fn failed_local_context_refresh_refuses_an_evidence_pack() {
+        use super::super::local_generator::test_support::{
+            expire_availability, fixture_server_with_status,
+        };
+        let meeting = artifact_store_fixture();
+        let evidence = meeting
+            .store
+            .artifact_evidence(
+                meeting.session_id,
+                96 * 1024,
+                MeetingNotesTemplate::default(),
+            )
+            .expect("retained meeting evidence");
+        let server = fixture_server_with_status(vec![
+            (
+                200,
+                r#"{"data":[{"id":"fixture-model","context_window_tokens":8192}]}"#.to_string(),
+            ),
+            (
+                200,
+                r#"{"choices":[{"message":{"content":"notes"}}]}"#.to_string(),
+            ),
+            (503, r#"{"error":"busy"}"#.to_string()),
+            (
+                200,
+                r#"{"choices":[{"message":{"content":"still available"}}]}"#.to_string(),
+            ),
+        ]);
+        let generator = LocalEndpointGenerator::new(&server.base_url, "fixture-model")
+            .expect("local generator");
+        assert!(generator.is_available());
+        assert_eq!(
+            generator.generate("system", "evidence", 16, ReplyShape::Prose),
+            Ok("notes".to_string())
+        );
+        expire_availability(&generator);
+        let prompt = ledger_system_prompt();
+        let input = fit_model_input(
+            &[],
+            evidence_budget(&generator, &prompt, LEDGER_MAX_TOKENS),
+            |_: &[MeetingEvidence]| LedgerPromptInput {
+                transcript: Vec::new(),
+            },
+        );
+        assert_eq!(
+            input,
+            Err(RunFailure::engine(EngineFailureCause::EvidencePack))
+        );
+        assert!(read_ledger(
+            &generator,
+            &evidence,
+            &HashMap::new(),
+            GENERATION_FIXTURE_TRANSCRIPT
+        )
+        .is_none());
+        let health = generator.generate("system", "health probe", 16, ReplyShape::Prose);
+        server.handle.join().expect("refresh fixture");
+        let requests: Vec<_> = server.requests.try_iter().collect();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            2,
+            "captured request lines: {:?}",
+            requests
+                .iter()
+                .map(|request| request.lines().next())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(health, Ok("still available".to_string()));
+    }
+
+    #[test]
+    fn explicit_local_context_survives_failed_discovery() {
+        use super::super::local_generator::test_support::{
+            expire_availability, fixture_server_with_status,
+        };
+        let server = fixture_server_with_status(vec![
+            (
+                200,
+                r#"{"data":[{"id":"fixture-model","context_window_tokens":8192}]}"#.to_string(),
+            ),
+            (503, r#"{"error":"busy"}"#.to_string()),
+            (
+                200,
+                r#"{"choices":[{"message":{"content":"bounded answer"}}]}"#.to_string(),
+            ),
+        ]);
+        let generator = LocalEndpointGenerator::new_with_context(
+            &server.base_url,
+            "fixture-model",
+            Some(16384),
+        )
+        .expect("configured local generator");
+        assert!(generator.is_available());
+        expire_availability(&generator);
+        assert_eq!(generator.models(), Err(LocalEndpointError::InvalidResponse));
+        let input = fit_model_input(
+            &[],
+            evidence_budget(&generator, "system", 16),
+            |_: &[MeetingEvidence]| LedgerPromptInput {
+                transcript: Vec::new(),
+            },
+        )
+        .expect("configured pack fits");
+        assert_eq!(
+            generator.generate("system", &input, 16, ReplyShape::Json),
+            Ok("bounded answer".to_string())
+        );
+        server.handle.join().expect("override fixture");
+        let requests: Vec<_> = server.requests.try_iter().collect();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[2]
+                .split_once("\r\n\r\n")
+                .expect("completion body")
+                .1,
+        )
+        .expect("completion JSON");
+        assert_eq!(body["messages"][1]["content"], input);
+    }
+
+    #[test]
+    fn local_endpoint_cache_replaces_the_generator_when_settings_change() {
+        let first_fixture = catalog_fixture(4, "endpoint-a");
+        let second_fixture = catalog_fixture(2, "endpoint-b");
+        let service = MeetingProcessingService::new(None);
+        let first_engine = crate::settings::MeetingLocalEngine::LocalEndpoint {
+            base_url: first_fixture.base_url.clone(),
+            model: "model-a".to_string(),
+            context_window_tokens: Some(8192),
+        };
+
+        let first_generator = service
+            .cached_local_endpoint_generator(&first_engine)
+            .expect("first local generator");
+        assert!(matches!(
+            first_generator.status(),
+            MeetingLocalEngineStatus::LocalEndpoint {
+                reachable: true,
+                model_count: 1,
+                error: None,
+            }
+        ));
+        let same_generator = service
+            .cached_local_endpoint_generator(&first_engine)
+            .expect("unchanged local generator");
+        assert!(same_generator.is_available());
+        assert_eq!(first_fixture.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            first_generator.generate("system", "evidence", 16, ReplyShape::Prose),
+            Ok("endpoint-a".to_string())
+        );
+        assert_eq!(first_fixture.connections.load(Ordering::SeqCst), 2);
+
+        let changed_model = crate::settings::MeetingLocalEngine::LocalEndpoint {
+            base_url: first_fixture.base_url.clone(),
+            model: "model-b".to_string(),
+            context_window_tokens: Some(8192),
+        };
+        assert!(matches!(
+            service
+                .cached_local_endpoint_generator(&changed_model)
+                .expect("changed model generator")
+                .status(),
+            MeetingLocalEngineStatus::LocalEndpoint {
+                reachable: true,
+                model_count: 1,
+                error: None,
+            }
+        ));
+        assert_eq!(first_fixture.connections.load(Ordering::SeqCst), 3);
+
+        let changed_context = crate::settings::MeetingLocalEngine::LocalEndpoint {
+            base_url: first_fixture.base_url.clone(),
+            model: "model-b".to_string(),
+            context_window_tokens: Some(16_384),
+        };
+        let context_generator = service
+            .cached_local_endpoint_generator(&changed_context)
+            .expect("context-only replacement");
+        assert_eq!(
+            evidence_budget(context_generator.as_ref(), "system", 16),
+            49_098
+        );
+        assert!(matches!(
+            service
+                .cached_local_endpoint_generator(&changed_context)
+                .expect("changed context generator")
+                .status(),
+            MeetingLocalEngineStatus::LocalEndpoint {
+                reachable: true,
+                model_count: 1,
+                error: None,
+            }
+        ));
+        assert_eq!(first_fixture.connections.load(Ordering::SeqCst), 4);
+
+        let changed_endpoint = crate::settings::MeetingLocalEngine::LocalEndpoint {
+            base_url: second_fixture.base_url.clone(),
+            model: "model-c".to_string(),
+            context_window_tokens: Some(8192),
+        };
+        let changed_endpoint_generator = service
+            .cached_local_endpoint_generator(&changed_endpoint)
+            .expect("changed endpoint generator");
+        assert!(matches!(
+            changed_endpoint_generator.status(),
+            MeetingLocalEngineStatus::LocalEndpoint {
+                reachable: true,
+                model_count: 1,
+                error: None,
+            }
+        ));
+        assert_eq!(second_fixture.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            changed_endpoint_generator.generate("system", "evidence", 16, ReplyShape::Prose),
+            Ok("endpoint-b".to_string())
+        );
+        assert_eq!(second_fixture.connections.load(Ordering::SeqCst), 2);
+
+        first_fixture.handle.join().expect("first catalog fixture");
+        second_fixture
+            .handle
+            .join()
+            .expect("second catalog fixture");
+    }
+    #[test]
+    fn a_local_endpoint_reserves_its_requested_reply_budget() {
+        let requested = ARTIFACT_MAX_TOKENS;
+        let fixture = artifact_store_fixture();
+        let server = generation_fixture(&fixture.segment_id, GENERATION_FIXTURE_TRANSCRIPT);
+        let generator = LocalEndpointGenerator::new_with_context(
+            &server.base_url,
+            "fixture-model",
+            Some(16_384),
+        )
+        .expect("fixture local endpoint");
+        let service = MeetingProcessingService::new(None);
+        service.set_text_generators(
+            Arc::new(generator),
+            Arc::new(StubGenerator::new("sona-relay", false)),
+        );
+
+        let outcome = service
+            .generate_artifacts(&fixture.store, fixture.session_id, 1)
+            .expect("artifact generation");
+        assert!(matches!(
+            &outcome,
+            ArtifactGenerationOutcome::Generated { .. }
+        ));
+
+        let requests: Vec<String> = (0..3)
+            .map(|_| server.requests.recv().expect("generation request"))
+            .collect();
+        let completion_requests: Vec<&String> = requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/chat/completions"))
+            .collect();
+        assert_eq!(completion_requests.len(), 2);
+        for request in completion_requests {
+            let body = completion_request(request);
+            assert_eq!(body.max_tokens, requested);
+        }
+        server.handle.join().expect("generation fixture");
+    }
+
+    #[test]
+    fn changing_only_the_local_endpoint_writes_a_new_artifact_revision() {
+        let fixture = artifact_store_fixture();
+        let first_server = generation_fixture(&fixture.segment_id, GENERATION_FIXTURE_TRANSCRIPT);
+        let first_generator = LocalEndpointGenerator::new_with_context(
+            &first_server.base_url,
+            "fixture-model",
+            Some(16_384),
+        )
+        .expect("first fixture local endpoint");
+        let service = MeetingProcessingService::new(None);
+        service.set_text_generators(
+            Arc::new(first_generator),
+            Arc::new(StubGenerator::new("sona-relay", false)),
+        );
+        let first_artifact_id = match service
+            .generate_artifacts(&fixture.store, fixture.session_id, 1)
+            .expect("first artifact generation")
+        {
+            ArtifactGenerationOutcome::Generated { artifact, .. } => artifact.artifact_id,
+            _ => panic!("first endpoint did not generate"),
+        };
+        for _ in 0..3 {
+            first_server
+                .requests
+                .recv()
+                .expect("first generation request");
+        }
+        first_server
+            .handle
+            .join()
+            .expect("first generation fixture");
+
+        let second_server = generation_fixture(&fixture.segment_id, GENERATION_FIXTURE_TRANSCRIPT);
+        let second_generator = LocalEndpointGenerator::new_with_context(
+            &second_server.base_url,
+            "fixture-model",
+            Some(16_384),
+        )
+        .expect("second fixture local endpoint");
+        service.set_text_generators(
+            Arc::new(second_generator),
+            Arc::new(StubGenerator::new("sona-relay", false)),
+        );
+        let second_artifact_id = match service
+            .generate_artifacts(&fixture.store, fixture.session_id, 1)
+            .expect("second artifact generation")
+        {
+            ArtifactGenerationOutcome::Generated { artifact, .. } => artifact.artifact_id,
+            ArtifactGenerationOutcome::Cached { .. } => {
+                panic!("endpoint-only change returned the first cached revision")
+            }
+            _ => panic!("second endpoint did not generate"),
+        };
+        assert_ne!(first_artifact_id, second_artifact_id);
+        for _ in 0..3 {
+            second_server
+                .requests
+                .recv()
+                .expect("second generation request");
+        }
+        second_server
+            .handle
+            .join()
+            .expect("second generation fixture");
+    }
+
     #[test]
     fn a_pack_is_cut_until_it_fits_the_engines_ceiling() {
         let session_id = MeetingSessionId::new();

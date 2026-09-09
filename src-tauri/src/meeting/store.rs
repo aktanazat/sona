@@ -5610,7 +5610,7 @@ impl MeetingStore {
         })
     }
 
-    /// Every unmerged speaker's display name for one meeting.
+    /// Every canonical speaker's display name for one meeting.
     ///
     /// The ledger pass needs the name twice: once in the pack, so the model
     /// can attribute a receipt to the person who said it, and once on the
@@ -5624,15 +5624,28 @@ impl MeetingStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT speaker_id, display_name FROM meeting_speakers
-             WHERE session_id = ?1 AND merged_into_speaker_id IS NULL",
+             WHERE session_id = ?1",
         )?;
         let rows = statement.query_map(params![id(session_id)], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        let mut names = HashMap::new();
+        let mut display_names = HashMap::new();
         for row in rows {
             let (speaker_id, display_name) = row?;
-            names.insert(SpeakerId::from_uuid(parse_uuid(&speaker_id)?), display_name);
+            display_names.insert(SpeakerId::from_uuid(parse_uuid(&speaker_id)?), display_name);
+        }
+        let canonical_ids = canonical_speaker_ids(&connection, session_id)?;
+        let mut names = HashMap::new();
+        for (&speaker_id, display_name) in &display_names {
+            let canonical_id = canonical_ids
+                .get(&speaker_id)
+                .copied()
+                .unwrap_or(speaker_id);
+            let canonical_name = display_names
+                .get(&canonical_id)
+                .cloned()
+                .unwrap_or_else(|| display_name.clone());
+            names.insert(canonical_id, canonical_name);
         }
         Ok(names)
     }
@@ -8042,6 +8055,48 @@ fn effective_segments_for_session(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Resolve merged speaker ids once at the store boundary. Analytics and every
+/// prompt built from it therefore share the same canonical identity.
+fn canonical_speaker_ids(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<HashMap<SpeakerId, SpeakerId>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT speaker_id, merged_into_speaker_id FROM meeting_speakers
+         WHERE session_id = ?1",
+    )?;
+    let rows = statement.query_map(params![id(session_id)], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut parent_by_speaker = HashMap::new();
+    for row in rows {
+        let (speaker_id, merged_into) = row?;
+        let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
+        let merged_into = merged_into
+            .map(|raw| parse_uuid(&raw).map(SpeakerId::from_uuid))
+            .transpose()?;
+        parent_by_speaker.insert(speaker_id, merged_into);
+    }
+
+    let mut canonical_ids = HashMap::new();
+    for source in parent_by_speaker.keys().copied().collect::<Vec<_>>() {
+        let mut path = Vec::new();
+        let mut current = source;
+        while let Some(Some(parent)) = parent_by_speaker.get(&current) {
+            if path.contains(&current) {
+                return Err(StoreError::Corrupt);
+            }
+            path.push(current);
+            current = *parent;
+        }
+        for speaker_id in path {
+            canonical_ids.insert(speaker_id, current);
+        }
+        canonical_ids.insert(source, current);
+    }
+    Ok(canonical_ids)
+}
+
 /// The canonical transcript as speaker-attributed utterances. Speaker identity
 /// follows the current diarization assignment, and edited text replaces the
 /// recognizer's, so metrics describe the transcript a person actually reads.
@@ -8078,7 +8133,14 @@ fn analytics_segments_in(
             text: row.get(4)?,
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    let mut segments = rows.collect::<Result<Vec<_>, _>>()?;
+    let canonical_ids = canonical_speaker_ids(connection, session_id)?;
+    for segment in &mut segments {
+        if let Some(canonical_id) = canonical_ids.get(&segment.speaker_id) {
+            segment.speaker_id = *canonical_id;
+        }
+    }
+    Ok(segments)
 }
 
 /// A meeting with no saved notes still has a notes layer: an empty body under
@@ -10602,8 +10664,68 @@ fn to_sql_error(_: StoreError) -> rusqlite::Error {
 mod tests {
     use super::*;
     use crate::analytics::DashboardTrendRange;
+    use crate::meeting::processing::{
+        MeetingTextGenerationError, MeetingTextGenerator, ReplyShape,
+    };
     use crate::secrets::SecretManager;
+    use std::borrow::Cow;
     use tempfile::TempDir;
+
+    struct CapturingLedgerGenerator {
+        citation: String,
+        evidence: Arc<Mutex<Option<String>>>,
+    }
+
+    impl MeetingTextGenerator for CapturingLedgerGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "test-ledger"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("test-ledger-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            assert_eq!(shape, ReplyShape::Json);
+            *self
+                .evidence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(evidence.to_string());
+            Ok(serde_json::json!({
+                "headline": "The speakers were merged.",
+                "threads": [{
+                    "topic": "Transcript",
+                    "state": "closed",
+                    "substantive": false,
+                    "receipt": {
+                        "quote": "one",
+                        "speaker": "Canonical speaker",
+                        "citations": [self.citation],
+                    },
+                    "owner": null,
+                }],
+                "open_loops": [],
+                "commitments": [],
+                "stances": [],
+                "caveats": [],
+            })
+            .to_string())
+        }
+    }
 
     fn store() -> (TempDir, Arc<MeetingStore>) {
         let directory = TempDir::new().unwrap();
@@ -13503,5 +13625,118 @@ mod tests {
             .expect("publish generation");
 
         assert_eq!(generation_state(&store, generation_id), "completed");
+    }
+
+    #[test]
+    fn merged_speakers_are_canonical_in_stored_transcript_and_names() {
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        let plan_id = MeetingPlanId::new();
+        let track_id = SourceTrackId::new();
+        {
+            let connection = store.connection().expect("store connection");
+            connection
+                .execute(
+                    "INSERT INTO meeting_run_plans (
+                        plan_id, session_id, attempt_number, schema_version, consent_id,
+                        canonical_plan_json, created_at_utc_ms
+                     ) VALUES (?1, ?2, 1, 1, ?3, '{}', 1)",
+                    params![id(plan_id), id(session_id), id(ConsentId::new())],
+                )
+                .expect("insert transcript plan");
+            connection
+                .execute(
+                    r#"INSERT INTO meeting_source_tracks (
+                        track_id, session_id, plan_id, source_kind, required, requested,
+                        descriptor_json, timestamp_bridge_json, health
+                     ) VALUES (?1, ?2, ?3, 'microphone', 1, 1, '{}', '{}', '"healthy"')"#,
+                    params![id(track_id), id(session_id), id(plan_id)],
+                )
+                .expect("insert transcript track");
+        }
+        list_transcript(&store, session_id, &["one", "two"]);
+        let source = store
+            .analytics_segments(session_id)
+            .expect("stored transcript")
+            .first()
+            .expect("transcript segment")
+            .speaker_id;
+        let target = SpeakerId::new();
+        {
+            let connection = store.connection().expect("store connection");
+            connection
+                .execute(
+                    "INSERT INTO meeting_speakers (
+                        speaker_id, session_id, source_kind, display_name, revision
+                     ) VALUES (?1, ?2, 'microphone', 'Canonical speaker', 0)",
+                    params![id(target), id(session_id)],
+                )
+                .expect("insert canonical speaker");
+        }
+        store
+            .merge_speaker(
+                MeetingOperationId::new(),
+                3,
+                session_id,
+                revision,
+                source,
+                target,
+            )
+            .expect("merge transcript speaker");
+
+        let segments = store
+            .analytics_segments(session_id)
+            .expect("canonical transcript");
+        assert!(!segments.is_empty());
+        assert!(segments.iter().all(|segment| segment.speaker_id == target));
+        let names = store
+            .speaker_display_names(session_id)
+            .expect("canonical speaker names");
+        assert_eq!(
+            names.get(&target).map(String::as_str),
+            Some("Canonical speaker")
+        );
+        assert!(!names.contains_key(&source));
+
+        let transcript = segments
+            .iter()
+            .map(|segment| MeetingEvidence {
+                citation: MeetingCitation {
+                    kind: CitationKind::Transcript,
+                    session_id,
+                    entity_id: segment.segment_id.uuid().to_string(),
+                    start_offset_ns: Some(segment.start_offset_ns),
+                    end_offset_ns: Some(segment.end_offset_ns),
+                },
+                text: segment.text.clone(),
+            })
+            .collect();
+        let evidence = ArtifactEvidence {
+            transcript,
+            manual_notes: Vec::new(),
+            user_notes: String::new(),
+            template: MeetingNotesTemplate::General,
+        };
+        let captured = Arc::new(Mutex::new(None));
+        let generator = CapturingLedgerGenerator {
+            citation: segments[0].segment_id.uuid().to_string(),
+            evidence: Arc::clone(&captured),
+        };
+        let ledger = crate::meeting::processing::generate_ledger(
+            &generator, &evidence, &segments, &names, session_id,
+        )
+        .expect("regenerated ledger");
+        let prompt = captured
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("captured ledger prompt");
+        assert!(prompt.contains("Canonical speaker"));
+        assert!(prompt.contains(segments[0].segment_id.uuid().to_string().as_str()));
+        assert_eq!(
+            ledger.threads[0].receipt.speaker.as_deref(),
+            Some("Canonical speaker")
+        );
     }
 }

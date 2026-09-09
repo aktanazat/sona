@@ -1718,14 +1718,14 @@
         "saveFailed": "Това не се запази."
       },
       "localEngine": {
-        "title": "Енджин за текст на срещи",
         "label": "Записване на текста на срещите в",
         "description": "Изберете къде да се създават обобщения, дневници, прегледи и отговори.",
         "apple": "Apple Intelligence",
         "endpoint": "Локална крайна точка, съвместима с OpenAI",
         "baseUrl": {
           "label": "Адрес на крайната точка",
-          "hint": "Само loopback. Включете пътя /v1."
+          "hint": "Само loopback. Включете пътя /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Модел",
@@ -1742,9 +1742,12 @@
           "appleAvailable": "Apple Intelligence е наличен.",
           "appleUnavailable": "Apple Intelligence не е наличен на този Mac.",
           "endpointReachable": "Локалната крайна точка е достъпна с {{count}} модела.",
-          "endpointUnreachable": "Локалната крайна точка не е достъпна: {{error}}",
+          "endpointUnreachable": "Локалната крайна точка не е достъпна.",
+          "endpointInvalid": "Адресът на локалната крайна точка е невалиден.",
+          "endpointInvalidResponse": "Локалната крайна точка върна невалиден отговор.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "неизвестна грешка"
+          "endpointNotConfigured": "Локалната крайна точка все още не е конфигурирана.",
+          "endpointUnknown": "Състоянието на локалната крайна точка е неизвестно."
         }
       },
       "remoteIntelligence": {

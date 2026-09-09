@@ -1732,14 +1732,14 @@
         "saveFailed": "Не сохранилось."
       },
       "localEngine": {
-        "title": "Движок текста встреч",
         "label": "Записывать текст встреч",
         "description": "Выберите, где создавать сводки, журналы, итоги и ответы.",
         "apple": "Apple Intelligence",
         "endpoint": "Локальная конечная точка OpenAI",
         "baseUrl": {
           "label": "Адрес конечной точки",
-          "hint": "Только loopback. Укажите путь /v1."
+          "hint": "Только loopback. Укажите путь /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Модель",
@@ -1756,9 +1756,12 @@
           "appleAvailable": "Apple Intelligence доступна.",
           "appleUnavailable": "Apple Intelligence недоступна на этом Mac.",
           "endpointReachable": "Локальная конечная точка доступна, моделей: {{count}}.",
-          "endpointUnreachable": "Локальная конечная точка недоступна: {{error}}",
+          "endpointUnreachable": "Локальная конечная точка недоступна.",
+          "endpointInvalid": "Адрес локальной конечной точки недействителен.",
+          "endpointInvalidResponse": "Локальная конечная точка вернула недопустимый ответ.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "неизвестная ошибка"
+          "endpointNotConfigured": "Локальная конечная точка еще не настроена.",
+          "endpointUnknown": "Состояние локальной конечной точки неизвестно."
         }
       },
       "remoteIntelligence": {

@@ -1732,14 +1732,14 @@
         "saveFailed": "To się nie zapisało."
       },
       "localEngine": {
-        "title": "Silnik tekstu spotkań",
         "label": "Zapisuj tekst spotkań w",
         "description": "Wybierz, gdzie tworzyć podsumowania, rejestry, podsumowania spotkań i odpowiedzi.",
         "apple": "Apple Intelligence",
         "endpoint": "Lokalny punkt końcowy zgodny z OpenAI",
         "baseUrl": {
           "label": "Adres punktu końcowego",
-          "hint": "Tylko loopback. Dołącz ścieżkę /v1."
+          "hint": "Tylko loopback. Dołącz ścieżkę /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Model",
@@ -1756,9 +1756,12 @@
           "appleAvailable": "Apple Intelligence jest dostępne.",
           "appleUnavailable": "Apple Intelligence nie jest dostępne na tym Macu.",
           "endpointReachable": "Lokalny punkt końcowy jest dostępny; modeli: {{count}}.",
-          "endpointUnreachable": "Lokalny punkt końcowy jest niedostępny: {{error}}",
+          "endpointUnreachable": "Lokalny punkt końcowy jest nieosiągalny.",
+          "endpointInvalid": "Adres lokalnego punktu końcowego jest nieprawidłowy.",
+          "endpointInvalidResponse": "Lokalny punkt końcowy zwrócił nieprawidłową odpowiedź.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "nieznany błąd"
+          "endpointNotConfigured": "Lokalny punkt końcowy nie jest jeszcze skonfigurowany.",
+          "endpointUnknown": "Stan lokalnego punktu końcowego jest nieznany."
         }
       },
       "remoteIntelligence": {

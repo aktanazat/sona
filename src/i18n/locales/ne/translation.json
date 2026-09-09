@@ -1718,14 +1718,14 @@
         "saveFailed": "त्यो सुरक्षित भएन।"
       },
       "localEngine": {
-        "title": "बैठक पाठ इन्जिन",
         "label": "बैठकको पाठ यहाँ लेख्नुहोस्",
         "description": "सारांश, लग, पुनरावलोकन र उत्तरहरू कहाँ बनाउने छान्नुहोस्।",
         "apple": "Apple Intelligence",
         "endpoint": "स्थानीय OpenAI-संगत endpoint",
         "baseUrl": {
           "label": "Endpoint ठेगाना",
-          "hint": "Loopback मात्र। /v1 बाटो समावेश गर्नुहोस्।"
+          "hint": "Loopback मात्र। /v1 बाटो समावेश गर्नुहोस्।",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "मोडेल",
@@ -1742,9 +1742,12 @@
           "appleAvailable": "Apple Intelligence उपलब्ध छ।",
           "appleUnavailable": "यस Mac मा Apple Intelligence उपलब्ध छैन।",
           "endpointReachable": "स्थानीय endpoint मा {{count}} मोडेल उपलब्ध छन्।",
-          "endpointUnreachable": "स्थानीय endpoint पहुँचयोग्य छैन: {{error}}",
+          "endpointUnreachable": "स्थानीय एन्डपोइन्ट पहुँचयोग्य छैन।",
+          "endpointInvalid": "स्थानीय एन्डपोइन्टको ठेगाना अमान्य छ।",
+          "endpointInvalidResponse": "स्थानीय एन्डपोइन्टले अमान्य प्रतिक्रिया फर्कायो।",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "अज्ञात त्रुटि"
+          "endpointNotConfigured": "स्थानीय एन्डपोइन्ट अझै कन्फिगर गरिएको छैन।",
+          "endpointUnknown": "स्थानीय एन्डपोइन्टको स्थिति अज्ञात छ।"
         }
       },
       "remoteIntelligence": {

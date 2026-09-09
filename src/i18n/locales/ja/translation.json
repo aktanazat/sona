@@ -1711,14 +1711,14 @@
         "saveFailed": "保存できませんでした。"
       },
       "localEngine": {
-        "title": "会議テキストエンジン",
         "label": "会議テキストの保存先",
         "description": "要約、台帳、振り返り、回答をどこで生成するか選択します。",
         "apple": "Apple Intelligence",
         "endpoint": "ローカル OpenAI 互換エンドポイント",
         "baseUrl": {
           "label": "エンドポイントアドレス",
-          "hint": "ループバックのみ。/v1 パスを含めてください。"
+          "hint": "ループバックのみ。/v1 パスを含めてください。",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "モデル",
@@ -1735,9 +1735,12 @@
           "appleAvailable": "Apple Intelligence は利用できます。",
           "appleUnavailable": "この Mac では Apple Intelligence を利用できません。",
           "endpointReachable": "ローカルエンドポイントに {{count}} 個のモデルがあります。",
-          "endpointUnreachable": "ローカルエンドポイントに接続できません: {{error}}",
+          "endpointUnreachable": "ローカルエンドポイントに接続できません。",
+          "endpointInvalid": "ローカルエンドポイントのアドレスが無効です。",
+          "endpointInvalidResponse": "ローカルエンドポイントが無効な応答を返しました。",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "不明なエラー"
+          "endpointNotConfigured": "ローカルエンドポイントはまだ設定されていません。",
+          "endpointUnknown": "ローカルエンドポイントの状態は不明です。"
         }
       },
       "remoteIntelligence": {

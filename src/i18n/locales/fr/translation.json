@@ -1725,14 +1725,14 @@
         "saveFailed": "Cela n'a pas été enregistré."
       },
       "localEngine": {
-        "title": "Moteur de texte des réunions",
         "label": "Écrire le texte des réunions sur",
         "description": "Choisissez où générer les résumés, journaux, récapitulatifs et réponses.",
         "apple": "Apple Intelligence",
         "endpoint": "Point de terminaison local compatible avec OpenAI",
         "baseUrl": {
           "label": "Adresse du point de terminaison",
-          "hint": "Loopback uniquement. Incluez le chemin /v1."
+          "hint": "Loopback uniquement. Incluez le chemin /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Modèle",
@@ -1749,9 +1749,12 @@
           "appleAvailable": "Apple Intelligence est disponible.",
           "appleUnavailable": "Apple Intelligence n’est pas disponible sur ce Mac.",
           "endpointReachable": "Le point de terminaison local est accessible avec {{count}} modèle(s).",
-          "endpointUnreachable": "Le point de terminaison local est inaccessible : {{error}}",
+          "endpointUnreachable": "Le point de terminaison local est inaccessible.",
+          "endpointInvalid": "L’adresse du point de terminaison local n’est pas valide.",
+          "endpointInvalidResponse": "Le point de terminaison local a renvoyé une réponse invalide.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "erreur inconnue"
+          "endpointNotConfigured": "Le point de terminaison local n’est pas encore configuré.",
+          "endpointUnknown": "L’état du point de terminaison local est inconnu."
         }
       },
       "remoteIntelligence": {

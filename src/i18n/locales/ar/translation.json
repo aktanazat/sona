@@ -1746,14 +1746,14 @@
         "saveFailed": "لم يُحفظ ذلك."
       },
       "localEngine": {
-        "title": "محرك نصوص الاجتماعات",
         "label": "كتابة نص الاجتماع إلى",
         "description": "اختر مكان إنشاء الملخصات والسجلات والمراجعات والإجابات.",
         "apple": "Apple Intelligence",
         "endpoint": "نقطة نهاية محلية متوافقة مع OpenAI",
         "baseUrl": {
           "label": "عنوان نقطة النهاية",
-          "hint": "Loopback فقط. أدرج المسار /v1."
+          "hint": "Loopback فقط. أدرج المسار /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "النموذج",
@@ -1770,9 +1770,12 @@
           "appleAvailable": "Apple Intelligence متاح.",
           "appleUnavailable": "Apple Intelligence غير متاح على هذا الـ Mac.",
           "endpointReachable": "نقطة النهاية المحلية متاحة مع {{count}} من النماذج.",
-          "endpointUnreachable": "نقطة النهاية المحلية غير متاحة: {{error}}",
+          "endpointUnreachable": "يتعذر الوصول إلى نقطة النهاية المحلية.",
+          "endpointInvalid": "عنوان نقطة النهاية المحلية غير صالح.",
+          "endpointInvalidResponse": "أعادت نقطة النهاية المحلية استجابة غير صالحة.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "خطأ غير معروف"
+          "endpointNotConfigured": "لم يتم إعداد نقطة النهاية المحلية بعد.",
+          "endpointUnknown": "حالة نقطة النهاية المحلية غير معروفة."
         }
       },
       "remoteIntelligence": {

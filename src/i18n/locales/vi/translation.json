@@ -1711,14 +1711,14 @@
         "saveFailed": "Cái đó chưa được lưu."
       },
       "localEngine": {
-        "title": "Công cụ văn bản cuộc họp",
         "label": "Ghi văn bản cuộc họp vào",
         "description": "Chọn nơi tạo bản tóm tắt, sổ ghi chép, bản tổng kết và câu trả lời.",
         "apple": "Apple Intelligence",
         "endpoint": "Điểm cuối cục bộ tương thích OpenAI",
         "baseUrl": {
           "label": "Địa chỉ điểm cuối",
-          "hint": "Chỉ loopback. Bao gồm đường dẫn /v1."
+          "hint": "Chỉ loopback. Bao gồm đường dẫn /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Mô hình",
@@ -1735,9 +1735,12 @@
           "appleAvailable": "Apple Intelligence khả dụng.",
           "appleUnavailable": "Apple Intelligence không khả dụng trên máy Mac này.",
           "endpointReachable": "Điểm cuối cục bộ có thể truy cập với {{count}} mô hình.",
-          "endpointUnreachable": "Không thể truy cập điểm cuối cục bộ: {{error}}",
+          "endpointUnreachable": "Không thể truy cập điểm cuối cục bộ.",
+          "endpointInvalid": "Địa chỉ điểm cuối cục bộ không hợp lệ.",
+          "endpointInvalidResponse": "Điểm cuối cục bộ trả về phản hồi không hợp lệ.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "lỗi không xác định"
+          "endpointNotConfigured": "Điểm cuối cục bộ chưa được cấu hình.",
+          "endpointUnknown": "Trạng thái điểm cuối cục bộ không xác định."
         }
       },
       "remoteIntelligence": {

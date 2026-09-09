@@ -1718,14 +1718,14 @@
         "saveFailed": "That did not save."
       },
       "localEngine": {
-        "title": "Meeting text engine",
         "label": "Write meeting text on",
         "description": "Choose where meeting summaries, ledgers, recaps and answers are generated.",
         "apple": "Apple Intelligence",
         "endpoint": "Local OpenAI-compatible endpoint",
         "baseUrl": {
           "label": "Endpoint address",
-          "hint": "Loopback only. Include the /v1 path."
+          "hint": "Loopback only. Include the /v1 path.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Model",
@@ -1742,9 +1742,12 @@
           "appleAvailable": "Apple Intelligence is available.",
           "appleUnavailable": "Apple Intelligence is not available on this Mac.",
           "endpointReachable": "Local endpoint is reachable with {{count}} model(s).",
-          "endpointUnreachable": "Local endpoint is unreachable: {{error}}",
+          "endpointUnreachable": "Local endpoint is unreachable.",
+          "endpointInvalid": "The local endpoint address is invalid.",
+          "endpointInvalidResponse": "The local endpoint returned an invalid response.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "unknown error"
+          "endpointNotConfigured": "Local endpoint is not configured yet.",
+          "endpointUnknown": "Local endpoint status is unknown."
         }
       },
       "remoteIntelligence": {

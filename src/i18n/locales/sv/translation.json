@@ -1718,14 +1718,14 @@
         "saveFailed": "Det sparades inte."
       },
       "localEngine": {
-        "title": "Textmotor för möten",
         "label": "Skriv mötestext till",
         "description": "Välj var sammanfattningar, loggar, återblickar och svar ska skapas.",
         "apple": "Apple Intelligence",
         "endpoint": "Lokal OpenAI-kompatibel slutpunkt",
         "baseUrl": {
           "label": "Slutpunktsadress",
-          "hint": "Endast loopback. Ta med sökvägen /v1."
+          "hint": "Endast loopback. Ta med sökvägen /v1.",
+          "placeholder": "http://127.0.0.1:11434/v1"
         },
         "model": {
           "label": "Modell",
@@ -1742,9 +1742,12 @@
           "appleAvailable": "Apple Intelligence är tillgängligt.",
           "appleUnavailable": "Apple Intelligence är inte tillgängligt på denna Mac.",
           "endpointReachable": "Lokal slutpunkt är nåbar med {{count}} modell(er).",
-          "endpointUnreachable": "Lokal slutpunkt kan inte nås: {{error}}",
+          "endpointUnreachable": "Den lokala slutpunkten kan inte nås.",
+          "endpointInvalid": "Adressen till den lokala slutpunkten är ogiltig.",
+          "endpointInvalidResponse": "Den lokala slutpunkten returnerade ett ogiltigt svar.",
           "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
-          "unknownError": "okänt fel"
+          "endpointNotConfigured": "Den lokala slutpunkten är inte konfigurerad ännu.",
+          "endpointUnknown": "Statusen för den lokala slutpunkten är okänd."
         }
       },
       "remoteIntelligence": {

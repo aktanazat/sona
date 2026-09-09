@@ -25,7 +25,7 @@
 //!   skip line when no server is listening:
 //!
 //!   ```text
-//!   bun run test:backend ledger_evals -- --nocapture
+//!   bun run test:backend ledger_evals -- --ignored --nocapture
 //!   ```
 //!
 //!   The server's first `/v1/models` entry is used unless `SONA_LOCAL_MODEL`
@@ -753,6 +753,7 @@ impl MeetingTextGenerator for Recording<'_> {
 /// of them against a hand-written ledger, so a weaker local model scores
 /// lower here rather than failing a build over its reading comprehension.
 #[test]
+#[ignore = "requires an explicitly requested local OpenAI-compatible server"]
 fn messy_two_party_with_model_or_skips_without_a_local_server() {
     let endpoint = LocalEndpointGenerator::new("http://127.0.0.1:11434/v1", "")
         .expect("the loopback endpoint is valid");

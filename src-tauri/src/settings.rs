@@ -274,18 +274,9 @@ impl MeetingLocalEngine {
                 "Meeting local engine context window must be greater than zero".to_string(),
             );
         }
-        let provider = PostProcessProvider {
-            id: "custom".to_string(),
-            label: "Custom".to_string(),
-            base_url: base_url.trim().to_string(),
-            allow_base_url_edit: true,
-            supports_structured_output: false,
-        };
-        let endpoint = provider.endpoint().map_err(|error| error.to_string())?;
-        if endpoint.is_remote() || !endpoint.base_url().trim_end_matches('/').ends_with("/v1") {
-            return Err("Meeting local engine requires a loopback /v1 endpoint".to_string());
-        }
-        Ok(())
+        PostProcessEndpoint::meeting_local(base_url)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 /// Where one catalog entry came from. Only the provider can report an entry:
@@ -361,6 +352,21 @@ pub(crate) struct PostProcessEndpoint {
 }
 
 impl PostProcessEndpoint {
+    pub(crate) fn meeting_local(base_url: &str) -> Result<Self, PostProcessEndpointError> {
+        let provider = PostProcessProvider {
+            id: "custom".to_string(),
+            label: "Custom".to_string(),
+            base_url: base_url.trim().to_string(),
+            allow_base_url_edit: true,
+            supports_structured_output: false,
+        };
+        let endpoint = provider.endpoint()?;
+        if endpoint.is_remote() || !endpoint.base_url().ends_with("/v1") {
+            return Err(PostProcessEndpointError::InvalidMeetingLocalRoute);
+        }
+        Ok(endpoint)
+    }
+
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -382,6 +388,7 @@ pub(crate) enum PostProcessEndpointError {
     UnsupportedScheme,
     RemoteHttp,
     InvalidAppleIntelligenceRoute,
+    InvalidMeetingLocalRoute,
 }
 
 impl std::fmt::Display for PostProcessEndpointError {
@@ -396,6 +403,9 @@ impl std::fmt::Display for PostProcessEndpointError {
             Self::RemoteHttp => "Remote provider URLs must use HTTPS",
             Self::InvalidAppleIntelligenceRoute => {
                 "Apple Intelligence must use its built-in local route"
+            }
+            Self::InvalidMeetingLocalRoute => {
+                "Meeting local engine requires a loopback /v1 endpoint"
             }
         };
         formatter.write_str(message)
@@ -3902,11 +3912,24 @@ mod tests {
         // go and cannot go there.
         std::fs::create_dir(&path).expect("a directory in the store file's place");
 
-        let error = persist_settings_to_store(&store, &get_default_settings())
+        let settings = AppSettings {
+            meeting_local_engine: MeetingLocalEngine::LocalEndpoint {
+                base_url: "http://127.0.0.1:11434/v1".to_string(),
+                model: "save-failure-model".to_string(),
+                context_window_tokens: Some(8192),
+            },
+            ..get_default_settings()
+        };
+        let error = persist_settings_to_store(&store, &settings)
             .expect_err("a store that cannot write must not report a saved settings document");
         assert!(
             matches!(error, SettingsPersistError::Save(_)),
             "the failure names the save, not the serialization: {error:?}"
+        );
+        assert_eq!(
+            read_settings_from_store(&store).meeting_local_engine,
+            settings.meeting_local_engine,
+            "readback must expose the engine effective after a failed disk save"
         );
 
         drop(store);
