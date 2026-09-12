@@ -35,7 +35,18 @@ struct SonaApp: App {
         MenuBarExtra {
             MenuBarMenu().environment(model)
         } label: {
-            Image(systemName: model.capture == .idle ? "circle" : "circle.fill")
+            Image(model.capture.mark)
+        }
+    }
+}
+
+extension CaptureState {
+    /// The menu bar mark: the Sona mark, badged with what the core is doing.
+    var mark: String {
+        switch self {
+        case .idle: "Mark"
+        case .recording: "MarkRecording"
+        case .working: "MarkWorking"
         }
     }
 }

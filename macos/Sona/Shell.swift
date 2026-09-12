@@ -53,8 +53,7 @@ struct Sidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 15, weight: .semibold))
+                Image("Mark")
                 Text("Sona")
                     .font(.system(size: 17, weight: .semibold))
             }
