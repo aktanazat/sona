@@ -178,80 +178,13 @@ struct ChatTurn: Identifiable, Hashable {
     let text: String
 }
 
-/// Fixtures for the design pass. Meetings, people, modes, prompts, workflows,
-/// agents, vocabulary, the palette and the chat still render from here; the
-/// core does not carry them over the socket yet. Dictations, models, stats
-/// and the microphone state come from the core.
+/// Placeholder collections for screens the core does not carry over the socket yet.
+/// User-content collections stay empty so a clean install never invents local data.
 enum SampleData {
-    static let calendar = Calendar.current
-    static let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 12, hour: 14, minute: 20))!
 
-    static func day(_ daysAgo: Int, _ hour: Int, _ minute: Int = 0) -> Date {
-        let base = calendar.date(byAdding: .day, value: -daysAgo, to: now)!
-        return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: base)!
-    }
+    static let meetings: [Meeting] = []
 
-    static let meetings: [Meeting] = [
-        Meeting(id: 1, title: "Retention proposal review", date: day(0, 10, 0), duration: 47 * 60, app: "Zoom",
-                people: ["Dana Whitfield", "Priya Raman", "You"],
-                summary: "Dana walked through the ninety-day retention default. Priya asked for a per-workspace override; the group agreed to ship the default first and revisit overrides after two customers ask. Nothing blocks Friday.",
-                decisions: ["Ninety days is the default retention window.", "Overrides wait for customer demand."],
-                actions: [ActionItem(id: 1, owner: "You", text: "Send Dana the two open questions", due: "Fri"),
-                          ActionItem(id: 2, owner: "Priya", text: "Draft the consent panel copy", due: "Mon")],
-                loops: ["Who owns the migration note for 1.0 users?"]),
-        Meeting(id: 2, title: "Standup", date: day(1, 9, 30), duration: 14 * 60, app: "Google Meet",
-                people: ["Priya Raman", "Marco Bell", "You"],
-                summary: "Short. Marco reproduced the Zoom preview false positive. Priya has the panel copy in review.",
-                decisions: [], actions: [ActionItem(id: 3, owner: "Marco", text: "Fix preview-window detection", due: "Wed")],
-                loops: ["Should paused meetings show in Recent?", "Rename 'Modes' before launch?", "Watch app battery numbers"]),
-        Meeting(id: 3, title: "Alder Systems intro", date: day(2, 15, 0), duration: 31 * 60, app: "Zoom",
-                people: ["Tomás Alder", "You"],
-                summary: "Tomás runs a forty-person support team and wants transcripts that never leave their machines. Local-first was the whole pitch; he asked twice whether anything phones home.",
-                decisions: ["Send the local-first architecture note."],
-                actions: [ActionItem(id: 4, owner: "You", text: "Send architecture note", due: "Thu")], loops: []),
-        Meeting(id: 4, title: "Design critique", date: day(3, 13, 0), duration: 52 * 60, app: "FaceTime",
-                people: ["Lena Okafor", "You"], summary: "Lena cut the sidebar to six items and asked for one action per screen.",
-                decisions: ["One headline, one action, per screen."], actions: [], loops: []),
-        Meeting(id: 5, title: "1:1 with Marco", date: day(4, 11, 0), duration: 28 * 60, app: "Zoom",
-                people: ["Marco Bell", "You"], summary: "Marco wants to own detection end to end.",
-                decisions: [], actions: [], loops: []),
-        Meeting(id: 6, title: "Whisper large v3 eval", date: day(5, 16, 0), duration: 39 * 60, app: "Google Meet",
-                people: ["Priya Raman", "You"], summary: "Word error rate fell from 9.1 to 6.4 on the meeting set.",
-                decisions: ["Large v3 becomes the default model."], actions: [], loops: []),
-        Meeting(id: 7, title: "Onboarding walkthrough", date: day(5, 10, 0), duration: 22 * 60, app: "Zoom",
-                people: ["Dana Whitfield", "You"], summary: "Three permission prompts is two too many.",
-                decisions: [], actions: [], loops: []),
-        Meeting(id: 8, title: "Pricing", date: day(6, 14, 30), duration: 44 * 60, app: "Google Meet",
-                people: ["Lena Okafor", "Tomás Alder", "You"], summary: "Per-seat, annual only, no free tier.",
-                decisions: ["Annual only."], actions: [], loops: []),
-        Meeting(id: 9, title: "Roadmap", date: day(6, 9, 0), duration: 58 * 60, app: "Zoom",
-                people: ["Dana Whitfield", "Priya Raman", "Marco Bell", "You"], summary: "Q4 is the native app.",
-                decisions: ["Q4 is the native app."], actions: [], loops: []),
-    ]
-
-    static let people: [Person] = [
-        Person(id: 1, name: "Dana Whitfield", organization: "Halden", role: "Head of Product", lastMet: day(0, 10), meetings: 11,
-               summary: "Dana runs product at Halden. Direct, prepared, sends the doc the night before.",
-               context: ["You owe her two questions on retention by Friday.", "She asked about a migration note for 1.0 users; nobody owns it yet.", "Last three meetings ran under time."]),
-        Person(id: 2, name: "Priya Raman", organization: "Halden", role: "Design", lastMet: day(1, 9, 30), meetings: 14,
-               summary: "Priya owns the consent panel and most of the copy.",
-               context: ["Consent panel copy due Monday.", "Prefers Meet over Zoom."]),
-        Person(id: 3, name: "Marco Bell", organization: "Halden", role: "Engineer", lastMet: day(1, 9, 30), meetings: 9,
-               summary: "Marco owns meeting detection.",
-               context: ["Fixing the Zoom preview false positive by Wednesday."]),
-        Person(id: 4, name: "Tomás Alder", organization: "Alder Systems", role: "Founder", lastMet: day(2, 15), meetings: 2,
-               summary: "Runs a forty-person support team. Cares about data never leaving the machine.",
-               context: ["Send the local-first architecture note.", "Second meeting; first was pricing."]),
-        Person(id: 5, name: "Lena Okafor", organization: "Independent", role: "Design advisor", lastMet: day(3, 13), meetings: 5,
-               summary: "Lena critiques the app every other week.",
-               context: ["Asked for one action per screen."]),
-        Person(id: 6, name: "Sam Ortiz", organization: "Northwind", role: "Support lead", lastMet: day(12, 15), meetings: 3,
-               summary: "Pilot customer.", context: ["Pilot ends this month."]),
-        Person(id: 7, name: "Ines Ferreira", organization: "Northwind", role: "IT", lastMet: day(12, 15), meetings: 1,
-               summary: "Reviews anything that touches the network.", context: []),
-        Person(id: 8, name: "Yuki Tanaka", organization: "Independent", role: "Contractor", lastMet: day(20, 11), meetings: 2,
-               summary: "Built the first watch prototype.", context: []),
-    ]
+    static let people: [Person] = []
 
     static let providers: [Provider] = [
         Provider(id: 1, name: "Apple Intelligence", detail: "On this Mac. Used for summaries and modes.", connected: true),
@@ -274,52 +207,24 @@ enum SampleData {
              prompt: "Summarise, list decisions, list action items with owners.", active: false),
     ]
 
-    static let decisions: [Decision] = [
-        Decision(id: 1, kind: .link, text: "Is “D. Whitfield” in Tuesday's invite the same person as Dana Whitfield?", accept: "Same person", decline: "Different"),
-        Decision(id: 2, kind: .loops, text: "Three open loops from Tuesday's standup are a week old.", accept: "Review", decline: "Close all"),
-        Decision(id: 3, kind: .vocabulary, text: "You said “Kubernetes” four times and Sona heard “cube and eighties”.", accept: "Add word", decline: "Ignore"),
-        Decision(id: 4, kind: .recovery, text: "A meeting from Monday stopped before it was saved. Twenty-one minutes are recoverable.", accept: "Recover", decline: "Discard"),
-    ]
+    static let decisions: [Decision] = []
 
-    static let prompts: [SavedPrompt] = [
-        SavedPrompt(id: 1, name: "Decisions only", text: "List every decision made, one per line, with who made it.", runs: 23),
-        SavedPrompt(id: 2, name: "What did I promise", text: "List everything I committed to, with the deadline if one was said.", runs: 41),
-        SavedPrompt(id: 3, name: "Customer note", text: "Write a three-sentence note for the CRM.", runs: 8),
-    ]
+    static let prompts: [SavedPrompt] = []
 
-    static let workflows: [Workflow] = [
-        Workflow(id: 1, name: "After every meeting", trigger: "Meeting ends", steps: 3, enabled: true),
-        Workflow(id: 2, name: "Customer calls to CRM", trigger: "Meeting with a person from a customer org ends", steps: 2, enabled: true),
-        Workflow(id: 3, name: "Weekly digest", trigger: "Friday 17:00", steps: 1, enabled: false),
-    ]
+    static let workflows: [Workflow] = []
 
-    static let agents: [Agent] = [
-        Agent(id: 1, name: "Claude Code", transport: "Local socket", lastSeen: "2 min ago"),
-        Agent(id: 2, name: "Codex", transport: "Local socket", lastSeen: "yesterday"),
-    ]
+    static let agents: [Agent] = []
 
-    static let vocabulary: [VocabularyEntry] = [
-        VocabularyEntry(id: 1, word: "Halden", heardAs: "hold in", uses: 31),
-        VocabularyEntry(id: 2, word: "Parakeet", heardAs: "pair a kit", uses: 12),
-        VocabularyEntry(id: 3, word: "diarization", heardAs: "diary station", uses: 9),
-        VocabularyEntry(id: 4, word: "Okafor", heardAs: "oak afore", uses: 7),
-    ]
+    static let vocabulary: [VocabularyEntry] = []
 
     static let commands: [PaletteCommand] = [
         PaletteCommand(id: 1, title: "Start recording", detail: "Note mode", shortcut: "⌥ Space"),
         PaletteCommand(id: 2, title: "New meeting", detail: "Record the current call", shortcut: "⌥ ⇧ M"),
-        PaletteCommand(id: 3, title: "Retention proposal review", detail: "Meeting · today 10:00", shortcut: ""),
-        PaletteCommand(id: 4, title: "Dana Whitfield", detail: "Person · Halden", shortcut: ""),
         PaletteCommand(id: 5, title: "Switch mode to Email", detail: "Mode", shortcut: "⌥ E"),
         PaletteCommand(id: 6, title: "Open settings", detail: "", shortcut: "⌘ ,"),
     ]
 
-    static let chat: [ChatTurn] = [
-        ChatTurn(id: 1, fromUser: true, text: "What did I promise Dana?"),
-        ChatTurn(id: 2, fromUser: false, text: "Two things. You said you would send her the two open questions on the retention window before Friday, and that the migration note for 1.0 users would have an owner by Monday. Nobody was named for the second one."),
-        ChatTurn(id: 3, fromUser: true, text: "Draft the questions."),
-        ChatTurn(id: 4, fromUser: false, text: "1. Does the ninety-day window count from capture or from last access?\n2. When a workspace is deleted, is its history purged on the same schedule or immediately?"),
-    ]
+    static let chat: [ChatTurn] = []
 }
 
 extension TimeInterval {

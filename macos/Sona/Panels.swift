@@ -302,7 +302,7 @@ struct ChatSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Retention proposal review").headlineText()
+                    Text("Meeting chat").headlineText()
                     Text("Answers come from the transcript on this Mac.").metaText()
                 }
                 Spacer()
