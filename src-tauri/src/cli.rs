@@ -36,6 +36,12 @@ pub struct CliArgs {
     #[arg(long)]
     pub no_tray: bool,
 
+    /// Serve the native macOS shell over this Unix socket instead of opening
+    /// a webview. The shell spawns this process, reads core events from the
+    /// socket, and the core exits when the shell is gone.
+    #[arg(long, value_name = "PATH")]
+    pub native_socket: Option<PathBuf>,
+
     /// Toggle transcription on/off (sent to running instance)
     #[arg(long)]
     pub toggle_transcription: bool,

@@ -33,6 +33,7 @@ pub mod meeting;
 pub mod meeting_macos;
 mod memory;
 mod modes;
+mod native_bridge;
 mod net_policy;
 mod overlay;
 mod paste_tx;
@@ -1553,6 +1554,10 @@ pub fn run(cli_args: CliArgs) {
     // when the variable is unset
     let console_filter = build_console_filter();
     let headless_mode = is_headless_mode(&cli_args);
+    // The native shell spawned this process and draws every surface itself,
+    // so the core keeps no webview and answers over the socket instead.
+    let native_socket = cli_args.native_socket.clone();
+    let native_mode = native_socket.is_some();
 
     // Claim the portable GUI runtime before the logger or any Tauri plugin
     // can write under this root. Headless CLI/MCP commands retain their
@@ -1949,8 +1954,11 @@ pub fn run(cli_args: CliArgs) {
             query::QueryLinkRequestedEvent,
         ]);
 
+    // The export keeps `src/bindings.ts` in step for the webview. A core the
+    // native shell spawned has no webview, and runs from inside the app bundle
+    // where that path does not exist.
     #[cfg(debug_assertions)]
-    {
+    if !native_mode {
         const BINDINGS_PATH: &str = "../src/bindings.ts";
         if let Err(error) = specta_builder.export(
             Typescript::default().bigint(BigIntExportBehavior::Number),
@@ -2002,7 +2010,9 @@ pub fn run(cli_args: CliArgs) {
                     // headless mode (--transcribe-file/--list-devices/--list-models)
                     // stdout carries only the result (JSON or plain), so send console
                     // logs to stderr instead to keep stdout clean for CI parsing.
-                    Target::new(if headless_mode {
+                    // The native shell's core is a child process and logs the
+                    // same way.
+                    Target::new(if headless_mode || native_mode {
                         TargetKind::Stderr
                     } else {
                         TargetKind::Stdout
@@ -2075,8 +2085,9 @@ pub fn run(cli_args: CliArgs) {
     // That would make the headless path
     // (--transcribe-file/--list-devices/--list-models) a silent no-op whenever the
     // app is already open, so skip it in headless mode and run a standalone
-    // instance instead.
-    if !headless_mode && uses_bundle_single_instance(portable::is_portable()) {
+    // instance instead. The native shell's core is owned by the shell that
+    // spawned it, so it never hands itself to another instance either.
+    if !headless_mode && !native_mode && uses_bundle_single_instance(portable::is_portable()) {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             // Windows and Linux deliver a registered protocol URL as argv, and
             // `opened_audio_files` is the variadic positional, so every
@@ -2280,54 +2291,61 @@ pub fn run(cli_args: CliArgs) {
             let settings = get_settings(app.handle());
             // Keep the first window non-activating until the webview reports a
             // composited frame. This prevents macOS from focusing empty chrome.
+            // The native shell's core stays here for good: the shell owns the
+            // Dock tile, and a second one would be a bug.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Create main window programmatically so we can set data_directory
-            // for portable mode (redirects WebView2 cache to portable Data dir)
-            let mut win_builder =
-                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("/".into()))
-                    .title("Sona")
-                    .inner_size(900.0, 800.0)
-                    .min_inner_size(900.0, 800.0)
-                    .resizable(true)
-                    .maximizable(true)
-                    .minimizable(true)
-                    .fullscreen(false)
-                    .visible(false);
-
-            if let Some(data_dir) = portable::data_dir() {
-                win_builder = win_builder.data_directory(data_dir.join("webview"));
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                win_builder = win_builder
-                    .transparent(true)
-                    .title_bar_style(tauri::TitleBarStyle::Overlay)
-                    .hidden_title(true);
-            }
-
-            win_builder = win_builder
-                .initialization_script(main_window_material_init(settings.appearance_material));
-            let _main_window = win_builder.build()?;
-            launch_trace::mark_native_window_created();
-            app.manage(agent_panel::AgentPanelManager::new(app.handle()));
-
-            // Glass is opt-in now, so vibrancy is applied only when the setting
-            // asks for it. This also corrects the initialization script above if
-            // the native view could not be applied — still before the window is
-            // shown, so a failed apply costs a log line and nothing visible.
-            shortcut::apply_window_material(app.handle(), settings.appearance_material);
-
             modes::refresh_clipboard_context_watcher(&settings);
 
-            // Apply the persisted appearance theme to the native title bar before
-            // the window is shown, so it matches the in-app palette without a flash
-            // of the wrong theme. See `apply_window_theme` for what this does per
-            // platform.
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
-            shortcut::apply_window_theme(app.handle(), settings.theme);
+            if !native_mode {
+                // Create main window programmatically so we can set data_directory
+                // for portable mode (redirects WebView2 cache to portable Data dir)
+                let mut win_builder = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::App("/".into()),
+                )
+                .title("Sona")
+                .inner_size(900.0, 800.0)
+                .min_inner_size(900.0, 800.0)
+                .resizable(true)
+                .maximizable(true)
+                .minimizable(true)
+                .fullscreen(false)
+                .visible(false);
+
+                if let Some(data_dir) = portable::data_dir() {
+                    win_builder = win_builder.data_directory(data_dir.join("webview"));
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    win_builder = win_builder
+                        .transparent(true)
+                        .title_bar_style(tauri::TitleBarStyle::Overlay)
+                        .hidden_title(true);
+                }
+
+                win_builder = win_builder
+                    .initialization_script(main_window_material_init(settings.appearance_material));
+                let _main_window = win_builder.build()?;
+                launch_trace::mark_native_window_created();
+                app.manage(agent_panel::AgentPanelManager::new(app.handle()));
+
+                // Glass is opt-in now, so vibrancy is applied only when the setting
+                // asks for it. This also corrects the initialization script above if
+                // the native view could not be applied — still before the window is
+                // shown, so a failed apply costs a log line and nothing visible.
+                shortcut::apply_window_material(app.handle(), settings.appearance_material);
+
+                // Apply the persisted appearance theme to the native title bar before
+                // the window is shown, so it matches the in-app palette without a flash
+                // of the wrong theme. See `apply_window_theme` for what this does per
+                // platform.
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                shortcut::apply_window_theme(app.handle(), settings.theme);
+            }
 
             let runtime = startup_runtime(&settings, &cli_args);
             let tauri_log_level: tauri_plugin_log::LogLevel = runtime.log_level.into();
@@ -2344,17 +2362,33 @@ pub fn run(cli_args: CliArgs) {
             app.manage(TranscriptionCoordinator::new(app_handle.clone()));
             // Reveal the styled launch shell first. Its DOM-paint event below
             // releases manager construction, including catalog and HF scans.
-            let shell_shown_before_startup = runtime.show_window_before_core;
+            // The native shell draws its own launch surface, so there is no
+            // paint to wait for and startup completes here in `setup`.
+            let shell_shown_before_startup = !native_mode && runtime.show_window_before_core;
             if shell_shown_before_startup {
                 show_main_window(&app_handle);
             }
 
             let startup_app = app_handle.clone();
-            app_handle.once(launch_trace::FIRST_DOM_PAINT_EVENT, move |_| {
+            let complete_startup = move || {
                 if let Err(error) = initialize_core_logic(&startup_app, runtime) {
-                    log::error!("Startup initialization failed after first paint: {error:#}");
+                    log::error!("Startup initialization failed: {error:#}");
                     startup_app.exit(1);
                     return;
+                }
+
+                // The shell connects as soon as this socket exists, so it is
+                // bound only now, with every manager its requests read in place.
+                if let Some(path) = &native_socket {
+                    if let Err(error) = native_bridge::start(&startup_app, path) {
+                        log::error!(
+                            "Native shell socket {} is unavailable: {error}",
+                            path.display()
+                        );
+                        startup_app.exit(1);
+                        return;
+                    }
+                    native_bridge::watch_parent(startup_app.clone());
                 }
 
                 for address in opened_deep_link_addresses(&cli_args.opened_audio_files) {
@@ -2382,7 +2416,7 @@ pub fn run(cli_args: CliArgs) {
                 // silently blocks keyed shortcuts and activates the Carbon fallback.
                 secure_input::init(&startup_app);
                 overlay::update_overlay_enabled_cache(
-                    settings.overlay_style != settings::OverlayStyle::None,
+                    !native_mode && settings.overlay_style != settings::OverlayStyle::None,
                 );
 
                 std::thread::spawn(|| {
@@ -2396,22 +2430,29 @@ pub fn run(cli_args: CliArgs) {
                 });
 
                 let should_force_show = should_force_show_permissions_window(&startup_app);
-                if !shell_shown_before_startup && (should_force_show || opened_audio_queued) {
+                if !shell_shown_before_startup
+                    && !native_mode
+                    && (should_force_show || opened_audio_queued)
+                {
                     show_main_window(&startup_app);
                 }
 
-                let ready_app = startup_app.clone();
-                if let Err(error) = startup_app.run_on_main_thread(move || {
-                    initialize_recording_overlay(&ready_app);
-                    meeting::consent_panel::create(&ready_app);
-                    if let Err(error) = ready_app.emit(launch_trace::BACKEND_READY_EVENT, ()) {
-                        log::error!("Failed to release the launch shell: {error}");
-                        ready_app.exit(1);
+                // The overlay and the consent panel are webviews; the native
+                // shell draws both itself.
+                if !native_mode {
+                    let ready_app = startup_app.clone();
+                    if let Err(error) = startup_app.run_on_main_thread(move || {
+                        initialize_recording_overlay(&ready_app);
+                        meeting::consent_panel::create(&ready_app);
+                        if let Err(error) = ready_app.emit(launch_trace::BACKEND_READY_EVENT, ()) {
+                            log::error!("Failed to release the launch shell: {error}");
+                            ready_app.exit(1);
+                        }
+                    }) {
+                        log::error!("Failed to schedule launch completion: {error}");
+                        startup_app.exit(1);
+                        return;
                     }
-                }) {
-                    log::error!("Failed to schedule launch completion: {error}");
-                    startup_app.exit(1);
-                    return;
                 }
 
                 // Keyring work starts only after the shell paint that triggered
@@ -2444,7 +2485,14 @@ pub fn run(cli_args: CliArgs) {
                         log::warn!("Retention sweep at startup is unavailable: {error:#}");
                     }
                 });
-            });
+            };
+            if native_mode {
+                complete_startup();
+            } else {
+                app_handle.once(launch_trace::FIRST_DOM_PAINT_EVENT, move |_| {
+                    complete_startup()
+                });
+            }
 
             Ok(())
         })

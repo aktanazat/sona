@@ -35,7 +35,7 @@ use std::time::Instant;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIcon;
-use tauri::{AppHandle, Manager, Theme};
+use tauri::{AppHandle, Emitter, Manager, Theme};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,8 +468,28 @@ pub fn get_icon_path(theme: AppTheme, state: TrayIconState, warning: bool) -> &'
     }
 }
 
+/// Emitted whenever the dictation activity changes. The native shell has no
+/// tray to read, and the overlay states depend on the overlay style, so this
+/// is the one style-independent record of what the pipeline is doing.
+pub const DICTATION_ACTIVITY_EVENT: &str = "dictation-activity";
+
+#[derive(Clone, Serialize)]
+struct DictationActivity {
+    state: &'static str,
+}
+
 /// Sets the current dictation activity shown by the tray.
 pub fn set_tray_state(app: &AppHandle, state: TrayIconState) {
+    let activity = DictationActivity {
+        state: match state {
+            TrayIconState::Idle => "idle",
+            TrayIconState::Recording => "recording",
+            TrayIconState::Transcribing => "transcribing",
+        },
+    };
+    if let Err(error) = app.emit(DICTATION_ACTIVITY_EVENT, activity) {
+        error!("Failed to emit {DICTATION_ACTIVITY_EVENT}: {error}");
+    }
     sync_tray_with(app, |inner| inner.icon_state = state);
 }
 
