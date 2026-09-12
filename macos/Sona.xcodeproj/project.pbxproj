@@ -130,12 +130,11 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/SonaCore.app/Contents/MacOS/sona-core",
-				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/SonaCore.app/Contents/Info.plist",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/SonaCore.app",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The Rust core is built by cargo in src-tauri. It ships as its own helper\n# bundle with its own identifier: a bare executable inside Sona.app registers\n# with LaunchServices as a second \"Sona\", and a quit or open event addressed\n# to the app can then land on the core instead of the shell. Without a built\n# core the app still builds and Core.swift reads SONA_CORE from the environment.\n# The script sandbox admits only declared output files, so the two files are\n# declared and the old binary is unlinked rather than the tree removed. A fresh\n# inode also keeps the kernel's signature cache from killing the next spawn.\nset -eu\ntarget=\"$SRCROOT/../src-tauri/target\"\nhelper=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/SonaCore.app\"\nfor core in \"$target/release/sona\" \"$target/debug/sona\"; do\n  if [ -x \"$core\" ]; then\n    rm -f \"$helper/Contents/MacOS/sona-core\"\n    mkdir -p \"$helper/Contents/MacOS\"\n    cp \"$core\" \"$helper/Contents/MacOS/sona-core\"\n    cat > \"$helper/Contents/Info.plist\" <<PLIST\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleExecutable</key>\n\t<string>sona-core</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.aktanazat.sona.core</string>\n\t<key>CFBundleName</key>\n\t<string>Sona Core</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>$MARKETING_VERSION</string>\n\t<key>CFBundleVersion</key>\n\t<string>$CURRENT_PROJECT_VERSION</string>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>$MACOSX_DEPLOYMENT_TARGET</string>\n\t<key>LSUIElement</key>\n\t<true/>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>Sona hears you only while a recording is on.</string>\n</dict>\n</plist>\nPLIST\n    exit 0\n  fi\ndone\necho \"warning: no sona core under $target; the app will need SONA_CORE\"\n";
+			shellScript = "# The Rust core is built by cargo in src-tauri. It ships as its own helper\n# bundle with its own identifier: a bare executable inside Sona.app registers\n# with LaunchServices as a second \"Sona\", and a quit or open event addressed\n# to the app can then land on the core instead of the shell. Without a built\n# core the app still builds and Core.swift reads SONA_CORE from the environment.\n# The core reads its resources (the VAD model, sounds, prompts) from\n# Contents/Resources of the bundle it runs in, so cargo's resources tree is\n# copied there. The old tree is removed first: overwriting the binary in place\n# leaves the kernel's signature cache stale, and the next spawn dies with SIGKILL.\n# ENABLE_USER_SCRIPT_SANDBOXING is off for this target: the sandbox only lets a\n# script write the declared output paths themselves, not the files under a\n# declared directory, and the resources tree is too large to declare file by file.\nset -eu\ntarget=\"$SRCROOT/../src-tauri/target\"\nhelper=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/SonaCore.app\"\nfor profile in release debug; do\n  core=\"$target/$profile/sona\"\n  if [ -x \"$core\" ]; then\n    rm -rf \"$helper\"\n    mkdir -p \"$helper/Contents/MacOS\" \"$helper/Contents/Resources\"\n    cp \"$core\" \"$helper/Contents/MacOS/sona-core\"\n    cp -R \"$target/$profile/resources\" \"$helper/Contents/Resources/resources\"\n    cat > \"$helper/Contents/Info.plist\" <<PLIST\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleExecutable</key>\n\t<string>sona-core</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.aktanazat.sona.core</string>\n\t<key>CFBundleName</key>\n\t<string>Sona Core</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>$MARKETING_VERSION</string>\n\t<key>CFBundleVersion</key>\n\t<string>$CURRENT_PROJECT_VERSION</string>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>$MACOSX_DEPLOYMENT_TARGET</string>\n\t<key>LSUIElement</key>\n\t<true/>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>Sona hears you only while a recording is on.</string>\n</dict>\n</plist>\nPLIST\n    exit 0\n  fi\ndone\necho \"warning: no sona core under $target; the app will need SONA_CORE\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -159,7 +158,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -184,7 +183,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				SDKROOT = macosx;
