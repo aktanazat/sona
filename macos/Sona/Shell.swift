@@ -3,7 +3,6 @@ import SwiftUI
 /// The main window: the sidebar on the left, one page on the right.
 struct Shell: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack {
@@ -18,9 +17,6 @@ struct Shell: View {
         }
         .background(Theme.page.ignoresSafeArea())
         .frame(minWidth: 1040, minHeight: 700)
-        .onAppear {
-            openWindow(id: "pill")
-        }
         .sheet(isPresented: Bindable(model).chatShown) {
             ChatSheet()
         }

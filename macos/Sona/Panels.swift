@@ -22,6 +22,51 @@ struct HUDPill: View {
     }
 }
 
+/// The window the pill lives in. It exists only while a recording is on, at the
+/// bottom of the screen the pointer is on, above other windows and on every
+/// space. A non-activating panel: showing it never takes the keyboard away from
+/// the app the words are going into, which a SwiftUI `Window` scene would.
+@MainActor
+final class PillPanel {
+    private var panel: NSPanel?
+
+    func show(_ model: AppModel) {
+        let panel = panel ?? make(model)
+        self.panel = panel
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(
+                x: visible.midX - panel.frame.width / 2,
+                y: visible.minY + 24))
+        }
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        panel?.orderOut(nil)
+    }
+
+    private func make(_ model: AppModel) -> NSPanel {
+        let panel = NSPanel(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true)
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        let content = NSHostingView(rootView: HUDPill().environment(model))
+        content.sizingOptions = .intrinsicContentSize
+        panel.contentView = content
+        panel.setContentSize(content.fittingSize)
+        return panel
+    }
+}
+
 /// Asked once, before a word of a call is kept.
 struct ConsentPanel: View {
     @Environment(AppModel.self) private var model

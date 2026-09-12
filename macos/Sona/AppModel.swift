@@ -60,6 +60,7 @@ final class AppModel {
     /// core decides; the shell only asks and follows the events.
     private(set) var capture: CaptureState = .idle
     let meter = LevelMeter()
+    @ObservationIgnored private let pill = PillPanel()
 
     var selectedMeeting: Meeting?
     var selectedPerson: Person?
@@ -133,8 +134,12 @@ final class AppModel {
         capture = state
         if case .recording = state {
             meter.start()
+            if hudPill {
+                pill.show(self)
+            }
         } else {
             meter.stop()
+            pill.hide()
         }
     }
 

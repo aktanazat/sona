@@ -16,16 +16,6 @@ struct SonaApp: App {
             CommandGroup(replacing: .newItem) {}
         }
 
-        Window("Pill", id: "pill") {
-            HUDPill().environment(model)
-        }
-        .windowStyle(.plain)
-        .windowLevel(.floating)
-        .windowResizability(.contentSize)
-        .defaultPosition(.bottom)
-        .windowBackgroundDragBehavior(.enabled)
-        .restorationBehavior(.disabled)
-
         Window("Consent", id: "consent") {
             ConsentPanel().environment(model)
         }
