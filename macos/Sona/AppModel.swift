@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import ServiceManagement
 
 /// The four places in the sidebar, in the order it shows them.
 enum Place: Int, CaseIterable, Identifiable {
@@ -87,7 +88,7 @@ final class AppModel {
 
     // Settings values. The real ones the core carries arrive in `apply`;
     // the rest give the toggles something honest to show.
-    var launchAtLogin = true
+    private(set) var launchAtLogin = false
     var showInMenuBar = true
     var hudPill = true
     var soundOnStart = false
@@ -204,6 +205,17 @@ final class AppModel {
         call { try await self.core.request("rescan_local_models") }
     }
 
+    /// Persists the preference in the core and registers or unregisters this
+    /// bundle. The shell is the app the user opens, so the shell is the login
+    /// item; a core the shell spawned leaves the login item alone.
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLogin = enabled
+        call {
+            try await self.core.request("change_autostart_setting", ["enabled": enabled])
+            try await LoginItem.apply(enabled)
+        }
+    }
+
     // MARK: Core
 
     /// Spawns the core, then fetches each part on its own: history stays
@@ -247,6 +259,8 @@ final class AppModel {
             pushToTalk = binding.currentBinding
             toggleShortcut = binding.currentBinding
         }
+        launchAtLogin = settings.autostartEnabled
+        try await LoginItem.apply(launchAtLogin)
     }
 
     private func loadHistory() async throws {
@@ -319,5 +333,24 @@ final class AppModel {
         } catch {
             coreError = "\(name): \(error.localizedDescription)"
         }
+    }
+}
+
+/// This bundle's own login item, kept equal to the core's `autostart_enabled`.
+enum LoginItem {
+    /// The status read is a round-trip to the background-task service, about
+    /// two seconds on a cold launch, so it runs off the main actor.
+    static func apply(_ enabled: Bool) async throws {
+        try await Task.detached(priority: .utility) {
+            let service = SMAppService.mainApp
+            switch (enabled, service.status) {
+            case (true, .enabled), (false, .notRegistered), (false, .notFound):
+                return
+            case (true, _):
+                try service.register()
+            case (false, _):
+                try service.unregister()
+            }
+        }.value
     }
 }

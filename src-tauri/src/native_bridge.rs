@@ -98,6 +98,11 @@ struct ModelParams {
     model_id: String,
 }
 
+#[derive(Deserialize)]
+struct EnabledParams {
+    enabled: bool,
+}
+
 #[derive(Serialize)]
 struct ModelLoad {
     is_loaded: bool,
@@ -289,6 +294,11 @@ async fn on_main_thread<T: Send + 'static>(
 async fn call(app: &AppHandle, method: &str, params: Option<&RawValue>) -> Result<String, String> {
     match method {
         "get_app_settings" => encode(&commands::get_app_settings(app.clone())?),
+        "change_autostart_setting" => {
+            let setting: EnabledParams = parse(params)?;
+            crate::shortcut::change_autostart_setting(app.clone(), setting.enabled)?;
+            encode(&())
+        }
         "get_history_entries" => {
             let page: PageParams = parse(params)?;
             let history = app.state::<Arc<HistoryManager>>();

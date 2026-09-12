@@ -10,7 +10,7 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 /// Serializes login-item application so a status read is never separated from
@@ -70,8 +70,16 @@ pub fn reconcile_autostart(app: &AppHandle) {
 /// Portable mode already refuses host credential storage for the same reason
 /// ([`crate::secrets::SecretManager::native_for_service`]); a login item is
 /// host state of the same class.
-fn owns_host_login_item(portable: bool) -> bool {
-    !portable
+///
+/// A core the native shell spawned does not either. `mainAppService()` is the
+/// bundle of the calling process, and inside the shell that is the helper
+/// `SonaCore.app`: registering it lists a second "Sona" under Login Items and
+/// starts a bare core, webview and all, at the next login. Measured
+/// 2026-09-12: the dev shell's helper sat in Login Items as "sona" at
+/// `Sona.app/Contents/Helpers/SonaCore.app`. The shell registers its own
+/// bundle from the same persisted preference.
+fn owns_host_login_item(portable: bool, native_shell: bool) -> bool {
+    !portable && !native_shell
 }
 /// Whether macOS must keep the legacy plugin owner for this OS release.
 ///
@@ -103,10 +111,11 @@ pub(crate) fn should_install_autostart_plugin() -> bool {
 
 /// The platform work itself. Callers hold [`APPLYING`].
 fn apply_locked(app: &AppHandle, enabled: bool) {
-    if !owns_host_login_item(crate::portable::is_portable()) {
+    let portable = crate::portable::is_portable();
+    let native_shell = app.state::<crate::cli::CliArgs>().native_socket.is_some();
+    if !owns_host_login_item(portable, native_shell) {
         log::info!(
-            "Portable mode: leaving the login item and launch agent alone (autostart_enabled={})",
-            enabled
+            "Leaving the login item and launch agent alone (autostart_enabled={enabled}, portable={portable}, native_shell={native_shell})"
         );
         return;
     }
@@ -360,24 +369,29 @@ mod linux {
 mod tests {
     use super::*;
 
-    /// The whole point of the guard is the *portable* case, and the installed
-    /// case is what makes "refused" observable rather than "always refuses":
-    /// a guard that returned `false` unconditionally would disable
-    /// launch-at-login for every user, which no test that only checked the
-    /// portable branch could tell apart from correct behaviour.
+    /// The whole point of the guard is the *portable* and *native shell* cases,
+    /// and the installed case is what makes "refused" observable rather than
+    /// "always refuses": a guard that returned `false` unconditionally would
+    /// disable launch-at-login for every user, which no test that only checked
+    /// the refusing branches could tell apart from correct behaviour.
     ///
     /// The requested preference is deliberately not an input. Portable refuses
     /// `enabled: true` as well — registering would mint a login item pointing
     /// at the portable bundle's own path, which is host state written by a copy
-    /// that may live on removable media.
+    /// that may live on removable media. A native-shell core refuses it too:
+    /// its own bundle is the helper, never the app the user opens.
     #[test]
-    fn only_an_installed_copy_owns_the_host_login_item() {
+    fn only_an_installed_standalone_copy_owns_the_host_login_item() {
         assert!(
-            !owns_host_login_item(true),
+            !owns_host_login_item(true, false),
             "a portable copy applied its own preference to the installed app's login item"
         );
         assert!(
-            owns_host_login_item(false),
+            !owns_host_login_item(false, true),
+            "a native-shell core registered its helper bundle as the login item"
+        );
+        assert!(
+            owns_host_login_item(false, false),
             "an installed copy refused to manage its own login item"
         );
     }

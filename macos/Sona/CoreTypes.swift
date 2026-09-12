@@ -61,6 +61,7 @@ struct CoreSettings: Decodable {
     let selectedMicrophone: String?
     let selectedLanguage: String
     let showTrayIcon: Bool
+    let autostartEnabled: Bool
     let bindings: [String: ShortcutBinding]
 }
 

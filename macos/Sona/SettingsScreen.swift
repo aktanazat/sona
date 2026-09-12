@@ -63,7 +63,7 @@ struct SettingsScreen: View {
                 ChoiceRow(title: "Microphone", value: $model.inputDevice, choices: ["MacBook Pro Microphone", "AirPods Pro", "Scarlett 2i2"])
                 ChoiceRow(title: "Language", value: $model.language, choices: ["English", "German", "Spanish", "French", "Japanese"])
                 ToggleRow(title: "Sounds", detail: "A short tone when recording starts and stops.", isOn: $model.soundOnStart)
-                ToggleRow(title: "Launch at login", isOn: $model.launchAtLogin)
+                ToggleRow(title: "Launch at login", isOn: Binding(get: { model.launchAtLogin }, set: model.setLaunchAtLogin))
                 ToggleRow(title: "Show in the menu bar", detail: "The dot shows what the microphone is doing.", isOn: $model.showInMenuBar)
                 ToggleRow(title: "Floating pill while recording", detail: "The sound waves, above other windows, while you talk.", isOn: $model.hudPill)
                 ToggleRow(title: "Notice when I join a meeting", detail: "Zoom, Meet, Teams and FaceTime. Sona asks before it records.", isOn: $model.detectMeetings)
