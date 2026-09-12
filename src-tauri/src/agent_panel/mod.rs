@@ -30,7 +30,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_specta::Event as _;
 
 pub use history::AgentChatConversationSummaryV1;
@@ -46,10 +46,6 @@ pub use wire::{
     AgentPanelTurnStateV1, AgentPanelTurnStatusV1, AgentPanelUndoChangeRequestV1,
 };
 
-/// The one window there is. Every command on this surface is called from the
-/// main webview now that the chat is a sheet inside it; the companion window
-/// and its label are gone.
-const MAIN_WINDOW_LABEL: &str = "main";
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const IDLE_POLL_AFTER: Duration = Duration::from_secs(10);
@@ -2543,77 +2539,47 @@ fn map_config_error(error: ConfigError) -> AgentPanelCommandErrorV1 {
     }
 }
 
-/// Whether a webview label may reach this surface.
-///
-/// One label, because there is one window. Every command below used to be
-/// split between the main window and the companion panel's own webview; the
-/// panel is a sheet inside the main window now, so the panel label is not a
-/// narrower caller than main — it does not exist. Kept as a predicate over the
-/// label rather than inlined into the gate so the rule is checkable without a
-/// live webview.
-fn is_allowed_caller(label: &str) -> bool {
-    label == MAIN_WINDOW_LABEL
-}
-
-fn require_caller(caller: &WebviewWindow) -> Result<(), AgentPanelCommandErrorV1> {
-    if is_allowed_caller(caller.label()) {
-        Ok(())
-    } else {
-        Err(AgentPanelCommandErrorV1::UnauthorizedWindow)
-    }
-}
-
 #[tauri::command]
 #[specta::specta]
 pub fn agent_panel_status(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     Ok(manager.status())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_panel_send_turn(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     request: AgentPanelSendTurnRequestV1,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.send_turn(request).await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_panel_cancel_turn(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     request: AgentPanelCancelTurnRequestV1,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.cancel_turn(request).await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn agent_panel_apply_change(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     request: AgentPanelApplyChangeRequestV1,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.apply_change(request)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn agent_panel_undo_change(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     request: AgentPanelUndoChangeRequestV1,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.undo_change(request)
 }
 
@@ -2623,12 +2589,10 @@ pub fn agent_panel_undo_change(
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_panel_apply_action(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     meetings: State<'_, Arc<MeetingSessionManager>>,
     request: AgentPanelActionRequestV1,
 ) -> Result<AgentPanelTurnStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager
         .apply_action(meetings.inner().as_ref(), request)
         .await
@@ -2638,12 +2602,10 @@ pub async fn agent_panel_apply_action(
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_panel_dismiss_action(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     meetings: State<'_, Arc<MeetingSessionManager>>,
     request: AgentPanelActionRequestV1,
 ) -> Result<AgentPanelTurnStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager
         .dismiss_action(meetings.inner().as_ref(), request)
         .await
@@ -2653,31 +2615,25 @@ pub async fn agent_panel_dismiss_action(
 #[tauri::command]
 #[specta::specta]
 pub fn agent_chat_history_list(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
 ) -> Result<Vec<AgentChatConversationSummaryV1>, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     Ok(manager.history_list())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn agent_chat_open(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
     conversation_id: String,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.open_conversation(&conversation_id)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn agent_chat_new(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.new_conversation()
 }
 
@@ -2692,10 +2648,8 @@ pub(crate) async fn cli_public_identity(
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_panel_public_identity(
-    caller: WebviewWindow,
     manager: State<'_, AgentPanelManager>,
 ) -> Result<AgentPanelPublicIdentityV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     manager.public_identity().await
 }
 
@@ -2762,11 +2716,9 @@ fn pairing_receipt(
 #[tauri::command]
 #[specta::specta]
 pub fn set_agent_panel_pairing(
-    caller: WebviewWindow,
     app: AppHandle,
     request: AgentPanelPairingRequestV1,
 ) -> Result<AgentPanelPairingReceiptV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     let requested_at_utc_ms = chrono::Utc::now().timestamp_millis();
     let pairing = validate_pairing(
         &request.relay_url,
@@ -2795,10 +2747,8 @@ pub fn set_agent_panel_pairing(
 #[tauri::command]
 #[specta::specta]
 pub fn clear_agent_panel_pairing(
-    caller: WebviewWindow,
     app: AppHandle,
 ) -> Result<AgentPanelPairingReceiptV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     let requested_at_utc_ms = chrono::Utc::now().timestamp_millis();
     crate::settings::update_settings(&app, |settings| {
         settings.agent_panel_relay_url = None;
@@ -2816,11 +2766,9 @@ pub fn clear_agent_panel_pairing(
 #[tauri::command]
 #[specta::specta]
 pub async fn agent_panel_test_connection(
-    caller: WebviewWindow,
     app: AppHandle,
     manager: State<'_, AgentPanelManager>,
 ) -> Result<AgentPanelPairingReceiptV1, AgentPanelCommandErrorV1> {
-    require_caller(&caller)?;
     let requested_at_utc_ms = chrono::Utc::now().timestamp_millis();
     manager.test_connection().await?;
     crate::settings::set_agent_panel_last_successful_connection_at(&app, requested_at_utc_ms)
@@ -3229,21 +3177,6 @@ mod tests {
         assert_eq!(tool_step_id(1, 0), "tool-1-0");
         assert_ne!(tool_step_id(1, 0), tool_step_id(2, 0));
         assert_ne!(tool_step_id(1, 0), tool_step_id(1, 1));
-    }
-
-    /// The gate every command on this surface goes through.
-    ///
-    /// It widened when the chat moved inside the main window: the commands
-    /// that drive a turn used to be reachable only from the companion
-    /// webview, and are now reachable only from main. What must not widen with
-    /// it is everything else — the overlay, the consent window, and the label
-    /// the deleted panel used to answer to.
-    #[test]
-    fn only_the_main_window_reaches_the_agent_commands() {
-        assert!(is_allowed_caller("main"));
-        for label in ["agent-panel", "recording_overlay", "consent", ""] {
-            assert!(!is_allowed_caller(label), "{label} is not the main window");
-        }
     }
 
     fn reported(id: &str, state: SonaAgentStepStateV1) -> SonaAgentStepV1 {
