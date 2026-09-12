@@ -20,14 +20,23 @@ struct Shell: View {
         .sheet(isPresented: Bindable(model).chatShown) {
             ChatSheet()
         }
-        .background(
-            Group {
-                Button("") { model.paletteShown.toggle() }.keyboardShortcut("k", modifiers: .command)
-                Button("") { model.toggleCapture() }.keyboardShortcut("r", modifiers: .command)
-                Button("") { model.showingSettings = true }.keyboardShortcut(",", modifiers: .command)
+        .sheet(isPresented: Binding(
+            get: { model.shortcutRecorder.isPresented },
+            set: { if !$0 { model.cancelShortcutCapture() } }
+        )) {
+            ShortcutRecorderSheet()
+                .environment(model)
+        }
+        .background {
+            if !model.shortcutRecorder.isPresented {
+                Group {
+                    Button("") { model.paletteShown.toggle() }.keyboardShortcut("k", modifiers: .command)
+                    Button("") { model.toggleCapture() }.keyboardShortcut("r", modifiers: .command)
+                    Button("") { model.showingSettings = true }.keyboardShortcut(",", modifiers: .command)
+                }
+                .hidden()
             }
-            .hidden()
-        )
+        }
     }
 
     @ViewBuilder

@@ -11,6 +11,7 @@ enum CoreEvent {
     static let historyStorage = "history-storage-changed"
     static let streamText = "stream-text-event"
     static let streamPhase = "stream-phase-event"
+    static let handyKeys = "handy-keys-event"
     static let modelStateChanged = "model-state-changed"
     static let modelsUpdated = "models-updated"
     static let downloadProgress = "model-download-progress"
@@ -53,6 +54,19 @@ struct ModelInfo: Decodable {
 
 struct ShortcutBinding: Decodable {
     let currentBinding: String
+}
+
+struct BindingChange: Decodable {
+    let success: Bool
+    let binding: ShortcutBinding?
+    let error: String?
+}
+
+struct HandyKeysEvent: Decodable {
+    let modifiers: [String]
+    let key: String?
+    let isKeyDown: Bool
+    let hotkeyString: String
 }
 
 /// The part of the core's settings the shell shows.

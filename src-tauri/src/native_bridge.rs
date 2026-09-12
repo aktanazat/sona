@@ -31,12 +31,13 @@ use crate::tray::DICTATION_ACTIVITY_EVENT;
 
 /// What the shell hears. The specta events keep the names the webview
 /// bindings export; the plain strings are emitted by hand in the managers.
-const FORWARDED_EVENTS: [&str; 12] = [
+const FORWARDED_EVENTS: [&str; 13] = [
     DICTATION_ACTIVITY_EVENT,
     HistoryUpdatePayload::NAME,
     HISTORY_STORAGE_EVENT,
     StreamTextEvent::NAME,
     StreamPhaseEvent::NAME,
+    "handy-keys-event",
     "model-state-changed",
     "models-updated",
     "model-download-progress",
@@ -101,6 +102,17 @@ struct ModelParams {
 #[derive(Deserialize)]
 struct EnabledParams {
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct BindingIdParams {
+    binding_id: String,
+}
+
+#[derive(Deserialize)]
+struct ChangeBindingParams {
+    id: String,
+    binding: String,
 }
 
 #[derive(Serialize)]
@@ -298,6 +310,32 @@ async fn call(app: &AppHandle, method: &str, params: Option<&RawValue>) -> Resul
             let setting: EnabledParams = parse(params)?;
             crate::shortcut::change_autostart_setting(app.clone(), setting.enabled)?;
             encode(&())
+        }
+        "start_handy_keys_recording" => {
+            let recording: BindingIdParams = parse(params)?;
+            let app = app.clone();
+            on_main_thread(&app.clone(), move || {
+                crate::shortcut::handy_keys::start_handy_keys_recording(app, recording.binding_id)
+            })
+            .await??;
+            encode(&())
+        }
+        "stop_handy_keys_recording" => {
+            let app = app.clone();
+            on_main_thread(&app.clone(), move || {
+                crate::shortcut::handy_keys::stop_handy_keys_recording(app)
+            })
+            .await??;
+            encode(&())
+        }
+        "change_binding" => {
+            let change: ChangeBindingParams = parse(params)?;
+            let app = app.clone();
+            let response = on_main_thread(&app.clone(), move || {
+                crate::shortcut::change_binding(app, change.id, change.binding)
+            })
+            .await??;
+            encode(&response)
         }
         "get_history_entries" => {
             let page: PageParams = parse(params)?;

@@ -67,6 +67,69 @@ final class PillPanel {
     }
 }
 
+struct ShortcutRecorderSheet: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Set recording shortcut")
+                .font(TypeScale.title)
+                .foregroundStyle(Theme.ink)
+            capture
+                .frame(maxWidth: .infinity, minHeight: 88)
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusCard)
+                        .strokeBorder(Theme.border, lineWidth: 1))
+            Text(instruction)
+                .metaText()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 10) {
+                Button("Cancel", action: model.cancelShortcutCapture)
+                    .buttonStyle(.secondary)
+                    .disabled(model.shortcutRecorder.isSaving)
+                Spacer()
+                if model.shortcutRecorder.canConfirm {
+                    Button("Use shortcut", action: model.confirmShortcutCapture)
+                        .buttonStyle(.primary)
+                } else if model.shortcutRecorder.isSaving {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+        .padding(28)
+        .frame(width: 440)
+        .background(Theme.page)
+        .interactiveDismissDisabled(model.shortcutRecorder.isSaving)
+    }
+
+    @ViewBuilder
+    private var capture: some View {
+        if let chord = model.shortcutRecorder.chord {
+            Shortcut(chord)
+        } else if model.shortcutRecorder == .starting {
+            ProgressView()
+                .controlSize(.small)
+        } else {
+            Text("Hold a new shortcut")
+                .font(TypeScale.headline)
+                .foregroundStyle(Theme.ink)
+        }
+    }
+
+    private var instruction: String {
+        switch model.shortcutRecorder {
+        case .closed, .starting: "Opening the key recorder."
+        case let .listening(candidate, _):
+            candidate.isEmpty ? "Hold the new shortcut." : "Release the keys to capture it."
+        case .stopping: "Checking the shortcut."
+        case let .ready(_, error): error ?? "Use this shortcut, or cancel to keep the current one."
+        case .saving: "Saving the shortcut."
+        }
+    }
+}
+
 /// Asked once, before a word of a call is kept.
 struct ConsentPanel: View {
     @Environment(AppModel.self) private var model

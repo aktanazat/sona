@@ -68,7 +68,13 @@ struct CaptureScreen: View {
                     }
                 }
                 HStack(spacing: 8) {
-                    Shortcut(model.pushToTalk)
+                    Button(action: model.beginShortcutCapture) {
+                        Shortcut(model.pushToTalk)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.capture != .idle)
+                    .accessibilityLabel("Change recording shortcut")
+                    .help("Change recording shortcut")
                     Text(hint).bodyText(15, Theme.inkSecondary)
                 }
                 if !model.liveText.isEmpty, model.capture != .idle {

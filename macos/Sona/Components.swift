@@ -140,17 +140,42 @@ struct KeyCap: View {
     }
 }
 
-/// A shortcut drawn as its key caps: "⌥ Space" becomes two caps.
+/// A backend shortcut drawn as macOS key caps: "option+space" becomes "⌥ Space".
 struct Shortcut: View {
     let keys: [String]
 
     init(_ shortcut: String) {
-        keys = shortcut.split(separator: " ").map(String.init)
+        let separator: (Character) -> Bool = shortcut.contains("+")
+            ? { $0 == "+" }
+            : { $0.isWhitespace }
+        keys = shortcut.split(whereSeparator: separator).map { Self.label(String($0)) }
     }
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(keys, id: \.self) { KeyCap($0) }
+            ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
+                KeyCap(key)
+            }
+        }
+    }
+
+    private static func label(_ key: String) -> String {
+        switch key.lowercased() {
+        case "option", "alt": "⌥"
+        case "shift": "⇧"
+        case "control", "ctrl": "⌃"
+        case "command", "cmd", "meta", "super": "⌘"
+        case "space": "Space"
+        case "return", "enter": "↩"
+        case "tab": "⇥"
+        case "escape", "esc": "Esc"
+        case "backspace": "⌫"
+        case "delete": "⌦"
+        case "up", "arrowup": "↑"
+        case "down", "arrowdown": "↓"
+        case "left", "arrowleft": "←"
+        case "right", "arrowright": "→"
+        default: key.count == 1 ? key.uppercased() : key.capitalized
         }
     }
 }

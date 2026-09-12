@@ -48,6 +48,33 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
     }
 }
 
+enum ShortcutRecorderState: Equatable {
+    case closed
+    case starting
+    case listening(candidate: String, hasMainKey: Bool)
+    case stopping(String)
+    case ready(String, error: String?)
+    case saving(String)
+
+    var isPresented: Bool { self != .closed }
+
+    var chord: String? {
+        switch self {
+        case let .listening(candidate, _): candidate.isEmpty ? nil : candidate
+        case let .stopping(chord), let .ready(chord, _), let .saving(chord): chord
+        case .closed, .starting: nil
+        }
+    }
+
+    var canConfirm: Bool {
+        if case .ready = self { true } else { false }
+    }
+
+    var isSaving: Bool {
+        if case .saving = self { true } else { false }
+    }
+}
+
 /// Everything the windows share. One instance, on the main actor, handed to every
 /// scene through the environment. The core is spawned here and every fact the
 /// screens show about dictation comes through it.
@@ -85,6 +112,7 @@ final class AppModel {
     private(set) var liveText = ""
     /// The last thing the core could not do, shown until the next success.
     private(set) var coreError: String?
+    private(set) var shortcutRecorder: ShortcutRecorderState = .closed
 
     // Settings values. The real ones the core carries arrive in `apply`;
     // the rest give the toggles something honest to show.
@@ -129,6 +157,84 @@ final class AppModel {
 
     func cancelCapture() {
         call { try await self.core.request("cancel_operation") }
+    }
+
+    func beginShortcutCapture() {
+        guard capture == .idle, shortcutRecorder == .closed else { return }
+        shortcutRecorder = .starting
+        Task {
+            do {
+                try await core.request(
+                    "start_handy_keys_recording", ["binding_id": "transcribe"])
+                if shortcutRecorder == .starting {
+                    shortcutRecorder = .listening(candidate: "", hasMainKey: false)
+                    coreError = nil
+                } else {
+                    try? await core.request("stop_handy_keys_recording")
+                }
+            } catch {
+                if shortcutRecorder == .starting {
+                    shortcutRecorder = .closed
+                    coreError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func cancelShortcutCapture() {
+        switch shortcutRecorder {
+        case .closed:
+            return
+        case .starting, .ready:
+            shortcutRecorder = .closed
+        case .listening:
+            shortcutRecorder = .closed
+            call { try await self.core.request("stop_handy_keys_recording") }
+        case .stopping:
+            shortcutRecorder = .closed
+        case .saving:
+            return
+        }
+    }
+
+    func confirmShortcutCapture() {
+        guard case let .ready(chord, _) = shortcutRecorder else { return }
+        shortcutRecorder = .saving(chord)
+        Task {
+            do {
+                let response: BindingChange = try await core.request(
+                    "change_binding", ["id": "transcribe", "binding": chord])
+                guard response.success, let binding = response.binding else {
+                    throw CoreError.remote(response.error ?? "The core did not accept that shortcut.")
+                }
+                pushToTalk = binding.currentBinding
+                toggleShortcut = binding.currentBinding
+                shortcutRecorder = .closed
+                coreError = nil
+            } catch {
+                shortcutRecorder = .ready(chord, error: error.localizedDescription)
+                coreError = error.localizedDescription
+            }
+        }
+    }
+
+    private func finishShortcutCapture(_ chord: String) {
+        guard !chord.isEmpty else { return }
+        shortcutRecorder = .stopping(chord)
+        Task {
+            do {
+                try await core.request("stop_handy_keys_recording")
+                if shortcutRecorder == .stopping(chord) {
+                    shortcutRecorder = .ready(chord, error: nil)
+                    coreError = nil
+                }
+            } catch {
+                if shortcutRecorder == .stopping(chord) {
+                    shortcutRecorder = .closed
+                    coreError = error.localizedDescription
+                }
+            }
+        }
     }
 
     private func setCapture(_ state: CaptureState) {
@@ -289,6 +395,24 @@ final class AppModel {
                     setCapture(.working("transcribing"))
                 default:
                     setCapture(.idle)
+                }
+            case CoreEvent.handyKeys:
+                let event: HandyKeysEvent = try Core.payload(line)
+                guard case let .listening(candidate, hasMainKey) = shortcutRecorder else { break }
+                if event.isKeyDown, !event.hotkeyString.isEmpty {
+                    if event.key != nil {
+                        shortcutRecorder = .listening(
+                            candidate: event.hotkeyString, hasMainKey: true)
+                    } else if !hasMainKey {
+                        shortcutRecorder = .listening(
+                            candidate: event.hotkeyString, hasMainKey: false)
+                    }
+                } else if !event.isKeyDown, event.key != nil {
+                    let chord = hasMainKey ? candidate : event.hotkeyString
+                    finishShortcutCapture(chord)
+                } else if !event.isKeyDown, event.modifiers.isEmpty,
+                          !hasMainKey, !candidate.isEmpty {
+                    finishShortcutCapture(candidate)
                 }
             case CoreEvent.streamText:
                 let text: StreamText = try Core.payload(line)
