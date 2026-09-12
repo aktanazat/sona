@@ -154,8 +154,8 @@ struct CaptureClock: View {
             TimelineView(.periodic(from: since, by: 1)) { context in
                 Text("Recording \(context.date.timeIntervalSince(since).clock)")
             }
-        case let .paused(elapsed):
-            Text("Paused \(elapsed.clock)")
+        case let .working(kind):
+            Text(kind.capitalized)
         }
     }
 }

@@ -42,7 +42,7 @@ struct ConsentPanel: View {
             }
             HStack(spacing: 10) {
                 Button {
-                    model.setCapture(.recording(since: .now))
+                    model.toggleCapture()
                 } label: {
                     Label("Record", systemImage: "video")
                 }

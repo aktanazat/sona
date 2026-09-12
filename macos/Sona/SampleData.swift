@@ -1,19 +1,34 @@
 import Foundation
 
-/// What the microphone is doing.
+/// What the microphone is doing. `working` names what the core is doing to
+/// the words after the microphone closed: "transcribing" or "polishing".
 enum CaptureState: Equatable {
     case idle
     case recording(since: Date)
-    case paused(elapsed: TimeInterval)
+    case working(String)
 }
 
+/// One dictation from the core's history.
 struct Transcription: Identifiable, Hashable {
-    let id: Int
+    let id: Int64
     let date: Date
-    let duration: TimeInterval
-    let mode: String
-    let app: String
+    let title: String
+    /// The words after the mode shaped them, or as heard when no mode ran.
     let text: String
+    /// The words as heard.
+    let rawText: String
+    var saved: Bool
+
+    init(_ entry: HistoryEntry) {
+        id = entry.id
+        date = Date(timeIntervalSince1970: TimeInterval(entry.timestamp))
+        title = entry.title
+        text = entry.postProcessedText ?? entry.transcriptionText
+        rawText = entry.transcriptionText
+        saved = entry.saved
+    }
+
+    var words: Int { text.split(separator: " ").count }
 }
 
 struct ActionItem: Identifiable, Hashable {
@@ -47,6 +62,7 @@ struct Person: Identifiable, Hashable {
     let context: [String]
 }
 
+/// One speech model the core knows about, on disk or in its catalog.
 struct Model: Identifiable, Hashable {
     enum Status: Hashable {
         case active
@@ -55,11 +71,36 @@ struct Model: Identifiable, Hashable {
         case available
     }
 
-    let id: Int
+    let id: String
     let name: String
-    let family: String
-    let size: String
-    let status: Status
+    /// What the catalog says, then the size: "Fast, accurate live preview · 620 MB".
+    let meta: String
+    var status: Status
+
+    init(_ info: ModelInfo, current: String) {
+        id = info.id
+        name = info.name
+        let size = Self.bytes(info.sizeMb * 1_000_000)
+        meta = info.description.isEmpty ? size : "\(info.description) · \(size)"
+        if info.isDownloading {
+            let fraction = info.sizeMb == 0 ? 0 : Double(info.partialSize) / Double(info.sizeMb * 1_000_000)
+            status = .downloading(fraction: min(fraction, 1), downloaded: "\(Self.bytes(info.partialSize)) of \(size)")
+        } else if info.isDownloaded {
+            status = info.id == current ? .active : .downloaded
+        } else {
+            status = .available
+        }
+    }
+
+    static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    static func bytes(_ count: UInt64) -> String {
+        byteFormatter.string(fromByteCount: Int64(count))
+    }
 }
 
 struct Provider: Identifiable, Hashable {
@@ -137,8 +178,10 @@ struct ChatTurn: Identifiable, Hashable {
     let text: String
 }
 
-/// Fixtures for the design pass. Every screen renders from here until the Rust
-/// core is bridged; nothing in this file is reachable from a real session.
+/// Fixtures for the design pass. Meetings, people, modes, prompts, workflows,
+/// agents, vocabulary, the palette and the chat still render from here; the
+/// core does not carry them over the socket yet. Dictations, models, stats
+/// and the microphone state come from the core.
 enum SampleData {
     static let calendar = Calendar.current
     static let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 12, hour: 14, minute: 20))!
@@ -147,27 +190,6 @@ enum SampleData {
         let base = calendar.date(byAdding: .day, value: -daysAgo, to: now)!
         return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: base)!
     }
-
-    static let transcriptions: [Transcription] = [
-        Transcription(id: 1, date: day(0, 13, 48), duration: 41, mode: "Message", app: "Slack",
-                      text: "Pushing the release to Thursday. The model download resumes from where it stopped now, so the long-file bug is closed."),
-        Transcription(id: 2, date: day(0, 11, 5), duration: 122, mode: "Email", app: "Mail",
-                      text: "Hi Dana, thanks for the walkthrough yesterday. I read the retention proposal twice and I think the ninety-day window is the right default. Two questions before Friday."),
-        Transcription(id: 3, date: day(0, 9, 31), duration: 18, mode: "Note", app: "Notes",
-                      text: "Check whether the diarization threshold changed between 1.0.4 and 1.1.0."),
-        Transcription(id: 4, date: day(1, 17, 12), duration: 66, mode: "Code", app: "Xcode",
-                      text: "Add a guard so an empty transcript never writes a meeting row. Return early and log at debug."),
-        Transcription(id: 5, date: day(1, 15, 40), duration: 240, mode: "Note", app: "Obsidian",
-                      text: "Standup takeaways. Priya owns the consent panel copy. Marco is looking at the Zoom detection false positive when a window is only previewed."),
-        Transcription(id: 6, date: day(1, 10, 2), duration: 35, mode: "Message", app: "Messages",
-                      text: "Running ten minutes late, start without me."),
-        Transcription(id: 7, date: day(2, 16, 25), duration: 88, mode: "Email", app: "Mail",
-                      text: "Attaching the export. The transcript is complete but the speaker labels for the first four minutes are guesses."),
-        Transcription(id: 8, date: day(2, 14, 8), duration: 54, mode: "Note", app: "Notes",
-                      text: "Idea: the overview should say what needs me first, then what happened."),
-        Transcription(id: 9, date: day(2, 9, 45), duration: 12, mode: "Message", app: "Slack",
-                      text: "Yes, ship it."),
-    ]
 
     static let meetings: [Meeting] = [
         Meeting(id: 1, title: "Retention proposal review", date: day(0, 10, 0), duration: 47 * 60, app: "Zoom",
@@ -229,15 +251,6 @@ enum SampleData {
                summary: "Reviews anything that touches the network.", context: []),
         Person(id: 8, name: "Yuki Tanaka", organization: "Independent", role: "Contractor", lastMet: day(20, 11), meetings: 2,
                summary: "Built the first watch prototype.", context: []),
-    ]
-
-    static let models: [Model] = [
-        Model(id: 1, name: "Whisper Large v3", family: "Whisper", size: "3.1 GB", status: .active),
-        Model(id: 2, name: "Whisper Large v3 Turbo", family: "Whisper", size: "1.6 GB", status: .downloaded),
-        Model(id: 3, name: "Parakeet TDT 0.6B", family: "Parakeet", size: "2.4 GB", status: .downloading(fraction: 0.42, downloaded: "1.0 GB of 2.4 GB")),
-        Model(id: 4, name: "Whisper Medium", family: "Whisper", size: "1.5 GB", status: .available),
-        Model(id: 5, name: "Whisper Small", family: "Whisper", size: "488 MB", status: .available),
-        Model(id: 6, name: "Whisper Tiny", family: "Whisper", size: "78 MB", status: .downloaded),
     ]
 
     static let providers: [Provider] = [
@@ -351,9 +364,10 @@ extension Date {
     var dayName: String { Date.dayFormat.string(from: self) }
     var short: String { Date.shortFormat.string(from: self) }
 
-    /// "Today", "Yesterday", or the day name, relative to the sample clock.
+    /// "Today", "Yesterday", or the day name.
     var relativeDay: String {
-        let days = SampleData.calendar.dateComponents([.day], from: SampleData.calendar.startOfDay(for: self), to: SampleData.calendar.startOfDay(for: SampleData.now)).day ?? 0
+        let calendar = Calendar.current
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: self), to: calendar.startOfDay(for: .now)).day ?? 0
         switch days {
         case 0: return "Today"
         case 1: return "Yesterday"

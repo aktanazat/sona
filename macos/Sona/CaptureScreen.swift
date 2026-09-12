@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The first page: what the microphone is doing, the week in three numbers,
+/// The first page: what the microphone is doing, the history in three numbers,
 /// what needs a decision, what happened lately.
 struct CaptureScreen: View {
     @Environment(AppModel.self) private var model
@@ -8,12 +8,20 @@ struct CaptureScreen: View {
     var body: some View {
         Page {
             hero.padding(.bottom, 32)
-            PageSection("This week") {
+            if let error = model.coreError {
+                Card {
+                    CardRow {
+                        Text(error).bodyText(15, Theme.inkSecondary)
+                    }
+                }
+                .padding(.bottom, 32)
+            }
+            PageSection("All time") {
                 Card {
                     HStack(spacing: 0) {
-                        Stat(label: "Dictations", value: "\(SampleData.transcriptions.count)")
+                        Stat(label: "Dictations", value: "\(model.stats?.entries ?? 0)")
                         Rectangle().fill(Theme.hairline).frame(width: 1)
-                        Stat(label: "Words", value: words.formatted())
+                        Stat(label: "Words", value: (model.stats?.totalWords ?? 0).formatted())
                         Rectangle().fill(Theme.hairline).frame(width: 1)
                         Stat(label: "Meetings", value: "\(SampleData.meetings.count)")
                     }
@@ -55,13 +63,19 @@ struct CaptureScreen: View {
                                 .monospacedDigit()
                         }
                         Circle().fill(Theme.live).frame(width: 10, height: 10)
-                    case let .paused(elapsed):
-                        Text("Paused \(elapsed.clock)").heroText().monospacedDigit()
+                    case let .working(kind):
+                        Text(kind.capitalized).heroText()
                     }
                 }
                 HStack(spacing: 8) {
                     Shortcut(model.pushToTalk)
                     Text(hint).bodyText(15, Theme.inkSecondary)
+                }
+                if !model.liveText.isEmpty, model.capture != .idle {
+                    Text(model.liveText)
+                        .bodyText(16)
+                        .lineLimit(3)
+                        .frame(maxWidth: 640, alignment: .leading)
                 }
                 HStack(spacing: 10) {
                     Button {
@@ -70,14 +84,14 @@ struct CaptureScreen: View {
                         Label(model.capture == .idle ? "Start recording" : "Stop", systemImage: model.capture == .idle ? "mic" : "stop.fill")
                     }
                     .buttonStyle(.primary)
-                    if case .recording = model.capture {
-                        Button("Pause") { model.pauseCapture() }.buttonStyle(.secondary)
-                    } else {
+                    if model.capture == .idle {
                         Button {
                         } label: {
                             Label("Import audio", systemImage: "waveform.badge.plus")
                         }
                         .buttonStyle(.secondary)
+                    } else {
+                        Button("Cancel") { model.cancelCapture() }.buttonStyle(.secondary)
                     }
                 }
                 .padding(.top, 6)
@@ -88,19 +102,15 @@ struct CaptureScreen: View {
 
     private var hint: String {
         switch model.capture {
-        case .idle: "tap to toggle · hold to talk · Note mode · \(model.activeModel?.name ?? "No model")"
-        case .recording: "release to paste · Note mode · \(model.inputDevice)"
-        case .paused: "nothing is being heard · resume or stop"
+        case .idle: "tap to toggle · hold to talk · \(model.activeModel?.name ?? "No model")"
+        case .recording: "release to paste · \(model.inputDevice)"
+        case .working: "the words land in the app in front"
         }
-    }
-
-    private var words: Int {
-        SampleData.transcriptions.reduce(0) { $0 + $1.text.split(separator: " ").count }
     }
 
     private var recent: [RecentItem] {
         let meetings = SampleData.meetings.prefix(3).map(RecentItem.meeting)
-        let words = SampleData.transcriptions.prefix(4).map(RecentItem.transcription)
+        let words = model.transcriptions.prefix(4).map(RecentItem.transcription)
         return (meetings + words).sorted { $0.date > $1.date }
     }
 }
@@ -147,7 +157,7 @@ struct RecentRow: View {
             } leading: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(transcription.text).bodyText(16).lineLimit(2)
-                    Text("\(transcription.app), \(transcription.date.time) · \(transcription.date.relativeDay.lowercased())").metaText()
+                    Text("\(transcription.words) words, \(transcription.date.time) · \(transcription.date.relativeDay.lowercased())").metaText()
                 }
             }
         }

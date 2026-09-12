@@ -209,7 +209,7 @@ struct Meter: View {
     }
 }
 
-/// The live dot. A ring while idle, red while recording, ink while paused.
+/// The live dot. A ring while idle, red while recording, ink while the core works.
 struct LiveDot: View {
     let state: CaptureState
 
@@ -219,7 +219,7 @@ struct LiveDot: View {
             Circle().strokeBorder(Theme.inkDisabled, lineWidth: 1.5).frame(width: 10, height: 10)
         case .recording:
             Circle().fill(Theme.live).frame(width: 10, height: 10)
-        case .paused:
+        case .working:
             Circle().fill(Theme.ink).frame(width: 10, height: 10)
         }
     }

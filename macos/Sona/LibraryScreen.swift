@@ -14,7 +14,7 @@ struct LibraryScreen: View {
 
     private var list: some View {
         Page {
-            PageTitle("Library", subtitle: "\(SampleData.transcriptions.count) recordings · \(totalDuration.clock) · \(words) words") {
+            PageTitle("Library", subtitle: subtitle) {
                 Button {
                 } label: {
                     Label("Import audio", systemImage: "waveform.badge.plus")
@@ -45,7 +45,7 @@ struct LibraryScreen: View {
                                     .frame(maxWidth: 640, alignment: .leading)
                             } trailing: {
                                 HStack(spacing: 24) {
-                                    Text("\(transcription.text.split(separator: " ").count) words").metaText()
+                                    Text("\(transcription.words) words").metaText()
                                     Text(transcription.date.time).metaText()
                                 }
                             }
@@ -53,21 +53,22 @@ struct LibraryScreen: View {
                     }
                 }
             }
+            if model.hasMoreTranscriptions {
+                Button("Show older") { model.loadMoreTranscriptions() }
+                    .buttonStyle(.secondary)
+            }
         }
+    }
+
+    private var subtitle: String {
+        guard let stats = model.stats else { return "" }
+        return "\(stats.entries) recordings · \((Double(stats.totalDurationMs) / 1000).clock) · \(stats.totalWords) words"
     }
 
     private var filtered: [Transcription] {
         let query = model.historyQuery.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return SampleData.transcriptions }
-        return SampleData.transcriptions.filter { $0.text.localizedCaseInsensitiveContains(query) }
-    }
-
-    private var totalDuration: TimeInterval {
-        SampleData.transcriptions.reduce(0) { $0 + $1.duration }
-    }
-
-    private var words: Int {
-        SampleData.transcriptions.reduce(0) { $0 + $1.text.split(separator: " ").count }
+        guard !query.isEmpty else { return model.transcriptions }
+        return model.transcriptions.filter { $0.text.localizedCaseInsensitiveContains(query) }
     }
 
     private var days: [(day: String, items: [Transcription])] {
@@ -90,11 +91,8 @@ struct TranscriptionDetail: View {
         Page {
             BackLink(title: "Library") { model.selectedTranscription = nil }
             PageTitle("\(transcription.date.relativeDay), \(transcription.date.time)",
-                      subtitle: "\(transcription.duration.clock) · \(transcription.mode) mode · pasted into \(transcription.app)") {
-                HStack(spacing: 10) {
-                    Button("Copy") {}.buttonStyle(.primary)
-                    Button("Paste again") {}.buttonStyle(.secondary)
-                }
+                      subtitle: transcription.rawText == transcription.text ? "\(transcription.words) words" : "\(transcription.words) words · polished") {
+                Button("Copy") { model.copy(transcription) }.buttonStyle(.primary)
             }
             Card {
                 Text(transcription.text)
@@ -103,23 +101,22 @@ struct TranscriptionDetail: View {
                     .padding(24)
             }
             .padding(.bottom, 32)
-            PageSection("Also kept") {
-                Card {
-                    CardRow {
-                        Text("The words as heard, before \(transcription.mode) mode shaped them.").bodyText()
-                    } trailing: {
-                        Button("Show") {}.buttonStyle(.compact)
+            if transcription.rawText != transcription.text {
+                PageSection("As heard") {
+                    Card {
+                        Text(transcription.rawText)
+                            .bodyText(16, Theme.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(24)
                     }
-                    CardRow {
-                        Text("Audio, for 24 hours, then removed.").bodyText()
-                    } trailing: {
-                        Button("Play") {}.buttonStyle(.compact)
-                    }
-                    CardRow {
-                        Text("Delete this recording").bodyText(15, Theme.inkSecondary)
-                    } trailing: {
-                        Button("Delete") {}.buttonStyle(.quiet)
-                    }
+                }
+                .padding(.bottom, 32)
+            }
+            Card {
+                CardRow {
+                    Text("Delete this recording").bodyText(15, Theme.inkSecondary)
+                } trailing: {
+                    Button("Delete") { model.delete(transcription) }.buttonStyle(.quiet)
                 }
             }
         }
