@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Observation
 import ServiceManagement
+import SwiftUI
 
 /// The four places in the sidebar, in the order it shows them.
 enum Place: Int, CaseIterable, Identifiable {
@@ -28,128 +29,266 @@ enum Place: Int, CaseIterable, Identifiable {
     }
 }
 
-/// The tabs across the top of Settings.
+/// The tabs across the top of Settings, in the order the strip shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
-    case essentials, models, modes, vocabulary, prompts, workflows, agents, advanced
+    case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
+    case agents, sync, privacy, importing, documents, about, debug
 
     var id: Int { rawValue }
 
     var title: String {
         switch self {
         case .essentials: "Essentials"
+        case .dictation: "Dictation"
         case .models: "Models"
         case .modes: "Modes"
         case .vocabulary: "Vocabulary"
         case .prompts: "Prompts"
         case .workflows: "Workflows"
+        case .meetings: "Meetings"
         case .agents: "Agents"
-        case .advanced: "Advanced"
+        case .sync: "Sync"
+        case .privacy: "Privacy"
+        case .importing: "Import"
+        case .documents: "Documents"
+        case .about: "About"
+        case .debug: "Debug"
         }
     }
 }
 
-enum ShortcutRecorderState: Equatable {
-    case closed
-    case starting
-    case listening(candidate: String, hasMainKey: Bool)
-    case stopping(String)
-    case ready(String, error: String?)
-    case saving(String)
+/// What floats over the main window. One at a time.
+enum Sheet: Identifiable {
+    case chat
+    case recorder
+    case whatsNew
 
-    var isPresented: Bool { self != .closed }
-
-    var chord: String? {
-        switch self {
-        case let .listening(candidate, _): candidate.isEmpty ? nil : candidate
-        case let .stopping(chord), let .ready(chord, _), let .saving(chord): chord
-        case .closed, .starting: nil
-        }
-    }
-
-    var canConfirm: Bool {
-        if case .ready = self { true } else { false }
-    }
-
-    var isSaving: Bool {
-        if case .saving = self { true } else { false }
-    }
+    var id: Self { self }
 }
 
-/// Everything the windows share. One instance, on the main actor, handed to every
-/// scene through the environment. The core is spawned here and every fact the
-/// screens show about dictation comes through it.
+/// `hud_pill_state`: the mode the idle pill records under. Whether it shows
+/// and where come from the settings record, which the pill already follows.
+struct HudPillState: Decodable {
+    let modeName: String?
+}
+
+/// `recording-error`: the failure lane. `errorType` names it; nothing else in
+/// the frame is shown.
+struct RecordingErrorEvent: Decodable {
+    let errorType: String
+}
+
+extension CoreEvent {
+    static let recordingError = "recording-error"
+    static let pasteError = "paste-error"
+    static let transcriptionError = "transcription-error"
+}
+
+/// Everything the windows share. One instance, on the main actor, handed to
+/// every scene through the environment. The core is spawned here, every slice
+/// store is created here against it, and what the slices leave to "the
+/// integrator" — navigation between them, the floating panels, the login
+/// item — lives here.
 @MainActor
 @Observable
 final class AppModel {
     var place: Place = .capture
     var settingsPlace: SettingsPlace = .essentials
     var showingSettings = false
+    var paletteShown = false
+    var sheet: Sheet?
+
+    /// The core answered its first request. Nothing that reads the core is
+    /// drawn before this.
+    private(set) var ready = false
     /// The microphone follows this: on while recording, off otherwise. The
     /// core decides; the shell only asks and follows the events.
     private(set) var capture: CaptureState = .idle
-    let meter = LevelMeter()
-    @ObservationIgnored private let pill = PillPanel()
-
-    var selectedMeeting: Meeting?
-    var selectedPerson: Person?
-    var selectedTranscription: Transcription?
-    var selectedMode: Mode?
-
-    var paletteShown = false
-    var chatShown = false
-
-    var historyQuery = ""
-    var decisions = SampleData.decisions
-
-    /// Dictations, newest first, as far as the pages fetched so far reach.
-    private(set) var transcriptions: [Transcription] = []
-    private(set) var hasMoreTranscriptions = false
-    private(set) var stats: HistoryStats?
-    private(set) var models: [Model] = []
-    private(set) var currentModelId = ""
     /// The words of the dictation in flight: committed text, then what the
     /// engine still expects to revise.
     private(set) var liveText = ""
     /// The last thing the core could not do, shown until the next success.
     private(set) var coreError: String?
-    private(set) var shortcutRecorder: ShortcutRecorderState = .closed
+    /// The last failure the core announced about a dictation, until dismissed
+    /// or the next recording starts.
+    private(set) var notice: String?
+    private(set) var models: [Model] = []
+    private(set) var currentModelId = ""
+    /// The mode the idle pill records under, as the core names it.
+    private(set) var pillMode: String?
 
-    // Settings values. The real ones the core carries arrive in `apply`;
-    // the rest give the toggles something honest to show.
-    private(set) var launchAtLogin = false
-    var showInMenuBar = true
-    var hudPill = true
-    var soundOnStart = false
-    var pasteAutomatically = true
-    var announceMeetings = true
-    var detectMeetings = true
-    var cloudSync = false
-    var autoUpdate = true
-    var verboseLogs = false
-    var pushToTalk = "⌥ Space"
-    var toggleShortcut = "⌥ ⇧ Space"
-    var meetingShortcut = "⌥ ⇧ M"
-    var inputDevice = "System default microphone"
-    var language = "English"
+    let meter = LevelMeter()
 
-    @ObservationIgnored private var core: Core!
-    @ObservationIgnored private var pageSize = 50
+    let settings: SettingsStore
+    let onboarding: OnboardingStore
+    let secureInput: SecureInputStore
+    let overview: OverviewStore
+    let library: LibraryStore
+    let meetings: MeetingsStore
+    let live: MeetingLiveStore
+    let meetingSettings: MeetingSettingsStore
+    let people: PeopleStore
+    let modes: ModesStore
+    let providers: ProvidersStore
+    let vocabulary: VocabularyStore
+    let prompts: PromptsStore
+    let workflows: WorkflowsStore
+    let agents: AgentBridgeStore
+    let pairing: AgentPairingStore
+    let chat: ChatStore
+    let cloudSync: CloudSyncStore
+    let privacy: PrivacyStore
+    let imports: ImportStore
+    let documents: DocumentStore
+    let query: QueryStore
+    let recorder: RecorderStore
+    let about: AboutStore
+    let debug: DebugStore
+
+    @ObservationIgnored let core = Core()
+    @ObservationIgnored private let pill = FloatingPanel()
+    @ObservationIgnored private let consent = FloatingPanel()
 
     init() {
-        core = Core { [weak self] name, line in
-            Task { @MainActor [weak self] in
-                self?.handle(name, line)
-            }
+        settings = SettingsStore(core: core)
+        onboarding = OnboardingStore(core: core)
+        secureInput = SecureInputStore(core: core)
+        overview = OverviewStore(core: core)
+        library = LibraryStore(core: core)
+        meetings = MeetingsStore(core: core)
+        live = MeetingLiveStore(core: core)
+        meetingSettings = MeetingSettingsStore(core: core)
+        people = PeopleStore(core: core)
+        modes = ModesStore(core: core)
+        providers = ProvidersStore(core: core)
+        vocabulary = VocabularyStore(core: core)
+        prompts = PromptsStore(core: core)
+        workflows = WorkflowsStore(core: core)
+        agents = AgentBridgeStore(core: core)
+        pairing = AgentPairingStore(core: core)
+        chat = ChatStore(core: core)
+        cloudSync = CloudSyncStore(core: core)
+        privacy = PrivacyStore(core: core)
+        imports = ImportStore(core: core)
+        documents = DocumentStore(core: core)
+        query = QueryStore(core: core)
+        recorder = RecorderStore(core: core)
+        about = AboutStore(core: core)
+        debug = DebugStore(core: core)
+
+        for name in [
+            CoreEvent.activity, CoreEvent.streamText, CoreEvent.streamPhase,
+            CoreEvent.modelStateChanged, CoreEvent.modelsUpdated, CoreEvent.downloadProgress,
+            CoreEvent.downloadComplete, CoreEvent.downloadFailed, CoreEvent.downloadCancelled,
+            CoreEvent.modelDeleted, CoreEvent.recordingError, CoreEvent.pasteError,
+            CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
+            CoreEvent.meetingNavigationRequested,
+        ] {
+            core.observe(name) { [weak self] line in self?.handle(name, line) }
+        }
+        settings.onAutostartChanged = { enabled in
+            Task { try? await LoginItem.apply(enabled) }
+        }
+        query.onLink = { [weak self] target in self?.open(target) }
+        imports.jobCompleted = { [weak self] _ in
+            Task { await self?.library.start() }
         }
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: nil
         ) { [core] _ in
-            core?.shutdown()
+            core.shutdown()
         }
         Task { await start() }
     }
 
     var activeModel: Model? { models.first { $0.status == .active } }
+
+    /// The agent may hear a question typed into the palette.
+    var canAsk: Bool { chat.packs && !chat.composerDisabled }
+
+    /// The places and verbs the palette offers before the plane is asked.
+    var paletteActions: [PaletteAction] {
+        var actions = Place.allCases.map { place in
+            PaletteAction(id: "go-\(place.rawValue)", group: .navigation, title: place.title) { [weak self] in
+                self?.go(place)
+            }
+        }
+        actions.append(PaletteAction(id: "go-settings", group: .navigation, title: "Settings") { [weak self] in
+            self?.showSettings(.essentials)
+        })
+        actions.append(PaletteAction(
+            id: "toggle-recording", group: .actions,
+            title: capture == .idle ? "Start recording" : "Stop recording"
+        ) { [weak self] in
+            self?.toggleCapture()
+        })
+        actions.append(PaletteAction(id: "record-meeting", group: .actions, title: "Record a meeting") { [weak self] in
+            self?.go(.meetings)
+            self?.live.startManual()
+        })
+        actions.append(PaletteAction(id: "record-screen", group: .actions, title: "Record the screen") { [weak self] in
+            self?.sheet = .recorder
+        })
+        actions.append(PaletteAction(id: "open-chat", group: .actions, title: "Ask Sona") { [weak self] in
+            self?.sheet = .chat
+        })
+        actions.append(PaletteAction(id: "import-audio", group: .actions, title: "Import audio") { [weak self] in
+            self?.showSettings(.importing)
+        })
+        return actions
+    }
+
+    // MARK: Navigation
+
+    func go(_ place: Place) {
+        self.place = place
+        showingSettings = false
+    }
+
+    func showSettings(_ tab: SettingsPlace) {
+        settingsPlace = tab
+        showingSettings = true
+    }
+
+    /// A retained meeting, by id, on its own page.
+    func openMeeting(_ sessionId: MeetingSessionId) {
+        meetings.open(sessionId)
+        go(.meetings)
+    }
+
+    func openPerson(_ id: String) {
+        people.openPerson(id)
+        go(.people)
+    }
+
+    /// A `sona://` link: the core resolves it and answers with a navigation
+    /// event, which lands in `open(_ target:)` or the meetings store.
+    func open(link: String) {
+        Task { await query.open(link: link) }
+    }
+
+    /// The agent hears the palette's question in the chat sheet.
+    func ask(_ question: String) {
+        chat.draft = question
+        sheet = .chat
+        chat.send()
+    }
+
+    private func open(_ target: QueryLinkTarget) {
+        switch target {
+        case let .person(id):
+            openPerson(id)
+        case .organization:
+            go(.people)
+        case .dictation:
+            go(.library)
+        case .search:
+            paletteShown = true
+        }
+        query.clearLinkRequest()
+    }
+
+    // MARK: Capture
 
     func toggleCapture() {
         call { try await self.core.request("hud_toggle_recording") }
@@ -159,176 +298,47 @@ final class AppModel {
         call { try await self.core.request("cancel_operation") }
     }
 
-    func beginShortcutCapture() {
-        guard capture == .idle, shortcutRecorder == .closed else { return }
-        shortcutRecorder = .starting
-        Task {
-            do {
-                try await core.request(
-                    "start_handy_keys_recording", ["binding_id": "transcribe"])
-                if shortcutRecorder == .starting {
-                    shortcutRecorder = .listening(candidate: "", hasMainKey: false)
-                    coreError = nil
-                } else {
-                    try? await core.request("stop_handy_keys_recording")
-                }
-            } catch {
-                if shortcutRecorder == .starting {
-                    shortcutRecorder = .closed
-                    coreError = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    func cancelShortcutCapture() {
-        switch shortcutRecorder {
-        case .closed:
-            return
-        case .starting, .ready:
-            shortcutRecorder = .closed
-        case .listening:
-            shortcutRecorder = .closed
-            call { try await self.core.request("stop_handy_keys_recording") }
-        case .stopping:
-            shortcutRecorder = .closed
-        case .saving:
-            return
-        }
-    }
-
-    func confirmShortcutCapture() {
-        guard case let .ready(chord, _) = shortcutRecorder else { return }
-        shortcutRecorder = .saving(chord)
-        Task {
-            do {
-                let response: BindingChange = try await core.request(
-                    "change_binding", ["id": "transcribe", "binding": chord])
-                guard response.success, let binding = response.binding else {
-                    throw CoreError.remote(response.error ?? "The core did not accept that shortcut.")
-                }
-                pushToTalk = binding.currentBinding
-                toggleShortcut = binding.currentBinding
-                shortcutRecorder = .closed
-                coreError = nil
-            } catch {
-                shortcutRecorder = .ready(chord, error: error.localizedDescription)
-                coreError = error.localizedDescription
-            }
-        }
-    }
-
-    private func finishShortcutCapture(_ chord: String) {
-        guard !chord.isEmpty else { return }
-        shortcutRecorder = .stopping(chord)
-        Task {
-            do {
-                try await core.request("stop_handy_keys_recording")
-                if shortcutRecorder == .stopping(chord) {
-                    shortcutRecorder = .ready(chord, error: nil)
-                    coreError = nil
-                }
-            } catch {
-                if shortcutRecorder == .stopping(chord) {
-                    shortcutRecorder = .closed
-                    coreError = error.localizedDescription
-                }
-            }
-        }
+    func dismissNotice() {
+        notice = nil
     }
 
     private func setCapture(_ state: CaptureState) {
         capture = state
         if case .recording = state {
             meter.start()
-            if hudPill {
-                pill.show(self)
-            }
         } else {
             meter.stop()
-            pill.hide()
         }
-    }
-
-    func resolve(_ decision: Decision) {
-        decisions.removeAll { $0.id == decision.id }
-    }
-
-    func go(_ place: Place) {
-        self.place = place
-        showingSettings = false
-        selectedMeeting = nil
-        selectedPerson = nil
-        selectedTranscription = nil
-        selectedMode = nil
-    }
-
-    // MARK: History
-
-    func loadMoreTranscriptions() {
-        guard hasMoreTranscriptions, let last = transcriptions.last else { return }
-        call {
-            let page: PaginatedHistory = try await self.core.request(
-                "get_history_entries", ["cursor": last.id, "limit": Int64(self.pageSize)])
-            self.transcriptions += page.entries.map(Transcription.init)
-            self.hasMoreTranscriptions = page.hasMore
-        }
-    }
-
-    func delete(_ transcription: Transcription) {
-        call {
-            try await self.core.request("delete_history_entry", ["id": transcription.id])
-            if self.selectedTranscription?.id == transcription.id {
-                self.selectedTranscription = nil
-            }
-        }
-    }
-
-    func copy(_ transcription: Transcription) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(transcription.text, forType: .string)
     }
 
     // MARK: Models
 
     func use(_ model: Model) {
-        call { try await self.core.request("switch_active_model", ["model_id": model.id]) }
+        call { try await self.core.request("set_active_model", ["modelId": model.id]) }
     }
 
     func download(_ model: Model) {
-        call { try await self.core.request("download_model", ["model_id": model.id]) }
+        call { try await self.core.request("download_model", ["modelId": model.id]) }
     }
 
     func cancelDownload(_ model: Model) {
-        call { try await self.core.request("cancel_download", ["model_id": model.id]) }
+        call { try await self.core.request("cancel_download", ["modelId": model.id]) }
     }
 
     func remove(_ model: Model) {
-        call { try await self.core.request("delete_model", ["model_id": model.id]) }
+        call { try await self.core.request("delete_model", ["modelId": model.id]) }
     }
 
     func rescanModels() {
         call { try await self.core.request("rescan_local_models") }
     }
 
-    /// Persists the preference in the core and registers or unregisters this
-    /// bundle. The shell is the app the user opens, so the shell is the login
-    /// item; a core the shell spawned leaves the login item alone.
-    func setLaunchAtLogin(_ enabled: Bool) {
-        launchAtLogin = enabled
-        call {
-            try await self.core.request("change_autostart_setting", ["enabled": enabled])
-            try await LoginItem.apply(enabled)
-        }
-    }
-
     // MARK: Core
 
-    /// Spawns the core, then fetches each part on its own: history stays
-    /// locked until the keychain prompt is answered, and that must not hide
-    /// the settings or the models. Typing into other apps needs the input
-    /// backend, which only starts once Accessibility is allowed, so its
-    /// failure is the one an owner most needs to see.
+    /// Spawns the core, then starts every store that has no screen of its own
+    /// to start it, each on its own: a keychain prompt holding one read must
+    /// not hide the rest. Typing into other apps and the global shortcuts
+    /// start from onboarding, once Accessibility is known to be allowed.
     private func start() async {
         do {
             try await core.start()
@@ -336,11 +346,39 @@ final class AppModel {
             coreError = error.localizedDescription
             return
         }
-        call { try await self.loadSettings() }
+        ready = true
+        Task { await onboarding.start() }
+        Task { await settings.start() }
+        Task { await secureInput.start() }
+        Task { await overview.start() }
+        Task { await live.start() }
+        Task { await meetings.start() }
+        Task { await meetingSettings.start() }
+        Task { await people.start() }
+        Task { await vocabulary.start() }
+        Task { await prompts.start() }
+        Task { await workflows.start() }
+        Task { await agents.start() }
+        Task { await cloudSync.start() }
+        Task { await privacy.start() }
+        Task { await imports.start() }
+        Task { await documents.start() }
+        Task { await query.start() }
+        Task { await about.start() }
+        Task { await debug.start() }
+        Task { await showWhatsNew() }
         call { try await self.loadModels() }
-        call { try await self.loadHistory() }
-        call { try await self.core.request("initialize_shortcuts") }
-        call { try await self.core.request("initialize_enigo") }
+        call { try await self.loadPill() }
+        track { [weak self] in self?.syncPill() }
+        track { [weak self] in self?.syncConsent() }
+        track { [weak self] in self?.syncNavigation() }
+    }
+
+    private func showWhatsNew() async {
+        await debug.whatsNew.start()
+        if debug.whatsNew.shouldShowOnLaunch, sheet == nil {
+            sheet = .whatsNew
+        }
     }
 
     /// Runs one request and keeps its failure on screen until the next success.
@@ -355,25 +393,11 @@ final class AppModel {
         }
     }
 
-    private func loadSettings() async throws {
-        let settings: CoreSettings = try await core.request("get_app_settings")
-        currentModelId = settings.selectedModel
-        showInMenuBar = settings.showTrayIcon
-        inputDevice = settings.selectedMicrophone ?? "System default microphone"
-        language = Locale.current.localizedString(forLanguageCode: settings.selectedLanguage) ?? settings.selectedLanguage
-        if let binding = settings.bindings["transcribe"] {
-            pushToTalk = binding.currentBinding
-            toggleShortcut = binding.currentBinding
+    /// Re-runs `apply` every time something it read changes.
+    private func track(_ apply: @escaping @MainActor () -> Void) {
+        withObservationTracking(apply) {
+            Task { @MainActor [weak self] in self?.track(apply) }
         }
-        launchAtLogin = settings.autostartEnabled
-        try await LoginItem.apply(launchAtLogin)
-    }
-
-    private func loadHistory() async throws {
-        let page: PaginatedHistory = try await core.request("get_history_entries", ["limit": Int64(pageSize)])
-        transcriptions = page.entries.map(Transcription.init)
-        hasMoreTranscriptions = page.hasMore
-        stats = try await core.request("get_history_stats")
     }
 
     private func loadModels() async throws {
@@ -381,6 +405,71 @@ final class AppModel {
         let infos: [ModelInfo] = try await core.request("get_available_models")
         models = infos.map { Model($0, current: currentModelId) }
     }
+
+    private func loadPill() async throws {
+        let state: HudPillState = try await core.request("hud_pill_state")
+        pillMode = state.modeName
+    }
+
+    // MARK: Floating panels
+
+    /// While recording, the sound at the overlay's edge unless the overlay is
+    /// off; idle, the mode pill at its own edge when it is on. One panel,
+    /// moved between the two.
+    private func syncPill() {
+        let record = settings.settings
+        if capture != .idle {
+            if record.overlayStyle == .none {
+                pill.hide()
+            } else {
+                pill.show(HUDPill().environment(self), at: .edge(record.overlayPosition))
+            }
+        } else if record.hudPillEnabled {
+            pill.show(HUDPill().environment(self), at: .edge(record.hudPillPosition))
+        } else {
+            pill.hide()
+        }
+    }
+
+    /// The consent panel: an offer to record, the recording in progress, a
+    /// prep or wrap card. Floats at the top right of the screen the pointer
+    /// is on, as the Tauri window did.
+    private func syncConsent() {
+        guard live.card != nil else {
+            consent.hide()
+            return
+        }
+        let view = MeetingConsentPanelView(
+            store: live,
+            onOpenBrief: { [weak self] id in self?.openMeeting(id) },
+            onOpenNotes: { [weak self] id in self?.openMeeting(id) },
+            followUp: { [core] id in
+                let draft: MeetingFollowUpDraft? = try? await core.request(
+                    "meeting_follow_up_draft", MeetingRequest.followUpDraft(id))
+                return draft?.body
+            }
+        )
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
+        .padding(8)
+        .environment(self)
+        consent.show(view, at: .topTrailing)
+    }
+
+    /// The cues the meeting store leaves for the shell: a stopped or imported
+    /// meeting to read, the digest asking for Capture.
+    private func syncNavigation() {
+        if let opened = live.opened {
+            openMeeting(opened)
+            live.clearOpened()
+        }
+        if live.captureRequested {
+            go(.capture)
+            live.clearCaptureRequest()
+        }
+    }
+
+    // MARK: Events
 
     private func handle(_ name: String, _ line: Data) {
         do {
@@ -390,29 +479,12 @@ final class AppModel {
                 switch activity.state {
                 case "recording":
                     liveText = ""
+                    notice = nil
                     setCapture(.recording(since: .now))
                 case "transcribing":
                     setCapture(.working("transcribing"))
                 default:
                     setCapture(.idle)
-                }
-            case CoreEvent.handyKeys:
-                let event: HandyKeysEvent = try Core.payload(line)
-                guard case let .listening(candidate, hasMainKey) = shortcutRecorder else { break }
-                if event.isKeyDown, !event.hotkeyString.isEmpty {
-                    if event.key != nil {
-                        shortcutRecorder = .listening(
-                            candidate: event.hotkeyString, hasMainKey: true)
-                    } else if !hasMainKey {
-                        shortcutRecorder = .listening(
-                            candidate: event.hotkeyString, hasMainKey: false)
-                    }
-                } else if !event.isKeyDown, event.key != nil {
-                    let chord = hasMainKey ? candidate : event.hotkeyString
-                    finishShortcutCapture(chord)
-                } else if !event.isKeyDown, event.modifiers.isEmpty,
-                          !hasMainKey, !candidate.isEmpty {
-                    finishShortcutCapture(candidate)
                 }
             case CoreEvent.streamText:
                 let text: StreamText = try Core.payload(line)
@@ -422,25 +494,6 @@ final class AppModel {
                 if phase.phase == "working", let kind = phase.kind {
                     setCapture(.working(kind))
                 }
-            case CoreEvent.historyUpdate:
-                let update: HistoryUpdate = try Core.payload(line)
-                switch update {
-                case let .added(entry):
-                    transcriptions.insert(Transcription(entry), at: 0)
-                case let .updated(entry):
-                    if let index = transcriptions.firstIndex(where: { $0.id == entry.id }) {
-                        transcriptions[index] = Transcription(entry)
-                    }
-                case let .deleted(id):
-                    transcriptions.removeAll { $0.id == id }
-                case let .toggled(id):
-                    if let index = transcriptions.firstIndex(where: { $0.id == id }) {
-                        transcriptions[index].saved.toggle()
-                    }
-                }
-                call { self.stats = try await self.core.request("get_history_stats") }
-            case CoreEvent.historyStorage:
-                call { try await self.loadHistory() }
             case CoreEvent.downloadProgress:
                 let progress: DownloadProgress = try Core.payload(line)
                 if let index = models.firstIndex(where: { $0.id == progress.modelId }) {
@@ -451,11 +504,52 @@ final class AppModel {
             case CoreEvent.modelStateChanged, CoreEvent.modelsUpdated, CoreEvent.downloadComplete,
                  CoreEvent.downloadFailed, CoreEvent.downloadCancelled, CoreEvent.modelDeleted:
                 call { try await self.loadModels() }
+            case CoreEvent.settingsChanged, CoreEvent.modesChanged:
+                call { try await self.loadPill() }
+            case CoreEvent.recordingError:
+                let event: RecordingErrorEvent = try Core.payload(line)
+                notice = Self.recordingErrorText(event.errorType)
+            case CoreEvent.pasteError:
+                notice = "The transcript could not be pasted into the active app. Focus a text field and try again."
+            case CoreEvent.transcriptionError:
+                notice = "Couldn't transcribe. Try again."
+            case CoreEvent.meetingNavigationRequested:
+                go(.meetings)
             default:
                 break
             }
         } catch {
             coreError = "\(name): \(error.localizedDescription)"
+        }
+    }
+
+    /// One sentence each: the cause, then the way out. The same sentences
+    /// `App.tsx` showed as toasts; the three the web app never named get the
+    /// HUD's short form.
+    private static func recordingErrorText(_ errorType: String) -> String {
+        switch errorType {
+        case "microphone_permission_denied":
+            "Grant microphone access in System Settings → Privacy & Security → Microphone."
+        case "no_input_device":
+            "No audio input device was detected. Connect a microphone and try again."
+        case "no_speech_detected":
+            "No speech was detected. A sample of the recording was saved to History."
+        case "no_model_selected":
+            "No transcription model selected. Choose one in Settings > Models."
+        case "command_no_selection":
+            "Select the text you want to change, then hold the command shortcut and say the change."
+        case "command_rewrite_unavailable":
+            "The rewrite returned nothing, so your selection was left as it was. Check the provider in Settings > Post-processing and try again."
+        case "no_speech_save_failed":
+            "Couldn't start recording: Some recordings could not be imported into the vocabulary. Try again."
+        case "capture_overrun":
+            "Recording cut short."
+        case "cloud_unavailable":
+            "Cloud unavailable."
+        case "cloud_transcription_held":
+            "Sona held the cloud result: nothing trustworthy came back and no local model was available."
+        default:
+            "Couldn't start recording: Unknown error. Try again."
         }
     }
 }

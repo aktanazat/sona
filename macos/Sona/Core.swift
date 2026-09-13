@@ -1,14 +1,92 @@
 import Darwin
 import Foundation
 
+/// Any JSON value, kept as the core sent it. A command's error arrives this
+/// way: a plain string for most commands, an enum or object for the ones
+/// with their own error type.
+enum JSONValue: Codable, Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if single.decodeNil() {
+            self = .null
+        } else if let bool = try? single.decode(Bool.self) {
+            self = .bool(bool)
+        } else if let number = try? single.decode(Double.self) {
+            self = .number(number)
+        } else if let string = try? single.decode(String.self) {
+            self = .string(string)
+        } else if let array = try? single.decode([JSONValue].self) {
+            self = .array(array)
+        } else {
+            self = .object(try single.decode([String: JSONValue].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var single = encoder.singleValueContainer()
+        switch self {
+        case .null: try single.encodeNil()
+        case let .bool(bool): try single.encode(bool)
+        case let .number(number): try single.encode(number)
+        case let .string(string): try single.encode(string)
+        case let .array(array): try single.encode(array)
+        case let .object(object): try single.encode(object)
+        }
+    }
+
+    /// The string a reader can act on: the string itself, an enum's name,
+    /// or the JSON text of anything else.
+    var message: String {
+        switch self {
+        case let .string(string): string
+        case .null: "the core gave no reason"
+        default: (try? JSONEncoder().encode(self)).flatMap { String(data: $0, encoding: .utf8) } ?? "unreadable error"
+        }
+    }
+
+    /// The value as one of the core's own error types.
+    func decoded<T: Decodable>(as type: T.Type = T.self) -> T? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return try? Core.decoder.decode(type, from: data)
+    }
+}
+
+/// Literals, so mixed params read as one dictionary:
+/// `["id": 3, "title": "x", "tags": ["a"]] as [String: JSONValue]`.
+extension JSONValue: ExpressibleByNilLiteral, ExpressibleByBooleanLiteral, ExpressibleByIntegerLiteral,
+    ExpressibleByFloatLiteral, ExpressibleByStringLiteral, ExpressibleByArrayLiteral, ExpressibleByDictionaryLiteral {
+    init(nilLiteral: ()) { self = .null }
+    init(booleanLiteral value: Bool) { self = .bool(value) }
+    init(integerLiteral value: Int) { self = .number(Double(value)) }
+    init(floatLiteral value: Double) { self = .number(value) }
+    init(stringLiteral value: String) { self = .string(value) }
+    init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
+    init(dictionaryLiteral elements: (String, JSONValue)...) {
+        self = .object(Dictionary(elements, uniquingKeysWith: { _, last in last }))
+    }
+
+    /// Any Encodable, as the value it serializes to. For a struct param.
+    init<T: Encodable>(_ value: T) throws {
+        self = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
+    }
+}
+
 /// What went wrong between the shell and the core.
 enum CoreError: Error, LocalizedError {
     /// The core binary is neither bundled nor named by `SONA_CORE`.
     case missingBinary
     /// The socket never accepted within the launch window.
     case unreachable(String)
-    /// The core answered the request with an error.
-    case remote(String)
+    /// The core answered the request with an error: the command's own error
+    /// value, or the bridge's reason for refusing the request.
+    case remote(JSONValue)
     /// The socket closed before the reply arrived.
     case closed
 
@@ -16,9 +94,14 @@ enum CoreError: Error, LocalizedError {
         switch self {
         case .missingBinary: "The Sona core is not installed with this app."
         case let .unreachable(reason): "The Sona core did not start: \(reason)"
-        case let .remote(message): message
+        case let .remote(value): value.message
         case .closed: "The Sona core stopped."
         }
+    }
+
+    /// The remote error as one of the core's own types, when it is one.
+    func remote<T: Decodable>(as type: T.Type = T.self) -> T? {
+        if case let .remote(value) = self { value.decoded(as: type) } else { nil }
     }
 }
 
@@ -27,13 +110,31 @@ enum CoreError: Error, LocalizedError {
 /// A request is `{"id", "method", "params"}` and its reply repeats the `id`
 /// with `result` or `error`. An event arrives without an `id`, as
 /// `{"event", "payload"}`. Replies resolve the continuation waiting on that
-/// id; events go to `onEvent` on the reader thread, and the receiver hops to
-/// the main actor itself.
+/// id; events go to the observers of that name, on the main actor, in the
+/// order the core sent them.
 final class Core: @unchecked Sendable {
+    /// The first look at a frame. `error` is present, possibly as `null`,
+    /// exactly when the request failed: a command whose error type is `()`
+    /// fails with `null`.
     private struct Head: Decodable {
         let id: UInt64?
         let event: String?
-        let error: String?
+        let error: JSONValue?
+
+        private enum Key: String, CodingKey { case id, event, error }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            id = try container.decodeIfPresent(UInt64.self, forKey: .id)
+            event = try container.decodeIfPresent(String.self, forKey: .event)
+            // Not a ternary: `JSONValue` is expressible by a nil literal, so a
+            // bare `nil` branch would read as `.null` and mark every reply failed.
+            if container.contains(.error) {
+                error = try container.decodeIfPresent(JSONValue.self, forKey: .error) ?? .null
+            } else {
+                error = nil
+            }
+        }
     }
 
     private struct Envelope<T: Decodable>: Decodable {
@@ -57,7 +158,7 @@ final class Core: @unchecked Sendable {
     private static let exitWindow: TimeInterval = 3
     private static let exitPoll: UInt32 = 20_000
     /// The Rust structs use snake_case; the Swift mirrors use camelCase.
-    private static let decoder: JSONDecoder = {
+    static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return decoder
@@ -65,15 +166,21 @@ final class Core: @unchecked Sendable {
 
     private let process = Process()
     private let socketPath: String
-    private let onEvent: @Sendable (String, Data) -> Void
     private let lock = NSLock()
     private var socket: Int32 = -1
     private var pending: [UInt64: CheckedContinuation<Data, Error>] = [:]
     private var nextID: UInt64 = 0
+    private var observers: [String: [@MainActor (Data) -> Void]] = [:]
 
-    init(onEvent: @escaping @Sendable (String, Data) -> Void) {
-        self.onEvent = onEvent
+    init() {
         socketPath = NSTemporaryDirectory() + "sona-core-\(getpid()).sock"
+    }
+
+    /// Registers interest in one event. The handler gets the whole frame,
+    /// which `payload` decodes. Observers of a name run in registration
+    /// order; an observer is for the life of the app.
+    func observe(_ name: String, _ handler: @escaping @MainActor (Data) -> Void) {
+        lock.withLock { observers[name, default: []].append(handler) }
     }
 
     /// Spawns the core and connects to it. The socket is bound only once every
@@ -267,7 +374,18 @@ final class Core: @unchecked Sendable {
             return
         }
         if let event = head.event {
-            onEvent(event, line)
+            let handlers = lock.withLock { observers[event] ?? [] }
+            if !handlers.isEmpty {
+                // The main queue is FIFO, which keeps stream text in order;
+                // a Task per frame would not promise that.
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        for handler in handlers {
+                            handler(line)
+                        }
+                    }
+                }
+            }
             return
         }
         guard let id = head.id, let continuation = lock.withLock({ pending.removeValue(forKey: id) }) else {

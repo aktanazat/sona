@@ -2298,6 +2298,11 @@ pub fn run(cli_args: CliArgs) {
 
             modes::refresh_clipboard_context_watcher(&settings);
 
+            // The chat panel serves both shells: a native Chat page asks it
+            // for status on its first paint, and `state()` on an unmanaged
+            // type is a panic, not an error.
+            app.manage(agent_panel::AgentPanelManager::new(app.handle()));
+
             if !native_mode {
                 // Create main window programmatically so we can set data_directory
                 // for portable mode (redirects WebView2 cache to portable Data dir)
@@ -2331,7 +2336,6 @@ pub fn run(cli_args: CliArgs) {
                     .initialization_script(main_window_material_init(settings.appearance_material));
                 let _main_window = win_builder.build()?;
                 launch_trace::mark_native_window_created();
-                app.manage(agent_panel::AgentPanelManager::new(app.handle()));
 
                 // Glass is opt-in now, so vibrancy is applied only when the setting
                 // asks for it. This also corrects the initialization script above if

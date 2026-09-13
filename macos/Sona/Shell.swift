@@ -1,42 +1,76 @@
 import SwiftUI
 
-/// The main window: the sidebar on the left, one page on the right.
+/// The main window: the sidebar on the left, one page on the right. Before
+/// the core answers, a wait; on a first run, the onboarding flow instead of
+/// the pages.
 struct Shell: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         ZStack {
-            HStack(spacing: 0) {
-                Sidebar()
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            if model.paletteShown {
-                CommandPalette()
+            if !model.ready {
+                waiting
+            } else if model.onboarding.step != .done {
+                OnboardingView(store: model.onboarding)
+            } else {
+                HStack(spacing: 0) {
+                    Sidebar()
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                if model.paletteShown {
+                    CommandPalette()
+                }
             }
         }
         .background(Theme.page.ignoresSafeArea())
         .frame(minWidth: 1040, minHeight: 700)
-        .sheet(isPresented: Bindable(model).chatShown) {
-            ChatSheet()
-        }
-        .sheet(isPresented: Binding(
-            get: { model.shortcutRecorder.isPresented },
-            set: { if !$0 { model.cancelShortcutCapture() } }
-        )) {
-            ShortcutRecorderSheet()
-                .environment(model)
-        }
-        .background {
-            if !model.shortcutRecorder.isPresented {
-                Group {
-                    Button("") { model.paletteShown.toggle() }.keyboardShortcut("k", modifiers: .command)
-                    Button("") { model.toggleCapture() }.keyboardShortcut("r", modifiers: .command)
-                    Button("") { model.showingSettings = true }.keyboardShortcut(",", modifiers: .command)
+        .sheet(item: Bindable(model).sheet) { sheet in
+            switch sheet {
+            case .chat:
+                ChatView(
+                    store: model.chat,
+                    onClose: { model.sheet = nil },
+                    openSettings: {
+                        model.sheet = nil
+                        model.showSettings(.agents)
+                    },
+                    pendingRequests: model.agents.pending.count,
+                    openRequests: {
+                        model.sheet = nil
+                        model.showSettings(.agents)
+                    })
+            case .recorder:
+                RecorderSheet(store: model.recorder) { model.sheet = nil }
+            case .whatsNew:
+                WhatsNewView(store: model.debug.whatsNew) {
+                    model.debug.whatsNew.dismiss()
+                    model.sheet = nil
                 }
-                .hidden()
             }
         }
+        .background {
+            Group {
+                Button("") { model.paletteShown.toggle() }.keyboardShortcut("k", modifiers: .command)
+                Button("") { model.toggleCapture() }.keyboardShortcut("r", modifiers: .command)
+                Button("") { model.showSettings(model.settingsPlace) }.keyboardShortcut(",", modifiers: .command)
+            }
+            .hidden()
+        }
+    }
+
+    /// The core is starting, or could not.
+    private var waiting: some View {
+        VStack(spacing: 12) {
+            if let error = model.coreError {
+                Text("Sona's engine could not start.").bodyText(15)
+                Text(error).bodyText(13, Theme.inkSecondary)
+            } else {
+                ProgressView()
+                Text("Starting…").bodyText(13, Theme.inkSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -45,12 +79,98 @@ struct Shell: View {
             SettingsScreen()
         } else {
             switch model.place {
-            case .capture: CaptureScreen()
-            case .library: LibraryScreen()
-            case .meetings: MeetingsScreen()
-            case .people: PeopleScreen()
+            case .capture:
+                CaptureScreen()
+            case .library:
+                LibraryScreen(
+                    store: model.library,
+                    importAudio: { model.showSettings(.importing) },
+                    addCorrection: { left, right in
+                        model.vocabulary.add(kind: .vocabulary, left: left, right: right)
+                    })
+            case .meetings:
+                MeetingsPlace()
+            case .people:
+                PeopleScreen(
+                    store: model.people,
+                    openMeeting: model.openMeeting,
+                    ingestDocument: { model.showSettings(.importing) },
+                    deleteDocument: { id in Task { await model.documents.delete(id: id) } },
+                    openVocabulary: { model.showSettings(.vocabulary) })
             }
         }
+    }
+}
+
+/// The meetings place: the live screen while one records, the gate between
+/// a press and a capture, one meeting's review, or the home page: what leads
+/// to a recording, then every recording there has been.
+struct MeetingsPlace: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let live = model.live
+        let meetings = model.meetings
+        if live.live != nil {
+            MeetingLiveView(store: live, onOpenReview: model.openMeeting)
+        } else if live.gate != nil {
+            MeetingStartGateView(store: live)
+        } else if meetings.openSessionId != nil {
+            MeetingReviewView(store: meetings, openPerson: model.openPerson)
+        } else {
+            home
+        }
+    }
+
+    private var home: some View {
+        let live = model.live
+        let meetings = model.meetings
+        return Page {
+            PageTitle("Meetings", subtitle: subtitle) {
+                HStack(spacing: 8) {
+                    Button("Deleted") { meetings.openTrash() }
+                        .buttonStyle(.secondary)
+                    Button("Import recording") { live.importMeeting() }
+                        .buttonStyle(.secondary)
+                        .disabled(live.importing)
+                    Button(live.starting ? "Starting…" : "Record") { live.startManual() }
+                        .buttonStyle(.primary)
+                        .disabled(live.starting || live.pending != nil)
+                }
+            }
+            ErrorNote(live.error)
+            if let notice = live.notice {
+                Text(notice).bodyText(13, Theme.inkSecondary).padding(.bottom, 16)
+            }
+            if let warning = live.engine?.warning {
+                Text(warning).bodyText(13, Theme.live).padding(.bottom, 16)
+            }
+            MeetingSuggestionsView(store: live)
+            MeetingStartCountdownView(store: live)
+            MeetingRecoveryView(store: live, onOpenSession: model.openMeeting)
+            UpcomingView(store: live) { model.showSettings(.meetings) }
+            MeetingsNoticeBand(store: meetings)
+            if let message = meetings.listError {
+                MeetingsRetryNote(message: message) { meetings.retry() }
+            }
+            MeetingsTrendCard(store: meetings)
+            MeetingsFilterCard(store: meetings)
+            MeetingsFeed(store: meetings)
+            MeetingsPager(store: meetings)
+        }
+        .sheet(isPresented: Binding(get: { meetings.trashOpen }, set: { if !$0 { meetings.closeTrash() } })) {
+            MeetingsTrashSheet(store: meetings)
+        }
+        .task { await live.loadUpcoming() }
+    }
+
+    /// What Sona has recorded in total, once the trend says.
+    private var subtitle: String {
+        guard let allTime = model.meetings.trend?.allTime, allTime.meetings > 0 else {
+            return "Record a meeting on this Mac."
+        }
+        let meetings = allTime.meetings == 1 ? "1 meeting" : "\(allTime.meetings) meetings"
+        return "\(meetings) recorded · \(allTime.capturedSpoken) captured"
     }
 }
 
@@ -74,8 +194,11 @@ struct Sidebar: View {
             SidebarItem(icon: "magnifyingglass", title: "Search", shortcut: "⌘ K", selected: false) {
                 model.paletteShown = true
             }
-            SidebarItem(icon: "bubble.left", title: "Chat", shortcut: nil, selected: false) {
-                model.chatShown = true
+            SidebarItem(
+                icon: "bubble.left", title: "Chat", shortcut: nil, selected: false,
+                badge: model.agents.pending.count
+            ) {
+                model.sheet = .chat
             }
 
             Spacer().frame(height: 16)
@@ -87,12 +210,13 @@ struct Sidebar: View {
                     shortcut: nil,
                     selected: model.place == place && !model.showingSettings,
                     live: place == .capture && model.capture != .idle
+                        || place == .meetings && model.live.live != nil
                 ) {
                     model.go(place)
                 }
             }
             SidebarItem(icon: "gearshape", title: "Settings", shortcut: nil, selected: model.showingSettings) {
-                model.showingSettings = true
+                model.showSettings(model.settingsPlace)
             }
             Spacer()
         }
@@ -111,6 +235,7 @@ private struct SidebarItem: View {
     let shortcut: String?
     let selected: Bool
     var live = false
+    var badge = 0
     let action: () -> Void
     @State private var hovering = false
 
@@ -128,7 +253,14 @@ private struct SidebarItem: View {
                     Circle().fill(Theme.live).frame(width: 7, height: 7)
                 }
                 Spacer()
-                if let shortcut {
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.onInvert)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.invert, in: Capsule())
+                } else if let shortcut {
                     Text(shortcut).metaText()
                 }
             }

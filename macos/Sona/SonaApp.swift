@@ -16,22 +16,6 @@ struct SonaApp: App {
             CommandGroup(replacing: .newItem) {}
         }
 
-        Window("Consent", id: "consent") {
-            ConsentPanel().environment(model)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowLevel(.floating)
-        .windowResizability(.contentSize)
-        .defaultPosition(.topTrailing)
-        .restorationBehavior(.disabled)
-
-        Window("Onboarding", id: "onboarding") {
-            Onboarding().environment(model)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .restorationBehavior(.disabled)
-
         MenuBarExtra {
             MenuBarMenu().environment(model)
         } label: {
@@ -51,18 +35,32 @@ extension CaptureState {
     }
 }
 
-/// The menu bar item: the state, the one action, the way in.
+/// The menu bar item: the state, the actions, the way in.
 struct MenuBarMenu: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        CaptureClock(state: model.capture, idleText: "Ready · Note mode")
+        CaptureClock(state: model.capture, idleText: "Ready · \(model.pillMode ?? "Dictate")")
         Divider()
         Button(model.capture == .idle ? "Start recording" : "Stop recording") {
             model.toggleCapture()
         }
+        Button("Record a meeting") {
+            openWindow(id: "main")
+            model.go(.meetings)
+            model.live.startManual()
+        }
+        Button("Record the screen") {
+            openWindow(id: "main")
+            model.sheet = .recorder
+        }
+        Divider()
         Button("Open Sona") { openWindow(id: "main") }
+        Button("Settings…") {
+            openWindow(id: "main")
+            model.showSettings(model.settingsPlace)
+        }
         Divider()
         Button("Quit Sona") { NSApplication.shared.terminate(nil) }
     }

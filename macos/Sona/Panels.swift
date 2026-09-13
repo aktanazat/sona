@@ -1,43 +1,82 @@
 import SwiftUI
 
-/// The pill that floats above other windows while you talk. Only the sound:
-/// eleven bars, the last quarter second of the microphone, newest on the right.
-/// Flat while nothing is being heard. No text, no buttons.
+/// The pill that floats above other windows. While you talk, only the sound:
+/// eleven bars, the last quarter second of the microphone, newest on the
+/// right, flat while nothing is being heard. Idle, the name of the mode the
+/// next recording goes under, and a press starts it.
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Theme.onInvert)
-                    .frame(width: 2, height: 2 + 12 * level)
+        Group {
+            if model.capture == .idle {
+                Button(action: model.toggleCapture) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "mic")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(model.pillMode ?? "Dictate")
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Theme.onInvert)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Theme.invert, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            } else {
+                HStack(spacing: 3) {
+                    ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Theme.onInvert)
+                            .frame(width: 2, height: 2 + 12 * level)
+                    }
+                }
+                .frame(height: 14)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.invert, in: Capsule())
             }
         }
-        .frame(height: 14)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Theme.invert, in: Capsule())
         .padding(8)
     }
 }
 
-/// The window the pill lives in. It exists only while a recording is on, at the
-/// bottom of the screen the pointer is on, above other windows and on every
-/// space. A non-activating panel: showing it never takes the keyboard away from
-/// the app the words are going into, which a SwiftUI `Window` scene would.
-@MainActor
-final class PillPanel {
-    private var panel: NSPanel?
+/// Where a floating panel sits on the screen the pointer is on.
+enum PanelPlacement: Equatable {
+    /// Centred along the top or bottom edge.
+    case edge(OverlayPosition)
+    /// Tucked into the top right corner.
+    case topTrailing
+}
 
-    func show(_ model: AppModel) {
-        let panel = panel ?? make(model)
+/// A window that floats above other windows and on every space, without
+/// taking the keyboard away from the app the words are going into, which a
+/// SwiftUI `Window` scene would. Shown with a fresh view each time; the
+/// hosting view keeps it, so a `show` with the same content redraws in
+/// place.
+@MainActor
+final class FloatingPanel {
+    private var panel: NSPanel?
+    private var host: NSHostingView<AnyView>?
+
+    func show(_ content: some View, at placement: PanelPlacement) {
+        let panel = panel ?? make()
         self.panel = panel
+        host?.rootView = AnyView(content)
+        panel.setContentSize(host?.fittingSize ?? .zero)
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
             let visible = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(
-                x: visible.midX - panel.frame.width / 2,
-                y: visible.minY + 24))
+            let size = panel.frame.size
+            let origin = switch placement {
+            case .edge(.bottom):
+                NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 24)
+            case .edge(.top):
+                NSPoint(x: visible.midX - size.width / 2, y: visible.maxY - size.height - 24)
+            case .topTrailing:
+                NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16)
+            }
+            panel.setFrameOrigin(origin)
         }
         panel.orderFrontRegardless()
     }
@@ -46,7 +85,7 @@ final class PillPanel {
         panel?.orderOut(nil)
     }
 
-    private func make(_ model: AppModel) -> NSPanel {
+    private func make() -> NSPanel {
         let panel = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -59,174 +98,77 @@ final class PillPanel {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
-        let content = NSHostingView(rootView: HUDPill().environment(model))
-        content.sizingOptions = .intrinsicContentSize
-        panel.contentView = content
-        panel.setContentSize(content.fittingSize)
+        let host = NSHostingView(rootView: AnyView(EmptyView()))
+        host.sizingOptions = .intrinsicContentSize
+        panel.contentView = host
+        self.host = host
         return panel
     }
 }
 
-struct ShortcutRecorderSheet: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Set recording shortcut")
-                .font(TypeScale.title)
-                .foregroundStyle(Theme.ink)
-            capture
-                .frame(maxWidth: .infinity, minHeight: 88)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.radiusCard)
-                        .strokeBorder(Theme.border, lineWidth: 1))
-            Text(instruction)
-                .metaText()
-                .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 10) {
-                Button("Cancel", action: model.cancelShortcutCapture)
-                    .buttonStyle(.secondary)
-                    .disabled(model.shortcutRecorder.isSaving)
-                Spacer()
-                if model.shortcutRecorder.canConfirm {
-                    Button("Use shortcut", action: model.confirmShortcutCapture)
-                        .buttonStyle(.primary)
-                } else if model.shortcutRecorder.isSaving {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-        }
-        .padding(28)
-        .frame(width: 440)
-        .background(Theme.page)
-        .interactiveDismissDisabled(model.shortcutRecorder.isSaving)
+/// One row of the palette that does something: a place to go or a verb.
+struct PaletteAction: Identifiable {
+    enum Group {
+        case navigation, actions
     }
 
-    @ViewBuilder
-    private var capture: some View {
-        if let chord = model.shortcutRecorder.chord {
-            Shortcut(chord)
-        } else if model.shortcutRecorder == .starting {
-            ProgressView()
-                .controlSize(.small)
-        } else {
-            Text("Hold a new shortcut")
-                .font(TypeScale.headline)
-                .foregroundStyle(Theme.ink)
-        }
-    }
+    let id: String
+    let group: Group
+    let title: String
+    let run: @MainActor () -> Void
+}
 
-    private var instruction: String {
-        switch model.shortcutRecorder {
-        case .closed, .starting: "Opening the key recorder."
-        case let .listening(candidate, _):
-            candidate.isEmpty ? "Hold the new shortcut." : "Release the keys to capture it."
-        case .stopping: "Checking the shortcut."
-        case let .ready(_, error): error ?? "Use this shortcut, or cancel to keep the current one."
-        case .saving: "Saving the shortcut."
+/// One answer from the query plane: a meeting, a person, a dictation, a loop.
+/// `link` is a `sona://` address the core knows how to open.
+struct PaletteHit: Decodable, Identifiable {
+    let kind: String
+    let id: String
+    let title: String
+    let snippet: String
+    let whenUtcMs: Int64
+    let link: String
+}
+
+private struct PalettePage: Decodable {
+    let entries: [PaletteHit]
+}
+
+/// What a keystroke in the field can land on, in the order the list shows them.
+private enum PaletteRow: Identifiable {
+    case action(PaletteAction)
+    case hit(PaletteHit)
+    case ask(String)
+
+    var id: String {
+        switch self {
+        case let .action(action): "action:\(action.id)"
+        case let .hit(hit): "hit:\(hit.link)"
+        case .ask: "ask"
         }
     }
 }
 
-/// Asked once, before a word of a call is kept.
-struct ConsentPanel: View {
-    @Environment(AppModel.self) private var model
-    @State private var announce = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Meeting noticed · Zoom").metaText()
-            Text("Dana and Priya are on a call with you.")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(Theme.ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Sona can record and transcribe it on this Mac. Nothing is sent anywhere, and the recording is announced to the others before it starts.")
-                .bodyText(15, Theme.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Card {
-                ToggleRow(title: "Announce in the call's chat", isOn: $announce)
-            }
-            HStack(spacing: 10) {
-                Button {
-                    model.toggleCapture()
-                } label: {
-                    Label("Record", systemImage: "video")
-                }
-                .buttonStyle(.primary)
-                Button("Not this one") {}.buttonStyle(.secondary)
-                Spacer()
-                Button("Never for this series") {}.buttonStyle(.quiet)
-            }
-            .padding(.top, 4)
-        }
-        .padding(28)
-        .frame(width: 480)
-        .background(Theme.page)
-    }
-}
-
-/// Three steps, one at a time, one action each.
-struct Onboarding: View {
-    @State private var step = 0
-
-    private let steps: [(title: String, headline: String, fact: String, action: String)] = [
-        ("Accessibility", "Let Sona type for you.",
-         "Sona pastes what you said into the app in front. macOS calls this accessibility access. Nothing is read back; Sona only types.",
-         "Open System Settings"),
-        ("Microphone", "Let Sona hear you.",
-         "Audio is transcribed on this Mac and kept for a day, then removed. It is never uploaded.",
-         "Allow the microphone"),
-        ("Model", "Download one model.",
-         "Whisper Large v3 is 3.1 GB and transcribes English and ninety-eight other languages. Smaller ones come later if you want them.",
-         "Download · 3.1 GB"),
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                ForEach(Array(steps.enumerated()), id: \.offset) { index, item in
-                    Text("\(index + 1)  \(item.title)")
-                        .font(TypeScale.label(13))
-                        .foregroundStyle(index == step ? Theme.ink : Theme.inkTertiary)
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .background(index == step ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
-                }
-            }
-            .padding(.bottom, 48)
-            Text(steps[step].headline)
-                .titleText()
-                .padding(.bottom, 12)
-            Text(steps[step].fact)
-                .bodyText(15, Theme.inkSecondary)
-                .frame(maxWidth: 460, alignment: .leading)
-                .padding(.bottom, 28)
-            HStack(spacing: 10) {
-                Button(steps[step].action) {
-                    step = min(step + 1, steps.count - 1)
-                }
-                .buttonStyle(.primary)
-                if step > 0 {
-                    Button("Back") { step -= 1 }.buttonStyle(.secondary)
-                }
-            }
-            Spacer()
-            Text("Step \(step + 1) of \(steps.count)").metaText()
-        }
-        .padding(40)
-        .padding(.top, 12)
-        .frame(width: 640, height: 440, alignment: .topLeading)
-        .background(Theme.page)
-    }
-}
-
-/// ⌘K. A floating panel: one search field and the rows it finds.
+/// ⌘K. A floating panel: one field, the places and verbs that match, then the
+/// meetings, people, dictations and loops the query plane found, and the ask
+/// row when the agent is allowed to hear the question. The corpus rows are
+/// never filtered by the letters typed: the plane matched them, sometimes by
+/// meaning, and a title need not share one letter with the question.
 struct CommandPalette: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
+    @State private var hits: [PaletteHit] = []
+    @State private var searchFailed = false
+    @State private var selection = 0
+    @State private var search: Task<Void, Never>?
     @FocusState private var focused: Bool
+
+    /// A single letter matches half the corpus, so it is not a query yet.
+    private static let minimumQuery = 2
+    /// One page: the newest dozen that matched. Recency orders the plane.
+    private static let limit: Int64 = 12
+    private static let kinds: [(kind: String, label: String)] = [
+        ("meeting", "Meetings"), ("person", "People"), ("dictation", "Dictations"), ("loop", "Loops"),
+    ]
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -238,40 +180,54 @@ struct CommandPalette: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(Theme.inkTertiary)
-                    TextField("", text: $query, prompt: Text("Search or do anything").foregroundStyle(Theme.inkTertiary))
+                    TextField("", text: $query, prompt: Text("Search or ask").foregroundStyle(Theme.inkTertiary))
                         .textFieldStyle(.plain)
                         .font(TypeScale.body(16))
                         .foregroundStyle(Theme.ink)
                         .focused($focused)
-                        .onSubmit { model.paletteShown = false }
+                        .onSubmit { runSelected() }
+                        .onKeyPress(.upArrow) { move(-1); return .handled }
+                        .onKeyPress(.downArrow) { move(1); return .handled }
                     KeyCap("esc")
                 }
                 .padding(.horizontal, 18)
                 .frame(height: 52)
                 Hairline()
-                VStack(spacing: 0) {
-                    ForEach(results) { command in
-                        Button {
-                            model.paletteShown = false
-                        } label: {
-                            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                Text(command.title).bodyText()
-                                if !command.detail.isEmpty {
-                                    Text(command.detail).metaText()
-                                }
-                                Spacer()
-                                if !command.shortcut.isEmpty {
-                                    Shortcut(command.shortcut)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(sections, id: \.label) { section in
+                                Text(section.label)
+                                    .sectionLabel()
+                                    .padding(.horizontal, 18)
+                                    .padding(.top, 12)
+                                    .padding(.bottom, 4)
+                                ForEach(section.rows) { row in
+                                    let index = rows.firstIndex { $0.id == row.id } ?? 0
+                                    PaletteRowView(row: row, selected: index == selection) {
+                                        selection = index
+                                        run(row)
+                                    }
+                                    .id(row.id)
                                 }
                             }
-                            .padding(.horizontal, 18)
-                            .frame(height: 42)
-                            .contentShape(Rectangle())
+                            if let empty {
+                                Text(empty)
+                                    .metaText()
+                                    .padding(.horizontal, 18)
+                                    .padding(.vertical, 14)
+                            }
                         }
-                        .buttonStyle(.plain)
+                        .padding(.bottom, 8)
+                    }
+                    .scrollIndicators(.never)
+                    .frame(maxHeight: 420)
+                    .onChange(of: selection) { _, index in
+                        if rows.indices.contains(index) {
+                            proxy.scrollTo(rows[index].id)
+                        }
                     }
                 }
-                .padding(.vertical, 6)
             }
             .frame(width: 600)
             .background(Theme.surface)
@@ -281,65 +237,134 @@ struct CommandPalette: View {
             .padding(.top, 96)
             .onAppear { focused = true }
             .onExitCommand { model.paletteShown = false }
+            .onChange(of: query) { _, text in
+                selection = 0
+                schedule(text)
+            }
+            .onDisappear { search?.cancel() }
         }
     }
 
-    private var results: [PaletteCommand] {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return SampleData.commands }
-        return SampleData.commands.filter {
-            $0.title.localizedCaseInsensitiveContains(trimmed) || $0.detail.localizedCaseInsensitiveContains(trimmed)
+    private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
+
+    private var actions: [PaletteAction] {
+        let all = model.paletteActions
+        guard !trimmed.isEmpty else { return all }
+        return all.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+    }
+
+    /// The sections in the order the list shows them: places, verbs, then the
+    /// plane's rows by kind, then the one ask row.
+    private var sections: [(label: String, rows: [PaletteRow])] {
+        var sections: [(label: String, rows: [PaletteRow])] = []
+        let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
+        let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
+        if !navigation.isEmpty { sections.append(("Navigation", navigation)) }
+        if !verbs.isEmpty { sections.append(("Actions", verbs)) }
+        for (kind, label) in Self.kinds {
+            let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
+            if !rows.isEmpty { sections.append((label, rows)) }
+        }
+        if model.canAsk, !trimmed.isEmpty {
+            sections.append(("Ask", [.ask(trimmed)]))
+        }
+        return sections
+    }
+
+    private var rows: [PaletteRow] { sections.flatMap(\.rows) }
+
+    /// The one sentence a settled search is allowed.
+    private var empty: String? {
+        if searchFailed { return "Search is unavailable right now." }
+        if trimmed.count >= Self.minimumQuery, hits.isEmpty, rows.isEmpty {
+            return "Nothing matched “\(trimmed)”."
+        }
+        return nil
+    }
+
+    private func move(_ delta: Int) {
+        guard !rows.isEmpty else { return }
+        selection = (selection + delta + rows.count) % rows.count
+    }
+
+    private func runSelected() {
+        guard rows.indices.contains(selection) else { return }
+        run(rows[selection])
+    }
+
+    private func run(_ row: PaletteRow) {
+        model.paletteShown = false
+        switch row {
+        case let .action(action): action.run()
+        case let .hit(hit): model.open(link: hit.link)
+        case let .ask(question): model.ask(question)
+        }
+    }
+
+    /// Long enough to swallow a typed word, short enough to feel like the list
+    /// is keeping up: 150 ms after the last keystroke, one page from the plane.
+    private func schedule(_ text: String) {
+        search?.cancel()
+        let query = text.trimmingCharacters(in: .whitespaces)
+        guard query.count >= Self.minimumQuery else {
+            hits = []
+            searchFailed = false
+            return
+        }
+        search = Task {
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            do {
+                let page: PalettePage = try await model.core.request(
+                    "sona_query_search",
+                    ["scope": "all", "query": .string(query), "limit": .number(Double(Self.limit)), "cursor": nil] as [String: JSONValue])
+                guard !Task.isCancelled else { return }
+                hits = page.entries
+                searchFailed = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                hits = []
+                searchFailed = true
+            }
         }
     }
 }
 
-/// Ask a meeting a question. Answers come from the transcript on this Mac.
-struct ChatSheet: View {
-    @Environment(AppModel.self) private var model
-    @State private var draft = ""
+private struct PaletteRowView: View {
+    let row: PaletteRow
+    let selected: Bool
+    let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Meeting chat").headlineText()
-                    Text("Answers come from the transcript on this Mac.").metaText()
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                switch row {
+                case let .action(action):
+                    Text(action.title).bodyText()
+                case let .hit(hit):
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(hit.title).bodyText().lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(Date(timeIntervalSince1970: TimeInterval(hit.whenUtcMs) / 1000).relativeDay)
+                            if !hit.snippet.isEmpty {
+                                Text("·")
+                                Text(hit.snippet).lineLimit(1)
+                            }
+                        }
+                        .metaText()
+                    }
+                case let .ask(question):
+                    Text("Ask Sona: \(question)").bodyText()
                 }
                 Spacer()
-                Button("Done") { model.chatShown = false }.buttonStyle(.secondary)
             }
-            .padding(.bottom, 24)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(SampleData.chat) { turn in
-                        Text(turn.text)
-                            .bodyText(15, turn.fromUser ? Theme.onInvert : Theme.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(turn.fromUser ? Theme.invert : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-                            .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(turn.fromUser ? .clear : Theme.border, lineWidth: 1))
-                            .frame(maxWidth: 480, alignment: turn.fromUser ? .trailing : .leading)
-                            .frame(maxWidth: .infinity, alignment: turn.fromUser ? .trailing : .leading)
-                    }
-                }
-                .padding(.bottom, 16)
-            }
-            .scrollIndicators(.never)
-            HStack(spacing: 10) {
-                TextField("", text: $draft, prompt: Text("Ask anything about this meeting").foregroundStyle(Theme.inkTertiary))
-                    .textFieldStyle(.plain)
-                    .font(TypeScale.body())
-                    .foregroundStyle(Theme.ink)
-                KeyCap("↩")
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 44)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
+            .frame(minHeight: 40)
+            .background(selected ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 6)
+            .contentShape(Rectangle())
         }
-        .padding(28)
-        .frame(width: 640, height: 540)
-        .background(Theme.page)
+        .buttonStyle(.plain)
     }
 }

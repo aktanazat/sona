@@ -60,6 +60,10 @@ struct CardRow<Leading: View, Trailing: View>: View {
         .contentShape(Rectangle())
         .onTapGesture { action?() }
         .onHover { hovering = $0 }
+        // A row with an action is a button to VoiceOver, so it can be pressed
+        // from the keyboard and from an assistive client.
+        .accessibilityAddTraits(action != nil ? .isButton : [])
+        .accessibilityAction { action?() }
     }
 }
 
@@ -133,6 +137,7 @@ struct KeyCap: View {
         Text(text)
             .font(TypeScale.body(13))
             .foregroundStyle(Theme.inkSecondary)
+            .fixedSize()
             .padding(.horizontal, 7)
             .frame(height: 24)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
@@ -393,5 +398,78 @@ struct Stat: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The last thing a store could not do, in live red under the title. Shows
+/// nothing while there is nothing to say.
+struct ErrorNote: View {
+    let message: String?
+
+    init(_ message: String?) {
+        self.message = message
+    }
+
+    var body: some View {
+        if let message {
+            Text(message)
+                .font(TypeScale.body(14))
+                .foregroundStyle(Theme.live)
+                .textSelection(.enabled)
+                .padding(.bottom, 20)
+        }
+    }
+}
+
+/// A row with a menu of choices on the right: "Language — English".
+struct ChoiceRow<Choice: Hashable>: View {
+    let title: String
+    var detail: String? = nil
+    let choices: [Choice]
+    let label: (Choice) -> String
+    @Binding var selection: Choice
+
+    var body: some View {
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).bodyText()
+                if let detail {
+                    Text(detail).metaText()
+                }
+            }
+        } trailing: {
+            Picker("", selection: $selection) {
+                ForEach(choices, id: \.self) { choice in
+                    Text(label(choice)).tag(choice)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
+    }
+}
+
+/// A row whose right side is one button: "Check now", "Reveal".
+struct ActionRow: View {
+    let title: String
+    var detail: String? = nil
+    let button: String
+    var busy = false
+    let action: () -> Void
+
+    var body: some View {
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).bodyText()
+                if let detail {
+                    Text(detail).metaText()
+                }
+            }
+        } trailing: {
+            Button(button, action: action)
+                .buttonStyle(.secondary)
+                .disabled(busy)
+        }
     }
 }

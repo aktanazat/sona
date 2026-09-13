@@ -31,11 +31,6 @@ struct HistoryEntry: Decodable {
     let postProcessedText: String?
 }
 
-struct PaginatedHistory: Decodable {
-    let entries: [HistoryEntry]
-    let hasMore: Bool
-}
-
 struct HistoryStats: Decodable {
     let entries: UInt64
     let totalDurationMs: UInt64
@@ -52,13 +47,8 @@ struct ModelInfo: Decodable {
     let partialSize: UInt64
 }
 
-struct ShortcutBinding: Decodable {
-    let currentBinding: String
-}
-
 struct BindingChange: Decodable {
     let success: Bool
-    let binding: ShortcutBinding?
     let error: String?
 }
 
@@ -67,16 +57,6 @@ struct HandyKeysEvent: Decodable {
     let key: String?
     let isKeyDown: Bool
     let hotkeyString: String
-}
-
-/// The part of the core's settings the shell shows.
-struct CoreSettings: Decodable {
-    let selectedModel: String
-    let selectedMicrophone: String?
-    let selectedLanguage: String
-    let showTrayIcon: Bool
-    let autostartEnabled: Bool
-    let bindings: [String: ShortcutBinding]
 }
 
 struct DictationActivity: Decodable {

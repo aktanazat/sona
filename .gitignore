@@ -50,3 +50,7 @@ result
 # Python bytecode (scripts/)
 __pycache__/
 *.tsbuildinfo
+
+# Xcode build output for the native shell
+macos/DerivedData.noindex/
+macos/*.xcodeproj/xcuserdata/
