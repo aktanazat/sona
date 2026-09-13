@@ -253,8 +253,8 @@ enum MeetingProcessingStatus: Decodable, Equatable {
         case .cancelled: "Processing cancelled"
         case let .failed(reason, cause):
             switch reason {
-            case .localModelUnavailable: "No local model was available"
-            case .remoteUnavailable: "The remote engine was unavailable"
+            case .localModelUnavailable: "The chosen engine was not ready"
+            case .remoteUnavailable: "Your server was not reachable"
             case .engineFailure: "Processing failed: \(cause?.label ?? "the engine failed")"
             case .cancelled: "Processing was cancelled"
             case .interrupted: "Sona closed before processing finished"
@@ -817,6 +817,9 @@ struct MeetingGeneratedArtifacts: Decodable {
     let risks: [ArtifactCitedText]
     let followUpDraft: ArtifactCitedText
     let ledger: MeetingLedger?
+    /// Why `ledger` is nil when the second pass was asked for it. Nil beside
+    /// a nil ledger is a revision written before the core kept the reason.
+    let ledgerFailure: MeetingEngineFailureCause?
 }
 
 enum MeetingArtifactState: String, Decodable {
@@ -938,9 +941,52 @@ struct MeetingReviewSnapshot: Decodable {
         artifacts.first { $0.state == .current }
     }
 
+    /// The newest revision with anything in it, current or not. A corrected
+    /// word or a renamed speaker marks the notes out of date; it does not
+    /// unwrite them, and a reader who has not asked for a rewrite still has
+    /// the earlier reading to go on.
+    var readableArtifact: MeetingArtifactRevision? {
+        currentArtifact ?? artifacts.first { $0.state == .outOfDate && $0.content != nil }
+    }
+
+    /// The newest ledger, current or written against the earlier transcript.
+    var readableLedger: (ledger: MeetingLedger, stale: Bool)? {
+        if let ledger = currentLedger { return (ledger, false) }
+        guard let ledger = artifacts.first(where: { $0.state == .outOfDate && $0.content?.ledger != nil })?
+            .content?.ledger
+        else { return nil }
+        return (ledger, true)
+    }
+
+    /// Why the newest revision carries no ledger, when the core wrote that
+    /// down.
+    var ledgerFailure: MeetingEngineFailureCause? {
+        readableArtifact?.content?.ledgerFailure
+    }
+
     /// The speaker names by id, for the transcript and the talk-time rows.
     var speakerNames: [SpeakerId: String] {
         Dictionary(speakers.map { ($0.speakerId, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// A snapshot with only the session in it, for the moment a start has
+    /// committed and the fuller read failed: the capture is running either
+    /// way, and a screen with a Stop on it beats one that says nothing is
+    /// recording. Everything else fills in on the next read.
+    init(session: MeetingSessionSnapshot) {
+        self.session = session
+        tracks = []
+        gaps = []
+        speakers = []
+        transcript = []
+        notes = []
+        artifacts = []
+        questions = []
+        diarization = MeetingDiarizationSnapshot(
+            status: .notRequested, modelId: "", modelVersion: "", generationId: nil,
+            assignedSegmentCount: 0)
+        canExport = false
+        remoteCancellationPending = false
     }
 }
 
@@ -1840,15 +1886,6 @@ enum MeetingRequest {
             "template": .string(template.rawValue),
             "expected_note_revision": .number(Double(expectedNoteRevision)),
         ])
-    }
-
-    static func reenhance(_ sessionId: MeetingSessionId, revision: Int, body: String,
-                          template: MeetingNotesTemplate, expectedNoteRevision: Int) -> [String: JSONValue] {
-        var request = mutation(sessionId, revision: revision)
-        request["body"] = .string(body)
-        request["template"] = .string(template.rawValue)
-        request["expected_note_revision"] = .number(Double(expectedNoteRevision))
-        return wrap(request)
     }
 
     static func followUpDraft(_ sessionId: MeetingSessionId) -> [String: JSONValue] {

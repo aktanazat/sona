@@ -109,6 +109,18 @@ enum MeetingNotesSaveState: Equatable {
     }
 }
 
+/// One save of the notes a person typed, captured whole at the moment it is
+/// decided. It names its meeting rather than reading the open one, so a save
+/// that starts as the page is left still lands on the meeting it belongs to,
+/// and a slow answer from an earlier meeting cannot reach a later one's
+/// editor.
+private struct NotesDraft {
+    let sessionId: MeetingSessionId
+    let body: String
+    let template: MeetingNotesTemplate
+    let expectedNoteRevision: Int
+}
+
 /// The three things a person does to a loop or a commitment.
 enum LoopChange {
     case resolve(dropped: Bool)
@@ -146,11 +158,19 @@ extension MeetingProcessingStatus {
         }
     }
 
-    /// `FAILURE_CAUSES`: only these three are worth another run of the model.
-    var offersRetry: Bool {
-        switch cause {
-        case .modelRefused, .replyNotStructured, .replyRejected: true
-        default: false
+    /// The one line under a failure that a setting can fix: what to check,
+    /// where. The engine row under Settings says which condition it is in —
+    /// Apple Intelligence off or still preparing, an endpoint without its
+    /// context window, a model the endpoint does not serve — so the page
+    /// sends the reader there instead of guessing which one it was.
+    var settingsAdvice: String? {
+        switch failure {
+        case .localModelUnavailable:
+            "The engine row under Settings › Meetings says what it is waiting on."
+        case .remoteUnavailable:
+            "Check the server under Settings › Meetings, or turn off writing on your server to use this Mac."
+        default:
+            nil
         }
     }
 
@@ -311,6 +331,10 @@ final class MeetingsStore {
     private(set) var openSessionId: MeetingSessionId?
     private(set) var snapshot: MeetingReviewSnapshot?
     private(set) var reviewLoading = false
+    /// Why the first read of the open meeting produced no page: the core's
+    /// own words, kept apart from `error` so the page can offer another read
+    /// instead of the sentence for a meeting that was deleted.
+    private(set) var reviewFailure: String?
     private(set) var tab: MeetingReviewTab = .transcript
     private(set) var chosenTab: MeetingReviewTab?
     private(set) var receipt: MeetingOperationReceipt?
@@ -353,6 +377,11 @@ final class MeetingsStore {
     @ObservationIgnored private var transcriptTask: Task<Void, Never>?
     @ObservationIgnored private var notesTask: Task<Void, Never>?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var openTask: Task<Void, Never>?
+    /// A departing save that did not land, kept for the next time that
+    /// meeting is opened so the words are back in the editor rather than
+    /// gone.
+    @ObservationIgnored private var parkedDraft: NotesDraft?
     /// The revision each side read last, so a refresh that changed nothing
     /// does not re-ask for analytics or loops. Artifacts can be rewritten
     /// without the session's revision moving, so the generation counts too.
@@ -388,15 +417,19 @@ final class MeetingsStore {
             }
             self.reloadListSoon()
         }
+        // A preflight is the live store's gate, not a page to read; opening it
+        // here would put an empty review in front of the consent.
         core.observe(CoreEvent.meetingNavigationRequested) { [weak self] line in
             guard let self, let payload: MeetingNavigationPayload = try? Core.payload(line) else { return }
             switch payload.destination {
             case .list:
                 self.closeReview()
-            case .session, .preflight:
+            case .session:
                 if let sessionId = payload.sessionId {
                     self.open(sessionId)
                 }
+            case .preflight:
+                break
             }
         }
     }
@@ -661,9 +694,10 @@ final class MeetingsStore {
     // MARK: - Opening one meeting
 
     func open(_ sessionId: MeetingSessionId) {
-        transcriptTask?.cancel()
+        leaveOpenMeeting()
         openSessionId = sessionId
         snapshot = nil
+        reviewFailure = nil
         analytics = nil
         analyticsKey = nil
         loops = nil
@@ -682,22 +716,41 @@ final class MeetingsStore {
         catchUp = nil
         followUp = nil
         followUpOpen = false
-        Task {
-            reviewLoading = true
-            defer { reviewLoading = false }
+        reviewLoading = true
+        openTask = Task { [weak self] in
+            guard let self else { return }
             await refreshSnapshot()
             await loadUserNotes()
             await loadPeople()
+            if isOpen(sessionId) { reviewLoading = false }
         }
     }
 
     func closeReview() {
+        leaveOpenMeeting()
+        openSessionId = nil
+        snapshot = nil
+        reviewFailure = nil
+        reviewLoading = false
+        followUpOpen = false
+    }
+
+    /// The page in front of the reader is about to change. Every read that
+    /// was still answering for the old meeting is dropped, and the notes they
+    /// typed go to the core now rather than after a settle that will never
+    /// come.
+    private func leaveOpenMeeting() {
+        openTask?.cancel()
         notesTask?.cancel()
         transcriptTask?.cancel()
         eventTask?.cancel()
-        openSessionId = nil
-        snapshot = nil
-        followUpOpen = false
+        guard notesState == .unsaved, let draft = pendingDraft else { return }
+        Task { await persist(draft) }
+    }
+
+    /// Whether an answer that arrives now is about the meeting on screen.
+    private func isOpen(_ sessionId: MeetingSessionId) -> Bool {
+        openSessionId == sessionId
     }
 
     func choose(tab: MeetingReviewTab) {
@@ -705,26 +758,48 @@ final class MeetingsStore {
         self.tab = tab
     }
 
-    /// `meeting_get`. A meeting that is no longer there closes the page.
+    /// `meeting_get`. A meeting that is no longer there closes the page; a
+    /// read that failed for any other reason says so on the page, with the
+    /// way to read again.
     func refreshSnapshot() async {
         guard let sessionId = openSessionId else { return }
         do {
             let next: MeetingReviewSnapshot = try await core.request(
                 "meeting_get", MeetingRequest.session(sessionId))
+            guard isOpen(sessionId) else { return }
             snapshot = next
+            reviewFailure = nil
             settleTab(next)
             await loadAnalytics(next)
             await loadLoops(next)
-        } catch let failure as CoreError {
-            if failure.remote(as: MeetingCommandError.self) == .notFound {
+        } catch {
+            guard isOpen(sessionId) else { return }
+            if (error as? CoreError)?.remote(as: MeetingCommandError.self) == .notFound {
                 closeReview()
                 notice = "That meeting is no longer here."
                 await loadPage()
                 return
             }
-            error = reason(failure)
-        } catch {
-            self.error = reason(error)
+            if snapshot == nil {
+                reviewFailure = reason(error)
+            } else {
+                self.error = reason(error)
+            }
+        }
+    }
+
+    /// Read the meeting again after a first read that failed.
+    func retryReview() {
+        guard let sessionId = openSessionId else { return }
+        reviewFailure = nil
+        reviewLoading = true
+        openTask?.cancel()
+        openTask = Task { [weak self] in
+            guard let self else { return }
+            await refreshSnapshot()
+            if userNotes == nil { await loadUserNotes() }
+            if people.isEmpty { await loadPeople() }
+            if isOpen(sessionId) { reviewLoading = false }
         }
     }
 
@@ -1071,12 +1146,11 @@ final class MeetingsStore {
     private func loadAnalytics(_ snapshot: MeetingReviewSnapshot) async {
         guard analyticsKey != MeetingsStore.key(snapshot) else { return }
         analyticsKey = MeetingsStore.key(snapshot)
-        do {
-            analytics = try await core.request(
-                "get_meeting_analytics", MeetingRequest.session(snapshot.session.sessionId))
-        } catch {
-            analytics = nil
-        }
+        let sessionId = snapshot.session.sessionId
+        let read: MeetingAnalyticsSnapshot? = try? await core.request(
+            "get_meeting_analytics", MeetingRequest.session(sessionId))
+        guard isOpen(sessionId) else { return }
+        analytics = read
     }
 
     /// The talk strip only reads when somebody said something.
@@ -1114,13 +1188,10 @@ final class MeetingsStore {
 
     private func reloadLoops() async {
         guard let sessionId = openSessionId else { return }
-        do {
-            let result: MeetingLoopsResult = try await core.request(
-                "meeting_loops", MeetingRequest.session(sessionId))
-            loops = result.rows
-        } catch {
-            loops = []
-        }
+        let read: MeetingLoopsResult? = try? await core.request(
+            "meeting_loops", MeetingRequest.session(sessionId))
+        guard isOpen(sessionId) else { return }
+        loops = read?.rows ?? []
     }
 
     func loopRows(_ kind: MeetingLoopKind) -> [MeetingLoopRow] {
@@ -1167,13 +1238,10 @@ final class MeetingsStore {
 
     private func loadPeople() async {
         guard let sessionId = openSessionId else { return }
-        do {
-            let result: MeetingPeopleContextResult = try await core.request(
-                "meeting_people_context", MeetingRequest.session(sessionId))
-            people = result.rows
-        } catch {
-            people = []
-        }
+        let read: MeetingPeopleContextResult? = try? await core.request(
+            "meeting_people_context", MeetingRequest.session(sessionId))
+        guard isOpen(sessionId) else { return }
+        people = read?.rows ?? []
     }
 
     /// `previouslyTogetherRows`: only the people this meeting was not the
@@ -1189,58 +1257,94 @@ final class MeetingsStore {
         do {
             let notes: MeetingUserNotes = try await core.request(
                 "get_meeting_user_notes", MeetingRequest.session(sessionId))
+            guard isOpen(sessionId) else { return }
             userNotes = notes
-            notesBody = notes.body
             savedNoteRevision = notes.revision
-            notesState = .idle
+            // A save that did not land when this meeting was last left goes
+            // back into the editor, unsaved, so the autosave carries it.
+            if let parked = parkedDraft, parked.sessionId == sessionId, parked.body != notes.body {
+                parkedDraft = nil
+                notesBody = parked.body
+                notesState = .unsaved
+                scheduleNotesSave()
+            } else {
+                notesBody = notes.body
+                notesState = .idle
+            }
         } catch {
+            guard isOpen(sessionId) else { return }
             notesState = .conflict
         }
     }
 
+    /// What a save right now would send: the open meeting, the words in the
+    /// editor, its template, and the revision the core last acknowledged.
+    private var pendingDraft: NotesDraft? {
+        guard let sessionId = openSessionId, let notes = userNotes else { return nil }
+        return NotesDraft(
+            sessionId: sessionId, body: notesBody, template: notes.template,
+            expectedNoteRevision: savedNoteRevision)
+    }
+
     /// Autosave, 1.2 seconds after the last keystroke.
     func typeNotes(_ text: String) {
-        guard let notes = userNotes else { return }
+        guard userNotes != nil else { return }
         notesBody = text
         notesState = .unsaved
+        scheduleNotesSave()
+    }
+
+    private func scheduleNotesSave() {
         notesTask?.cancel()
         notesTask = Task { [weak self] in
             try? await Task.sleep(for: MeetingsStore.notesSettle)
-            guard !Task.isCancelled, let self else { return }
-            await self.persistNotes(text, template: notes.template)
+            guard !Task.isCancelled, let self, let draft = pendingDraft else { return }
+            await persist(draft)
         }
     }
 
     /// The blur React saves on: a pending change goes now rather than later.
     func flushNotes() {
-        guard notesState == .unsaved, let notes = userNotes else { return }
+        guard notesState == .unsaved, let draft = pendingDraft else { return }
         notesTask?.cancel()
-        Task { await persistNotes(notesBody, template: notes.template) }
+        Task { await persist(draft) }
     }
 
     func choose(template: MeetingNotesTemplate) {
-        guard let notes = userNotes, template != notes.template else { return }
+        guard let notes = userNotes, template != notes.template, let sessionId = openSessionId else { return }
         notesTask?.cancel()
-        Task { await persistNotes(notesBody, template: template) }
+        let draft = NotesDraft(
+            sessionId: sessionId, body: notesBody, template: template,
+            expectedNoteRevision: savedNoteRevision)
+        Task { await persist(draft) }
     }
 
+    /// One save, addressed to the meeting the draft names. The editor only
+    /// learns the outcome while that meeting is still the open one; a save
+    /// for a meeting the reader has left either lands quietly or is parked
+    /// for their return.
     @discardableResult
-    private func persistNotes(_ body: String, template: MeetingNotesTemplate) async -> MeetingUserNotes? {
-        guard let sessionId = openSessionId else { return nil }
-        notesState = .saving
+    private func persist(_ draft: NotesDraft) async -> MeetingUserNotes? {
+        if isOpen(draft.sessionId) { notesState = .saving }
         do {
             let saved: MeetingUserNotes = try await core.request(
                 "save_meeting_user_notes",
                 MeetingRequest.userNotesSave(
-                    sessionId, body: body, template: template,
-                    expectedNoteRevision: savedNoteRevision)
+                    draft.sessionId, body: draft.body, template: draft.template,
+                    expectedNoteRevision: draft.expectedNoteRevision)
             )
+            guard isOpen(draft.sessionId) else { return saved }
             savedNoteRevision = saved.revision
             userNotes = saved
-            notesState = .saved
+            // Words typed while the save was out are not saved yet.
+            notesState = notesBody == draft.body ? .saved : .unsaved
             return saved
         } catch {
-            notesState = .conflict
+            if isOpen(draft.sessionId) {
+                notesState = .conflict
+            } else {
+                parkedDraft = draft
+            }
             return nil
         }
     }
@@ -1253,24 +1357,26 @@ final class MeetingsStore {
     }
 
     /// Write the notes again with what a person typed in front of the model.
+    /// The words are saved first, on their own, so the editor holds the
+    /// revision the core acknowledged whether or not the model then answers:
+    /// a rewrite that fails must not leave the next keystroke's save
+    /// refused as stale.
     func reenhance() {
-        guard let session = snapshot?.session, let notes = userNotes else { return }
+        guard snapshot?.session != nil, let draft = pendingDraft else { return }
         notesTask?.cancel()
         Task {
             enhancing = true
             defer { enhancing = false }
-            do {
-                let result: MeetingMutationResult = try await core.request(
-                    "reenhance_meeting_with_notes",
-                    MeetingRequest.reenhance(
-                        session.sessionId, revision: session.revision, body: notesBody,
-                        template: notes.template, expectedNoteRevision: savedNoteRevision)
+            guard await persist(draft) != nil, isOpen(draft.sessionId) else { return }
+            await act("Rewriting the notes") {
+                guard let session = self.snapshot?.session else { return }
+                let result: MeetingMutationResult = try await self.core.request(
+                    "meeting_artifacts_regenerate",
+                    MeetingRequest.wrap(MeetingRequest.mutation(session.sessionId, revision: session.revision))
                 )
-                receive(result.receipt)
-                await loadUserNotes()
-                await refreshSnapshot()
-            } catch {
-                self.error = reason(error)
+                self.receive(result.receipt)
+                await self.refreshSnapshot()
+                await self.loadPage()
             }
         }
     }

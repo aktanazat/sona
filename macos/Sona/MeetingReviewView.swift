@@ -4,7 +4,9 @@ import SwiftUI
 /// and the ledger a reader can check against quotes.
 struct MeetingReviewView: View {
     let store: MeetingsStore
+    let settings: MeetingSettingsStore
     var openPerson: (String) -> Void = { _ in }
+    var openMeetingSettings: () -> Void = {}
     @State private var confirmingDelete = false
 
     var body: some View {
@@ -16,9 +18,12 @@ struct MeetingReviewView: View {
                 MeetingsNoticeBand(store: store)
                 MeetingReviewTabs(store: store)
                 pane(snapshot)
+            } else if let failure = store.reviewFailure {
+                unread(failure)
+            } else if store.reviewLoading {
+                Text("Reading the meeting…").bodyText(15, Theme.inkSecondary)
             } else {
-                Text(store.reviewLoading ? "Reading the meeting…" : "That meeting is no longer here.")
-                    .bodyText(15, Theme.inkSecondary)
+                Text("That meeting is no longer here.").bodyText(15, Theme.inkSecondary)
             }
         }
         .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
@@ -37,9 +42,27 @@ struct MeetingReviewView: View {
         case .transcript:
             TranscriptPane(store: store, snapshot: snapshot)
         case .insights:
-            MeetingInsightsPane(store: store, snapshot: snapshot, openPerson: openPerson)
+            MeetingInsightsPane(
+                store: store, settings: settings, snapshot: snapshot,
+                openPerson: openPerson, openMeetingSettings: openMeetingSettings)
         case .ledger:
             LedgerPane(store: store, snapshot: snapshot, openPerson: openPerson)
+        }
+    }
+
+    /// The first read failed: the reason, and the way to read again. The
+    /// meeting is still there; only this read of it is not.
+    private func unread(_ failure: String) -> some View {
+        Card {
+            CardRow {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Sona could not read this meeting.").bodyText()
+                    Text(failure).metaText(Theme.inkSecondary)
+                }
+            } trailing: {
+                Button("Try again") { store.retryReview() }
+                    .buttonStyle(SecondaryButton(compact: true))
+            }
         }
     }
 
@@ -102,9 +125,12 @@ struct MeetingReviewHeader: View {
                 Button("Cancel") { editing = false }.buttonStyle(QuietButton())
             }
         } else {
-            Text(snapshot.session.title)
-                .titleText()
-                .onTapGesture { if store.editable { start() } }
+            Button { start() } label: {
+                Text(snapshot.session.title).titleText()
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.editable)
+            .accessibilityHint(store.editable ? "Edit the title" : "")
         }
     }
 
@@ -437,17 +463,23 @@ struct TranscriptTurnRow: View {
             SegmentEditor(store: store, segment: segment) { editing = nil }
                 .id(segment.base.segmentId)
         } else {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(TranscriptHighlight.mark(segment.text, query: store.transcriptQuery))
-                    .bodyText(15, segment.removed ? Theme.inkDisabled : Theme.ink)
-                    .strikethrough(segment.removed, color: Theme.inkDisabled)
-                if segment.edited {
-                    Text("corrected").font(TypeScale.body(11)).foregroundStyle(Theme.inkTertiary)
+            Button {
+                editing = segment.base.segmentId
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(TranscriptHighlight.mark(segment.text, query: store.transcriptQuery))
+                        .bodyText(15, segment.removed ? Theme.inkDisabled : Theme.ink)
+                        .strikethrough(segment.removed, color: Theme.inkDisabled)
+                    if segment.edited {
+                        Text("corrected").font(TypeScale.body(11)).foregroundStyle(Theme.inkTertiary)
+                    }
                 }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .disabled(!store.editable)
+            .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
-            .contentShape(Rectangle())
-            .onTapGesture { if store.editable { editing = segment.base.segmentId } }
         }
     }
 }
@@ -513,17 +545,22 @@ struct SegmentEditor: View {
 /// The people, the numbers, the notes, and whatever the model wrote.
 struct MeetingInsightsPane: View {
     let store: MeetingsStore
+    let settings: MeetingSettingsStore
     let snapshot: MeetingReviewSnapshot
     var openPerson: (String) -> Void = { _ in }
+    var openMeetingSettings: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
             MeetingPeopleBand(store: store, openPerson: openPerson)
             MeetingAnalyticsStrip(store: store)
-            ArtifactPane(store: store, snapshot: snapshot)
+            ArtifactPane(store: store, snapshot: snapshot, openMeetingSettings: openMeetingSettings)
             MeetingQuestionsCard(store: store, snapshot: snapshot)
             MeetingNotesCard(store: store, snapshot: snapshot)
             MeetingUserNotesCard(store: store)
+            MeetingSeriesSection(
+                store: settings, sessionId: snapshot.session.sessionId,
+                openMeetingSettings: openMeetingSettings)
         }
     }
 }
@@ -624,10 +661,14 @@ struct MeetingAnalyticsStrip: View {
 struct ArtifactPane: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
+    var openMeetingSettings: () -> Void = {}
 
     var body: some View {
-        if let artifact = snapshot.currentArtifact, let content = artifact.content {
+        if let artifact = snapshot.readableArtifact, let content = artifact.content {
             VStack(alignment: .leading, spacing: 28) {
+                if artifact.state == .outOfDate {
+                    StaleNotesBand(store: store, what: "These notes")
+                }
                 summary(content, artifact: artifact)
                 if !content.outline.isEmpty { outline(content) }
                 if !content.decisions.isEmpty { decisions(content) }
@@ -637,7 +678,7 @@ struct ArtifactPane: View {
                 followUp(content)
             }
         } else {
-            ArtifactFailureCard(store: store, snapshot: snapshot)
+            ArtifactFailureCard(store: store, snapshot: snapshot, openMeetingSettings: openMeetingSettings)
         }
     }
 
@@ -793,22 +834,28 @@ struct ArtifactPane: View {
 struct ArtifactFailureCard: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
+    var openMeetingSettings: () -> Void = {}
+
+    private var status: MeetingProcessingStatus { snapshot.session.processingStatus }
 
     var body: some View {
         PageSection("Notes") {
             Card {
                 CardRow {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(snapshot.session.processingStatus.label).bodyText()
-                        Text(snapshot.session.processingStatus.explanation).metaText(Theme.inkSecondary)
-                        if snapshot.session.processingStatus.offersSettings {
-                            Text("Install a local model, or point Sona at a remote engine, in Settings.")
-                                .metaText(Theme.accent)
+                        Text(status.label).bodyText()
+                        Text(status.explanation).metaText(Theme.inkSecondary)
+                        if let advice = status.settingsAdvice {
+                            Text(advice).metaText(Theme.accent)
                         }
                     }
                 } trailing: {
                     HStack(spacing: 12) {
-                        if snapshot.session.processingStatus.offersRetry, store.canRegenerate {
+                        if status.offersSettings {
+                            Button("Open Settings", action: openMeetingSettings)
+                                .buttonStyle(SecondaryButton(compact: true))
+                        }
+                        if status.isFailed, store.canRegenerate {
                             Button("Try again") { store.regenerate() }
                                 .buttonStyle(SecondaryButton(compact: true))
                                 .disabled(store.busy)
@@ -816,6 +863,31 @@ struct ArtifactFailureCard: View {
                         Button("Refresh") { Task { await store.refreshSnapshot() } }
                             .buttonStyle(QuietButton())
                     }
+                }
+            }
+        }
+    }
+}
+
+/// The words changed after this was written: a corrected line, a renamed
+/// speaker. What is on screen still reads; it just reads the earlier
+/// transcript, and one click writes it again.
+struct StaleNotesBand: View {
+    let store: MeetingsStore
+    let what: String
+
+    var body: some View {
+        Card {
+            CardRow {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(what) were written before the transcript changed.").bodyText()
+                    Text("They still read the earlier words.").metaText(Theme.inkSecondary)
+                }
+            } trailing: {
+                if store.canRegenerate {
+                    Button("Write again") { store.regenerate() }
+                        .buttonStyle(SecondaryButton(compact: true))
+                        .disabled(store.busy)
                 }
             }
         }
@@ -1006,8 +1078,12 @@ struct LedgerPane: View {
     var openPerson: (String) -> Void = { _ in }
 
     var body: some View {
-        if let ledger = snapshot.currentLedger {
+        if let readable = snapshot.readableLedger {
+            let ledger = readable.ledger
             VStack(alignment: .leading, spacing: 28) {
+                if readable.stale {
+                    StaleNotesBand(store: store, what: "This ledger")
+                }
                 headline(ledger)
                 if !ledger.threads.isEmpty { threads(ledger) }
                 LoopList(store: store, kind: .loop, openPerson: openPerson)
@@ -1019,11 +1095,35 @@ struct LedgerPane: View {
             PageSection("Ledger") {
                 Card {
                     CardRow {
-                        Text("No ledger was written for this meeting.").bodyText(15, Theme.inkSecondary)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(missing).bodyText(15, Theme.inkSecondary)
+                            if snapshot.ledgerFailure != nil {
+                                Text("The notes above were written; only this second pass was not.")
+                                    .metaText(Theme.inkSecondary)
+                            }
+                        }
+                    } trailing: {
+                        if snapshot.ledgerFailure != nil, store.canRegenerate {
+                            Button("Write again") { store.regenerate() }
+                                .buttonStyle(SecondaryButton(compact: true))
+                                .disabled(store.busy)
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Why there is no ledger: the cause the core kept, or the plain fact
+    /// when the notes are older than that record or were never written.
+    private var missing: String {
+        if let cause = snapshot.ledgerFailure {
+            return "No ledger was written because \(cause.label)."
+        }
+        if snapshot.session.processingStatus.isPending {
+            return "The ledger is written after the notes. It lands here."
+        }
+        return "No ledger was written for this meeting."
     }
 
     private func headline(_ ledger: MeetingLedger) -> some View {

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Everything the capture page shows under the record button: this week's
@@ -51,6 +52,8 @@ final class OverviewStore {
     @ObservationIgnored private let core: Core
     /// A refresh that lands after a newer one started is stale.
     @ObservationIgnored private var feedGeneration = 0
+    /// The sleep until the first upcoming event ends.
+    @ObservationIgnored private var upcomingWake: Task<Void, Never>?
 
     init(core: Core) {
         self.core = core
@@ -61,6 +64,9 @@ final class OverviewStore {
             if case .toggled = update { return }
             Task { await self.loadTrend() }
             Task { await self.loadStats() }
+            // Suggestions are mined from the dictations, so a new one may
+            // have just earned a row.
+            Task { await self.loadSuggestions() }
             self.refreshFeed()
         }
         // The startup unlock: a read refused while the database was locked
@@ -74,15 +80,33 @@ final class OverviewStore {
             guard let self, let snapshot: CaptureModeSnapshot = try? Core.payload(line) else { return }
             self.modes = snapshot
         }
+        // A meeting that finished, gained an artifact, or was removed changes
+        // the recent lists and the meetings column alike; an answered
+        // suggestion arrives as an artifact change with no session.
         core.observe(CoreEvent.overviewMeetingArtifactChanged) { [weak self] _ in
-            self?.refreshFeed()
+            guard let self else { return }
+            self.refreshFeed()
+            Task { await self.loadMeetingTrend() }
+            Task { await self.loadSuggestions() }
+        }
+        core.observe(CoreEvent.meetingSessionChanged) { [weak self] _ in
+            Task { await self?.loadMeetingTrend() }
         }
         core.observe(CoreEvent.overviewMeetingRemoved) { [weak self] _ in
-            self?.refreshFeed()
+            guard let self else { return }
+            self.refreshFeed()
+            Task { await self.loadMeetingTrend() }
         }
         core.observe(CoreEvent.activity) { [weak self] line in
             guard let self, let activity: DictationActivity = try? Core.payload(line) else { return }
             self.capturing = activity.state != "idle"
+        }
+        // The calendar moves while this app is in the back: coming to the
+        // front is the moment to read the week ahead again.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.loadUpcoming() }
         }
     }
 
@@ -256,10 +280,20 @@ final class OverviewStore {
         }
     }
 
+    /// The week ahead, then a wake at the moment its first row ends, so an
+    /// event that has passed leaves the list without a visit to prompt it.
     private func loadUpcoming() async {
         await call {
             self.upcoming = try await self.core.request(
                 "meeting_upcoming_events", OverviewUpcomingParams(days: Self.upcomingDays))
+        }
+        upcomingWake?.cancel()
+        guard let next = upcoming?.rows.map(\.endUtcMs).min() else { return }
+        let wait = Double(next) / 1000 - Date.now.timeIntervalSince1970
+        upcomingWake = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(wait, 1)))
+            guard !Task.isCancelled else { return }
+            await self?.loadUpcoming()
         }
     }
 

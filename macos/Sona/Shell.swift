@@ -116,7 +116,9 @@ struct MeetingsPlace: View {
         } else if live.gate != nil {
             MeetingStartGateView(store: live)
         } else if meetings.openSessionId != nil {
-            MeetingReviewView(store: meetings, openPerson: model.openPerson)
+            MeetingReviewView(
+                store: meetings, settings: model.meetingSettings, openPerson: model.openPerson,
+                openMeetingSettings: { model.showSettings(.meetings) })
         } else {
             home
         }
