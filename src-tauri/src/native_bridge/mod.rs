@@ -334,10 +334,10 @@ fn reply<T: Serialize, E: Serialize>(result: Result<T, E>) -> Result<String, Fau
     match result {
         Ok(value) => encode_plain(value),
         Err(error) => {
-            let error = serde_json::to_string(&error)
-                .map_err(|error| Fault::Bridge(error.to_string()))?;
-            let error = RawValue::from_string(error)
-                .map_err(|error| Fault::Bridge(error.to_string()))?;
+            let error =
+                serde_json::to_string(&error).map_err(|error| Fault::Bridge(error.to_string()))?;
+            let error =
+                RawValue::from_string(error).map_err(|error| Fault::Bridge(error.to_string()))?;
             Err(Fault::Command(error))
         }
     }
@@ -416,7 +416,10 @@ mod tests {
             Err(fault) => fault,
             Ok(_) => panic!("an err must fault"),
         };
-        assert_eq!(failure(7, &typed), r#"{"id":7,"error":{"kind":"unpaired"}}"#);
+        assert_eq!(
+            failure(7, &typed),
+            r#"{"id":7,"error":{"kind":"unpaired"}}"#
+        );
         assert_eq!(
             failure(7, &Fault::Bridge("bad \"quote\"".to_string())),
             r#"{"id":7,"error":"bad \"quote\""}"#

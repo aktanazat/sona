@@ -120,7 +120,8 @@ mod tests {
     fn the_bridge_answers_or_says_why_not() {
         println!(
             "availability: {}",
-            apple_intelligence_blocker().map_or("available".to_string(), |blocker| blocker.to_string())
+            apple_intelligence_blocker()
+                .map_or("available".to_string(), |blocker| blocker.to_string())
         );
 
         let started = std::time::Instant::now();

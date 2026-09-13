@@ -1,8 +1,8 @@
 use crate::managers::transcription::TranscriptionManager;
-use std::sync::Arc;
 use crate::settings::{update_settings, ModelUnloadTimeout};
 use serde::Serialize;
 use specta::Type;
+use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 #[derive(Serialize, Type)]
