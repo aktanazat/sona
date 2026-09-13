@@ -1716,6 +1716,7 @@ pub fn run(cli_args: CliArgs) {
             secure_input::run_keyboard_diagnostic,
             show_main_window_command,
             commands::cancel_operation,
+            commands::finish_recording,
             commands::is_portable,
             commands::get_app_dir_path,
             commands::get_app_settings,

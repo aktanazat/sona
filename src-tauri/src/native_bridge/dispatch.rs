@@ -1572,6 +1572,13 @@ pub(super) async fn call(
             })
             .await?
         }
+        "finish_recording" => {
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                encode_plain(crate::commands::finish_recording(handle.clone()))
+            })
+            .await?
+        }
         "is_portable" => {
             on_main_thread(app, move || encode_plain(crate::commands::is_portable())).await?
         }

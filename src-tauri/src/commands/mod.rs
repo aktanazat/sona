@@ -42,6 +42,20 @@ pub fn cancel_operation(app: AppHandle) {
     cancel_current_operation(&app);
 }
 
+/// The Stop button on the capture page. It ends whatever is recording,
+/// whichever shortcut opened it, and does nothing while the words are still
+/// being worked on; the toggle the shortcut uses would remember that press
+/// and open the microphone again the moment the pipeline drained.
+#[tauri::command]
+#[specta::specta]
+pub fn finish_recording(app: AppHandle) {
+    if let Some(coordinator) =
+        app.try_state::<crate::transcription_coordinator::TranscriptionCoordinator>()
+    {
+        coordinator.send_finish("capture-page");
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn is_portable() -> bool {

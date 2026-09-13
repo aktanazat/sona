@@ -118,7 +118,13 @@ struct InputEvent {
 /// Commands processed sequentially by the coordinator thread.
 enum Command {
     Input(InputEvent),
-    Cancel { recording_was_active: bool },
+    /// End whatever is recording; see [`CoordinatorState::on_finish`].
+    Finish {
+        source: String,
+    },
+    Cancel {
+        recording_was_active: bool,
+    },
     ProcessingFinished,
 }
 
@@ -454,6 +460,18 @@ impl CoordinatorState {
         }
     }
 
+    /// A Stop button rather than a shortcut edge: it ends the recording in
+    /// flight whatever intent opened it, and it is never remembered. While
+    /// the pipeline is busy or idle it does nothing, so a stop can never
+    /// turn into the start of the next recording the way a toggle press does.
+    fn on_finish(&mut self, source: String) -> Option<Effect> {
+        if !matches!(self.stage, Stage::Recording { .. }) {
+            return None;
+        }
+        self.pending_release = None;
+        self.hand_over_recording(source)
+    }
+
     /// Hand the active recording's plan to the executor. Returns None when
     /// `intent` is not the intent currently recording.
     fn stop_recording(
@@ -464,6 +482,10 @@ impl CoordinatorState {
         if !matches!(&self.stage, Stage::Recording { intent: active, .. } if active == intent) {
             return None;
         }
+        self.hand_over_recording(shortcut_label)
+    }
+
+    fn hand_over_recording(&mut self, shortcut_label: String) -> Option<Effect> {
         match std::mem::replace(&mut self.stage, Stage::Processing) {
             Stage::Recording {
                 intent, run_plan, ..
@@ -519,6 +541,7 @@ impl TranscriptionCoordinator {
 
                     let effect = match cmd {
                         Command::Input(input) => state.on_input(input, Instant::now()),
+                        Command::Finish { source } => state.on_finish(source),
                         Command::Cancel {
                             recording_was_active,
                         } => {
@@ -575,6 +598,20 @@ impl TranscriptionCoordinator {
 
     fn send(&self, input: InputEvent) {
         if self.tx.send(Command::Input(input)).is_err() {
+            warn!("Transcription coordinator channel closed");
+        }
+    }
+
+    /// A Stop button. Ends the recording in flight whatever intent opened
+    /// it, and does nothing at any other stage.
+    pub fn send_finish(&self, source: &str) {
+        if self
+            .tx
+            .send(Command::Finish {
+                source: source.to_string(),
+            })
+            .is_err()
+        {
             warn!("Transcription coordinator channel closed");
         }
     }
@@ -937,6 +974,11 @@ mod tests {
             self.apply(effect);
         }
 
+        fn finish(&mut self) {
+            let effect = self.state.on_finish("button".to_string());
+            self.apply(effect);
+        }
+
         fn advance(&mut self, by: Duration) {
             self.clock += by;
         }
@@ -1200,6 +1242,43 @@ mod tests {
             "an even number of busy presses is a no-op"
         );
         assert!(harness.is_idle());
+    }
+
+    /// The Stop button is not a toggle edge. Pressed while the pipeline is
+    /// still working it is dropped, never remembered: it must not open the
+    /// microphone again the moment the previous dictation lands.
+    #[test]
+    fn a_finish_during_processing_starts_nothing_when_the_pipeline_drains() {
+        let mut harness = Harness::new();
+        harness.input(active_mode(), true, false);
+        harness.advance(DEBOUNCE);
+        harness.finish();
+        assert!(harness.is_processing());
+
+        harness.finish();
+        harness.processing_finished();
+        assert_eq!(harness.starts, 1, "a stop is never a deferred start");
+        assert!(harness.is_idle());
+    }
+
+    /// The button ends whatever is recording, including a recording that a
+    /// command shortcut opened, which the dictation toggle would ignore.
+    #[test]
+    fn a_finish_ends_a_recording_another_intent_opened() {
+        let mut harness = Harness::new();
+        harness.input(TranscriptionIntent::Command, true, true);
+        assert!(harness.is_recording());
+
+        harness.advance(DEBOUNCE);
+        harness.input(active_mode(), true, false);
+        assert_eq!(
+            harness.stops, 0,
+            "the dictation toggle belongs to its own intent"
+        );
+
+        harness.finish();
+        assert_eq!((harness.starts, harness.stops), (1, 1));
+        assert!(harness.is_processing());
     }
 
     #[test]
