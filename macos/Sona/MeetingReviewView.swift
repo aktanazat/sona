@@ -559,7 +559,7 @@ struct MeetingPeopleBand: View {
 
     private func line(_ row: MeetingPersonContextRow) -> String {
         var parts: [String] = []
-        let before = max(0, row.meetingsTogether - 1)
+        let before = row.priorMeetings
         if before > 0 {
             parts.append(before == 1 ? "1 meeting before this" : "\(before) meetings before this")
         }

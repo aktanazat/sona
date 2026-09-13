@@ -337,6 +337,21 @@ struct PersonView: View {
                 deleteDocument: deleteDocument,
                 dismiss: { self.prompt = nil })
         }
+        .alert("Which voice should Sona keep?", isPresented: voiceConflictPresented, presenting: store.voiceConflict) { conflict in
+            Button("Keep \(store.detail?.person.displayName ?? "this person")'s voice") {
+                store.resolveVoiceConflict(keepSource: true)
+            }
+            Button("Keep \(conflict.targetName)'s voice") {
+                store.resolveVoiceConflict(keepSource: false)
+            }
+            Button("Cancel", role: .cancel) { store.dismissVoiceConflict() }
+        } message: { conflict in
+            Text("Both people have a saved voice, and the two were learned by different models, so they cannot be combined. The merged person keeps one; the other is forgotten, and \(conflict.targetName) can be enrolled again later.")
+        }
+    }
+
+    private var voiceConflictPresented: Binding<Bool> {
+        Binding(get: { store.voiceConflict != nil }, set: { if !$0 { store.dismissVoiceConflict() } })
     }
 }
 
@@ -475,7 +490,7 @@ struct PersonSections: View {
     var deleteDocument: ((String) -> Void)?
 
     var body: some View {
-        PersonSummaryView(summary: detail.person.summary)
+        PersonSummaryView(summary: detail.person.summary, outcome: store.summaryOutcome)
         BriefingView(row: store.briefing)
         PersonLedgerView(
             label: "Open loops",
@@ -501,19 +516,26 @@ struct PersonSections: View {
 /// Three sentences about a relationship, and the two facts that make them
 /// readable: a paragraph a model wrote is only readable if you know which
 /// model and when. No paragraph, no section — the verb that asks for the first
-/// one is in the page's menu.
+/// one is in the page's menu — unless that verb was just pressed and wrote
+/// nothing, in which case the section says why.
 struct PersonSummaryView: View {
     let summary: PersonSummary?
+    let outcome: PersonSummaryOutcome?
 
     var body: some View {
-        if let summary {
+        if summary != nil || outcome?.note != nil {
             PageSection("About") {
                 Card {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(summary.text).bodyText(16)
-                        Text("Written by \(summary.modelId) on \(PeopleFormat.moment(PeopleFormat.date(summary.generatedAtUtcMs)))")
-                            .metaText()
-                            .monospacedDigit()
+                        if let summary {
+                            Text(summary.text).bodyText(16)
+                            Text("Written by \(summary.modelId) on \(PeopleFormat.moment(PeopleFormat.date(summary.generatedAtUtcMs)))")
+                                .metaText()
+                                .monospacedDigit()
+                        }
+                        if let note = outcome?.note {
+                            Text(note).metaText(Theme.live)
+                        }
                     }
                     .padding(20)
                 }
@@ -564,8 +586,12 @@ struct BriefingView: View {
         return "\(met) · last \(PeopleFormat.moment(last.at))"
     }
 
+    /// Only what is still outstanding: the core keeps a done or dropped
+    /// commitment for the relationship's history, and the brief is the two
+    /// lines a reader acts on in the next thirty seconds.
     private static func rows(_ row: BriefingRow) -> [PersonLedgerRow] {
         (row.openLoops.map(PersonLedgerRow.init) + row.commitments.map(PersonLedgerRow.init))
+            .filter { $0.status.outstanding }
             .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
@@ -1167,16 +1193,21 @@ struct LinkPickerSheet: View {
     let store: PeopleStore
     let dismiss: () -> Void
 
+    @State private var query = ""
+
     var body: some View {
+        let picker = store.linkPicker
+        let rows = picker.state.rows
         PeopleSheet(title: "Link a meeting", dismiss: dismiss) {
-            if let candidates = store.linkCandidates {
-                if candidates.isEmpty {
-                    Text("Every meeting Sona has is already linked to this person.")
-                        .bodyText(14, Theme.inkSecondary)
-                } else {
+            VStack(alignment: .leading, spacing: 12) {
+                InputField(prompt: "Search by title", text: $query)
+                    .onChange(of: query) { _, next in
+                        store.loadLinkCandidates(query: next.trimmingCharacters(in: .whitespaces))
+                    }
+                if !rows.isEmpty {
                     ScrollView {
                         Card {
-                            ForEach(candidates) { candidate in
+                            ForEach(rows) { candidate in
                                 CardRow(action: {
                                     dismiss()
                                     store.addManualLink(candidate.sessionId)
@@ -1196,11 +1227,43 @@ struct LinkPickerSheet: View {
                     }
                     .frame(maxHeight: 320)
                 }
-            } else {
-                Text("Loading…").bodyText(14, Theme.inkSecondary)
+                footnote(picker)
             }
         } footer: {
             Button("Cancel", action: dismiss).buttonStyle(.secondary)
+        }
+    }
+
+    /// Under the rows: what the read is doing, what it could not do, or the
+    /// way to the next page. The "everything is linked" sentence is reserved
+    /// for an unfiltered list that has been read to its end.
+    @ViewBuilder
+    private func footnote(_ picker: LinkPicker) -> some View {
+        switch picker.state {
+        case .idle, .loading:
+            Text(picker.state.rows.isEmpty ? "Loading…" : "Loading more…").bodyText(14, Theme.inkSecondary)
+        case let .failed(reason, _):
+            HStack(spacing: 12) {
+                Text("Sona could not read the meetings: \(reason)").bodyText(14, Theme.live)
+                Spacer(minLength: 0)
+                Button("Try again") {
+                    if picker.state.rows.isEmpty {
+                        store.loadLinkCandidates(query: picker.query)
+                    } else {
+                        store.loadMoreLinkCandidates()
+                    }
+                }
+                .buttonStyle(.compact)
+            }
+        case let .loaded(rows, next):
+            if next != nil {
+                Button("Show more") { store.loadMoreLinkCandidates() }.buttonStyle(.compact)
+            } else if rows.isEmpty {
+                Text(picker.query.isEmpty
+                    ? "Every meeting Sona has is already linked to this person."
+                    : "No meeting title matches \u{201C}\(picker.query)\u{201D}.")
+                    .bodyText(14, Theme.inkSecondary)
+            }
         }
     }
 }
@@ -1353,11 +1416,9 @@ struct PersonMeetingContextView: View {
         .task(id: sessionId) { rows = await store.meetingContext(sessionId) }
     }
 
-    /// How many times you met before this meeting, which is one fewer than the
-    /// count including it.
+    /// How many times you met before this meeting.
     private func earlier(_ row: PersonMeetingContextRow) -> String {
-        let count = row.meetingsTogether > 0 ? row.meetingsTogether - 1 : 0
-        return count == 1 ? "1 earlier meeting" : "\(count) earlier meetings"
+        row.priorMeetings == 1 ? "1 earlier meeting" : "\(row.priorMeetings) earlier meetings"
     }
 }
 

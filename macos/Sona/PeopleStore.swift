@@ -53,9 +53,13 @@ final class PeopleStore {
     private(set) var inbox: [PersonOpenLoop] = []
     /// Terms Sona keeps hearing and cannot spell.
     private(set) var candidates: [PeopleVocabularyCandidate] = []
-    /// Meetings offered for a manual link, newest first. Nil while the picker
-    /// is still reading them.
-    private(set) var linkCandidates: [LinkCandidate]?
+    /// The meetings a manual link can reach, read a page at a time.
+    private(set) var linkPicker = LinkPicker()
+    /// Two saved voices from different models cannot be combined. The merge
+    /// waits here until the reader says which one the merged person keeps.
+    private(set) var voiceConflict: VoiceConflict?
+    /// What the last Regenerate did, until the next one or the page changes.
+    private(set) var summaryOutcome: PersonSummaryOutcome?
 
     private(set) var route: PeopleRoute = .list
     /// A write is out. Every verb on the page is held until it answers.
@@ -144,7 +148,8 @@ final class PeopleStore {
         detail = nil
         briefing = nil
         detailFailed = false
-        linkCandidates = nil
+        linkPicker = LinkPicker()
+        voiceConflict = nil
     }
 
     // MARK: - Reads
@@ -236,14 +241,40 @@ final class PeopleStore {
         }
     }
 
-    /// The meetings a manual link can reach: the newest ones this person is
-    /// not on already.
-    func loadLinkCandidates() {
-        linkCandidates = nil
-        act { [self] in
-            let page: LinkCandidatePage = try await core.request("meeting_list", ["limit": 50])
-            let linked = Set((detail?.links ?? []).map(\.id))
-            linkCandidates = page.entries.filter { !linked.contains($0.sessionId) }
+    /// The first page of meetings a manual link can reach: the newest ones
+    /// this person is not on already, narrowed by the title they typed.
+    func loadLinkCandidates(query: String = "") {
+        linkPicker = LinkPicker(query: query, state: .loading())
+        Task { await readLinkCandidates(after: nil) }
+    }
+
+    /// The next page of the same picker.
+    func loadMoreLinkCandidates() {
+        guard case let .loaded(rows, cursor) = linkPicker.state, let cursor else { return }
+        linkPicker.state = .loading(more: rows)
+        Task { await readLinkCandidates(after: cursor) }
+    }
+
+    private func readLinkCandidates(after cursor: Int64?) async {
+        let picker = linkPicker
+        let linked = Set((detail?.links ?? []).map(\.id))
+        let request: [String: JSONValue] = [
+            "limit": .number(50),
+            "cursorUtcMs": cursor.map { .number(Double($0)) } ?? .null,
+            "filter": .object(["titleQuery": .string(picker.query)]),
+        ]
+        do {
+            let page: LinkCandidatePage = try await core.request("meeting_list", request)
+            guard linkPicker.query == picker.query else { return }
+            let earlier = linkPicker.state.rows
+            let rows = earlier + page.entries.filter { !linked.contains($0.sessionId) }
+            // The next cursor is the last row read, linked or not: a page of
+            // already-linked meetings still moves the picker on.
+            let next = page.hasMore ? page.entries.last?.createdAtUtcMs : nil
+            linkPicker.state = .loaded(rows, next: next)
+        } catch {
+            guard linkPicker.query == picker.query else { return }
+            linkPicker.state = .failed(Self.message(error), earlier: linkPicker.state.rows)
         }
     }
 
@@ -275,20 +306,44 @@ final class PeopleStore {
     }
 
     /// Merging keeps both records' samples, which is what merging two records
-    /// of one person means, and follows whatever the merge left behind.
+    /// of one person means, and follows whatever the merge left behind. Two
+    /// saved voices from different models cannot be combined; that merge
+    /// stops to ask which voice survives, and `resolveVoiceConflict` finishes
+    /// it.
     func merge(into targetPersonId: String) {
+        merge(into: targetPersonId, voice: .combineCompatible)
+    }
+
+    func resolveVoiceConflict(keepSource: Bool) {
+        guard let conflict = voiceConflict else { return }
+        voiceConflict = nil
+        merge(into: conflict.targetPersonId, voice: keepSource ? .replaceTargetWithSource : .discardSource)
+    }
+
+    func dismissVoiceConflict() {
+        voiceConflict = nil
+    }
+
+    private func merge(into targetPersonId: String, voice: PersonVoiceResolution) {
         guard case let .person(personId) = route else { return }
+        let targetName = entries?.first { $0.person.id == targetPersonId }?.person.displayName
         write(
             { revision, core in
                 let request = PersonMergeRequest(
                     sourcePersonId: personId,
                     targetPersonId: targetPersonId,
                     expectedRevision: revision,
-                    voiceProfileResolution: .combineCompatible)
+                    voiceProfileResolution: voice)
                 return try await core.request("person_merge", ["request": request])
             },
             then: { store, result in
                 store.follow(result.person?.id ?? targetPersonId)
+            },
+            refused: { store, refusal in
+                guard refusal == .profileModelIncompatible, voice == .combineCompatible else { return false }
+                store.voiceConflict = VoiceConflict(
+                    targetPersonId: targetPersonId, targetName: targetName ?? "the other person")
+                return true
             })
     }
 
@@ -344,7 +399,7 @@ final class PeopleStore {
     /// You say this meeting was with this person: the strongest evidence there
     /// is, and the only kind Sona never guesses at.
     func addManualLink(_ meetingId: String) {
-        linkCandidates = nil
+        linkPicker = LinkPicker()
         link("link_add_manual", meetingId)
     }
 
@@ -357,18 +412,21 @@ final class PeopleStore {
         }
     }
 
-    /// One model call over this person's own evidence. A Mac with no engine
-    /// refuses outright, which is why success says nothing.
+    /// One model call over this person's own evidence. The core says what
+    /// the call did; a paragraph that did not change is reported as such
+    /// rather than shown again as if it were new.
     func regenerateSummary() {
         guard case let .person(personId) = route else { return }
         busy = true
+        summaryOutcome = nil
         act { [self] in
             defer { busy = false }
-            let result: PersonDetailResult = try await core.request(
+            let result: PersonSummaryRegenerateResult = try await core.request(
                 "person_summary_regenerate", ["personId": personId])
             guard route == .person(personId) else { return }
-            detail = result.detail
-            detailRevision = result.revision
+            detail = result.page.detail
+            detailRevision = result.page.revision
+            summaryOutcome = result.outcome
         }
     }
 
@@ -391,10 +449,14 @@ final class PeopleStore {
 
     /// Runs one write at the revision the open page was read at, then re-reads.
     /// `then` replaces that re-read for the two verbs that move the page
-    /// somewhere else, and owns re-reading wherever it lands.
+    /// somewhere else, and owns re-reading wherever it lands. `refused` sees a
+    /// refusal first and answers true when it has turned it into a question
+    /// for the reader, in which case it is not an error and the page does not
+    /// re-read.
     private func write(
         _ operation: @escaping (UInt64, Core) async throws -> PeopleMutationResult,
-        then: ((PeopleStore, PeopleMutationResult) -> Void)? = nil
+        then: ((PeopleStore, PeopleMutationResult) -> Void)? = nil,
+        refused: ((PeopleStore, PeopleCommandError) -> Bool)? = nil
     ) {
         busy = true
         act { [self] in
@@ -407,6 +469,11 @@ final class PeopleStore {
                     await reread()
                 }
             } catch {
+                if let refused, let refusal = (error as? CoreError)?.remote(as: PeopleCommandError.self),
+                   refused(self, refusal)
+                {
+                    return
+                }
                 // A refusal is itself a fact about the corpus — usually that
                 // it moved — so the page re-reads before the reader decides
                 // what to do about it.

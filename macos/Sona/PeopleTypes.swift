@@ -111,6 +111,15 @@ enum PersonLoopStatus: String, Decodable {
     case dropped
     case carried
 
+    /// Still owed by somebody: open, or carried forward from an earlier
+    /// meeting. Done and dropped are history.
+    var outstanding: Bool {
+        switch self {
+        case .open, .carried: true
+        case .done, .dropped: false
+        }
+    }
+
     /// The word worth a chip. "Open" under a heading that reads "Open loops"
     /// is the heading said twice, so only a status that contradicts its
     /// section earns one.
@@ -378,7 +387,8 @@ struct PersonMeetingContextRow: Decodable, Identifiable {
     let personId: String
     let displayName: String
     let evidenceSource: PersonLinkSource
-    let meetingsTogether: UInt64
+    /// Meetings with this person before this one; never a later one.
+    let priorMeetings: UInt64
     let lastPriorMeeting: BriefingLastMeeting?
     let topOpenLoop: PersonOpenLoop?
 
@@ -548,6 +558,63 @@ struct LinkCandidate: Decodable, Identifiable {
 struct LinkCandidatePage: Decodable {
     let entries: [LinkCandidate]
     let hasMore: Bool
+}
+
+/// The link picker, one page at a time: what was typed to narrow it, and
+/// where the read stands. Rows already read stay on screen while the next
+/// page loads or after it fails, so a slow core never blanks the list.
+struct LinkPicker {
+    enum State {
+        case idle
+        case loading(more: [LinkCandidate] = [])
+        /// `next` is the cursor for the page after this one; nil means the
+        /// list is exhausted.
+        case loaded([LinkCandidate], next: Int64?)
+        case failed(String, earlier: [LinkCandidate])
+
+        var rows: [LinkCandidate] {
+            switch self {
+            case .idle: []
+            case let .loading(more): more
+            case let .loaded(rows, _): rows
+            case let .failed(_, earlier): earlier
+            }
+        }
+    }
+
+    var query = ""
+    var state: State = .idle
+}
+
+/// A merge stopped because both people have a saved voice from different
+/// models. The merged person keeps one of them.
+struct VoiceConflict {
+    let targetPersonId: String
+    let targetName: String
+}
+
+/// `PersonSummaryOutcome`: what pressing Regenerate did.
+enum PersonSummaryOutcome: String, Decodable {
+    case written
+    case noEvidence = "no_evidence"
+    case engineUnavailable = "engine_unavailable"
+    case failed
+
+    /// The one line under the paragraph after an attempt that wrote nothing.
+    /// `written` needs no line: the new paragraph is the report.
+    var note: String? {
+        switch self {
+        case .written: nil
+        case .noEvidence: "There is no confirmed meeting to write this from yet."
+        case .engineUnavailable: "No engine is ready to write this. Check Settings › Meetings."
+        case .failed: "The engine answered nothing usable. The earlier paragraph stays."
+        }
+    }
+}
+
+struct PersonSummaryRegenerateResult: Decodable {
+    let outcome: PersonSummaryOutcome
+    let page: PersonDetailResult
 }
 
 enum VoiceIdentityTarget: Encodable {

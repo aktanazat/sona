@@ -1464,7 +1464,8 @@ struct MeetingPersonContextRow: Decodable, Identifiable {
     let personId: MeetingPersonId
     let displayName: String
     let evidenceSource: MeetingPersonLinkSource
-    let meetingsTogether: Int
+    /// Meetings with this person before this one; never a later one.
+    let priorMeetings: Int
     let lastPriorMeeting: MeetingPersonLastMeeting?
     let topOpenLoop: MeetingPersonOpenLoop?
 
