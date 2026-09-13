@@ -12,6 +12,8 @@ struct RecorderSheet: View {
     /// The shell's dismissal. The sheet only calls it for a phase that may
     /// close; `store.stop` cancels a preview however the sheet went away.
     var onClose: () -> Void = {}
+    /// The discard question is open. It asks because the file is deleted.
+    @State private var discardOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -29,6 +31,16 @@ struct RecorderSheet: View {
         .background(Theme.page)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
         .interactiveDismissDisabled(!store.canClose)
+        .confirmationDialog(
+            "Discard this recording?",
+            isPresented: $discardOpen,
+            titleVisibility: .visible
+        ) {
+            Button("Discard", role: .destructive) { store.discard() }
+            Button("Keep recording", role: .cancel) {}
+        } message: {
+            Text("The video recorded so far will be deleted. This cannot be undone.")
+        }
         .task { await store.start() }
         .onDisappear { store.stop() }
     }
@@ -197,6 +209,7 @@ struct RecorderSheet: View {
             }
         case .recording:
             bar {
+                discardButton
                 Button("Pause") { store.pause() }
                     .buttonStyle(.secondary)
                 Button("Stop & save") { store.stopAndSave() }
@@ -204,6 +217,7 @@ struct RecorderSheet: View {
             }
         case .paused:
             bar {
+                discardButton
                 Button("Resume") { store.resume() }
                     .buttonStyle(.secondary)
                 Button("Stop & save") { store.stopAndSave() }
@@ -289,6 +303,14 @@ struct RecorderSheet: View {
             .buttonStyle(.secondary)
     }
 
+    /// The way to throw a recording away without saving it. It sits at the
+    /// far left, away from Stop & save, and asks first.
+    private var discardButton: some View {
+        Button("Discard") { discardOpen = true }
+            .buttonStyle(.quiet)
+            .accessibilityHint("Deletes the video recorded so far.")
+    }
+
     private var doneButton: some View {
         Button("Done") { close() }
             .buttonStyle(.primary)
@@ -332,7 +354,7 @@ private struct RecorderDeviceRow: View {
         } trailing: {
             HStack(spacing: 12) {
                 if isOn, devices.count > 1, deviceId != nil {
-                    Picker("", selection: selection) {
+                    Picker("\(title) device", selection: selection) {
                         ForEach(devices) { device in
                             Text(device.name).tag(device.id)
                         }
@@ -341,7 +363,7 @@ private struct RecorderDeviceRow: View {
                     .pickerStyle(.menu)
                     .fixedSize()
                 }
-                Toggle("", isOn: $isOn)
+                Toggle(title, isOn: $isOn)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .tint(Theme.accent)

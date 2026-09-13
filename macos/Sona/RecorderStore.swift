@@ -129,7 +129,7 @@ final class RecorderStore {
         session += 1
         selectionPending = false
         permissionPending = false
-        if previewing { cancelPreview() }
+        if previewing { discard() }
     }
 
     /// Whether the sheet may close now. `previewing` is cancelled by `stop`,
@@ -199,8 +199,8 @@ final class RecorderStore {
     }
 
     /// `recorder_cancel`: give up whatever is in flight, in any phase that
-    /// holds work.
-    func cancelPreview() {
+    /// holds work. A recording in progress is deleted from disk.
+    func discard() {
         Task { await run("recorder_cancel", phase: .idle) }
     }
 
