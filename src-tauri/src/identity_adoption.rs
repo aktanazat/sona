@@ -73,6 +73,14 @@ pub struct IdentityAdoptionReceipt {
     pub app_version: String,
 }
 
+/// What a rollback left behind for the reader: the folder holding the
+/// settings and history Sona wrote after adopting, which the legacy folder
+/// never saw. `None` when there was nothing of the kind to keep.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
+pub struct IdentityRollbackReceipt {
+    pub backup_dir: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityAdoptionError {
@@ -818,12 +826,74 @@ pub fn get_identity_adoption_status(
     Ok(read_receipt(&root.join(RECEIPT_FILE)))
 }
 
+/// The files Sona wrote in its own root after adopting, which a rollback
+/// keeps rather than deletes: the legacy folder holds only the copies made
+/// at adoption, so every dictation and setting since lives here alone.
+const ROLLBACK_KEPT_FILES: [&str; 6] = [
+    SETTINGS_FILE,
+    HISTORY_FILE,
+    "history.db-wal",
+    "history.db-shm",
+    UPSTREAM_RECEIPT_FILE,
+    UPSTREAM_BACKUP_FILE,
+];
+
+/// Where one rollback parks those files, named by the moment so a second
+/// rollback never lands on the first.
+fn rollback_backup_dir(destination_root: &Path, at: chrono::DateTime<chrono::Local>) -> PathBuf {
+    destination_root.join(format!("rollback-{}", at.format("%Y-%m-%d-%H%M%S")))
+}
+
+/// The file half of a rollback. Recordings and models go back to the folder
+/// they were moved from; the settings and history go into `backup_dir`, which
+/// is created only when there is something to keep. Returns whether it was.
+///
+/// Nothing is deleted, and every move is a rename: a rollback that stops
+/// halfway leaves each file in exactly one of its two places.
+fn rollback_paths(paths: &AdoptionPaths, backup_dir: &Path) -> Result<bool, IdentityAdoptionError> {
+    for directory in ["recordings", "models"] {
+        move_directory_children(
+            &paths.destination_root.join(directory),
+            &paths.source_root.join(directory),
+        )?;
+    }
+    let mut kept = false;
+    for file in ROLLBACK_KEPT_FILES {
+        let path = paths.destination_root.join(file);
+        if !path.is_file() {
+            continue;
+        }
+        if !kept {
+            create_private_dir(backup_dir).map_err(|_| IdentityAdoptionError::RollbackFailed)?;
+            kept = true;
+        }
+        fs::rename(&path, backup_dir.join(file))
+            .map_err(|_| IdentityAdoptionError::RollbackFailed)?;
+    }
+    Ok(kept)
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Undo a completed adoption. Recordings, models and provider keys go back
+/// to the legacy app; the settings and history Sona has now are kept in a
+/// backup folder the receipt names. The caller ends the process afterwards:
+/// the managers still hold the moved files open, and a fresh start is the
+/// only state that reads them correctly.
 #[tauri::command]
 #[specta::specta]
 pub async fn revert_identity_adoption(
     app: AppHandle,
     secrets: State<'_, std::sync::Arc<SecretManager>>,
-) -> Result<(), IdentityAdoptionError> {
+) -> Result<IdentityRollbackReceipt, IdentityAdoptionError> {
     let destination_root =
         crate::portable::app_data_dir(&app).map_err(|_| IdentityAdoptionError::Unavailable)?;
     let receipt_path = destination_root.join(RECEIPT_FILE);
@@ -835,25 +905,16 @@ pub async fn revert_identity_adoption(
         return Err(IdentityAdoptionError::LegacyRunning);
     }
     let source_root = legacy_data_root().ok_or(IdentityAdoptionError::Unavailable)?;
-    for directory in ["recordings", "models"] {
-        move_directory_children(
-            &destination_root.join(directory),
-            &source_root.join(directory),
-        )?;
-    }
-    for file in [
-        SETTINGS_FILE,
-        HISTORY_FILE,
-        "history.db-wal",
-        "history.db-shm",
-        UPSTREAM_RECEIPT_FILE,
-        UPSTREAM_BACKUP_FILE,
-    ] {
-        let path = destination_root.join(file);
-        if path.exists() {
-            fs::remove_file(path).map_err(|_| IdentityAdoptionError::RollbackFailed)?;
-        }
-    }
+    let paths = AdoptionPaths {
+        source_root,
+        destination_root,
+    };
+    let backup_dir = rollback_backup_dir(&paths.destination_root, chrono::Local::now());
+    let kept = rollback_paths(&paths, &backup_dir)?;
+    let AdoptionPaths {
+        source_root,
+        destination_root,
+    } = paths;
     let legacy = SecretManager::native_for_service(LEGACY_FORK_SECRET_SERVICE_NAME);
     for credential in receipt
         .credentials
@@ -892,7 +953,9 @@ pub async fn revert_identity_adoption(
             fs::remove_file(path).map_err(|_| IdentityAdoptionError::RollbackFailed)?;
         }
     }
-    Ok(())
+    Ok(IdentityRollbackReceipt {
+        backup_dir: kept.then(|| backup_dir.to_string_lossy().into_owned()),
+    })
 }
 
 fn move_directory_children(source: &Path, destination: &Path) -> Result<(), IdentityAdoptionError> {
@@ -1108,6 +1171,77 @@ mod tests {
         assert!(paths.destination_root.join("recordings/clip.wav").is_file());
         assert!(!paths.source_root.join("models/model.bin").exists());
         assert!(paths.source_root.join(TOMBSTONE_FILE).is_file());
+    }
+
+    /// After adopting, the user dictates: Sona's history grows past the copy
+    /// the legacy folder kept. A rollback returns the recordings and models,
+    /// keeps every byte Sona wrote since in one backup folder, and deletes
+    /// nothing; the legacy folder still reads exactly as adoption left it.
+    #[test]
+    fn rollback_returns_moved_files_and_parks_everything_written_since() {
+        let (_root, paths) = test_paths("rollback");
+        fs::write(paths.source_root.join(SETTINGS_FILE), b"{}").expect("settings");
+        fs::write(paths.source_root.join(HISTORY_FILE), b"legacy history").expect("history");
+        fs::create_dir_all(paths.source_root.join("recordings")).expect("recordings");
+        fs::write(paths.source_root.join("recordings/clip.wav"), b"audio").expect("recording");
+        fs::create_dir_all(paths.source_root.join("models")).expect("models");
+        fs::write(paths.source_root.join("models/model.bin"), b"model").expect("model");
+        let (source, destination, _, _) = test_managers();
+        adopt_paths(
+            &paths,
+            false,
+            &mut move_data,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        )
+        .expect("adoption");
+        // Life after adoption: new words, a WAL, a new recording.
+        fs::write(
+            paths.destination_root.join(HISTORY_FILE),
+            b"legacy history plus a new dictation",
+        )
+        .expect("grow history");
+        fs::write(paths.destination_root.join("history.db-wal"), b"wal").expect("wal");
+        fs::write(
+            paths.destination_root.join("recordings/new.wav"),
+            b"new audio",
+        )
+        .expect("new recording");
+
+        let backup_dir = paths.destination_root.join("rollback-2026-09-13-101500");
+        let kept = rollback_paths(&paths, &backup_dir).expect("rollback");
+
+        assert!(kept);
+        assert_eq!(
+            fs::read(backup_dir.join(HISTORY_FILE)).expect("parked history"),
+            b"legacy history plus a new dictation"
+        );
+        assert!(backup_dir.join("history.db-wal").is_file());
+        assert!(backup_dir.join(SETTINGS_FILE).is_file());
+        assert!(!paths.destination_root.join(HISTORY_FILE).exists());
+        assert!(!paths.destination_root.join(SETTINGS_FILE).exists());
+        assert_eq!(
+            fs::read(paths.source_root.join(HISTORY_FILE)).expect("legacy history"),
+            b"legacy history",
+            "the legacy copy is not overwritten with a newer schema"
+        );
+        for recording in [
+            "recordings/clip.wav",
+            "recordings/new.wav",
+            "models/model.bin",
+        ] {
+            assert!(
+                paths.source_root.join(recording).is_file(),
+                "{recording} went back"
+            );
+            assert!(!paths.destination_root.join(recording).exists());
+        }
+        // A root with nothing left to keep asks for no folder.
+        let second = paths.destination_root.join("rollback-2026-09-13-101501");
+        assert!(!rollback_paths(&paths, &second).expect("second rollback"));
+        assert!(!second.exists());
     }
 
     #[test]
