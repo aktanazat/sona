@@ -247,6 +247,14 @@ private struct MeetingSettingsSessionParam: Encodable {
             guard let self else { return }
             Task { await self.loadSettings() }
         }
+        // The Apple Intelligence switch and a local server both live outside
+        // this app, so the engine's answer can change while it is in the back.
+        // Coming to the front asks once more.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.recheckEngineStatus() }
+        }
     }
 
     /// Reads everything this page shows. Independent objects, one wait.
@@ -464,6 +472,12 @@ private struct MeetingSettingsSessionParam: Encodable {
         NSWorkspace.shared.open(url)
     }
 
+    /// System Settings → Apple Intelligence & Siri, where the switch and the
+    /// model download are.
+    func openAppleIntelligenceSettings() {
+        NSWorkspace.shared.open(MeetingAppleIntelligenceBlocker.systemSettingsPane)
+    }
+
     // MARK: - The settings subset
 
     func loadSettings() async {
@@ -647,6 +661,14 @@ private struct MeetingSettingsSessionParam: Encodable {
         engineStatusFor = settings.localEngine
         let status: MeetingRemoteEngineStatus? = try? await core.request("meeting_local_engine_status")
         engineStatus = status
+    }
+
+    /// The same read with the "already asked for this engine" guard dropped:
+    /// the engine is unchanged, the world around it may not be.
+    private func recheckEngineStatus() async {
+        guard settingsRead else { return }
+        engineStatusFor = nil
+        await refreshEngineStatus()
     }
 
     // MARK: - Retention

@@ -401,17 +401,19 @@ extension MeetingRemoteEngine: Codable {
 
 /// What the chosen engine answers right now.
 enum MeetingRemoteEngineStatus: Decodable {
-    case appleIntelligence(available: Bool)
+    /// `blocker` is nil when Apple Intelligence can answer.
+    case appleIntelligence(blocker: MeetingAppleIntelligenceBlocker?)
     case localEndpoint(reachable: Bool, modelCount: Int, error: String?)
 
-    private enum Key: String, CodingKey { case kind, available, reachable, modelCount, error }
+    private enum Key: String, CodingKey { case kind, blocker, reachable, modelCount, error }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
         let kind = try container.decode(String.self, forKey: .kind)
         switch kind {
         case "apple_intelligence":
-            self = .appleIntelligence(available: try container.decode(Bool.self, forKey: .available))
+            self = .appleIntelligence(
+                blocker: try container.decodeIfPresent(MeetingAppleIntelligenceBlocker.self, forKey: .blocker))
         case "local_endpoint":
             self = .localEndpoint(
                 reachable: try container.decode(Bool.self, forKey: .reachable),
@@ -425,10 +427,8 @@ enum MeetingRemoteEngineStatus: Decodable {
 
     var sentence: String {
         switch self {
-        case let .appleIntelligence(available):
-            available
-                ? "Apple Intelligence is available."
-                : "Apple Intelligence is not available on this Mac."
+        case let .appleIntelligence(blocker):
+            blocker.map { "\($0.reason). \($0.advice)" } ?? "Apple Intelligence is available."
         case let .localEndpoint(reachable, modelCount, error):
             if let error {
                 MeetingRemoteEngineStatus.endpointFailure(error)
@@ -443,9 +443,15 @@ enum MeetingRemoteEngineStatus: Decodable {
     /// True while the reader has something to fix.
     var isWarning: Bool {
         switch self {
-        case let .appleIntelligence(available): !available
+        case let .appleIntelligence(blocker): blocker != nil
         case let .localEndpoint(reachable, _, error): !reachable || error != nil
         }
+    }
+
+    /// The blocker whose fix is in System Settings, so the page can offer the
+    /// pane rather than describe the way there.
+    var settingsPaneBlocker: MeetingAppleIntelligenceBlocker? {
+        if case let .appleIntelligence(blocker?) = self, blocker.systemSettingsHelps { blocker } else { nil }
     }
 
     private static func endpointFailure(_ error: String) -> String {

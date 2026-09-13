@@ -281,7 +281,7 @@ const MeetingLocalEngineSettings: React.FC = () => {
   const statusTone = hasLocalDraft
     ? "warning"
     : status?.kind === "apple_intelligence"
-      ? status.available
+      ? status.blocker === null
         ? "muted"
         : "warning"
       : status?.kind === "local_endpoint"
@@ -294,7 +294,7 @@ const MeetingLocalEngineSettings: React.FC = () => {
     : status === null
       ? t("settings.meetings.localEngine.status.checking")
       : status.kind === "apple_intelligence"
-        ? status.available
+        ? status.blocker === null
           ? t("settings.meetings.localEngine.status.appleAvailable")
           : t("settings.meetings.localEngine.status.appleUnavailable")
         : status.error

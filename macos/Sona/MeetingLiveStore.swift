@@ -73,13 +73,27 @@ struct MeetingLiveWarning {
     let urgent: Bool
 }
 
-/// The three fields of the app settings this slice reads. `settings-changed`
+/// The fields of the app settings this slice reads. `settings-changed`
 /// carries no useful payload, so the store re-reads `get_app_settings` and
 /// decodes only these.
 struct MeetingStartAppSettings: Decodable {
     /// The template the preview card names for a series. Absent means the app
     /// default, which the card reads as "App default".
     let meetingNotesTemplate: MeetingNotesTemplate?
+    /// Whether a new meeting's notes go to the operator's server: the switch
+    /// is on and a relay is paired, the two facts the core's engine choice
+    /// reads first. While they hold, the engine on this Mac writes only the
+    /// series kept here.
+    let notesOnServer: Bool
+
+    private enum Key: String, CodingKey { case meetingNotesTemplate }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        meetingNotesTemplate = try container.decodeIfPresent(MeetingNotesTemplate.self, forKey: .meetingNotesTemplate)
+        let relay = try MeetingSettingsSnapshot(from: decoder)
+        notesOnServer = relay.remoteIntelligenceEnabled && relay.isRelayPaired
+    }
 }
 
 // MARK: - The store
@@ -138,6 +152,15 @@ final class MeetingLiveStore {
     private(set) var acceptPartial = false
     private(set) var engine: MeetingLiveLocalEngineStatus?
     private(set) var settings: MeetingStartAppSettings?
+
+    /// The engine that would write a new meeting's notes here, when it cannot.
+    /// Nothing while the server path is on: the core sends a new meeting's
+    /// text there, and the engine on this Mac matters only to the series kept
+    /// here, which the settings page's own row covers.
+    var engineWarning: MeetingLiveLocalEngineStatus? {
+        guard settings?.notesOnServer != true, let engine, engine.warning != nil else { return nil }
+        return engine
+    }
 
     // MARK: Capture, while it runs
 
@@ -224,6 +247,14 @@ final class MeetingLiveStore {
         core.observe(CoreEvent.sonaCaptureRequested) { [weak self] _ in
             self?.captureRequested = true
         }
+        // The Apple Intelligence switch is in System Settings, so the answer
+        // to "can notes be written here" changes while this app is in the
+        // back. Coming to the front is the moment to ask again.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.loadEngine() }
+        }
     }
 
     /// The first read: what detection sees, the offers standing, the meetings
@@ -276,6 +307,12 @@ final class MeetingLiveStore {
 
     private func loadEngine() async {
         engine = try? await core.request("meeting_local_engine_status")
+    }
+
+    /// System Settings → Apple Intelligence & Siri, where the switch and the
+    /// model download are.
+    func openAppleIntelligenceSettings() {
+        NSWorkspace.shared.open(MeetingAppleIntelligenceBlocker.systemSettingsPane)
     }
 
     private func loadActive() async {

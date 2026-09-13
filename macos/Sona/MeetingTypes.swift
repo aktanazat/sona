@@ -11,7 +11,8 @@ import Foundation
 /// rather than dropped: `SourceKind` is `MeetingSourceKind`,
 /// `EffectiveTranscriptSegment` is `TranscriptEffectiveSegment`,
 /// `CitedArtifactText` is `ArtifactCitedText`, `OperationReceipt` is
-/// `MeetingOperationReceipt`, `AllowedMeetingAction` is `MeetingAllowedAction`.
+/// `MeetingOperationReceipt`, `AllowedMeetingAction` is `MeetingAllowedAction`,
+/// `AppleIntelligenceBlocker` is `MeetingAppleIntelligenceBlocker`.
 
 // MARK: - Identifiers
 
@@ -1533,6 +1534,58 @@ enum MeetingProcessingDestination: Decodable {
                 forKey: .kind, in: container, debugDescription: "unknown destination \(kind)")
         }
     }
+}
+
+/// `AppleIntelligenceBlocker`: why Apple Intelligence cannot write notes right
+/// now. The reasons call for different things — a switch to flip, a download
+/// to wait for, hardware that will never qualify — so a page names the reason
+/// and the fix rather than saying "unavailable".
+enum MeetingAppleIntelligenceBlocker: String, Decodable {
+    case notEnabled = "not_enabled"
+    case modelNotReady = "model_not_ready"
+    case deviceNotEligible = "device_not_eligible"
+    case osTooOld = "os_too_old"
+    case unknown
+
+    /// What is wrong, as a clause the page finishes.
+    var reason: String {
+        switch self {
+        case .notEnabled: "Apple Intelligence is switched off on this Mac"
+        case .modelNotReady: "Apple Intelligence is still downloading its model"
+        case .deviceNotEligible: "Apple Intelligence cannot run on this Mac"
+        case .osTooOld: "Apple Intelligence needs macOS 26 or newer"
+        case .unknown: "Apple Intelligence is unavailable on this Mac"
+        }
+    }
+
+    /// What the operator can do about it.
+    var advice: String {
+        switch self {
+        case .notEnabled:
+            "Turn it on in System Settings → Apple Intelligence & Siri, or write notes with a local model endpoint instead."
+        case .modelNotReady:
+            "Wait for the download to finish, or write notes with a local model endpoint instead."
+        case .deviceNotEligible:
+            "Write notes with a local model endpoint instead."
+        case .osTooOld:
+            "Update macOS, or write notes with a local model endpoint instead."
+        case .unknown:
+            "Check System Settings → Apple Intelligence & Siri, or write notes with a local model endpoint instead."
+        }
+    }
+
+    /// Whether the Apple Intelligence pane is where this is fixed, or where a
+    /// download can be watched. Hardware and OS age are not settled there.
+    var systemSettingsHelps: Bool {
+        switch self {
+        case .notEnabled, .modelNotReady, .unknown: true
+        case .deviceNotEligible, .osTooOld: false
+        }
+    }
+
+    /// System Settings → Apple Intelligence & Siri. The identifier is the
+    /// bundle id of `SiriPreferenceExtension.appex`; verified on macOS 26.6.
+    static let systemSettingsPane = URL(string: "x-apple.systempreferences:com.apple.Siri-Settings.extension")!
 }
 
 // MARK: - Request bodies

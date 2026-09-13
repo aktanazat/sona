@@ -53,11 +53,45 @@ impl std::fmt::Display for LocalEndpointError {
     }
 }
 
+/// Why Apple Intelligence cannot answer right now. Three of these are
+/// different instructions rather than three ways of saying "unavailable":
+/// a switch to flip, a download to wait for, or hardware that will never
+/// qualify. The codes come from `swift/apple_intelligence_bridge.h`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AppleIntelligenceBlocker {
+    /// The switch in System Settings > Apple Intelligence & Siri is off.
+    NotEnabled,
+    /// Switched on, and the model is still downloading.
+    ModelNotReady,
+    /// This machine will never run it.
+    DeviceNotEligible,
+    /// macOS older than 26.
+    OsTooOld,
+    /// A reason this build does not know.
+    Unknown,
+}
+
+impl std::fmt::Display for AppleIntelligenceBlocker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotEnabled => {
+                "Apple Intelligence is switched off in System Settings > Apple Intelligence & Siri"
+            }
+            Self::ModelNotReady => "Apple Intelligence is still downloading its model",
+            Self::DeviceNotEligible => "this Mac is not eligible for Apple Intelligence",
+            Self::OsTooOld => "Apple Intelligence requires macOS 26 or newer",
+            Self::Unknown => "Apple Intelligence is unavailable for an unrecognized reason",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MeetingLocalEngineStatus {
     AppleIntelligence {
-        available: bool,
+        /// `None` when it can answer.
+        blocker: Option<AppleIntelligenceBlocker>,
     },
     LocalEndpoint {
         reachable: bool,

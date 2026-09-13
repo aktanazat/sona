@@ -580,8 +580,17 @@ private struct MeetingRemoteSection: View {
                 // The status line describes what is stored, so while the
                 // fields hold something the core has not been told it says so
                 // instead. "Not saved" and "never configured" are different
-                // problems with different fixes.
-                MeetingSettingsNote(engineLine, warning: engineLineIsWarning)
+                // problems with different fixes. When the fix is the Apple
+                // Intelligence switch, the row carries the way to it.
+                if !store.endpointUnconfigured, let blocker = store.engineStatus?.settingsPaneBlocker {
+                    ActionRow(
+                        title: "\(blocker.reason).",
+                        detail: blocker.advice,
+                        button: "Open System Settings",
+                        action: { store.openAppleIntelligenceSettings() })
+                } else {
+                    MeetingSettingsNote(engineLine, warning: engineLineIsWarning)
+                }
 
                 ToggleRow(
                     title: "Write meeting notes on my server",

@@ -1,3 +1,4 @@
+use crate::meeting::local_generator::AppleIntelligenceBlocker;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 
@@ -16,35 +17,23 @@ extern "C" {
 }
 
 /// The reason Apple Intelligence cannot answer right now, or `None` when it
-/// can. Status codes are defined once, in `swift/apple_intelligence_bridge.h`.
-///
-/// The OS distinguishes three unavailability reasons and they call for
-/// different action — a switch to flip, a download to wait for, or hardware
-/// that will never qualify — so the bridge carries the reason rather than
-/// collapsing them into a bare "unavailable". The text is diagnostic English
-/// for `sona.log`; the settings UI has its own translated string.
-///
-/// This is deliberately a reason string and not a typed enum. Nothing branches
-/// per reason today, so an enum's discriminating power would be unused, and the
-/// consumer that would use it — settings copy choosing one of three translated
-/// keys — does not exist yet. The Swift codes are the stable contract; when
-/// that consumer arrives it can map them to variants then.
-pub fn apple_intelligence_unavailable_reason() -> Option<&'static str> {
+/// can. Status codes are defined once, in `swift/apple_intelligence_bridge.h`;
+/// the meeting engine status carries the variant to the settings and meetings
+/// pages, and its `Display` is the diagnostic line for `sona.log`.
+pub fn apple_intelligence_blocker() -> Option<AppleIntelligenceBlocker> {
     // SAFETY: The Swift bridge exports this no-argument function for the lifetime of the process.
     match unsafe { apple_intelligence_status() } {
         0 => None,
-        1 => Some(
-            "Apple Intelligence is switched off in System Settings > Apple Intelligence & Siri",
-        ),
-        2 => Some("Apple Intelligence is still downloading its model"),
-        3 => Some("this Mac is not eligible for Apple Intelligence"),
-        4 => Some("Apple Intelligence requires macOS 26 or newer"),
-        _ => Some("Apple Intelligence is unavailable for an unrecognized reason"),
+        1 => Some(AppleIntelligenceBlocker::NotEnabled),
+        2 => Some(AppleIntelligenceBlocker::ModelNotReady),
+        3 => Some(AppleIntelligenceBlocker::DeviceNotEligible),
+        4 => Some(AppleIntelligenceBlocker::OsTooOld),
+        _ => Some(AppleIntelligenceBlocker::Unknown),
     }
 }
 
 pub fn check_apple_intelligence_availability() -> bool {
-    apple_intelligence_unavailable_reason().is_none()
+    apple_intelligence_blocker().is_none()
 }
 
 // Link to the Swift function for system prompt support
@@ -131,7 +120,7 @@ mod tests {
     fn the_bridge_answers_or_says_why_not() {
         println!(
             "availability: {}",
-            apple_intelligence_unavailable_reason().unwrap_or("available")
+            apple_intelligence_blocker().map_or("available".to_string(), |blocker| blocker.to_string())
         );
 
         let started = std::time::Instant::now();

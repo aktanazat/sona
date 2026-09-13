@@ -543,8 +543,9 @@ pub(crate) async fn post_process_transcription(
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             // Which reason it is decides what the user would have to do about
-            // it, and this log line is the only place that ever says so.
-            if let Some(reason) = apple_intelligence::apple_intelligence_unavailable_reason() {
+            // it; the meetings and settings pages say so, and this line is the
+            // record of a dictation that went out uncleaned.
+            if let Some(reason) = apple_intelligence::apple_intelligence_blocker() {
                 warn!("Post-processing skipped because {reason}");
                 return None;
             }

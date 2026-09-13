@@ -3513,6 +3513,13 @@ external_mutations_enabled?: boolean }
  * resolves the two and is the only writer of the webview's `data-material`.
  */
 export type AppearanceMaterial = "solid" | "glass"
+/**
+ * Why Apple Intelligence cannot answer right now. Three of these are
+ * different instructions rather than three ways of saying "unavailable":
+ * a switch to flip, a download to wait for, or hardware that will never
+ * qualify. The codes come from `swift/apple_intelligence_bridge.h`.
+ */
+export type AppleIntelligenceBlocker = "not_enabled" | "model_not_ready" | "device_not_eligible" | "os_too_old" | "unknown"
 export type ArtifactCitation = { segment_id: TranscriptSegmentId; start_offset_ns: number; end_offset_ns: number }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type AudioFormat = { sample_rate_hz: number; channels: number }
@@ -4769,7 +4776,11 @@ title_query?: string }
  * OpenAI-compatible route.
  */
 export type MeetingLocalEngine = { kind: "apple_intelligence" } | { kind: "local_endpoint"; base_url: string; model: string; context_window_tokens?: number | null }
-export type MeetingLocalEngineStatus = { kind: "apple_intelligence"; available: boolean } | { kind: "local_endpoint"; reachable: boolean; model_count: number; error: string | null }
+export type MeetingLocalEngineStatus = { kind: "apple_intelligence";
+/**
+ * `None` when it can answer.
+ */
+blocker: AppleIntelligenceBlocker | null } | { kind: "local_endpoint"; reachable: boolean; model_count: number; error: string | null }
 export type MeetingLoopAssignRequest = { operation_id: MeetingOperationId; loop_id: MeetingLoopId; expected_revision: number;
 /**
  * `None` clears the owner.

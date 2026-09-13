@@ -423,16 +423,23 @@ pub trait MeetingTextGenerator: Send + Sync {
 
 struct AppleIntelligenceGenerator;
 
-impl MeetingTextGenerator for AppleIntelligenceGenerator {
-    fn is_available(&self) -> bool {
+impl AppleIntelligenceGenerator {
+    /// Why it cannot write notes right now, or `None` when it can.
+    fn blocker() -> Option<super::local_generator::AppleIntelligenceBlocker> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            crate::apple_intelligence::check_apple_intelligence_availability()
+            crate::apple_intelligence::apple_intelligence_blocker()
         }
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
-            false
+            Some(super::local_generator::AppleIntelligenceBlocker::DeviceNotEligible)
         }
+    }
+}
+
+impl MeetingTextGenerator for AppleIntelligenceGenerator {
+    fn is_available(&self) -> bool {
+        Self::blocker().is_none()
     }
 
     fn model_id(&self) -> &'static str {
@@ -771,14 +778,14 @@ impl MeetingProcessingService {
     pub(crate) fn meeting_local_engine_status(&self) -> MeetingLocalEngineStatus {
         let Some(app) = self.app.as_ref() else {
             return MeetingLocalEngineStatus::AppleIntelligence {
-                available: AppleIntelligenceGenerator.is_available(),
+                blocker: AppleIntelligenceGenerator::blocker(),
             };
         };
         let engine = crate::settings::get_settings(app).meeting_local_engine;
         match engine {
             crate::settings::MeetingLocalEngine::AppleIntelligence => {
                 MeetingLocalEngineStatus::AppleIntelligence {
-                    available: AppleIntelligenceGenerator.is_available(),
+                    blocker: AppleIntelligenceGenerator::blocker(),
                 }
             }
             crate::settings::MeetingLocalEngine::LocalEndpoint { .. } => {

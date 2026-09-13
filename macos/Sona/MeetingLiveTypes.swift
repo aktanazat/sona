@@ -391,17 +391,19 @@ enum MeetingLiveStopSurface: String {
 /// `MeetingLocalEngineStatus`: whether anything on this Mac can turn the words
 /// into notes.
 enum MeetingLiveLocalEngineStatus: Decodable {
-    case appleIntelligence(available: Bool)
+    /// `blocker` is nil when Apple Intelligence can answer.
+    case appleIntelligence(blocker: MeetingAppleIntelligenceBlocker?)
     case localEndpoint(reachable: Bool, modelCount: Int, error: String?)
 
-    private enum Key: String, CodingKey { case kind, available, reachable, modelCount, error }
+    private enum Key: String, CodingKey { case kind, blocker, reachable, modelCount, error }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
         let kind = try container.decode(String.self, forKey: .kind)
         switch kind {
         case "apple_intelligence":
-            self = .appleIntelligence(available: try container.decode(Bool.self, forKey: .available))
+            self = .appleIntelligence(
+                blocker: try container.decodeIfPresent(MeetingAppleIntelligenceBlocker.self, forKey: .blocker))
         case "local_endpoint":
             self = .localEndpoint(
                 reachable: try container.decode(Bool.self, forKey: .reachable),
@@ -416,16 +418,22 @@ enum MeetingLiveLocalEngineStatus: Decodable {
     /// Whether notes can be written here at all.
     var available: Bool {
         switch self {
-        case let .appleIntelligence(available): available
+        case let .appleIntelligence(blocker): blocker == nil
         case let .localEndpoint(reachable, modelCount, _): reachable && modelCount > 0
         }
+    }
+
+    /// What keeps Apple Intelligence from answering, when that is the engine
+    /// and it cannot. The start page offers the System Settings pane on it.
+    var appleBlocker: MeetingAppleIntelligenceBlocker? {
+        if case let .appleIntelligence(blocker) = self { blocker } else { nil }
     }
 
     /// The line the start surface shows, and nothing while processing is fine.
     var warning: String? {
         switch self {
-        case let .appleIntelligence(available):
-            available ? nil : "Apple Intelligence is unavailable, so no notes will be written for this meeting."
+        case let .appleIntelligence(blocker):
+            blocker.map { "\($0.reason), so no notes will be written for this meeting. \($0.advice)" }
         case let .localEndpoint(reachable, modelCount, error):
             if !reachable {
                 error.map { "The local model endpoint is unreachable: \($0)" }

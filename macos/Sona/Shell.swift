@@ -142,8 +142,22 @@ struct MeetingsPlace: View {
             if let notice = live.notice {
                 Text(notice).bodyText(13, Theme.inkSecondary).padding(.bottom, 16)
             }
-            if let warning = live.engine?.warning {
-                Text(warning).bodyText(13, Theme.live).padding(.bottom, 16)
+            if let engine = live.engineWarning, let warning = engine.warning {
+                // Every engine warning is fixed under Settings → Meetings; the
+                // Apple Intelligence switch and its download are one pane
+                // further, in System Settings.
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(warning).bodyText(13, Theme.live)
+                    HStack(spacing: 8) {
+                        if engine.appleBlocker?.systemSettingsHelps == true {
+                            Button("Open System Settings") { live.openAppleIntelligenceSettings() }
+                                .buttonStyle(.compact)
+                        }
+                        Button("Meeting settings") { model.showSettings(.meetings) }
+                            .buttonStyle(.compact)
+                    }
+                }
+                .padding(.bottom, 16)
             }
             MeetingSuggestionsView(store: live)
             MeetingStartCountdownView(store: live)
