@@ -22,6 +22,7 @@ struct VocabularyView: View {
     @State private var newLeft = ""
     @State private var newRight = ""
     @FocusState private var focus: VocabularyFocus?
+    @State private var restoreOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -49,12 +50,31 @@ struct VocabularyView: View {
                     review: review,
                     savedCount: store.savedEntryCount,
                     busy: store.busy,
+                    error: store.error,
                     onStep: { store.setReviewStep($0) },
                     onClose: { store.closeReview() },
+                    onPreviewAgain: { store.previewAgain() },
                     onApply: { store.applyImport() }
                 )
             }
         }
+        .confirmationDialog(
+            "Restore the default rewrites?",
+            isPresented: $restoreOpen,
+            titleVisibility: .visible
+        ) {
+            Button("Restore defaults", role: .destructive) { store.restoreDefaultRewrites() }
+            Button("Keep mine", role: .cancel) {}
+        } message: {
+            Text(restoreConsequence)
+        }
+    }
+
+    /// What the restore throws away, counted, so the reader decides on facts.
+    private var restoreConsequence: String {
+        let count = store.rewrites.count
+        let mine = count == 1 ? "your 1 rewrite" : "your \(count) rewrites"
+        return "Sona's starter list replaces \(mine). Vocabulary, shortcuts, and emoji rules stay. This cannot be undone."
     }
 
     // MARK: The four switches
@@ -111,7 +131,7 @@ struct VocabularyView: View {
                 Button("Export CSV") { store.exportCsv() }
                     .buttonStyle(.compact)
                     .disabled(store.busy || store.savedEntryCount == 0)
-                Button("Restore default rewrites") { store.restoreDefaultRewrites() }
+                Button("Restore default rewrites") { restoreOpen = true }
                     .buttonStyle(.compact)
                     .disabled(store.busy)
             }
@@ -423,7 +443,7 @@ private struct VocabularyRuleRow: View {
                 .disabled(busy),
                 trailing: HStack(spacing: 8) {
                     if let enabled = rule.enabled {
-                        Toggle("", isOn: Binding(get: { enabled }, set: onToggle))
+                        Toggle(rule.left.isEmpty ? "New \(rule.kind.title) rule" : rule.left, isOn: Binding(get: { enabled }, set: onToggle))
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.mini)
@@ -500,15 +520,19 @@ private struct VocabularySampleRow: View {
     }
 }
 
-/// Two steps, because a CSV import replaces the saved list: read what the file
-/// contains, then confirm the replacement. Nothing is written until the last
-/// button.
+/// Two steps, because a CSV import writes to the saved list: read what the
+/// file contains, then confirm the addition. Nothing is written until the
+/// last button.
 private struct VocabularyImportSheet: View {
     let review: VocabularyImportReview
     let savedCount: Int
     let busy: Bool
+    /// What the last step could not do. The page's own note sits behind this
+    /// sheet, so the refusal is repeated here, at the button that asked.
+    let error: String?
     let onStep: (VocabularyImportStep) -> Void
     let onClose: () -> Void
+    let onPreviewAgain: () -> Void
     let onApply: () -> Void
 
     var body: some View {
@@ -527,8 +551,21 @@ private struct VocabularyImportSheet: View {
                     entryTable
                 }
             } else {
-                Text("Applying replaces the \(savedCount) saved pairs with the \(review.preview.entries.count) pairs from this file.")
+                Text(consequence)
                     .bodyText(14, Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(error)
+                        .metaText(Theme.live)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button("Preview again", action: onPreviewAgain)
+                        .buttonStyle(.compact)
+                        .disabled(busy)
+                        .help("Read the file against the saved list as it stands now")
+                }
             }
             HStack(spacing: 10) {
                 Spacer()
@@ -553,6 +590,15 @@ private struct VocabularyImportSheet: View {
         .frame(width: 520)
         .background(Theme.page)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
+    }
+
+    /// The import adds; it never replaces. Both counts, so the reader knows
+    /// the size of the list they will have.
+    private var consequence: String {
+        let adding = review.preview.entries.count
+        let added = adding == 1 ? "1 pair" : "\(adding) pairs"
+        let kept = savedCount == 1 ? "the 1 saved pair" : "the \(savedCount) saved pairs"
+        return "Applying adds \(added) from this file and keeps \(kept)."
     }
 
     /// Only the count that always means something, plus the ones that are a

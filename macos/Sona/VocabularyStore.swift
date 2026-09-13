@@ -434,15 +434,18 @@ final class VocabularyStore {
             guard let self else {
                 return
             }
-            let csv = try String(contentsOf: url, encoding: .utf8)
-            let preview: VocabularyCsvPreview = try await core.request(
-                "preview_vocabulary_csv",
-                VocabularyCsvRequest(scope: .global, csvText: csv)
-            )
-            review = VocabularyImportReview(csv: csv, preview: preview, step: .review)
+            try await preview(csv: try String(contentsOf: url, encoding: .utf8))
         }, retry: { [weak self] in
             self?.previewCsv(at: url)
         })
+    }
+
+    private func preview(csv: String) async throws {
+        let preview: VocabularyCsvPreview = try await core.request(
+            "preview_vocabulary_csv",
+            VocabularyCsvRequest(scope: .global, csvText: csv)
+        )
+        review = VocabularyImportReview(csv: csv, preview: preview, step: .review)
     }
 
     func setReviewStep(_ step: VocabularyImportStep) {
@@ -453,9 +456,9 @@ final class VocabularyStore {
         review = nil
     }
 
-    /// Nothing is written until this. The core replaces the persisted list with
-    /// the CSV rows, so local rows the CSV does not define are merged back
-    /// instead of silently discarded.
+    /// Nothing is written until this. The core adds the CSV rows to the
+    /// saved list and answers with the whole list, so rows typed here and
+    /// never saved are merged back instead of silently discarded.
     func applyImport() {
         guard let pending = review, pending.preview.canApply else {
             return
@@ -474,6 +477,20 @@ final class VocabularyStore {
             review = nil
         }, retry: { [weak self] in
             self?.applyImport()
+        })
+    }
+
+    /// Reads the same file against the saved list as it stands now. The core
+    /// checks the CSV again at apply time, so a list that changed since the
+    /// preview can refuse a preview that looked clean.
+    func previewAgain() {
+        guard let pending = review else {
+            return
+        }
+        write({ [weak self] in
+            try await self?.preview(csv: pending.csv)
+        }, retry: { [weak self] in
+            self?.previewAgain()
         })
     }
 

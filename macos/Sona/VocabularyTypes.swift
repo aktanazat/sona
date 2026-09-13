@@ -287,9 +287,9 @@ enum VocabularyDraft {
         samePairs(current, previousSaved) ? incomingSaved : current
     }
 
-    /// The core replaces the persisted list with the CSV rows, so rows typed
-    /// locally and never saved are absent from that answer. Keep every local
-    /// row the CSV does not also define.
+    /// The core adds the CSV rows to the saved list and answers with that
+    /// list, so rows typed locally and never saved are absent from the
+    /// answer. Keep every local row the CSV does not also define.
     static func mergeAppliedCsv(
         _ localDrafts: [VocabularyEntry],
         _ applied: [VocabularyEntry]

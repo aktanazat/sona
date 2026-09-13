@@ -58,7 +58,11 @@ struct ImportView: View {
             PageSection("Chosen files") {
                 Card {
                     ForEach(store.rows) { row in
-                        ImportFileRow(row: row)
+                        ImportFileRow(row: row) {
+                            store.retry(row.path)
+                        } remove: {
+                            store.remove(row.path)
+                        }
                     }
                     CardRow {
                         Text(store.pending == 0
@@ -131,9 +135,13 @@ struct ImportView: View {
 }
 
 /// One chosen file. The name truncates in the middle, so the extension and
-/// the digits before it survive at any width.
+/// the digits before it survive at any width. A refused file keeps the
+/// core's reason and gets the two things that can be done about it: try it
+/// again once the cause is fixed, or take it out of the list.
 private struct ImportFileRow: View {
     let row: ImportRow
+    let retry: () -> Void
+    let remove: () -> Void
 
     var body: some View {
         CardRow {
@@ -143,13 +151,23 @@ private struct ImportFileRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let failure = row.failure {
-                    Text(failure).metaText(Theme.live)
+                    Text(failure)
+                        .metaText(Theme.live)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .help(row.path)
         } trailing: {
-            Text(row.state.word)
-                .metaText(row.state == .failed ? Theme.live : Theme.inkSecondary)
+            HStack(spacing: 12) {
+                Text(row.state.word)
+                    .metaText(row.state == .failed ? Theme.live : Theme.inkSecondary)
+                if row.state == .failed {
+                    Button("Retry", action: retry).buttonStyle(.compact)
+                    Button("Remove", action: remove).buttonStyle(.quiet)
+                } else if row.state == .ready {
+                    Button("Remove", action: remove).buttonStyle(.quiet)
+                }
+            }
         }
     }
 }

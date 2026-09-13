@@ -55,12 +55,6 @@ final class ImportStore {
 
     // MARK: - The dialog's list
 
-    /// A fresh opening is a fresh list, not the last import's leftovers.
-    func clearRows() {
-        rows = []
-        error = nil
-    }
-
     /// The native picker, multi-select, limited to what the core's importer
     /// reads. A dismissed picker is somebody changing their mind, not a failure.
     func chooseFiles() {
@@ -86,9 +80,27 @@ final class ImportStore {
         rows.filter { $0.state == .ready }.count
     }
 
+    /// Put a refused file back in line. Its reason is cleared with it: the
+    /// next attempt gets its own.
+    func retry(_ path: String) {
+        update(path) { row in
+            guard row.state == .failed else { return }
+            row.state = .ready
+            row.failure = nil
+        }
+    }
+
+    /// Take a file out of the list. The list is what the reader chose, so a
+    /// choice can be unmade; a job already handed to the core is the core's.
+    func remove(_ path: String) {
+        rows.removeAll { $0.path == path && $0.jobId == nil }
+    }
+
     /// Hand every ready row to the core, in the order they were chosen. Each
     /// one is queued there and keeps reporting through its job, so the dialog
-    /// can be closed over a run without stopping anything.
+    /// can be closed over a run without stopping anything. The method is the
+    /// shell's own: the core grants a chosen file to its file scope before it
+    /// queues it, which the webview's `import_audio_file` never does.
     func runImport() async {
         guard !running else { return }
         let paths = rows.filter { $0.state == .ready }.map(\.path)
@@ -98,7 +110,7 @@ final class ImportStore {
         var refused = false
         for path in paths {
             do {
-                let job: AudioImportJob = try await core.request("import_audio_file", ["path": path])
+                let job: AudioImportJob = try await core.request("import_chosen_media_file", ["path": path])
                 update(path) { row in
                     row.state = .queued
                     row.jobId = job.id
@@ -107,15 +119,18 @@ final class ImportStore {
                 apply(job)
             } catch {
                 refused = true
+                /* The core's own sentence stays on the row: it is the one
+                 * thing that says what to change before trying again. */
+                let reason = (error as? CoreError)?.remote(as: String.self) ?? error.localizedDescription
                 update(path) { row in
                     row.state = .failed
-                    row.failure = nil
+                    row.failure = reason
                 }
             }
         }
         // One report per run, not one per file: the rows already name which
         // file was refused.
-        error = refused ? "Couldn't start the file import. Try again." : nil
+        error = refused ? "Some files couldn't be imported. Each one says why." : nil
     }
 
     // MARK: - The queue
