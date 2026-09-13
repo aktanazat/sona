@@ -29,12 +29,17 @@ struct Card<Content: View>: View {
 }
 
 /// A row in a card: leading content, trailing meta or controls, a hairline
-/// underneath. Tappable when it has an action.
+/// underneath. With an action it is a button to every input: the pointer
+/// clicks it, keyboard navigation tabs to it and presses it with space or
+/// return, and VoiceOver presses it as one. It stays a plain stack rather
+/// than a `Button` so the controls a row may carry in `trailing` keep their
+/// own clicks.
 struct CardRow<Leading: View, Trailing: View>: View {
     let leading: Leading
     let trailing: Trailing
     var action: (() -> Void)?
     @State private var hovering = false
+    @FocusState private var focused: Bool
 
     init(
         action: (() -> Void)? = nil,
@@ -60,16 +65,46 @@ struct CardRow<Leading: View, Trailing: View>: View {
         .contentShape(Rectangle())
         .onTapGesture { action?() }
         .onHover { hovering = $0 }
-        // A row with an action is a button to VoiceOver, so it can be pressed
-        // from the keyboard and from an assistive client.
+        .focusable(action != nil, interactions: .activate)
+        .focused($focused)
+        .onKeyPress(.space) { press() }
+        .onKeyPress(.return) { press() }
         .accessibilityAddTraits(action != nil ? .isButton : [])
         .accessibilityAction { action?() }
+    }
+
+    /// Space or return on the row itself. A control the row carries keeps
+    /// its own keys: with focus inside the row, this is not the row's press.
+    private func press() -> KeyPress.Result {
+        guard focused, let action else { return .ignored }
+        action()
+        return .handled
     }
 }
 
 extension CardRow where Trailing == EmptyView {
     init(action: (() -> Void)? = nil, @ViewBuilder leading: () -> Leading) {
         self.init(action: action, leading: leading) { EmptyView() }
+    }
+}
+
+/// One quiet sentence in a card, where a row would be too much furniture:
+/// "Reading your prompts…", "No activity yet."
+struct CardLine: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .metaText()
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .bottom) { Hairline() }
     }
 }
 
@@ -378,7 +413,9 @@ struct ToggleRow: View {
                 }
             }
         } trailing: {
-            Toggle("", isOn: $isOn)
+            // The title is the switch's name for VoiceOver; only its drawing
+            // is hidden, since the row already shows it.
+            Toggle(title, isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .tint(Theme.accent)
@@ -438,7 +475,7 @@ struct ChoiceRow<Choice: Hashable>: View {
                 }
             }
         } trailing: {
-            Picker("", selection: $selection) {
+            Picker(title, selection: $selection) {
                 ForEach(choices, id: \.self) { choice in
                     Text(label(choice)).tag(choice)
                 }
