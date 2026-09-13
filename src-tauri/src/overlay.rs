@@ -931,7 +931,16 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
     // `emit_to` with the overlay's window label produces a single
     // eval_script call per callback, cutting the per-callback WebKit
     // dispatch work in half.
-    let _ = app_handle.emit_to("recording_overlay", "mic-level", levels);
+    //
+    // A targeted emit reaches only listeners registered under that label,
+    // so the native bridge's app-level listener never sees it. The native
+    // shell keeps no webview at all, so a broadcast there reaches the
+    // bridge and nothing else.
+    if app_handle.get_webview_window("recording_overlay").is_some() {
+        let _ = app_handle.emit_to("recording_overlay", "mic-level", levels);
+    } else {
+        let _ = app_handle.emit("mic-level", levels);
+    }
 }
 
 #[cfg(test)]

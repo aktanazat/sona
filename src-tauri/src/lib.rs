@@ -2420,8 +2420,11 @@ pub fn run(cli_args: CliArgs) {
                 // Secure Input monitor (macOS): detects stuck secure input that
                 // silently blocks keyed shortcuts and activates the Carbon fallback.
                 secure_input::init(&startup_app);
+                // The native shell draws the meter too, and hides it under
+                // `None` like the webview overlay does, so the same gate
+                // decides whether levels are worth emitting in both modes.
                 overlay::update_overlay_enabled_cache(
-                    !native_mode && settings.overlay_style != settings::OverlayStyle::None,
+                    settings.overlay_style != settings::OverlayStyle::None,
                 );
 
                 std::thread::spawn(|| {
