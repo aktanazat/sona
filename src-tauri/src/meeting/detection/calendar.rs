@@ -210,6 +210,12 @@ pub fn occurrence_key(series_key: &str, start_utc_ms: i64) -> String {
     format!("{series_key}#{start_utc_ms}")
 }
 
+/// The start instant an `occurrence_key` carries, or `None` for a key this
+/// module did not mint.
+pub fn occurrence_start(event_key: &str) -> Option<i64> {
+    event_key.rsplit_once('#')?.1.parse().ok()
+}
+
 /// Maps `EKParticipantStatus`'s raw value onto the answer a person recognizes.
 ///
 /// Keyed on the raw integer, and living outside the macOS module, so the one

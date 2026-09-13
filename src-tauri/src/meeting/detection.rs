@@ -1693,6 +1693,8 @@ impl DetectionRuntime {
         }
     }
 
+    /// The event a start names, from what detection is looking at now: the
+    /// countdown, or a prompt still waiting for its answer.
     pub fn calendar_event_for_start(&self, event_key: &str) -> Option<CalendarEventSummary> {
         let state = self.lock();
         let event = state
@@ -1708,6 +1710,19 @@ impl DetectionRuntime {
             .find(|event| event.event_key == event_key)
             .cloned();
         event
+    }
+
+    /// The occurrence an upcoming row was built from, read back from the
+    /// calendar by its key. Detection knows only the event in front of it now;
+    /// a row for tomorrow lives in the calendar alone, which is where a start
+    /// from that row has to find it. Blocking, like every EventKit read.
+    pub fn calendar_event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary> {
+        let start_utc_ms = calendar::occurrence_start(event_key)?;
+        self.calendar
+            .events_between(start_utc_ms, start_utc_ms.checked_add(1)?)
+            .into_iter()
+            .map(|occurrence| occurrence.summary)
+            .find(|event| event.event_key == event_key)
     }
 
     fn raise(self: &Arc<Self>, prompt: PromptKind, calendar_event: Option<CalendarEventSummary>) {

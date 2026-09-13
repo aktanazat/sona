@@ -34,6 +34,10 @@ pub fn meeting_suggestions_list(
     manager.suggestions_list(host_monotonic_now_ns())
 }
 
+/// A start that names a calendar occurrence carries the occurrence in. The
+/// event detection is looking at answers first; any other row of the week
+/// ahead is read back from the calendar, which blocks like every EventKit
+/// read and so runs off the async workers.
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_preflight_create(
@@ -41,15 +45,24 @@ pub async fn meeting_preflight_create(
     detection: State<'_, Arc<DetectionRuntime>>,
     request: MeetingPreflightCreateRequest,
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
-    let calendar_event = request
-        .calendar_event_key
-        .as_deref()
-        .map(|event_key| {
-            detection
-                .calendar_event_for_start(event_key)
-                .ok_or(MeetingCommandError::InvalidRequest)
-        })
-        .transpose()?;
+    let calendar_event = match request.calendar_event_key.as_deref() {
+        None => None,
+        Some(event_key) => {
+            let event = match detection.calendar_event_for_start(event_key) {
+                Some(event) => Some(event),
+                None => {
+                    let detection = Arc::clone(&detection);
+                    let event_key = event_key.to_string();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        detection.calendar_event_by_key(&event_key)
+                    })
+                    .await
+                    .unwrap_or_default()
+                }
+            };
+            Some(event.ok_or(MeetingCommandError::InvalidRequest)?)
+        }
+    };
     manager
         .create_preflight_with_calendar(request, calendar_event)
         .await
