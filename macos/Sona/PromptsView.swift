@@ -95,7 +95,7 @@ struct PromptsView: View {
             PromptEditorSheet(store: store, draft: draft) { self.draft = nil }
         }
         .sheet(item: $pendingDelete) { entry in
-            PromptDeleteSheet(store: store, entry: entry, selected: store.selectedDictationId == entry.id) {
+            PromptDeleteSheet(store: store, entry: entry, inUse: store.isInUse(entry)) {
                 pendingDelete = nil
             }
         }
@@ -110,9 +110,9 @@ struct PromptsView: View {
         PageSection("Prompts") {
             Card {
                 if store.loading && store.prompts.isEmpty {
-                    PromptLine("Reading your prompts…")
+                    CardLine("Reading your prompts…")
                 } else if store.prompts.isEmpty {
-                    PromptLine("No prompts yet.")
+                    CardLine("No prompts yet.")
                 } else {
                     ForEach(store.prompts) { prompt in
                         PromptRow(
@@ -158,7 +158,7 @@ struct PromptsView: View {
                     .frame(maxWidth: 320)
                 }
                 if let note = store.runNote {
-                    PromptLine(note)
+                    CardLine(note)
                 }
             }
         }
@@ -169,7 +169,7 @@ struct PromptsView: View {
             PageSection("Prompt results") {
                 Card {
                     if store.runs.isEmpty {
-                        PromptLine("Nothing has been asked about \(target.title) yet.")
+                        CardLine("Nothing has been asked about \(target.title) yet.")
                     } else {
                         ForEach(store.runs) { run in
                             PromptRunRow(
@@ -214,28 +214,32 @@ struct PromptsView: View {
         PageSection("Post-processing prompts") {
             Card {
                 if store.dictationLoading && store.dictation.isEmpty {
-                    PromptLine("Loading prompts…")
+                    CardLine("Loading prompts…")
                 } else if store.dictation.isEmpty {
-                    PromptLine(
-                        "A prompt tells the model what to do with the transcript, for example: rewrite the following as a short message, keeping every fact: ${output}"
+                    CardLine(
+                        "A prompt tells the model what to do with the transcript, for example: rewrite this as a short message, keeping every fact."
                     )
                 } else {
                     ForEach(store.dictation) { entry in
                         PromptDictationRow(
                             store: store,
                             entry: entry,
-                            selected: store.selectedDictationId == entry.id,
+                            inUse: store.isInUse(entry),
                             isLast: store.dictation.count <= 1,
                             edit: { draft = PromptDraft.of(entry) },
                             remove: { pendingDelete = entry }
                         )
                     }
                 }
-                if !store.dictation.isEmpty && store.selectedDictationId == nil {
-                    PromptLine("No prompt selected: every mode uses the prompt it defines.")
+                if let note = store.useNote {
+                    CardLine(note)
+                } else if let name = store.activeMode?.name, !store.dictation.isEmpty,
+                    !store.dictation.contains(where: store.isInUse)
+                {
+                    CardLine("\(name) uses its own instructions. Use a prompt here to hand it one.")
                 }
                 if store.dictation.count == 1 {
-                    PromptLine(
+                    CardLine(
                         "Sona keeps at least one prompt, so this one cannot be deleted. Create another first."
                     )
                 }
@@ -270,24 +274,6 @@ struct PromptTabBar: View {
     }
 }
 
-/// One quiet sentence in a card, where a row would be too much furniture.
-struct PromptLine: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        Text(text)
-            .metaText()
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline() }
-    }
-}
 
 /// One saved prompt: a name and what it is about, and the body one click
 /// away. The page stays the same height however many questions are kept.
@@ -414,11 +400,12 @@ struct PromptRunBody: View {
     }
 }
 
-/// One post-processing prompt, with the chip that says a mode starts from it.
+/// One post-processing prompt, with the chip that says the active mode is
+/// using it.
 struct PromptDictationRow: View {
     let store: PromptsStore
     let entry: PromptDictationEntry
-    let selected: Bool
+    let inUse: Bool
     let isLast: Bool
     let edit: () -> Void
     let remove: () -> Void
@@ -428,7 +415,7 @@ struct PromptDictationRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(entry.name).bodyText()
-                    if selected {
+                    if inUse {
                         Chip("In use")
                     }
                 }
@@ -439,10 +426,11 @@ struct PromptDictationRow: View {
             }
         } trailing: {
             HStack(spacing: 14) {
-                if !selected {
+                if !inUse {
                     Button("Use") { Task { await store.useDictation(entry) } }
                         .buttonStyle(.compact)
                         .disabled(store.saving)
+                        .help("Hand this prompt to the active mode")
                 }
                 Button("Edit", action: edit)
                     .buttonStyle(.quiet)
@@ -483,7 +471,7 @@ struct PromptEditorSheet: View {
                 Text(draft.library == .saved ? "Prompt" : "Instructions").bodyText(14, Theme.inkSecondary)
                 PromptTextArea(prompt: bodyPlaceholder, text: $draft.body, minHeight: 120)
                 if draft.library == .dictation {
-                    Text("Write ${output} where the transcript should be inserted.").metaText()
+                    Text("The transcript follows the instructions; there is no need to mark where it goes.").metaText()
                 }
             }
             if draft.library == .saved {
@@ -567,7 +555,7 @@ struct PromptEditorSheet: View {
     private var bodyPlaceholder: String {
         draft.library == .saved
             ? "List the decisions and who owns each one."
-            : "Improve grammar and clarity for the following text: ${output}"
+            : "Improve grammar and clarity, keeping every fact."
     }
 
     private var schemaBinding: Binding<Bool> {
@@ -599,7 +587,7 @@ struct PromptEditorSheet: View {
 struct PromptDeleteSheet: View {
     let store: PromptsStore
     let entry: PromptDictationEntry
-    let selected: Bool
+    let inUse: Bool
     let onFinished: () -> Void
 
     var body: some View {
@@ -635,9 +623,9 @@ struct PromptDeleteSheet: View {
     }
 
     private var consequence: String {
-        selected
-            ? "\(entry.name) is in use. Deleting it moves the selection to the first prompt in the list."
-            : "\(entry.name) is removed from the library. Modes that already copied its text keep their own prompt."
+        inUse
+            ? "\(entry.name) is in use. The active mode keeps a copy of its text, and the prompt leaves the library."
+            : "\(entry.name) is removed from the library. Modes that copied its text keep their own instructions."
     }
 }
 

@@ -39,6 +39,8 @@ final class ProvidersStore {
     private(set) var consentError: String?
     /// What the prompt editor could not do, shown inside the sheet.
     private(set) var promptError: String?
+    /// What the last "Use" did, in one sentence, until the next prompt write.
+    private(set) var promptNote: String?
     /// The address was rewritten and the new one is not acknowledged yet.
     private(set) var endpointChanged = false
 
@@ -126,7 +128,12 @@ final class ProvidersStore {
     var baseUrl: String { selectedProvider?.baseUrl ?? "" }
     var model: String { settings?.model(for: selectedProviderId) ?? "" }
     var prompts: [PostProcessPrompt] { settings?.prompts ?? [] }
-    var selectedPromptId: String? { settings?.postProcessSelectedPromptId }
+    var activeModeName: String? { settings?.activeMode?.name }
+
+    /// True when the active mode's instructions are this prompt, unchanged.
+    func isInUse(_ prompt: PostProcessPrompt) -> Bool {
+        settings?.activeMode?.uses(promptId: prompt.id, text: prompt.prompt) == true
+    }
 
     /// The probe wins over the settings copy; both come from the same store and
     /// the probe is never older.
@@ -545,6 +552,7 @@ final class ProvidersStore {
         guard trimmed["name"]?.isEmpty == false, trimmed["prompt"]?.isEmpty == false else { return false }
 
         working.insert(Busy.prompt)
+        promptNote = nil
         defer { working.remove(Busy.prompt) }
         do {
             try await core.request(method, trimmed)
@@ -558,29 +566,38 @@ final class ProvidersStore {
     }
 
     /// The core keeps at least one prompt, and the screen says so rather than
-    /// letting the reader find out from a refusal.
+    /// letting the reader find out from a refusal. A refusal lands on the
+    /// page: the confirmation that asked has closed, and the editing sheet
+    /// that shows `promptError` is not open for a delete.
     func deletePrompt(_ id: String) async -> Bool {
         guard prompts.count > 1 else { return false }
         working.insert(Busy.prompt)
+        promptNote = nil
         defer { working.remove(Busy.prompt) }
         do {
             try await core.request("delete_post_process_prompt", ["id": id])
-            promptError = nil
+            error = nil
             await refresh()
             return true
         } catch {
-            promptError = error.localizedDescription
+            self.error = "Couldn't delete that prompt. \(error.localizedDescription)"
             return false
         }
     }
 
-    func usePrompt(_ id: String) async {
+    /// Hands one prompt to the active mode. The core writes it into that
+    /// mode's instructions and answers with the modes as they now stand.
+    func usePrompt(_ prompt: PostProcessPrompt) async {
         working.insert(Busy.prompt)
+        promptNote = nil
         defer { working.remove(Busy.prompt) }
         do {
-            try await core.request("set_post_process_selected_prompt", ["id": id])
+            let snapshot: ModesSnapshot = try await core.request(
+                "set_post_process_selected_prompt", ["id": prompt.id])
             error = nil
             await refresh()
+            let mode = snapshot.modes.first { $0.id == snapshot.activeModeId }
+            promptNote = mode.map { "\($0.name) now uses \(prompt.name)." }
         } catch {
             self.error = error.localizedDescription
         }

@@ -25,9 +25,14 @@ final class PromptsStore {
 
     /// The post-processing prompts, out of the core's settings.
     private(set) var dictation: [PromptDictationEntry] = []
-    /// The one a mode without its own prompt starts from.
+    /// The one a new mode starts from.
     private(set) var selectedDictationId: String?
+    /// The active mode's instructions, so the library can say which prompt
+    /// dictation is using right now.
+    private(set) var activeMode: PromptModeInstructions?
     private(set) var dictationLoading = true
+    /// What the last "Use" did, in one sentence, until the next write.
+    private(set) var useNote: String?
 
     /// Every record a prompt can be asked about, all three kinds together.
     private(set) var options: [PromptTargetOption] = []
@@ -258,16 +263,23 @@ final class PromptsStore {
             let settings: PromptAppSettings = try await core.request("get_app_settings")
             dictation = settings.postProcessPrompts ?? []
             selectedDictationId = settings.postProcessSelectedPromptId
+            activeMode = settings.modes?.first { $0.id == settings.activeModeId }
             error = nil
         } catch {
             self.error = promptErrorSentence(error)
         }
     }
 
+    /// True when the active mode's instructions are this prompt, unchanged.
+    func isInUse(_ entry: PromptDictationEntry) -> Bool {
+        activeMode?.uses(promptId: entry.id, text: entry.prompt) == true
+    }
+
     /// Writes one post-processing prompt, new or edited. `true` when it landed.
     func saveDictation(_ draft: PromptDraft) async -> Bool {
         saving = true
         draftError = nil
+        useNote = nil
         defer { saving = false }
         let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = draft.body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -292,6 +304,7 @@ final class PromptsStore {
     func deleteDictation(_ entry: PromptDictationEntry) async -> Bool {
         saving = true
         error = nil
+        useNote = nil
         defer { saving = false }
         do {
             try await core.request("delete_post_process_prompt", ["id": entry.id])
@@ -303,14 +316,19 @@ final class PromptsStore {
         }
     }
 
-    /// Makes one post-processing prompt the one modes start from.
+    /// Hands one post-processing prompt to the active mode. The core writes
+    /// it into that mode's instructions and keeps it as the seed for a first mode.
     func useDictation(_ entry: PromptDictationEntry) async {
         saving = true
         error = nil
+        useNote = nil
         defer { saving = false }
         do {
-            try await core.request("set_post_process_selected_prompt", ["id": entry.id])
+            let snapshot: ModesSnapshot = try await core.request(
+                "set_post_process_selected_prompt", ["id": entry.id])
             await loadDictation()
+            let mode = snapshot.modes.first { $0.id == snapshot.activeModeId }
+            useNote = mode.map { "\($0.name) now uses \(entry.name)." }
         } catch {
             self.error = promptErrorSentence(error)
         }

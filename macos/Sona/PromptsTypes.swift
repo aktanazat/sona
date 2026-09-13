@@ -204,10 +204,33 @@ struct PromptDictationEntry: Decodable, Identifiable, Hashable {
     let prompt: String
 }
 
-/// The two fields of the core's settings this screen reads.
+/// The fields of the core's settings this screen reads: the library, the
+/// prompt new modes seed from, and enough of each mode to say which library
+/// prompt the active one is using.
 struct PromptAppSettings: Decodable {
     let postProcessPrompts: [PromptDictationEntry]?
     let postProcessSelectedPromptId: String?
+    let activeModeId: String?
+    let modes: [PromptModeInstructions]?
+}
+
+/// A mode's instructions, as far as the library cares: which library prompt
+/// they came from and whether they still read the same.
+struct PromptModeInstructions: Decodable, Equatable, Sendable {
+    let id: String
+    let name: String
+    let prompt: Instructions
+
+    struct Instructions: Decodable, Equatable, Sendable {
+        let sourcePromptId: String?
+        let customPrompt: String?
+    }
+
+    /// True when this mode's instructions are that library prompt, byte for
+    /// byte. An edit on either side ends the claim.
+    func uses(promptId: String, text: String) -> Bool {
+        prompt.sourcePromptId == promptId && prompt.customPrompt == text
+    }
 }
 
 /// The command errors these screens say something specific about. Anything

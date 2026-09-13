@@ -61,9 +61,9 @@ struct ProvidersView: View {
         } message: {
             if let prompt = pendingDelete {
                 Text(
-                    prompt.id == store.selectedPromptId
-                        ? "\(prompt.name) is in use. Deleting it moves the selection to the first prompt in the list."
-                        : "\(prompt.name) is removed from the library. Modes that already copied its text keep their own prompt."
+                    store.isInUse(prompt)
+                        ? "\(prompt.name) is in use. The active mode keeps a copy of its text, and the prompt leaves the library."
+                        : "\(prompt.name) is removed from the library. Modes that copied its text keep their own instructions."
                 )
             }
         }
@@ -283,16 +283,16 @@ struct ProvidersView: View {
             Card {
                 if store.prompts.isEmpty {
                     ProviderNoteRow(
-                        text: "A prompt tells the model what to do with the transcript, for example: rewrite the following as a short message, keeping every fact: ${output}"
+                        text: "A prompt tells the model what to do with the transcript, for example: rewrite this as a short message, keeping every fact."
                     )
                 } else {
                     ForEach(store.prompts) { prompt in
                         PostProcessPromptRow(
                             prompt: prompt,
-                            selected: prompt.id == store.selectedPromptId,
+                            selected: store.isInUse(prompt),
                             busy: store.isSavingPrompt,
                             canDelete: store.prompts.count > 1,
-                            onUse: { Task { await store.usePrompt(prompt.id) } },
+                            onUse: { Task { await store.usePrompt(prompt) } },
                             onEdit: {
                                 store.clearPromptError()
                                 promptDraft = PostProcessPromptDraft(
@@ -305,8 +305,12 @@ struct ProvidersView: View {
                         )
                     }
                 }
-                if !store.prompts.isEmpty, store.selectedPromptId == nil {
-                    ProviderNoteRow(text: "No prompt selected: every mode uses the prompt it defines.")
+                if let note = store.promptNote {
+                    ProviderNoteRow(text: note)
+                } else if let name = store.activeModeName, !store.prompts.isEmpty,
+                    !store.prompts.contains(where: store.isInUse)
+                {
+                    ProviderNoteRow(text: "\(name) uses its own instructions. Use a prompt here to hand it one.")
                 }
                 if store.prompts.count == 1 {
                     ProviderNoteRow(
@@ -315,7 +319,7 @@ struct ProvidersView: View {
                 }
                 ActionRow(
                     title: "New prompt",
-                    detail: "Write ${output} where the transcript should be inserted.",
+                    detail: "An instruction the model follows after each dictation.",
                     button: "New prompt",
                     busy: store.isSavingPrompt
                 ) {
@@ -510,6 +514,7 @@ struct PostProcessPromptRow: View {
                     Button("Use", action: onUse)
                         .buttonStyle(.secondary)
                         .disabled(busy)
+                        .help("Hand this prompt to the active mode")
                 }
                 Button("Edit", action: onEdit)
                     .buttonStyle(.quiet)
@@ -562,7 +567,7 @@ struct PostProcessPromptSheet: View {
                         RoundedRectangle(cornerRadius: Theme.radiusControl)
                             .strokeBorder(Theme.border, lineWidth: 1)
                     )
-                Text("Write ${output} where the transcript should be inserted.").metaText()
+                Text("The transcript follows the instructions; there is no need to mark where it goes.").metaText()
             }
 
             if let message = store.promptError {

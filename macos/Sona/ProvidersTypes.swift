@@ -356,6 +356,8 @@ struct ProvidersSettings: Decodable, Equatable, Sendable {
     let postProcessPrompts: [PostProcessPrompt]?
     let postProcessSelectedPromptId: String?
     let cloudSttProviders: [CloudSttProviderSettings]?
+    let activeModeId: String?
+    let modes: [PromptModeInstructions]?
 
     var enabled: Bool { postProcessEnabled ?? false }
     var providers: [Provider] { postProcessProviders ?? [] }
@@ -363,6 +365,7 @@ struct ProvidersSettings: Decodable, Equatable, Sendable {
     var selectedProvider: Provider? { providers.first { $0.id == selectedProviderId } }
     var prompts: [PostProcessPrompt] { postProcessPrompts ?? [] }
     var cloudProviders: [CloudSttProviderSettings] { cloudSttProviders ?? [] }
+    var activeMode: PromptModeInstructions? { modes?.first { $0.id == activeModeId } }
 
     func secretState(for providerId: String) -> SecretState? {
         postProcessSecretStates?[providerId]
