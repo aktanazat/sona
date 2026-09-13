@@ -1070,51 +1070,38 @@ pub(in crate::meeting::store) fn merge_voice_profiles_in(
                 return remove_voice_person_evidence_in(transaction, source_person_id);
             };
             let mut change = remove_voice_person_evidence_in(transaction, target_person_id)?;
-            clear_person_matches_in(transaction, source_person_id)?;
-            let next_profile_revision = source
-                .profile_revision
-                .checked_add(1)
-                .ok_or(StoreError::VoiceInvariant)?;
-            // The copied centroid is a placeholder; `recompute_profile_in` below
-            // rebuilds it from the samples now pointing at the target.
-            transaction.execute(
-                "INSERT INTO voice_profiles (
-                    person_id, model_id, model_revision, model_sha256, embedding_dimensions,
-                    sample_rate_hz, feature_bins, feature_pipeline_revision, normalization,
-                    centroid, sample_count, profile_revision, consent_version,
-                    created_at_utc_ms, updated_at_utc_ms
-                 )
-                 SELECT ?1, model_id, model_revision, model_sha256, embedding_dimensions,
-                        sample_rate_hz, feature_bins, feature_pipeline_revision, normalization,
-                        centroid, sample_count, ?2, consent_version, created_at_utc_ms, ?3
-                   FROM voice_profiles WHERE person_id = ?4",
-                params![
-                    id(target_person_id),
-                    to_i64(next_profile_revision)?,
-                    now_utc_ms,
-                    id(source_person_id),
-                ],
-            )?;
-            transaction.execute(
-                "UPDATE voice_profile_samples SET person_id = ?1 WHERE person_id = ?2",
-                params![id(target_person_id), id(source_person_id)],
-            )?;
-            transaction.execute(
-                "DELETE FROM voice_profiles WHERE person_id = ?1",
-                params![id(source_person_id)],
-            )?;
-            recompute_profile_in(
+            move_profile_in(
                 transaction,
+                &source,
+                source_person_id,
                 target_person_id,
-                next_profile_revision,
                 now_utc_ms,
             )?;
             change.profiles_changed = true;
             Ok(change)
         }
         VoiceProfileMergeResolution::CombineCompatible => {
-            let (Some(source), Some(target)) = (source, target) else {
-                return Err(StoreError::ProfileModelIncompatible);
+            // One profile between the two people is nothing to combine and
+            // nothing to be incompatible with: the merged person keeps it.
+            let (source, target) = match (source, target) {
+                (None, Some(_)) => {
+                    clear_person_matches_in(transaction, source_person_id)?;
+                    return Ok(VoiceEvidenceChange::default());
+                }
+                (Some(source), None) => {
+                    move_profile_in(
+                        transaction,
+                        &source,
+                        source_person_id,
+                        target_person_id,
+                        now_utc_ms,
+                    )?;
+                    return Ok(VoiceEvidenceChange {
+                        profiles_changed: true,
+                    });
+                }
+                (Some(source), Some(target)) => (source, target),
+                (None, None) => unreachable!("handled before a resolution is required"),
             };
             if source.model != target.model {
                 return Err(StoreError::ProfileModelIncompatible);
@@ -1147,6 +1134,56 @@ pub(in crate::meeting::store) fn merge_voice_profiles_in(
             Ok(change)
         }
     }
+}
+
+/// Re-homes the source person's enrolled profile and every sample behind it
+/// on the target, who must have none. The copied centroid is a placeholder;
+/// `recompute_profile_in` rebuilds it from the samples now pointing at the
+/// target.
+fn move_profile_in(
+    transaction: &Transaction<'_>,
+    source: &VoiceProfileRow,
+    source_person_id: PersonId,
+    target_person_id: PersonId,
+    now_utc_ms: i64,
+) -> Result<(), StoreError> {
+    clear_person_matches_in(transaction, source_person_id)?;
+    let next_profile_revision = source
+        .profile_revision
+        .checked_add(1)
+        .ok_or(StoreError::VoiceInvariant)?;
+    transaction.execute(
+        "INSERT INTO voice_profiles (
+            person_id, model_id, model_revision, model_sha256, embedding_dimensions,
+            sample_rate_hz, feature_bins, feature_pipeline_revision, normalization,
+            centroid, sample_count, profile_revision, consent_version,
+            created_at_utc_ms, updated_at_utc_ms
+         )
+         SELECT ?1, model_id, model_revision, model_sha256, embedding_dimensions,
+                sample_rate_hz, feature_bins, feature_pipeline_revision, normalization,
+                centroid, sample_count, ?2, consent_version, created_at_utc_ms, ?3
+           FROM voice_profiles WHERE person_id = ?4",
+        params![
+            id(target_person_id),
+            to_i64(next_profile_revision)?,
+            now_utc_ms,
+            id(source_person_id),
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE voice_profile_samples SET person_id = ?1 WHERE person_id = ?2",
+        params![id(target_person_id), id(source_person_id)],
+    )?;
+    transaction.execute(
+        "DELETE FROM voice_profiles WHERE person_id = ?1",
+        params![id(source_person_id)],
+    )?;
+    recompute_profile_in(
+        transaction,
+        target_person_id,
+        next_profile_revision,
+        now_utc_ms,
+    )
 }
 
 fn clear_person_matches_in(

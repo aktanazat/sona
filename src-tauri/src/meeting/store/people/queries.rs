@@ -454,28 +454,36 @@ fn meeting_people_context_in(
         let person = person_by_id_in(connection, person_id)?;
         let mut facts = facts_for_person_in(connection, &person)?;
         gate_continuity_facts_in(connection, &mut facts)?;
-        let meetings_together =
-            u64::try_from(facts.meetings.len()).map_err(|_| StoreError::Corrupt)?;
-        let last_prior_meeting = facts
+        // The facts list runs newest first with a fixed tie-break, so the
+        // meetings before this one are the ones after it in that list. A
+        // later meeting must not pass for an earlier one: the oldest of
+        // three has nobody before it, whatever came after.
+        let prior = facts
             .meetings
             .iter()
-            .find(|meeting| meeting.id != meeting_id)
-            .map(|meeting| PersonBriefingLastMeeting {
-                id: meeting.id,
-                title: meeting.title.clone(),
-                at_utc_ms: meeting.at_utc_ms,
-                headline: meeting.headline.clone(),
-            });
+            .position(|meeting| meeting.id == meeting_id)
+            .map_or(&[][..], |position| &facts.meetings[position + 1..]);
+        let prior_meetings = u64::try_from(prior.len()).map_err(|_| StoreError::Corrupt)?;
+        let last_prior_meeting = prior.first().map(|meeting| PersonBriefingLastMeeting {
+            id: meeting.id,
+            title: meeting.title.clone(),
+            at_utc_ms: meeting.at_utc_ms,
+            headline: meeting.headline.clone(),
+        });
         let top_open_loop = facts
             .open_loops
             .iter()
-            .find(|open_loop| open_loop.meeting_id != meeting_id)
+            .find(|open_loop| {
+                prior
+                    .iter()
+                    .any(|meeting| meeting.id == open_loop.meeting_id)
+            })
             .cloned();
         rows.push(MeetingPersonContextRow {
             person_id,
             display_name: person.display_name,
             evidence_source: source_from_db(&evidence_source)?,
-            meetings_together,
+            prior_meetings,
             last_prior_meeting,
             top_open_loop,
         });

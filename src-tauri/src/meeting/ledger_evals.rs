@@ -792,7 +792,7 @@ fn messy_two_party_with_model_or_skips_without_a_local_server() {
         answers.len(),
         session_id.uuid()
     );
-    let Some(ledger) = ledger else {
+    let Ok(ledger) = ledger else {
         // Say where each answer was refused, in the order the seam asks.
         for (attempt, answer) in answers.iter().enumerate() {
             println!("--- answer {} ---\n{answer}", attempt + 1);
@@ -809,7 +809,10 @@ fn messy_two_party_with_model_or_skips_without_a_local_server() {
                 },
             }
         }
-        panic!("the model produced no usable ledger");
+        panic!(
+            "the model produced no usable ledger: {:?}",
+            ledger.unwrap_err()
+        );
     };
     println!(
         "{}",

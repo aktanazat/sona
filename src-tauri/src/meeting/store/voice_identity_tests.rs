@@ -899,6 +899,56 @@ fn replacing_a_target_with_a_sourceless_profile_keeps_the_target_profile() -> Re
     Ok(())
 }
 
+/// The default merge sends `CombineCompatible`. With one enrolled voice
+/// between the two people there is nothing to be incompatible with: the
+/// merged person keeps that voice, whichever side it was on.
+#[test]
+fn combining_moves_a_sole_source_profile_to_the_target() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let speaker_id = SpeakerId::new();
+    insert_speaker(&store, session_id, speaker_id);
+    let source_person_id = person(&store, "Ada Lovelace", &[], &[]);
+    let target_person_id = person(&store, "Grace Hopper", &[], &[]);
+    enroll(&store, session_id, speaker_id, source_person_id)?;
+
+    store.merge_persons_with_voice_resolution(
+        source_person_id,
+        target_person_id,
+        people_revision(&store),
+        Some(VoiceProfileMergeResolution::CombineCompatible),
+        7,
+    )?;
+
+    assert_eq!(profile_count(&store, source_person_id)?, 0);
+    assert_eq!(profile_count(&store, target_person_id)?, 1);
+    assert_eq!(profile_sample_count(&store, target_person_id)?, 1);
+    Ok(())
+}
+
+#[test]
+fn combining_keeps_a_sole_target_profile() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let speaker_id = SpeakerId::new();
+    insert_speaker(&store, session_id, speaker_id);
+    let source_person_id = person(&store, "Ada Lovelace", &[], &[]);
+    let target_person_id = person(&store, "Grace Hopper", &[], &[]);
+    enroll(&store, session_id, speaker_id, target_person_id)?;
+
+    store.merge_persons_with_voice_resolution(
+        source_person_id,
+        target_person_id,
+        people_revision(&store),
+        Some(VoiceProfileMergeResolution::CombineCompatible),
+        7,
+    )?;
+
+    assert_eq!(profile_count(&store, target_person_id)?, 1);
+    assert_eq!(profile_sample_count(&store, target_person_id)?, 1);
+    Ok(())
+}
+
 #[test]
 fn marking_unknown_cleans_up_a_profile_from_a_superseded_model() -> Result<(), StoreError> {
     let (_directory, store) = store();

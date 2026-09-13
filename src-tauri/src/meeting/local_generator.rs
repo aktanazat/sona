@@ -100,6 +100,22 @@ pub enum MeetingLocalEngineStatus {
     },
 }
 
+/// Where the next meeting's text would be written, for a series that has not
+/// been kept on this Mac. The answer a start page needs before a meeting
+/// exists: `choose_text_engine` with the series consent taken as given, so a
+/// page never has to read the relay's four settings fields a second time.
+#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MeetingTextEngineChoice {
+    /// The operator's server, over the paired relay.
+    Relay,
+    /// The engine on this Mac.
+    Local,
+    /// Nothing can write it: the relay is not chosen and the engine here
+    /// cannot answer. Carries that engine's state so the page can say why.
+    Unavailable { engine: MeetingLocalEngineStatus },
+}
+
 #[derive(Clone, Debug)]
 struct AvailabilityCache {
     checked_at: Instant,
@@ -209,9 +225,7 @@ impl LocalEndpointGenerator {
             Ok(models) => MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: true,
                 model_count: models.len(),
-                error: (!self.model.trim().is_empty()
-                    && self.configured_context_window_bytes().is_none())
-                .then(|| "context_window_not_configured".to_string()),
+                error: self.configuration_gap(&models).map(str::to_string),
             },
             Err(error) => MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: !matches!(error, LocalEndpointError::Unreachable),
@@ -220,14 +234,34 @@ impl LocalEndpointGenerator {
             },
         }
     }
+
+    /// What still stands between a reachable endpoint and a request. The
+    /// reasons `is_available` refuses on, so a status never calls an endpoint
+    /// ready that a generation would not ask.
+    ///
+    /// A selected model the catalog does not list is a gap of its own. The
+    /// status used to read ready as long as *some* model was served, and the
+    /// first generation then asked for a model the server had never heard of
+    /// and failed with a reason that named the engine, not the setting.
+    fn configuration_gap(&self, models: &[String]) -> Option<&'static str> {
+        if self.model.trim().is_empty() {
+            Some("model_not_selected")
+        } else if models.is_empty() {
+            Some("no_models")
+        } else if !models.iter().any(|served| served == &self.model) {
+            Some("model_not_served")
+        } else if self.configured_context_window_bytes().is_none() {
+            Some("context_window_not_configured")
+        } else {
+            None
+        }
+    }
 }
 
 impl MeetingTextGenerator for LocalEndpointGenerator {
     fn is_available(&self) -> bool {
-        !self.model.trim().is_empty()
-            && self.models().is_ok_and(|models| {
-                !models.is_empty() && self.configured_context_window_bytes().is_some()
-            })
+        self.models()
+            .is_ok_and(|models| self.configuration_gap(&models).is_none())
     }
 
     fn model_id(&self) -> &'static str {
@@ -592,5 +626,47 @@ mod tests {
         );
         assert_eq!(fixture.connections.load(Ordering::Relaxed), 1);
         fixture.handle.join().expect("fixture thread");
+    }
+
+    /// A start page shows the status as the reason nothing will write the
+    /// next meeting's notes, so an endpoint `is_available` refuses must
+    /// never read as healthy. One test per gap, each reporting on its own.
+    fn gap_is_reported(models: &[&str], model: &str, context: Option<usize>, code: &str) {
+        let catalog = serde_json::json!({
+            "data": models.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+        });
+        let fixture = fixture_server(vec![catalog.to_string()]);
+        let generator = LocalEndpointGenerator::new_with_context(&fixture.base_url, model, context)
+            .expect("generator");
+        assert!(!generator.is_available());
+        assert_eq!(
+            generator.status(),
+            MeetingLocalEngineStatus::LocalEndpoint {
+                reachable: true,
+                model_count: models.len(),
+                error: Some(code.to_string()),
+            }
+        );
+        fixture.handle.join().expect("fixture thread");
+    }
+
+    #[test]
+    fn unselected_model_is_reported_as_the_gap() {
+        gap_is_reported(&["model"], "", Some(8192), "model_not_selected");
+    }
+
+    #[test]
+    fn empty_catalog_is_reported_as_the_gap() {
+        gap_is_reported(&[], "model", Some(8192), "no_models");
+    }
+
+    #[test]
+    fn unstated_context_window_is_reported_as_the_gap() {
+        gap_is_reported(&["model"], "model", None, "context_window_not_configured");
+    }
+
+    #[test]
+    fn a_selected_model_the_catalog_lacks_is_reported_as_the_gap() {
+        gap_is_reported(&["other-model"], "model", Some(8192), "model_not_served");
     }
 }

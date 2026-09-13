@@ -242,6 +242,25 @@ impl MeetingCatchUp {
     }
 }
 
+/// One utterance recognized while the capture was still running. No segment
+/// id, no speaker and no revision: those belong to the stored transcript the
+/// post-stop pass writes, and this reading is thrown away when capture ends.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingProvisionalSegment {
+    pub start_offset_ns: u64,
+    pub end_offset_ns: u64,
+    pub text: String,
+}
+
+/// The words a running capture has recognized so far, in start order. Empty
+/// for a meeting that is not capturing now: after the stop the stored
+/// revision is the only transcript there is.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingProvisionalTranscript {
+    pub session_id: MeetingSessionId,
+    pub segments: Vec<MeetingProvisionalSegment>,
+}
+
 /// The most bullets a catch-up ever returns, and the number the prompt asks
 /// for. Anything longer stops being a catch-up.
 pub const CATCH_UP_MAX_BULLETS: usize = 6;

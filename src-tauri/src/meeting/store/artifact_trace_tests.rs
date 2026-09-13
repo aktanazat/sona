@@ -56,6 +56,7 @@ fn artifacts(
         risks: Vec::new(),
         follow_up_draft: cited("Thanks all."),
         ledger: None,
+        ledger_failure: None,
     }
 }
 

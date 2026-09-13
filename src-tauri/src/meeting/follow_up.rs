@@ -329,6 +329,7 @@ mod tests {
             risks: Vec::new(),
             follow_up_draft: text(""),
             ledger: None,
+            ledger_failure: None,
         }
     }
 

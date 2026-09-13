@@ -2335,6 +2335,15 @@ pub(super) async fn call(
             })
             .await?
         }
+        "meeting_text_engine_for_next_meeting" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                encode_plain(
+                    crate::commands::meeting::meeting_text_engine_for_next_meeting(handle.state()),
+                )
+            })
+            .await?
+        }
         "meeting_retention_set" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
@@ -2397,6 +2406,18 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let session_id = args.take("sessionId")?;
             reply(crate::commands::meeting::meeting_catch_up(app.state(), session_id).await)
+        }
+        "meeting_live_transcript" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                encode_plain(crate::commands::meeting::meeting_live_transcript(
+                    handle.state(),
+                    session_id,
+                ))
+            })
+            .await?
         }
         "meeting_series_template_get" => {
             let mut args = Args::parse(params)?;

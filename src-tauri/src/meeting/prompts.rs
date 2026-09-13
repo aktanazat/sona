@@ -710,6 +710,7 @@ mod tests {
                         citations: Vec::new(),
                     },
                     ledger: None,
+                    ledger_failure: None,
                 }),
                 generated_at_utc_ms: NOW,
             })

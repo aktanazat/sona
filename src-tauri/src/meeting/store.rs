@@ -64,7 +64,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -1965,6 +1965,10 @@ pub struct MeetingStore {
     database_path: PathBuf,
     connection: Mutex<Connection>,
     master_key: Arc<MeetingStorageKey>,
+    /// Told of every source-health verdict once it is on disk. The verdicts
+    /// are written from the track workers, which have no way to reach the
+    /// shell; the session manager installs this so they do not need one.
+    health_listener: OnceLock<Box<dyn Fn(HealthChange) + Send + Sync>>,
 }
 
 impl MeetingStore {
@@ -1988,8 +1992,22 @@ impl MeetingStore {
             database_path,
             connection: Mutex::new(connection),
             master_key: Arc::new(master_key),
+            health_listener: OnceLock::new(),
         }))
     }
+
+    /// Install the one listener for source-health changes. Installed once, by
+    /// the owner that can reach the shell; a second call is ignored.
+    pub(crate) fn watch_health(&self, listener: impl Fn(HealthChange) + Send + Sync + 'static) {
+        let _ = self.health_listener.set(Box::new(listener));
+    }
+
+    fn publish_health_change(&self, change: Option<HealthChange>) {
+        if let (Some(change), Some(listener)) = (change, self.health_listener.get()) {
+            listener(change);
+        }
+    }
+
     pub(crate) fn grant_series_consent(
         &self,
         series_key: &str,
@@ -4016,11 +4034,18 @@ impl MeetingStore {
                 ],
             )?
         };
-        if degraded > 0 {
+        let change = if degraded > 0 {
             let session_id = track_session(&transaction, gap.track_id)?;
-            note_health_change(&transaction, session_id, SourceHealth::Degraded)?;
-        }
+            Some(note_health_change(
+                &transaction,
+                session_id,
+                SourceHealth::Degraded,
+            )?)
+        } else {
+            None
+        };
         transaction.commit()?;
+        self.publish_health_change(change);
         Ok(())
     }
 
@@ -4040,10 +4065,17 @@ impl MeetingStore {
                 encode_json(&SourceHealth::Starting)?,
             ],
         )?;
-        if failed > 0 {
-            note_health_change(&transaction, session_id, SourceHealth::Failed)?;
-        }
+        let change = if failed > 0 {
+            Some(note_health_change(
+                &transaction,
+                session_id,
+                SourceHealth::Failed,
+            )?)
+        } else {
+            None
+        };
         transaction.commit()?;
+        self.publish_health_change(change);
         Ok(())
     }
 
@@ -4167,16 +4199,17 @@ impl MeetingStore {
     }
 
     /// Ask this session to announce itself, naming who the room is told the
-    /// notes are for.
+    /// notes are for and which application's chat box the line belongs in.
     ///
     /// Only ever moves a session from `NotAsked` to `Pending`. A session that
-    /// already attempted its disclosure keeps that record: the line is posted
+    /// already attempted its disclosure keeps that record: the line is typed
     /// once per recording, and a second request would be a second line in
     /// somebody's chat.
     pub(crate) fn request_session_disclosure(
         &self,
         session_id: MeetingSessionId,
         notetaker: &str,
+        composer_app: Option<&str>,
     ) -> Result<(), StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -4188,6 +4221,7 @@ impl MeetingStore {
             session_id,
             &MeetingSessionDisclosure::Pending {
                 notetaker: notetaker.to_string(),
+                composer_app: composer_app.map(str::to_string),
             },
         )?;
         transaction.commit()?;
@@ -5922,6 +5956,11 @@ impl MeetingStore {
     /// answers. A reader auditing what left their machine needs the engine
     /// named by the operation that ran, not inferred afterwards from a setting
     /// that may have changed since.
+    ///
+    /// A committed rewrite also closes the processing row as `Succeeded`, in
+    /// the same transaction: the header used to keep describing whichever run
+    /// came first, so a meeting whose notes had just been written still read
+    /// "notes failed" from the pipeline's earlier shortfall.
     pub(crate) fn record_artifact_regeneration(
         &self,
         operation_id: MeetingOperationId,
@@ -5971,6 +6010,10 @@ impl MeetingStore {
             vec![id(artifact_id), engine.to_string()],
         );
         insert_operation_receipt(&transaction, &receipt, requested_at_utc_ms)?;
+        transaction.execute(
+            "UPDATE meeting_sessions SET processing_status = ?1 WHERE id = ?2",
+            params![encode_json(&ProcessingStatus::Succeeded)?, id(session_id)],
+        )?;
         transaction.commit()?;
         Ok(receipt)
     }
@@ -7089,7 +7132,7 @@ impl MeetingStore {
                 encode_json(&SourceHealth::Starting)?,
             ],
         )?;
-        if promoted > 0 {
+        let change = if promoted > 0 {
             // The session clock starts before any device does. This lane's
             // audio begins at its first record, so the interval before it is
             // missing from the meeting and the ledger should say so once, here,
@@ -7112,9 +7155,16 @@ impl MeetingStore {
                 )?;
             }
             let session_id = track_session(&transaction, track_id)?;
-            note_health_change(&transaction, session_id, SourceHealth::Healthy)?;
-        }
+            Some(note_health_change(
+                &transaction,
+                session_id,
+                SourceHealth::Healthy,
+            )?)
+        } else {
+            None
+        };
         transaction.commit()?;
+        self.publish_health_change(change);
         Ok(())
     }
 }
@@ -7484,15 +7534,25 @@ fn insert_operation_receipt(
     Ok(())
 }
 
+/// A source-health verdict once it is on disk: the session it moved and the
+/// revision it moved to, which is what a reader needs to know its copy is
+/// stale.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HealthChange {
+    pub session_id: MeetingSessionId,
+    pub revision: u64,
+}
+
 /// One place that turns a health verdict into something a reader can see: the
 /// snapshot revision moves, so a poll notices, and the event log keeps the
 /// value. Three callers change health - the first committed packet, the first
-/// lost audio, and the seal - and each owes the session this note.
+/// lost audio, and the seal - and each owes the session this note, and owes
+/// the listener the returned change once the transaction has committed.
 fn note_health_change(
     transaction: &Transaction<'_>,
     session_id: MeetingSessionId,
     health: SourceHealth,
-) -> Result<(), StoreError> {
+) -> Result<HealthChange, StoreError> {
     let current = session_row(transaction, session_id)?;
     let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
     transaction.execute(
@@ -7508,7 +7568,11 @@ fn note_health_change(
         "source_health_changed",
         None,
         &format!("{{\"health\":{}}}", encode_json(&health)?),
-    )
+    )?;
+    Ok(HealthChange {
+        session_id,
+        revision: next_revision,
+    })
 }
 
 fn track_session(
@@ -10998,6 +11062,7 @@ mod tests {
             risks: Vec::new(),
             follow_up_draft: text,
             ledger: None,
+            ledger_failure: None,
         }
     }
 
@@ -13132,13 +13197,14 @@ mod tests {
         );
 
         store
-            .request_session_disclosure(session_id, "Aktan Azat")
+            .request_session_disclosure(session_id, "Aktan Azat", Some("us.zoom.xos"))
             .expect("arm the disclosure");
 
         assert_eq!(
             store.session_disclosure(session_id).expect("disclosure"),
             MeetingSessionDisclosure::Pending {
-                notetaker: "Aktan Azat".to_string()
+                notetaker: "Aktan Azat".to_string(),
+                composer_app: Some("us.zoom.xos".to_string()),
             }
         );
 
@@ -13173,7 +13239,7 @@ mod tests {
             recorded
         );
         store
-            .request_session_disclosure(session_id, "Somebody Else")
+            .request_session_disclosure(session_id, "Somebody Else", None)
             .expect("arming again is a no-op");
         assert_eq!(
             store.session_disclosure(session_id).expect("disclosure"),

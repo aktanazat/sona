@@ -1,11 +1,11 @@
 use crate::analytics::DashboardTrendRequest;
 use crate::meeting::analytics::{
     KeywordTracker, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
-    MeetingUserNotes,
+    MeetingProvisionalTranscript, MeetingUserNotes,
 };
 use crate::meeting::clock::host_monotonic_now_ns;
 use crate::meeting::detection::DetectionRuntime;
-use crate::meeting::local_generator::MeetingLocalEngineStatus;
+use crate::meeting::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
 use crate::meeting::series_types::{
     MeetingSeriesAlwaysRecordSetRequest, MeetingSeriesDigestSetRequest,
     MeetingSeriesMutationResult, MeetingSeriesPreferences, MeetingSeriesRemoteOptOutSetRequest,
@@ -240,7 +240,13 @@ pub async fn meeting_stop(
     let result = manager
         .stop(request, MeetingStopCause::Operator(surface))
         .await;
-    if result.is_ok() {
+    // An `Ok` carries a receipt, and a rejected receipt is a stop that did
+    // not happen: a stale revision, a duplicate. Detection keeps tracking
+    // the session until the stop is the one that committed.
+    if result
+        .as_ref()
+        .is_ok_and(|result| result.receipt.result == OperationResult::Committed)
+    {
         detection.track_ended(session_id);
     }
     result
@@ -494,6 +500,16 @@ pub fn meeting_local_engine_status(
     manager.meeting_local_engine_status()
 }
 
+/// Where the next meeting's notes would be written, and when nowhere, the
+/// engine on this Mac and what keeps it from answering.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn meeting_text_engine_for_next_meeting(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> MeetingTextEngineChoice {
+    manager.text_engine_for_next_meeting()
+}
+
 /// Conversation metrics, tracker hits, action-item ticks and the user's notes
 /// for one meeting. Metrics are derived from the transcript on every call, so
 /// the answer always matches the transcript the caller can see.
@@ -590,6 +606,18 @@ pub async fn meeting_catch_up(
     session_id: MeetingSessionId,
 ) -> Result<MeetingCatchUp, MeetingCommandError> {
     manager.catch_up(session_id).await
+}
+
+/// The words the running capture has recognized so far, for the live screen.
+/// Empty once the meeting has stopped: the stored transcript is then the one
+/// reading, and `meeting_get` carries it.
+#[tauri::command]
+#[specta::specta]
+pub fn meeting_live_transcript(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> MeetingProvisionalTranscript {
+    manager.provisional_transcript(session_id)
 }
 
 /// What one calendar series has decided — template, digest inclusion, and

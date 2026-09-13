@@ -342,24 +342,36 @@ pub struct MeetingTrashEntry {
     pub expires_at_utc_ms: i64,
 }
 
-/// What one recording's disclosure — the line the consent panel offers to post
-/// in the meeting's own chat — is doing.
+/// What one recording's disclosure — the line the consent panel offers to type
+/// into the meeting's own chat box — is doing.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MeetingSessionDisclosure {
     /// Nobody asked this meeting to announce itself, which is the default.
     NotAsked,
-    /// Asked for and not posted yet. `notetaker` is the name the room is told
+    /// Asked for and not typed yet. `notetaker` is the name the room is told
     /// the notes are for: the calendar account's own attendee entry, which is
     /// the only place this app learns its operator's name.
+    ///
+    /// `composer_app` is the bundle id of the application whose chat box the
+    /// line belongs in: the app that raised the offer, or the meeting app in
+    /// front when a calendar offer was accepted. The one attempt goes to that
+    /// application's focused composer and nowhere else; `None` means no such
+    /// application was in front, and the attempt is refused rather than aimed
+    /// at whatever is focused.
     ///
     /// ponytail: falls back to the meeting's title when the calendar names
     /// nobody, so the one sentence always has something to interpolate. The
     /// upgrade path is an account name in settings, not a second phrasing.
-    Pending { notetaker: String },
-    /// Posted, or refused. Delivery's own receipt says which: a target that
+    Pending {
+        notetaker: String,
+        #[serde(default)]
+        composer_app: Option<String>,
+    },
+    /// Typed, or refused. Delivery's own receipt says which: a target that
     /// cannot accept an insertion is `definitely_not_dispatched`, and that is
-    /// the case the live surface mentions.
+    /// the case the live surface mentions. Typed is not sent: the line sits
+    /// in the composer until the person sends it.
     Attempted {
         receipt: crate::delivery::DeliveryReceipt,
     },
@@ -1202,6 +1214,13 @@ pub struct GeneratedMeetingArtifacts {
     /// back; a `TEMPLATE_VERSION` bump is what retires those.
     #[serde(default)]
     pub ledger: Option<MeetingLedger>,
+    /// Why `ledger` is `None` when it was asked for: the part of the second
+    /// pass that produced nothing usable. `None` beside a `None` ledger is a
+    /// revision written before this existed. The review page shows the cause
+    /// so that a tab reading only "no ledger" stops meaning both "the model
+    /// refused" and "nobody asked".
+    #[serde(default)]
+    pub ledger_failure: Option<EngineFailureCause>,
 }
 
 impl GeneratedMeetingArtifacts {

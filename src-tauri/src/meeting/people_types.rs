@@ -207,6 +207,32 @@ pub struct PersonDetailResult {
     pub detail: PersonDetail,
 }
 
+/// What pressing "Regenerate" on a person's paragraph did. Every arm except
+/// `Written` leaves the earlier paragraph in place, so the page needs the
+/// word to say why nothing new appeared rather than reporting a success it
+/// cannot show.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonSummaryOutcome {
+    /// A new paragraph was written and is in `detail`.
+    Written,
+    /// No confirmed meeting and no loop: nothing to write a relationship
+    /// out of, and a paragraph from an empty pack would be invention.
+    NoEvidence,
+    /// The meeting's engine could not be resolved: none on this Mac, or the
+    /// chosen one is not ready.
+    EngineUnavailable,
+    /// The engine ran and answered nothing usable.
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonSummaryRegenerateResult {
+    pub outcome: PersonSummaryOutcome,
+    /// The page after the attempt, whichever way it went.
+    pub page: PersonDetailResult,
+}
+
 /// One organization, read across the people who carry it.
 ///
 /// Every field is a union of what its people already answer, in the same
@@ -258,12 +284,16 @@ pub struct PersonContextResult {
     pub rows: Vec<PersonBriefingRow>,
 }
 
+/// One person on a meeting's "previously together" band. Everything here is
+/// relative to that meeting: the count, the last meeting, and the loop all
+/// come from meetings that happened before it, never after.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingPersonContextRow {
     pub person_id: PersonId,
     pub display_name: String,
     pub evidence_source: PersonLinkSource,
-    pub meetings_together: u64,
+    /// How many confirmed meetings with this person came before this one.
+    pub prior_meetings: u64,
     pub last_prior_meeting: Option<PersonBriefingLastMeeting>,
     pub top_open_loop: Option<PersonOpenLoop>,
 }

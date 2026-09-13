@@ -1,6 +1,7 @@
 use super::analytics::{
     merge_turns, talk_metrics, tracker_results, AnalyticsSegment, KeywordTracker, MeetingAnalytics,
-    MeetingCatchUp, MeetingCatchUpState, MeetingNotesTemplate, CATCH_UP_MAX_BULLETS,
+    MeetingCatchUp, MeetingCatchUpState, MeetingNotesTemplate, MeetingProvisionalSegment,
+    MeetingProvisionalTranscript, CATCH_UP_MAX_BULLETS,
 };
 use super::diarization::{
     model_manifest, wespeaker_embedding_model_key, DiarizationEngineKind, DiarizationError,
@@ -12,9 +13,9 @@ use super::ledger::{
     LedgerStance, LedgerThread, LedgerThreadState, MeetingLedger,
 };
 use super::local_generator::{
-    LocalEndpointError, LocalEndpointGenerator, MeetingLocalEngineStatus,
+    LocalEndpointError, LocalEndpointGenerator, MeetingLocalEngineStatus, MeetingTextEngineChoice,
 };
-use super::people_types::{PersonId, PersonSummary};
+use super::people_types::{PersonId, PersonSummary, PersonSummaryOutcome};
 use super::prompt_types::{
     answer_matches_schema, PromptOutput, PromptRun, PromptRunFailure, PromptRunResult,
     PromptTargetRef, SavedPrompt,
@@ -305,7 +306,7 @@ impl From<StoreError> for RunFailure {
 
 impl RunFailure {
     /// The engine refused, and the part that did.
-    const fn engine(cause: EngineFailureCause) -> Self {
+    pub const fn engine(cause: EngineFailureCause) -> Self {
         Self::Engine(cause)
     }
 
@@ -346,7 +347,7 @@ impl RunFailure {
     }
 
     /// The row this failure is written down as.
-    const fn status(self) -> ProcessingStatus {
+    pub const fn status(self) -> ProcessingStatus {
         ProcessingStatus::Failed {
             reason: self.reason(),
             cause: self.cause(),
@@ -536,6 +537,54 @@ const fn choose_text_engine(facts: TextEngineFacts) -> TextEngineChoice {
     }
 }
 
+/// The engine on this Mac as one reading of the settings, so the generator
+/// a choice is made on and the state reported for that choice describe the
+/// same engine. A settings write during a slow endpoint probe otherwise
+/// leaves a choice made on one engine explained by another.
+enum LocalEngine {
+    /// A build with no app handle: the generator the test injected.
+    Injected(Arc<dyn MeetingTextGenerator>),
+    AppleIntelligence,
+    LocalEndpoint(Result<Arc<LocalEndpointGenerator>, LocalEndpointError>),
+}
+
+impl LocalEngine {
+    fn generator(&self) -> Option<Arc<dyn MeetingTextGenerator>> {
+        match self {
+            Self::Injected(generator) => Some(generator.clone()),
+            Self::AppleIntelligence => Some(Arc::new(AppleIntelligenceGenerator)),
+            Self::LocalEndpoint(generator) => generator
+                .as_ref()
+                .ok()
+                .map(|generator| generator.clone() as Arc<dyn MeetingTextGenerator>),
+        }
+    }
+
+    fn status(&self) -> MeetingLocalEngineStatus {
+        match self {
+            Self::Injected(_) | Self::AppleIntelligence => {
+                MeetingLocalEngineStatus::AppleIntelligence {
+                    blocker: AppleIntelligenceGenerator::blocker(),
+                }
+            }
+            Self::LocalEndpoint(Ok(generator)) => generator.status(),
+            Self::LocalEndpoint(Err(error)) => MeetingLocalEngineStatus::LocalEndpoint {
+                reachable: false,
+                model_count: 0,
+                error: Some(error.reason_code().to_string()),
+            },
+        }
+    }
+}
+
+/// What [`MeetingProcessingService::text_engines`] hands back: the choice and
+/// the two engines it was made between.
+struct TextEngines {
+    choice: TextEngineChoice,
+    local: LocalEngine,
+    relay: Arc<dyn MeetingTextGenerator>,
+}
+
 /// Which meetings one prompt reads, and how.
 ///
 /// Two shapes because two questions are being asked. A prompt about one
@@ -711,7 +760,34 @@ impl MeetingProcessingService {
         store: &MeetingStore,
         session_id: MeetingSessionId,
     ) -> Option<Arc<dyn MeetingTextGenerator>> {
-        let local = self.local_text_generator();
+        let engines = self.text_engines(self.series_opted_out_of_remote(store, session_id));
+        match engines.choice {
+            TextEngineChoice::Relay => Some(engines.relay),
+            TextEngineChoice::Local => engines.local.generator(),
+            TextEngineChoice::None => None,
+        }
+    }
+
+    /// Where the next meeting's text would go, for a series not kept here.
+    /// The same rule as [`Self::text_generator_for_session`] with the series
+    /// consent taken as given, which is all a page can know before the meeting
+    /// exists. A series kept on this Mac writes with the engine here, whose
+    /// state [`Self::meeting_local_engine_status`] reports on its own.
+    pub(crate) fn text_engine_for_next_meeting(&self) -> MeetingTextEngineChoice {
+        let engines = self.text_engines(false);
+        match engines.choice {
+            TextEngineChoice::Relay => MeetingTextEngineChoice::Relay,
+            TextEngineChoice::Local => MeetingTextEngineChoice::Local,
+            TextEngineChoice::None => MeetingTextEngineChoice::Unavailable {
+                engine: engines.local.status(),
+            },
+        }
+    }
+
+    /// Both engines and the choice between them, gathered once so the facts
+    /// the choice was made on are the engines handed back.
+    fn text_engines(&self, series_opted_out: bool) -> TextEngines {
+        let local = self.local_engine();
         let relay = self
             .relay_text_generator
             .lock()
@@ -719,16 +795,16 @@ impl MeetingProcessingService {
             .clone();
         let facts = TextEngineFacts {
             remote_enabled: self.remote_intelligence_enabled(),
-            series_opted_out: self.series_opted_out_of_remote(store, session_id),
+            series_opted_out,
             relay_reachable: relay.is_available(),
             local_available: local
-                .as_ref()
+                .generator()
                 .is_some_and(|generator| generator.is_available()),
         };
-        match choose_text_engine(facts) {
-            TextEngineChoice::Relay => Some(relay),
-            TextEngineChoice::Local => local,
-            TextEngineChoice::None => None,
+        TextEngines {
+            choice: choose_text_engine(facts),
+            local,
+            relay,
         }
     }
 
@@ -754,9 +830,9 @@ impl MeetingProcessingService {
         generator
     }
 
-    fn local_text_generator(&self) -> Option<Arc<dyn MeetingTextGenerator>> {
+    fn local_engine(&self) -> LocalEngine {
         let Some(app) = self.app.as_ref() else {
-            return Some(
+            return LocalEngine::Injected(
                 self.text_generator
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -766,39 +842,16 @@ impl MeetingProcessingService {
         let engine = crate::settings::get_settings(app).meeting_local_engine;
         match engine {
             crate::settings::MeetingLocalEngine::AppleIntelligence => {
-                Some(Arc::new(AppleIntelligenceGenerator))
+                LocalEngine::AppleIntelligence
             }
-            crate::settings::MeetingLocalEngine::LocalEndpoint { .. } => self
-                .cached_local_endpoint_generator(&engine)
-                .ok()
-                .map(|generator| generator as Arc<dyn MeetingTextGenerator>),
+            crate::settings::MeetingLocalEngine::LocalEndpoint { .. } => {
+                LocalEngine::LocalEndpoint(self.cached_local_endpoint_generator(&engine))
+            }
         }
     }
 
     pub(crate) fn meeting_local_engine_status(&self) -> MeetingLocalEngineStatus {
-        let Some(app) = self.app.as_ref() else {
-            return MeetingLocalEngineStatus::AppleIntelligence {
-                blocker: AppleIntelligenceGenerator::blocker(),
-            };
-        };
-        let engine = crate::settings::get_settings(app).meeting_local_engine;
-        match engine {
-            crate::settings::MeetingLocalEngine::AppleIntelligence => {
-                MeetingLocalEngineStatus::AppleIntelligence {
-                    blocker: AppleIntelligenceGenerator::blocker(),
-                }
-            }
-            crate::settings::MeetingLocalEngine::LocalEndpoint { .. } => {
-                self.cached_local_endpoint_generator(&engine).map_or_else(
-                    |error| MeetingLocalEngineStatus::LocalEndpoint {
-                        reachable: false,
-                        model_count: 0,
-                        error: Some(error.reason_code().to_string()),
-                    },
-                    |generator| generator.status(),
-                )
-            }
-        }
+        self.local_engine().status()
     }
 
     /// Whether the operator has routed meeting intelligence to their own
@@ -933,42 +986,47 @@ impl MeetingProcessingService {
     /// the receipt: "these notes were written on your server" is a fact about
     /// one operation, and reading it back from settings afterwards would be a
     /// second answer that could differ from the one that actually ran.
+    ///
+    /// `operation_id` names the press. A person who asks for the notes again
+    /// with nothing changed is asking for a second reading, not for the first
+    /// one handed back from the cache, and the id is what makes this pass a
+    /// different generation from the pipeline's. The caller checks the
+    /// revision before asking, so a stale press never reaches an engine.
     pub fn regenerate(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
-        expected_revision: u64,
-    ) -> Result<(MeetingArtifactRevision, &'static str), ProcessingFailure> {
-        let snapshot = store
-            .session_snapshot(session_id)
-            .map_err(|_| ProcessingFailure::EngineFailure)?;
-        if snapshot.revision != expected_revision {
-            return Err(ProcessingFailure::Cancelled);
-        }
-        self.generate_artifacts(store, session_id, expected_revision)
-            .map_err(RunFailure::reason)
-            .map(|outcome| match outcome {
-                ArtifactGenerationOutcome::Generated { artifact, engine }
-                | ArtifactGenerationOutcome::Cached { artifact, engine } => Ok((artifact, engine)),
-                /* Any outcome without a revision is a failure to whoever
-                 * pressed: they asked for notes and there are none. The reason
-                 * comes from `generation_shortfall`, so this and the pipeline
-                 * agree about what each outcome means and there is one place to
-                 * change it. Silence is the single deliberate difference — a
-                 * finished pass to the pipeline, an engine failure to a person
-                 * who pressed a button and got nothing. A command reply has no
-                 * field for the part that refused, so the cause the pipeline
-                 * would write on a row is dropped here rather than reshaped. */
-                other => {
-                    let reason = generation_shortfall(&other)
-                        .map_or(ProcessingFailure::EngineFailure, RunFailure::reason);
-                    log::warn!(
-                        "Meeting {session_id:?} regenerated no notes: {reason:?}. The reason \
-                         travels to the caller; this line is so it is also written down."
-                    );
-                    Err(reason)
-                }
-            })?
+        input_revision: u64,
+        operation_id: MeetingOperationId,
+    ) -> Result<(MeetingArtifactRevision, &'static str), RunFailure> {
+        self.generate_artifacts(
+            store,
+            session_id,
+            input_revision,
+            GenerationIntent::Rewrite(operation_id),
+        )
+        .and_then(|outcome| match outcome {
+            ArtifactGenerationOutcome::Generated { artifact, engine }
+            | ArtifactGenerationOutcome::Cached { artifact, engine } => Ok((artifact, engine)),
+            /* Any outcome without a revision is a failure to whoever
+             * pressed: they asked for notes and there are none. The reason
+             * comes from `generation_shortfall`, so this and the pipeline
+             * agree about what each outcome means and there is one place to
+             * change it. Silence is the single deliberate difference — a
+             * finished pass to the pipeline, an engine failure to a person
+             * who pressed a button and got nothing. The part that refused
+             * travels with the reason: the command writes it on the row, so
+             * the header stops describing whichever run came first. */
+            other => {
+                let failure = generation_shortfall(&other)
+                    .unwrap_or(RunFailure::Reason(ProcessingFailure::EngineFailure));
+                log::warn!(
+                    "Meeting {session_id:?} regenerated no notes: {failure:?}. The reason \
+                     travels to the caller; this line is so it is also written down."
+                );
+                Err(failure)
+            }
+        })
     }
 
     /// Ask one saved prompt, and hand back what it produced.
@@ -1067,6 +1125,17 @@ impl MeetingProcessingService {
         cancelled: Arc<AtomicBool>,
         origin: ProcessingOrigin,
     ) {
+        // The row says the work is under way from the moment it is. Until
+        // this was written, a meeting read "waiting to be processed" for the
+        // whole of its transcription and its notes pass, and the only status
+        // that ever reached a row was the terminal one. Best effort: a row
+        // that could not be marked running still gets its outcome below.
+        if store
+            .set_processing_status(session_id, ProcessingStatus::Running)
+            .is_ok()
+        {
+            self.emit_current(&store, "meeting:session-changed", session_id);
+        }
         // A panic in the pipeline used to take the whole thread with it, and
         // with it the only code that writes the outcome down: the meeting kept
         // its Processing phase and its pending status until the next launch
@@ -1232,7 +1301,12 @@ impl MeetingProcessingService {
         // they are derived before generation and survive a model that is
         // unavailable or fails.
         let _ = self.refresh_analytics(store, session_id, input_revision);
-        let shortfall = match self.generate_artifacts(store, session_id, input_revision) {
+        let shortfall = match self.generate_artifacts(
+            store,
+            session_id,
+            input_revision,
+            GenerationIntent::Pipeline,
+        ) {
             Ok(outcome) => {
                 if matches!(
                     outcome,
@@ -1912,6 +1986,7 @@ impl MeetingProcessingService {
         store: &MeetingStore,
         session_id: MeetingSessionId,
         input_revision: u64,
+        intent: GenerationIntent,
     ) -> Result<ArtifactGenerationOutcome, RunFailure> {
         let transcript_revision_id = store
             .current_transcript_revision_id(session_id)
@@ -1943,7 +2018,9 @@ impl MeetingProcessingService {
         // regenerates rather than showing the last engine's notes as this
         // engine's, editing the wording regenerates rather than serving notes
         // written to a prompt that no longer exists, and a revision can always
-        // be traced back to the engine that wrote it.
+        // be traced back to the engine that wrote it. A press of "write it
+        // again" is the fourth input: the same evidence read a second time is
+        // a different generation, and the cache is only for the pipeline.
         let generation_key = generation_key(
             &canonical_input,
             input_revision,
@@ -1951,6 +2028,7 @@ impl MeetingProcessingService {
             &system_prompt,
             generator.model_id(),
             &generator.model_version(),
+            intent,
         );
         if let Some(existing) = store
             .artifact_by_generation_key(session_id, &generation_key)
@@ -2033,20 +2111,30 @@ impl MeetingProcessingService {
         // separately: it has its own prompt and its own output budget, and a
         // ledger the model cannot produce leaves the notes above intact rather
         // than failing the whole revision. The diarized segments go with it
-        // because its checks are run on the page it would render as.
+        // because its checks are run on the page it would render as. When the
+        // second pass produces nothing, the part that refused is written on
+        // the revision beside the notes: a ledger tab that says only "no
+        // ledger" read, from the outside, exactly like a meeting that never
+        // asked for one.
         let segments = store
             .analytics_segments(session_id)
             .map_err(RunFailure::from)?;
         let speaker_names = store
             .speaker_display_names(session_id)
             .map_err(RunFailure::from)?;
-        content.ledger = generate_ledger(
+        match generate_ledger(
             generator.as_ref(),
             &evidence,
             &segments,
             &speaker_names,
             session_id,
-        );
+        ) {
+            Ok(ledger) => content.ledger = Some(ledger),
+            Err(cause) => {
+                log::warn!("Meeting {session_id:?} got notes but no ledger: {cause:?}");
+                content.ledger_failure = Some(cause);
+            }
+        }
         let artifact = store
             .store_artifact_revision(ArtifactRevisionInput {
                 session_id,
@@ -2127,8 +2215,10 @@ impl MeetingProcessingService {
             .into_iter()
             .take(MAX_RELATIONSHIP_SUMMARIES_PER_ARTIFACT)
         {
-            if let Err(error) = write_relationship_summary(store, person_id, generator) {
-                log::warn!("Could not summarize {person_id:?}: {error:?}");
+            match write_relationship_summary(store, person_id, generator) {
+                Ok(PersonSummaryOutcome::Written | PersonSummaryOutcome::NoEvidence) => {}
+                Ok(outcome) => log::warn!("Could not summarize {person_id:?}: {outcome:?}"),
+                Err(error) => log::warn!("Could not summarize {person_id:?}: {error:?}"),
             }
         }
     }
@@ -2258,12 +2348,8 @@ impl MeetingProcessingService {
                 provisional,
             ));
         };
-        let through_offset_ns = evidence
-            .iter()
-            .filter_map(|item| item.citation.end_offset_ns)
-            .max();
         let system_prompt = catch_up_prompt();
-        let canonical_input = fit_model_input(
+        let fitted = fit_model_input_counted(
             &evidence,
             evidence_budget(generator.as_ref(), &system_prompt, CATCH_UP_MAX_TOKENS),
             |evidence| QuestionPromptInput {
@@ -2272,6 +2358,17 @@ impl MeetingProcessingService {
             },
         )
         .map_err(RunFailure::reason)?;
+        // The recap's numbers describe the transcript the model read. A pack
+        // cut to the engine's ceiling stops early, and a recap that claimed
+        // the whole meeting while reading half of it was wrong in the one
+        // figure a reader checks it by.
+        let read = &evidence[..fitted.kept];
+        let segment_count = u32::try_from(read.len()).unwrap_or(u32::MAX);
+        let through_offset_ns = read
+            .iter()
+            .filter_map(|item| item.citation.end_offset_ns)
+            .max();
+        let canonical_input = fitted.pack;
         let model_output = match generator.generate(
             &system_prompt,
             &canonical_input,
@@ -2383,6 +2480,7 @@ impl MeetingProcessingService {
             .map_err(|_| ProcessingFailure::EngineFailure)?
             .tracks;
         let mut cursors = live.cursors();
+        let mut appended = 0_usize;
         for track in &tracks {
             let cursor = match cursors.entry(track.track_id) {
                 Entry::Occupied(entry) => entry.into_mut(),
@@ -2436,7 +2534,15 @@ impl MeetingProcessingService {
                     end_offset_ns: chunk.end_offset_ns,
                     text,
                 });
+                appended += 1;
             }
+        }
+        // The live screen shows these words, and it learns of them the way it
+        // learns of every other transcript: one event, then a read. Told only
+        // when a pass found something, so a silent room is not a refresh
+        // every twenty seconds.
+        if appended > 0 {
+            self.emit_current(store, "meeting:transcript-changed", session_id);
         }
         Ok(())
     }
@@ -2553,6 +2659,30 @@ impl LiveTranscript {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(segment);
+    }
+
+    /// What has been recognized so far, as the live screen shows it: every
+    /// segment, in start order across tracks, with nothing cut. The transcript
+    /// of a meeting is what a person reads while it runs, and a reader that
+    /// was handed a budgeted tail would be missing the beginning.
+    pub(crate) fn snapshot(&self, session_id: MeetingSessionId) -> MeetingProvisionalTranscript {
+        let segments = self
+            .segments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut ordered: Vec<&LiveSegment> = segments.iter().collect();
+        ordered.sort_by_key(|segment| (segment.start_offset_ns, segment.end_offset_ns));
+        MeetingProvisionalTranscript {
+            session_id,
+            segments: ordered
+                .into_iter()
+                .map(|segment| MeetingProvisionalSegment {
+                    start_offset_ns: segment.start_offset_ns,
+                    end_offset_ns: segment.end_offset_ns,
+                    text: segment.text.clone(),
+                })
+                .collect(),
+        }
     }
 
     /// What has been recognized so far, as evidence a prompt can quote.
@@ -3426,20 +3556,47 @@ fn fit_model_input<'evidence, T: Serialize>(
     max_bytes: usize,
     build: impl Fn(&'evidence [MeetingEvidence]) -> T,
 ) -> Result<String, RunFailure> {
+    fit_model_input_counted(evidence, max_bytes, build).map(|fitted| fitted.pack)
+}
+
+/// A pack cut to an engine's ceiling, and how much of the evidence it holds.
+struct FittedInput {
+    pack: String,
+    /// How many leading evidence items the pack carries. Equal to the list's
+    /// length when nothing was cut.
+    kept: usize,
+}
+
+/// [`fit_model_input`], for a caller that reports what the model read.
+///
+/// A recap that says "through minute forty" when the pack stopped at minute
+/// twenty is wrong in the one number a reader checks it by, so the pass that
+/// writes those numbers reads them from the kept slice, not the whole list.
+fn fit_model_input_counted<'evidence, T: Serialize>(
+    evidence: &'evidence [MeetingEvidence],
+    max_bytes: usize,
+    build: impl Fn(&'evidence [MeetingEvidence]) -> T,
+) -> Result<FittedInput, RunFailure> {
     let pack_failure = || RunFailure::engine(EngineFailureCause::EvidencePack);
     let whole = serde_json::to_string(&build(evidence)).map_err(|_| pack_failure())?;
     if whole.len() <= max_bytes {
-        return Ok(whole);
+        return Ok(FittedInput {
+            pack: whole,
+            kept: evidence.len(),
+        });
     }
     let mut low = 0_usize;
     let mut high = evidence.len();
-    let mut best: Option<String> = None;
+    let mut best: Option<FittedInput> = None;
     while low <= high {
         let kept = low + (high - low) / 2;
         let candidate =
             serde_json::to_string(&build(&evidence[..kept])).map_err(|_| pack_failure())?;
         if candidate.len() <= max_bytes {
-            best = Some(candidate);
+            best = Some(FittedInput {
+                pack: candidate,
+                kept,
+            });
             low = kept + 1;
         } else if kept == 0 {
             break;
@@ -3539,6 +3696,7 @@ struct RawCatchUpOutput {
 /// which engine wrote it. The engine travels with the outcome so the receipt
 /// the caller writes can name it without asking a second time and risking a
 /// different answer.
+#[derive(Debug)]
 enum ArtifactGenerationOutcome {
     Generated {
         artifact: MeetingArtifactRevision,
@@ -3684,18 +3842,20 @@ const RELATIONSHIP_SUMMARY_MAX_TOKENS: i32 = 220;
 ///
 /// An engine that answers nothing writes nothing. The paragraph already on the
 /// row is older but true, and replacing it with an empty string would lose it
-/// to a relay that was asleep for a minute.
+/// to a relay that was asleep for a minute. The outcome says which of those
+/// happened, so a button that asked for the rewrite can tell the reader
+/// instead of returning the old paragraph as if it were new.
 pub(crate) fn write_relationship_summary(
     store: &MeetingStore,
     person_id: PersonId,
     generator: &dyn MeetingTextGenerator,
-) -> Result<(), StoreError> {
+) -> Result<PersonSummaryOutcome, StoreError> {
     let detail = store.person_detail(person_id)?.detail;
     let pack = crate::query::pack::for_person(store, &detail);
     if pack.sources.is_empty() {
         // No meetings and no loops: nothing to say about a relationship, and a
         // paragraph written from an empty pack would be invention.
-        return Ok(());
+        return Ok(PersonSummaryOutcome::NoEvidence);
     }
     let Ok(text) = generator.generate(
         &relationship_summary_prompt(&detail.person.display_name),
@@ -3703,11 +3863,11 @@ pub(crate) fn write_relationship_summary(
         RELATIONSHIP_SUMMARY_MAX_TOKENS,
         ReplyShape::Prose,
     ) else {
-        return Ok(());
+        return Ok(PersonSummaryOutcome::Failed);
     };
     let text = text.trim();
     if text.is_empty() {
-        return Ok(());
+        return Ok(PersonSummaryOutcome::Failed);
     }
     store.set_person_summary(
         person_id,
@@ -3716,7 +3876,8 @@ pub(crate) fn write_relationship_summary(
             generated_at_utc_ms: utc_now_ms(),
             model_id: generator.model_id().to_string(),
         },
-    )
+    )?;
+    Ok(PersonSummaryOutcome::Written)
 }
 
 /// The catch-up prompt is deliberately fixed: a mid-meeting recap is a recap,
@@ -3870,6 +4031,7 @@ fn generation_key(
     system_prompt: &str,
     model_id: &str,
     model_version: &str,
+    intent: GenerationIntent,
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(canonical_input.as_bytes());
@@ -3879,7 +4041,23 @@ fn generation_key(
     hash.update(TEMPLATE_VERSION.to_le_bytes());
     hash.update(model_id.as_bytes());
     hash.update(model_version.as_bytes());
+    if let GenerationIntent::Rewrite(operation_id) = intent {
+        hash.update(operation_id.uuid().as_bytes());
+    }
     format!("{:x}", hash.finalize())
+}
+
+/// Why a generation was asked for, which is part of what it is.
+///
+/// The pipeline's pass is keyed on its inputs alone so that a second run over
+/// the same evidence finds the first revision instead of paying for a second.
+/// An explicit rewrite is the opposite request: the person has the notes and
+/// wants them read again, so the press that asked joins the key and the
+/// cache does not answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenerationIntent {
+    Pipeline,
+    Rewrite(MeetingOperationId),
 }
 
 fn validate_artifact_output(
@@ -3939,6 +4117,7 @@ fn validate_artifact_output(
         // Filled in by a second, separately budgeted pass over the same
         // evidence; see `generate_ledger`.
         ledger: None,
+        ledger_failure: None,
     })
 }
 
@@ -4136,15 +4315,16 @@ fn ledger_system_prompt() -> String {
 /// unverifiable claims are removed and the ledger says so in its own caveats.
 /// The structural checks report: every failure is logged, the two a reader
 /// can weigh become caveats, and none of them rejects a ledger the receipt
-/// check accepted. `None` means the model produced nothing usable; the
-/// generated notes it was asked for alongside are unaffected.
+/// check accepted. The error names the part that produced nothing usable —
+/// the pack, the engine, or the reply — and the generated notes it was asked
+/// for alongside are unaffected either way.
 pub(crate) fn generate_ledger(
     generator: &dyn MeetingTextGenerator,
     evidence: &ArtifactEvidence,
     segments: &[AnalyticsSegment],
     speaker_names: &HashMap<SpeakerId, String>,
     session_id: MeetingSessionId,
-) -> Option<MeetingLedger> {
+) -> Result<MeetingLedger, EngineFailureCause> {
     let haystack = ledger::fold_haystack(evidence.transcript.iter().map(|item| item.text.as_str()));
     // Who said each turn, keyed by the uuid the evidence rows carry, so the
     // pack can name a speaker without re-deriving the mapping per row.
@@ -4186,7 +4366,7 @@ pub(crate) fn generate_ledger(
             ledger.caveats.push(caveat);
         }
     }
-    Some(ledger)
+    Ok(ledger)
 }
 
 /// One reading of the transcript, with every receipt looked up: the model is
@@ -4197,7 +4377,7 @@ fn read_ledger(
     evidence: &ArtifactEvidence,
     turn_speakers: &HashMap<String, &str>,
     haystack: &str,
-) -> Option<MeetingLedger> {
+) -> Result<MeetingLedger, EngineFailureCause> {
     let prompt = ledger_system_prompt();
     let input = fit_model_input(
         &evidence.transcript,
@@ -4215,25 +4395,39 @@ fn read_ledger(
                 .collect(),
         },
     )
-    .ok()?;
+    .map_err(|_| EngineFailureCause::EvidencePack)?;
 
     let mut last: Option<MeetingLedger> = None;
     for _ in 0..=LEDGER_RECEIPT_RETRIES {
         let output = generator
             .generate(&prompt, &input, LEDGER_MAX_TOKENS, ReplyShape::Json)
-            .ok()?;
-        let raw: RawLedgerOutput = first_json_value(&output).ok()?;
-        let candidate = validate_ledger_output(&raw, &evidence.transcript).ok()?;
+            .map_err(|error| match error {
+                MeetingTextGenerationError::ReplyNotStructured => {
+                    EngineFailureCause::ReplyNotStructured
+                }
+                /* The engine that wrote the notes a moment ago and then went
+                 * away is, to this pass, an engine that refused. */
+                MeetingTextGenerationError::Unreachable | MeetingTextGenerationError::Failed => {
+                    EngineFailureCause::ModelRefused
+                }
+            })?;
+        let raw: RawLedgerOutput =
+            first_json_value(&output).map_err(|()| EngineFailureCause::ReplyNotStructured)?;
+        let candidate = validate_ledger_output(&raw, &evidence.transcript)
+            .map_err(|()| EngineFailureCause::ReplyRejected)?;
         if ledger::unverified_receipts(&candidate, haystack) == 0 {
-            return Some(candidate);
+            return Ok(candidate);
         }
         last = Some(candidate);
     }
-    let mut degraded = last?;
+    let mut degraded = last.ok_or(EngineFailureCause::ModelRefused)?;
     ledger::degrade_unverified(&mut degraded, haystack);
     // A ledger whose every thread was invented is not a degraded ledger, it is
-    // no ledger.
-    (!degraded.threads.is_empty()).then_some(degraded)
+    // no ledger: the model answered and nothing it said checked out.
+    if degraded.threads.is_empty() {
+        return Err(EngineFailureCause::ReplyRejected);
+    }
+    Ok(degraded)
 }
 
 pub(crate) fn validate_ledger_output(
@@ -5133,10 +5327,16 @@ mod tests {
         handle: thread::JoinHandle<()>,
     }
 
+    /// The catalog lists the fixture model and the three the cache test
+    /// switches between: a selected model the endpoint does not serve is a
+    /// configuration gap, so a test that changes the model must change it to
+    /// one that is there.
+    const CATALOG_MODEL_COUNT: usize = 4;
+
     fn catalog_response(stream: &mut impl Read, completion_text: &str) -> String {
         let request = read_http_request(stream);
         if request.contains("GET /v1/models") {
-            r#"{"data":[{"id":"fixture-model","context_window_tokens":8192}]}"#.to_string()
+            r#"{"data":[{"id":"fixture-model","context_window_tokens":8192},{"id":"model-a"},{"id":"model-b"},{"id":"model-c"}]}"#.to_string()
         } else {
             format!(
                 r#"{{"choices":[{{"message":{{"content":"{}"}}}}]}}"#,
@@ -5158,9 +5358,10 @@ mod tests {
             .write_all(b"dels HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .expect("finish request");
         let mut fragments = (&stream).take(10).chain(&stream);
-        assert_eq!(
-            catalog_response(&mut fragments, "completion"),
-            r#"{"data":[{"id":"fixture-model","context_window_tokens":8192}]}"#
+        let response = catalog_response(&mut fragments, "completion");
+        assert!(
+            response.contains(r#""id":"fixture-model""#),
+            "a request line split across reads is still read as the catalog request: {response}"
         );
     }
 
@@ -5199,6 +5400,11 @@ mod tests {
         session_id: MeetingSessionId,
         segment_id: String,
     }
+
+    /// The revision the fixture meeting sits at. A generation asked for at any
+    /// other revision is stored out of date, which never reads back as
+    /// current: a test about the cache has to ask at this one.
+    const ARTIFACT_FIXTURE_REVISION: u64 = 0;
 
     fn artifact_store_fixture() -> ArtifactStoreFixture {
         let (directory, store) = crate::meeting::store::workflow_core_tests::store();
@@ -5239,51 +5445,110 @@ mod tests {
         .to_string()
     }
 
+    /// The notes the fixture engine answers with: one summary line citing the
+    /// one segment, and nothing else.
+    fn fixture_artifact_json(segment_id: &str, transcript: &str) -> String {
+        serde_json::json!({
+            "summary": [{
+                "text": transcript,
+                "citations": [segment_id]
+            }],
+            "outline": [],
+            "decisions": [],
+            "action_items": [],
+            "key_questions": [],
+            "risks": [],
+            "follow_up_draft": {
+                "text": "No follow-up requested.",
+                "citations": [segment_id]
+            }
+        })
+        .to_string()
+    }
+
+    /// The ledger the fixture engine answers with: one closed thread whose
+    /// receipt is the whole transcript.
+    fn fixture_ledger_json(segment_id: &str, transcript: &str) -> String {
+        serde_json::json!({
+            "headline": "The fixture transcript has one sentence.",
+            "threads": [{
+                "topic": "Fixture transcript",
+                "state": "closed",
+                "substantive": false,
+                "receipt": {
+                    "quote": transcript,
+                    "speaker": serde_json::Value::Null,
+                    "citations": [segment_id]
+                },
+                "owner": serde_json::Value::Null
+            }],
+            "open_loops": [],
+            "commitments": [],
+            "stances": [],
+            "caveats": []
+        })
+        .to_string()
+    }
+
+    /// An in-process engine that answers every generation with the fixture
+    /// notes and ledger, and counts how many times it was asked.
+    struct CountingGenerator {
+        artifact: String,
+        ledger: String,
+        calls: AtomicUsize,
+    }
+
+    impl CountingGenerator {
+        fn new(segment_id: &str, transcript: &str) -> Self {
+            Self {
+                artifact: fixture_artifact_json(segment_id, transcript),
+                ledger: fixture_ledger_json(segment_id, transcript),
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl MeetingTextGenerator for CountingGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "apple-intelligence"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("counting-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        /// A generation is two calls, the notes and then the ledger, so the
+        /// even calls are notes.
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            _evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(if call.is_multiple_of(2) {
+                self.artifact.clone()
+            } else {
+                self.ledger.clone()
+            })
+        }
+    }
+
     fn generation_fixture(segment_id: &str, transcript: &str) -> GenerationFixture {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("generation fixture listener");
         let address = listener.local_addr().expect("generation fixture address");
         let (sender, requests) = mpsc::channel();
-        let segment_id = segment_id.to_string();
-        let transcript = transcript.to_string();
-        let artifact = openai_fixture_response(
-            serde_json::json!({
-                "summary": [{
-                    "text": transcript,
-                    "citations": [segment_id]
-                }],
-                "outline": [],
-                "decisions": [],
-                "action_items": [],
-                "key_questions": [],
-                "risks": [],
-                "follow_up_draft": {
-                    "text": "No follow-up requested.",
-                    "citations": [segment_id]
-                }
-            })
-            .to_string(),
-        );
-        let ledger = openai_fixture_response(
-            serde_json::json!({
-                "headline": "The fixture transcript has one sentence.",
-                "threads": [{
-                    "topic": "Fixture transcript",
-                    "state": "closed",
-                    "substantive": false,
-                    "receipt": {
-                        "quote": transcript,
-                        "speaker": serde_json::Value::Null,
-                        "citations": [segment_id]
-                    },
-                    "owner": serde_json::Value::Null
-                }],
-                "open_loops": [],
-                "commitments": [],
-                "stances": [],
-                "caveats": []
-            })
-            .to_string(),
-        );
+        let artifact = openai_fixture_response(fixture_artifact_json(segment_id, transcript));
+        let ledger = openai_fixture_response(fixture_ledger_json(segment_id, transcript));
         let handle = thread::spawn(move || {
             let mut completion = 0;
             for _ in 0..3 {
@@ -5398,13 +5663,16 @@ mod tests {
             input,
             Err(RunFailure::engine(EngineFailureCause::EvidencePack))
         );
-        assert!(read_ledger(
-            &generator,
-            &evidence,
-            &HashMap::new(),
-            GENERATION_FIXTURE_TRANSCRIPT
-        )
-        .is_none());
+        assert_eq!(
+            read_ledger(
+                &generator,
+                &evidence,
+                &HashMap::new(),
+                GENERATION_FIXTURE_TRANSCRIPT
+            )
+            .err(),
+            Some(EngineFailureCause::EvidencePack)
+        );
         let health = generator.generate("system", "health probe", 16, ReplyShape::Prose);
         server.handle.join().expect("refresh fixture");
         let requests: Vec<_> = server.requests.try_iter().collect();
@@ -5490,7 +5758,7 @@ mod tests {
             first_generator.status(),
             MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: true,
-                model_count: 1,
+                model_count: CATALOG_MODEL_COUNT,
                 error: None,
             }
         ));
@@ -5517,7 +5785,7 @@ mod tests {
                 .status(),
             MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: true,
-                model_count: 1,
+                model_count: CATALOG_MODEL_COUNT,
                 error: None,
             }
         ));
@@ -5542,7 +5810,7 @@ mod tests {
                 .status(),
             MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: true,
-                model_count: 1,
+                model_count: CATALOG_MODEL_COUNT,
                 error: None,
             }
         ));
@@ -5560,7 +5828,7 @@ mod tests {
             changed_endpoint_generator.status(),
             MeetingLocalEngineStatus::LocalEndpoint {
                 reachable: true,
-                model_count: 1,
+                model_count: CATALOG_MODEL_COUNT,
                 error: None,
             }
         ));
@@ -5595,7 +5863,12 @@ mod tests {
         );
 
         let outcome = service
-            .generate_artifacts(&fixture.store, fixture.session_id, 1)
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                1,
+                GenerationIntent::Pipeline,
+            )
             .expect("artifact generation");
         assert!(matches!(
             &outcome,
@@ -5633,7 +5906,12 @@ mod tests {
             Arc::new(StubGenerator::new("sona-relay", false)),
         );
         let first_artifact_id = match service
-            .generate_artifacts(&fixture.store, fixture.session_id, 1)
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                1,
+                GenerationIntent::Pipeline,
+            )
             .expect("first artifact generation")
         {
             ArtifactGenerationOutcome::Generated { artifact, .. } => artifact.artifact_id,
@@ -5662,7 +5940,12 @@ mod tests {
             Arc::new(StubGenerator::new("sona-relay", false)),
         );
         let second_artifact_id = match service
-            .generate_artifacts(&fixture.store, fixture.session_id, 1)
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                1,
+                GenerationIntent::Pipeline,
+            )
             .expect("second artifact generation")
         {
             ArtifactGenerationOutcome::Generated { artifact, .. } => artifact.artifact_id,
@@ -5682,6 +5965,74 @@ mod tests {
             .handle
             .join()
             .expect("second generation fixture");
+    }
+
+    /// "Write it again" used to hand back the revision the pipeline had
+    /// already written: same evidence, same engine, same key, so the cache
+    /// answered and the press did nothing.
+    #[test]
+    fn a_rewrite_writes_a_new_revision_where_the_pipeline_finds_its_cached_one() {
+        let fixture = artifact_store_fixture();
+        let generator = Arc::new(CountingGenerator::new(
+            &fixture.segment_id,
+            GENERATION_FIXTURE_TRANSCRIPT,
+        ));
+        let service = MeetingProcessingService::new(None);
+        service.set_text_generators(
+            Arc::clone(&generator) as Arc<dyn MeetingTextGenerator>,
+            Arc::new(StubGenerator::new("sona-relay", false)),
+        );
+        let first = match service
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                ARTIFACT_FIXTURE_REVISION,
+                GenerationIntent::Pipeline,
+            )
+            .expect("pipeline generation")
+        {
+            ArtifactGenerationOutcome::Generated { artifact, .. } => artifact.artifact_id,
+            other => panic!("the pipeline did not generate: {other:?}"),
+        };
+        let calls_after_pipeline = generator.calls.load(Ordering::SeqCst);
+        match service
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                ARTIFACT_FIXTURE_REVISION,
+                GenerationIntent::Pipeline,
+            )
+            .expect("second pipeline pass")
+        {
+            ArtifactGenerationOutcome::Cached { artifact, .. } => {
+                assert_eq!(artifact.artifact_id, first)
+            }
+            other => panic!("the pipeline read the same evidence twice: {other:?}"),
+        }
+        assert_eq!(
+            generator.calls.load(Ordering::SeqCst),
+            calls_after_pipeline,
+            "a second pipeline pass over the same evidence asks the engine nothing"
+        );
+
+        let (rewritten, engine) = service
+            .regenerate(
+                &fixture.store,
+                fixture.session_id,
+                ARTIFACT_FIXTURE_REVISION,
+                MeetingOperationId::new(),
+            )
+            .expect("rewrite");
+
+        assert_ne!(
+            rewritten.artifact_id, first,
+            "a rewrite is a new revision, not the cached first one"
+        );
+        assert_eq!(engine, "apple-intelligence");
+        assert!(
+            generator.calls.load(Ordering::SeqCst) > calls_after_pipeline,
+            "a rewrite asks the engine again"
+        );
     }
 
     #[test]
@@ -5831,6 +6182,7 @@ mod tests {
                 system_prompt,
                 "apple-intelligence",
                 ARTIFACT_MODEL_VERSION,
+                GenerationIntent::Pipeline,
             )
         };
         let without_notes = artifact_system_prompt(template, false);

@@ -2,7 +2,7 @@ use crate::meeting::people_types::{
     MeetingPeopleContextResult, OpenLoopsInboxResult, OrganizationDetailResult, PeopleListResult,
     PeopleMutationResult, PersonContextResult, PersonDeleteRequest, PersonDetailResult, PersonId,
     PersonLinkRequest, PersonMergeRequest, PersonRenameRequest, PersonSplitRequest,
-    VocabularyCandidatesResult,
+    PersonSummaryRegenerateResult, VocabularyCandidatesResult,
 };
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
@@ -45,7 +45,7 @@ pub async fn organization_detail(
 pub async fn person_summary_regenerate(
     manager: State<'_, Arc<MeetingSessionManager>>,
     person_id: PersonId,
-) -> Result<PersonDetailResult, MeetingCommandError> {
+) -> Result<PersonSummaryRegenerateResult, MeetingCommandError> {
     manager.person_summary_regenerate(person_id).await
 }
 

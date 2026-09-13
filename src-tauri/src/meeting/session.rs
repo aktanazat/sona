@@ -1,6 +1,6 @@
 use super::analytics::{
     merge_turns, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
-    MeetingNotesTemplate, MeetingUserNotes,
+    MeetingNotesTemplate, MeetingProvisionalTranscript, MeetingUserNotes,
 };
 use super::capture::{MeetingCaptureSource, PacketLaneReadError, PacketLaneReader, PacketSink};
 use super::clock::host_monotonic_now_ns;
@@ -14,15 +14,17 @@ use super::follow_up::{
 use super::import_formats::{read_transcript_export, resolve_spans, ImportedSegment};
 use super::keep_awake::MeetingKeepAwake;
 use super::ledger;
-use super::local_generator::MeetingLocalEngineStatus;
+use super::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
 use super::loop_types::{
     MeetingLoopAssignRequest, MeetingLoopMutationResult, MeetingLoopReopenRequest,
     MeetingLoopResolveRequest, MeetingLoopsResult,
 };
-use super::people_types::{PersonDetailResult, PersonId, PersonLinkConfidence};
+use super::people_types::{
+    PersonId, PersonLinkConfidence, PersonSummaryOutcome, PersonSummaryRegenerateResult,
+};
 use super::processing::{
     write_relationship_summary, LiveTranscript, LiveTranscriptWorker, MeetingProcessingService,
-    MeetingTextGenerationError, ProcessingOrigin, ReplyShape,
+    MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
 };
 use super::store::{
     InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting, SegmentEdit,
@@ -609,6 +611,9 @@ impl MeetingSessionManager {
     pub(crate) fn meeting_local_engine_status(&self) -> MeetingLocalEngineStatus {
         self.processing.meeting_local_engine_status()
     }
+    pub(crate) fn text_engine_for_next_meeting(&self) -> MeetingTextEngineChoice {
+        self.processing.text_engine_for_next_meeting()
+    }
 
     fn release_keep_awake(&self) {
         self.keep_awake
@@ -1174,6 +1179,7 @@ impl MeetingSessionManager {
                 result.snapshot.session_id,
                 &result.snapshot.title,
                 context.calendar_event.as_ref(),
+                composer_app_for(context.trigger_bundle_id.as_deref()),
                 request.announce_in_chat,
                 true,
             )
@@ -1185,9 +1191,9 @@ impl MeetingSessionManager {
     /// Note that a recording that just started owes the room a disclosure, and
     /// — from the panel only — remember the decision for the series.
     ///
-    /// Nothing is posted here. The panel is the surface that owns the words, and
-    /// it asks for the paste as soon as it sees a `pending` disclosure on the
-    /// live meeting.
+    /// Nothing is typed here. The panel is the surface that owns the words, and
+    /// it asks for the insertion as soon as it sees a `pending` disclosure on
+    /// the live meeting. `composer_app` is where that insertion may go.
     ///
     /// A failure to remember or to arm is logged and dropped: the recording is
     /// already running, and a start that failed because a courtesy line could
@@ -1197,6 +1203,7 @@ impl MeetingSessionManager {
         session_id: MeetingSessionId,
         title: &str,
         calendar_event: Option<&CalendarEventSummary>,
+        composer_app: Option<String>,
         announce_in_chat: bool,
         remember_for_series: bool,
     ) {
@@ -1217,9 +1224,11 @@ impl MeetingSessionManager {
         if !announce_in_chat {
             return;
         }
-        if let Err(error) =
-            store.request_session_disclosure(session_id, notetaker(calendar_event, title))
-        {
+        if let Err(error) = store.request_session_disclosure(
+            session_id,
+            notetaker(calendar_event, title),
+            composer_app.as_deref(),
+        ) {
             log::warn!("Meeting {session_id:?} could not arm its disclosure: {error:?}");
         }
     }
@@ -1303,6 +1312,7 @@ impl MeetingSessionManager {
                 result.snapshot.session_id,
                 &result.snapshot.title,
                 context.calendar_event.as_ref(),
+                composer_app_for(context.trigger_bundle_id.as_deref()),
                 announce,
                 false,
             )
@@ -1502,13 +1512,16 @@ impl MeetingSessionManager {
         }))
     }
 
-    /// Post the recording disclosure into whatever the frontmost application has
-    /// focused, once, and write down what happened.
+    /// Type the recording disclosure into the focused composer of the
+    /// application the meeting is in, once, and write down what happened.
     ///
     /// The line is the caller's because it is words a person reads. The refusal
     /// case is ordinary and expected: a target with no composer focused — a
     /// document, a browser, Sona's own panel — cannot accept an insertion, and
-    /// the receipt says so rather than the app pressing ⌘V at it and hoping.
+    /// the receipt says so rather than the app pressing ⌘V at it and hoping. An
+    /// application other than the meeting's in front is refused before any
+    /// insertion is tried: the line belongs in one chat box and nowhere else.
+    /// Typed is not sent; the line waits in the composer for the person.
     pub async fn announce_disclosure(
         &self,
         session_id: MeetingSessionId,
@@ -1519,13 +1532,17 @@ impl MeetingSessionManager {
             .session_disclosure(session_id)
             .map_err(map_store_error)?;
         match held {
-            // Nobody asked for one, so nothing is pasted. Not an error: the
+            // Nobody asked for one, so nothing is typed. Not an error: the
             // panel re-reads the live meeting on every change, and asking about
             // a meeting that is not announcing itself is a no-op.
             MeetingSessionDisclosure::NotAsked => Ok(MeetingSessionDisclosure::NotAsked),
             MeetingSessionDisclosure::Attempted { .. } => Ok(held),
-            MeetingSessionDisclosure::Pending { .. } => {
-                let receipt = crate::delivery::announce(&line);
+            MeetingSessionDisclosure::Pending { composer_app, .. } => {
+                let receipt = if composer_app_in_front(composer_app.as_deref()) {
+                    crate::delivery::announce(&line)
+                } else {
+                    crate::delivery::DeliveryReceipt::not_dispatched()
+                };
                 store
                     .record_session_disclosure(session_id, &receipt)
                     .map_err(map_store_error)
@@ -1899,6 +1916,7 @@ impl MeetingSessionManager {
             return self.result_for_receipt(store, receipt, request.session_id);
         }
         self.acquire_keep_awake();
+        let mut resumed = 0usize;
         for source in active.sources.values_mut() {
             let next_epoch = source
                 .epoch
@@ -1912,6 +1930,7 @@ impl MeetingSessionManager {
                         && report.epoch.get() >= next_epoch.get() =>
                 {
                     source.epoch = report.epoch;
+                    resumed += 1;
                 }
                 Ok(_) | Err(_) => {
                     let _ = source.source.abort();
@@ -1938,9 +1957,26 @@ impl MeetingSessionManager {
         let resuming = store
             .session_snapshot(request.session_id)
             .map_err(map_store_error)?;
-        store
-            .open_capture_window(request.session_id, resuming.elapsed_offset_ns.unwrap_or(0))
-            .map_err(map_store_error)?;
+        // A window opens only over audio that is arriving. With every source
+        // failed the session stays paused under a committed receipt: nothing
+        // is recording, and Stop and a second Resume both remain open to it.
+        let (next_phase, event_kind, reason_codes) = if resumed == 0 {
+            self.release_keep_awake();
+            (
+                MeetingPhase::CapturingPaused,
+                "resume_failed",
+                vec![MeetingReasonCode::SourceStartFailed],
+            )
+        } else {
+            store
+                .open_capture_window(request.session_id, resuming.elapsed_offset_ns.unwrap_or(0))
+                .map_err(map_store_error)?;
+            (
+                MeetingPhase::CapturingRecording,
+                "resume_confirmed",
+                Vec::new(),
+            )
+        };
         store
             .transition(StoreTransition {
                 operation_id: None,
@@ -1950,9 +1986,9 @@ impl MeetingSessionManager {
                 session_id: request.session_id,
                 expected_revision: resuming.revision,
                 allowed_from: &[MeetingPhase::CapturingResuming],
-                next_phase: MeetingPhase::CapturingRecording,
-                event_kind: "resume_confirmed",
-                reason_codes: Vec::new(),
+                next_phase,
+                event_kind,
+                reason_codes,
             })
             .map_err(map_store_error)?;
         drop(actor);
@@ -2547,15 +2583,33 @@ impl MeetingSessionManager {
         })
     }
 
+    /// Every meeting still waiting for recovery, newest first. The list page
+    /// is a display limit and recovery rows share the `Failed` state with
+    /// failed processing, so the pages are read to the end: a meeting parked
+    /// behind a hundred newer ones needs recovering as much as the latest.
     pub async fn recovery_list(&self) -> Result<Vec<MeetingHistorySummary>, MeetingCommandError> {
         let store = self.store().await?;
-        Ok(store
-            .list_sessions(None, 100, &MeetingListFilter::default())
-            .map_err(map_store_error)?
-            .entries
-            .into_iter()
-            .filter(|summary| summary.phase == MeetingPhase::RecoveryRequired)
-            .collect())
+        let filter = MeetingListFilter {
+            status: MeetingStatusFilter::Failed,
+            ..MeetingListFilter::default()
+        };
+        let mut cursor = None;
+        let mut entries = Vec::new();
+        loop {
+            let page = store
+                .list_sessions(cursor, 100, &filter)
+                .map_err(map_store_error)?;
+            cursor = page.entries.last().map(|summary| summary.created_at_utc_ms);
+            entries.extend(
+                page.entries
+                    .into_iter()
+                    .filter(|summary| summary.phase == MeetingPhase::RecoveryRequired),
+            );
+            if !page.has_more || cursor.is_none() {
+                break;
+            }
+        }
+        Ok(entries)
     }
 
     pub async fn recovery_finalize(
@@ -2891,18 +2945,19 @@ impl MeetingSessionManager {
     }
 
     /// Rewrites one person's relationship paragraph now, and hands back their
-    /// page.
+    /// page with what the attempt did.
     ///
     /// The engine follows the person's most recent confirmed meeting, because
     /// D14 routes a meeting's text by that meeting's series and this paragraph
     /// is written out of those meetings' evidence. A person with no meeting has
     /// no engine to pick and nothing to summarize; a Mac with no engine at all
-    /// writes nothing. Both return the page unchanged rather than an error: the
-    /// button did what it could, and the paragraph already there is still true.
+    /// writes nothing. Neither is an error — the paragraph already there is
+    /// still true — but each is named in the outcome, because a button that
+    /// returned the old paragraph as a success taught readers nothing.
     pub async fn person_summary_regenerate(
         &self,
         person_id: PersonId,
-    ) -> Result<PersonDetailResult, MeetingCommandError> {
+    ) -> Result<PersonSummaryRegenerateResult, MeetingCommandError> {
         let store = self.store().await?;
         let detail = store.person_detail(person_id).map_err(map_store_error)?;
         let session_id = detail
@@ -2911,17 +2966,32 @@ impl MeetingSessionManager {
             .iter()
             .find(|link| link.confidence == PersonLinkConfidence::Confirmed)
             .map(|link| link.meeting.id);
-        if let Some(session_id) = session_id {
-            if let Some(generator) = self
-                .processing
-                .text_generator_for_session(&store, session_id)
-            {
-                write_relationship_summary(&store, person_id, generator.as_ref())
-                    .map_err(map_store_error)?;
-                return store.person_detail(person_id).map_err(map_store_error);
+        let Some(session_id) = session_id else {
+            return Ok(PersonSummaryRegenerateResult {
+                outcome: PersonSummaryOutcome::NoEvidence,
+                page: detail,
+            });
+        };
+        let Some(generator) = self
+            .processing
+            .text_generator_for_session(&store, session_id)
+        else {
+            return Ok(PersonSummaryRegenerateResult {
+                outcome: PersonSummaryOutcome::EngineUnavailable,
+                page: detail,
+            });
+        };
+        let outcome = write_relationship_summary(&store, person_id, generator.as_ref())
+            .map_err(map_store_error)?;
+        let page = match outcome {
+            PersonSummaryOutcome::Written => {
+                store.person_detail(person_id).map_err(map_store_error)?
             }
-        }
-        Ok(detail)
+            PersonSummaryOutcome::NoEvidence
+            | PersonSummaryOutcome::EngineUnavailable
+            | PersonSummaryOutcome::Failed => detail,
+        };
+        Ok(PersonSummaryRegenerateResult { outcome, page })
     }
 
     pub async fn speaker_rename(
@@ -3082,21 +3152,45 @@ impl MeetingSessionManager {
         {
             return self.result_for_receipt(store, receipt, request.session_id);
         }
+        /* A stale press never reaches an engine. The receipt below refuses it
+         * too, but only after the rewrite has been paid for. */
+        let current = store
+            .session_snapshot(request.session_id)
+            .map_err(map_store_error)?;
+        if current.revision != request.expected_revision {
+            return Err(MeetingCommandError::StaleRevision);
+        }
         /* Off the runtime. A relayed generation blocks its calling thread for
          * up to `RELAY_JOIN_TIMEOUT`, and this is an async command, so waiting
          * here would hold a runtime worker for minutes on a machine that is
          * also transcribing. */
-        let (artifact, engine) = {
+        let generated = {
             let processing = Arc::clone(&self.processing);
             let store = Arc::clone(&store);
             let session_id = request.session_id;
             let expected_revision = request.expected_revision;
+            let operation_id = request.operation_id;
             tauri::async_runtime::spawn_blocking(move || {
-                processing.regenerate(&store, session_id, expected_revision)
+                processing.regenerate(&store, session_id, expected_revision, operation_id)
             })
             .await
-            .map_err(|_| map_processing_error(ProcessingFailure::EngineFailure))?
-            .map_err(map_processing_error)?
+            .unwrap_or_else(|_| Err(RunFailure::engine(EngineFailureCause::Panicked)))
+        };
+        let (artifact, engine) = match generated {
+            Ok(generated) => generated,
+            Err(failure) => {
+                /* The row describes this press. Until it did, a rewrite that
+                 * failed left the header saying whatever the pipeline had
+                 * said, which for a meeting whose notes were written once and
+                 * refused the second time was "notes ready". */
+                store
+                    .set_processing_status(request.session_id, failure.status())
+                    .map_err(map_store_error)?;
+                if let Ok(snapshot) = store.session_snapshot(request.session_id) {
+                    self.emit_session_changed(&snapshot);
+                }
+                return Err(map_processing_error(failure.reason()));
+            }
         };
         let receipt = store
             .record_artifact_regeneration(
@@ -3410,6 +3504,23 @@ impl MeetingSessionManager {
             .map_err(map_processing_error)
     }
 
+    /// The words the running capture has recognized so far, for the live
+    /// screen. Empty for any meeting that is not the one capturing now: the
+    /// stored revision is that meeting's transcript, and `meeting_get` reads
+    /// it. This never touches the store or the engine — it is a lock and a
+    /// copy, so the screen can ask on every transcript event.
+    pub fn provisional_transcript(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> MeetingProvisionalTranscript {
+        self.live_transcript(session_id)
+            .map(|live| live.snapshot(session_id))
+            .unwrap_or(MeetingProvisionalTranscript {
+                session_id,
+                segments: Vec::new(),
+            })
+    }
+
     /// The provisional transcript of the capture that is running now, when the
     /// running capture is this meeting's.
     ///
@@ -3550,6 +3661,22 @@ impl MeetingSessionManager {
             return Ok(store);
         }
         let opened = MeetingStore::open(root, key).map_err(map_store_error)?;
+        // A lane's health moves from the track worker's thread, which has no
+        // handle to the shell. The store tells this listener after each
+        // verdict commits, and the live screen re-reads the session — which
+        // is also how it learns the revision a later Stop has to carry.
+        if let Some(app) = self.app.clone() {
+            opened.watch_health(move |change| {
+                let _ = app.emit(
+                    "meeting:source-health-changed",
+                    MeetingEventPayload {
+                        event_schema_version: MEETING_EVENT_SCHEMA_VERSION,
+                        session_id: Some(change.session_id),
+                        revision: change.revision,
+                    },
+                );
+            });
+        }
         let store = cached.insert(opened).clone();
         drop(cached);
         super::workflow_engine::resume_pending_workflow_events(
@@ -3967,6 +4094,38 @@ fn notetaker<'a>(calendar_event: Option<&'a CalendarEventSummary>, title: &'a st
         })
         .filter(|name| !name.is_empty())
         .unwrap_or(title)
+}
+
+/// Which application's chat box a disclosure belongs in.
+///
+/// An offer raised by an application names it. A calendar offer names none,
+/// so the meeting application in front when the offer was accepted stands in:
+/// the consent panel does not take focus, so that is the application the
+/// person was looking at. Anything else in front — an editor, a terminal,
+/// nothing — means no composer is known, and the attempt is refused later
+/// rather than aimed at whatever happens to be focused.
+fn composer_app_for(trigger_bundle_id: Option<&str>) -> Option<String> {
+    if let Some(bundle_id) = trigger_bundle_id {
+        return Some(bundle_id.to_string());
+    }
+    crate::context::frontmost_application_identifier().filter(|bundle_id| {
+        super::detection::apps::is_browser_bundle_id(bundle_id)
+            || super::detection::apps::DEFAULT_MEETING_APP_BUNDLE_IDS
+                .iter()
+                .any(|candidate| bundle_id.eq_ignore_ascii_case(candidate))
+    })
+}
+
+/// Whether the application a disclosure belongs in is the one in front now.
+/// The insertion goes to the focused composer of the frontmost application,
+/// so any other application in front means the line would land somewhere it
+/// was never meant to go.
+fn composer_app_in_front(composer_app: Option<&str>) -> bool {
+    let Some(composer_app) = composer_app else {
+        return false;
+    };
+    crate::context::frontmost_application_identifier()
+        .is_some_and(|front| front.eq_ignore_ascii_case(composer_app))
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -6223,6 +6382,7 @@ pub(crate) mod tests {
                     citations: Vec::new(),
                 },
                 ledger: None,
+                ledger_failure: None,
             };
             // A `Current` artifact generated from a revision that is not the
             // session's own is filed `OutOfDate` instead, which is the whole

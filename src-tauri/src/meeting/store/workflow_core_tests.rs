@@ -893,7 +893,7 @@ fn person_split_moves_only_selected_evidence_without_data_loss() {
     let context = store.meeting_people_context(second).unwrap();
     assert_eq!(context.rows.len(), 1);
     assert_eq!(context.rows[0].person_id, target.id);
-    assert_eq!(context.rows[0].meetings_together, 2);
+    assert_eq!(context.rows[0].prior_meetings, 1);
     assert_eq!(
         context.rows[0].last_prior_meeting.as_ref().unwrap().id,
         first
@@ -902,6 +902,36 @@ fn person_split_moves_only_selected_evidence_without_data_loss() {
         context.rows[0].top_open_loop.as_ref().unwrap().text,
         "Ship the integration"
     );
+}
+
+/// The band on a meeting describes what came before it. The oldest of three
+/// meetings has no earlier meeting to cite, and the loop raised in a later
+/// one is not "still open" from its point of view.
+#[test]
+fn previously_together_reads_only_meetings_before_this_one() {
+    let (_directory, store) = store();
+    let person_id = person(&store, "Alice Doe", &[], &[]);
+    let oldest = meeting(&store, "Oldest", 10);
+    let middle = meeting(&store, "Middle", 20);
+    let newest = meeting(&store, "Newest", 30);
+    for meeting_id in [oldest, middle, newest] {
+        link(&store, meeting_id, person_id, "manual", "confirmed");
+    }
+    artifact(&store, newest, "Newest headline");
+
+    let context = store.meeting_people_context(oldest).unwrap();
+    assert_eq!(context.rows.len(), 1);
+    assert_eq!(context.rows[0].prior_meetings, 0);
+    assert!(context.rows[0].last_prior_meeting.is_none());
+    assert!(context.rows[0].top_open_loop.is_none());
+
+    let context = store.meeting_people_context(newest).unwrap();
+    assert_eq!(context.rows[0].prior_meetings, 2);
+    assert_eq!(
+        context.rows[0].last_prior_meeting.as_ref().unwrap().id,
+        middle
+    );
+    assert!(context.rows[0].top_open_loop.is_none());
 }
 
 /// Renaming your own voice must not mint a contact out of you.

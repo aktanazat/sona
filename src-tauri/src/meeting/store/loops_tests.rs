@@ -101,6 +101,7 @@ fn ledger_meeting(store: &MeetingStore, at_utc_ms: i64) -> MeetingSessionId {
             citations: Vec::new(),
         },
         ledger: Some(ledger()),
+        ledger_failure: None,
     };
     let connection = store.connection().unwrap();
     connection
