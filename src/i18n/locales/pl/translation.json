@@ -548,19 +548,19 @@
         "promptLabel": "Nazwa promptu",
         "promptLabelPlaceholder": "Nazwij ten prompt",
         "promptInstructions": "Instrukcje",
-        "promptInstructionsPlaceholder": "Popraw gramatykę i jasność dla następującego tekstu: ${output}",
+        "promptInstructionsPlaceholder": "Popraw gramatykę i jasność dla następującego tekstu",
         "updatePrompt": "Zaktualizuj prompt",
         "deletePrompt": "Usuń prompt",
         "createPrompt": "Utwórz prompt",
         "empty": {
-          "description": "Prompt mówi modelowi, co zrobić z transkrypcją, na przykład: przepisz poniższe jako krótką wiadomość, zachowując każdy fakt: ${output}"
+          "description": "Prompt mówi modelowi, co zrobić z transkrypcją, na przykład: przepisz poniższe jako krótką wiadomość, zachowując każdy fakt"
         },
         "inUse": "W użyciu",
         "lastPrompt": "Sona zachowuje co najmniej jeden prompt, więc tego nie można usunąć. Najpierw utwórz inny.",
         "libraryTitle": "Prompty przetwarzania końcowego",
         "loading": "Wczytywanie promptów",
         "noSelection": "Nie wybrano promptu: każdy tryb używa promptu, który sam definiuje.",
-        "outputTip": "Wpisz ${output} tam, gdzie ma zostać wstawiona transkrypcja.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Użyj",
         "confirmDelete": {
           "body": "{{name}} zostanie usunięty z biblioteki. Tryby, które już skopiowały jego treść, zachowują własny prompt.",

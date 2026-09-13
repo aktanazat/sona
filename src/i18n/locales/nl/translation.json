@@ -548,19 +548,19 @@
         "promptLabel": "Promptnaam",
         "promptLabelPlaceholder": "Geef deze prompt een naam",
         "promptInstructions": "Instructies",
-        "promptInstructionsPlaceholder": "Verbeter de grammatica en helderheid van de volgende tekst: ${output}",
+        "promptInstructionsPlaceholder": "Verbeter de grammatica en helderheid van de volgende tekst",
         "updatePrompt": "Prompt bijwerken",
         "deletePrompt": "Prompt verwijderen",
         "createPrompt": "Prompt maken",
         "empty": {
-          "description": "Een prompt vertelt het model wat het met het transcript moet doen, bijvoorbeeld: herschrijf het volgende als een kort bericht en behoud elk feit: ${output}"
+          "description": "Een prompt vertelt het model wat het met het transcript moet doen, bijvoorbeeld: herschrijf het volgende als een kort bericht en behoud elk feit"
         },
         "inUse": "In gebruik",
         "lastPrompt": "Sona bewaart minstens één prompt, dus deze kan niet worden verwijderd. Maak eerst een andere.",
         "libraryTitle": "Nabewerkingsprompts",
         "loading": "Prompts laden",
         "noSelection": "Geen prompt geselecteerd: elke modus gebruikt de prompt die deze zelf definieert.",
-        "outputTip": "Schrijf ${output} op de plek waar het transcript moet worden ingevoegd.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Gebruiken",
         "confirmDelete": {
           "body": "{{name}} wordt uit de bibliotheek verwijderd. Modi die de tekst al hebben gekopieerd, behouden hun eigen prompt.",

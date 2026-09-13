@@ -548,19 +548,19 @@
         "promptLabel": "Promptnamn",
         "promptLabelPlaceholder": "Namnge den här prompten",
         "promptInstructions": "Instruktioner",
-        "promptInstructionsPlaceholder": "Förbättra grammatik och tydlighet för följande text: ${output}",
+        "promptInstructionsPlaceholder": "Förbättra grammatik och tydlighet för följande text",
         "updatePrompt": "Uppdatera prompt",
         "deletePrompt": "Ta bort prompt",
         "createPrompt": "Skapa prompt",
         "empty": {
-          "description": "En prompt talar om för modellen vad den ska göra med transkriptet, till exempel: skriv om följande som ett kort meddelande och behåll alla fakta: ${output}"
+          "description": "En prompt talar om för modellen vad den ska göra med transkriptet, till exempel: skriv om följande som ett kort meddelande och behåll alla fakta"
         },
         "inUse": "Används",
         "lastPrompt": "Sona behåller minst en prompt, så den här kan inte raderas. Skapa en annan först.",
         "libraryTitle": "Efterbearbetningsprompter",
         "loading": "Läser in prompter",
         "noSelection": "Ingen prompt vald: varje läge använder den prompt det själv definierar.",
-        "outputTip": "Skriv ${output} där transkriptet ska infogas.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Använd",
         "confirmDelete": {
           "body": "{{name}} tas bort från biblioteket. Lägen som redan kopierat dess text behåller sin egen prompt.",

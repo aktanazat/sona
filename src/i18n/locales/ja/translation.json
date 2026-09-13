@@ -548,19 +548,19 @@
         "promptLabel": "プロンプト名",
         "promptLabelPlaceholder": "プロンプトに名前を付ける",
         "promptInstructions": "指示",
-        "promptInstructionsPlaceholder": "以下のテキストの文法と明瞭さを改善してください: ${output}",
+        "promptInstructionsPlaceholder": "以下のテキストの文法と明瞭さを改善してください",
         "updatePrompt": "プロンプトを更新",
         "deletePrompt": "プロンプトを削除",
         "createPrompt": "プロンプトを作成",
         "empty": {
-          "description": "プロンプトは文字起こしに対してモデルが行う処理を指示します。例: すべての事実を保持したまま、以下を短いメッセージに書き換えてください: ${output}"
+          "description": "プロンプトは文字起こしに対してモデルが行う処理を指示します。例: すべての事実を保持したまま、以下を短いメッセージに書き換えてください"
         },
         "inUse": "使用中",
         "lastPrompt": "Sona は少なくとも1つのプロンプトを保持するため、これは削除できません。先に別のプロンプトを作成してください。",
         "libraryTitle": "後処理プロンプト",
         "loading": "プロンプトを読み込み中",
         "noSelection": "プロンプトが選択されていません: 各モードは自身で定義したプロンプトを使用します。",
-        "outputTip": "文字起こしを挿入する位置に ${output} と書いてください。",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "使用",
         "confirmDelete": {
           "body": "{{name}} はライブラリから削除されます。すでにテキストをコピーしたモードは、それぞれのプロンプトを保持します。",

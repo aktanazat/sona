@@ -548,23 +548,23 @@
         "promptLabel": "Prompt name",
         "promptLabelPlaceholder": "Name this prompt",
         "promptInstructions": "Instructions",
-        "promptInstructionsPlaceholder": "Improve grammar and clarity for the following text: ${output}",
+        "promptInstructionsPlaceholder": "Improve grammar and clarity, keeping every fact.",
         "updatePrompt": "Update prompt",
         "deletePrompt": "Delete prompt",
         "createPrompt": "Create prompt",
         "empty": {
-          "description": "A prompt tells the model what to do with the transcript, for example: rewrite the following as a short message, keeping every fact: ${output}"
+          "description": "A prompt tells the model what to do with the transcript, for example: rewrite this as a short message, keeping every fact."
         },
         "inUse": "In use",
         "lastPrompt": "Sona keeps at least one prompt, so this one cannot be deleted. Create another first.",
         "libraryTitle": "Post-processing prompts",
         "loading": "Loading prompts",
-        "noSelection": "No prompt selected: every mode uses the prompt it defines.",
-        "outputTip": "Write ${output} where the transcript should be inserted.",
+        "noSelection": "{{mode}} uses its own instructions. Use a prompt here to hand it one.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Use",
         "confirmDelete": {
-          "body": "{{name}} is removed from the library. Modes that already copied its text keep their own prompt.",
-          "selected": "{{name}} is in use. Deleting it moves the selection to the first prompt in the list."
+          "body": "{{name}} is removed from the library. Modes that copied its text keep their own instructions.",
+          "selected": "{{name}} is in use. The active mode keeps a copy of its text, and the prompt leaves the library."
         },
         "deleteNamed": "Delete {{name}}",
         "editNamed": "Edit {{name}}",

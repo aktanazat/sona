@@ -548,19 +548,19 @@
         "promptLabel": "Prompt-Name",
         "promptLabelPlaceholder": "Diesen Prompt benennen",
         "promptInstructions": "Anweisungen",
-        "promptInstructionsPlaceholder": "Verbessere Grammatik und Klarheit für folgenden Text: ${output}",
+        "promptInstructionsPlaceholder": "Verbessere Grammatik und Klarheit für folgenden Text",
         "updatePrompt": "Prompt aktualisieren",
         "deletePrompt": "Prompt löschen",
         "createPrompt": "Prompt erstellen",
         "empty": {
-          "description": "Ein Prompt sagt dem Modell, was es mit dem Transkript tun soll, zum Beispiel: Schreibe Folgendes als kurze Nachricht um und behalte jeden Fakt: ${output}"
+          "description": "Ein Prompt sagt dem Modell, was es mit dem Transkript tun soll, zum Beispiel: Schreibe Folgendes als kurze Nachricht um und behalte jeden Fakt"
         },
         "inUse": "In Verwendung",
         "lastPrompt": "Sona behält mindestens einen Prompt, daher kann dieser nicht gelöscht werden. Erstelle zuerst einen anderen.",
         "libraryTitle": "Nachbearbeitungs-Prompts",
         "loading": "Prompts werden geladen",
         "noSelection": "Kein Prompt ausgewählt: Jeder Modus verwendet den Prompt, den er selbst definiert.",
-        "outputTip": "Schreibe ${output} an die Stelle, an der das Transkript eingefügt werden soll.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Verwenden",
         "confirmDelete": {
           "body": "{{name}} wird aus der Bibliothek entfernt. Modi, die den Text bereits kopiert haben, behalten ihren eigenen Prompt.",

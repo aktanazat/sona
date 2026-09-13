@@ -71,7 +71,14 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
   }, [createRequest, onCreateRequestHandled]);
 
   const prompts = settings?.post_process_prompts ?? EMPTY_PROMPTS;
-  const selectedId = settings?.post_process_selected_prompt_id ?? null;
+  /* "In use" is the active mode's own instructions: the mode remembers which
+   * library prompt it took, and the claim ends when either side is edited. */
+  const activeMode = settings?.modes?.find(
+    (mode) => mode.id === settings.active_mode_id,
+  );
+  const inUse = (prompt: LLMPrompt) =>
+    activeMode?.prompt.source_prompt_id === prompt.id &&
+    activeMode.prompt.custom_prompt === prompt.prompt;
   const isLastPrompt = prompts.length <= 1;
   const sectionLabel = t(
     "settings.postProcessing.prompts.libraryTitle",
@@ -140,7 +147,7 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
         <EmptyLine
           text={t(
             "settings.postProcessing.prompts.empty.description",
-            "A prompt tells the model what to do with the transcript, for example: rewrite the following as a short message, keeping every fact: ${output}",
+            "A prompt tells the model what to do with the transcript, for example: rewrite this as a short message, keeping every fact.",
           )}
         />
       );
@@ -149,7 +156,7 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
     return (
       <RuleList label={sectionLabel}>
         {prompts.map((prompt) => {
-          const selected = prompt.id === selectedId;
+          const selected = inUse(prompt);
 
           return (
             <RuleRow
@@ -164,8 +171,8 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
                     {prompt.name}
                   </span>
                   {selected && (
-                    /* The prompt modes start from carries the inverted current
-                     * chip. */
+                    /* The prompt the active mode is using carries the
+                     * inverted current chip. */
                     <Badge className="flex-none">
                       {t("settings.postProcessing.prompts.inUse", "In use")}
                     </Badge>
@@ -256,14 +263,16 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
         >
           {library()}
 
-          {/* Two states the list cannot show on its own: nothing is selected,
-           * or the last prompt is the reason delete is unavailable. */}
-          {prompts.length > 0 && selectedId === null && (
+          {/* Two states the list cannot show on its own: the active mode is
+           * not using any of these, or the last prompt is the reason delete
+           * is unavailable. */}
+          {prompts.length > 0 && activeMode && !prompts.some(inUse) && (
             <Notice live={false} className="px-6 py-3">
-              {t(
-                "settings.postProcessing.prompts.noSelection",
-                "No prompt selected: every mode uses the prompt it defines.",
-              )}
+              {t("settings.postProcessing.prompts.noSelection", {
+                defaultValue:
+                  "{{mode}} uses its own instructions. Use a prompt here to hand it one.",
+                mode: activeMode.name,
+              })}
             </Notice>
           )}
 
@@ -352,12 +361,12 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
                   disabled={busy}
                   data-testid="prompt-body-field"
                 />
-                {/* The one thing the field cannot show: the token that marks
-                 * where the transcript lands. */}
+                {/* The one thing the field cannot show: the transcript is
+                 * sent after the instructions, never pasted into them. */}
                 <Hint id={outputTipId}>
                   {t(
                     "settings.postProcessing.prompts.outputTip",
-                    "Write ${output} where the transcript should be inserted.",
+                    "The transcript follows the instructions; there is no need to mark where it goes.",
                   )}
                 </Hint>
               </div>
@@ -404,15 +413,15 @@ export const DictationPrompts: React.FC<DictationPromptsProps> = ({
             {/* The consequence is the description, so the dialog is a title
              * and one sentence rather than a title, a blurb and a sentence. */}
             <DialogDescription>
-              {pendingDelete?.id === selectedId
+              {pendingDelete && inUse(pendingDelete)
                 ? t("settings.postProcessing.prompts.confirmDelete.selected", {
                     defaultValue:
-                      "{{name}} is in use. Deleting it moves the selection to the first prompt in the list.",
-                    name: pendingDelete?.name ?? "",
+                      "{{name}} is in use. The active mode keeps a copy of its text, and the prompt leaves the library.",
+                    name: pendingDelete.name,
                   })
                 : t("settings.postProcessing.prompts.confirmDelete.body", {
                     defaultValue:
-                      "{{name}} is removed from the library. Modes that already copied its text keep their own prompt.",
+                      "{{name}} is removed from the library. Modes that copied its text keep their own instructions.",
                     name: pendingDelete?.name ?? "",
                   })}
             </DialogDescription>

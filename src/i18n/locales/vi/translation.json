@@ -548,19 +548,19 @@
         "promptLabel": "Tên prompt",
         "promptLabelPlaceholder": "Đặt tên cho prompt này",
         "promptInstructions": "Hướng dẫn",
-        "promptInstructionsPlaceholder": "Cải thiện ngữ pháp và độ rõ ràng cho văn bản sau: ${output}",
+        "promptInstructionsPlaceholder": "Cải thiện ngữ pháp và độ rõ ràng cho văn bản sau",
         "updatePrompt": "Cập nhật Prompt",
         "deletePrompt": "Xóa Prompt",
         "createPrompt": "Tạo Prompt",
         "empty": {
-          "description": "Prompt cho mô hình biết cần làm gì với bản ghi thoại, ví dụ: viết lại nội dung sau thành một tin nhắn ngắn, giữ nguyên mọi dữ kiện: ${output}"
+          "description": "Prompt cho mô hình biết cần làm gì với bản ghi thoại, ví dụ: viết lại nội dung sau thành một tin nhắn ngắn, giữ nguyên mọi dữ kiện"
         },
         "inUse": "Đang dùng",
         "lastPrompt": "Sona giữ ít nhất một prompt, nên không thể xóa prompt này. Hãy tạo prompt khác trước.",
         "libraryTitle": "Prompt hậu xử lý",
         "loading": "Đang tải prompt",
         "noSelection": "Chưa chọn prompt nào: mỗi chế độ dùng prompt mà nó tự định nghĩa.",
-        "outputTip": "Viết ${output} tại vị trí bản ghi thoại cần được chèn vào.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Dùng",
         "confirmDelete": {
           "body": "{{name}} sẽ bị xóa khỏi thư viện. Các chế độ đã sao chép văn bản của nó giữ prompt riêng của chúng.",

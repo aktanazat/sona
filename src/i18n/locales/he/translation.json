@@ -548,19 +548,19 @@
         "promptLabel": "שם הפרומפט",
         "promptLabelPlaceholder": "תן שם לפרומפט",
         "promptInstructions": "הוראות",
-        "promptInstructionsPlaceholder": "שפר דקדוק ובהירות עבור הטקסט הבא: ${output}",
+        "promptInstructionsPlaceholder": "שפר דקדוק ובהירות עבור הטקסט הבא",
         "updatePrompt": "עדכן פרומפט",
         "deletePrompt": "מחק פרומפט",
         "createPrompt": "צור פרומפט",
         "empty": {
-          "description": "הנחיה אומרת למודל מה לעשות עם התמלול, לדוגמה: שכתב את הטקסט הבא כהודעה קצרה תוך שמירה על כל עובדה: ${output}"
+          "description": "הנחיה אומרת למודל מה לעשות עם התמלול, לדוגמה: שכתב את הטקסט הבא כהודעה קצרה תוך שמירה על כל עובדה"
         },
         "inUse": "בשימוש",
         "lastPrompt": "Sona שומר לפחות הנחיה אחת, ולכן לא ניתן למחוק אותה. צור אחרת תחילה.",
         "libraryTitle": "הנחיות עיבוד לאחר תמלול",
         "loading": "טוען הנחיות",
         "noSelection": "לא נבחרה הנחיה: כל מצב משתמש בהנחיה שהוא מגדיר.",
-        "outputTip": "כתוב ${output} במקום שבו התמלול צריך להשתלב.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "השתמש",
         "confirmDelete": {
           "body": "{{name}} יוסר מהספרייה. מצבים שכבר העתיקו את הטקסט שלו שומרים על ההנחיה שלהם.",

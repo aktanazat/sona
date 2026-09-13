@@ -548,19 +548,19 @@
         "promptLabel": "Nombre del prompt",
         "promptLabelPlaceholder": "Nombra este prompt",
         "promptInstructions": "Instrucciones",
-        "promptInstructionsPlaceholder": "Mejora la gramática y claridad del siguiente texto: ${output}",
+        "promptInstructionsPlaceholder": "Mejora la gramática y claridad del siguiente texto",
         "updatePrompt": "Actualizar prompt",
         "deletePrompt": "Eliminar prompt",
         "createPrompt": "Crear prompt",
         "empty": {
-          "description": "Un prompt le dice al modelo qué hacer con la transcripción, por ejemplo: reescribe lo siguiente como un mensaje corto, conservando cada dato: ${output}"
+          "description": "Un prompt le dice al modelo qué hacer con la transcripción, por ejemplo: reescribe lo siguiente como un mensaje corto, conservando cada dato"
         },
         "inUse": "En uso",
         "lastPrompt": "Sona conserva al menos un prompt, así que este no puede eliminarse. Crea otro primero.",
         "libraryTitle": "Prompts de posprocesamiento",
         "loading": "Cargando prompts",
         "noSelection": "Ningún prompt seleccionado: cada modo usa el prompt que define.",
-        "outputTip": "Escribe ${output} donde deba insertarse la transcripción.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Usar",
         "confirmDelete": {
           "body": "{{name}} se elimina de la biblioteca. Los modos que ya copiaron su texto conservan su propio prompt.",

@@ -548,19 +548,19 @@
         "promptLabel": "اسم المطالبة",
         "promptLabelPlaceholder": "سمِّ هذه المطالبة",
         "promptInstructions": "التعليمات",
-        "promptInstructionsPlaceholder": "قم بتحسين القواعد والوضوح للنص التالي: ${output}",
+        "promptInstructionsPlaceholder": "قم بتحسين القواعد والوضوح للنص التالي",
         "updatePrompt": "تحديث المطالبة",
         "deletePrompt": "حذف المطالبة",
         "createPrompt": "إنشاء مطالبة",
         "empty": {
-          "description": "يخبر الموجّه النموذج بما يفعله بالنص، مثلًا: أعد كتابة ما يلي كرسالة قصيرة مع الحفاظ على كل الحقائق: ${output}"
+          "description": "يخبر الموجّه النموذج بما يفعله بالنص، مثلًا: أعد كتابة ما يلي كرسالة قصيرة مع الحفاظ على كل الحقائق"
         },
         "inUse": "قيد الاستخدام",
         "lastPrompt": "يحتفظ Sona بموجّه واحد على الأقل، لذا لا يمكن حذف هذا. أنشئ آخر أولًا.",
         "libraryTitle": "موجّهات المعالجة اللاحقة",
         "loading": "جارٍ تحميل الموجّهات",
         "noSelection": "لم يتم اختيار موجّه: يستخدم كل وضع الموجّه الذي يعرّفه.",
-        "outputTip": "اكتب ${output} في المكان الذي يجب إدراج النص فيه.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "استخدام",
         "confirmDelete": {
           "body": "تتم إزالة {{name}} من المكتبة. الأوضاع التي نسخت نصه بالفعل تحتفظ بموجّهها الخاص.",

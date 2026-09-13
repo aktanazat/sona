@@ -548,19 +548,19 @@
         "promptLabel": "提示詞名稱",
         "promptLabelPlaceholder": "為此提示詞命名",
         "promptInstructions": "指令",
-        "promptInstructionsPlaceholder": "改善以下文字的語法和清晰度: ${output}",
+        "promptInstructionsPlaceholder": "改善以下文字的語法和清晰度",
         "updatePrompt": "更新提示詞",
         "deletePrompt": "刪除提示詞",
         "createPrompt": "建立提示詞",
         "empty": {
-          "description": "提示會告訴模型如何處理逐字稿，例如：將以下內容改寫為簡短訊息，保留所有事實：${output}"
+          "description": "提示會告訴模型如何處理逐字稿，例如：將以下內容改寫為簡短訊息，保留所有事實"
         },
         "inUse": "使用中",
         "lastPrompt": "Sona 至少保留一個提示，因此無法刪除此提示。請先建立另一個。",
         "libraryTitle": "後處理提示",
         "loading": "正在載入提示",
         "noSelection": "未選取提示：每個模式使用自己定義的提示。",
-        "outputTip": "在應插入逐字稿的位置寫上 ${output}。",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "使用",
         "confirmDelete": {
           "body": "{{name}} 會從提示庫中移除。已複製其文字的模式會保留自己的提示。",

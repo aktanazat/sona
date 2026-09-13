@@ -548,19 +548,19 @@
         "promptLabel": "Nome do prompt",
         "promptLabelPlaceholder": "Nomeie este prompt",
         "promptInstructions": "Instruções",
-        "promptInstructionsPlaceholder": "Melhore a gramática e clareza do seguinte texto: ${output}",
+        "promptInstructionsPlaceholder": "Melhore a gramática e clareza do seguinte texto",
         "updatePrompt": "Atualizar Prompt",
         "deletePrompt": "Excluir Prompt",
         "createPrompt": "Criar Prompt",
         "empty": {
-          "description": "Um prompt diz ao modelo o que fazer com a transcrição, por exemplo: reescreve o seguinte como uma mensagem curta, mantendo todos os factos: ${output}"
+          "description": "Um prompt diz ao modelo o que fazer com a transcrição, por exemplo: reescreve o seguinte como uma mensagem curta, mantendo todos os factos"
         },
         "inUse": "Em uso",
         "lastPrompt": "O Sona mantém pelo menos um prompt, por isso este não pode ser eliminado. Crie outro primeiro.",
         "libraryTitle": "Prompts de pós-processamento",
         "loading": "A carregar prompts",
         "noSelection": "Nenhum prompt selecionado: cada modo usa o prompt que define.",
-        "outputTip": "Escreva ${output} onde a transcrição deve ser inserida.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Usar",
         "confirmDelete": {
           "body": "{{name}} é removido da biblioteca. Os modos que já copiaram o seu texto mantêm o próprio prompt.",

@@ -548,19 +548,19 @@
         "promptLabel": "프롬프트 이름",
         "promptLabelPlaceholder": "이 프롬프트의 이름을 지정하세요",
         "promptInstructions": "지시사항",
-        "promptInstructionsPlaceholder": "다음 텍스트의 문법과 명확성을 개선하세요: ${output}",
+        "promptInstructionsPlaceholder": "다음 텍스트의 문법과 명확성을 개선하세요",
         "updatePrompt": "프롬프트 업데이트",
         "deletePrompt": "프롬프트 삭제",
         "createPrompt": "프롬프트 만들기",
         "empty": {
-          "description": "프롬프트는 모델이 전사로 무엇을 할지 지시합니다. 예: 모든 사실을 유지하면서 다음을 짧은 메시지로 다시 쓰기: ${output}"
+          "description": "프롬프트는 모델이 전사로 무엇을 할지 지시합니다. 예: 모든 사실을 유지하면서 다음을 짧은 메시지로 다시 쓰기"
         },
         "inUse": "사용 중",
         "lastPrompt": "Sona는 프롬프트를 최소 하나 유지하므로 이 프롬프트는 삭제할 수 없습니다. 먼저 다른 프롬프트를 만드세요.",
         "libraryTitle": "후처리 프롬프트",
         "loading": "프롬프트 불러오는 중",
         "noSelection": "선택된 프롬프트 없음: 각 모드가 자체 정의한 프롬프트를 사용합니다.",
-        "outputTip": "전사가 삽입될 위치에 ${output}을 쓰세요.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "사용",
         "confirmDelete": {
           "body": "{{name}}이(가) 라이브러리에서 제거됩니다. 이미 텍스트를 복사한 모드는 자체 프롬프트를 유지합니다.",

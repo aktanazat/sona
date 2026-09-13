@@ -548,19 +548,19 @@
         "promptLabel": "提示词名称",
         "promptLabelPlaceholder": "为此提示词命名",
         "promptInstructions": "指令",
-        "promptInstructionsPlaceholder": "改进以下文本的语法和清晰度: ${output}",
+        "promptInstructionsPlaceholder": "改进以下文本的语法和清晰度",
         "updatePrompt": "更新提示词",
         "deletePrompt": "删除提示词",
         "createPrompt": "创建提示词",
         "empty": {
-          "description": "提示词告诉模型如何处理转录，例如：将以下内容改写为一条简短消息，保留所有事实：${output}"
+          "description": "提示词告诉模型如何处理转录，例如：将以下内容改写为一条简短消息，保留所有事实"
         },
         "inUse": "使用中",
         "lastPrompt": "Sona 至少保留一个提示词，因此无法删除此项。请先创建另一个。",
         "libraryTitle": "后处理提示词",
         "loading": "正在加载提示词",
         "noSelection": "未选择提示词：每个模式使用自己定义的提示词。",
-        "outputTip": "在转录应插入的位置写上 ${output}。",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "使用",
         "confirmDelete": {
           "body": "{{name}} 将从库中移除。已复制其文本的模式会保留各自的提示词。",

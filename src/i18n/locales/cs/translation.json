@@ -548,19 +548,19 @@
         "promptLabel": "Název promptu",
         "promptLabelPlaceholder": "Pojmenujte tento prompt",
         "promptInstructions": "Instrukce",
-        "promptInstructionsPlaceholder": "Zlepšete gramatiku a srozumitelnost následujícího textu: ${output}",
+        "promptInstructionsPlaceholder": "Zlepšete gramatiku a srozumitelnost následujícího textu",
         "updatePrompt": "Aktualizovat prompt",
         "deletePrompt": "Smazat prompt",
         "createPrompt": "Vytvořit prompt",
         "empty": {
-          "description": "Prompt říká modelu, co má s přepisem udělat, například: přepiš následující text jako krátkou zprávu a zachovej všechna fakta: ${output}"
+          "description": "Prompt říká modelu, co má s přepisem udělat, například: přepiš následující text jako krátkou zprávu a zachovej všechna fakta"
         },
         "inUse": "Používá se",
         "lastPrompt": "Sona zachovává alespoň jeden prompt, takže tento nelze smazat. Nejprve vytvořte jiný.",
         "libraryTitle": "Prompty pro následné zpracování",
         "loading": "Načítání promptů",
         "noSelection": "Není vybrán žádný prompt: každý režim používá prompt, který sám definuje.",
-        "outputTip": "Napište ${output} tam, kam se má vložit přepis.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Použít",
         "confirmDelete": {
           "body": "{{name}} bude odstraněn z knihovny. Režimy, které si jeho text již zkopírovaly, si svůj prompt ponechají.",

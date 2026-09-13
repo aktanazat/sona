@@ -548,19 +548,19 @@
         "promptLabel": "Promptnavn",
         "promptLabelPlaceholder": "Navngiv denne prompt",
         "promptInstructions": "Instruktioner",
-        "promptInstructionsPlaceholder": "Forbedr grammatik og klarhed for følgende tekst: ${output}",
+        "promptInstructionsPlaceholder": "Forbedr grammatik og klarhed for følgende tekst",
         "updatePrompt": "Opdater prompt",
         "deletePrompt": "Slet prompt",
         "createPrompt": "Opret prompt",
         "empty": {
-          "description": "En prompt fortæller modellen, hvad den skal gøre med transskriptionen, for eksempel: omskriv følgende som en kort besked og behold alle fakta: ${output}"
+          "description": "En prompt fortæller modellen, hvad den skal gøre med transskriptionen, for eksempel: omskriv følgende som en kort besked og behold alle fakta"
         },
         "inUse": "I brug",
         "lastPrompt": "Sona beholder mindst én prompt, så denne kan ikke slettes. Opret først en anden.",
         "libraryTitle": "Efterbehandlingsprompter",
         "loading": "Indlæser prompter",
         "noSelection": "Ingen prompt valgt: hver tilstand bruger den prompt, den selv definerer.",
-        "outputTip": "Skriv ${output} der, hvor transskriptionen skal indsættes.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Brug",
         "confirmDelete": {
           "body": "{{name}} fjernes fra biblioteket. Tilstande, der allerede har kopieret dens tekst, beholder deres egen prompt.",

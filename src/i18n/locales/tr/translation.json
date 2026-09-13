@@ -548,19 +548,19 @@
         "promptLabel": "Prompt adı",
         "promptLabelPlaceholder": "Bu prompta ad verin",
         "promptInstructions": "Talimatlar",
-        "promptInstructionsPlaceholder": "Aşağıdaki metnin dilbilgisini ve açıklığını iyileştir: ${output}",
+        "promptInstructionsPlaceholder": "Aşağıdaki metnin dilbilgisini ve açıklığını iyileştir",
         "updatePrompt": "Promptu Güncelle",
         "deletePrompt": "Promptu Sil",
         "createPrompt": "Prompt Oluştur",
         "empty": {
-          "description": "Bir istem, modele transkriptle ne yapacağını söyler, örneğin: aşağıdakini her gerçeği koruyarak kısa bir mesaj olarak yeniden yaz: ${output}"
+          "description": "Bir istem, modele transkriptle ne yapacağını söyler, örneğin: aşağıdakini her gerçeği koruyarak kısa bir mesaj olarak yeniden yaz"
         },
         "inUse": "Kullanımda",
         "lastPrompt": "Sona en az bir istem tutar, bu yüzden bu istem silinemez. Önce başka bir tane oluşturun.",
         "libraryTitle": "Son işleme istemleri",
         "loading": "İstemler yükleniyor",
         "noSelection": "İstem seçilmedi: her mod kendi tanımladığı istemi kullanır.",
-        "outputTip": "Transkriptin ekleneceği yere ${output} yazın.",
+        "outputTip": "The transcript follows the instructions; there is no need to mark where it goes.",
         "use": "Kullan",
         "confirmDelete": {
           "body": "{{name}} kitaplıktan kaldırılır. Metnini zaten kopyalayan modlar kendi istemlerini korur.",
