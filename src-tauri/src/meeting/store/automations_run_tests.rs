@@ -15,6 +15,7 @@
 
 use super::workflow_core_tests::{meeting, store};
 use super::*;
+use crate::meeting::analytics::MeetingNotesTemplate;
 use crate::meeting::automation_types::{
     MeetingAutomationFailure, MeetingAutomationKind, MeetingAutomationRunReceipt,
     MeetingAutomationRunState, MeetingSeriesAutomationSetRequest,
@@ -22,7 +23,7 @@ use crate::meeting::automation_types::{
 use crate::meeting::automations::{reminders_gate, AutomationEffects, EffectOutcome, ReminderItem};
 use crate::meeting::detection::calendar::CalendarAccess;
 use crate::meeting::detection::machine::CalendarEventSummary;
-use crate::meeting::export::render as render_export;
+use crate::meeting::export::{render as render_export, ExportDocument};
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
 };
@@ -428,9 +429,19 @@ fn a_webhook_is_posted_the_same_document_the_export_action_writes() {
     let (url, body) = &asked.webhooks[0];
     assert_eq!(url, TAILNET_URL);
     let review = store.review_snapshot(session_id).unwrap();
+    let user_notes = store
+        .user_notes(session_id, MeetingNotesTemplate::default())
+        .unwrap();
     assert_eq!(
         body,
-        &render_export(MeetingExportFormat::Json, &review).unwrap(),
+        &render_export(
+            MeetingExportFormat::Json,
+            &ExportDocument {
+                review: &review,
+                user_notes: &user_notes.body,
+            },
+        )
+        .unwrap(),
         "one document, from the one renderer the Export action uses"
     );
 }

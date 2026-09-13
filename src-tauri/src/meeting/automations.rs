@@ -43,6 +43,7 @@
 //! meeting" is the trigger; the artifact revision is only the identity that
 //! keeps one trigger from firing twice.
 
+use super::analytics::MeetingNotesTemplate;
 use super::automation_types::{
     MeetingAutomationFailure, MeetingAutomationKind, MeetingAutomationRunReceipt,
     MeetingAutomationRunState, MeetingSeriesAutomation,
@@ -417,9 +418,20 @@ fn plans_for_meeting(
             )
         })
         .then(|| {
-            export::render(MeetingExportFormat::Json, &review)
-                .ok()
-                .map(Arc::new)
+            // The template only fills in the default when no notes row
+            // exists, and an export reads the body alone.
+            let user_notes = store
+                .user_notes(session_id, MeetingNotesTemplate::default())
+                .ok()?;
+            export::render(
+                MeetingExportFormat::Json,
+                &export::ExportDocument {
+                    review: &review,
+                    user_notes: &user_notes.body,
+                },
+            )
+            .ok()
+            .map(Arc::new)
         })
         .flatten();
     let reminders = if kinds.contains(&MeetingAutomationKind::Reminders) {

@@ -3237,8 +3237,17 @@ impl MeetingSessionManager {
         if !review.can_export {
             return Err(MeetingCommandError::InvalidTransition);
         }
-        let contents = export::render(request.format, &review)
-            .map_err(|_| MeetingCommandError::ExportFailed)?;
+        let user_notes = store
+            .user_notes(request.session_id, self.default_notes_template())
+            .map_err(map_store_error)?;
+        let contents = export::render(
+            request.format,
+            &export::ExportDocument {
+                review: &review,
+                user_notes: &user_notes.body,
+            },
+        )
+        .map_err(|_| MeetingCommandError::ExportFailed)?;
         let app = self.app.clone().ok_or(MeetingCommandError::ExportFailed)?;
         let (filter_name, extension, file_name) = match request.format {
             MeetingExportFormat::Json => ("JSON", "json", "meeting.json"),
