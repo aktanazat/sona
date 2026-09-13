@@ -815,7 +815,8 @@
           "decode": "Impossibile decodificare il file audio.",
           "duration_limit": "I file audio importati sono limitati a 30 minuti.",
           "transcription": "Impossibile trascrivere l'audio.",
-          "history": "Impossibile salvare la trascrizione nella cronologia."
+          "history": "Impossibile salvare la trascrizione nella cronologia.",
+          "history_off": "La cronologia salvata è disattivata, quindi le parole di questo file non hanno dove andare. Imposta i dettati da conservare sopra 0 nella Libreria."
         },
         "errors": {
           "start": "Non è stato possibile avviare l'importazione del file. Riprova.",

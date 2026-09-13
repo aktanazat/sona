@@ -11,7 +11,7 @@ use crate::managers::transcription::CloudStreamFinalization;
 #[cfg(feature = "cloud-realtime")]
 use crate::managers::transcription::StreamEngine;
 use crate::managers::transcription::{BatchDecode, StreamWorkKind, TranscriptionManager};
-use crate::modes::{AsrPlan, CloudReceiptStatus, RequestedEngine, RunPlan};
+use crate::modes::{AsrPlan, CloudReceiptStatus, RequestedEngine, RewriteOutcome, RunPlan};
 use crate::prompt_renderer::RenderedPrompt;
 use crate::secrets::{SecretAccount, SecretManager, SecretResolveError};
 use crate::settings::{get_settings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
@@ -56,6 +56,40 @@ impl RecordingErrorEvent {
             error_type: error_type.to_string(),
             cloud_kind: None,
             detail: None,
+        }
+    }
+}
+
+/// `paste-error`: the words were transcribed and kept, but never left Sona.
+/// The id says which history entry holds them, so a shell can open it; it is
+/// `None` when history is off and nothing was kept.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct PasteErrorEvent {
+    history_id: Option<i64>,
+}
+
+/// `rewrite-skipped`: the mode asked for a rewrite and the words went out as
+/// spoken instead. `outcome` says why; the id names the history entry that
+/// keeps the receipt, `None` when history is off.
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct RewriteSkippedEvent {
+    history_id: Option<i64>,
+    outcome: RewriteOutcome,
+}
+
+impl RewriteSkippedEvent {
+    /// Only an outcome the user did not choose is worth a notice: a mode
+    /// without a rewrite and a rewrite that landed are both the plan working.
+    fn for_outcome(history_id: Option<i64>, outcome: RewriteOutcome) -> Option<Self> {
+        match outcome {
+            RewriteOutcome::NotRequested | RewriteOutcome::Applied => None,
+            RewriteOutcome::Unavailable
+            | RewriteOutcome::NoCredential
+            | RewriteOutcome::TooLong
+            | RewriteOutcome::Failed => Some(Self {
+                history_id,
+                outcome,
+            }),
         }
     }
 }
@@ -283,6 +317,55 @@ fn strip_think_block(s: &str) -> &str {
     s
 }
 
+/// What a rewrite may replace the dictation with: a non-blank answer. A blank
+/// one is the provider declining, and typing nothing in place of the words
+/// would lose every one of them.
+fn accept_rewrite(content: &str) -> Result<String, RewriteOutcome> {
+    let cleaned = strip_invisible_chars(strip_think_block(content));
+    if cleaned.trim().is_empty() {
+        warn!("Post-processing returned no text; delivering the raw transcript");
+        return Err(RewriteOutcome::Failed);
+    }
+    Ok(cleaned)
+}
+
+/// The rewrite inside a structured answer.
+///
+/// The schema asks for one object with the transcription field. An endpoint
+/// that ignores the schema answers in prose, and that prose is the rewrite.
+/// One that answers with an object missing the field, or with JSON that does
+/// not parse, answered the wrong question: its bytes are not the dictation
+/// and must not be typed in its place.
+fn structured_rewrite(content: &str) -> Result<String, StructuredRewriteError> {
+    let content = strip_think_block(content);
+    let body = strip_code_fence(content);
+    if !body.trim_start().starts_with('{') {
+        return Ok(body.to_string());
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| StructuredRewriteError::Malformed)?;
+    json.get(TRANSCRIPTION_FIELD)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or(StructuredRewriteError::MissingField)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StructuredRewriteError {
+    Malformed,
+    MissingField,
+}
+
+/// A fenced ```json block around an object is still that object.
+fn strip_code_fence(content: &str) -> &str {
+    let trimmed = content.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest.find('\n').map_or("", |newline| &rest[newline + 1..]);
+    rest.strip_suffix("```").unwrap_or(rest).trim()
+}
+
 /// Returns `true` when a transcription has no meaningful content to
 /// post-process (empty or whitespace-only). Used to skip the post-processing
 /// LLM call when nothing was actually transcribed, which would otherwise make
@@ -376,6 +459,7 @@ enum FrozenTranscript {
 #[cfg(feature = "cloud-realtime")]
 fn resolve_cloud_finalization<F>(
     run: &RunPlan,
+    cloud: &crate::modes::CloudRunPlan,
     finalization: CloudStreamFinalization,
     samples: &[f32],
     decode_fallback: F,
@@ -384,15 +468,18 @@ where
     F: FnOnce(&AsrPlan, &[f32]) -> anyhow::Result<BatchDecode>,
 {
     match finalization {
-        CloudStreamFinalization::Final(text) => Ok(FrozenTranscript::Final {
-            // Provider finals never pass through post_process_transcription_text,
-            // so the text is the provider's own output.
-            model_produced_text: !text.trim().is_empty(),
-            text,
-            engine_used: run.requested_engine(),
-            cloud_status: CloudReceiptStatus::Final,
-            realtime_factor: None,
-        }),
+        CloudStreamFinalization::Final(text) => {
+            // The provider's own words decide whether it produced text; the
+            // user's passes below may legitimately empty them.
+            let model_produced_text = !text.trim().is_empty();
+            Ok(FrozenTranscript::Final {
+                text: crate::managers::transcription::finalize_cloud_text(text, run.asr(), cloud),
+                engine_used: run.requested_engine(),
+                cloud_status: CloudReceiptStatus::Final,
+                realtime_factor: None,
+                model_produced_text,
+            })
+        }
         CloudStreamFinalization::Failed { failure, .. } => {
             let Some(fallback) = run.local_asr() else {
                 debug!("Cloud final unavailable without local fallback: {failure:?}");
@@ -417,7 +504,7 @@ fn transcribe_frozen_run(
     run: &RunPlan,
     samples: &[f32],
 ) -> anyhow::Result<FrozenTranscript> {
-    if run.cloud().is_some() {
+    if let Some(cloud) = run.cloud() {
         let finalization = manager.finalize_cloud_stream();
         if matches!(&finalization, CloudStreamFinalization::Failed { .. })
             && run.local_asr().is_some()
@@ -427,7 +514,7 @@ fn transcribe_frozen_run(
             manager.clear_stream_preview();
             manager.emit_stream_engine(StreamEngine::LocalFallback);
         }
-        resolve_cloud_finalization(run, finalization, samples, |fallback, audio| {
+        resolve_cloud_finalization(run, cloud, finalization, samples, |fallback, audio| {
             manager.transcribe_shared(fallback, audio)
         })
     } else {
@@ -502,34 +589,37 @@ fn provider_allows_unauthenticated_request(
 /// Runs the frozen rewrite provider over an already-rendered prompt. Voice
 /// command mode renders a different prompt but must not fork the provider,
 /// credential, structured-output, and fallback handling below.
+///
+/// The error is how the rewrite ended, never `Applied` or `NotRequested`:
+/// the caller delivers the raw words and records the reason with them.
 pub(crate) async fn post_process_transcription(
     app: &AppHandle,
     run: &RunPlan,
     rendered: &RenderedPrompt,
     transcription: &str,
-) -> Option<String> {
+) -> Result<String, RewriteOutcome> {
     if is_blank_transcription(transcription) {
         debug!("Post-processing skipped because the transcription is empty");
-        return None;
+        return Err(RewriteOutcome::Failed);
     }
 
     // The run plan freezes the provider and model at recording start. The
     // credential is resolved immediately before provider I/O instead.
     let Some(llm) = run.prompt().llm.as_ref() else {
         debug!("Post-processing skipped because this run resolved no provider");
-        return None;
+        return Err(RewriteOutcome::Unavailable);
     };
     let provider = llm.provider.clone();
     let endpoint = llm.endpoint.clone();
     if !provider.endpoint().is_ok_and(|current| current == endpoint) {
         warn!("Post-processing skipped because its frozen destination changed");
-        return None;
+        return Err(RewriteOutcome::Unavailable);
     }
     let model = llm.model_id.clone();
 
     if model.trim().is_empty() {
         debug!("Post-processing skipped because no model is configured");
-        return None;
+        return Err(RewriteOutcome::Unavailable);
     }
 
     debug!("Starting LLM post-processing");
@@ -547,7 +637,7 @@ pub(crate) async fn post_process_transcription(
             // record of a dictation that went out uncleaned.
             if let Some(reason) = apple_intelligence::apple_intelligence_blocker() {
                 warn!("Post-processing skipped because {reason}");
-                return None;
+                return Err(RewriteOutcome::Unavailable);
             }
 
             let token_limit = model.trim().parse::<i32>().unwrap_or(0);
@@ -556,11 +646,10 @@ pub(crate) async fn post_process_transcription(
                 &rendered.user_message,
                 token_limit,
             ) {
-                Ok(result) if result.trim().is_empty() => None,
-                Ok(result) => Some(strip_invisible_chars(&result)),
+                Ok(result) => accept_rewrite(&result),
                 Err(error) => {
                     warn!("Apple Intelligence post-processing failed: {error}");
-                    None
+                    Err(RewriteOutcome::Failed)
                 }
             };
         }
@@ -568,7 +657,7 @@ pub(crate) async fn post_process_transcription(
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             debug!("Apple Intelligence provider selected on an unsupported platform");
-            return None;
+            return Err(RewriteOutcome::Unavailable);
         }
     }
 
@@ -577,7 +666,7 @@ pub(crate) async fn post_process_transcription(
             Ok(account) => account,
             Err(_) => {
                 warn!("Post-processing skipped because its credential account is invalid");
-                return None;
+                return Err(RewriteOutcome::NoCredential);
             }
         };
         if provider_allows_unauthenticated_request(&provider, &endpoint) {
@@ -588,14 +677,14 @@ pub(crate) async fn post_process_transcription(
                 Ok(secret) => Some(secret),
                 Err(SecretResolveError::NotFound) => {
                     warn!("Post-processing skipped because no credential is configured");
-                    return None;
+                    return Err(RewriteOutcome::NoCredential);
                 }
                 Err(SecretResolveError::Store(error)) => {
                     warn!(
                         "Post-processing skipped because credential access failed ({:?})",
                         error.kind
                     );
-                    return None;
+                    return Err(RewriteOutcome::NoCredential);
                 }
             }
         }
@@ -632,23 +721,24 @@ pub(crate) async fn post_process_transcription(
                 if secret.is_some() {
                     crate::settings::mark_post_process_secret_verified(app, &provider.id);
                 }
-                let content = strip_think_block(&content);
-                match serde_json::from_str::<serde_json::Value>(content) {
-                    Ok(json) => {
-                        if let Some(transcription_value) = json
-                            .get(TRANSCRIPTION_FIELD)
-                            .and_then(|value| value.as_str())
-                        {
-                            return Some(strip_invisible_chars(transcription_value));
-                        }
-                        return Some(strip_invisible_chars(content));
+                match structured_rewrite(&content) {
+                    Ok(text) => return accept_rewrite(&text),
+                    // The endpoint honoured the request and answered the
+                    // wrong thing; asking again in prose is the one retry
+                    // that can still produce the rewrite.
+                    Err(error) => {
+                        warn!("Structured post-processing answered {error:?}; retrying without a schema");
                     }
-                    Err(_) => return Some(strip_invisible_chars(content)),
                 }
             }
-            Ok(None) => return None,
-            Err(_) => {
-                warn!("Structured post-processing failed; retrying without a schema");
+            Ok(None) => {
+                warn!(
+                    "Structured post-processing returned no content; delivering the raw transcript"
+                );
+                return Err(RewriteOutcome::Failed);
+            }
+            Err(error) => {
+                warn!("Structured post-processing failed ({error}); retrying without a schema");
             }
         }
     }
@@ -668,9 +758,16 @@ pub(crate) async fn post_process_transcription(
             if secret.is_some() {
                 crate::settings::mark_post_process_secret_verified(app, &provider.id);
             }
-            Some(strip_invisible_chars(strip_think_block(&content)))
+            accept_rewrite(&content)
         }
-        Ok(None) | Err(_) => None,
+        Ok(None) => {
+            warn!("Post-processing returned no content; delivering the raw transcript");
+            Err(RewriteOutcome::Failed)
+        }
+        Err(error) => {
+            warn!("Post-processing failed ({error}); delivering the raw transcript");
+            Err(RewriteOutcome::Failed)
+        }
     }
 }
 
@@ -725,6 +822,8 @@ async fn maybe_convert_chinese_variant(
 pub(crate) struct ProcessedTranscription {
     pub final_text: String,
     pub post_processed_text: Option<String>,
+    /// How the mode's rewrite ended, for the receipt and the shell's notice.
+    pub rewrite: RewriteOutcome,
 }
 
 /// The measured facts about one capture that reached the engine. Every receipt
@@ -778,7 +877,8 @@ impl PendingHistoryEntry {
             run_receipt: run
                 .mode_receipt_with_cloud_status(Some(decoded.engine_used), decoded.cloud_status)
                 .with_input_level(capture.level.peak, capture.level.rms)
-                .with_realtime_factor(decoded.realtime_factor),
+                .with_realtime_factor(decoded.realtime_factor)
+                .with_rewrite(processed.rewrite),
             context_receipt: run.context().receipt().clone(),
             started_at_ms: run.run_started_at_ms,
             duration_ms: capture.duration_ms,
@@ -879,6 +979,8 @@ impl PendingHistoryEntry {
         }
     }
 
+    /// `None` is a dictation with no row: saved history is off, or the write
+    /// failed. Either way there is nothing for a delivery receipt to join.
     fn save(self, history: &HistoryManager) -> Option<i64> {
         let completed_at_ms = now_ms();
         match history.save_entry_with_receipt(
@@ -898,7 +1000,7 @@ impl PendingHistoryEntry {
                 capture_status: self.capture_status,
             }),
         ) {
-            Ok(entry) => Some(entry.id),
+            Ok(entry) => entry.map(|entry| entry.id),
             Err(error) => {
                 error!("Failed to save history entry with run receipt: {error}");
                 None
@@ -1248,19 +1350,43 @@ pub(crate) async fn process_transcription_output(
             rendered.budget_receipt.user_budget_bytes,
             rendered.budget_receipt.transcript_truncated
         );
-        if let Some(processed_text) =
-            post_process_transcription(app, run, &rendered, &final_text).await
-        {
-            post_processed_text = Some(processed_text.clone());
-            final_text = processed_text;
-        }
-    } else if final_text != transcription {
+        // A model cannot keep words it never received. When the dictation
+        // does not fit the request, the rewrite would replace all of it with
+        // a rewrite of part of it, so the raw words go out whole instead.
+        let rewrite = if rendered.budget_receipt.transcript_truncated {
+            warn!(
+                "Post-processing skipped because the transcript exceeds the prompt budget; \
+                 delivering the raw transcript"
+            );
+            RewriteOutcome::TooLong
+        } else {
+            match post_process_transcription(app, run, &rendered, &final_text).await {
+                Ok(processed_text) => {
+                    post_processed_text = Some(processed_text.clone());
+                    final_text = processed_text;
+                    RewriteOutcome::Applied
+                }
+                Err(outcome) => outcome,
+            }
+        };
+        return ProcessedTranscription {
+            final_text,
+            post_processed_text,
+            rewrite,
+        };
+    }
+    if final_text != transcription {
         post_processed_text = Some(final_text.clone());
     }
 
     ProcessedTranscription {
         final_text,
         post_processed_text,
+        rewrite: if run.prompt().rewrite_unavailable {
+            RewriteOutcome::Unavailable
+        } else {
+            RewriteOutcome::NotRequested
+        },
     }
 }
 
@@ -1789,6 +1915,12 @@ impl TranscribeAction {
                                     // before dispatch. The later delivery outcome is
                                     // an append-only child record.
                                     let history_id = history_entry.save(&hm);
+                                    if let Some(event) = RewriteSkippedEvent::for_outcome(
+                                        history_id,
+                                        processed.rewrite,
+                                    ) {
+                                        let _ = ah.emit("rewrite-skipped", event);
+                                    }
                                     let ah_clone = ah.clone();
                                     let hm_for_main = Arc::clone(&hm);
                                     let hm_for_fallback = Arc::clone(&hm);
@@ -1823,7 +1955,12 @@ impl TranscribeAction {
                                         if receipt.outcome
                                             == DeliveryOutcome::DefinitelyNotDispatched
                                         {
-                                            let _ = ah_clone.emit("paste-error", ());
+                                            let _ = ah_clone.emit(
+                                                "paste-error",
+                                                PasteErrorEvent {
+                                                    history_id: history_for_main,
+                                                },
+                                            );
                                         }
                                         persist_delivery_attempt(
                                             &hm_for_main,
@@ -2233,8 +2370,8 @@ mod tests {
     }
 
     #[cfg(feature = "cloud-realtime")]
-    fn cloud_run(local_fallback_enabled: bool) -> crate::modes::RunPlan {
-        use crate::modes::{CloudSttProvider, RequestedEngine, RunPlan, TranscriptionIntent};
+    fn cloud_settings(local_fallback_enabled: bool) -> crate::settings::AppSettings {
+        use crate::modes::{CloudSttProvider, RequestedEngine};
 
         let mut settings = crate::settings::get_default_settings();
         let mode = settings.modes.first_mut().expect("default mode");
@@ -2249,8 +2386,18 @@ mod tests {
         provider.audio_transfer_consent = true;
         provider.privacy_consent = true;
         provider.local_fallback_consent = true;
+        settings
+    }
 
-        RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).expect("valid cloud run")
+    #[cfg(feature = "cloud-realtime")]
+    fn cloud_run(local_fallback_enabled: bool) -> crate::modes::RunPlan {
+        use crate::modes::{RunPlan, TranscriptionIntent};
+
+        RunPlan::for_intent(
+            &cloud_settings(local_fallback_enabled),
+            &TranscriptionIntent::ActiveMode,
+        )
+        .expect("valid cloud run")
     }
 
     /// A local run with no model selected can only fail after the microphone
@@ -2284,15 +2431,29 @@ mod tests {
         assert!(!local_model_is_missing(&with_model));
     }
 
+    /// The user's text passes are settings, not engine features: a
+    /// replacement rule applies to a provider final the same as to a local
+    /// decode, and the final is delivered without a local decode.
     #[cfg(feature = "cloud-realtime")]
     #[test]
-    fn cloud_final_keeps_provider_text_without_local_decode() {
+    fn cloud_final_gets_the_users_passes_without_local_decode() {
         use crate::managers::transcription::CloudStreamFinalization;
-        use crate::modes::{CloudReceiptStatus, RequestedEngine};
+        use crate::modes::{CloudReceiptStatus, RequestedEngine, RunPlan, TranscriptionIntent};
+        use crate::settings::ReplacementRule;
 
-        let run = cloud_run(true);
+        let mut settings = cloud_settings(true);
+        settings.replacements_enabled = true;
+        settings.replacements_rules.push(ReplacementRule {
+            spoken: "provider".to_string(),
+            written: "Deepgram".to_string(),
+            enabled: true,
+        });
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+            .expect("valid cloud run");
+        let cloud = run.cloud().expect("cloud plan");
         let result = resolve_cloud_finalization(
             &run,
+            cloud,
             CloudStreamFinalization::Final("provider final".to_string()),
             &[0.25, -0.5],
             |_, _| panic!("provider final must not decode locally"),
@@ -2308,7 +2469,7 @@ mod tests {
                 model_produced_text,
             } => {
                 assert!(model_produced_text);
-                assert_eq!(text, "provider final");
+                assert_eq!(text, "Deepgram final");
                 assert_eq!(engine_used, RequestedEngine::DeepgramNova3);
                 assert_eq!(cloud_status, CloudReceiptStatus::Final);
                 // No local decode ran, so there is no throughput to claim.
@@ -2331,6 +2492,7 @@ mod tests {
         let decode_calls = Cell::new(0);
         let result = resolve_cloud_finalization(
             &run,
+            run.cloud().expect("cloud plan"),
             CloudStreamFinalization::Failed {
                 failure: CloudStreamFailure::KeyUnavailable,
                 audio_sent: false,
@@ -2381,6 +2543,7 @@ mod tests {
         let decode_calls = Cell::new(0);
         let result = resolve_cloud_finalization(
             &run,
+            run.cloud().expect("cloud plan"),
             CloudStreamFinalization::Failed {
                 failure: CloudStreamFailure::KeyUnavailable,
                 audio_sent: false,

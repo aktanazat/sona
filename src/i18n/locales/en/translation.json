@@ -814,7 +814,8 @@
           "decode": "The audio file could not be decoded.",
           "duration_limit": "Imported audio is limited to 30 minutes.",
           "transcription": "The audio could not be transcribed.",
-          "history": "The transcript could not be saved to history."
+          "history": "The transcript could not be saved to history.",
+          "history_off": "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Library."
         },
         "errors": {
           "start": "Couldn't start the file import. Try again.",

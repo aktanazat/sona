@@ -814,7 +814,8 @@
           "decode": "Ses dosyası çözümlenemedi.",
           "duration_limit": "İçe aktarılan ses 30 dakika ile sınırlıdır.",
           "transcription": "Ses transkribe edilemedi.",
-          "history": "Transkript geçmişe kaydedilemedi."
+          "history": "Transkript geçmişe kaydedilemedi.",
+          "history_off": "Kayıtlı geçmiş kapalı, bu yüzden bu dosyanın sözlerinin gidecek yeri yok. Kitaplık'ta saklanacak dikte sayısını 0'ın üzerine ayarlayın."
         },
         "errors": {
           "start": "Dosya içe aktarma başlatılamadı. Yeniden deneyin.",

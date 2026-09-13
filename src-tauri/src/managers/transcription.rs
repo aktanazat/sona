@@ -3165,6 +3165,17 @@ fn transcribe_cpp_run_plan(
     }
 }
 
+/// The passes a local decode gets, run over a cloud provider's final. Filler
+/// removal, replacements, snippets, spoken edits and vocabulary are the
+/// user's settings, not the engine's, so a dictation must not lose them by
+/// taking the cloud route. The provider already received the vocabulary as
+/// keyterms, so entries are matched exactly, as after a prompted local decode.
+#[cfg(feature = "cloud-realtime")]
+pub(crate) fn finalize_cloud_text(text: String, asr: &AsrPlan, cloud: &CloudRunPlan) -> String {
+    let evidence = resolve_output_language_evidence(asr, cloud.language(), &[], false);
+    post_process_transcription_text(text, asr, !cloud.keyterms().is_empty(), &evidence, &[])
+}
+
 fn post_process_transcription_text(
     raw: String,
     asr: &AsrPlan,

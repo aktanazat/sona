@@ -174,13 +174,6 @@ const settingUpdaters: SettingUpdaters = {
   history_limit: (value) => commands.updateHistoryLimit(value),
   post_process_enabled: (value) =>
     commands.changePostProcessEnabledSetting(value),
-  /* The backend only ever *selects* a prompt that exists, so there is no
-   * command for clearing the selection. Reject instead of sending a null the
-   * IPC layer would refuse to deserialize. */
-  post_process_selected_prompt_id: (value) =>
-    value === null
-      ? Promise.reject(new Error("No post-process prompt id to select"))
-      : commands.setPostProcessSelectedPrompt(value),
   mute_while_recording: (value) =>
     commands.changeMuteWhileRecordingSetting(value),
   append_trailing_space: (value) =>

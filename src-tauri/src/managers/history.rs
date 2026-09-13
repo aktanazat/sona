@@ -1119,6 +1119,10 @@ impl HistoryManager {
     /// Saves a history entry and its immutable run receipt before any delivery
     /// side effect is attempted. Prompt bodies are intentionally never accepted
     /// by this API, so a caller cannot accidentally persist one.
+    ///
+    /// `None` is saved history turned off: nothing was written, the recording
+    /// the caller put on disk is gone, and there is no row for a delivery
+    /// receipt to attach to.
     pub fn save_entry_with_receipt(
         &self,
         file_name: String,
@@ -1126,7 +1130,7 @@ impl HistoryManager {
         post_process_requested: bool,
         post_processed_text: Option<String>,
         receipt: Option<NewRunReceipt>,
-    ) -> Result<HistoryEntry> {
+    ) -> Result<Option<HistoryEntry>> {
         self.save_entry_with_receipt_internal(
             file_name,
             transcription_text,
@@ -1139,7 +1143,8 @@ impl HistoryManager {
 
     /// A retry or a reprocess creates a new immutable history row and child run
     /// receipt, linked back to the row whose recording it reused. The original
-    /// transcription and its prior receipts remain untouched.
+    /// transcription and its prior receipts remain untouched. `None` is saved
+    /// history turned off, and the parent's recording is left alone.
     pub fn save_derived_entry_with_receipt(
         &self,
         derived_from_history_id: i64,
@@ -1148,7 +1153,7 @@ impl HistoryManager {
         post_process_requested: bool,
         post_processed_text: Option<String>,
         receipt: NewRunReceipt,
-    ) -> Result<HistoryEntry> {
+    ) -> Result<Option<HistoryEntry>> {
         self.save_entry_with_receipt_internal(
             file_name,
             transcription_text,
@@ -1167,7 +1172,19 @@ impl HistoryManager {
         post_processed_text: Option<String>,
         derived_from_history_id: Option<i64>,
         receipt: Option<NewRunReceipt>,
-    ) -> Result<HistoryEntry> {
+    ) -> Result<Option<HistoryEntry>> {
+        // "Dictations to keep" at zero is saved history turned off. Nothing is
+        // written, not even the receipt. A fresh recording goes with the
+        // refusal, since a recording without a row is one nobody can reach; a
+        // derived row reuses its parent's file, which is not this call's to
+        // remove.
+        if crate::settings::get_settings(&self.app_handle).history_limit == 0 {
+            if derived_from_history_id.is_none() {
+                Self::remove_recording_file(&self.recordings_dir, &file_name)?;
+            }
+            debug!("Saved history is off; the dictation was not kept");
+            return Ok(None);
+        }
         let timestamp = Utc::now().timestamp();
         let title = self.format_timestamp_title(timestamp);
         // The insert owns the connection only until it commits. `cleanup_old_entries`
@@ -1209,7 +1226,6 @@ impl HistoryManager {
                 entry.post_processed_text.as_deref(),
             ),
         );
-        self.cleanup_old_entries()?;
         if let Err(error) = (HistoryUpdatePayload::Added {
             entry: entry.clone(),
         })
@@ -1217,11 +1233,14 @@ impl HistoryManager {
         {
             error!("Failed to emit history-updated event: {error}");
         }
+        // After the announcement, so a listener already holds the row when the
+        // sweep reports what it took from it.
+        self.cleanup_old_entries()?;
         // The one place dictation history is established as having moved, and so
         // the one place the local learning loops are woken. The call is
         // day-bucketed on the other side, so this is cheap per dictation.
         crate::meeting::learning::notify_dictation_history_changed(&self.app_handle);
-        Ok(entry)
+        Ok(Some(entry))
     }
 
     fn save_entry_with_receipt_with_connection(
@@ -1485,18 +1504,54 @@ impl HistoryManager {
             .map_err(Into::into)
     }
 
+    /// Apply both policies the Library offers, each on its own terms.
+    ///
+    /// "Dictations to keep" is a count: the newest `history_limit` unsaved rows
+    /// survive and the rest go, words and recording alike. "Recordings" is an
+    /// expiry on audio alone: a row past it keeps its words and loses its
+    /// recording. The two never read each other, so a zero limit empties the
+    /// unsaved log under every audio choice, and "not kept" strips audio from
+    /// every unsaved row the count let live. A saved row is outside both.
+    ///
+    /// Both run on one connection, and the rows they touched are announced
+    /// once it is released, so an open Library mirrors the sweep instead of
+    /// finding out at its next reload.
     pub fn cleanup_old_entries(&self) -> Result<()> {
-        let retention_period = crate::settings::get_recording_retention_period(&self.app_handle);
+        let settings = crate::settings::get_settings(&self.app_handle);
+        let limit = settings.history_limit;
+        let expiry =
+            recording_expiry_cutoff(settings.recording_retention_period, Utc::now().timestamp());
 
-        match retention_period {
-            crate::settings::RecordingRetentionPeriod::Never => Ok(()),
-            crate::settings::RecordingRetentionPeriod::PreserveLimit => {
-                let limit = crate::settings::get_history_limit(&self.app_handle);
-                self.cleanup_by_count(limit)
-            }
-            _ => self.cleanup_by_time(retention_period),
+        let (deleted, expired) = self.storage.with_connection(|conn| {
+            let deleted = Self::sweep_by_count_with_connection(conn, &self.recordings_dir, limit)?;
+            let expired = match expiry {
+                Some(cutoff) => {
+                    Self::expire_recordings_with_connection(conn, &self.recordings_dir, cutoff)?
+                }
+                None => Vec::new(),
+            };
+            Ok((deleted, expired))
+        })?;
+
+        if !deleted.is_empty() {
+            debug!("Retention removed {} history entries", deleted.len());
         }
+        if !expired.is_empty() {
+            debug!("Retention removed {} recordings", expired.len());
+        }
+        for id in deleted {
+            if let Err(error) = (HistoryUpdatePayload::Deleted { id }).emit(&self.app_handle) {
+                error!("Failed to emit history-updated event: {error}");
+            }
+        }
+        for entry in expired {
+            if let Err(error) = (HistoryUpdatePayload::Updated { entry }).emit(&self.app_handle) {
+                error!("Failed to emit history-updated event: {error}");
+            }
+        }
+        Ok(())
     }
+
     fn remove_recording_file(recordings_dir: &Path, file_name: &str) -> Result<()> {
         // A stored name that is not a bare file name references nothing this
         // app owns, so there is no file to delete and nothing outside the
@@ -1519,6 +1574,9 @@ impl HistoryManager {
         }
     }
 
+    /// Whether another row still holds this recording. A retry or a reprocess
+    /// reuses its parent's file, and a row whose audio expired keeps the name
+    /// without the file, so only a row that still has audio counts.
     fn has_other_recording_reference(
         conn: &Connection,
         history_id: i64,
@@ -1527,7 +1585,7 @@ impl HistoryManager {
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM transcription_history
-                WHERE file_name = ?1 AND id != ?2
+                WHERE file_name = ?1 AND id != ?2 AND has_audio = 1
             )",
             params![file_name, history_id],
             |row| row.get(0),
@@ -1535,16 +1593,15 @@ impl HistoryManager {
         .map_err(Into::into)
     }
 
+    /// Delete the rows and the recordings only they hold; returns the ids that
+    /// went. A row whose recording refuses to go stays so a later sweep can
+    /// retry it.
     fn delete_entries_and_files_with_connection(
         conn: &Connection,
         recordings_dir: &Path,
         entries: &[(i64, String)],
-    ) -> Result<usize> {
-        if entries.is_empty() {
-            return Ok(0);
-        }
-
-        let mut deleted_count = 0;
+    ) -> Result<Vec<i64>> {
+        let mut deleted = Vec::with_capacity(entries.len());
 
         for (id, file_name) in entries {
             if !Self::has_other_recording_reference(conn, *id, file_name)? {
@@ -1557,43 +1614,32 @@ impl HistoryManager {
                 }
             }
 
-            deleted_count += conn.execute(
+            if conn.execute(
                 "DELETE FROM transcription_history WHERE id = ?1",
                 params![id],
-            )?;
+            )? > 0
+            {
+                deleted.push(*id);
+            }
         }
 
-        Ok(deleted_count)
+        Ok(deleted)
     }
 
-    /// Delete the oldest unsaved entries beyond `limit`.
+    /// The oldest unsaved rows beyond `limit`, deleted on the connection that
+    /// selected them, so the rows that go are exactly the rows that were
+    /// chosen. Reading them on one connection and deleting them on another let
+    /// a row change in between.
     ///
-    /// The selection and the deletion share one connection, so the rows that
-    /// get deleted are exactly the rows that were selected. Reading them on one
-    /// connection and deleting them on another let a row change in between.
-    fn cleanup_by_count(&self, limit: usize) -> Result<()> {
-        let deleted_count = self.storage.with_connection(|conn| {
-            Self::sweep_by_count_with_connection(conn, &self.recordings_dir, limit)
-        })?;
-
-        if deleted_count > 0 {
-            debug!("Cleaned up {} old history entries by count", deleted_count);
-        }
-
-        Ok(())
-    }
-
-    /// The rows a count sweep deletes, and their deletion, on one connection.
-    ///
-    /// Separate from the settings read above so the selection is reachable from
-    /// a test: which rows are chosen is the half of retention that had no
+    /// Separate from the settings read above so the selection is reachable
+    /// from a test: which rows are chosen is the half of retention that needs
     /// coverage, and it is not the half that needs an `AppHandle`.
     fn sweep_by_count_with_connection(
         conn: &Connection,
         recordings_dir: &Path,
         limit: usize,
-    ) -> Result<usize> {
-        // Get all entries that are not saved, ordered by timestamp desc
+    ) -> Result<Vec<i64>> {
+        // Every unsaved row, newest first, so the survivors are a prefix.
         let entries: Vec<(i64, String)> = {
             let mut stmt = conn.prepare(
                 "SELECT id, file_name FROM transcription_history WHERE saved = 0 ORDER BY timestamp DESC"
@@ -1605,41 +1651,28 @@ impl HistoryManager {
         };
 
         if entries.len() <= limit {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         Self::delete_entries_and_files_with_connection(conn, recordings_dir, &entries[limit..])
     }
 
-    fn cleanup_by_time(
-        &self,
-        retention_period: crate::settings::RecordingRetentionPeriod,
-    ) -> Result<()> {
-        let cutoff_timestamp = retention_cutoff_timestamp(retention_period, Utc::now().timestamp());
-
-        let deleted_count = self.storage.with_connection(|conn| {
-            Self::sweep_by_time_with_connection(conn, &self.recordings_dir, cutoff_timestamp)
-        })?;
-
-        if deleted_count > 0 {
-            debug!(
-                "Cleaned up {} old history entries based on retention period",
-                deleted_count
-            );
-        }
-
-        Ok(())
-    }
-    /// The rows a time sweep deletes, and their deletion, on one connection.
-    /// Split out for the same reason as the count sweep's half.
-    fn sweep_by_time_with_connection(
+    /// Take the recording from every unsaved row older than `cutoff` and leave
+    /// the row, with `has_audio` cleared so the Library stops offering a play
+    /// control it cannot honour. Returns the rows as they now read.
+    ///
+    /// The file itself goes only when no other row still holds it: a retry or a
+    /// reprocess shares its parent's recording, and the child may be saved or
+    /// younger than the cutoff. A file that refuses to go keeps its row's
+    /// `has_audio` so a later sweep retries it.
+    fn expire_recordings_with_connection(
         conn: &Connection,
         recordings_dir: &Path,
         cutoff_timestamp: i64,
-    ) -> Result<usize> {
-        // Get all unsaved entries older than the cutoff timestamp
-        let entries_to_delete: Vec<(i64, String)> = {
+    ) -> Result<Vec<HistoryEntry>> {
+        let entries: Vec<(i64, String)> = {
             let mut stmt = conn.prepare(
-                "SELECT id, file_name FROM transcription_history WHERE saved = 0 AND timestamp < ?1",
+                "SELECT id, file_name FROM transcription_history
+                 WHERE saved = 0 AND has_audio = 1 AND timestamp < ?1",
             )?;
             let rows = stmt.query_map(params![cutoff_timestamp], |row| {
                 Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
@@ -1647,7 +1680,33 @@ impl HistoryManager {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
-        Self::delete_entries_and_files_with_connection(conn, recordings_dir, &entries_to_delete)
+        let mut expired = Vec::with_capacity(entries.len());
+        for (id, file_name) in &entries {
+            // The row loses its claim first, so the reference check below sees
+            // only rows that still hold the file.
+            conn.execute(
+                "UPDATE transcription_history SET has_audio = 0 WHERE id = ?1",
+                params![id],
+            )?;
+            if !Self::has_other_recording_reference(conn, *id, file_name)? {
+                if let Err(error) = Self::remove_recording_file(recordings_dir, file_name) {
+                    error!(
+                        "Failed to delete expired WAV file {} for history entry {}; retaining it for retry: {}",
+                        file_name, id, error
+                    );
+                    conn.execute(
+                        "UPDATE transcription_history SET has_audio = 1 WHERE id = ?1",
+                        params![id],
+                    )?;
+                    continue;
+                }
+            }
+            if let Some(entry) = Self::entry_by_id_with_connection(conn, *id)? {
+                expired.push(entry);
+            }
+        }
+
+        Ok(expired)
     }
 
     /// Read all-time aggregates from the retained history rows. The one grouped
@@ -2548,8 +2607,9 @@ fn backfill_semantic_chunk_with_connection(
     Ok(pending.len())
 }
 
-/// The instant a time-based retention period cuts at, in the same unit the
-/// `timestamp` column stores.
+/// The instant before which a recording no longer belongs on disk, in the
+/// same unit the `timestamp` column stores, or `None` when audio lives exactly
+/// as long as its row.
 ///
 /// That unit is the whole reason this is a named function rather than a `match`
 /// inside the sweep. `timestamp` is written as `Utc::now().timestamp()`, which
@@ -2560,25 +2620,22 @@ fn backfill_semantic_chunk_with_connection(
 /// silently keep it forever. Taking `now` as an argument is what lets a test
 /// pin both the unit and the arithmetic without waiting three days.
 ///
-/// `Months3` is 90 days, not three calendar months.
-///
-/// Only the three time-based periods reach here. `Never` and `PreserveLimit`
-/// are answered by `cleanup_old_entries` before a cutoff means anything.
-fn retention_cutoff_timestamp(
+/// `Months3` is 90 days, not three calendar months. "Not kept" is a cutoff
+/// after every row there is: the recording goes as soon as the words it
+/// produced are written.
+fn recording_expiry_cutoff(
     retention_period: crate::settings::RecordingRetentionPeriod,
     now_seconds: i64,
-) -> i64 {
+) -> Option<i64> {
     const DAY: i64 = 24 * 60 * 60;
     let window = match retention_period {
+        crate::settings::RecordingRetentionPeriod::PreserveLimit => return None,
+        crate::settings::RecordingRetentionPeriod::Never => return Some(i64::MAX),
         crate::settings::RecordingRetentionPeriod::Days3 => 3 * DAY,
         crate::settings::RecordingRetentionPeriod::Weeks2 => 14 * DAY,
         crate::settings::RecordingRetentionPeriod::Months3 => 90 * DAY,
-        crate::settings::RecordingRetentionPeriod::Never
-        | crate::settings::RecordingRetentionPeriod::PreserveLimit => {
-            unreachable!("cleanup_old_entries answers these without a cutoff")
-        }
     };
-    now_seconds - window
+    Some(now_seconds - window)
 }
 
 /// The single owner of the recordings-directory join.
@@ -2755,6 +2812,7 @@ mod tests {
                 context_policy: crate::context::ContextPolicy::None,
                 prompt_preset: crate::modes::PromptPreset::MinimalistCleanup,
                 post_process_requested: true,
+                rewrite: crate::modes::RewriteOutcome::Applied,
                 provider_id: Some("local".to_string()),
                 model_id: Some("model".to_string()),
                 engine_requested: crate::modes::RequestedEngine::Local,
@@ -3590,21 +3648,31 @@ mod tests {
             (crate::settings::RecordingRetentionPeriod::Months3, 90),
         ] {
             assert_eq!(
-                retention_cutoff_timestamp(period, NOW),
-                NOW - days * DAY,
+                recording_expiry_cutoff(period, NOW),
+                Some(NOW - days * DAY),
                 "{period:?} must cut {days} days back, in seconds"
             );
         }
+        assert_eq!(
+            recording_expiry_cutoff(
+                crate::settings::RecordingRetentionPeriod::PreserveLimit,
+                NOW
+            ),
+            None,
+            "audio kept with the dictation has no expiry"
+        );
+        assert!(
+            recording_expiry_cutoff(crate::settings::RecordingRetentionPeriod::Never, NOW)
+                .is_some_and(|cutoff| cutoff > NOW),
+            "audio not kept expires every row, including one written this second"
+        );
     }
 
-    /// A row one second inside the window survives and a row one second outside
-    /// it does not, for every period, and starring a row exempts it either way.
-    ///
-    /// This is the selection half of retention, which had no coverage: the
-    /// existing deletion test covers what happens to a chosen row's audio, not
-    /// which rows get chosen.
+    /// A row one second inside the window keeps its recording and a row one
+    /// second outside it loses only the recording, for every period; starring a
+    /// row exempts it either way. The words never go: expiry is an audio policy.
     #[test]
-    fn a_time_sweep_deletes_only_unsaved_rows_past_the_cutoff() {
+    fn expiry_takes_the_recording_from_unsaved_rows_past_the_cutoff_and_keeps_the_words() {
         const NOW: i64 = 1_788_417_783;
 
         for period in [
@@ -3614,11 +3682,19 @@ mod tests {
         ] {
             let conn = setup_conn();
             let recordings = tempfile::tempdir().expect("recordings directory");
-            let cutoff = retention_cutoff_timestamp(period, NOW);
+            let cutoff = recording_expiry_cutoff(period, NOW).expect("a dated period has a cutoff");
 
             let inside = insert_base_entry(&conn, cutoff + 1, "inside the window");
             let on_the_boundary = insert_base_entry(&conn, cutoff, "exactly at the cutoff");
-            let outside = insert_base_entry(&conn, cutoff - 1, "past the window");
+            let outside = seed_wav_retention_entry(
+                &conn,
+                recordings.path(),
+                cutoff - 1,
+                "sona-outside.wav",
+                "past the window",
+                false,
+                None,
+            );
             let starred = insert_base_entry(&conn, cutoff - 1, "starred and ancient");
             conn.execute(
                 "UPDATE transcription_history SET saved = 1 WHERE id = ?1",
@@ -3626,26 +3702,81 @@ mod tests {
             )
             .expect("star the ancient row");
 
-            let deleted =
-                HistoryManager::sweep_by_time_with_connection(&conn, recordings.path(), cutoff)
-                    .expect("time sweep runs");
+            let expired =
+                HistoryManager::expire_recordings_with_connection(&conn, recordings.path(), cutoff)
+                    .expect("expiry runs");
 
-            assert_eq!(deleted, 1, "{period:?} must delete exactly the stale row");
-            assert!(row_exists(&conn, inside), "{period:?} kept the recent row");
-            // `timestamp < cutoff` is strict, so the boundary row is retained.
-            assert!(
-                row_exists(&conn, on_the_boundary),
-                "{period:?} treats the cutoff itself as inside the window"
+            assert_eq!(
+                expired.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+                vec![outside],
+                "{period:?} must expire exactly the stale row"
             );
             assert!(
-                !row_exists(&conn, outside),
-                "{period:?} deleted the stale row"
+                !row_has_audio(&conn, outside),
+                "{period:?} cleared the stale row's audio"
+            );
+            assert_eq!(
+                expired[0].transcription_text, "past the window",
+                "{period:?} kept the words"
             );
             assert!(
-                row_exists(&conn, starred),
-                "{period:?} must never delete a starred row"
+                !recordings.path().join("sona-outside.wav").exists(),
+                "{period:?} deleted the stale recording"
             );
+            for (id, why) in [
+                (inside, "the recent row"),
+                // `timestamp < cutoff` is strict, so the boundary row keeps its audio.
+                (on_the_boundary, "the row on the cutoff itself"),
+                (starred, "a starred row"),
+            ] {
+                assert!(row_exists(&conn, id), "{period:?} kept {why}");
+                assert!(
+                    row_has_audio(&conn, id),
+                    "{period:?} must leave the audio of {why}"
+                );
+            }
         }
+    }
+
+    /// An expiry keeps a recording that another row still plays: the words of
+    /// the expired row lose their audio, the shared file stays for the other.
+    #[test]
+    fn expiry_keeps_a_recording_another_row_still_holds() {
+        let conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let stale = seed_wav_retention_entry(
+            &conn,
+            recordings.path(),
+            100,
+            "sona-shared.wav",
+            "stale original",
+            false,
+            None,
+        );
+        let fresh_retry = insert_base_entry(&conn, 900, "fresh retry of the same audio");
+        conn.execute(
+            "UPDATE transcription_history SET file_name = 'sona-shared.wav' WHERE id = ?1",
+            params![fresh_retry],
+        )
+        .expect("make the retry share the recording");
+
+        let expired =
+            HistoryManager::expire_recordings_with_connection(&conn, recordings.path(), 500)
+                .expect("expiry runs");
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, stale);
+        assert!(!row_has_audio(&conn, stale));
+        assert!(row_has_audio(&conn, fresh_retry));
+        assert!(
+            recordings.path().join("sona-shared.wav").exists(),
+            "the retry still plays this file"
+        );
+
+        // Once the last holder expires too, the file goes with it.
+        HistoryManager::expire_recordings_with_connection(&conn, recordings.path(), 1_000)
+            .expect("second expiry runs");
+        assert!(!recordings.path().join("sona-shared.wav").exists());
     }
 
     /// The count sweep keeps the newest `limit` unsaved rows and no more, and a
@@ -3669,7 +3800,11 @@ mod tests {
         let deleted = HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 2)
             .expect("count sweep runs");
 
-        assert_eq!(deleted, 1, "three unsaved rows at a limit of two loses one");
+        assert_eq!(
+            deleted,
+            vec![oldest],
+            "three unsaved rows at a limit of two loses one"
+        );
         assert!(row_exists(&conn, newest));
         assert!(row_exists(&conn, middle));
         assert!(!row_exists(&conn, oldest), "the oldest unsaved row goes");
@@ -3689,7 +3824,7 @@ mod tests {
         let deleted = HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 5)
             .expect("count sweep runs");
 
-        assert_eq!(deleted, 0);
+        assert!(deleted.is_empty());
         assert!(row_exists(&conn, only));
     }
 
@@ -3700,6 +3835,15 @@ mod tests {
             |row| row.get(0),
         )
         .expect("read row existence")
+    }
+
+    fn row_has_audio(conn: &Connection, id: i64) -> bool {
+        conn.query_row(
+            "SELECT has_audio FROM transcription_history WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("read row audio flag")
     }
 
     fn seed_wav_retention_entry(
@@ -3776,7 +3920,8 @@ mod tests {
         let deleted = HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 1)
             .expect("run count retention");
 
-        assert_eq!(deleted, 2);
+        // Newest first: the sweep walks the log in the order it survives.
+        assert_eq!(deleted, vec![parent, oldest]);
         assert!(!row_exists(&conn, oldest));
         assert!(!row_exists(&conn, parent));
         assert!(row_exists(&conn, retained_child));
@@ -3796,12 +3941,12 @@ mod tests {
     }
 
     #[test]
-    fn file_backed_time_retention_keeps_saved_boundary_and_shared_parent_audio() {
+    fn file_backed_expiry_keeps_saved_boundary_and_shared_parent_audio() {
         const NOW: i64 = 1_788_417_783;
         let conn = setup_conn();
         let recordings = tempfile::tempdir().expect("recordings directory");
-        let cutoff =
-            retention_cutoff_timestamp(crate::settings::RecordingRetentionPeriod::Days3, NOW);
+        let cutoff = recording_expiry_cutoff(crate::settings::RecordingRetentionPeriod::Days3, NOW)
+            .expect("three days has a cutoff");
         let expired = seed_wav_retention_entry(
             &conn,
             recordings.path(),
@@ -3848,17 +3993,23 @@ mod tests {
             Some(parent),
         );
 
-        let deleted =
-            HistoryManager::sweep_by_time_with_connection(&conn, recordings.path(), cutoff)
-                .expect("run controlled time retention");
+        let expired_entries =
+            HistoryManager::expire_recordings_with_connection(&conn, recordings.path(), cutoff)
+                .expect("run controlled audio expiry");
 
-        assert_eq!(deleted, 2);
-        assert!(!row_exists(&conn, expired));
-        assert!(!row_exists(&conn, parent));
-        for (id, text) in [
-            (saved, "saved old text"),
-            (boundary, "boundary text"),
-            (shared_child, "recent child text"),
+        assert_eq!(
+            expired_entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![expired, parent]
+        );
+        for (id, text, has_audio) in [
+            (expired, "expired unsaved text", false),
+            (parent, "expired parent text", false),
+            (saved, "saved old text", true),
+            (boundary, "boundary text", true),
+            (shared_child, "recent child text", true),
         ] {
             assert_eq!(
                 conn.query_row(
@@ -3869,11 +4020,19 @@ mod tests {
                 .expect("retained history text"),
                 text
             );
+            assert_eq!(
+                row_has_audio(&conn, id),
+                has_audio,
+                "audio flag of {text:?}"
+            );
         }
         assert!(!recordings.path().join("expired.wav").exists());
         assert!(recordings.path().join("saved.wav").exists());
         assert!(recordings.path().join("boundary.wav").exists());
-        assert!(recordings.path().join("shared.wav").exists());
+        assert!(
+            recordings.path().join("shared.wav").exists(),
+            "the recent child still plays the shared file"
+        );
     }
     #[test]
     fn every_prior_schema_version_migrates_to_the_current_head() {
@@ -4363,7 +4522,7 @@ mod tests {
         );
         std::fs::set_permissions(recordings.path(), original_permissions)
             .expect("restore recordings permissions");
-        assert_eq!(cleanup.expect("attempt cleanup"), 0);
+        assert!(cleanup.expect("attempt cleanup").is_empty());
         assert!(row_exists(&conn, entry_id));
         assert!(wav_path.exists());
 
@@ -4373,7 +4532,7 @@ mod tests {
             &entries,
         )
         .expect("retry cleanup");
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, vec![entry_id]);
         assert!(!row_exists(&conn, entry_id));
         assert!(!wav_path.exists());
     }
@@ -4405,7 +4564,7 @@ mod tests {
             &[(original_id, file_name.to_string())],
         )
         .expect("delete original history row");
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, vec![original_id]);
         assert!(wav_path.exists());
 
         let deleted = HistoryManager::delete_entries_and_files_with_connection(
@@ -4414,7 +4573,7 @@ mod tests {
             &[(retry_id, file_name.to_string())],
         )
         .expect("delete final retry row");
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, vec![retry_id]);
         assert!(!wav_path.exists());
     }
 

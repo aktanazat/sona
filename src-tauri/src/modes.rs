@@ -4,6 +4,7 @@ use crate::settings::{
     self, AppSettings, AutoSubmitKey, ClipboardHandling, EmojiReplacement, EnglishSpelling,
     OrtAcceleratorSetting, PasteMethod, PersonaSample, PostProcessEndpoint, PostProcessProvider,
     ReplacementRule, ShortcutBinding, TranscribeAcceleratorSetting, TypingTool, VocabularyEntry,
+    APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID,
 };
 use crate::snippets::Snippet;
 use serde::{Deserialize, Serialize};
@@ -187,7 +188,17 @@ impl ModeLlmSettings {
         match &self.provider_id {
             Some(provider_id) => ModeLlmDestination {
                 provider_id: provider_id.clone(),
-                model_id: self.model_id.clone(),
+                // Apple Intelligence runs one fixed on-device model and its
+                // row offers no model field, so a mode that names it
+                // explicitly gets the fixed identifier rather than the empty
+                // id that would skip every rewrite.
+                model_id: if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID
+                    && self.model_id.trim().is_empty()
+                {
+                    APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string()
+                } else {
+                    self.model_id.clone()
+                },
                 inherited: false,
             },
             None => {
@@ -883,6 +894,32 @@ fn apply_set_active_mode(settings: &mut AppSettings, mode_id: &str) -> Result<()
     Ok(())
 }
 
+/// "Use" on a library prompt: the active mode's instructions become that
+/// prompt's text, and the mode remembers which one. The selection is kept
+/// too: it is what the first mode is seeded from when modes are created.
+fn apply_use_post_process_prompt(settings: &mut AppSettings, id: &str) -> Result<(), String> {
+    let prompt = settings
+        .post_process_prompts
+        .iter()
+        .find(|prompt| prompt.id == id)
+        .ok_or_else(|| format!("Prompt with id '{id}' not found"))?
+        .prompt
+        .clone();
+    settings.post_process_selected_prompt_id = Some(id.to_string());
+    let active_id = active_mode(settings)
+        .map(|mode| mode.id.clone())
+        .ok_or_else(|| "No mode to use the prompt in".to_string())?;
+    let mode = settings
+        .modes
+        .iter_mut()
+        .find(|mode| mode.id == active_id)
+        .ok_or_else(|| "No mode to use the prompt in".to_string())?;
+    mode.prompt.source_prompt_id = Some(id.to_string());
+    mode.prompt.custom_prompt = Some(prompt);
+    settings.modes_revision = settings.modes_revision.saturating_add(1);
+    Ok(())
+}
+
 fn apply_capture_mode_activation_rule(
     settings: &mut AppSettings,
     app_id: String,
@@ -1011,6 +1048,20 @@ pub fn set_active_mode(app: AppHandle, mode_id: String) -> Result<ModeSettingsSn
     commit_mode_mutation(&app, |settings| apply_set_active_mode(settings, &mode_id))
 }
 
+/// The library's "Use": the active mode takes this prompt as its
+/// instructions. Returns the snapshot like every other mode mutation, so a
+/// modes page open beside the library follows the change.
+#[tauri::command]
+#[specta::specta]
+pub fn set_post_process_selected_prompt(
+    app: AppHandle,
+    id: String,
+) -> Result<ModeSettingsSnapshot, String> {
+    commit_mode_mutation(&app, |settings| {
+        apply_use_post_process_prompt(settings, &id)
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn upsert_mode(
@@ -1047,9 +1098,30 @@ pub fn reorder_modes(
     })
 }
 
+/// Reads what is in front once Sona's own window is out of the way. The
+/// webview shell's window is the core's to hide and show; the native shell
+/// has none here and hides its own before it asks. Either way the read waits
+/// for macOS to hand focus back first.
+#[cfg(target_os = "macos")]
+fn read_behind_own_window<T, E>(
+    app: &AppHandle,
+    unavailable: E,
+    read: impl FnOnce() -> T,
+) -> Result<T, E> {
+    let main_window = app.get_webview_window("main");
+    if let Some(window) = &main_window {
+        window.hide().map_err(|_| unavailable)?;
+    }
+    std::thread::sleep(Duration::from_millis(120));
+    let result = read();
+    if main_window.is_some() {
+        crate::show_main_window(app);
+    }
+    Ok(result)
+}
+
 /// Captures the application that was active immediately before the mode editor
-/// became visible. Hiding the window briefly lets macOS return focus to that
-/// application without reading Accessibility data or a browser URL.
+/// became visible, without reading Accessibility data or a browser URL.
 #[tauri::command]
 #[specta::specta]
 pub async fn capture_mode_activation_rule(
@@ -1059,16 +1131,12 @@ pub async fn capture_mode_activation_rule(
 ) -> Result<ModeSettingsSnapshot, ModeMutationError> {
     #[cfg(target_os = "macos")]
     {
-        let main_window = app
-            .get_webview_window("main")
-            .ok_or(ModeMutationError::FrontmostApplicationUnavailable)?;
-        main_window
-            .hide()
-            .map_err(|_| ModeMutationError::FrontmostApplicationUnavailable)?;
-        std::thread::sleep(Duration::from_millis(120));
-        let app_id = context::frontmost_application_identifier();
-        crate::show_main_window(&app);
-        let app_id = app_id.ok_or(ModeMutationError::FrontmostApplicationUnavailable)?;
+        let app_id = read_behind_own_window(
+            &app,
+            ModeMutationError::FrontmostApplicationUnavailable,
+            context::frontmost_application_identifier,
+        )?
+        .ok_or(ModeMutationError::FrontmostApplicationUnavailable)?;
         commit_mode_mutation(&app, |settings| {
             apply_capture_mode_activation_rule(settings, app_id, &mode_id, expected_revision)
         })
@@ -1112,15 +1180,11 @@ pub async fn capture_mode_website_activation_rule(
             return Err(ModeMutationError::WebsiteActivationConsentRequired);
         }
 
-        let main_window = app
-            .get_webview_window("main")
-            .ok_or(ModeMutationError::FrontmostWebsiteUnavailable)?;
-        main_window
-            .hide()
-            .map_err(|_| ModeMutationError::FrontmostWebsiteUnavailable)?;
-        std::thread::sleep(Duration::from_millis(120));
-        let capture = context::capture_frontmost_website_host();
-        crate::show_main_window(&app);
+        let capture = read_behind_own_window(
+            &app,
+            ModeMutationError::FrontmostWebsiteUnavailable,
+            context::capture_frontmost_website_host,
+        )?;
         let host = match capture {
             context::WebsiteHostCapture::Captured(host) => host,
             context::WebsiteHostCapture::SecureField => {
@@ -1286,6 +1350,10 @@ pub struct PromptPlan {
     pub custom_prompt: Option<String>,
     pub llm: Option<ResolvedLlmSettings>,
     pub post_process_requested: bool,
+    /// The mode asked for a rewrite that could not be resolved, so none is
+    /// requested of this run. The receipt records it as
+    /// [`RewriteOutcome::Unavailable`] rather than as a mode that never asked.
+    pub rewrite_unavailable: bool,
     /// Samples of the user's own writing, frozen at run start like every other
     /// plan field so a mid-run settings edit cannot change the prompt.
     pub persona_samples: Vec<PersonaSample>,
@@ -1452,6 +1520,31 @@ impl CloudRunPlan {
     pub const fn timestamps(&self) -> bool {
         self.timestamps
     }
+}
+
+/// How a mode's rewrite ended, kept apart from whether it was asked for so a
+/// dictation delivered raw can say why. Each variant names a different thing
+/// for the user to do about it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RewriteOutcome {
+    /// The mode asked for none, or the run admits none (an import, a retry
+    /// of a raw run).
+    #[default]
+    NotRequested,
+    Applied,
+    /// The mode named a destination that cannot be used: a provider that is
+    /// not configured, an invalid address, or a remote one without consent.
+    /// Decided before the microphone opened.
+    Unavailable,
+    /// The provider needs a key that is not saved, or the vault could not be
+    /// read.
+    NoCredential,
+    /// The dictation is longer than the model can be handed in one request,
+    /// and a rewrite of part of it would have lost the rest.
+    TooLong,
+    /// The request failed, or the answer was nothing usable.
+    Failed,
 }
 
 /// A rejected plan never starts capture. The UI receives a closed reason rather
@@ -1694,6 +1787,7 @@ impl RunPlan {
                 custom_prompt: None,
                 llm: None,
                 post_process_requested: false,
+                rewrite_unavailable: false,
                 persona_samples: Vec::new(),
                 spoken_instructions: false,
             },
@@ -1759,6 +1853,7 @@ impl RunPlan {
         rewrite_required: bool,
     ) -> Result<Self, RunPlanError> {
         let mut post_process_requested = post_process_override.unwrap_or(mode.llm.enabled);
+        let mut rewrite_unavailable = false;
         let llm = if post_process_requested {
             match Self::resolve_rewrite(settings, &mode.llm) {
                 Ok(llm) => Some(llm),
@@ -1779,6 +1874,7 @@ impl RunPlan {
                         mode.id
                     );
                     post_process_requested = false;
+                    rewrite_unavailable = true;
                     None
                 }
             }
@@ -1872,6 +1968,7 @@ impl RunPlan {
                 custom_prompt: mode.prompt.custom_prompt,
                 llm,
                 post_process_requested,
+                rewrite_unavailable,
                 persona_samples: settings.persona_samples.clone(),
                 spoken_instructions: post_process_requested && mode.llm.spoken_instructions,
             },
@@ -2063,6 +2160,13 @@ impl RunPlan {
             context_policy: self.context.effective_policy(),
             prompt_preset: self.prompt.preset,
             post_process_requested: self.post_process_requested(),
+            // What the plan can say on its own. A run that sends the request
+            // replaces this with how it ended.
+            rewrite: if self.prompt.rewrite_unavailable {
+                RewriteOutcome::Unavailable
+            } else {
+                RewriteOutcome::NotRequested
+            },
             provider_id: self.prompt.llm.as_ref().map(|llm| llm.provider.id.clone()),
             model_id: self.prompt.llm.as_ref().map(|llm| llm.model_id.clone()),
             engine_requested: self.requested_engine,
@@ -2110,6 +2214,13 @@ impl ModeReceipt {
         self.realtime_factor = factor;
         self
     }
+
+    /// Attach how the rewrite ended, once the run has delivered or given up.
+    #[must_use]
+    pub fn with_rewrite(mut self, rewrite: RewriteOutcome) -> Self {
+        self.rewrite = rewrite;
+        self
+    }
 }
 /// `Eq` is deliberately absent: the measured amplitudes below are floats, and a
 /// measurement is compared for equality only in tests, never keyed on.
@@ -2126,6 +2237,10 @@ pub struct ModeReceipt {
     pub context_policy: ContextPolicy,
     pub prompt_preset: PromptPreset,
     pub post_process_requested: bool,
+    /// How the rewrite ended. Rows written before the field existed read as
+    /// not requested, which is the only claim they can support.
+    #[serde(default)]
+    pub rewrite: RewriteOutcome,
     pub provider_id: Option<String>,
     pub model_id: Option<String>,
     /// The route selected at capture start. The former requested_engine field
@@ -3044,6 +3159,39 @@ mod tests {
         assert_eq!(settings.modes_revision, revision);
         let mode = settings.modes[1].clone();
         assert!(apply_upsert_mode(&mut settings, mode, revision).is_ok());
+    }
+
+    /// "Use" on a library prompt has to change what the next dictation
+    /// sends, not only which row wears the chip. The active mode's plan
+    /// carries the prompt text afterwards, and the structural revision
+    /// moves so an open editor cannot save over it unaware.
+    #[test]
+    fn using_a_library_prompt_rewrites_the_active_modes_instructions() {
+        let mut settings = configured_settings();
+        settings.post_process_prompts = vec![crate::settings::LLMPrompt {
+            id: "terse".to_string(),
+            name: "Terse".to_string(),
+            prompt: "Cut every sentence to its facts.".to_string(),
+        }];
+        apply_set_active_mode(&mut settings, "email").unwrap();
+        let revision = settings.modes_revision;
+
+        apply_use_post_process_prompt(&mut settings, "terse").unwrap();
+
+        let plan = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        assert_eq!(
+            plan.prompt().custom_prompt.as_deref(),
+            Some("Cut every sentence to its facts.")
+        );
+        assert_eq!(settings.modes_revision, revision + 1);
+        assert_eq!(
+            settings.post_process_selected_prompt_id.as_deref(),
+            Some("terse")
+        );
+        assert_eq!(
+            apply_use_post_process_prompt(&mut settings, "missing").unwrap_err(),
+            "Prompt with id 'missing' not found"
+        );
     }
 
     #[test]

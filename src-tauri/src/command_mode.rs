@@ -18,7 +18,7 @@
 //!    fallback pastes over it.
 
 use crate::actions::{post_process_transcription, ProcessedTranscription, RecordingErrorEvent};
-use crate::modes::{CommandPlan, RunPlan, RunPlanError, TranscriptionIntent};
+use crate::modes::{CommandPlan, RewriteOutcome, RunPlan, RunPlanError, TranscriptionIntent};
 use crate::prompt_renderer::{render_instruction, InstructionRenderInput};
 use log::{debug, warn};
 use tauri::{AppHandle, Emitter};
@@ -119,12 +119,15 @@ pub(crate) async fn rewrite_selection(
     );
 
     match post_process_transcription(app, run, &rendered, instruction).await {
-        Some(rewritten) if !rewritten.trim().is_empty() => ProcessedTranscription {
+        Ok(rewritten) => ProcessedTranscription {
             post_processed_text: Some(rewritten.clone()),
             final_text: rewritten,
+            rewrite: RewriteOutcome::Applied,
         },
-        _ => {
-            warn!("Command rewrite produced no text; the selection was left unchanged");
+        Err(outcome) => {
+            warn!(
+                "Command rewrite produced no text ({outcome:?}); the selection was left unchanged"
+            );
             let _ = app.emit(
                 "recording-error",
                 RecordingErrorEvent::typed(REWRITE_UNAVAILABLE_ERROR),
@@ -132,6 +135,7 @@ pub(crate) async fn rewrite_selection(
             ProcessedTranscription {
                 final_text: String::new(),
                 post_processed_text: None,
+                rewrite: outcome,
             }
         }
     }

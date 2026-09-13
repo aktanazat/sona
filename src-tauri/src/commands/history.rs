@@ -257,7 +257,11 @@ async fn replay_stored_recording(
                 capture_status: None,
             },
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "Saved history is off, so the new version has nowhere to go. Set Dictations to keep above 0 in Library."
+                .to_string()
+        })?;
     history_manager
         .append_delivery_attempt(
             saved.id,

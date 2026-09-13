@@ -816,7 +816,8 @@
           "decode": "Nie udało się zdekodować pliku audio.",
           "duration_limit": "Importowane audio jest ograniczone do 30 minut.",
           "transcription": "Nie udało się transkrybować dźwięku.",
-          "history": "Nie udało się zapisać transkrypcji w historii."
+          "history": "Nie udało się zapisać transkrypcji w historii.",
+          "history_off": "Zapisywana historia jest wyłączona, więc słowa z tego pliku nie mają dokąd trafić. W Bibliotece ustaw liczbę zachowywanych dyktowań powyżej 0."
         },
         "errors": {
           "start": "Nie udało się rozpocząć importu pliku. Spróbuj ponownie.",

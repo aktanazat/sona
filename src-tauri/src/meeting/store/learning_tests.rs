@@ -128,6 +128,7 @@ fn mode_receipt(mode_id: &str, source: ModeSelectionSource) -> ModeReceipt {
         context_policy: ContextPolicy::None,
         prompt_preset: PromptPreset::MinimalistCleanup,
         post_process_requested: false,
+        rewrite: crate::modes::RewriteOutcome::NotRequested,
         provider_id: None,
         model_id: None,
         engine_requested: RequestedEngine::Local,

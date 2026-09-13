@@ -814,7 +814,8 @@
           "decode": "Ljudfilen kunde inte avkodas.",
           "duration_limit": "Importerad ljuddata är begränsad till 30 minuter.",
           "transcription": "Ljudet kunde inte transkriberas.",
-          "history": "Transkriptionen kunde inte sparas i historiken."
+          "history": "Transkriptionen kunde inte sparas i historiken.",
+          "history_off": "Sparad historik är av, så orden i den här filen har ingenstans att ta vägen. Ställ in antalet dikteringar att behålla över 0 i Biblioteket."
         },
         "errors": {
           "start": "Kunde inte starta filimporten. Försök igen.",

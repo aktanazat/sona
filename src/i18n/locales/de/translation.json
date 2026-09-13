@@ -814,7 +814,8 @@
           "decode": "Die Audiodatei konnte nicht dekodiert werden.",
           "duration_limit": "Importierte Audiodateien sind auf 30 Minuten begrenzt.",
           "transcription": "Die Audiodatei konnte nicht transkribiert werden.",
-          "history": "Das Transkript konnte nicht im Verlauf gespeichert werden."
+          "history": "Das Transkript konnte nicht im Verlauf gespeichert werden.",
+          "history_off": "Der gespeicherte Verlauf ist aus, also haben die Wörter dieser Datei keinen Platz. Stelle in der Bibliothek die Anzahl zu behaltender Diktate auf mehr als 0."
         },
         "errors": {
           "start": "Dateiimport konnte nicht gestartet werden. Versuchen Sie es erneut.",

@@ -1434,22 +1434,6 @@ pub async fn discover_post_process_model_catalog(
 
 #[tauri::command]
 #[specta::specta]
-pub fn set_post_process_selected_prompt(app: AppHandle, id: String) -> Result<(), String> {
-    settings::try_update_settings(&app, |settings| {
-        if !settings
-            .post_process_prompts
-            .iter()
-            .any(|prompt| prompt.id == id)
-        {
-            return Err(format!("Prompt with id '{}' not found", id));
-        }
-        settings.post_process_selected_prompt_id = Some(id);
-        Ok(())
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
 pub fn change_mute_while_recording_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.mute_while_recording = enabled;

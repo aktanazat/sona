@@ -1338,7 +1338,7 @@ pub(super) async fn call(
             let id = args.take("id")?;
             let handle = app.clone();
             on_main_thread(app, move || {
-                reply(crate::shortcut::set_post_process_selected_prompt(
+                reply(crate::modes::set_post_process_selected_prompt(
                     handle.clone(),
                     id,
                 ))

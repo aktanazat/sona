@@ -212,6 +212,13 @@ fn serialized_context_len(context: &ContextPacket) -> usize {
         .len()
 }
 
+/// The placeholder older prompts used when the transcript was pasted into
+/// the instructions. The transcript now arrives in the envelope, so the
+/// token is resolved to a reference the model can follow instead of being
+/// shipped as a literal the model would read as an empty slot.
+const LEGACY_OUTPUT_PLACEHOLDER: &str = "${output}";
+const OUTPUT_PLACEHOLDER_REFERENCE: &str = "the transcript in the envelope";
+
 fn render_system(run: &RunPlan) -> String {
     let prompt_plan = run.prompt();
     let custom_prompt = prompt_plan.custom_prompt.as_deref();
@@ -222,7 +229,12 @@ fn render_system(run: &RunPlan) -> String {
     system.push_str(NORMALIZER);
     system.push_str("\n\n");
     if let Some(prompt) = custom_prompt {
-        system.push_str(prompt);
+        if prompt.contains(LEGACY_OUTPUT_PLACEHOLDER) {
+            system
+                .push_str(&prompt.replace(LEGACY_OUTPUT_PLACEHOLDER, OUTPUT_PLACEHOLDER_REFERENCE));
+        } else {
+            system.push_str(prompt);
+        }
     } else if prompt_plan.preset == PromptPreset::ApplicationContext {
         system.push_str(APPLICATION_CONTEXT_PREAMBLE);
         system.push_str("\n\n");
@@ -415,6 +427,25 @@ mod tests {
         let without = render_for(&run_with_samples(Vec::new())).system_message;
         assert!(!without.contains("[WRITING SAMPLES]"));
         assert_eq!(without, render_for(&run(Tone::Balanced)).system_message);
+    }
+
+    /// A prompt written for the version that pasted the transcript into the
+    /// instructions still works: the placeholder points at the envelope
+    /// rather than reaching the model as an empty slot.
+    #[test]
+    fn legacy_output_placeholder_points_at_the_envelope_transcript() {
+        let mut settings = get_default_settings();
+        ensure_mode_settings(&mut settings);
+        settings.modes[0].prompt.custom_prompt =
+            Some("Improve grammar and clarity for the following text: ${output}".to_string());
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+
+        let system = render_for(&run).system_message;
+
+        assert!(!system.contains("${output}"));
+        assert!(system.contains(
+            "Improve grammar and clarity for the following text: the transcript in the envelope"
+        ));
     }
 
     #[test]

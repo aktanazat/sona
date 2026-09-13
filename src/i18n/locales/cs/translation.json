@@ -816,7 +816,8 @@
           "decode": "Zvukový soubor se nepodařilo dekódovat.",
           "duration_limit": "Importovaný zvuk je omezen na 30 minut.",
           "transcription": "Zvuk se nepodařilo přepsat.",
-          "history": "Přepis se nepodařilo uložit do historie."
+          "history": "Přepis se nepodařilo uložit do historie.",
+          "history_off": "Ukládání historie je vypnuté, takže slova z tohoto souboru nemají kam jít. V Knihovně nastavte počet uchovávaných diktátů na více než 0."
         },
         "errors": {
           "start": "Import souboru se nepodařilo spustit. Zkuste to znovu.",

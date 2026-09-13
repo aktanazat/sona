@@ -625,10 +625,14 @@ async fn send_openai_chat_completion_with_schema(
     .await
     .map_err(openai_completion_error)?;
 
-    Ok(completion
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.clone()))
+    let choice = completion.choices.first();
+    // A reply clipped at the ceiling is a partial rewrite, and the caller
+    // reads an error as "no rewrite" and delivers the raw transcript. The
+    // Anthropic path makes the same call on `max_tokens`.
+    if choice.and_then(|choice| choice.finish_reason.as_deref()) == Some("length") {
+        return Err("The endpoint stopped the reply at the output-token ceiling".to_string());
+    }
+    Ok(choice.and_then(|choice| choice.message.content.clone()))
 }
 
 #[derive(Debug)]

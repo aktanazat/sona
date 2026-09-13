@@ -1692,7 +1692,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::add_post_process_prompt,
             shortcut::update_post_process_prompt,
             shortcut::delete_post_process_prompt,
-            shortcut::set_post_process_selected_prompt,
+            modes::set_post_process_selected_prompt,
             shortcut::suspend_all_bindings,
             shortcut::resume_all_bindings,
             shortcut::change_mute_while_recording_setting,

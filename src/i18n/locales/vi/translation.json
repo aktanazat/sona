@@ -813,7 +813,8 @@
           "decode": "Không thể giải mã tệp âm thanh.",
           "duration_limit": "Âm thanh đã nhập bị giới hạn ở 30 phút.",
           "transcription": "Không thể chuyển âm thanh thành văn bản.",
-          "history": "Không thể lưu bản ghi âm vào Lịch sử."
+          "history": "Không thể lưu bản ghi âm vào Lịch sử.",
+          "history_off": "Lịch sử đã lưu đang tắt, nên nội dung của tệp này không có chỗ để lưu. Đặt số bản đọc chính tả cần giữ lớn hơn 0 trong Thư viện."
         },
         "errors": {
           "start": "Không bắt đầu được việc nhập tệp. Hãy thử lại.",

@@ -815,7 +815,8 @@
           "decode": "Le fichier audio n'a pas pu être décodé.",
           "duration_limit": "Les fichiers audio importés sont limités à 30 minutes.",
           "transcription": "L'audio n'a pas pu être transcrit.",
-          "history": "La transcription n'a pas pu être enregistrée dans l'historique."
+          "history": "La transcription n'a pas pu être enregistrée dans l'historique.",
+          "history_off": "L'historique enregistré est désactivé, donc les mots de ce fichier n'ont nulle part où aller. Réglez le nombre de dictées conservées au-dessus de 0 dans la Bibliothèque."
         },
         "errors": {
           "start": "Impossible de démarrer l'import du fichier. Réessayez.",

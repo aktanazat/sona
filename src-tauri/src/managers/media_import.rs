@@ -75,6 +75,7 @@ pub enum AudioImportFailureCode {
     DurationLimit,
     Transcription,
     History,
+    HistoryOff,
     MeetingImport,
 }
 
@@ -193,6 +194,14 @@ impl AudioImportError {
         }
     }
 
+    /// Saved history is off, so a dictation import has nowhere to land.
+    fn history_off() -> Self {
+        Self {
+            code: AudioImportFailureCode::HistoryOff,
+            message: "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Library.",
+        }
+    }
+
     fn meeting_import() -> Self {
         Self {
             code: AudioImportFailureCode::MeetingImport,
@@ -290,7 +299,9 @@ impl<T: Send> ImportActivity for T {}
 trait ImportRuntime: Send + Sync {
     fn begin_job(&self) -> Box<dyn ImportActivity>;
     fn transcribe(&self, plan: &AsrPlan, audio: &[f32]) -> AnyResult<String>;
-    fn save(&self, record: ImportHistoryRecord) -> AnyResult<i64>;
+    /// `Ok(None)` is saved history turned off: the transcript has nowhere to
+    /// land and the job must say so.
+    fn save(&self, record: ImportHistoryRecord) -> AnyResult<Option<i64>>;
     /// Hand one opened recording to the meeting pipeline, blocking until the
     /// meeting exists. Blocking is what this queue's single worker is for, and
     /// the caller needs the meeting's id to report where the file went.
@@ -316,7 +327,7 @@ impl ImportRuntime for AppImportRuntime {
             .map(|decode| decode.text)
     }
 
-    fn save(&self, record: ImportHistoryRecord) -> AnyResult<i64> {
+    fn save(&self, record: ImportHistoryRecord) -> AnyResult<Option<i64>> {
         let entry = self.history.save_entry_with_receipt(
             record.file_name,
             record.transcription,
@@ -334,7 +345,7 @@ impl ImportRuntime for AppImportRuntime {
                 capture_status: None,
             }),
         )?;
-        Ok(entry.id)
+        Ok(entry.map(|entry| entry.id))
     }
 
     fn import_meeting(&self, path: &Path) -> AnyResult<MeetingSessionId> {
@@ -605,7 +616,11 @@ fn process_work(inner: &Arc<MediaImportInner>, work: WorkItem) {
         started_at_ms: work.run.run_started_at_ms,
     };
     let history_id = match inner.runtime.save(record) {
-        Ok(history_id) => history_id,
+        Ok(Some(history_id)) => history_id,
+        Ok(None) => {
+            finish_failed(inner, work.id, AudioImportError::history_off());
+            return;
+        }
         Err(error) => {
             log::warn!("Media import history save failed: {error}");
             finish_failed(inner, work.id, AudioImportError::history());
@@ -1225,10 +1240,10 @@ mod tests {
             Ok(format!("{} samples", audio.len()))
         }
 
-        fn save(&self, record: ImportHistoryRecord) -> AnyResult<i64> {
+        fn save(&self, record: ImportHistoryRecord) -> AnyResult<Option<i64>> {
             let mut saved_names = self.saved_names.lock();
             saved_names.push(record.file_name);
-            Ok(i64::try_from(saved_names.len()).unwrap_or(i64::MAX))
+            Ok(Some(i64::try_from(saved_names.len()).unwrap_or(i64::MAX)))
         }
 
         fn import_meeting(&self, path: &Path) -> AnyResult<MeetingSessionId> {

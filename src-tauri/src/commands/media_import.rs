@@ -1,6 +1,7 @@
 use crate::managers::media_import::{
-    validate_audio_import_path, AudioImportError, AudioImportFailureCode, AudioImportJob,
-    AudioImportResult, AudioImportStatus, AudioImportUpdateEvent, ImportOrigin, MediaImportManager,
+    validate_audio_import_path, validate_media_path, AudioImportError, AudioImportFailureCode,
+    AudioImportJob, AudioImportResult, AudioImportStatus, AudioImportUpdateEvent, ImportOrigin,
+    MediaImportManager,
 };
 use crate::modes::RunPlan;
 use crate::settings::get_settings;
@@ -147,6 +148,26 @@ pub(crate) fn enqueue_opened_audio_file(
     })?;
     enqueue_scoped_audio_file(app, media_import_manager, path, ImportOrigin::SystemOpen)
         .map_err(OpenedAudioImportFailure::invalid_file)
+}
+
+/// A file chosen in the native shell's open panel or dropped on its window.
+/// The webview's picker is granted to the file scope by the dialog plugin
+/// before it calls `import_audio_file`; the native panel has no plugin between
+/// it and the core, so the grant happens here. Both are the same explicit
+/// choice, so both carry `ImportOrigin::Picker`, and the picker's full media
+/// set applies: a video chosen on purpose is not the audio-only Open With case.
+/// The path is validated before it is granted so a refused choice leaves
+/// nothing behind in the scope.
+pub(crate) fn enqueue_chosen_media_file(
+    app: &AppHandle,
+    media_import_manager: &MediaImportManager,
+    path: &Path,
+) -> Result<AudioImportJob, String> {
+    validate_media_path(path).map_err(|error| error.to_string())?;
+    app.fs_scope()
+        .allow_file(path)
+        .map_err(|_| "Could not grant the chosen file to Sona".to_string())?;
+    enqueue_scoped_audio_file(app, media_import_manager, path, ImportOrigin::Picker)
 }
 
 #[tauri::command]

@@ -27,9 +27,10 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use tauri::{AppHandle, Listener};
+use tauri::{AppHandle, Listener, Manager};
 
 use crate::managers::history::HISTORY_STORAGE_EVENT;
+use crate::managers::media_import::MediaImportManager;
 use crate::tray::DICTATION_ACTIVITY_EVENT;
 
 /// The events the managers emit by string name rather than through a specta
@@ -272,12 +273,34 @@ fn serve(app: AppHandle, connection: Arc<Connection>, stream: UnixStream, regist
     lock_recover(&registry).retain(|other| !Arc::ptr_eq(other, &connection));
 }
 
+/// The methods only the shell can send come first; everything else is a
+/// Tauri command, dispatched by the generated table.
 async fn call(app: &AppHandle, method: &str, params: Option<&RawValue>) -> Result<String, Fault> {
-    if method == "shutdown" {
-        app.exit(0);
-        return encode_plain(());
+    match method {
+        "shutdown" => {
+            app.exit(0);
+            encode_plain(())
+        }
+        // The shell's open panel and window drop. Not a Tauri command: the
+        // webview's picker is granted to the file scope by the dialog plugin,
+        // and a command that granted any path it was handed would give a
+        // webview the scope back. The shell has no plugin and no webview.
+        "import_chosen_media_file" => {
+            let mut args = Args::parse(params)?;
+            let path: String = args.take("path")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                let manager: tauri::State<'_, Arc<MediaImportManager>> = handle.state();
+                reply(crate::commands::media_import::enqueue_chosen_media_file(
+                    &handle,
+                    manager.inner().as_ref(),
+                    Path::new(&path),
+                ))
+            })
+            .await?
+        }
+        _ => dispatch::call(app, method, params).await,
     }
-    dispatch::call(app, method, params).await
 }
 
 fn answer(id: u64, result: &str) -> String {

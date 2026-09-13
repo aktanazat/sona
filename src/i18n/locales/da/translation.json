@@ -814,7 +814,8 @@
           "decode": "Lydfilen kunne ikke afkodes.",
           "duration_limit": "Importeret lyd er begrænset til 30 minutter.",
           "transcription": "Lyden kunne ikke transskriberes.",
-          "history": "Transskriptionen kunne ikke gemmes i historikken."
+          "history": "Transskriptionen kunne ikke gemmes i historikken.",
+          "history_off": "Gemt historik er slået fra, så ordene i denne fil har ingen steder at være. Sæt antallet af gemte diktater over 0 i Biblioteket."
         },
         "errors": {
           "start": "Kunne ikke starte filimporten. Prøv igen.",

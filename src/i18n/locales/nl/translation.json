@@ -814,7 +814,8 @@
           "decode": "Het audiobestand kon niet worden gedecodeerd.",
           "duration_limit": "Geïmporteerde audio is beperkt tot 30 minuten.",
           "transcription": "De audio kon niet worden getranscribeerd.",
-          "history": "Het transcript kon niet worden opgeslagen in de geschiedenis."
+          "history": "Het transcript kon niet worden opgeslagen in de geschiedenis.",
+          "history_off": "Opgeslagen geschiedenis staat uit, dus de woorden uit dit bestand kunnen nergens heen. Zet het aantal te bewaren dictaten in de Bibliotheek boven 0."
         },
         "errors": {
           "start": "Kon de bestandsimport niet starten. Probeer het opnieuw.",

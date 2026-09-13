@@ -815,7 +815,8 @@
           "decode": "Não foi possível decodificar o arquivo de áudio.",
           "duration_limit": "O áudio importado é limitado a 30 minutos.",
           "transcription": "Não foi possível transcrever o áudio.",
-          "history": "Não foi possível salvar a transcrição no histórico."
+          "history": "Não foi possível salvar a transcrição no histórico.",
+          "history_off": "O histórico salvo está desativado, então as palavras deste arquivo não têm para onde ir. Defina os ditados a manter acima de 0 na Biblioteca."
         },
         "errors": {
           "start": "Não foi possível iniciar a importação do arquivo. Tente novamente.",
