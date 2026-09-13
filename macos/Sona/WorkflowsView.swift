@@ -7,6 +7,8 @@ import SwiftUI
 /// belong — "Nothing new to do" is a true sentence about a real run.
 struct WorkflowsView: View {
     let store: WorkflowsStore
+    let openMeeting: (MeetingSessionId) -> Void
+    let openDocuments: () -> Void
 
     var body: some View {
         Page {
@@ -24,9 +26,9 @@ struct WorkflowsView: View {
         PageSection("What Sona does on its own") {
             Card {
                 if store.loadingWorkflows && store.entries.isEmpty {
-                    WorkflowLine("Reading your workflows…")
+                    CardLine("Reading your workflows…")
                 } else if store.entries.isEmpty {
-                    WorkflowLine("No workflows to show.")
+                    CardLine("No workflows to show.")
                 } else {
                     ForEach(store.entries) { workflow in
                         WorkflowRow(store: store, workflow: workflow)
@@ -39,27 +41,21 @@ struct WorkflowsView: View {
     @ViewBuilder private var runLog: some View {
         PageSection("Activity") {
             Card {
-                if !store.receipts.isEmpty {
-                    WorkflowWeek(values: workflowRunsPerDay(store.receipts))
+                if let trend = store.trend, trend.total > 0 {
+                    WorkflowWeek(trend: trend)
                 }
                 if store.loadingRuns && store.receipts.isEmpty {
-                    WorkflowLine("Reading the run log…")
+                    CardLine("Reading the run log…")
                 } else if store.receipts.isEmpty && store.runError == nil {
-                    WorkflowLine("No activity yet.")
+                    CardLine("No activity yet.")
                 } else {
                     ForEach(store.receipts) { receipt in
-                        WorkflowRunRow(receipt: receipt)
+                        WorkflowRunRow(receipt: receipt, open: open(receipt.jumpTarget))
                     }
                 }
-                if let message = store.runError {
-                    WorkflowRetryRow(message: message, busy: store.loadingRuns) {
-                        Task {
-                            if store.receipts.isEmpty {
-                                await store.loadFirstRunPage()
-                            } else {
-                                await store.loadMoreRuns()
-                            }
-                        }
+                if let runError = store.runError {
+                    WorkflowRetryRow(message: runError.message, busy: store.loadingRuns || store.loadingMore) {
+                        Task { await store.retryRuns() }
                     }
                 } else if store.hasMoreRuns {
                     CardRow {
@@ -73,6 +69,17 @@ struct WorkflowsView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Where a run's row goes: the meeting it was about, or the documents
+    /// page for a document pass. A run about nothing in particular, a daily
+    /// digest or a skipped detection, is a line and not a button.
+    private func open(_ target: FeedJump?) -> (() -> Void)? {
+        switch target {
+        case let .meeting(id): { openMeeting(id) }
+        case .document: openDocuments
+        case nil: nil
         }
     }
 }
@@ -94,7 +101,10 @@ struct WorkflowRow: View {
                 lastRun
             }
         } trailing: {
-            Toggle("", isOn: binding)
+            /* The switch's own name is the workflow's, so VoiceOver reads
+             * "Remember people, switch, on" and not an unnamed switch. The
+             * name stays hidden on screen since the row already shows it. */
+            Toggle(workflow.id.name, isOn: binding)
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .tint(Theme.accent)
@@ -125,12 +135,14 @@ struct WorkflowRow: View {
     }
 }
 
-/// One row of the run log: what happened, which workflow, and when.
+/// One row of the run log: what happened, which workflow, and when. A run
+/// about a meeting or a document opens it.
 struct WorkflowRunRow: View {
     let receipt: WorkflowRunReceipt
+    let open: (() -> Void)?
 
     var body: some View {
-        CardRow {
+        CardRow(action: open) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 WorkflowStatusGlyph(status: receipt.status)
                 VStack(alignment: .leading, spacing: 4) {
@@ -139,13 +151,19 @@ struct WorkflowRunRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Text("\(receipt.workflowId.name) · \(promptRelativeTime(receipt.finishedAtUtcMs))")
                         .metaText(Theme.inkDisabled)
-                    if let failure = receipt.error {
+                    if let failure = receipt.failureText {
                         Text(failure)
                             .font(TypeScale.body(13))
                             .foregroundStyle(Theme.live)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
+        } trailing: {
+            if open != nil {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.inkTertiary)
             }
         }
     }
@@ -179,24 +197,27 @@ struct WorkflowStatusGlyph: View {
     }
 }
 
-/// Runs per day over the last seven local days, today last.
+/// Runs per day over the last seven local days, today last. The count is
+/// the core's over every run it holds, not the page on screen.
 struct WorkflowWeek: View {
-    let values: [Int]
+    let trend: WorkflowRunTrend
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 6) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(promptCounted(values.reduce(0, +), "run", "runs")).bodyText(14)
+                Text(promptCounted(trend.total, "run", "runs")).bodyText(14)
                 Text("in the last 7 days").metaText(Theme.inkDisabled)
             }
             Spacer(minLength: 16)
             HStack(alignment: .bottom, spacing: 5) {
-                ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                ForEach(trend.points, id: \.localDate) { point in
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(index == values.count - 1 ? Theme.accent : Theme.selection)
-                        .frame(width: 10, height: height(value))
+                        .fill(point.localDate == trend.points.last?.localDate ? Theme.accent : Theme.selection)
+                        .frame(width: 10, height: height(point.runs))
+                        .accessibilityLabel("\(point.localDate): \(promptCounted(point.runs, "run", "runs"))")
                 }
             }
+            .accessibilityElement(children: .combine)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
@@ -204,9 +225,9 @@ struct WorkflowWeek: View {
         .overlay(alignment: .bottom) { Hairline() }
     }
 
-    private func height(_ value: Int) -> CGFloat {
-        let peak = max(values.max() ?? 0, 1)
-        return 3 + 25 * CGFloat(value) / CGFloat(peak)
+    private func height(_ runs: Int) -> CGFloat {
+        let peak = max(trend.points.map(\.runs).max() ?? 0, 1)
+        return 3 + 25 * CGFloat(runs) / CGFloat(peak)
     }
 }
 
@@ -227,24 +248,5 @@ struct WorkflowRetryRow: View {
                 .buttonStyle(.secondary)
                 .disabled(busy)
         }
-    }
-}
-
-/// One quiet sentence where a row would be too much furniture.
-struct WorkflowLine: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        Text(text)
-            .metaText()
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline() }
     }
 }

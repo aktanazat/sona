@@ -123,6 +123,8 @@ struct WorkflowOutcomeCounts: Decodable {
 struct WorkflowRunReceipt: Decodable, Identifiable {
     let id: String
     let workflowId: WorkflowId
+    /// The meeting or document the run was about, when there is one to open.
+    let jumpTarget: FeedJump?
     let status: WorkflowRunStatus
     let startedAtUtcMs: Double
     let finishedAtUtcMs: Double
@@ -131,6 +133,39 @@ struct WorkflowRunReceipt: Decodable, Identifiable {
     let outcomeCode: String
     let outcomeCounts: WorkflowOutcomeCounts
     let error: String?
+
+    /// Whether this run comes after `other` in the log's order: newest
+    /// first, the id breaking a tie the way the core's cursor does.
+    func isOlder(than other: WorkflowRunReceipt) -> Bool {
+        startedAtUtcMs < other.startedAtUtcMs
+            || (startedAtUtcMs == other.startedAtUtcMs && id < other.id)
+    }
+
+    /// The stored code, said for a person: what went wrong, whether it comes
+    /// back on its own, and what to do if it does not. The code stays as
+    /// the detail, since it is what a bug report needs. Nothing retries a
+    /// run; the next meeting that qualifies starts a new one.
+    var failureText: String? {
+        guard let error else { return nil }
+        let sentence: String
+        switch error {
+        case "storage_unavailable", "store_unavailable", "io_error":
+            sentence = "Sona's meeting storage couldn't be reached. Nothing was changed; the next meeting runs it again."
+        case "encryption_unavailable":
+            sentence = "Sona's meeting storage was locked. Nothing was changed; the next meeting runs it again."
+        case "store_corrupt":
+            sentence = "A stored record couldn't be read. Nothing was changed."
+        case "invalid_event_payload":
+            sentence = "The meeting record this run was given was incomplete. Nothing was changed."
+        case "workflow_panicked":
+            sentence = "This run hit a bug and stopped before writing anything. Nothing was changed."
+        case "local_model_unavailable":
+            sentence = "The local model this run needs isn't available. Nothing was changed; check Models."
+        default:
+            return error
+        }
+        return "\(sentence) (\(error))"
+    }
 }
 
 /// One workflow in the Settings list.
@@ -178,6 +213,18 @@ struct WorkflowRunsPage: Decodable {
     let nextCursor: WorkflowRunCursor?
 }
 
+/// Runs per local calendar day over the last seven days, today last, over
+/// every run the core holds: the number is the week's, not the page's.
+struct WorkflowRunTrend: Decodable {
+    struct Point: Decodable {
+        let localDate: String
+        let runs: Int
+    }
+
+    let total: Int
+    let points: [Point]
+}
+
 /// What a run did, said the way a person would say it. One sentence per
 /// outcome code, counted from the receipt the run wrote — never from the
 /// workflow's name, which is the subsystem's word for itself.
@@ -193,10 +240,22 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
         return counts.carried == 1
             ? "Carried 1 open loop forward"
             : "Carried \(counts.carried) open loops forward"
+    /* The pass finds candidates for the vocabulary; nothing is learned
+     * until one is accepted, so the sentence says what was found. */
     case "vocabulary_candidates":
-        return counts.candidates == 1 ? "Learned a new word" : "Learned \(counts.candidates) new words"
+        switch counts.candidates {
+        case 0: return "Found no new words"
+        case 1: return "Found 1 word for your vocabulary"
+        default: return "Found \(counts.candidates) words for your vocabulary"
+        }
+    /* The run is about one imported document; what it counts is the
+     * people it connected the document to. */
     case "document_links":
-        return counts.changes == 1 ? "Linked a document" : "Linked \(counts.changes) documents"
+        switch counts.persons {
+        case 0: return "Found no one to link this document to"
+        case 1: return "Linked this document to 1 person"
+        default: return "Linked this document to \(counts.persons) people"
+        }
     case "learning_suggestions":
         return counts.suggestions == 1 ? "Noticed 1 thing" : "Noticed \(counts.suggestions) things"
     case "series_primed": return "Prepared a recurring meeting"
@@ -224,30 +283,20 @@ func workflowOutcomeText(_ receipt: WorkflowRunReceipt) -> String {
     }
 }
 
-/// Counts the loaded receipts into the seven local calendar days ending today.
-func workflowRunsPerDay(_ receipts: [WorkflowRunReceipt], now: Date = .now) -> [Int] {
-    let calendar = Calendar.current
-    let today = calendar.startOfDay(for: now)
-    let days = (0..<7).compactMap { offset in
-        calendar.date(byAdding: .day, value: offset - 6, to: today)
-    }
-    var values = [Int](repeating: 0, count: days.count)
-    for receipt in receipts {
-        let day = calendar.startOfDay(for: Date(timeIntervalSince1970: receipt.startedAtUtcMs / 1000))
-        if let index = days.firstIndex(of: day) {
-            values[index] += 1
-        }
-    }
-    return values
-}
-
 /// The workflow catalogue and its run log.
 @MainActor
 @Observable
 final class WorkflowsStore {
+    /// Which read of the log failed, so the retry repeats that one.
+    enum RunLoad {
+        case firstPage
+        case nextPage
+    }
+
     private(set) var entries: [WorkflowSummary] = []
     private(set) var revision: UInt64 = 0
     private(set) var receipts: [WorkflowRunReceipt] = []
+    private(set) var trend: WorkflowRunTrend?
     private(set) var loadingWorkflows = true
     private(set) var loadingRuns = true
     private(set) var loadingMore = false
@@ -255,10 +304,13 @@ final class WorkflowsStore {
     private(set) var pending: WorkflowId?
     /// The last thing the core could not do, shown until the next success.
     private(set) var error: String?
-    /// The run log's own failure: it retries on its own button.
-    private(set) var runError: String?
+    /// The run log's own failure, and which read it was.
+    private(set) var runError: (load: RunLoad, message: String)?
 
     @ObservationIgnored private var nextCursor: WorkflowRunCursor?
+    /// Bumped by every read of the first page. A page of older runs that
+    /// comes back after the log moved on is dropped, not appended.
+    @ObservationIgnored private var generation = 0
     @ObservationIgnored private let core: Core
 
     var hasMoreRuns: Bool { nextCursor != nil }
@@ -281,11 +333,12 @@ final class WorkflowsStore {
         await reload()
     }
 
-    /// Both halves, the way the React hook loads them: together.
+    /// Every half at once: the switches, the newest runs, the week.
     func reload() async {
         async let list: Void = loadWorkflows()
         async let runs: Void = loadFirstRunPage()
-        _ = await (list, runs)
+        async let week: Void = loadTrend()
+        _ = await (list, runs, week)
     }
 
     func loadWorkflows() async {
@@ -300,33 +353,71 @@ final class WorkflowsStore {
         }
     }
 
+    /// The newest page. Rows already read past it stay: a meeting ending
+    /// while someone is reading last month's runs must not scroll them back
+    /// to the top. Only a page that no longer reaches the rows on screen,
+    /// more than a page of new runs, starts the log over.
     func loadFirstRunPage() async {
+        generation += 1
         loadingRuns = true
         defer { loadingRuns = false }
         do {
             let page: WorkflowRunsPage = try await core.request(
                 "workflow_runs", ["request": RunsRequest(cursor: nil)])
-            receipts = page.entries
-            nextCursor = page.nextCursor
+            merge(page)
             runError = nil
         } catch {
-            runError = "Couldn't load activity. \(promptErrorSentence(error))"
+            runError = (.firstPage, "Couldn't load activity. \(promptErrorSentence(error))")
         }
     }
 
     /// The next page, appended. The cursor is the core's, handed back.
     func loadMoreRuns() async {
         guard let cursor = nextCursor, !loadingMore else { return }
+        let generation = generation
         loadingMore = true
         defer { loadingMore = false }
         do {
             let page: WorkflowRunsPage = try await core.request(
                 "workflow_runs", ["request": RunsRequest(cursor: cursor)])
+            guard generation == self.generation else { return }
             receipts += page.entries
             nextCursor = page.nextCursor
             runError = nil
         } catch {
-            runError = "Couldn't load more activity. \(promptErrorSentence(error))"
+            guard generation == self.generation else { return }
+            runError = (.nextPage, "Couldn't load more activity. \(promptErrorSentence(error))")
+        }
+    }
+
+    /// Repeats the read that failed.
+    func retryRuns() async {
+        switch runError?.load {
+        case .firstPage: await loadFirstRunPage()
+        case .nextPage: await loadMoreRuns()
+        case nil: break
+        }
+    }
+
+    func loadTrend() async {
+        do {
+            trend = try await core.request("workflow_run_trend", ["request": ["range": "days_7"]])
+        } catch {
+            trend = nil
+        }
+    }
+
+    private func merge(_ page: WorkflowRunsPage) {
+        guard let head = receipts.first, let last = page.entries.last,
+              page.entries.contains(where: { $0.id == head.id }) else {
+            receipts = page.entries
+            nextCursor = page.nextCursor
+            return
+        }
+        let older = receipts.filter { $0.isOlder(than: last) }
+        receipts = page.entries + older
+        if older.isEmpty {
+            nextCursor = page.nextCursor
         }
     }
 

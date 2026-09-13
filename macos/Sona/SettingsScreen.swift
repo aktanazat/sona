@@ -74,7 +74,10 @@ struct SettingsScreen: View {
         case .prompts:
             PromptsView(store: model.prompts)
         case .workflows:
-            WorkflowsView(store: model.workflows)
+            WorkflowsView(
+                store: model.workflows,
+                openMeeting: model.openMeeting,
+                openDocuments: { model.showSettings(.documents) })
         case .meetings:
             Page {
                 PageTitle("Meetings", subtitle: "When Sona notices a call, what it keeps, and what it does after.")
