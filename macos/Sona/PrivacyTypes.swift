@@ -481,6 +481,20 @@ struct IdentityAdoptionReceipt: Decodable {
     var canRevert: Bool { mode == .completed }
 }
 
+/// What a rollback left for the reader: where the settings and history Sona
+/// wrote after adopting now sit, or nothing, when there was nothing to keep.
+struct IdentityRollbackReceipt: Decodable {
+    let backupDir: String?
+
+    var sentence: String {
+        guard let backupDir else {
+            return "Recordings, models and keys are back with the legacy app. Sona quits now and starts fresh next time."
+        }
+        let folder = URL(fileURLWithPath: backupDir).lastPathComponent
+        return "Recordings, models and keys are back with the legacy app. The history and settings Sona had are kept in the folder \(folder) inside Sona's data folder. Sona quits now and starts fresh next time."
+    }
+}
+
 enum IdentityAdoptionFailure: String, Decodable {
     case unavailable
     case legacyRunning = "legacy_running"
@@ -540,6 +554,7 @@ enum AudioImportFailureCode: String, Decodable {
     case durationLimit = "duration_limit"
     case transcription
     case history
+    case historyOff = "history_off"
     case meetingImport = "meeting_import"
 
     var sentence: String {
@@ -551,6 +566,8 @@ enum AudioImportFailureCode: String, Decodable {
         case .durationLimit: "Imported audio is limited to 30 minutes."
         case .transcription: "The audio could not be transcribed."
         case .history: "The transcript could not be saved to history."
+        case .historyOff:
+            "Saved history is off, so this file's words have nowhere to go. Set Dictations to keep above 0 in Library."
         case .meetingImport: "This recording could not be saved as a meeting."
         }
     }
@@ -628,8 +645,10 @@ struct AudioImportJob: Decodable, Identifiable {
 
     /// `done` is two sentences, not one: a dictation landed in History, and a
     /// recording the OS opened landed in Library. The result says which.
+    /// "Cancelling" is only true while the work is still going; a job that
+    /// has finished says how it finished, whatever was asked of it.
     var word: String {
-        if cancelRequested { return "Cancelling" }
+        if cancelRequested, status.isRunning { return "Cancelling" }
         if result?.isMeeting == true { return "Saved as a meeting" }
         return status.word
     }

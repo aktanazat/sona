@@ -9,6 +9,8 @@ import SwiftUI
 struct PrivacyView: View {
     let store: PrivacyStore
 
+    @State private var confirmingRevert = false
+
     var body: some View {
         Page {
             PageTitle("Privacy", subtitle: "What Sona reads, what leaves this Mac, and what it keeps.")
@@ -20,6 +22,30 @@ struct PrivacyView: View {
             storageSection
             upstreamSection
             identitySection
+        }
+        .alert("Put the adopted data back?", isPresented: $confirmingRevert) {
+            Button("Revert and quit", role: .destructive) {
+                Task { await store.revertIdentity() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Recordings, models and provider keys move back to the legacy app. "
+                    + "The history and settings Sona has now are kept in a backup folder inside Sona's data folder, so nothing is lost. "
+                    + "Sona quits when it is done.")
+        }
+        // Nothing else is safe after a rollback: the core still holds the
+        // moved files open, so the one button is the quit.
+        .alert(
+            "The data is back",
+            isPresented: Binding(
+                get: { store.identityReverted != nil },
+                set: { _ in }),
+            presenting: store.identityReverted
+        ) { _ in
+            Button("Quit Sona") { NSApplication.shared.terminate(nil) }
+        } message: { receipt in
+            Text(receipt.sentence)
         }
     }
 
@@ -113,10 +139,19 @@ struct PrivacyView: View {
                     Text("Nothing leaves this Mac except on the routes listed here, and provider keys stay in the system credential store, never in Sona's settings.")
                         .bodyText(14, Theme.inkSecondary)
                 }
-                CardRow {
-                    Text("AI cleanup").bodyText()
-                } trailing: {
-                    PrivacyFact(store.cleanupRoute.fact, live: store.cleanupRoute == .failed)
+                if store.cleanupRoute == .failed {
+                    PrivacyFailureRow(
+                        "AI cleanup setup could not be checked.",
+                        retry: "Retry"
+                    ) {
+                        Task { await store.retryEgress() }
+                    }
+                } else {
+                    CardRow {
+                        Text("AI cleanup").bodyText()
+                    } trailing: {
+                        PrivacyFact(store.cleanupRoute.fact, live: false)
+                    }
                 }
                 if store.transcriptionRoute == .failed {
                     PrivacyFailureRow(
@@ -364,11 +399,11 @@ struct PrivacyView: View {
                     if receipt.canRevert {
                         ActionRow(
                             title: "Put the adopted data back",
-                            detail: "Moves history, recordings and keys to the folder they came from. The legacy app must be closed.",
+                            detail: "Moves recordings, models and keys to the folder they came from, and keeps what Sona wrote since. The legacy app must be closed.",
                             button: "Revert adoption",
                             busy: store.identityBusy
                         ) {
-                            Task { await store.revertIdentity() }
+                            confirmingRevert = true
                         }
                     }
                 }
@@ -476,7 +511,7 @@ private struct PrivacyCheckRow: View {
                 if let fact {
                     Text(fact).metaText()
                 }
-                Toggle("", isOn: Binding(get: { isOn }, set: change))
+                Toggle(title, isOn: Binding(get: { isOn }, set: change))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
                     .disabled(!enabled)

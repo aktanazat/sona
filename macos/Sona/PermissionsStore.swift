@@ -43,6 +43,14 @@ final class PermissionsStore {
 
     init(core: Core) {
         self.core = core
+        // A permission revoked in System Settings after setup comes back into
+        // view with the app: one non-prompting look on each activation, so
+        // the rows and the recovery banner say what is true now.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { await self?.refresh() }
+        }
     }
 
     var allGranted: Bool {
@@ -69,7 +77,6 @@ final class PermissionsStore {
         microphone = Self.settle(microphone, granted: PermissionsMicrophone.state == .granted)
         do {
             let diagnostics: AccessibilityDiagnostics = try await core.request("get_context_diagnostics")
-            let wasGranted = accessibility == .granted
             switch diagnostics.accessibility {
             case .granted:
                 accessibility = .granted
@@ -78,10 +85,11 @@ final class PermissionsStore {
             case .unsupported:
                 accessibility = .unsupported
             }
-            // Enigo and the global shortcut listener are started exactly once
-            // per grant, and this transition is the only source: the core
-            // refuses both while it is untrusted.
-            if accessibility == .granted, !wasGranted {
+            // Enigo and the global shortcut listener are started once per
+            // grant: the core refuses both while it is untrusted, and holds
+            // them once they are up. A start that failed is tried again on
+            // the next look, not only on the next grant.
+            if accessibility == .granted {
                 initializeInput()
             }
             error = nil

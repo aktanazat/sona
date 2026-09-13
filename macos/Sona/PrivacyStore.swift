@@ -50,6 +50,9 @@ final class PrivacyStore {
     private(set) var identity: IdentityAdoptionReceipt?
     private(set) var identityFailure: String?
     private(set) var identityBusy = false
+    /// Set once a rollback has finished. From here the only move is to quit:
+    /// the core still holds the moved files open.
+    private(set) var identityReverted: IdentityRollbackReceipt?
     private(set) var isPortable = false
 
     /// The last thing the core could not do, shown until the next success.
@@ -290,17 +293,18 @@ final class PrivacyStore {
         await loadIdentity()
     }
 
-    /// Move the adopted data folder back where it came from. Only a completed
-    /// adoption can be undone, and only while the legacy app is closed.
+    /// Move the adopted data back where it came from. Only a completed
+    /// adoption can be undone, and only while the legacy app is closed. The
+    /// receipt names the backup that keeps what Sona wrote since adopting.
     func revertIdentity() async {
-        guard !identityBusy else { return }
+        guard !identityBusy, identityReverted == nil else { return }
         identityBusy = true
         identityFailure = nil
         defer { identityBusy = false }
         do {
-            try await core.request("revert_identity_adoption")
+            let receipt: IdentityRollbackReceipt = try await core.request("revert_identity_adoption")
             error = nil
-            await loadIdentity()
+            identityReverted = receipt
         } catch let failure as CoreError {
             identityFailure = failure.remote(as: IdentityAdoptionFailure.self)?.sentence
                 ?? failure.localizedDescription
@@ -404,14 +408,21 @@ final class PrivacyStore {
             return
         }
         var configured: [String] = []
+        var refused = false
         for provider in candidates {
-            // A read that fails counts as no key: the credential store can be
-            // locked, and a route is only a route once a key is proven there.
-            if await secretConfigured(kind: "llm", id: provider.id) {
-                configured.append(provider.label)
+            do {
+                let secret: EgressSecretState = try await core.request(
+                    "get_provider_secret_state", ["kind": "llm", "providerId": provider.id])
+                if secret.configured {
+                    configured.append(provider.label)
+                }
+            } catch {
+                refused = true
             }
         }
-        cleanupRoute = configured.isEmpty ? .thisMac : .providers(configured)
+        // The same rule as transcription below: a key that could not be
+        // checked is not a key that is absent, and "this Mac" is a claim.
+        cleanupRoute = refused ? .failed : (configured.isEmpty ? .thisMac : .providers(configured))
     }
 
     private func loadTranscriptionRoute(_ settings: PrivacySettings) async {
@@ -434,12 +445,6 @@ final class PrivacyStore {
         // reading "this Mac" would be a guess, and this is the one page that
         // cannot guess.
         transcriptionRoute = refused ? .failed : (live.isEmpty ? .thisMac : .providers(live))
-    }
-
-    private func secretConfigured(kind: String, id: String) async -> Bool {
-        let state: EgressSecretState? = try? await core.request(
-            "get_provider_secret_state", ["kind": kind, "providerId": id])
-        return state?.configured ?? false
     }
 
     private func narrowSelection(to status: UpstreamImportStatus) {

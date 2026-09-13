@@ -69,6 +69,16 @@ final class SecureInputStore {
         return "macOS is temporarily blocking \(shortcuts)"
     }
 
+    /// How to end it, since dismissing the banner does not: Secure Input is
+    /// the other app's, and only leaving it or turning it off gives the
+    /// keyboard back. Which of the two is tentative, like the culprit above.
+    var recovery: String {
+        if let name = status?.culpritName {
+            return "Secure Input is on in \(name): a password field, or Terminal's Secure Keyboard Entry. Click out of the field, or turn the setting off in the Terminal menu. Sona's shortcuts come back on their own."
+        }
+        return "Secure Input is on somewhere: a password field, or Terminal's Secure Keyboard Entry. Click out of the field, or turn the setting off in the Terminal menu. Sona's shortcuts come back on their own."
+    }
+
     /// A dismissal lasts for this episode only: once the condition clears, the
     /// next occurrence warns again.
     func dismiss() {
@@ -83,7 +93,7 @@ final class SecureInputStore {
     }
 }
 
-/// The warning itself: one line, and the way to put it away.
+/// The warning itself: the one line, the way out, and the way to put it away.
 struct SecureInputBanner: View {
     let store: SecureInputStore
 
@@ -95,7 +105,10 @@ struct SecureInputBanner: View {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 13))
                             .foregroundStyle(Theme.inkSecondary)
-                        Text(message).bodyText(14)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(message).bodyText(14)
+                            Text(store.recovery).metaText()
+                        }
                     }
                 } trailing: {
                     Button("Dismiss") { store.dismiss() }
