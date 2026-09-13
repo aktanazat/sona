@@ -3114,6 +3114,15 @@ fn try_update_settings_inner<R, E>(
     {
         manager.signal_idle_watcher();
     }
+    // Every window that mirrors a setting listens for this and reads the
+    // record again; the native shell's stores and the webview's settings store
+    // both take it as "something was written, ask again". Emitted here, from
+    // the one seam every write passes through, so a page cannot show a value
+    // another page has already replaced. The few writers that also name the
+    // setting and its value keep doing so for the readers that act on the name
+    // without a read; those paths announce twice, and a second read is what
+    // they cost.
+    let _ = app.emit("settings-changed", serde_json::json!({ "setting": null }));
     if let Err(error) = &persisted {
         // The caller may only be able to say *that* the write failed, so the
         // reason is recorded here once, where it still exists.
