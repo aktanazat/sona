@@ -164,13 +164,16 @@ final class Core: @unchecked Sendable {
         return decoder
     }()
 
-    private let process = Process()
+    /// The child of the latest `start`. A `Process` runs once, so a restart
+    /// builds a new one. Read and replaced on the main actor only.
+    private var process = Process()
     private let socketPath: String
     private let lock = NSLock()
     private var socket: Int32 = -1
     private var pending: [UInt64: CheckedContinuation<Data, Error>] = [:]
     private var nextID: UInt64 = 0
     private var observers: [String: [@MainActor (Data) -> Void]] = [:]
+    private var closed: (@MainActor () -> Void)?
 
     init() {
         socketPath = NSTemporaryDirectory() + "sona-core-\(getpid()).sock"
@@ -183,16 +186,29 @@ final class Core: @unchecked Sendable {
         lock.withLock { observers[name, default: []].append(handler) }
     }
 
+    /// Registers what runs when the socket closes under the shell: once per
+    /// close, on the main actor, after every pending request has failed. A
+    /// close the shell asked for through `shutdown` is not announced.
+    func onClose(_ handler: @escaping @MainActor () -> Void) {
+        lock.withLock { closed = handler }
+    }
+
     /// Spawns the core and connects to it. The socket is bound only once every
-    /// manager is ready, so the connect loop is the readiness check.
+    /// manager is ready, so the connect loop is the readiness check. Called
+    /// again after the socket closed: the previous child is given its exit
+    /// window first, so the new one is the only core that binds the path.
     func start() async throws {
         let binary = try Self.binary()
+        let previous = process
+        let process = Process()
         process.executableURL = binary
         process.currentDirectoryURL = binary.deletingLastPathComponent()
         process.arguments = ["--native-socket", socketPath, "--no-tray", "--start-hidden"]
-        try process.run()
-        let socket = try await Task.detached(priority: .userInitiated) { [socketPath, process] in
-            try Self.connect(to: socketPath, while: process)
+        self.process = process
+        let socket = try await Task.detached(priority: .userInitiated) { [socketPath] in
+            Self.end(previous)
+            try process.run()
+            return try Self.connect(to: socketPath, while: process)
         }.value
         lock.withLock { self.socket = socket }
         let reader = Thread { [self] in read(socket) }
@@ -201,22 +217,33 @@ final class Core: @unchecked Sendable {
     }
 
     /// Asks the core to exit and gives it a moment to do so; a core that
-    /// does not answer is killed. `Process.waitUntilExit` would spin a nested
-    /// run loop inside the app's own termination, so this polls instead.
-    /// The socket file is the shell's to remove: the core never unlinks it.
+    /// does not answer is killed. The close this causes is the shell's own,
+    /// so it is not announced. The socket file is the shell's to remove:
+    /// the core never unlinks it.
     func shutdown() {
-        let socket = lock.withLock { self.socket }
+        let socket = lock.withLock { () -> Int32 in
+            closed = nil
+            return self.socket
+        }
         if socket >= 0 {
             _ = send("{\"id\":0,\"method\":\"shutdown\"}\n", to: socket)
         }
-        let deadline = Date().addingTimeInterval(Self.exitWindow)
+        Self.end(process)
+        unlink(socketPath)
+    }
+
+    /// Waits out the exit window for a core that was asked to stop, or has
+    /// already closed its socket, then kills what is still running.
+    /// `Process.waitUntilExit` would spin a nested run loop inside the app's
+    /// own termination, so this polls instead.
+    private static func end(_ process: Process) {
+        let deadline = Date().addingTimeInterval(exitWindow)
         while process.isRunning, Date() < deadline {
-            usleep(Self.exitPoll)
+            usleep(exitPoll)
         }
         if process.isRunning {
             process.terminate()
         }
-        unlink(socketPath)
     }
 
     func request(_ method: String) async throws {
@@ -357,16 +384,21 @@ final class Core: @unchecked Sendable {
                 dispatch(line)
             }
         }
-        let waiting = lock.withLock { () -> [CheckedContinuation<Data, Error>] in
+        let (waiting, closed) = lock.withLock { () -> ([CheckedContinuation<Data, Error>], (@MainActor () -> Void)?) in
             self.socket = -1
             let all = Array(pending.values)
             pending.removeAll()
-            return all
+            return (all, self.closed)
         }
         for continuation in waiting {
             continuation.resume(throwing: CoreError.closed)
         }
         close(socket)
+        if let closed {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { closed() }
+            }
+        }
     }
 
     private func dispatch(_ line: Data) {

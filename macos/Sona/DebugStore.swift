@@ -338,6 +338,9 @@ final class DebugStore {
         do {
             let directory: String = try await core.request("get_log_dir_path")
             logDirectory = directory
+            // A second start, after the core was restarted, replaces the tail
+            // rather than doubling the polling.
+            tail?.stop()
             let tail = LogTailReader(directory: directory) { [weak self] lines in
                 self?.append(lines)
             }

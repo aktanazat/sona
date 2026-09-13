@@ -18,6 +18,11 @@ enum CoreEvent {
     static let downloadComplete = "model-download-complete"
     static let downloadFailed = "model-download-failed"
     static let downloadCancelled = "model-download-cancelled"
+    static let verificationStarted = "model-verification-started"
+    static let verificationCompleted = "model-verification-completed"
+    static let extractionStarted = "model-extraction-started"
+    static let extractionCompleted = "model-extraction-completed"
+    static let extractionFailed = "model-extraction-failed"
     static let modelDeleted = "model-deleted"
 }
 
@@ -104,4 +109,21 @@ struct DownloadProgress: Decodable {
     let modelId: String
     let downloaded: UInt64
     let total: UInt64
+}
+
+/// `model-download-failed` and `model-extraction-failed`: which model, and
+/// the core's own sentence about why.
+struct ModelFailure: Decodable {
+    let modelId: String
+    let error: String
+}
+
+/// `model-state-changed`: the engine loading, done, or refusing a model.
+/// `unloaded` with an error is the engine having crashed under the model.
+struct ModelStateChange: Decodable {
+    /// "loading_started", "loading_completed", "loading_failed",
+    /// "selection_changed", or "unloaded".
+    let eventType: String
+    let modelId: String?
+    let error: String?
 }
