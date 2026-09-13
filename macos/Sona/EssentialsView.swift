@@ -33,13 +33,7 @@ struct EssentialsView<MeetingRows: View>: View {
                 /// hundred it would ignore.
                 LanguageRow(store: store)
                 SoundsRow(store: store)
-                ToggleRow(
-                    title: "Launch at login",
-                    isOn: Binding(
-                        get: { store.settings.autostartEnabled },
-                        set: { value in Task { await store.setAutostart(value) } }
-                    )
-                )
+                LoginItemRow(store: store)
                 meetingRows()
             }
         }
@@ -49,6 +43,44 @@ struct EssentialsView<MeetingRows: View>: View {
 extension EssentialsView where MeetingRows == EmptyView {
     init(store: SettingsStore) {
         self.init(store: store) { EmptyView() }
+    }
+}
+
+/// Whether Sona starts with the Mac. The switch is the setting; under it,
+/// what macOS did with that, when it is not the same thing.
+struct LoginItemRow: View {
+    let store: SettingsStore
+
+    var body: some View {
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Launch at login").bodyText()
+                switch store.loginItem {
+                case .matching:
+                    EmptyView()
+                case .needsApproval:
+                    Text("Switched off in System Settings. Allow Sona under Login Items to start it with the Mac.")
+                        .metaText()
+                case let .failed(reason):
+                    Text("macOS refused the change: \(reason)").metaText(Theme.live)
+                }
+            }
+        } trailing: {
+            HStack(spacing: 10) {
+                if store.loginItem == .needsApproval {
+                    Button("Open Login Items") { store.openLoginItems() }
+                        .buttonStyle(.quiet)
+                }
+                Toggle("Launch at login", isOn: Binding(
+                    get: { store.settings.autostartEnabled },
+                    set: { value in Task { await store.setAutostart(value) } }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .tint(Theme.accent)
+                .disabled(store.isBusy("autostart_enabled"))
+            }
+        }
     }
 }
 
@@ -75,7 +107,7 @@ struct MicrophoneRow: View {
                         .buttonStyle(.quiet)
                         .disabled(store.isBusy("selected_microphone"))
                 }
-                Picker("", selection: Binding(
+                Picker("Microphone", selection: Binding(
                     get: { selected },
                     set: { name in Task { await store.setMicrophone(name) } }
                 )) {
@@ -237,7 +269,7 @@ struct SoundsRow: View {
                     .tint(Theme.accent)
                     .accessibilityLabel("Sound volume")
                 }
-                Toggle("", isOn: Binding(
+                Toggle("Sounds", isOn: Binding(
                     get: { store.settings.audioFeedback },
                     set: { value in Task { await store.setAudioFeedback(value) } }
                 ))

@@ -177,7 +177,7 @@ struct HudPillRow: View {
         } trailing: {
             HStack(spacing: 12) {
                 if store.settings.hudPillEnabled {
-                    Picker("", selection: Binding(
+                    Picker("Idle pill position", selection: Binding(
                         get: { store.settings.hudPillPosition },
                         set: { value in Task { await store.setHudPillPosition(value) } }
                     )) {
@@ -190,7 +190,7 @@ struct HudPillRow: View {
                     .fixedSize()
                     .disabled(store.isBusy("hud_pill_position"))
                 }
-                Toggle("", isOn: Binding(
+                Toggle("Show the idle pill", isOn: Binding(
                     get: { store.settings.hudPillEnabled },
                     set: { value in Task { await store.setHudPillEnabled(value) } }
                 ))
@@ -280,7 +280,7 @@ struct MicrophoneClamshellRow: View {
                         .buttonStyle(.quiet)
                         .disabled(store.isBusy("clamshell_microphone"))
                 }
-                Picker("", selection: Binding(
+                Picker("Clamshell microphone", selection: Binding(
                     get: { selected },
                     set: { name in Task { await store.setClamshellMicrophone(name) } }
                 )) {
@@ -314,7 +314,7 @@ struct SoundThemeRow: View {
             Text("Sound theme").bodyText()
         } trailing: {
             HStack(spacing: 10) {
-                Picker("", selection: Binding(
+                Picker("Sound theme", selection: Binding(
                     get: { store.settings.soundTheme },
                     set: { value in Task { await store.setSoundTheme(value) } }
                 )) {
@@ -337,6 +337,7 @@ struct SoundThemeRow: View {
                 }
                 .buttonStyle(.quiet)
                 .help("Preview the start and stop sounds")
+                .accessibilityLabel("Preview sounds")
                 .disabled(store.isBusy("test_sound"))
             }
         }

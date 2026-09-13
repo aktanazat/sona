@@ -118,7 +118,6 @@ struct ShortcutCaptureRow: View {
 
     private func start(_ record: BindingRecord) async {
         guard !capture.recording else { return }
-        capture.original = record.currentBinding
         switch store.settings.keyboardImplementation {
         case .handyKeys:
             /// The core refuses while secure input holds the keyboard, and
@@ -153,6 +152,12 @@ struct ShortcutCaptureRow: View {
     /// event never arrived, which is exactly what secure input causes.
     private func handle(_ event: HandyKeysEvent) async {
         guard capture.recording else { return }
+        /// The same way out as the window listener has: Escape alone keeps
+        /// the shortcut that was there. The core names the key in lowercase.
+        if event.isKeyDown, event.key == "escape", event.modifiers.isEmpty {
+            await cancel()
+            return
+        }
         if event.isKeyDown, !event.hotkeyString.isEmpty {
             if event.key == nil {
                 capture.modifierOnly = event.hotkeyString
@@ -209,14 +214,12 @@ struct ShortcutCaptureRow: View {
     }
 
     private func commit(_ chord: String) async {
-        let original = capture.original
         await finish()
-        /// A refused chord — one another app already holds — leaves the row
-        /// showing whatever the core kept, so put the old one back rather
-        /// than leave the shortcut on a chord that will not fire.
-        if await store.changeBinding(id, chord: chord) == false, !original.isEmpty {
-            await store.changeBinding(id, chord: original)
-        }
+        /// A refused chord — one another app already holds — is refused
+        /// with the old one still registered and still in the record, so
+        /// the re-read puts the row back on it. Writing the old chord again
+        /// would succeed, and a success wipes the reason off the page.
+        await store.changeBinding(id, chord: chord)
     }
 
     private func cancel() async {
@@ -255,8 +258,6 @@ final class ShortcutCaptureSession {
     /// Still down, and everything that went down during this capture.
     var held: [String] = []
     var recorded: [String] = []
-    /// The chord to put back if the capture is abandoned or refused.
-    var original = ""
     @ObservationIgnored var monitor: Any?
 
     func tearDown() {

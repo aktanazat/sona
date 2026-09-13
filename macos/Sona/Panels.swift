@@ -1,44 +1,111 @@
 import SwiftUI
 
-/// The pill that floats above other windows. While you talk, only the sound:
-/// eleven bars, the last quarter second of the microphone, newest on the
-/// right, flat while nothing is being heard. Idle, the name of the mode the
-/// next recording goes under, and a press starts it.
+/// The pill that floats above other windows. Idle, the name of the mode the
+/// next recording goes under: a press starts it, a right-click picks the
+/// mode. While you talk, the sound: eleven bars, the last quarter second of
+/// the microphone, newest on the right, flat while nothing is being heard.
+/// With the live overlay style, the words as the model hears them sit beside
+/// the bars. While the words are worked on, the phase in one word.
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         Group {
-            if model.capture == .idle {
-                Button(action: model.toggleCapture) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "mic")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text(model.pillMode ?? "Dictate")
-                            .font(.system(size: 11, weight: .medium))
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(Theme.onInvert)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Theme.invert, in: Capsule())
+            switch model.capture {
+            case .idle:
+                idle
+            case .recording:
+                pill {
+                    bars
+                    liveWords
                 }
-                .buttonStyle(.plain)
-            } else {
-                HStack(spacing: 3) {
-                    ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Theme.onInvert)
-                            .frame(width: 2, height: 2 + 12 * level)
-                    }
+            case let .working(kind):
+                pill {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(Theme.onInvert)
+                    Text(Self.phaseLabel(kind))
+                        .font(.system(size: 11, weight: .medium))
+                    liveWords
                 }
-                .frame(height: 14)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Theme.invert, in: Capsule())
             }
         }
         .padding(8)
+    }
+
+    private var idle: some View {
+        Button(action: model.toggleCapture) {
+            HStack(spacing: 6) {
+                Image(systemName: "mic")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(model.pillMode ?? "Dictate")
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(Theme.onInvert)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Theme.invert, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Start recording")
+        .accessibilityHint("Right-click to choose the mode.")
+        .contextMenu {
+            ForEach(model.pillModes) { mode in
+                Button {
+                    model.choosePillMode(mode.id)
+                } label: {
+                    if mode.active {
+                        Label(mode.name, systemImage: "checkmark")
+                    } else {
+                        Text(mode.name)
+                    }
+                }
+                .disabled(mode.active)
+            }
+        }
+    }
+
+    private var bars: some View {
+        HStack(spacing: 3) {
+            ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Theme.onInvert)
+                    .frame(width: 2, height: 2 + 12 * level)
+            }
+        }
+        .frame(height: 14)
+        .accessibilityLabel("Recording")
+    }
+
+    /// The words so far, under the live style. The frame is fixed so the
+    /// pill does not grow with every word; before any arrive it says so.
+    @ViewBuilder private var liveWords: some View {
+        if model.settings.settings.overlayStyle == .live {
+            Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
+                .font(.system(size: 12))
+                .opacity(model.liveText.isEmpty ? 0.6 : 1)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .frame(width: 360, alignment: .leading)
+        }
+    }
+
+    private func pill(@ViewBuilder content: () -> some View) -> some View {
+        HStack(spacing: 10, content: content)
+            .foregroundStyle(Theme.onInvert)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Theme.invert, in: Capsule())
+    }
+
+    /// The core's work kinds, said for the pill.
+    private static func phaseLabel(_ kind: String) -> String {
+        switch kind {
+        case "transcribing": "Transcribing…"
+        case "polishing": "Polishing…"
+        default: kind.capitalized + "…"
+        }
     }
 }
 
@@ -118,32 +185,52 @@ struct PaletteAction: Identifiable {
     let run: @MainActor () -> Void
 }
 
-/// One answer from the query plane: a meeting, a person, a dictation, a loop.
-/// `link` is a `sona://` address the core knows how to open.
-struct PaletteHit: Decodable, Identifiable {
-    let kind: String
-    let id: String
-    let title: String
-    let snippet: String
-    let whenUtcMs: Int64
-    let link: String
-}
-
-private struct PalettePage: Decodable {
-    let entries: [PaletteHit]
-}
-
 /// What a keystroke in the field can land on, in the order the list shows them.
 private enum PaletteRow: Identifiable {
     case action(PaletteAction)
-    case hit(PaletteHit)
+    case hit(QueryRow)
+    /// The next page of the same question, when the plane said there is one.
+    case more
     case ask(String)
 
     var id: String {
         switch self {
         case let .action(action): "action:\(action.id)"
         case let .hit(hit): "hit:\(hit.link)"
+        case .more: "more"
         case .ask: "ask"
+        }
+    }
+}
+
+/// What the plane has said about the text in the field. The rows shown are
+/// always the answer to the question that is there now: an earlier answer
+/// stays visible while the next is on its way, dimmed and unreachable, so
+/// return can never open a row from a question no longer in the field.
+private enum Lookup {
+    /// Under two letters: the plane is not asked.
+    case none
+    /// Asked about the current text, not answered. `earlier` is the last
+    /// answer, kept on screen so the list does not blink between keystrokes.
+    case pending(earlier: [QueryRow])
+    case answered(Answer)
+    case failed(String)
+
+    struct Answer {
+        var rows: [QueryRow]
+        var next: QueryCursor?
+        var reason: QueryPageReason?
+        /// The next page is on its way; the rows here stay live meanwhile.
+        var loadingMore = false
+        /// The next page did not arrive.
+        var moreFailed = false
+    }
+
+    var earlier: [QueryRow] {
+        switch self {
+        case .none, .failed: []
+        case let .pending(earlier): earlier
+        case let .answered(answer): answer.rows
         }
     }
 }
@@ -156,8 +243,7 @@ private enum PaletteRow: Identifiable {
 struct CommandPalette: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
-    @State private var hits: [PaletteHit] = []
-    @State private var searchFailed = false
+    @State private var lookup = Lookup.none
     @State private var selection = 0
     @State private var search: Task<Void, Never>?
     @FocusState private var focused: Bool
@@ -166,8 +252,8 @@ struct CommandPalette: View {
     private static let minimumQuery = 2
     /// One page: the newest dozen that matched. Recency orders the plane.
     private static let limit: Int64 = 12
-    private static let kinds: [(kind: String, label: String)] = [
-        ("meeting", "Meetings"), ("person", "People"), ("dictation", "Dictations"), ("loop", "Loops"),
+    private static let kinds: [(kind: QueryRowKind, label: String)] = [
+        (.meeting, "Meetings"), (.person, "People"), (.dictation, "Dictations"), (.loop, "Loops"),
     ]
 
     var body: some View {
@@ -188,6 +274,9 @@ struct CommandPalette: View {
                         .onSubmit { runSelected() }
                         .onKeyPress(.upArrow) { move(-1); return .handled }
                         .onKeyPress(.downArrow) { move(1); return .handled }
+                    if case .pending = lookup {
+                        ProgressView().controlSize(.small)
+                    }
                     KeyCap("esc")
                 }
                 .padding(.horizontal, 18)
@@ -203,20 +292,17 @@ struct CommandPalette: View {
                                     .padding(.top, 12)
                                     .padding(.bottom, 4)
                                 ForEach(section.rows) { row in
-                                    let index = rows.firstIndex { $0.id == row.id } ?? 0
+                                    let index = section.live ? rows.firstIndex { $0.id == row.id } ?? 0 : -1
                                     PaletteRowView(row: row, selected: index == selection) {
                                         selection = index
                                         run(row)
                                     }
                                     .id(row.id)
+                                    .opacity(section.live ? 1 : 0.4)
+                                    .allowsHitTesting(section.live)
                                 }
                             }
-                            if let empty {
-                                Text(empty)
-                                    .metaText()
-                                    .padding(.horizontal, 18)
-                                    .padding(.vertical, 14)
-                            }
+                            footnote
                         }
                         .padding(.bottom, 8)
                     }
@@ -235,7 +321,10 @@ struct CommandPalette: View {
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Theme.border, lineWidth: 1))
             .shadow(color: .black.opacity(0.18), radius: 24, y: 12)
             .padding(.top, 96)
-            .onAppear { focused = true }
+            .onAppear {
+                focused = true
+                query = model.takePaletteSeed()
+            }
             .onExitCommand { model.paletteShown = false }
             .onChange(of: query) { _, text in
                 selection = 0
@@ -254,32 +343,69 @@ struct CommandPalette: View {
     }
 
     /// The sections in the order the list shows them: places, verbs, then the
-    /// plane's rows by kind, then the one ask row.
-    private var sections: [(label: String, rows: [PaletteRow])] {
-        var sections: [(label: String, rows: [PaletteRow])] = []
+    /// plane's rows by kind, then the one ask row. A section is live when its
+    /// rows answer the question in the field now.
+    private var sections: [(label: String, rows: [PaletteRow], live: Bool)] {
+        var sections: [(label: String, rows: [PaletteRow], live: Bool)] = []
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
         let verbs = actions.filter { $0.group == .actions }.map(PaletteRow.action)
-        if !navigation.isEmpty { sections.append(("Navigation", navigation)) }
-        if !verbs.isEmpty { sections.append(("Actions", verbs)) }
+        if !navigation.isEmpty { sections.append(("Navigation", navigation, true)) }
+        if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
+        let hits = lookup.earlier
+        let live = if case .pending = lookup { false } else { true }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
-            if !rows.isEmpty { sections.append((label, rows)) }
+            if !rows.isEmpty { sections.append((label, rows, live)) }
+        }
+        if case let .answered(answer) = lookup, answer.next != nil, !answer.loadingMore, !answer.moreFailed {
+            sections.append(("More", [.more], true))
         }
         if model.canAsk, !trimmed.isEmpty {
-            sections.append(("Ask", [.ask(trimmed)]))
+            sections.append(("Ask", [.ask(trimmed)], true))
         }
         return sections
     }
 
-    private var rows: [PaletteRow] { sections.flatMap(\.rows) }
+    /// The rows a keystroke can land on.
+    private var rows: [PaletteRow] { sections.filter(\.live).flatMap(\.rows) }
 
-    /// The one sentence a settled search is allowed.
-    private var empty: String? {
-        if searchFailed { return "Search is unavailable right now." }
-        if trimmed.count >= Self.minimumQuery, hits.isEmpty, rows.isEmpty {
-            return "Nothing matched “\(trimmed)”."
+    /// Under the rows: what the plane could not do, or the one sentence a
+    /// settled search with nothing to show is allowed. Never a verdict while
+    /// the plane is still being asked.
+    @ViewBuilder
+    private var footnote: some View {
+        switch lookup {
+        case .none, .pending:
+            EmptyView()
+        case let .failed(reason):
+            note(reason, retry: "Try again") { schedule(query, now: true) }
+        case let .answered(answer):
+            if answer.moreFailed {
+                note("The next page did not arrive.", retry: "Try again") { loadMore() }
+            } else if answer.loadingMore {
+                note("Loading more…")
+            }
+            if answer.reason == .semanticUnavailable {
+                note(
+                    "Only exact words matched: the meaning model is not on this Mac yet.",
+                    retry: "Search again"
+                ) { schedule(query, now: true) }
+            } else if answer.rows.isEmpty, rows.isEmpty {
+                note("Nothing matched “\(trimmed)”.")
+            }
         }
-        return nil
+    }
+
+    private func note(_ text: String, retry: String? = nil, action: @escaping () -> Void = {}) -> some View {
+        HStack(spacing: 12) {
+            Text(text).metaText()
+            if let retry {
+                Spacer(minLength: 0)
+                Button(retry, action: action).buttonStyle(.compact)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
     }
 
     private func move(_ delta: Int) {
@@ -293,40 +419,93 @@ struct CommandPalette: View {
     }
 
     private func run(_ row: PaletteRow) {
+        if case .more = row {
+            loadMore()
+            return
+        }
         model.paletteShown = false
         switch row {
         case let .action(action): action.run()
         case let .hit(hit): model.open(link: hit.link)
         case let .ask(question): model.ask(question)
+        case .more: break
         }
     }
 
     /// Long enough to swallow a typed word, short enough to feel like the list
     /// is keeping up: 150 ms after the last keystroke, one page from the plane.
-    private func schedule(_ text: String) {
+    /// `now` skips the pause for a retry the reader asked for by hand.
+    private func schedule(_ text: String, now: Bool = false) {
         search?.cancel()
         let query = text.trimmingCharacters(in: .whitespaces)
         guard query.count >= Self.minimumQuery else {
-            hits = []
-            searchFailed = false
+            lookup = .none
             return
         }
+        lookup = .pending(earlier: lookup.earlier)
         search = Task {
-            try? await Task.sleep(for: .milliseconds(150))
+            if !now {
+                try? await Task.sleep(for: .milliseconds(150))
+            }
             guard !Task.isCancelled else { return }
             do {
-                let page: PalettePage = try await model.core.request(
-                    "sona_query_search",
-                    ["scope": "all", "query": .string(query), "limit": .number(Double(Self.limit)), "cursor": nil] as [String: JSONValue])
+                let page = try await ask(query, after: nil)
                 guard !Task.isCancelled else { return }
-                hits = page.entries
-                searchFailed = false
+                lookup = .answered(.init(rows: page.entries, next: page.nextCursor, reason: page.reason))
             } catch {
                 guard !Task.isCancelled else { return }
-                hits = []
-                searchFailed = true
+                lookup = .failed(Self.sentence(for: error))
             }
         }
+    }
+
+    /// The next page of the same question, appended under the rows already
+    /// here. A cursor the corpus no longer knows starts the question over.
+    private func loadMore() {
+        guard case let .answered(answer) = lookup, let next = answer.next, !answer.loadingMore else { return }
+        var waiting = answer
+        waiting.loadingMore = true
+        waiting.moreFailed = false
+        lookup = .answered(waiting)
+        let query = trimmed
+        search = Task {
+            do {
+                let page = try await ask(query, after: next)
+                guard !Task.isCancelled else { return }
+                var grown = answer
+                grown.rows += page.entries
+                grown.next = page.nextCursor
+                grown.reason = page.reason ?? answer.reason
+                lookup = .answered(grown)
+            } catch {
+                guard !Task.isCancelled else { return }
+                if let failure = error as? CoreError, failure.remote(as: QueryFailure.self) == .unknownCursor {
+                    schedule(query, now: true)
+                    return
+                }
+                var failed = answer
+                failed.moreFailed = true
+                lookup = .answered(failed)
+            }
+        }
+    }
+
+    private func ask(_ query: String, after cursor: QueryCursor?) async throws -> QuerySearchPage {
+        try await model.core.request(
+            "sona_query_search",
+            [
+                "scope": "all",
+                "query": .string(query),
+                "limit": .number(Double(Self.limit)),
+                "cursor": try cursor.map { try JSONValue($0) } ?? .null,
+            ] as [String: JSONValue])
+    }
+
+    private static func sentence(for error: Error) -> String {
+        if let failure = error as? CoreError, let code = failure.remote(as: QueryFailure.self) {
+            return code.sentence
+        }
+        return "Search is unavailable right now."
     }
 }
 
@@ -345,7 +524,7 @@ private struct PaletteRowView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(hit.title).bodyText().lineLimit(1)
                         HStack(spacing: 6) {
-                            Text(Date(timeIntervalSince1970: TimeInterval(hit.whenUtcMs) / 1000).relativeDay)
+                            Text(hit.when.relativeDay)
                             if !hit.snippet.isEmpty {
                                 Text("·")
                                 Text(hit.snippet).lineLimit(1)
@@ -353,6 +532,8 @@ private struct PaletteRowView: View {
                         }
                         .metaText()
                     }
+                case .more:
+                    Text("Show more results").bodyText(15, Theme.inkSecondary)
                 case let .ask(question):
                     Text("Ask Sona: \(question)").bodyText()
                 }

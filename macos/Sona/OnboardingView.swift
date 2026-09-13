@@ -140,29 +140,48 @@ struct OnboardingView: View {
     }
 }
 
-/// The banner the app carries while the process that types is not trusted:
-/// one sentence and the dialog that lists Sona in the pane that fixes it. Shows
-/// nothing once the core is trusted, and nothing on a platform with no such
-/// permission.
-struct AccessibilityNotice: View {
+/// The banner the app carries while a permission it was set up with is gone:
+/// one sentence per missing permission and the dialog that lists Sona in the
+/// pane that fixes it. Shows nothing while both are held, and nothing for
+/// accessibility on a platform with no such permission.
+struct PermissionsNotice: View {
     let store: PermissionsStore
 
     var body: some View {
-        if store.accessibility == .needed || store.accessibility == .waiting {
+        if missing(store.microphone) || missing(store.accessibility) {
             Card {
-                CardRow {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Sona needs accessibility permissions to type transcribed text.")
-                            .bodyText(14)
-                        Text("Turn on “Sona” in the Accessibility list.")
-                            .metaText()
+                if missing(store.microphone) {
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sona needs microphone access to hear you.")
+                                .bodyText(14)
+                            Text("Turn on “Sona” in the Microphone list.")
+                                .metaText()
+                        }
+                    } trailing: {
+                        Button("Grant permission") { store.grantMicrophone() }
+                            .buttonStyle(.secondary)
                     }
-                } trailing: {
-                    Button("Grant permission") { store.grantAccessibility() }
-                        .buttonStyle(.secondary)
+                }
+                if missing(store.accessibility) {
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sona needs accessibility permissions to type transcribed text.")
+                                .bodyText(14)
+                            Text("Turn on “Sona” in the Accessibility list.")
+                                .metaText()
+                        }
+                    } trailing: {
+                        Button("Grant permission") { store.grantAccessibility() }
+                            .buttonStyle(.secondary)
+                    }
                 }
             }
         }
+    }
+
+    private func missing(_ state: PermissionState) -> Bool {
+        state == .needed || state == .waiting
     }
 }
 

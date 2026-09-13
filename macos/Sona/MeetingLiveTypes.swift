@@ -15,9 +15,9 @@ import Foundation
 /// `MeetingSuggestion`, `MeetingSource`, `Detection`, `Ritual`, `Upcoming` —
 /// so a wire type whose Rust name carries no such prefix is renamed rather
 /// than dropped: `MeetingStopSurface` is `MeetingLiveStopSurface`,
-/// `MeetingLocalEngineStatus` is `MeetingLiveLocalEngineStatus`,
 /// `CalendarEventSummary` is `DetectionCalendarEvent`, `MeetingRitual*` are
-/// `Ritual*`, `MeetingUpcoming*` are `Upcoming*`.
+/// `Ritual*`, `MeetingUpcoming*` are `Upcoming*`. The engine types the start
+/// page shares with the settings page live in `MeetingTypes.swift`.
 
 // MARK: - Events
 
@@ -116,9 +116,19 @@ enum MeetingConsentDisclosure: Decodable {
         }
     }
 
-    /// The room was not told, and the target is what refused it.
-    var refused: Bool {
-        if case let .attempted(receipt) = self { receipt.outcome == .definitelyNotDispatched } else { false }
+    /// What the one attempt did, as the card says it. Typed is not sent: the
+    /// line waits in the chat box for the person, and the card says so rather
+    /// than claiming the room was told.
+    var outcomeLine: String? {
+        guard case let .attempted(receipt) = self else { return nil }
+        switch receipt.outcome {
+        case .delivered, .dispatchedUnderSecureInput:
+            return "The notice is in the chat box. Send it when you're ready."
+        case .dispatchedButUnconfirmed:
+            return "Sona may have typed the notice. Check the chat box."
+        case .definitelyNotDispatched:
+            return "The notice wasn't typed: the meeting's chat box wasn't open when recording started."
+        }
     }
 
     var notetaker: String? {
@@ -386,65 +396,6 @@ enum MeetingLiveRequest {
 enum MeetingLiveStopSurface: String {
     case meetingLive = "meeting_live"
     case consentPanel = "consent_panel"
-}
-
-/// `MeetingLocalEngineStatus`: whether anything on this Mac can turn the words
-/// into notes.
-enum MeetingLiveLocalEngineStatus: Decodable {
-    /// `blocker` is nil when Apple Intelligence can answer.
-    case appleIntelligence(blocker: MeetingAppleIntelligenceBlocker?)
-    case localEndpoint(reachable: Bool, modelCount: Int, error: String?)
-
-    private enum Key: String, CodingKey { case kind, blocker, reachable, modelCount, error }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: Key.self)
-        let kind = try container.decode(String.self, forKey: .kind)
-        switch kind {
-        case "apple_intelligence":
-            self = .appleIntelligence(
-                blocker: try container.decodeIfPresent(MeetingAppleIntelligenceBlocker.self, forKey: .blocker))
-        case "local_endpoint":
-            self = .localEndpoint(
-                reachable: try container.decode(Bool.self, forKey: .reachable),
-                modelCount: try container.decode(Int.self, forKey: .modelCount),
-                error: try container.decodeIfPresent(String.self, forKey: .error))
-        default:
-            throw DecodingError.dataCorruptedError(
-                forKey: .kind, in: container, debugDescription: "unknown local engine \(kind)")
-        }
-    }
-
-    /// Whether notes can be written here at all.
-    var available: Bool {
-        switch self {
-        case let .appleIntelligence(blocker): blocker == nil
-        case let .localEndpoint(reachable, modelCount, _): reachable && modelCount > 0
-        }
-    }
-
-    /// What keeps Apple Intelligence from answering, when that is the engine
-    /// and it cannot. The start page offers the System Settings pane on it.
-    var appleBlocker: MeetingAppleIntelligenceBlocker? {
-        if case let .appleIntelligence(blocker) = self { blocker } else { nil }
-    }
-
-    /// The line the start surface shows, and nothing while processing is fine.
-    var warning: String? {
-        switch self {
-        case let .appleIntelligence(blocker):
-            blocker.map { "\($0.reason), so no notes will be written for this meeting. \($0.advice)" }
-        case let .localEndpoint(reachable, modelCount, error):
-            if !reachable {
-                error.map { "The local model endpoint is unreachable: \($0)" }
-                    ?? "The local model endpoint is unreachable, so no notes will be written."
-            } else if modelCount == 0 {
-                "The local model endpoint has no model loaded, so no notes will be written."
-            } else {
-                nil
-            }
-        }
-    }
 }
 
 // MARK: - Detection

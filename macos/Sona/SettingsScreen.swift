@@ -4,6 +4,8 @@ import SwiftUI
 /// own page; the ones that come as a column get the page and the title here.
 struct SettingsScreen: View {
     @Environment(AppModel.self) private var model
+    /// Which edges have a tab hidden past them, so only those edges fade.
+    @State private var overflow = StripOverflow()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,31 +15,69 @@ struct SettingsScreen: View {
         }
     }
 
+    /// Fifteen tabs outrun a narrow window. The strip scrolls, the chosen
+    /// tab is brought into view whenever it changes (a "Meeting settings"
+    /// button elsewhere chooses one too), and a fade at an edge says a tab
+    /// is hidden past it.
     private var tabs: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 24) {
-                ForEach(SettingsPlace.allCases) { place in
-                    let current = model.settingsPlace == place
-                    Button {
-                        model.settingsPlace = place
-                    } label: {
-                        Text(place.title)
-                            .font(TypeScale.label(15))
-                            .foregroundStyle(current ? Theme.ink : Theme.inkSecondary)
-                            .padding(.vertical, 14)
-                            .overlay(alignment: .bottom) {
-                                Rectangle().fill(current ? Theme.ink : .clear).frame(height: 2)
-                            }
-                            .contentShape(Rectangle())
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                HStack(spacing: 24) {
+                    ForEach(SettingsPlace.allCases) { place in
+                        let current = model.settingsPlace == place
+                        Button {
+                            model.settingsPlace = place
+                        } label: {
+                            Text(place.title)
+                                .font(TypeScale.label(15))
+                                .foregroundStyle(current ? Theme.ink : Theme.inkSecondary)
+                                .padding(.vertical, 14)
+                                .overlay(alignment: .bottom) {
+                                    Rectangle().fill(current ? Theme.ink : .clear).frame(height: 2)
+                                }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(current ? .isSelected : [])
+                        .id(place)
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, Theme.margin)
+                .padding(.top, 8)
             }
-            .padding(.horizontal, Theme.margin)
-            .padding(.top, 8)
+            .scrollIndicators(.never)
+            .onScrollGeometryChange(for: StripOverflow.self) { geometry in
+                let offset = geometry.contentOffset.x
+                let end = geometry.contentSize.width - geometry.containerSize.width
+                return StripOverflow(leading: offset > 1, trailing: offset < end - 1)
+            } action: { _, edges in
+                overflow = edges
+            }
+            .mask { edgeFade }
+            .overlay(alignment: .bottom) { Hairline() }
+            .onAppear { proxy.scrollTo(model.settingsPlace, anchor: .center) }
+            .onChange(of: model.settingsPlace) { _, place in
+                withAnimation(.snappy) { proxy.scrollTo(place, anchor: .center) }
+            }
         }
-        .scrollIndicators(.never)
-        .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    private var edgeFade: some View {
+        HStack(spacing: 0) {
+            LinearGradient(
+                colors: [.black.opacity(overflow.leading ? 0 : 1), .black],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: Theme.margin)
+            Rectangle()
+            LinearGradient(
+                colors: [.black, .black.opacity(overflow.trailing ? 0 : 1)],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: Theme.margin)
+        }
+        .animation(.easeOut(duration: 0.15), value: overflow.leading)
+        .animation(.easeOut(duration: 0.15), value: overflow.trailing)
     }
 
     @ViewBuilder
@@ -108,6 +148,12 @@ struct SettingsScreen: View {
             }
         }
     }
+}
+
+/// The tab strip's overflow: whether a tab is hidden past each edge.
+private struct StripOverflow: Equatable {
+    var leading = false
+    var trailing = false
 }
 
 /// The head of a settings tab: the tab's name and one line of plain fact.

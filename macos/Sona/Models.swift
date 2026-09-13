@@ -72,6 +72,33 @@ struct Model: Identifiable, Hashable {
     }
 }
 
+/// What is being done to one model beyond what the catalog records: the
+/// phases the core announces between "Download" and "Use", and the last
+/// failure, which stays on the row until dismissed or the next attempt.
+enum ModelOperation: Hashable {
+    /// The download was asked for and the server has not answered yet.
+    case starting
+    case verifying
+    case extracting
+    case loading
+    case failed(String)
+
+    /// The phase, said for the row. A failure has its own sentence.
+    var label: String? {
+        switch self {
+        case .starting: "Starting…"
+        case .verifying: "Verifying…"
+        case .extracting: "Unpacking…"
+        case .loading: "Loading…"
+        case .failed: nil
+        }
+    }
+
+    var failure: String? {
+        if case let .failed(message) = self { message } else { nil }
+    }
+}
+
 extension TimeInterval {
     /// "3:12" or "1:04:07": a clock that fits in a row.
     var clock: String {

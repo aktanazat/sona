@@ -9,15 +9,28 @@ struct CaptureScreen: View {
     var body: some View {
         Page {
             SecureInputBanner(store: model.secureInput)
-            AccessibilityNotice(store: model.onboarding.permissions)
+            PermissionsNotice(store: model.onboarding.permissions)
             hero.padding(.bottom, 32)
             if let notice = model.notice {
                 Card {
-                    CardRow(action: model.dismissNotice) {
-                        Text(notice).bodyText(15, Theme.inkSecondary)
+                    CardRow {
+                        Text(notice.text).bodyText(15, Theme.inkSecondary)
                     } trailing: {
-                        Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.inkTertiary)
+                        HStack(spacing: 12) {
+                            if let id = notice.dictation {
+                                Button("Open in Library") {
+                                    model.dismissNotice()
+                                    model.openDictation(id)
+                                }
+                                .buttonStyle(.compact)
+                            }
+                            Button(action: model.dismissNotice) {
+                                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Theme.inkTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Dismiss")
+                        }
                     }
                 }
                 .padding(.bottom, 32)
@@ -75,13 +88,14 @@ struct CaptureScreen: View {
                         .frame(maxWidth: 640, alignment: .leading)
                 }
                 HStack(spacing: 10) {
-                    Button {
-                        model.toggleCapture()
-                    } label: {
-                        Label(model.capture == .idle ? "Start recording" : "Stop", systemImage: model.capture == .idle ? "mic" : "stop.fill")
-                    }
-                    .buttonStyle(.primary)
-                    if model.capture == .idle {
+                    switch model.capture {
+                    case .idle:
+                        Button {
+                            model.startCapture()
+                        } label: {
+                            Label("Start recording", systemImage: "mic")
+                        }
+                        .buttonStyle(.primary)
                         Button {
                             model.sheet = .recorder
                         } label: {
@@ -94,7 +108,22 @@ struct CaptureScreen: View {
                             Label("Import audio", systemImage: "waveform.badge.plus")
                         }
                         .buttonStyle(.secondary)
-                    } else {
+                    case .recording:
+                        Button {
+                            model.stopCapture()
+                        } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                        }
+                        .buttonStyle(.primary)
+                        Button("Cancel") { model.cancelCapture() }.buttonStyle(.secondary)
+                    case let .working(kind):
+                        // The words are being worked on: nothing to stop, and a
+                        // stop offered here would only read as a broken button.
+                        Button {} label: {
+                            Label(kind.capitalized, systemImage: "ellipsis")
+                        }
+                        .buttonStyle(.primary)
+                        .disabled(true)
                         Button("Cancel") { model.cancelCapture() }.buttonStyle(.secondary)
                     }
                 }
@@ -110,7 +139,11 @@ struct CaptureScreen: View {
             let hold = model.settings.settings.pushToTalk ? "hold to talk" : "tap to toggle"
             return "\(hold) · \(model.activeModel?.name ?? "No model")"
         case .recording:
-            return "release to paste · \(model.settings.settings.selectedMicrophone ?? "Default microphone")"
+            /* A shortcut hold ends when the keys go up; a toggle or the Start
+             * button ends with the shortcut again or Stop. The hint must not
+             * tell a toggle to release. */
+            let finish = model.settings.settings.pushToTalk ? "release to paste" : "press again or Stop to paste"
+            return "\(finish) · \(model.settings.settings.selectedMicrophone ?? "Default microphone")"
         case .working:
             return "the words land in the app in front"
         }

@@ -80,20 +80,6 @@ struct MeetingStartAppSettings: Decodable {
     /// The template the preview card names for a series. Absent means the app
     /// default, which the card reads as "App default".
     let meetingNotesTemplate: MeetingNotesTemplate?
-    /// Whether a new meeting's notes go to the operator's server: the switch
-    /// is on and a relay is paired, the two facts the core's engine choice
-    /// reads first. While they hold, the engine on this Mac writes only the
-    /// series kept here.
-    let notesOnServer: Bool
-
-    private enum Key: String, CodingKey { case meetingNotesTemplate }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: Key.self)
-        meetingNotesTemplate = try container.decodeIfPresent(MeetingNotesTemplate.self, forKey: .meetingNotesTemplate)
-        let relay = try MeetingSettingsSnapshot(from: decoder)
-        notesOnServer = relay.remoteIntelligenceEnabled && relay.isRelayPaired
-    }
 }
 
 // MARK: - The store
@@ -130,14 +116,23 @@ final class MeetingLiveStore {
     private(set) var ritual: RitualEvent?
     /// The wrap card's Copy follow-up, once it has been pressed.
     private(set) var followUpCopied = false
+    /// The follow-up is being drafted; the card's button says so and refuses
+    /// a second press until the draft lands or fails.
+    private(set) var followUpDrafting = false
 
     // MARK: The panel's own recording
 
     private(set) var active: MeetingConsentPanelSessionState?
-    /// The two boxes a calendar offer carries. Local until Record is pressed:
-    /// they are part of the consent that press expresses.
-    private(set) var alwaysRecordSeries = false
-    private(set) var announceInChat = false
+    /// The two boxes an offer carries, kept for the one prompt they were
+    /// ticked on. Part of the consent that prompt's Record expresses, so a
+    /// choice made on one offer never answers for another.
+    private var choices: PromptChoices?
+
+    private struct PromptChoices {
+        let promptId: String
+        var alwaysRecordSeries: Bool
+        var announceInChat: Bool
+    }
 
     // MARK: Getting a meeting recording
 
@@ -150,21 +145,28 @@ final class MeetingLiveStore {
     private(set) var refreshing = false
     /// The gate's one checkbox: the person accepts a partial record.
     private(set) var acceptPartial = false
-    private(set) var engine: MeetingLiveLocalEngineStatus?
+    /// Where the next meeting's notes would go, from the core's own choice.
+    private(set) var textEngine: MeetingTextEngineChoice?
     private(set) var settings: MeetingStartAppSettings?
 
-    /// The engine that would write a new meeting's notes here, when it cannot.
-    /// Nothing while the server path is on: the core sends a new meeting's
-    /// text there, and the engine on this Mac matters only to the series kept
-    /// here, which the settings page's own row covers.
-    var engineWarning: MeetingLiveLocalEngineStatus? {
-        guard settings?.notesOnServer != true, let engine, engine.warning != nil else { return nil }
-        return engine
+    /// The engine on this Mac, when the core says nothing will write a new
+    /// meeting's notes: the server path is off or unpaired and this engine
+    /// cannot answer. Nothing while the notes have somewhere to go; the series
+    /// kept here are the settings page's own row.
+    var engineWarning: MeetingLocalEngineStatus? {
+        if case let .unavailable(engine) = textEngine { engine } else { nil }
     }
 
     // MARK: Capture, while it runs
 
     private(set) var live: MeetingReviewSnapshot?
+    /// The words recognized so far by the pass that runs during capture.
+    /// Separate from `live.transcript`, which is the stored reading and is
+    /// empty until the meeting stops.
+    private(set) var provisional: [MeetingProvisionalSegment] = []
+    /// When `live` was read. The clock the core reports is as of that read,
+    /// and the screen counts on from it while the capture runs.
+    private(set) var liveReadAt: Date?
     /// The word for what is in flight, which disables the controls that would
     /// contradict it.
     private(set) var pending: String?
@@ -194,6 +196,7 @@ final class MeetingLiveStore {
     private let core: Core
     @ObservationIgnored private var suggestionTask: Task<Void, Never>?
     @ObservationIgnored private var liveTask: Task<Void, Never>?
+    @ObservationIgnored private var expiryTask: Task<Void, Never>?
 
     init(core: Core) {
         self.core = core
@@ -237,12 +240,25 @@ final class MeetingLiveStore {
             guard let self else { return }
             let payload: MeetingEventPayload? = try? Core.payload(line)
             guard let removed = payload?.sessionId else { return }
-            if self.live?.session.sessionId == removed { self.live = nil }
+            if self.live?.session.sessionId == removed { self.closeLive() }
             if self.gate?.sessionId == removed { self.closeGate() }
             self.recovery.removeAll { $0.sessionId == removed }
         }
+        // A start the detection panel made that did not reach capture: the
+        // core sends the preflight here, and the gate is where a person
+        // refreshes a blocked source or records without it.
+        core.observe(CoreEvent.meetingNavigationRequested) { [weak self] line in
+            guard let self, let payload: MeetingNavigationPayload = try? Core.payload(line),
+                  payload.destination == .preflight, let sessionId = payload.sessionId else { return }
+            Task { await self.openGate(sessionId) }
+        }
+        // The choice reads the server switch, the pairing and the engine here,
+        // all of which a settings write can move.
         core.observe(CoreEvent.meetingLiveSettingsChanged) { [weak self] _ in
-            Task { await self?.loadSettings() }
+            Task {
+                await self?.loadSettings()
+                await self?.loadEngine()
+            }
         }
         core.observe(CoreEvent.sonaCaptureRequested) { [weak self] _ in
             self?.captureRequested = true
@@ -289,12 +305,31 @@ final class MeetingLiveStore {
         }
     }
 
+    /// The offers standing, then a re-read timed for the first one to lapse.
+    /// The core purges an offer only when something reads the list, and its
+    /// expiry sends no event, so the card would otherwise outlive the offer.
     private func loadSuggestions() async {
         do {
             suggestions = try await core.request("meeting_suggestions_list")
         } catch {
             self.error = reason(error)
         }
+        expiryTask?.cancel()
+        guard let next = suggestions.map(\.expiresAtNs).min() else { return }
+        let wait = next - MeetingLiveStore.hostNowNs()
+        expiryTask = Task { [weak self] in
+            if wait > 0 { try? await Task.sleep(for: .nanoseconds(wait)) }
+            guard !Task.isCancelled else { return }
+            await self?.loadSuggestions()
+        }
+    }
+
+    /// The clock the core stamps offers with: mach absolute time in
+    /// nanoseconds, which `meeting/clock.rs` reads through Core Audio and this
+    /// side reads through `CLOCK_UPTIME_RAW`. The same counter, so an expiry
+    /// compares directly.
+    private static func hostNowNs() -> Int64 {
+        Int64(clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
     }
 
     private func loadRecovery() async {
@@ -305,8 +340,18 @@ final class MeetingLiveStore {
         }
     }
 
+    /// Each read stamps itself; only the newest read's answer is kept. A
+    /// settings write can start a read while an earlier one is still waiting
+    /// on a slow model endpoint, and that earlier answer describes the engine
+    /// the write just moved away from.
+    @ObservationIgnored private var engineRead = 0
+
     private func loadEngine() async {
-        engine = try? await core.request("meeting_local_engine_status")
+        engineRead += 1
+        let read = engineRead
+        let choice: MeetingTextEngineChoice? = try? await core.request("meeting_text_engine_for_next_meeting")
+        guard read == engineRead else { return }
+        textEngine = choice
     }
 
     /// System Settings → Apple Intelligence & Siri, where the switch and the
@@ -353,30 +398,46 @@ final class MeetingLiveStore {
         }
     }
 
-    /// One session event, coalesced: the gate, the live screen and the panel
-    /// all read the same revision.
+    /// One session event, coalesced. A session a surface is standing on is
+    /// re-read at its revision. A session nobody here is watching still
+    /// matters twice over: a standing series can start recording by itself,
+    /// and the panel is the only Stop for it; and the background pass can
+    /// finish or open a recovery, which moves the unfinished list. Neither
+    /// costs more than one read after the burst settles.
     private func sessionChanged(_ line: Data) {
         let payload: MeetingEventPayload? = try? Core.payload(line)
         let touched = payload?.sessionId
         let watching = live?.session.sessionId ?? gate?.sessionId
-        guard touched == nil || touched == watching || active != nil else { return }
+        let watched = touched == nil || touched == watching
         liveTask?.cancel()
         liveTask = Task { [weak self] in
             try? await Task.sleep(for: MeetingLiveStore.eventSettle)
             guard !Task.isCancelled, let self else { return }
-            await self.refreshSession()
-            if self.active != nil { await self.loadActive() }
+            if watched { await self.refreshSession() }
+            await self.loadActive()
+            if !watched { await self.loadRecovery() }
         }
     }
 
     /// `meeting_get` on whichever session a surface is standing on.
     private func refreshSession() async {
         if let sessionId = live?.session.sessionId {
-            live = await read(sessionId)
+            await adoptLive(sessionId)
             return
         }
         guard let sessionId = gate?.sessionId, let snapshot = await read(sessionId) else { return }
         gate = snapshot.session
+    }
+
+    /// The live screen's one read: the session, and the words its running
+    /// capture has recognized. A read that fails leaves the last snapshot
+    /// standing — the recording is still running, and a screen with no Stop
+    /// on it would be the worse answer — and says so in the error line.
+    private func adoptLive(_ sessionId: MeetingSessionId) async {
+        guard let snapshot = await read(sessionId) else { return }
+        live = snapshot
+        liveReadAt = Date()
+        provisional = snapshot.session.phase.isActive ? await readProvisional(sessionId) : []
     }
 
     private func read(_ sessionId: MeetingSessionId) async -> MeetingReviewSnapshot? {
@@ -386,6 +447,25 @@ final class MeetingLiveStore {
             self.error = reason(error)
             return nil
         }
+    }
+
+    private func readProvisional(_ sessionId: MeetingSessionId) async -> [MeetingProvisionalSegment] {
+        let transcript: MeetingProvisionalTranscript? = try? await core.request(
+            "meeting_live_transcript", MeetingRequest.session(sessionId))
+        return transcript?.segments ?? provisional
+    }
+
+    /// The gate, for a preflight the core created on this screen's behalf.
+    /// The consent the gate rebuilds is read off the session: what it was
+    /// asked to record, and the title it was given.
+    private func openGate(_ sessionId: MeetingSessionId) async {
+        guard let snapshot = await read(sessionId), snapshot.session.phase == .preflight else { return }
+        options = MeetingStartOptions(
+            title: snapshot.session.title, origin: .suggestion, suggestionId: nil,
+            calendarEventKey: nil, sources: snapshot.session.sources.map(\.sourceKind),
+            preview: nil)
+        acceptPartial = false
+        gate = snapshot.session
     }
 
     // MARK: - Detection
@@ -461,13 +541,28 @@ final class MeetingLiveStore {
         }
     }
 
-    /// Copy follow-up: the text is the review slice's draft, so the button is
-    /// wired by whoever has it. The press is still reported to the core, which
-    /// is what makes the card say "Copied".
-    func copyFollowUp(_ event: RitualEvent, text: String) {
-        copy(text)
-        followUpCopied = true
-        respond(event, action: .wrapFollowUpCopied)
+    /// Copy follow-up: the text is the review slice's draft, so the draft is
+    /// wired by whoever has it. A draft that fails is said on the card in the
+    /// core's words; one that lands is copied, and the press is reported to
+    /// the core, which is what makes the card say "Copied".
+    func copyFollowUp(
+        _ event: RitualEvent, for sessionId: MeetingSessionId,
+        draft: @escaping (MeetingSessionId) async throws -> String
+    ) {
+        guard !followUpDrafting else { return }
+        followUpDrafting = true
+        Task {
+            defer { followUpDrafting = false }
+            do {
+                let text = try await draft(sessionId)
+                copy(text)
+                followUpCopied = true
+                error = nil
+                respond(event, action: .wrapFollowUpCopied)
+            } catch {
+                self.error = reason(error)
+            }
+        }
     }
 
     // MARK: - The panel's recording
@@ -496,20 +591,42 @@ final class MeetingLiveStore {
     private func fitDisclosure() async {
         guard let state = active else { return }
         try? await core.request(
-            "meeting_consent_panel_fit_disclosure", ["note": JSONValue.bool(state.disclosure.refused)])
+            "meeting_consent_panel_fit_disclosure",
+            ["note": JSONValue.bool(state.disclosure.outcomeLine != nil)])
     }
 
-    func setAlwaysRecordSeries(_ on: Bool) {
-        alwaysRecordSeries = on
+    /// The box "Always record this meeting": only a calendar offer has one.
+    func alwaysRecordSeries(_ prompt: DetectionPromptEvent) -> Bool {
+        prompt.prompt.isCalendar && choices(for: prompt).alwaysRecordSeries
     }
 
-    func setAnnounceInChat(_ on: Bool) {
-        announceInChat = on
+    /// The box for the chat notice, starting from what the series remembers.
+    func announceInChat(_ prompt: DetectionPromptEvent) -> Bool {
+        choices(for: prompt).announceInChat
+    }
+
+    func setAlwaysRecordSeries(_ on: Bool, for prompt: DetectionPromptEvent) {
+        var current = choices(for: prompt)
+        current.alwaysRecordSeries = on
+        choices = current
+    }
+
+    func setAnnounceInChat(_ on: Bool, for prompt: DetectionPromptEvent) {
+        var current = choices(for: prompt)
+        current.announceInChat = on
+        choices = current
+    }
+
+    private func choices(for prompt: DetectionPromptEvent) -> PromptChoices {
+        if let choices, choices.promptId == prompt.promptId { return choices }
+        return PromptChoices(
+            promptId: prompt.promptId, alwaysRecordSeries: false, announceInChat: prompt.announceInChat)
     }
 
     /// Record, from the panel. The consent is the press on this card: both
     /// sources acknowledged, nothing missing accepted, and the standing grant
-    /// only when the box for it was ticked.
+    /// only when the box for it was ticked. A series grant is a calendar
+    /// thing, so an app offer never sends one.
     func record(_ prompt: DetectionPromptEvent) {
         Task {
             await act("Starting") {
@@ -520,12 +637,11 @@ final class MeetingLiveStore {
                     "meeting_consent_panel_start",
                     MeetingLiveRequest.consentPanelStart(
                         promptId: prompt.promptId, consent: consent,
-                        alwaysRecordSeries: self.alwaysRecordSeries,
-                        announceInChat: self.announceInChat))
+                        alwaysRecordSeries: self.alwaysRecordSeries(prompt),
+                        announceInChat: self.announceInChat(prompt)))
                 guard self.receive(result.receipt) else { return }
                 self.prompts.removeAll { $0.promptId == prompt.promptId }
-                self.alwaysRecordSeries = false
-                self.announceInChat = false
+                self.choices = nil
                 if result.snapshot.phase == .capturingRecording {
                     await self.loadActive()
                 }
@@ -547,7 +663,9 @@ final class MeetingLiveStore {
         }
     }
 
-    /// Stop, from the panel. The core records which Stop was pressed.
+    /// Stop, from the panel. The core records which Stop was pressed. A
+    /// refusal re-reads the panel's session, so the next press carries the
+    /// revision the core has now rather than the one a health change moved.
     func stopFromPanel() {
         guard let session = active?.snapshot else { return }
         Task {
@@ -556,8 +674,12 @@ final class MeetingLiveStore {
                     "meeting_stop",
                     MeetingLiveRequest.stop(
                         session.sessionId, revision: session.revision, surface: .consentPanel))
-                guard self.receive(result.receipt) else { return }
+                guard self.receive(result.receipt) else {
+                    await self.loadActive()
+                    return
+                }
                 self.active = nil
+                if self.live?.session.sessionId == session.sessionId { self.closeLive() }
                 self.opened = session.sessionId
             }
         }
@@ -565,9 +687,10 @@ final class MeetingLiveStore {
 
     // MARK: - Starting
 
-    /// Every start goes through here: a preflight row, then either the gate or
-    /// the recording. The gate opens for one reason — a source the session was
-    /// told to record is required and unavailable.
+    /// Every start goes through here: a preflight row, then the gate. The
+    /// consent the core persists says the press happened below the sentence
+    /// naming what is recorded, so the gate is shown for a healthy start too;
+    /// with every source available it is one screen and one press.
     func offer(_ options: MeetingStartOptions) {
         guard !options.sources.isEmpty else { return }
         self.options = options
@@ -576,13 +699,13 @@ final class MeetingLiveStore {
             await act("Starting") {
                 let created: MeetingMutationResult = try await self.core.request(
                     "meeting_preflight_create", MeetingLiveRequest.preflightCreate(options))
-                guard self.receive(created.receipt) else { return }
-                let session = created.snapshot
-                if session.sources.contains(where: { $0.required && $0.availability != .available }) {
-                    self.gate = session
+                guard self.receive(created.receipt) else {
+                    // An offer the core would not take is over: it lapsed, or
+                    // the app closed. The list is re-read so the card goes with it.
+                    if options.suggestionId != nil { await self.loadSuggestions() }
                     return
                 }
-                await self.capture(session)
+                self.gate = created.snapshot
             }
         }
     }
@@ -591,7 +714,7 @@ final class MeetingLiveStore {
     /// it sends are the ones the sentence above the button claimed.
     func record() {
         guard let session = gate, let options, session.allows(.start),
-              session.phase == .preflight else { return }
+              session.phase == .preflight, !gateBlocked || canStartPartial else { return }
         let accepted = acceptPartial ? blockedSources.map(\.sourceKind) : []
         Task {
             await act("Starting") {
@@ -603,13 +726,12 @@ final class MeetingLiveStore {
         }
     }
 
-    /// `meeting_start`. A committed start is the live screen; a refusal leaves
+    /// `meeting_start`. A start that reached capture is the live screen; a
+    /// refusal, or a committed consent whose sources all failed to open, leaves
     /// the gate standing on a freshly read session.
-    private func capture(_ session: MeetingSessionSnapshot, consent: MeetingConsentInput? = nil) async {
-        guard let options else { return }
+    private func capture(_ session: MeetingSessionSnapshot, consent: MeetingConsentInput) async {
         starting = true
         defer { starting = false }
-        let consent = consent ?? options.consent(acceptedMissingSources: [], acceptPartial: false)
         do {
             let result: MeetingMutationResult = try await core.request(
                 "meeting_start",
@@ -619,12 +741,23 @@ final class MeetingLiveStore {
                 gate = await read(session.sessionId)?.session ?? result.snapshot
                 return
             }
+            // The core keeps the consent it was given and then opens the
+            // sources. When none of them starts, the phase rolls back to
+            // preflight under a committed receipt: nothing is recording, and
+            // the gate is where a person tries again.
+            guard result.snapshot.phase.isActive else {
+                gate = await read(session.sessionId)?.session ?? result.snapshot
+                error = "Nothing is recording: no source could be started. Check the sources and try again."
+                return
+            }
             gate = nil
-            live = await read(session.sessionId)
+            provisional = []
+            await adoptLive(session.sessionId)
             if live == nil {
-                // The session is recording either way; the screen just has no
-                // transcript to show yet.
-                error = nil
+                // The capture is running either way. The screen stands on the
+                // session the start returned until the next read lands.
+                live = MeetingReviewSnapshot(session: result.snapshot)
+                liveReadAt = Date()
             }
         } catch {
             self.error = reason(error)
@@ -735,15 +868,20 @@ final class MeetingLiveStore {
 
     func open(_ snapshot: MeetingReviewSnapshot) {
         live = snapshot
+        liveReadAt = Date()
+        provisional = []
+        Task { await adoptLive(snapshot.session.sessionId) }
     }
 
     /// The live screen, read from the session the core says is capturing.
     func open(_ sessionId: MeetingSessionId) {
-        Task { live = await read(sessionId) }
+        Task { await adoptLive(sessionId) }
     }
 
     func closeLive() {
         live = nil
+        liveReadAt = nil
+        provisional = []
         noteBody = ""
     }
 
@@ -756,7 +894,9 @@ final class MeetingLiveStore {
     }
 
     /// Stop. The surface is recorded, because a stop from the live screen and
-    /// a stop from the panel are different acts.
+    /// a stop from the panel are different acts. A committed stop hands the
+    /// window to the review page, where the notes arrive: the live screen has
+    /// nothing left to say once the capture has ended.
     func stop() {
         guard let session = live?.session, session.allows(.stop) || pending != nil else { return }
         Task {
@@ -765,8 +905,8 @@ final class MeetingLiveStore {
                     "meeting_stop",
                     MeetingLiveRequest.stop(
                         session.sessionId, revision: session.revision, surface: .meetingLive))
-                guard self.receive(result.receipt) else { return }
-                self.live = await self.read(session.sessionId)
+                guard await self.settle(result, session) else { return }
+                self.closeLive()
                 self.opened = session.sessionId
             }
         }
@@ -781,9 +921,11 @@ final class MeetingLiveStore {
                     "meeting_discard",
                     MeetingRequest.wrap(
                         MeetingRequest.mutation(session.sessionId, revision: session.revision)))
-                guard self.receive(result.receipt) else { return }
-                self.live = nil
-                self.noteBody = ""
+                guard self.receive(result.receipt) else {
+                    await self.adoptLive(session.sessionId)
+                    return
+                }
+                self.closeLive()
                 self.notice = "Session discarded"
                 await self.loadRecovery()
             }
@@ -794,22 +936,25 @@ final class MeetingLiveStore {
         noteBody = text
     }
 
-    /// A note against this moment of the meeting. The offset is where the
-    /// capture is now, which is what makes it a note about the moment.
+    /// A note against this moment of the meeting. The moment is where the
+    /// capture is now, counted on from the last read; a note written two
+    /// minutes after the screen last refreshed is a note about now, not then.
+    /// The draft stays in the sheet until the core has kept it, so a refusal
+    /// hands the words back rather than losing them.
     func createNote() {
         guard let session = live?.session else { return }
         let body = noteBody.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
-        noteBody = ""
+        let moment = elapsedNs(at: Date())
         Task {
             await act("Saving the note") {
                 let result: MeetingMutationResult = try await self.core.request(
                     "meeting_note_create",
                     MeetingRequest.noteCreate(
                         session.sessionId, revision: session.revision,
-                        startOffsetNs: session.elapsedOffsetNs, body: body))
-                guard self.receive(result.receipt) else { return }
-                self.live = await self.read(session.sessionId)
+                        startOffsetNs: moment, body: body))
+                guard await self.settle(result, session) else { return }
+                self.noteBody = ""
             }
         }
     }
@@ -823,10 +968,21 @@ final class MeetingLiveStore {
                     method,
                     MeetingRequest.wrap(
                         MeetingRequest.mutation(session.sessionId, revision: session.revision)))
-                guard self.receive(result.receipt) else { return }
-                self.live = await self.read(session.sessionId)
+                await self.settle(result, session)
             }
         }
+    }
+
+    /// Every live mutation ends here: the receipt is read, and the session is
+    /// re-read whichever way it went. A refusal is most often a stale
+    /// revision — a source's health moved the session under the screen — and
+    /// the re-read is what makes the next press carry the revision the core
+    /// has now.
+    @discardableResult
+    private func settle(_ result: MeetingMutationResult, _ session: MeetingSessionSnapshot) async -> Bool {
+        let committed = receive(result.receipt)
+        await adoptLive(session.sessionId)
+        return committed
     }
 
     // MARK: - The unfinished
@@ -949,6 +1105,12 @@ final class MeetingLiveStore {
         (gate?.sources ?? []).filter { $0.required && $0.availability != .available }
     }
 
+    /// Whether a partial recording has anything to record: a start with every
+    /// source blocked would seal an empty meeting, so the gate refuses it.
+    var canStartPartial: Bool {
+        (gate?.sources ?? []).contains { $0.availability == .available }
+    }
+
     var canStart: Bool {
         guard let gate else { return false }
         return gate.phase == .preflight && gate.allows(.start)
@@ -968,8 +1130,26 @@ final class MeetingLiveStore {
         (live?.transcript ?? []).filter { !$0.removed }
     }
 
-    var elapsed: String {
-        (live?.session.elapsedOffsetNs ?? 0).meetingOffsetClock
+    /// Whether the screen is reading the running pass rather than the stored
+    /// transcript: the stored one is empty until the meeting stops.
+    var showsProvisional: Bool {
+        lines.isEmpty && !provisional.isEmpty
+    }
+
+    /// Where the capture is at `now`: the offset the core reported, plus the
+    /// time since it reported it, while the capture is running. Paused, the
+    /// clock stands where the core left it.
+    func elapsedNs(at now: Date) -> Int64 {
+        guard let session = live?.session else { return 0 }
+        let reported = session.elapsedOffsetNs ?? 0
+        guard session.phase == .capturingRecording, let liveReadAt else { return reported }
+        let since = now.timeIntervalSince(liveReadAt)
+        guard since > 0 else { return reported }
+        return reported + Int64(since * 1_000_000_000)
+    }
+
+    func elapsed(at now: Date) -> String {
+        elapsedNs(at: now).meetingOffsetClock
     }
 
     /// The two lines the live screen has to say, in the order it says them:
@@ -980,26 +1160,61 @@ final class MeetingLiveStore {
         if session.storage != .available {
             lines.append(MeetingLiveWarning(text: "Storage needs attention.", urgent: true))
         }
-        if systemAudioLimited {
-            lines.append(MeetingLiveWarning(
-                text: "Recording the microphone only. System audio is unavailable, "
-                    + "so this meeting will be partial.",
-                urgent: false))
-        } else if session.captureCompleteness == .partial {
-            lines.append(MeetingLiveWarning(
-                text: "Some audio is missing. Check the gaps before relying on the generated notes.",
-                urgent: false))
+        if let audio = audioWarning(session) {
+            lines.append(audio)
         }
         return lines
     }
 
-    /// `systemAudioLimited`: the lane is absent, not allowed, or not working.
-    private var systemAudioLimited: Bool {
-        guard let session = live?.session else { return false }
+    /// The audio line, if there is one. A microphone-only meeting the person
+    /// chose is said as a fact, not a fault; a lane that was asked for and is
+    /// not working is the fault, and the line names every lane in that state
+    /// rather than assuming the microphone is fine; anything else missing
+    /// reads off the core's completeness.
+    private func audioWarning(_ session: MeetingSessionSnapshot) -> MeetingLiveWarning? {
+        let microphone = session.sources.first { $0.sourceKind == .microphone }
         guard let lane = session.sources.first(where: { $0.sourceKind == .systemAudio }) else {
-            return true
+            return microphone != nil
+                ? MeetingLiveWarning(
+                    text: "Recording the microphone only. The other side of the call is not captured.",
+                    urgent: false)
+                : nil
         }
-        return lane.availability != .available || lane.health == .failed || lane.health == .degraded
+        let systemDown = MeetingLiveStore.down(lane)
+        let microphoneDown = microphone.map(MeetingLiveStore.down) ?? true
+        if systemDown && microphoneDown {
+            return MeetingLiveWarning(
+                text: session.phase == .capturingPaused
+                    ? "Nothing resumed: neither source could be reopened. Stop, or try again."
+                    : "Nothing is being recorded: both sources have failed. Stop, or check the sources.",
+                urgent: true)
+        }
+        if systemDown {
+            return MeetingLiveWarning(
+                text: "Recording the microphone only. System audio is unavailable, "
+                    + "so this meeting will be partial.",
+                urgent: false)
+        }
+        if microphoneDown {
+            return MeetingLiveWarning(
+                text: "Recording system audio only. The microphone is unavailable, "
+                    + "so this meeting will be partial.",
+                urgent: false)
+        }
+        if session.captureCompleteness == .partial || lane.health == .degraded
+            || microphone?.health == .degraded
+        {
+            return MeetingLiveWarning(
+                text: "Some audio is missing. Check the gaps before relying on the generated notes.",
+                urgent: false)
+        }
+        return nil
+    }
+
+    /// A lane that is not delivering audio at all. Gaps are a different
+    /// state: the lane is recording, with holes.
+    private static func down(_ lane: MeetingSourceSnapshot) -> Bool {
+        lane.availability != .available || lane.health == .failed
     }
 
     /// One word per source, as the gate's list and the live screen read it.

@@ -315,10 +315,17 @@ final class OnboardingStore {
 
     /// `download_model` returns when the bytes are on disk, verified and
     /// unpacked — the events only narrate it — so the model is ready to be
-    /// activated the moment this resolves.
+    /// activated the moment this resolves. One exception: the core answers a
+    /// cancelled transfer with the same success as a finished one, because
+    /// the partial file is kept for a resume. The cancellation this store
+    /// recorded decides, not the answer, or Cancel would select the model.
     private func download(_ id: String) async {
         do {
             try await core.request("download_model", ["modelId": id])
+            guard cancelled.remove(id) == nil else {
+                clear(id)
+                return
+            }
             error = nil
             work[id] = .switching
             await activate(id)

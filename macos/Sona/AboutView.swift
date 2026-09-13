@@ -14,7 +14,8 @@ struct AboutView: View {
             PageSection("Appearance") {
                 Card {
                     ChoiceRow(
-                        title: "App language",
+                        title: "Language",
+                        detail: "The language the assistant answers in and the menu bar menu uses. This window stays in English.",
                         choices: AppLanguage.all,
                         label: { $0.label },
                         selection: Binding(

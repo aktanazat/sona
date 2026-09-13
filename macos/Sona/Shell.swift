@@ -5,6 +5,7 @@ import SwiftUI
 /// the pages.
 struct Shell: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack {
@@ -15,8 +16,13 @@ struct Shell: View {
             } else {
                 HStack(spacing: 0) {
                     Sidebar()
-                    content
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    VStack(spacing: 0) {
+                        if model.coreStopped {
+                            CoreStoppedBanner()
+                        }
+                        content
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
                 if model.paletteShown {
                     CommandPalette()
@@ -49,22 +55,21 @@ struct Shell: View {
                 }
             }
         }
-        .background {
-            Group {
-                Button("") { model.paletteShown.toggle() }.keyboardShortcut("k", modifiers: .command)
-                Button("") { model.toggleCapture() }.keyboardShortcut("r", modifiers: .command)
-                Button("") { model.showSettings(model.settingsPlace) }.keyboardShortcut(",", modifiers: .command)
-            }
-            .hidden()
+        .onAppear {
+            model.presentMainWindow = { openWindow(id: "main") }
         }
     }
 
-    /// The core is starting, or could not.
+    /// The core is starting, or could not. A failed start is not the end:
+    /// the same button the stopped-core banner has sits here too.
     private var waiting: some View {
         VStack(spacing: 12) {
-            if let error = model.coreError {
+            if let error = model.coreError, !model.coreRestarting {
                 Text("Sona's engine could not start.").bodyText(15)
                 Text(error).bodyText(13, Theme.inkSecondary)
+                Button("Try again") { model.restartCore() }
+                    .buttonStyle(.primary)
+                    .padding(.top, 8)
             } else {
                 ProgressView()
                 Text("Starting…").bodyText(13, Theme.inkSecondary)
@@ -102,6 +107,45 @@ struct Shell: View {
     }
 }
 
+/// The core stopped under the shell. The pages keep what they had; nothing
+/// that reads the core works until it is started again, so the way to do
+/// that sits with the news, on every page.
+struct CoreStoppedBanner: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.inkSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sona's engine stopped.").bodyText(14)
+                Text(detail).bodyText(13, Theme.inkSecondary)
+            }
+            Spacer(minLength: 12)
+            if model.coreRestarting {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel("Restarting the engine")
+            } else {
+                Button(model.coreError == nil ? "Restart" : "Try again") { model.restartCore() }
+                    .buttonStyle(.primary)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Theme.surface)
+        .overlay(alignment: .bottom) { Hairline() }
+        .accessibilityElement(children: .contain)
+    }
+
+    /// What was lost, or why the restart did not take.
+    private var detail: String {
+        if model.coreRestarting { return "Starting it again…" }
+        if let error = model.coreError { return error }
+        return "Anything in flight was lost. Restart to keep going."
+    }
+}
+
 /// The meetings place: the live screen while one records, the gate between
 /// a press and a capture, one meeting's review, or the home page: what leads
 /// to a recording, then every recording there has been.
@@ -135,7 +179,7 @@ struct MeetingsPlace: View {
                     Button("Import recording") { live.importMeeting() }
                         .buttonStyle(.secondary)
                         .disabled(live.importing)
-                    Button(live.starting ? "Starting…" : "Record") { live.startManual() }
+                    Button(live.starting ? "Starting…" : "Record…") { live.startManual() }
                         .buttonStyle(.primary)
                         .disabled(live.starting || live.pending != nil)
                 }
@@ -144,14 +188,15 @@ struct MeetingsPlace: View {
             if let notice = live.notice {
                 Text(notice).bodyText(13, Theme.inkSecondary).padding(.bottom, 16)
             }
-            if let engine = live.engineWarning, let warning = engine.warning {
+            if let engine = live.engineWarning {
                 // Every engine warning is fixed under Settings → Meetings; the
                 // Apple Intelligence switch and its download are one pane
                 // further, in System Settings.
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(warning).bodyText(13, Theme.live)
+                    Text("No notes will be written for the next meeting. \(engine.sentence)")
+                        .bodyText(13, Theme.live)
                     HStack(spacing: 8) {
-                        if engine.appleBlocker?.systemSettingsHelps == true {
+                        if engine.settingsPaneBlocker != nil {
                             Button("Open System Settings") { live.openAppleIntelligenceSettings() }
                                 .buttonStyle(.compact)
                         }
@@ -160,6 +205,24 @@ struct MeetingsPlace: View {
                     }
                 }
                 .padding(.bottom, 16)
+            }
+            if let running = live.active?.snapshot {
+                // A recording the panel started — a standing series, a call
+                // the person accepted from a notification — runs with no live
+                // screen open. The row is the way in; the panel keeps its Stop.
+                PageSection("Recording now") {
+                    Card {
+                        CardRow(action: { live.open(running.sessionId) }) {
+                            HStack(spacing: 8) {
+                                LiveDot(state: running.phase == .capturingPaused ? .idle : .recording(since: Date()))
+                                Text(running.title).bodyText(14)
+                            }
+                        } trailing: {
+                            Text(running.phase == .capturingPaused ? "Paused" : "Open")
+                                .metaText(Theme.inkSecondary)
+                        }
+                    }
+                }
             }
             MeetingSuggestionsView(store: live)
             MeetingStartCountdownView(store: live)
@@ -289,6 +352,8 @@ private struct SidebarItem: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(live ? "In progress" : "")
         .onHover { hovering = $0 }
     }
 }

@@ -43,6 +43,23 @@ struct MeetingStartGateView: View {
                     MeetingSourceListView(readings: store.readings(session))
                 }
 
+                ForEach(store.blockedSources, id: \.sourceKind) { source in
+                    if let remedy = MeetingSourceRemedy(source) {
+                        HStack(spacing: 12) {
+                            Text(remedy.sentence).bodyText(14, Theme.inkSecondary)
+                            Spacer(minLength: 0)
+                            Button(remedy.action) { NSWorkspace.shared.open(remedy.url) }
+                                .buttonStyle(.compact)
+                        }
+                        .padding(.bottom, 12)
+                    }
+                }
+                if store.gateBlocked {
+                    Text("After changing a setting, press Refresh.")
+                        .metaText()
+                        .padding(.bottom, 16)
+                }
+
                 if session.storage != .available {
                     Text("Encrypted meeting storage is unavailable.")
                         .bodyText(14, Theme.live)
@@ -55,19 +72,19 @@ struct MeetingStartGateView: View {
                     Text("Records this Mac's audio locally. Nothing joins the call.")
                         .bodyText(14)
 
-                    if store.gateBlocked {
-                        Toggle(
-                            "The meeting is marked partial, and the missing source is named in it.",
-                            isOn: Binding(
-                                get: { store.acceptPartial },
-                                set: { store.setAcceptPartial($0) })
-                        )
-                        .toggleStyle(.checkbox)
-                        .font(TypeScale.body(14))
-                        .disabled(store.starting)
+                    if store.gateBlocked && store.canStartPartial {
+                        Toggle(partialSentence, isOn: Binding(
+                            get: { store.acceptPartial },
+                            set: { store.setAcceptPartial($0) }))
+                            .toggleStyle(.checkbox)
+                            .font(TypeScale.body(14))
+                            .disabled(store.starting)
                     }
 
-                    if !store.canStart {
+                    if store.gateBlocked && !store.canStartPartial {
+                        Text("Nothing can be recorded until at least one source is available.")
+                            .bodyText(14, Theme.live)
+                    } else if !store.canStart {
                         Text("This action is not available in the current phase.")
                             .bodyText(14, Theme.live)
                     }
@@ -81,7 +98,7 @@ struct MeetingStartGateView: View {
                             .buttonStyle(.primary)
                             .disabled(
                                 store.starting || !store.canStart
-                                    || (store.gateBlocked && !store.acceptPartial))
+                                    || (store.gateBlocked && !(store.acceptPartial && store.canStartPartial)))
                     }
                 }
             }
@@ -90,7 +107,53 @@ struct MeetingStartGateView: View {
 
     private var startWord: String {
         if store.starting { return "Starting…" }
-        return store.gateBlocked ? "Record without it" : "Record"
+        guard store.gateBlocked else { return "Record" }
+        return store.blockedSources.count == 1 ? "Record without it" : "Record without them"
+    }
+
+    /// The acknowledgement names what will be missing, so the press below it
+    /// agrees to something specific.
+    private var partialSentence: String {
+        let names = store.blockedSources.map { $0.sourceKind.label.lowercased() }
+        let missing = names.count == 1
+            ? "The \(names[0]) is missing from"
+            : "The \(names.joined(separator: " and ")) are missing from"
+        return "\(missing) this recording, and the meeting is marked partial."
+    }
+}
+
+/// What unblocks one source: the sentence, and the pane where the fix lives.
+/// macOS grants system audio through Screen Recording, which is the surprise
+/// this sentence exists to remove.
+struct MeetingSourceRemedy {
+    let sentence: String
+    let action: String
+    let url: URL
+
+    init?(_ source: MeetingSourceSnapshot) {
+        switch (source.sourceKind, source.availability) {
+        case (.microphone, .permissionRequired), (.microphone, .permissionDenied):
+            sentence = "macOS is not letting Sona use the microphone."
+            action = "Open Microphone settings"
+            url = Self.privacy("Privacy_Microphone")
+        case (.systemAudio, .permissionRequired), (.systemAudio, .permissionDenied):
+            sentence = "macOS grants system audio through Screen Recording. Nothing on screen is captured."
+            action = "Open Screen Recording settings"
+            url = Self.privacy("Privacy_ScreenCapture")
+        case (.microphone, .deviceUnavailable):
+            sentence = "No microphone is connected."
+            action = "Open Sound settings"
+            // Force unwrapped: a constant, well formed URL.
+            url = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension")!
+        case (_, .available), (_, .deviceUnavailable), (_, .unsupportedPlatform),
+             (_, .storageUnavailable), (_, .unknown):
+            return nil
+        }
+    }
+
+    private static func privacy(_ pane: String) -> URL {
+        // Force unwrapped: a constant, well formed URL.
+        URL(string: "x-apple.systempreferences:com.apple.preference.security?" + pane)!
     }
 }
 
@@ -160,7 +223,7 @@ struct MeetingStartPreviewCard: View {
                         Button("Skip", action: onSkip).buttonStyle(.quiet)
                     }
                     if let onRecord {
-                        Button("Record", action: onRecord).buttonStyle(.secondary)
+                        Button("Record…", action: onRecord).buttonStyle(.secondary)
                     }
                     Image(systemName: open || expanded ? "chevron.up" : "chevron.down")
                         .foregroundStyle(Theme.inkTertiary)
@@ -366,7 +429,7 @@ struct MeetingStartCountdownView: View {
                                 .disabled(store.pending != nil)
                         }
                     } else {
-                        Button("Record") { store.start(countdown.event) }
+                        Button("Record…") { store.start(countdown.event) }
                             .buttonStyle(.primary)
                             .disabled(store.pending != nil || store.starting)
                     }
@@ -386,10 +449,14 @@ struct MeetingStartCountdownView: View {
 // MARK: - The meeting that was interrupted
 
 /// A capture that never got its ending: Sona quit, the Mac slept, the process
-/// died. Finishing it seals what was recorded; discarding it deletes it.
+/// died. Finishing it seals what was recorded; discarding it deletes it, which
+/// is why discarding asks first — what was recorded before the interruption
+/// may exist nowhere else.
 struct MeetingRecoveryView: View {
     let store: MeetingLiveStore
     var onOpenSession: (MeetingSessionId) -> Void = { _ in }
+
+    @State private var discarding: MeetingHistorySummary?
 
     var body: some View {
         if !store.recovery.isEmpty {
@@ -403,7 +470,7 @@ struct MeetingRecoveryView: View {
                             }
                         } trailing: {
                             HStack(spacing: 8) {
-                                Button("Discard") { store.discardRecovery(entry) }
+                                Button("Discard") { discarding = entry }
                                     .buttonStyle(.quiet)
                                     .disabled(store.pending != nil)
                                 Button("Finish") { store.finalizeRecovery(entry) }
@@ -413,6 +480,19 @@ struct MeetingRecoveryView: View {
                         }
                     }
                 }
+            }
+            .confirmationDialog(
+                "Discard “\(discarding?.title ?? "")”?",
+                isPresented: Binding(get: { discarding != nil }, set: { if !$0 { discarding = nil } }),
+                titleVisibility: .visible,
+                presenting: discarding
+            ) { entry in
+                Button("Discard", role: .destructive) { store.discardRecovery(entry) }
+                Button("Keep", role: .cancel) {}
+            } message: { _ in
+                Text(
+                    "The audio recorded before the interruption, its transcript, and any notes "
+                        + "will be deleted. This cannot be undone.")
             }
         }
     }

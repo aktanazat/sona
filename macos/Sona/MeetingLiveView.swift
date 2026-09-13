@@ -19,6 +19,9 @@ struct MeetingLiveView: View {
     var onOpenReview: (MeetingSessionId) -> Void = { _ in }
 
     @State private var noteOpen = false
+    /// Set by the Add press; the sheet closes when the core has kept the note
+    /// and stays open, draft intact, when it refused.
+    @State private var noteSaving = false
     @State private var discardOpen = false
 
     private var session: MeetingSessionSnapshot? { store.live?.session }
@@ -63,9 +66,17 @@ struct MeetingLiveView: View {
             if session.phase != .capturingRecording {
                 Text(session.phase.label).metaText(Theme.inkSecondary)
             }
-            HStack(spacing: 6) {
-                LiveDot(state: .recording(since: Date()))
-                Text(store.elapsed).font(TypeScale.mono(13)).foregroundStyle(Theme.ink)
+            // The core reports the offset once per read; the screen counts on
+            // from it every second while the capture runs, and stands still
+            // while it is paused.
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack(spacing: 6) {
+                    LiveDot(state: dot(session))
+                    Text(store.elapsed(at: context.date))
+                        .font(TypeScale.mono(13))
+                        .foregroundStyle(Theme.ink)
+                        .monospacedDigit()
+                }
             }
             .accessibilityLabel("Elapsed")
             Button("Stop") { store.stop() }
@@ -74,6 +85,16 @@ struct MeetingLiveView: View {
             menu(session)
         }
         .padding(.bottom, 24)
+    }
+
+    /// Red while recording, a ring while paused, ink while the core is
+    /// stopping or processing.
+    private func dot(_ session: MeetingSessionSnapshot) -> CaptureState {
+        switch session.phase {
+        case .capturingRecording: .recording(since: Date())
+        case .capturingPaused: .idle
+        default: .working(session.phase.label)
+        }
     }
 
     @ViewBuilder
@@ -122,42 +143,57 @@ struct MeetingLiveView: View {
     @ViewBuilder
     private var transcript: some View {
         PageSection("Transcript") {
-            if store.lines.isEmpty {
+            if store.showsProvisional {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(store.provisional.enumerated()), id: \.offset) { _, segment in
+                        line(at: segment.startOffsetNs, segment.text)
+                    }
+                    Text("Provisional. The final transcript is written when the meeting ends.")
+                        .metaText(Theme.inkTertiary)
+                        .padding(.top, 8)
+                }
+            } else if store.lines.isEmpty {
                 Text("Words appear here as they are recognized.")
                     .bodyText(14, Theme.inkSecondary)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(store.lines, id: \.base.segmentId) { segment in
-                        HStack(alignment: .firstTextBaseline, spacing: 20) {
-                            Text(segment.base.startOffsetNs.meetingOffsetClock)
-                                .font(TypeScale.mono(12))
-                                .foregroundStyle(Theme.inkTertiary)
-                                .frame(width: 62, alignment: .trailing)
-                            Text(segment.text).bodyText(14)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+                        line(at: segment.base.startOffsetNs, segment.text)
                     }
                 }
             }
         }
     }
 
+    private func line(at offsetNs: Int64, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 20) {
+            Text(offsetNs.meetingOffsetClock)
+                .font(TypeScale.mono(12))
+                .foregroundStyle(Theme.inkTertiary)
+                .frame(width: 62, alignment: .trailing)
+            Text(text).bodyText(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     // MARK: A note about this moment
 
     /// The note is anchored at the clock when it is saved, which is why
-    /// nothing here asks for a time.
+    /// nothing here asks for a time. The sheet stays until the core has kept
+    /// the words; a refusal is read here, over the draft, not behind it.
     private var note: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Note for this moment").headlineText()
             InputField(
                 prompt: "Write a note for this moment",
                 text: Binding(get: { store.noteBody }, set: { store.setNote($0) }))
+            ErrorNote(store.error)
             HStack {
                 Spacer()
                 Button("Cancel") { noteOpen = false }.buttonStyle(.secondary)
-                Button("Add a note") {
+                Button(noteSaving ? "Adding…" : "Add a note") {
+                    noteSaving = true
                     store.createNote()
-                    noteOpen = false
                 }
                 .buttonStyle(.primary)
                 .disabled(
@@ -168,6 +204,12 @@ struct MeetingLiveView: View {
         .padding(28)
         .frame(width: 420)
         .background(Theme.page)
+        .onChange(of: store.pending) { _, pending in
+            guard noteSaving, pending == nil else { return }
+            noteSaving = false
+            if store.noteBody.isEmpty { noteOpen = false }
+        }
+        .onDisappear { noteSaving = false }
     }
 }
 
@@ -186,7 +228,7 @@ struct MeetingConsentPanelView: View {
 
     /// The follow-up text lives with the notes, which this slice does not
     /// read. Unwired, the copy button is not drawn at all.
-    var followUp: ((MeetingSessionId) async -> String?)?
+    var followUp: ((MeetingSessionId) async throws -> String)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -238,14 +280,19 @@ struct DetectionPromptView: View {
                         Toggle(
                             "Always record this meeting",
                             isOn: Binding(
-                                get: { store.alwaysRecordSeries },
-                                set: { store.setAlwaysRecordSeries($0) }))
+                                get: { store.alwaysRecordSeries(prompt) },
+                                set: { store.setAlwaysRecordSeries($0, for: prompt) }))
                     }
                     Toggle(
-                        "Announce in chat",
+                        "Put a notice in the chat",
                         isOn: Binding(
-                            get: { store.announceInChat },
-                            set: { store.setAnnounceInChat($0) }))
+                            get: { store.announceInChat(prompt) },
+                            set: { store.setAnnounceInChat($0, for: prompt) }))
+                    if store.announceInChat(prompt) {
+                        Text("Typed into the meeting's chat box for you to send.")
+                            .metaText(Theme.inkTertiary)
+                            .padding(.leading, 20)
+                    }
                 }
                 .toggleStyle(.checkbox)
                 .font(TypeScale.body(13))
@@ -274,17 +321,17 @@ struct MeetingConsentActiveCard: View {
         Card {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    LiveDot(state: .recording(since: Date()))
-                    Text("Recording").metaText(Theme.live)
+                    let paused = state.snapshot.phase == .capturingPaused
+                    LiveDot(state: paused ? .idle : .recording(since: Date()))
+                    Text(paused ? "Paused" : "Recording").metaText(paused ? Theme.inkSecondary : Theme.live)
                     Spacer()
                     Text((state.snapshot.elapsedOffsetNs ?? 0).meetingOffsetClock)
                         .font(TypeScale.mono(12))
                         .foregroundStyle(Theme.inkSecondary)
                 }
                 Text(state.snapshot.title).bodyText(14)
-                if state.disclosure.refused {
-                    Text("The disclosure wasn't posted: this app wouldn't take it.")
-                        .bodyText(12, Theme.inkSecondary)
+                if let line = state.disclosure.outcomeLine {
+                    Text(line).bodyText(12, Theme.inkSecondary)
                 }
                 HStack {
                     if state.standingSeriesKey != nil {
@@ -316,8 +363,13 @@ struct RitualRecordingView: View {
         Card {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    LiveDot(state: .recording(since: Date()))
-                    Text("Recording started").metaText(Theme.live)
+                    // The card is an event; the phase is the session's. Paused
+                    // is the one state the card would otherwise misreport.
+                    let paused = store.active?.snapshot.sessionId == card.sessionId
+                        && store.active?.snapshot.phase == .capturingPaused
+                    LiveDot(state: paused ? .idle : .recording(since: Date()))
+                    Text(paused ? "Paused" : "Recording started")
+                        .metaText(paused ? Theme.inkSecondary : Theme.live)
                     Spacer()
                     Text(card.startedAtUtcMs.meetingElapsed(since: Date()))
                         .font(TypeScale.mono(12))
@@ -413,7 +465,14 @@ struct RitualWrapView: View {
     let event: RitualEvent
     let card: RitualWrapCard
     var onOpenNotes: (MeetingSessionId) -> Void = { _ in }
-    var followUp: ((MeetingSessionId) async -> String?)?
+    var followUp: ((MeetingSessionId) async throws -> String)?
+
+    /// What the copy button says: the draft in flight, the copy that landed,
+    /// or the offer.
+    private var followUpLabel: String {
+        if store.followUpDrafting { return "Drafting…" }
+        return store.followUpCopied ? "Copied" : "Copy follow-up"
+    }
 
     /// The counts, in the order `RitualCards.tsx` reads them, and only the
     /// ones that are not zero.
@@ -456,14 +515,11 @@ struct RitualWrapView: View {
                     .buttonStyle(.secondary)
                     .disabled(store.pending != nil)
                     if let followUp {
-                        Button(store.followUpCopied ? "Copied" : "Copy follow-up") {
-                            Task {
-                                guard let text = await followUp(card.sessionId) else { return }
-                                store.copyFollowUp(event, text: text)
-                            }
+                        Button(followUpLabel) {
+                            store.copyFollowUp(event, for: card.sessionId, draft: followUp)
                         }
                         .buttonStyle(.secondary)
-                        .disabled(store.pending != nil)
+                        .disabled(store.pending != nil || store.followUpDrafting)
                     }
                     Spacer()
                     Button("Done") { store.respond(event, action: .wrapDone) }
@@ -484,7 +540,7 @@ struct RitualView: View {
     let store: MeetingLiveStore
     var onOpenBrief: (String) -> Void = { _ in }
     var onOpenNotes: (MeetingSessionId) -> Void = { _ in }
-    var followUp: ((MeetingSessionId) async -> String?)?
+    var followUp: ((MeetingSessionId) async throws -> String)?
 
     var body: some View {
         MeetingConsentPanelView(

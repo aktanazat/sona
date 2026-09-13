@@ -14,6 +14,18 @@ struct SonaApp: App {
         .defaultLaunchBehavior(.presented)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.openSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandMenu("Capture") {
+                CaptureMenuItem(model: model)
+                Button("Record a Meeting") { model.recordMeeting() }
+                Button("Record the Screen") { model.recordScreen() }
+                Divider()
+                Button("Search Sona…") { model.toggleSearch() }
+                    .keyboardShortcut("k", modifiers: .command)
+            }
         }
 
         MenuBarExtra {
@@ -35,33 +47,49 @@ extension CaptureState {
     }
 }
 
+/// The start/stop item of a menu, with ⌘R. While the words are being worked
+/// on it names the stage and is disabled, since there is nothing to stop.
+struct CaptureMenuItem: View {
+    let model: AppModel
+
+    var body: some View {
+        Button(title) { model.toggleCapture() }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(model.captureActionTitle == nil)
+    }
+
+    private var title: String {
+        switch model.capture {
+        case .idle: "Start Recording"
+        case .recording: "Stop Recording"
+        case let .working(kind): "\(kind.capitalized)…"
+        }
+    }
+}
+
 /// The menu bar item: the state, the actions, the way in.
 struct MenuBarMenu: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        CaptureClock(state: model.capture, idleText: "Ready · \(model.pillMode ?? "Dictate")")
-        Divider()
-        Button(model.capture == .idle ? "Start recording" : "Stop recording") {
-            model.toggleCapture()
-        }
-        Button("Record a meeting") {
-            openWindow(id: "main")
-            model.go(.meetings)
-            model.live.startManual()
-        }
-        Button("Record the screen") {
-            openWindow(id: "main")
-            model.sheet = .recorder
+        if model.coreStopped {
+            Text(model.coreRestarting ? "Restarting the engine…" : "Sona's engine stopped")
+            Divider()
+            Button("Restart the Engine") { model.restartCore() }
+                .disabled(model.coreRestarting)
+        } else {
+            CaptureClock(state: model.capture, idleText: "Ready · \(model.pillMode ?? "Dictate")")
+            Divider()
+            CaptureMenuItem(model: model)
+            Button("Record a Meeting") { model.recordMeeting() }
+            Button("Record the Screen") { model.recordScreen() }
         }
         Divider()
-        Button("Open Sona") { openWindow(id: "main") }
-        Button("Settings…") {
-            openWindow(id: "main")
-            model.showSettings(model.settingsPlace)
-        }
+        Button("Open Sona") { model.reveal() }
+        Button("Settings…") { model.openSettings() }
+            .keyboardShortcut(",", modifiers: .command)
         Divider()
         Button("Quit Sona") { NSApplication.shared.terminate(nil) }
+            .keyboardShortcut("q", modifiers: .command)
     }
 }

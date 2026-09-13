@@ -1,6 +1,8 @@
 import AppKit
+import CoreAudio
 import Foundation
 import Observation
+import ServiceManagement
 
 /// Everything the settings pages read and write.
 ///
@@ -8,8 +10,9 @@ import Observation
 /// and nothing else. A row writes through its own command and the record is
 /// read back, so what a control shows is what the core stored — not what the
 /// click meant. `settings-changed` fires for every write from anywhere (this
-/// window, the tray, an agent proposal) and carries the name of one setting,
-/// which is enough to know a re-read is due and never enough to skip it.
+/// window, the tray, an agent proposal). A few writes name their setting for
+/// the webview's own listeners; here every payload means one thing, a re-read
+/// is due, and it is never skipped.
 @MainActor
 @Observable
 final class SettingsStore {
@@ -29,22 +32,28 @@ final class SettingsStore {
     private(set) var customSounds = SoundCustomFiles.none
     /// Model capabilities by id, for the language and translation rows.
     private(set) var capabilities: [String: SettingsModelCapability] = [:]
-    /// The last thing the core refused to do.
+    /// The last thing the core refused to do, or could not read.
     private(set) var error: String?
+    /// Whether `error` came from a read, which the next good read may clear.
+    @ObservationIgnored private var errorIsFromRead = false
     /// Something that succeeded and is worth saying anyway: the chords a
     /// keyboard-implementation switch had to drop.
     private(set) var notice: String?
     /// Rows with a write in flight, by the key the row disables on.
     private(set) var busy: Set<String> = []
-
-    /// Called after the core accepts an autostart change. The login item
-    /// registration is the shell's own: only the app bundle knows itself.
-    var onAutostartChanged: (Bool) -> Void = { _ in }
+    /// Where this bundle's login item stands against `autostart_enabled`:
+    /// what the row says under its switch when the two are not the same.
+    private(set) var loginItem: LoginItemState = .matching
 
     @ObservationIgnored let core: Core
     /// The shortcut recorder's ear, while one is recording. Registered once
     /// in `init` and pointed at whichever row is capturing.
     @ObservationIgnored var onHandyKeys: ((HandyKeysEvent) -> Void)?
+    /// The re-enumeration a device change asked for. A microphone that is
+    /// plugged in announces itself more than once; one read follows the burst.
+    @ObservationIgnored private var devicesTask: Task<Void, Never>?
+    /// The login item change in flight; the next one waits for it.
+    @ObservationIgnored private var loginItemTask: Task<Void, Never>?
 
     init(core: Core) {
         self.core = core
@@ -61,6 +70,31 @@ final class SettingsStore {
             guard let self else { return }
             Task { await self.refreshCapabilities() }
         }
+        watchDevices()
+    }
+
+    /// CoreAudio says the device list changed: a microphone was plugged in
+    /// or pulled. The picker's list and the selected device's channel count
+    /// follow, so a microphone connected after launch can be chosen.
+    private func watchDevices() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, .main
+        ) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.devicesTask?.cancel()
+                self.devicesTask = Task {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled else { return }
+                    await self.refreshMicrophones()
+                    await self.refreshChannels()
+                }
+            }
+        }
     }
 
     /// The payload of `settings-changed`: which setting was written.
@@ -76,6 +110,7 @@ final class SettingsStore {
     func start() async {
         await refresh()
         loaded = true
+        reconcileLoginItem()
         await ask { self.defaults = try await self.core.request("get_default_settings") }
         await refreshMicrophones()
         await refreshChannels()
@@ -89,22 +124,13 @@ final class SettingsStore {
         await ask { self.settings = try await self.core.request("get_app_settings") }
     }
 
-    /// A write landed somewhere. Re-read the record, and the enumeration the
-    /// written setting invalidates.
+    /// A write landed somewhere. Re-read the record, and when a microphone was
+    /// reset, the enumeration that write invalidates.
     private func reload(after setting: String?) async {
         await refresh()
-        switch setting {
-        case "selected_microphone":
+        if setting == "selected_microphone" {
             await refreshMicrophones()
             await refreshChannels()
-        case "clamshell_microphone":
-            await refreshMicrophones()
-        case "sound_theme":
-            await refreshCustomSounds()
-        case "selected_model":
-            await refreshCapabilities()
-        default:
-            break
         }
     }
 
@@ -246,19 +272,29 @@ final class SettingsStore {
             }
             error = nil
         } catch {
-            self.error = error.localizedDescription
+            refuse(error.localizedDescription)
         }
         busy.remove(key)
     }
 
-    /// A read. A failed read says so and leaves the last good value.
+    /// A read. A failed read says so and leaves the last good value. A read
+    /// that works clears only a read's own failure: every write re-reads the
+    /// record afterwards, and that re-read must not wipe the refusal the
+    /// write just put on screen.
     private func ask(_ body: () async throws -> Void) async {
         do {
             try await body()
-            error = nil
+            if errorIsFromRead { error = nil }
         } catch {
             self.error = error.localizedDescription
+            errorIsFromRead = true
         }
+    }
+
+    /// A write the core would not take. Stays until the next write lands.
+    private func refuse(_ message: String) {
+        error = message
+        errorIsFromRead = false
     }
 
     // MARK: - Essentials
@@ -349,7 +385,32 @@ final class SettingsStore {
             \.autostartEnabled, enabled, "change_autostart_setting",
             ["enabled": .bool(enabled)], key: "autostart_enabled"
         )
-        if error == nil { onAutostartChanged(enabled) }
+        if error == nil { reconcileLoginItem() }
+    }
+
+    // MARK: - Login item
+
+    /// This bundle's own login item, brought to `autostart_enabled`. Only the
+    /// app bundle knows itself, so the registration is the shell's and not
+    /// the core's: read at launch against the saved setting, which covers a
+    /// setting saved before this shell existed, and again after each change.
+    /// Changes queue behind one another, so two quick presses finish in the
+    /// order they were made.
+    func reconcileLoginItem() {
+        let enabled = settings.autostartEnabled
+        let previous = loginItemTask
+        loginItemTask = Task {
+            await previous?.value
+            do {
+                loginItem = try await LoginItem.apply(enabled) ? .matching : .needsApproval
+            } catch {
+                loginItem = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    func openLoginItems() {
+        SMAppService.openSystemSettingsLoginItems()
     }
 
     // MARK: - Dictation
@@ -473,8 +534,8 @@ final class SettingsStore {
 
     // MARK: - Shortcuts
 
-    /// Store one chord. False means the core refused it and the row should
-    /// put back what it was showing.
+    /// Store one chord. False means the core refused it and kept the old
+    /// one registered; the re-read puts the row back on it.
     @discardableResult
     func changeBinding(_ id: String, chord: String) async -> Bool {
         let key = "binding_\(id)"
@@ -485,11 +546,13 @@ final class SettingsStore {
                 "change_binding", ["id": JSONValue.string(id), "binding": .string(chord)]
             )
             stored = response.success
-            error = response.success
-                ? nil
-                : "Couldn't set the shortcut: \(response.error ?? "the core refused it")"
+            if response.success {
+                error = nil
+            } else {
+                refuse("Couldn't set the shortcut: \(response.error ?? "the core refused it")")
+            }
         } catch {
-            self.error = "Couldn't set the shortcut: \(error.localizedDescription)"
+            refuse("Couldn't set the shortcut: \(error.localizedDescription)")
         }
         busy.remove(key)
         await refresh()
@@ -514,7 +577,7 @@ final class SettingsStore {
             let blocked = (error as? CoreError)?.remote(as: String.self) == "secure-input-active"
                 || error.localizedDescription.contains("secure-input-active")
             let reason = blocked
-                ? "macOS Secure Input is blocking key events, so shortcuts cannot be recorded. Resolve the Secure Input warning first."
+                ? "macOS Secure Input is holding the keyboard, so the shortcut can't be recorded. Click out of the password field that turned it on, or turn off Secure Keyboard Entry in Terminal's menu, then try again."
                 : "Couldn't set the shortcut: \(error.localizedDescription)"
             self.error = reason
             return reason
@@ -533,5 +596,43 @@ final class SettingsStore {
 
     func resumeAllBindings() async {
         await send("resume_all_bindings", key: "bindings_suspended")
+    }
+}
+
+/// Where the login item stands against the setting.
+enum LoginItemState: Equatable {
+    /// The registration matches the setting, or has not been read yet.
+    case matching
+    /// Registered, and switched off by the person in System Settings: macOS
+    /// will not start Sona until they turn it on there, and registering
+    /// again does not do that for them.
+    case needsApproval
+    /// macOS refused the change, in its words.
+    case failed(String)
+}
+
+/// This bundle's own login item.
+enum LoginItem {
+    /// Brings the registration to `enabled`. Returns false when macOS holds
+    /// the item switched off in System Settings, which only the person can
+    /// change. The status read is a round-trip to the background-task
+    /// service, about two seconds on a cold launch, so it runs off the main
+    /// actor.
+    static func apply(_ enabled: Bool) async throws -> Bool {
+        try await Task.detached(priority: .utility) {
+            let service = SMAppService.mainApp
+            switch (enabled, service.status) {
+            case (true, .enabled), (false, .notRegistered), (false, .notFound):
+                return true
+            case (true, .requiresApproval):
+                return false
+            case (true, _):
+                try service.register()
+                return service.status != .requiresApproval
+            case (false, _):
+                try service.unregister()
+                return true
+            }
+        }.value
     }
 }
