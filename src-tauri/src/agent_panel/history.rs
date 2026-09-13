@@ -107,16 +107,14 @@ pub(crate) fn upsert(
 }
 
 /// What the bytes on disk say, or nothing at all.
-pub(crate) fn decode(bytes: &[u8]) -> Vec<AgentChatConversationV1> {
-    let Ok(file) = serde_json::from_slice::<ChatHistoryFileV1>(bytes) else {
-        return Vec::new();
-    };
+pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<AgentChatConversationV1>> {
+    let file = serde_json::from_slice::<ChatHistoryFileV1>(bytes).ok()?;
     if file.schema_version != HISTORY_SCHEMA_VERSION {
-        return Vec::new();
+        return None;
     }
     let mut conversations = file.conversations;
     conversations.truncate(MAX_STORED_CONVERSATIONS);
-    conversations
+    Some(conversations)
 }
 
 pub(crate) fn encode(conversations: &[AgentChatConversationV1]) -> Vec<u8> {
@@ -127,8 +125,53 @@ pub(crate) fn encode(conversations: &[AgentChatConversationV1]) -> Vec<u8> {
     .unwrap_or_default()
 }
 
+/// The file as found: absent, readable, or present but not ours to read.
+///
+/// The three are told apart because they are treated differently on the way
+/// back out. An absent file is a fresh profile. An unreadable one — damaged
+/// bytes, or a newer schema than this build knows — is a file some other
+/// build may still want, so a write sets it aside rather than over it.
+pub(crate) enum Loaded {
+    Absent,
+    Conversations(Vec<AgentChatConversationV1>),
+    Unreadable,
+}
+
+impl Loaded {
+    fn conversations(self) -> Vec<AgentChatConversationV1> {
+        match self {
+            Loaded::Conversations(conversations) => conversations,
+            Loaded::Absent | Loaded::Unreadable => Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn load(path: &Path) -> Loaded {
+    match std::fs::read(path) {
+        Ok(bytes) => decode(&bytes).map_or(Loaded::Unreadable, Loaded::Conversations),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Loaded::Absent,
+        Err(_) => Loaded::Unreadable,
+    }
+}
+
 pub(crate) fn read_at(path: &Path) -> Vec<AgentChatConversationV1> {
-    std::fs::read(path).map_or_else(|_| Vec::new(), |bytes| decode(&bytes))
+    load(path).conversations()
+}
+
+/// Move a file this build cannot read out of the way, keeping its bytes.
+///
+/// The name carries the moment, so two set-asides in one profile do not
+/// overwrite each other either.
+fn set_aside(path: &Path) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(HISTORY_FILE_NAME);
+    let aside = path.with_file_name(format!(
+        "{name}.unreadable-{}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    std::fs::rename(path, aside)
 }
 
 /// Replace the file, or leave the one that is there untouched.
@@ -183,19 +226,36 @@ pub(crate) fn turns_of<R: Runtime>(
 ///
 /// An empty exchange is not a conversation: `new chat` followed by nothing must
 /// not leave an untitled row in the popover, so nothing is written until the
-/// reader has actually said something.
+/// reader has actually said something. A failure is the caller's to show: a
+/// chat that is not being saved is a fact the reader should have before they
+/// rely on finding it again.
 pub(crate) fn remember<R: Runtime>(
     app: &AppHandle<R>,
     conversation_id: &str,
     turns: &[SonaAgentChatTurnV1],
-) {
+) -> std::io::Result<()> {
     if turns.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(path) = history_path(app) else {
-        return;
+        return Err(std::io::Error::other("no history location"));
     };
-    let mut conversations = read_at(&path);
+    remember_at(&path, conversation_id, turns)
+}
+
+fn remember_at(
+    path: &Path,
+    conversation_id: &str,
+    turns: &[SonaAgentChatTurnV1],
+) -> std::io::Result<()> {
+    let mut conversations = match load(path) {
+        Loaded::Conversations(conversations) => conversations,
+        Loaded::Absent => Vec::new(),
+        Loaded::Unreadable => {
+            set_aside(path)?;
+            Vec::new()
+        }
+    };
     upsert(
         &mut conversations,
         AgentChatConversationV1 {
@@ -205,9 +265,7 @@ pub(crate) fn remember<R: Runtime>(
             updated_at_utc_ms: chrono::Utc::now().timestamp_millis(),
         },
     );
-    if let Err(error) = write_at(&path, &conversations) {
-        log::warn!("Failed to persist agent chat history: {error}");
-    }
+    write_at(path, &conversations)
 }
 
 #[cfg(test)]
@@ -340,7 +398,7 @@ mod tests {
     fn legacy_turns_without_an_outcome_still_load() {
         let legacy = br#"{"schema_version":1,"conversations":[{"conversation_id":"legacy","title":"Question","turns":[{"role":"user","message":"Question"}],"updated_at_utc_ms":1700000000000}]}"#;
 
-        let conversations = decode(legacy);
+        let conversations = decode(legacy).expect("legacy file decodes");
 
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].turns, vec![user("Question")]);
@@ -376,8 +434,53 @@ mod tests {
         std::fs::write(&future, br#"{"schema_version":2,"conversations":[]}"#)
             .expect("future fixture");
 
-        assert!(read_at(&missing).is_empty());
+        assert!(matches!(load(&missing), Loaded::Absent));
+        assert!(matches!(load(&corrupt), Loaded::Unreadable));
+        assert!(matches!(load(&future), Loaded::Unreadable));
         assert!(read_at(&corrupt).is_empty());
-        assert!(read_at(&future).is_empty());
+    }
+
+    /// A file this build cannot read is somebody's chats — a newer build's,
+    /// or this one's before the bytes were damaged. Writing the new
+    /// conversation must not cost them: the old bytes move aside, byte for
+    /// byte, and the new file starts with only what was just said.
+    #[test]
+    fn remembering_over_an_unreadable_file_sets_its_bytes_aside() {
+        let directory = tempfile::tempdir().expect("temporary history root");
+        let path = directory.path().join(HISTORY_FILE_NAME);
+        let foreign = br#"{"schema_version":2,"conversations":[{"future":true}]}"#;
+        std::fs::write(&path, foreign).expect("foreign fixture");
+
+        remember_at(&path, "c1", &[user("Question"), assistant("Answer")])
+            .expect("remember over foreign file");
+
+        let conversations = read_at(&path);
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].conversation_id, "c1");
+        let aside: Vec<Vec<u8>> = std::fs::read_dir(directory.path())
+            .expect("list history root")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("agent_chat_history.json.unreadable-"))
+            })
+            .map(|entry| std::fs::read(entry).expect("read aside"))
+            .collect();
+        assert_eq!(aside, vec![foreign.to_vec()]);
+    }
+
+    /// A location that cannot be written is a fact the manager has to pass
+    /// on, not a warning in a log nobody opens. The writer makes missing
+    /// directories itself, so the location here is under a plain file.
+    #[test]
+    fn a_failed_write_is_reported() {
+        let directory = tempfile::tempdir().expect("temporary history root");
+        let blocker = directory.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("blocker fixture");
+        let path = blocker.join(HISTORY_FILE_NAME);
+
+        assert!(remember_at(&path, "c1", &[user("Question")]).is_err());
     }
 }

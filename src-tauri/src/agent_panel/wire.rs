@@ -161,6 +161,9 @@ pub struct AgentPanelStatusV1 {
     pub relay_status: AgentPanelRelayStatusV1,
     pub conversation_id: Option<String>,
     pub conversation: Vec<SonaAgentChatTurnV1>,
+    /// The last write of this conversation to the history file did not land.
+    /// The sheet says so; the conversation on screen is still whole.
+    pub unsaved: bool,
     pub turn: Option<AgentPanelTurnStatusV1>,
     pub proposal: Option<AgentPanelProposalPreviewV1>,
 }

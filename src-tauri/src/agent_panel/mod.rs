@@ -49,7 +49,6 @@ pub use wire::{
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const IDLE_POLL_AFTER: Duration = Duration::from_secs(10);
-const MAX_CONVERSATION_TURNS: usize = MAX_RECENT_TURNS * 2;
 const MODEL_CATALOG_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,19 +204,29 @@ impl ActiveTurn {
     }
 
     /// The one place a turn's state moves, so the one place that can stamp
-    /// when it stopped moving. A turn reaches a terminal state once; a second
-    /// terminal transition (a cancel landing after a failure, say) must not
-    /// rewrite the moment the reader watched it end.
-    fn set_state(&mut self, state: AgentPanelTurnStateV1) {
+    /// when it stopped moving. A turn reaches a terminal state once and stays
+    /// there: a cancel landing after a failure, a stale poll reply after the
+    /// answer, or an events error after success must not rewrite the moment
+    /// the reader watched it end, nor the end itself. Returns whether the
+    /// turn moved.
+    fn set_state(&mut self, state: AgentPanelTurnStateV1) -> bool {
+        if self.state.is_terminal() {
+            return false;
+        }
         self.state = state;
-        if state.is_terminal() && self.completed_at_utc_ms.is_none() {
+        if state.is_terminal() {
             self.completed_at_utc_ms = Some(chrono::Utc::now().timestamp_millis());
         }
+        true
     }
 
+    /// End the turn with a reason, once. The reason belongs to the end it
+    /// caused; one recorded after the turn had already ended would explain an
+    /// outcome the reader did not see.
     fn fail(&mut self, failure: AgentPanelTurnFailureV1) {
-        self.failure.get_or_insert(failure);
-        self.set_state(AgentPanelTurnStateV1::Failed);
+        if self.set_state(AgentPanelTurnStateV1::Failed) {
+            self.failure.get_or_insert(failure);
+        }
     }
 
     /// Milliseconds since this turn was accepted, which is the axis every step
@@ -302,6 +311,10 @@ struct PanelState {
     relay_status: AgentPanelRelayStatusV1,
     conversation_id: Option<String>,
     conversation: Vec<SonaAgentChatTurnV1>,
+    /// The last write of this conversation did not land. Cleared by the next
+    /// write that does, and by leaving the conversation: a fresh chat has not
+    /// failed to save yet.
+    unsaved: bool,
     turn: Option<ActiveTurn>,
     proposal: Option<StoredProposal>,
 }
@@ -313,6 +326,7 @@ impl Default for PanelState {
             relay_status: AgentPanelRelayStatusV1::Disabled,
             conversation_id: None,
             conversation: Vec::new(),
+            unsaved: false,
             turn: None,
             proposal: None,
         }
@@ -331,17 +345,17 @@ impl PanelState {
             relay_status: self.relay_status,
             conversation_id: self.conversation_id.clone(),
             conversation: self.conversation.clone(),
+            unsaved: self.unsaved,
             turn: self.turn.as_ref().map(ActiveTurn::status),
             proposal: self.proposal.as_ref().map(StoredProposal::preview),
         }
     }
 
+    /// Every row said, in order. The model's window is cut separately by
+    /// [`PanelState::recent_turns`]; what is on screen and in history is the
+    /// whole conversation, so the first question stays the title.
     fn push_conversation(&mut self, turn: SonaAgentChatTurnV1) {
         self.conversation.push(turn);
-        if self.conversation.len() > MAX_CONVERSATION_TURNS {
-            let excess = self.conversation.len() - MAX_CONVERSATION_TURNS;
-            self.conversation.drain(..excess);
-        }
     }
 
     fn record_latest_user_outcome(&mut self, outcome: SonaAgentChatOutcomeV1) {
@@ -544,6 +558,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             }
             state.conversation_id = Some(conversation_id.to_string());
             state.conversation = turns;
+            state.unsaved = false;
             state.turn = None;
             state.proposal = None;
             self.refresh_configured_status_locked(&mut state);
@@ -568,6 +583,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             }
             state.conversation_id = None;
             state.conversation.clear();
+            state.unsaved = false;
             state.turn = None;
             state.proposal = None;
             self.refresh_configured_status_locked(&mut state);
@@ -582,7 +598,10 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     ///
     /// Called wherever a turn is pushed onto the scrollback, and nowhere else:
     /// the file's contents are "what has been said", and what has been said
-    /// changes exactly when something is said.
+    /// changes exactly when something is said. A write that does not land is
+    /// kept on the status, so the sheet can say the chat is not being saved
+    /// rather than let the reader find out at the next launch. Every caller
+    /// emits a turn after this, which is what sends the shell back to read.
     fn remember_conversation(&self) {
         let _history_write = match self.history_write.lock() {
             Ok(guard) => guard,
@@ -595,7 +614,17 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         let Some(conversation_id) = conversation_id else {
             return;
         };
-        history::remember(&self.app, &conversation_id, &turns);
+        let saved = match history::remember(&self.app, &conversation_id, &turns) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("Failed to persist agent chat history: {error}");
+                false
+            }
+        };
+        let mut state = self.lock_state();
+        if state.conversation_id.as_deref() == Some(conversation_id.as_str()) {
+            state.unsaved = !saved;
+        }
     }
 
     pub(crate) async fn public_identity(
@@ -611,13 +640,37 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             .map_err(map_relay_error)
     }
 
+    /// Try the relay, and publish what happened. Retry on the chat's offline
+    /// notice is this, and a test from Settings that succeeds clears the same
+    /// notice: a relay that came back is a status that reads differently,
+    /// and a status nothing rewrites is a notice that never leaves.
     pub(crate) async fn test_connection(&self) -> Result<(), AgentPanelCommandErrorV1> {
-        let client = RelayClient::from_settings(&self.app, self.nonce_cache.clone())
-            .await
-            .map_err(map_relay_error)?;
-        client.test_connection().await.map_err(map_relay_error)?;
-        let _ = self.model_alias(&client, true).await;
-        Ok(())
+        let outcome = match RelayClient::from_settings(&self.app, self.nonce_cache.clone()).await {
+            Ok(client) => match client.test_connection().await {
+                Ok(()) => {
+                    let _ = self.model_alias(&client, true).await;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        let relay_status = match outcome {
+            Ok(()) => AgentPanelRelayStatusV1::Ready,
+            Err(error) => relay_status_for_error(error),
+        };
+        let changed = {
+            let mut state = self.lock_state();
+            let changed = state.relay_status != relay_status;
+            if changed {
+                state.relay_status = relay_status;
+            }
+            changed.then(|| state.invalidate())
+        };
+        if let Some(invalidation_id) = changed {
+            self.emit_status(invalidation_id, relay_status);
+        }
+        outcome.map_err(map_relay_error)
     }
 
     pub(crate) async fn send_turn(
@@ -1141,6 +1194,18 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
              * extracted function does not compile until somebody has decided
              * what it tells the reader. */
             Err(RelayJobRefusal::UnknownTurn) => return Err(AgentPanelCommandErrorV1::UnknownTurn),
+            /* The turn ended while this reply was in flight — a poll and a
+             * cancel overlap, or the same completion came back to both. The
+             * first reply settled it; this one has nothing left to say. */
+            Err(RelayJobRefusal::Settled) => {
+                return Ok(JobFollowUp {
+                    proposal_id: None,
+                    auto_apply: false,
+                    cancel_requested: false,
+                    terminal: true,
+                    tool_calls: false,
+                });
+            }
             Err(RelayJobRefusal::OwnershipRejected) => {
                 self.record_relay_error(turn_id, RelayError::OwnershipRejected, false);
                 return Err(AgentPanelCommandErrorV1::OwnershipRejected);
@@ -1574,6 +1639,10 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         );
     }
 
+    /// Record a relay error against the turn that met it. A turn that has
+    /// already ended keeps its ending: an error on a request made after the
+    /// answer arrived — an events fetch, a cancel that crossed a completion —
+    /// moves the relay status and nothing on the turn.
     fn record_relay_error(&self, turn_id: &str, error: RelayError, submit_failure: bool) {
         let relay_status = relay_status_for_error(error);
         let retryable = matches!(error, RelayError::RequestFailed) && !submit_failure;
@@ -1584,7 +1653,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             let turn_state = state
                 .turn
                 .as_mut()
-                .filter(|active| active.turn_id == turn_id)
+                .filter(|active| active.turn_id == turn_id && !active.state.is_terminal())
                 .map(|active| {
                     active.submitting = false;
                     if let Some(failure) = failure {
@@ -1597,7 +1666,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             }
             (state.invalidate(), turn_state)
         };
-        if failure.is_some() {
+        if failure.is_some() && turn_state.is_some() {
             self.remember_conversation();
         }
         self.emit_status(invalidation_id, relay_status);
@@ -1611,7 +1680,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             let turn_state = state
                 .turn
                 .as_mut()
-                .filter(|active| active.turn_id == turn_id)
+                .filter(|active| active.turn_id == turn_id && !active.state.is_terminal())
                 .map(|active| {
                     active.fail(AgentPanelTurnFailureV1::Failed);
                     active.state
@@ -1623,7 +1692,9 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             }
             (state.invalidate(), turn_state)
         };
-        self.remember_conversation();
+        if turn_state.is_some() {
+            self.remember_conversation();
+        }
         self.emit_status(invalidation_id, relay_status);
         self.emit_turn(invalidation_id, Some(turn_id.to_string()), turn_state);
     }
@@ -1645,13 +1716,49 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         });
     }
 
-    /// Stop the poll loop.
-    ///
-    /// `pub(crate)` because switching the agent off in Settings has to reach
-    /// it: the relay is no longer allowed to be talked to, and a loop left
-    /// running would keep talking to it until the turn finished.
+    /// Stop the poll loop. Also reached when the main window is destroyed:
+    /// nothing is left to read an answer, and the relay job is cancelled at
+    /// shutdown rather than there because the app can outlive its window.
     pub(crate) fn stop_polling(&self) {
         self.poll_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The agent was switched off in Settings. The poll loop stops, and a
+    /// turn in flight ends here as stopped: its answer is on a relay this
+    /// Mac has just been told not to talk to, so waiting for it would leave
+    /// the composer shut behind a turn that can never finish. The reply
+    /// that was on the wire meets a settled turn and is refused.
+    pub(crate) fn disable(&self) {
+        self.stop_polling();
+        let (invalidation_id, ended) = {
+            let mut state = self.lock_state();
+            let ended = state
+                .turn
+                .as_mut()
+                .filter(|active| !active.state.is_terminal())
+                .map(|active| {
+                    active.submitting = false;
+                    active.cancel_requested = true;
+                    active.set_state(AgentPanelTurnStateV1::Canceled);
+                    active.turn_id.clone()
+                });
+            if ended.is_some() {
+                state.record_latest_user_outcome(SonaAgentChatOutcomeV1::Canceled);
+            }
+            state.relay_status = AgentPanelRelayStatusV1::Disabled;
+            (state.invalidate(), ended)
+        };
+        if ended.is_some() {
+            self.remember_conversation();
+        }
+        self.emit_status(invalidation_id, AgentPanelRelayStatusV1::Disabled);
+        if let Some(turn_id) = ended {
+            self.emit_turn(
+                invalidation_id,
+                Some(turn_id),
+                Some(AgentPanelTurnStateV1::Canceled),
+            );
+        }
     }
 
     fn poll_plan(&self, generation: u64) -> Option<PollPlan> {
@@ -1841,6 +1948,10 @@ enum RelayJobRefusal {
     /// [`RelayJobRefusal::UntrustedResponse`] because the reader's fix differs
     /// — this one is the relay's own bug, not a key that stopped matching.
     WorkspaceMismatch,
+    /// The turn had already ended when this reply arrived. The reply that
+    /// ended it was taken; a second copy of the same completion, or a running
+    /// snapshot that was on the wire when the cancel landed, is not.
+    Settled,
 }
 
 /// Which refusal a rejected answer is.
@@ -1887,6 +1998,9 @@ fn accept_job_in_state(
             .is_some_and(|existing| existing != job_id)
         {
             return Err(RelayJobRefusal::OwnershipRejected);
+        }
+        if active.state.is_terminal() {
+            return Err(RelayJobRefusal::Settled);
         }
         if let Some(response) = response.as_ref() {
             if let Err(error) = response.validate(&active.request, &active.allowed) {
@@ -2155,6 +2269,12 @@ async fn poll_once<R: AgentPanelRuntimeOps>(
              * failure, over a relay that was merely unreachable. */
             let _ = manager.submit_active_turn(&plan.turn_id).await;
         }
+        return Ok(());
+    }
+    /* Events carry progress, not text. A job that has ended has nothing
+     * further to report, and a fetch that failed here used to stamp a
+     * finished answer as a failure. */
+    if follow_up.terminal {
         return Ok(());
     }
     let events = match relay::retry_rate_limited(
@@ -2653,21 +2773,23 @@ pub async fn agent_panel_public_identity(
     manager.public_identity().await
 }
 
-/// Switching the agent off stops the poll loop with it.
+/// Switching the agent off ends the turn in flight and stops the poll loop;
+/// switching it on publishes the status the pairing now reads, so a sheet
+/// that is open sees the notice change without a command of its own.
 ///
-/// A loop left running would keep signing requests to a relay the reader has
-/// just said no to, and would keep doing it until the turn finished. Nothing
-/// else needs closing: the sheet is a fold in the main window's layout, and
-/// the pill that opens it disappears with the setting.
+/// Nothing else needs closing: the sheet is a fold in the main window's
+/// layout, and the pill that opens it disappears with the setting.
 #[tauri::command]
 #[specta::specta]
 pub fn change_agent_panel_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     crate::settings::update_settings(&app, |settings| {
         settings.agent_panel_enabled = enabled;
     })?;
-    if !enabled {
-        if let Some(manager) = app.try_state::<AgentPanelManager>() {
-            manager.stop_polling();
+    if let Some(manager) = app.try_state::<AgentPanelManager>() {
+        if enabled {
+            let _ = manager.status();
+        } else {
+            manager.disable();
         }
     }
     Ok(())
@@ -2894,6 +3016,7 @@ mod tests {
                 message: message.to_string(),
                 outcome: None,
             }],
+            unsaved: false,
             turn: Some(ActiveTurn {
                 turn_id: turn_id.to_string(),
                 workspace: AgentPanelWorkspaceV1::SonaChat,
