@@ -150,14 +150,11 @@ final class ProvidersStore {
         selectedProvider.map(ProviderEndpoint.of) ?? .invalid
     }
 
-    /// The stored acknowledgement names this exact address, and grants it.
+    /// The stored acknowledgement names this exact address and origin, for
+    /// this wording, and grants it.
     var hasCurrentConsent: Bool {
-        guard let address = endpoint.address,
-              let consent = settings?.consent(for: selectedProviderId)
-        else {
-            return false
-        }
-        return consent.grants(address)
+        guard let consent = settings?.consent(for: selectedProviderId) else { return false }
+        return consent.grants(endpoint)
     }
 
     // MARK: - Model catalog
@@ -651,9 +648,18 @@ final class ProvidersStore {
     }
 
     /// Verification spends a real request against the provider, so the core
-    /// refuses it until the transfer is acknowledged.
+    /// refuses it until the transfer is acknowledged. A refusal changes what
+    /// the core records about the key — a rejected key loses its verified
+    /// stamp — so the state is read back after one, error and all: the error
+    /// line is this call's, the row is the core's.
     func verifyCloudSecret(_ provider: CloudSttProvider) async {
         await cloudCall(provider, "verify_stt_provider_secret", ["provider": provider.rawValue])
+        guard cloudErrors[provider.accountId] != nil else { return }
+        let params = ["kind": SecretKind.stt.rawValue, "providerId": provider.accountId]
+        let state: SecretState? = try? await core.request("get_provider_secret_state", params)
+        if let state {
+            cloudSecrets[provider.accountId] = state
+        }
     }
 
     /// Every command in this row answers with the key's new state, which is the

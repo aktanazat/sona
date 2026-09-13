@@ -124,10 +124,12 @@ enum ProviderEndpoint: Equatable, Sendable {
     case local
     /// Not an https address, so no acknowledgement can name it.
     case invalid
-    case remote(String)
+    /// The base address text goes to, and its origin (scheme, host, and any
+    /// non-default port), which the acknowledgement names separately.
+    case remote(address: String, origin: String)
 
     var address: String? {
-        if case let .remote(value) = self { value } else { nil }
+        if case let .remote(value, _) = self { value } else { nil }
     }
 
     static func of(_ provider: Provider) -> ProviderEndpoint {
@@ -155,12 +157,18 @@ enum ProviderEndpoint: Equatable, Sendable {
         if parts.port == 443 { parts.port = nil }
         while parts.path.hasSuffix("/") { parts.path.removeLast() }
         guard let address = parts.string else { return .invalid }
-        return .remote(address)
+        let origin = parts.port.map { "\(scheme)://\(host):\($0)" } ?? "\(scheme)://\(host)"
+        return .remote(address: address, origin: origin)
     }
 }
 
 /// The acknowledgement the core stored for one provider.
 struct ProviderConsent: Decodable, Equatable, Sendable {
+    /// The disclosure this build was written against. The core bumps its copy
+    /// whenever the wording changes, and an acknowledgement of older wording
+    /// is not an acknowledgement of this one.
+    static let version = 1
+
     /// Optional throughout: a field this build does not recognise must not
     /// blank the settings, and an acknowledgement that cannot be read is
     /// treated as one that was never given.
@@ -169,9 +177,15 @@ struct ProviderConsent: Decodable, Equatable, Sendable {
     let origin: String?
     let textTransferConsent: Bool?
 
-    /// Granted, and granted for this exact address.
-    func grants(_ address: String) -> Bool {
-        endpoint == address && textTransferConsent == true
+    /// Granted, for this wording, and for this exact address and origin. The
+    /// same four checks the core makes before text leaves, so the row never
+    /// reads "allowed" for a route the core would refuse.
+    func grants(_ endpoint: ProviderEndpoint) -> Bool {
+        guard case let .remote(address, origin) = endpoint else { return false }
+        return consentVersion == Self.version
+            && textTransferConsent == true
+            && self.endpoint == address
+            && self.origin == origin
     }
 }
 

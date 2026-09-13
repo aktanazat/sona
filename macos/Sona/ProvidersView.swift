@@ -197,7 +197,7 @@ struct ProvidersView: View {
                 text: "This provider destination is invalid or local-only, so no remote consent can be recorded.",
                 tone: Theme.live
             )
-        case let .remote(address):
+        case let .remote(address, _):
             ActionRow(
                 title: "Remote text transfer",
                 detail: store.hasCurrentConsent
@@ -430,9 +430,13 @@ struct CloudSttKeyRow: View {
     private var busy: Bool { store.isBusy(provider) }
     private var consented: Bool { store.settings?.hasCurrentCloudConsent(provider) ?? false }
 
+    /// The line under the provider name. A failure this row just reported
+    /// outranks the stamp: "verified" beside a rejection would be two claims
+    /// about one key, and the note below carries the rejection's own words.
     private var status: String {
         if checking { return "Checking the system credential store…" }
         if !saved { return "No API key saved." }
+        if store.cloudError(provider) != nil { return "API key saved. The last check failed." }
         return state?.verified == true ? "API key verified." : "API key saved. It has not been verified."
     }
 
