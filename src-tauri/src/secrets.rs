@@ -937,12 +937,21 @@ fn persisted_provider_state(
     }
 }
 
-fn persist_provider_state(
-    app: &AppHandle,
+/// Persist a provider's state, and only a change. Every settings write
+/// announces itself and the privacy page reloads on that announcement by
+/// asking for these states again, so an unchanged read must cost no write
+/// and no announcement or the two would feed each other without end.
+fn persist_provider_state<Rt: tauri::Runtime>(
+    app: &AppHandle<Rt>,
     kind: SecretKind,
     provider_id: String,
     state: SecretState,
 ) {
+    if matches!(kind, SecretKind::MeetingStorage)
+        || persisted_provider_state(&settings::get_settings(app), kind, &provider_id) == state
+    {
+        return;
+    }
     // Nothing in this function's shape can report a store failure; the settings seam logs it.
     let _ = settings::update_settings(app, |settings| match kind {
         SecretKind::Llm => {
@@ -1180,6 +1189,13 @@ async fn verify_stt_secret_for_settings(
     // keepalive, or background retry is sent, and test callers replace verifier.
     verifier.verify(provider, api_key).await
 }
+
+/// One handshake, and the record of it. A pass stamps the key as verified
+/// now. A rejection by the provider withdraws any earlier stamp: the key
+/// that was verified then is the key that is refused now, and a row reading
+/// "verified" beside "rejected" would be two claims about one fact. Other
+/// failures — no network, a quota, a locked store — say nothing about the
+/// key, so they leave the stamp alone.
 async fn verify_stt_secret_with(
     app: &AppHandle,
     secrets: &SecretManager,
@@ -1187,15 +1203,29 @@ async fn verify_stt_secret_with(
     verifier: &dyn SttSecretVerifier,
 ) -> Result<SecretState, SttSecretVerificationError> {
     let settings = settings::get_settings(app);
-    verify_stt_secret_for_settings(&settings, secrets, provider, verifier).await?;
-    let state = SecretState::configured(Some(chrono::Utc::now().timestamp_millis()));
-    persist_provider_state(
-        app,
-        SecretKind::Stt,
-        provider.id().to_string(),
-        state.clone(),
-    );
-    Ok(state)
+    match verify_stt_secret_for_settings(&settings, secrets, provider, verifier).await {
+        Ok(()) => {
+            let state = SecretState::configured(Some(chrono::Utc::now().timestamp_millis()));
+            persist_provider_state(
+                app,
+                SecretKind::Stt,
+                provider.id().to_string(),
+                state.clone(),
+            );
+            Ok(state)
+        }
+        #[cfg(feature = "cloud-realtime")]
+        Err(SttSecretVerificationError::Authentication) => {
+            persist_provider_state(
+                app,
+                SecretKind::Stt,
+                provider.id().to_string(),
+                SecretState::configured(None),
+            );
+            Err(SttSecretVerificationError::Authentication)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -1759,6 +1789,50 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         }
+    }
+
+    /// The privacy page reloads on every settings announcement and asks for
+    /// each provider's state again. The state read must therefore announce
+    /// nothing when it has nothing new, or one read would start a loop of
+    /// writes and reloads that never ends.
+    #[test]
+    fn an_unchanged_provider_state_writes_and_announces_nothing() {
+        use tauri::Listener;
+
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        let announced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::clone(&announced);
+        handle.listen("settings-changed", move |_| {
+            heard.fetch_add(1, Ordering::SeqCst);
+        });
+        let verified = SecretState::configured(Some(1_700_000_000_000));
+
+        persist_provider_state(
+            handle,
+            SecretKind::Llm,
+            "openai".to_string(),
+            verified.clone(),
+        );
+        let revision_after_change = settings::get_settings(handle).settings_revision;
+        persist_provider_state(handle, SecretKind::Llm, "openai".to_string(), verified);
+
+        assert_eq!(
+            announced.load(Ordering::SeqCst),
+            1,
+            "only the change announces; the unchanged read stays silent"
+        );
+        assert_eq!(
+            settings::get_settings(handle).settings_revision,
+            revision_after_change,
+            "the unchanged read must not advance the settings revision"
+        );
     }
 
     impl LegacySettingsJournal for MemorySettingsJournal {
