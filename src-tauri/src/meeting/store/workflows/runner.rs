@@ -627,6 +627,62 @@ mod tests {
         );
     }
 
+    /// A failed digest run is not the last word either, but the thing that
+    /// tries again is the digest's own clock inside its day, never the
+    /// startup scan: yesterday's digest written over breakfast is worse than
+    /// none. So the event runs again when asked, and the scan is not offered
+    /// it.
+    #[test]
+    fn a_failed_digest_runs_again_when_asked_but_not_at_launch() {
+        let (_directory, store) = store();
+        let digest = store
+            .record_workflow_event(event(
+                WorkflowEventKind::DailyDigestDue,
+                serde_json::json!({
+                    "local_day": "2026-08-31",
+                    "day_start_utc_ms": 1_000,
+                    "day_end_utc_ms": 2_000,
+                }),
+                "daily-digest:2026-08-31",
+            ))
+            .unwrap();
+        let failed = run_once(
+            &store,
+            digest.event_id,
+            WorkflowId::DailyDigest,
+            |_, _, _| Err(StoreError::Unavailable),
+        );
+        assert_eq!(failed.status, WorkflowRunStatus::Failed);
+        assert!(
+            !store
+                .pending_workflow_event_ids()
+                .unwrap()
+                .contains(&digest.event_id),
+            "the launch scan was offered a digest, which it must never write"
+        );
+
+        let retried = store
+            .run_workflow_event(
+                digest.event_id,
+                false,
+                &crate::meeting::learning::no_inputs(),
+            )
+            .unwrap();
+        assert_eq!(retried.len(), 1, "the failed digest counted as finished");
+        assert_eq!(retried[0].status, WorkflowRunStatus::Ok);
+
+        // Once it has succeeded there is nothing left to run, which is what
+        // keeps the next tick of the evening from posting twice.
+        assert!(store
+            .run_workflow_event(
+                digest.event_id,
+                false,
+                &crate::meeting::learning::no_inputs()
+            )
+            .unwrap()
+            .is_empty());
+    }
+
     /// A detection stop is readable through the events page, and the thing that
     /// identifies it is the summary rather than the workflow name.
     ///

@@ -2,17 +2,20 @@ mod runner;
 
 use super::learning::LearningInputs;
 use super::{MeetingStore, StoreError};
+use crate::analytics::{DashboardTrendRequest, LocalCalendarRange};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::document_types::DocumentId;
 use crate::meeting::types::MeetingSessionId;
 use crate::meeting::workflow_types::{
     NewWorkflowEvent, PaginatedWorkflowRuns, WorkflowDispatchResult, WorkflowEventId,
     WorkflowEventKind, WorkflowId, WorkflowJumpTarget, WorkflowOutcomeCode, WorkflowOutcomeCounts,
-    WorkflowRunCursor, WorkflowRunId, WorkflowRunReceipt, WorkflowRunStatus, WorkflowRunsRequest,
-    WorkflowSummary, WorkflowsListResult,
+    WorkflowRunCursor, WorkflowRunId, WorkflowRunReceipt, WorkflowRunStatus, WorkflowRunTrend,
+    WorkflowRunTrendPoint, WorkflowRunsRequest, WorkflowSummary, WorkflowsListResult,
 };
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const SCHEMA_VERSION: u32 = 1;
@@ -93,7 +96,8 @@ impl MeetingStore {
     /// treated as corruption. Such a row can only come from a newer build that
     /// wrote it before a downgrade, and failing the scan on it would stall every
     /// other pending event on the machine — one unreadable row taking the whole
-    /// queue with it.
+    /// queue with it. A kind that retries on its own clock is skipped too; see
+    /// [`WorkflowEventKind::reconciled_at_launch`].
     pub(crate) fn pending_workflow_event_ids(&self) -> Result<Vec<WorkflowEventId>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection
@@ -111,6 +115,9 @@ impl MeetingStore {
             let Some(kind) = WorkflowEventKind::from_str(&kind) else {
                 continue;
             };
+            if !kind.reconciled_at_launch() {
+                continue;
+            }
             for workflow_id in matching_enabled_workflows_in(&connection, kind)? {
                 if !terminal_receipt_exists_in(&connection, event_id, kind, workflow_id)? {
                     pending.push(event_id);
@@ -236,6 +243,67 @@ impl MeetingStore {
     pub(crate) fn workflow_run_revision(&self) -> Result<u64, StoreError> {
         let connection = self.connection()?;
         workflow_run_revision_in(&connection)
+    }
+
+    /// Runs started on each local calendar day of the window, today last.
+    /// The days are cut where every dashboard range cuts them, so a run
+    /// counted here is on the same day the meeting trend would put it.
+    pub(crate) fn workflow_run_trend(
+        &self,
+        request: DashboardTrendRequest,
+    ) -> Result<WorkflowRunTrend, StoreError> {
+        self.workflow_run_trend_at(Local::now(), request)
+    }
+
+    pub(super) fn workflow_run_trend_at(
+        &self,
+        now: DateTime<Local>,
+        request: DashboardTrendRequest,
+    ) -> Result<WorkflowRunTrend, StoreError> {
+        let calendar =
+            LocalCalendarRange::at(now, request.range).map_err(|_| StoreError::Invalid)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT started_at_utc_ms FROM workflow_runs
+              WHERE started_at_utc_ms >= ?1 AND started_at_utc_ms < ?2",
+        )?;
+        let starts = statement
+            .query_map(
+                params![calendar.start_utc_ms(), calendar.end_exclusive_utc_ms()],
+                |row| row.get::<_, i64>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut per_day = HashMap::<NaiveDate, u64>::new();
+        for started in starts {
+            // A UTC instant has exactly one local reading.
+            let date = Local
+                .timestamp_millis_opt(started)
+                .single()
+                .ok_or(StoreError::Corrupt)?
+                .date_naive();
+            *per_day.entry(date).or_default() += 1;
+        }
+        let mut total = 0;
+        let mut points = Vec::with_capacity(request.range.days());
+        for date in calendar.local_dates().map_err(|_| StoreError::Invalid)? {
+            let runs = per_day.remove(&date).unwrap_or(0);
+            total += runs;
+            points.push(WorkflowRunTrendPoint {
+                local_date: date.format("%F").to_string(),
+                runs,
+            });
+        }
+        if !per_day.is_empty() {
+            return Err(StoreError::Corrupt);
+        }
+        Ok(WorkflowRunTrend {
+            range: request.range,
+            range_start_local_date: calendar.start_local_date(),
+            range_end_local_date: calendar.end_local_date(),
+            total,
+            points,
+        })
     }
 
     pub(crate) fn remember_calendar_facts(

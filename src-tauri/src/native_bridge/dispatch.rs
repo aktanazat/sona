@@ -2593,6 +2593,11 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::workflows::workflow_runs(app.state(), request).await)
         }
+        "workflow_run_trend" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::workflows::workflow_run_trend(app.state(), request).await)
+        }
         "learning_suggestions" => {
             reply(crate::commands::learning::learning_suggestions(app.state()).await)
         }

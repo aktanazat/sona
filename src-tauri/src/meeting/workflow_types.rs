@@ -1,5 +1,6 @@
 use super::document_types::DocumentId;
 use super::types::MeetingSessionId;
+use crate::analytics::DashboardTrendRange;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
@@ -255,6 +256,25 @@ pub struct PaginatedWorkflowRuns {
     pub next_cursor: Option<WorkflowRunCursor>,
 }
 
+/// Runs started on one local calendar day.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct WorkflowRunTrendPoint {
+    pub local_date: String,
+    pub runs: u64,
+}
+
+/// Runs per local calendar day over one trend window, every day present and
+/// today last. Counted over every run the store holds, so the number is the
+/// window's and not the run log's scroll position.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct WorkflowRunTrend {
+    pub range: DashboardTrendRange,
+    pub range_start_local_date: String,
+    pub range_end_local_date: String,
+    pub total: u64,
+    pub points: Vec<WorkflowRunTrendPoint>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowEventKind {
@@ -350,20 +370,29 @@ impl WorkflowEventKind {
 
     /// Whether a failed run of this event is worth another attempt.
     ///
-    /// Every other kind is raised again by its own next occurrence, so a
-    /// failure costs one signal and the next one recovers. The daily corpus
-    /// sweep has no next occurrence: every later dictation of the same local
-    /// day collapses into the same dedupe key, so a single failure would
-    /// otherwise silence all three of its loops until tomorrow. For that kind
-    /// only a *successful* run is terminal, and the startup reconciliation scan
-    /// is what tries again.
+    /// Most kinds are raised again by their own next occurrence, so a failure
+    /// costs one signal and the next one recovers. Two kinds have no next
+    /// occurrence, because everything later on the same local day collapses
+    /// into the same dedupe key: the daily corpus sweep, where a single
+    /// failure would otherwise silence all three of its loops until tomorrow,
+    /// and the evening digest, where it would cost the day's only
+    /// notification. For those two only a *successful* run is terminal.
     ///
-    /// The digest is day-bucketed too and still does *not* retry: it is a
-    /// moment rather than a debt. The reconciliation scan runs at the next
-    /// launch, which could be tomorrow morning, and an evening summary of
-    /// yesterday delivered over breakfast is worse than no summary at all.
+    /// Who tries again differs. The sweep is a debt, and the startup
+    /// reconciliation scan pays it whenever the app next runs. The digest is
+    /// a moment: its own clock tries again on the next tick of the day it is
+    /// about, and [`Self::reconciled_at_launch`] keeps the scan off it, since
+    /// an evening summary of yesterday written over breakfast is worse than
+    /// none at all.
     pub const fn retries_after_failure(self) -> bool {
-        matches!(self, Self::DictationCorpusSwept)
+        matches!(self, Self::DictationCorpusSwept | Self::DailyDigestDue)
+    }
+
+    /// Whether the startup reconciliation scan may run what this event still
+    /// owes. False only for the digest, whose scheduler retries it inside its
+    /// own day; see [`Self::retries_after_failure`].
+    pub const fn reconciled_at_launch(self) -> bool {
+        !matches!(self, Self::DailyDigestDue)
     }
 }
 

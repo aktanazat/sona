@@ -15,9 +15,10 @@ use super::types::{
 };
 use super::workflow_types::{
     NewWorkflowEvent, PaginatedWorkflowRuns, WorkflowDispatchResult, WorkflowEventId,
-    WorkflowEventKind, WorkflowRunReceipt, WorkflowRunsRequest, WorkflowSetEnabledRequest,
-    WorkflowsListResult,
+    WorkflowEventKind, WorkflowRunReceipt, WorkflowRunTrend, WorkflowRunsRequest,
+    WorkflowSetEnabledRequest, WorkflowsListResult,
 };
+use crate::analytics::DashboardTrendRequest;
 use chrono::Local;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -64,6 +65,16 @@ impl MeetingSessionManager {
         self.store()
             .await?
             .workflow_runs(request)
+            .map_err(map_store_error)
+    }
+
+    pub async fn workflow_run_trend(
+        &self,
+        request: DashboardTrendRequest,
+    ) -> Result<WorkflowRunTrend, MeetingCommandError> {
+        self.store()
+            .await?
+            .workflow_run_trend(request)
             .map_err(map_store_error)
     }
 

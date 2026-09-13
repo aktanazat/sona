@@ -1,7 +1,9 @@
+use crate::analytics::DashboardTrendRequest;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingCommandError;
 use crate::meeting::workflow_types::{
-    PaginatedWorkflowRuns, WorkflowRunsRequest, WorkflowSetEnabledRequest, WorkflowsListResult,
+    PaginatedWorkflowRuns, WorkflowRunTrend, WorkflowRunsRequest, WorkflowSetEnabledRequest,
+    WorkflowsListResult,
 };
 use std::sync::Arc;
 use tauri::State;
@@ -30,4 +32,13 @@ pub async fn workflow_runs(
     request: Option<WorkflowRunsRequest>,
 ) -> Result<PaginatedWorkflowRuns, MeetingCommandError> {
     manager.workflow_runs(request.unwrap_or_default()).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn workflow_run_trend(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: DashboardTrendRequest,
+) -> Result<WorkflowRunTrend, MeetingCommandError> {
+    manager.workflow_run_trend(request).await
 }

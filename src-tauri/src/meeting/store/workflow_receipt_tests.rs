@@ -1,4 +1,5 @@
 use super::workflow_core_tests::{event, inputs, meeting, person, store, transcript};
+use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::meeting::detection::machine::{
     CalendarAttendee, CalendarEventSummary, ParticipationStatus,
 };
@@ -6,6 +7,7 @@ use crate::meeting::types::{DeletionCause, MeetingOperationId};
 use crate::meeting::workflow_types::{
     WorkflowEventKind, WorkflowId, WorkflowOutcomeCode, WorkflowRunStatus,
 };
+use chrono::{Local, TimeZone};
 use rusqlite::params;
 use uuid::Uuid;
 
@@ -444,4 +446,79 @@ fn calendar_briefing_requires_its_successful_enabled_receipt() {
         .unwrap()
         .rows
         .is_empty());
+}
+
+/// The week is every run the store holds, cut at local midnight on both
+/// ends: a run at the first midnight of the window is in, one a millisecond
+/// earlier is out, and tomorrow's midnight is out however late today runs.
+#[test]
+fn workflow_run_trend_counts_every_run_inside_local_day_boundaries() {
+    let (_directory, store) = store();
+    let now = Local.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap();
+    let window_start = Local.with_ymd_and_hms(2026, 8, 28, 0, 0, 0).unwrap();
+    let tomorrow = Local.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).unwrap();
+    let mid_week = Local.with_ymd_and_hms(2026, 8, 31, 9, 30, 0).unwrap();
+    let starts = [
+        window_start.timestamp_millis(),
+        window_start.timestamp_millis() - 1,
+        mid_week.timestamp_millis(),
+        mid_week.timestamp_millis() + 60_000,
+        tomorrow.timestamp_millis() - 1,
+        tomorrow.timestamp_millis(),
+    ];
+    // One run per workflow per event is the table's rule, so each run rides
+    // its own event.
+    for (index, started_at_utc_ms) in starts.into_iter().enumerate() {
+        let dispatch = store
+            .record_workflow_event(event(
+                WorkflowEventKind::MeetingFinalized,
+                serde_json::json!({"session_id": Uuid::new_v4().to_string()}),
+                &format!("trend-event-{index}"),
+            ))
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO workflow_runs (
+                    id, workflow_id, event_id, status, started_at_utc_ms,
+                    finished_at_utc_ms, outcome_summary, error
+                 ) VALUES (?1, 'person_linking', ?2, 'ok', ?3, ?3, 'person_links:changes=0', NULL)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    dispatch.event_id.uuid().to_string(),
+                    started_at_utc_ms
+                ],
+            )
+            .unwrap();
+    }
+
+    let trend = store
+        .workflow_run_trend_at(
+            now,
+            DashboardTrendRequest {
+                range: DashboardTrendRange::Days7,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(trend.range_start_local_date, "2026-08-28");
+    assert_eq!(trend.range_end_local_date, "2026-09-03");
+    assert_eq!(trend.total, 4);
+    assert_eq!(
+        trend
+            .points
+            .iter()
+            .map(|point| (point.local_date.as_str(), point.runs))
+            .collect::<Vec<_>>(),
+        vec![
+            ("2026-08-28", 1),
+            ("2026-08-29", 0),
+            ("2026-08-30", 0),
+            ("2026-08-31", 2),
+            ("2026-09-01", 0),
+            ("2026-09-02", 0),
+            ("2026-09-03", 1),
+        ]
+    );
 }

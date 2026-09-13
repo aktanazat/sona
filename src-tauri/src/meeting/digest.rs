@@ -3,9 +3,11 @@
 //! The whole feature is a clock, a dedupe key, and a sentence. A thread wakes
 //! every minute, and once the configured local hour has passed on a local day
 //! nothing has summarized yet, it raises one `DailyDigestDue` workflow event.
-//! The event's dedupe key is that local day, so the second attempt of the
-//! evening — or the first after a restart at 21:00 — records nothing and runs
-//! nothing.
+//! The event's dedupe key is that local day, and the event's one successful
+//! run is what settles it: the second attempt of the evening — or the first
+//! after a restart at 21:00 — finds that run on record and posts nothing.
+//! An attempt that fails is not the last word, and the next tick of the same
+//! day tries again.
 //!
 //! Three gates stand between the clock and a notification, and they are
 //! deliberately in different places:
@@ -32,7 +34,7 @@ use crate::analytics::local_days_start_utc_ms;
 use chrono::{DateTime, Duration, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration as StdDuration;
 use tauri::AppHandle;
@@ -149,7 +151,8 @@ fn plural(count: u64, one: &str, many: &str) -> String {
 /// without a notification centre.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DigestOutcome {
-    /// The day already had its event; nothing ran.
+    /// The day's run was already on record, or nothing was switched on to
+    /// run; nothing ran now.
     AlreadyRaised,
     /// The day was counted and had nothing worth saying.
     Quiet,
@@ -173,33 +176,42 @@ impl MeetingSessionManager {
         prompts: Arc<dyn PromptPresenter>,
     ) {
         let manager = Arc::clone(self);
-        let last_raised = Mutex::new(None::<String>);
-        thread::spawn(move || loop {
-            thread::sleep(TICK);
-            let settings = crate::settings::get_settings(&app);
-            let mut guard = last_raised
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(day) = due_digest_day(
-                Local::now(),
-                settings.meeting_digest_enabled,
-                settings.meeting_digest_minute_of_day,
-                guard.as_deref(),
-            ) else {
-                continue;
-            };
-            *guard = Some(day.local_day.clone());
-            drop(guard);
-            match manager.raise_digest(&app, prompts.as_ref(), &day) {
-                Ok(outcome) => {
-                    log::info!("Evening digest for {}: {outcome:?}", day.local_day.as_str())
+        thread::spawn(move || {
+            // This process's memory of a day it finished with. Filled only by
+            // a completed attempt: one that failed leaves it empty, so the
+            // next tick of the same day tries again, and what the store
+            // already holds for that day is not run twice.
+            let mut last_raised = None::<String>;
+            loop {
+                thread::sleep(TICK);
+                let settings = crate::settings::get_settings(&app);
+                let Some(day) = due_digest_day(
+                    Local::now(),
+                    settings.meeting_digest_enabled,
+                    settings.meeting_digest_minute_of_day,
+                    last_raised.as_deref(),
+                ) else {
+                    continue;
+                };
+                match manager.raise_digest(&app, prompts.as_ref(), &day) {
+                    Ok(outcome) => {
+                        log::info!("Evening digest for {}: {outcome:?}", day.local_day.as_str());
+                        last_raised = Some(day.local_day);
+                    }
+                    Err(error) => log::warn!("Evening digest could not run: {error:?}"),
                 }
-                Err(error) => log::warn!("Evening digest could not run: {error:?}"),
             }
         });
     }
 
     /// Records the day's event, runs it, and posts the sentence it produced.
+    ///
+    /// The event on record is the day's claim, not its digest: the run after
+    /// the insert can fail, and the process can stop between the two. So the
+    /// run is what settles the day. A day whose run already succeeded has no
+    /// work left and hands back no receipt, which is the one-per-day
+    /// guarantee across restarts; a failed run is not terminal for this kind,
+    /// so the next call runs it again.
     ///
     /// The counts come back out of the run's own receipt rather than from a
     /// second query. The receipt is what a reader — or an agent — can go and
@@ -224,28 +236,25 @@ impl MeetingSessionManager {
             source: "meeting_digest",
             dedupe_key: format!("daily-digest:{}", day.local_day),
         })?;
-        if !dispatch.inserted {
-            return Ok(DigestOutcome::AlreadyRaised);
-        }
         let inputs = AppLearningInputs::resolve(Some(app));
         let receipts = match inputs {
             Some(inputs) => store.run_workflow_event(dispatch.event_id, false, &inputs),
             None => store.run_workflow_event(dispatch.event_id, false, &no_inputs()),
         }?;
-        let Some(counts) = receipts
+        let Some(receipt) = receipts
             .iter()
-            .find(|receipt| {
-                receipt.workflow_id == WorkflowId::DailyDigest
-                    && receipt.status == WorkflowRunStatus::Ok
-            })
-            .map(|receipt| MeetingDigestCounts {
-                meetings: receipt.outcome_counts.meetings,
-                loops_closed: receipt.outcome_counts.loops_closed,
-                suggestions_waiting: receipt.outcome_counts.suggestions_waiting,
-                waiting_on_stale: receipt.outcome_counts.waiting_on_stale,
-            })
+            .find(|receipt| receipt.workflow_id == WorkflowId::DailyDigest)
         else {
+            return Ok(DigestOutcome::AlreadyRaised);
+        };
+        if receipt.status != WorkflowRunStatus::Ok {
             return Err(super::store::StoreError::Unavailable);
+        }
+        let counts = MeetingDigestCounts {
+            meetings: receipt.outcome_counts.meetings,
+            loops_closed: receipt.outcome_counts.loops_closed,
+            suggestions_waiting: receipt.outcome_counts.suggestions_waiting,
+            waiting_on_stale: receipt.outcome_counts.waiting_on_stale,
         };
         let Some(body) = digest_body(counts) else {
             return Ok(DigestOutcome::Quiet);

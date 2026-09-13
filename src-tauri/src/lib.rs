@@ -1871,6 +1871,7 @@ pub fn run(cli_args: CliArgs) {
             commands::workflows::workflows_list,
             commands::workflows::workflow_set_enabled,
             commands::workflows::workflow_runs,
+            commands::workflows::workflow_run_trend,
             commands::learning::learning_suggestions,
             commands::learning::learning_decide,
             commands::documents::doc_ingest,
