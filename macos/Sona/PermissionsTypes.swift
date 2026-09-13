@@ -4,15 +4,19 @@ import ApplicationServices
 import Foundation
 
 /// The shapes the first run and the permission surfaces need, and the one fact
-/// about this app's layout that decides where a permission has to be checked.
+/// about this app's layout that decides which name a permission is filed under.
 ///
 /// Sona is two processes. The shell (`com.aktanazat.sona.mac`) draws this
 /// window; the core (`com.aktanazat.sona.core`, `Contents/Helpers/SonaCore.app`)
-/// records the audio, types the text and owns the global shortcuts. macOS keys
-/// Accessibility trust to the process that asks, and `AXIsProcessTrusted`
-/// answers only for its own caller — so the shell's own answer is about the
-/// shell, which never types. The authoritative answer for the process that does
-/// type comes over the socket from `get_context_diagnostics`, which calls
+/// records the audio, types the text and owns the global shortcuts. The shell
+/// spawns the core with `Process` and never disclaims it, so macOS holds the
+/// shell responsible for it: tccd files the core's own Accessibility checks
+/// under `com.aktanazat.sona.mac`, and the row in the Accessibility list is
+/// "Sona". (Measured 2026-09-12: `responsibility_get_pid_responsible_for_pid`
+/// of the core is the shell's pid, and tccd logs the core's requests with
+/// `subject=com.aktanazat.sona.mac`.) The prompt is therefore raised from the
+/// shell, and the answer the rows show still comes from the process that types,
+/// over the socket from `get_context_diagnostics`, which calls
 /// `AXIsProcessTrusted()` inside the core (src-tauri/src/context/macos.rs:69).
 
 /// Where one permission stands, in the order a first run moves through it.
@@ -54,10 +58,9 @@ struct OnboardingSettings: Decodable {
 ///
 /// macOS shows the microphone consent dialog once, ever: after a denial the
 /// request resolves silently and a row that only knows how to ask would sit on
-/// "Waiting…" with nothing to click. Accessibility is worse — the shell must
-/// never raise that prompt, because the prompt registers the *calling* process
-/// and the caller here is not the one that types. Deep linking the pane is the
-/// way both rows stay actionable.
+/// "Waiting…" with nothing to click. The Accessibility dialog has no allow
+/// button at all; it only points at the pane. Deep linking the pane is the way
+/// both rows stay actionable.
 enum PermissionsPane {
     case accessibility
     case microphone
@@ -98,16 +101,27 @@ enum PermissionsMicrophone {
     }
 }
 
-/// The shell's own Accessibility trust, for the one sentence that needs it: the
-/// name in the Accessibility list is the helper, not this window.
+/// The Accessibility consent dialog, raised from the shell because the shell is
+/// the process macOS holds responsible for the core (see the top of this file).
+/// The dialog names "Sona.app" and points at the pane; it has no allow button.
+///
+/// Raising it does what a deep link to the pane cannot: it lists "Sona" in the
+/// Accessibility pane when nothing has yet, filed under this build's designated
+/// requirement. That requirement is why the project signs with a real identity
+/// (macos/Sona.xcodeproj, `CODE_SIGN_IDENTITY`): an ad-hoc build's requirement
+/// is its cdhash, and the row dies with the next build. A row left by such a
+/// build is not repaired by anything an app can do — measured 2026-09-12, tccd
+/// kept the old requirement through both the switch in System Settings and this
+/// prompt, and logged "Failed to match existing code requirement" on every
+/// check. `tccutil reset Accessibility com.aktanazat.sona.mac` deletes it; the
+/// next prompt files a fresh one.
 enum AccessibilityTrust {
-    /// Non-prompting, and about this process only.
-    static var shell: Bool {
-        AXIsProcessTrusted()
+    /// True when already trusted, in which case no dialog appears.
+    @discardableResult
+    static func prompt() -> Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
     }
-
-    /// What the reader has to switch on in System Settings.
-    static let coreName = "Sona Core"
 }
 
 /// `SecureInputStatus` from `get_secure_input_status` and the

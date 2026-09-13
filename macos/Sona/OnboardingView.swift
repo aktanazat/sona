@@ -84,11 +84,10 @@ struct OnboardingView: View {
                             title: "Accessibility access",
                             detail: """
                             Required to type transcribed text into your applications. \
-                            Sona types through the helper inside it, so the switch to turn \
-                            on is “\(AccessibilityTrust.coreName)”.
+                            The switch to turn on is “Sona”.
                             """,
                             state: store.permissions.accessibility,
-                            grant: "Open System Settings",
+                            grant: "Grant permission",
                             onGrant: { store.permissions.grantAccessibility() },
                             onOpenSettings: { store.permissions.openPane(.accessibility) },
                             onRecheck: { store.permissions.recheck() }
@@ -142,8 +141,9 @@ struct OnboardingView: View {
 }
 
 /// The banner the app carries while the process that types is not trusted:
-/// one sentence and the pane that fixes it. Shows nothing once the core is
-/// trusted, and nothing on a platform with no such permission.
+/// one sentence and the dialog that lists Sona in the pane that fixes it. Shows
+/// nothing once the core is trusted, and nothing on a platform with no such
+/// permission.
 struct AccessibilityNotice: View {
     let store: PermissionsStore
 
@@ -154,11 +154,11 @@ struct AccessibilityNotice: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Sona needs accessibility permissions to type transcribed text.")
                             .bodyText(14)
-                        Text("Turn on “\(AccessibilityTrust.coreName)” in the Accessibility list.")
+                        Text("Turn on “Sona” in the Accessibility list.")
                             .metaText()
                     }
                 } trailing: {
-                    Button("Open System Settings") { store.openPane(.accessibility) }
+                    Button("Grant permission") { store.grantAccessibility() }
                         .buttonStyle(.secondary)
                 }
             }

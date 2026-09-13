@@ -7,16 +7,17 @@ import Foundation
 ///
 /// Microphone is checked natively, because the answer is about a process and
 /// the shell can read its own. Accessibility is asked of the core, because the
-/// core is the process that types: `AXIsProcessTrusted` answers only for its
-/// caller, so a native check here would report on a window that never sends a
-/// keystroke. `get_context_diagnostics` runs that check inside the core
+/// core is the process that types: `AXIsProcessTrusted` answers for its caller,
+/// and the caller that matters is the one sending keystrokes.
+/// `get_context_diagnostics` runs that check inside the core
 /// (src-tauri/src/context/mod.rs:826) and is non-prompting, which is also what
-/// makes it safe to poll.
+/// makes it safe to poll. macOS files that check under the shell, which it holds
+/// responsible for the core it spawned, so the consent dialog is raised here
+/// (`AccessibilityTrust.prompt`) and the two answers agree.
 ///
-/// Neither permission is requested on Sona's behalf by anything else: the grant
-/// happens in System Settings or in the system's consent dialog, so this store
-/// polls while it waits, with a failure budget, exactly as the web onboarding
-/// did.
+/// The grant itself happens in System Settings or in the system's consent
+/// dialog, so this store polls while it waits, with a failure budget, exactly
+/// as the web onboarding did.
 @MainActor
 @Observable
 final class PermissionsStore {
@@ -24,9 +25,6 @@ final class PermissionsStore {
     private(set) var accessibility: PermissionState = .checking
     /// The microphone authorization of this process.
     private(set) var microphone: PermissionState = .checking
-    /// Whether this window's own process is trusted. Not a gate — it is the
-    /// reason the accessibility row can say which name to look for.
-    private(set) var shellTrusted = false
     /// The last thing the core could not do, shown until the next success.
     private(set) var error: String?
     /// Called once, the first time both permissions are held.
@@ -68,7 +66,6 @@ final class PermissionsStore {
     /// waiting until its permission is actually held, so the grant in the other
     /// window is what ends the wait rather than a re-check.
     func refresh() async {
-        shellTrusted = AccessibilityTrust.shell
         microphone = Self.settle(microphone, granted: PermissionsMicrophone.state == .granted)
         do {
             let diagnostics: AccessibilityDiagnostics = try await core.request("get_context_diagnostics")
@@ -123,13 +120,14 @@ final class PermissionsStore {
         }
     }
 
-    /// Accessibility has no prompt this process may raise: the system dialog
-    /// registers whoever called it, and the caller here is the window, not the
-    /// helper that types. So this opens the pane the helper appears in — the
-    /// core's own trust check, which the poll runs, is what puts it there.
+    /// Raises the system's Accessibility dialog, which points at the pane and
+    /// lists this app there, then watches for the flip. The dialog is raised
+    /// from this process on purpose: macOS holds the shell responsible for the
+    /// core, so this is the identity tccd checks when the core asks to type.
     func grantAccessibility() {
         accessibility = .waiting
-        openPane(.accessibility)
+        AccessibilityTrust.prompt()
+        recheck()
     }
 
     func openPane(_ pane: PermissionsPane) {
