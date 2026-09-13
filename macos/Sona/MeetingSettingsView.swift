@@ -249,7 +249,7 @@ private struct MeetingAppsRow: View {
         let on = store.isAppOn(entry)
         CardRow {
             HStack(spacing: 10) {
-                Toggle("", isOn: Binding(get: { on }, set: { next in Task { await store.setApp(entry, on: next) } }))
+                Toggle(entry.name, isOn: Binding(get: { on }, set: { next in Task { await store.setApp(entry, on: next) } }))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
                     .disabled(blocked)
@@ -266,7 +266,7 @@ private struct MeetingAppsRow: View {
                 HStack(spacing: 10) {
                     Text("Record automatically").metaText(Theme.inkSecondary)
                     Toggle(
-                        "",
+                        "Record \(entry.name) automatically",
                         isOn: Binding(
                             get: { store.isAutoRecord(entry) },
                             set: { next in Task { await store.setAutoRecord(entry, on: next) } })
@@ -292,7 +292,7 @@ private struct MeetingAppsCustomRow: View {
     var body: some View {
         CardRow {
             HStack(spacing: 10) {
-                Toggle("", isOn: Binding(get: { true }, set: { _ in Task { await store.dropApps([bundleId]) } }))
+                Toggle(bundleId, isOn: Binding(get: { true }, set: { _ in Task { await store.dropApps([bundleId]) } }))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
                     .disabled(blocked)
@@ -560,6 +560,14 @@ private struct MeetingRemoteSection: View {
         store.endpointUnconfigured || store.engineStatus?.isWarning == true
     }
 
+    /// The check itself failed, so the line above describes an earlier
+    /// answer or none at all.
+    private func checkFailed(_ failure: String) -> String {
+        store.engineStatus == nil
+            ? "Sona could not check the engine: \(failure)"
+            : "The last check failed, so this may be out of date: \(failure)"
+    }
+
     var body: some View {
         PageSection("Meeting intelligence") {
             Card {
@@ -588,6 +596,12 @@ private struct MeetingRemoteSection: View {
                         detail: blocker.advice,
                         button: "Open System Settings",
                         action: { store.openAppleIntelligenceSettings() })
+                } else if !store.endpointUnconfigured, let failure = store.engineCheckFailure {
+                    ActionRow(
+                        title: checkFailed(failure),
+                        detail: store.engineStatus?.sentence,
+                        button: "Check again",
+                        action: { Task { await store.recheckEngineStatus() } })
                 } else {
                     MeetingSettingsNote(engineLine, warning: engineLineIsWarning)
                 }

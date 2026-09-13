@@ -1589,6 +1589,110 @@ enum MeetingAppleIntelligenceBlocker: String, Decodable {
     static let systemSettingsPane = URL(string: "x-apple.systempreferences:com.apple.Siri-Settings.extension")!
 }
 
+/// `MeetingLocalEngineStatus`: what the engine on this Mac answers right now.
+/// The settings row shows it as a sentence; the start page shows it only when
+/// the core says nothing else will write the next meeting's notes.
+enum MeetingLocalEngineStatus: Decodable {
+    /// `blocker` is nil when Apple Intelligence can answer.
+    case appleIntelligence(blocker: MeetingAppleIntelligenceBlocker?)
+    case localEndpoint(reachable: Bool, modelCount: Int, error: String?)
+
+    private enum Key: String, CodingKey { case kind, blocker, reachable, modelCount, error }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "apple_intelligence":
+            self = .appleIntelligence(
+                blocker: try container.decodeIfPresent(MeetingAppleIntelligenceBlocker.self, forKey: .blocker))
+        case "local_endpoint":
+            self = .localEndpoint(
+                reachable: try container.decode(Bool.self, forKey: .reachable),
+                modelCount: try container.decode(Int.self, forKey: .modelCount),
+                error: try container.decodeIfPresent(String.self, forKey: .error))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container, debugDescription: "unknown local engine \(kind)")
+        }
+    }
+
+    /// The state in a sentence, whether or not it can answer.
+    var sentence: String {
+        switch self {
+        case let .appleIntelligence(blocker):
+            blocker.map { "\($0.reason). \($0.advice)" } ?? "Apple Intelligence is available."
+        case let .localEndpoint(reachable, modelCount, error):
+            if let error {
+                Self.endpointFailure(error)
+            } else if reachable {
+                "Local endpoint is reachable with \(modelCount) model\(modelCount == 1 ? "" : "s")."
+            } else {
+                "Local endpoint is unreachable."
+            }
+        }
+    }
+
+    /// True while the reader has something to fix.
+    var isWarning: Bool {
+        switch self {
+        case let .appleIntelligence(blocker): blocker != nil
+        case let .localEndpoint(reachable, _, error): !reachable || error != nil
+        }
+    }
+
+    /// The blocker whose fix is in System Settings, so a page can offer the
+    /// pane rather than describe the way there.
+    var settingsPaneBlocker: MeetingAppleIntelligenceBlocker? {
+        if case let .appleIntelligence(blocker?) = self, blocker.systemSettingsHelps { blocker } else { nil }
+    }
+
+    /// The reason codes of `LocalEndpointError`, plus the ones `status` adds
+    /// for a reachable endpoint the core would still not ask: no model chosen,
+    /// no model on offer, a chosen model the endpoint does not list, or a
+    /// context window nobody has stated.
+    private static func endpointFailure(_ error: String) -> String {
+        switch error {
+        case "model_not_selected": "Local endpoint is reachable. Choose a model in Meeting settings."
+        case "no_models": "Local endpoint is reachable, but it lists no models to choose from."
+        case "model_not_served": "Local endpoint is reachable, but it does not serve the chosen model. Pick one it lists in Meeting settings."
+        case "context_window_not_configured": "Local endpoint is reachable, but its context window is not configured."
+        case "invalid_endpoint": "The local endpoint address is invalid."
+        case "invalid_response": "The local endpoint returned an invalid response."
+        case "unreachable": "Local endpoint is unreachable."
+        default: "Local endpoint status is unknown."
+        }
+    }
+}
+
+/// `MeetingTextEngineChoice`: where the next meeting's notes would be written,
+/// for a series not kept on this Mac. `unavailable` carries the engine here so
+/// the page can say why nothing will write them.
+enum MeetingTextEngineChoice: Decodable {
+    /// The operator's server, over the paired relay.
+    case relay
+    /// The engine on this Mac.
+    case local
+    /// The relay is not chosen and the engine here cannot answer.
+    case unavailable(engine: MeetingLocalEngineStatus)
+
+    private enum Key: String, CodingKey { case kind, engine }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let kind = try container.decode(String.self, forKey: .kind)
+        switch kind {
+        case "relay": self = .relay
+        case "local": self = .local
+        case "unavailable":
+            self = .unavailable(engine: try container.decode(MeetingLocalEngineStatus.self, forKey: .engine))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container, debugDescription: "unknown text engine choice \(kind)")
+        }
+    }
+}
+
 // MARK: - Request bodies
 
 /// Every meeting command's params, in the exact wire keys. The command

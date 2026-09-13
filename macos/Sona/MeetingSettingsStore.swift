@@ -188,7 +188,11 @@ private struct MeetingSettingsSessionParam: Encodable {
     private(set) var digestSaving = false
     private(set) var remoteSaving = false
     private(set) var engineSaving = false
-    private(set) var engineStatus: MeetingRemoteEngineStatus?
+    private(set) var engineStatus: MeetingLocalEngineStatus?
+    /// Why the last engine check returned nothing: the core did not answer,
+    /// or refused the question. Distinct from an engine that answered and
+    /// is not ready, which `engineStatus` carries.
+    private(set) var engineCheckFailure: String?
     /// The engine the status on screen was read for, so a settings event that
     /// changed something else does not re-ask the endpoint.
     private var engineStatusFor: MeetingRemoteEngine?
@@ -654,18 +658,29 @@ private struct MeetingSettingsSessionParam: Encodable {
     func refreshEngineStatus() async {
         guard !endpointUnconfigured else {
             engineStatus = nil
+            engineCheckFailure = nil
             engineStatusFor = nil
             return
         }
         guard engineStatusFor != settings.localEngine || engineStatus == nil else { return }
-        engineStatusFor = settings.localEngine
-        let status: MeetingRemoteEngineStatus? = try? await core.request("meeting_local_engine_status")
-        engineStatus = status
+        let engine = settings.localEngine
+        engineStatusFor = engine
+        do {
+            let status: MeetingLocalEngineStatus = try await core.request("meeting_local_engine_status")
+            guard engineStatusFor == engine else { return }
+            engineStatus = status
+            engineCheckFailure = nil
+        } catch {
+            guard engineStatusFor == engine else { return }
+            // The last answer stays on screen; the failure says it is old.
+            engineCheckFailure = (error as? CoreError)?.remote(as: MeetingCommandError.self)?.label
+                ?? error.localizedDescription
+        }
     }
 
     /// The same read with the "already asked for this engine" guard dropped:
     /// the engine is unchanged, the world around it may not be.
-    private func recheckEngineStatus() async {
+    func recheckEngineStatus() async {
         guard settingsRead else { return }
         engineStatusFor = nil
         await refreshEngineStatus()
