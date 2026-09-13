@@ -189,6 +189,15 @@ struct ChatView: View {
             }
         }
 
+        if store.unsaved {
+            Hairline()
+            Text("This chat couldn't be saved. It stays here until you close it, but won't be in History.")
+                .metaText(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+        }
+
         if store.error != nil {
             Hairline()
             ErrorNote(store.error)
@@ -324,13 +333,16 @@ private struct ChatAnswer: View {
     }
 
     /// The addresses are links in the run of text rather than buttons beside
-    /// it, so the sentence still reads as a sentence.
+    /// it, so the sentence still reads as a sentence. The prose between them
+    /// is read as inline Markdown, because that is how an assistant writes
+    /// emphasis and code, and a reader should see the word, not the stars
+    /// around it. Lines and paragraphs are kept as the answer laid them out.
     private var prose: AttributedString {
         var result = AttributedString()
         for segment in ChatSegment.scan(message) {
             switch segment {
             case let .text(text):
-                result += AttributedString(text)
+                result += Self.inline(text)
             case let .link(link):
                 var run = AttributedString(link)
                 run.underlineStyle = .single
@@ -341,6 +353,15 @@ private struct ChatAnswer: View {
             }
         }
         return result
+    }
+
+    /// Text that does not parse as Markdown is still an answer; it is shown
+    /// as written rather than lost to a parser's opinion of it.
+    private static func inline(_ text: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
     }
 }
 
@@ -370,7 +391,7 @@ private struct ChatWorkRow: View {
                     Text("Still waiting…").metaText(Theme.inkSecondary)
                     Button("Cancel") { store.stop() }
                         .buttonStyle(.quiet)
-                        .disabled(store.busy)
+                        .disabled(store.stopping)
                 }
             }
             if let failure = turn.failure {
@@ -476,6 +497,8 @@ private struct ChatOutcomeNote: View {
 /// into the conversation and stores the proposal beside it, so drawing both
 /// would print one sentence twice. Applying moves this same card to Applied
 /// with an Undo, rather than adding a second card that reports on the first.
+/// A proposal that moves nothing is a question back, and gets no Apply: the
+/// core refuses an empty change, so the button would only ever fail.
 private struct ChatProposalCard: View {
     let store: ChatStore
     let proposal: AgentPanelProposal
@@ -491,18 +514,24 @@ private struct ChatProposalCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 /* Wraps rather than truncates: this sentence is the whole of
                  * what the assistant said, and a press on Apply under half a
-                 * sentence is a press on something nobody was shown. */
+                 * sentence is a press on something nobody was shown. The
+                 * same goes for the changes: one line each, with the target,
+                 * because the card is the disclosure, not the prose. */
                 Text(proposal.summary)
                     .bodyText(14)
                     .fixedSize(horizontal: false, vertical: true)
-                if !proposal.changeKeys.isEmpty {
-                    Text(proposal.changeKeys).metaText().lineLimit(1)
+                ForEach(proposal.actions) { change in
+                    Text(change.line)
+                        .metaText()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
             Spacer(minLength: 8)
 
             switch proposal.state {
+            case .pending where proposal.actions.isEmpty:
+                EmptyView()
             case .pending:
                 Button("Apply") { store.applyProposal() }
                     .buttonStyle(.compact)
@@ -540,7 +569,7 @@ private struct ChatActionCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(action.action.line)
+                Text(action.action.line(naming: store.people))
                     .bodyText(14)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(action.action.reason)
@@ -580,8 +609,8 @@ private struct ChatActionCard: View {
     }
 }
 
-/// The field and the one button beside it, which is Send until a turn is
-/// running and Stop while it is.
+/// The field and the one button beside it, which is Send until a question is
+/// on its way and Stop from then until the turn is over.
 private struct ChatComposer: View {
     let store: ChatStore
     let onClose: () -> Void
@@ -598,6 +627,7 @@ private struct ChatComposer: View {
                 }
                 ChatComposerField(
                     text: Binding(get: { store.draft }, set: { store.draft = $0 }),
+                    label: store.workspace.prompt,
                     isEnabled: !store.composerDisabled && !store.running,
                     send: { store.send() },
                     escape: onClose)
@@ -609,9 +639,9 @@ private struct ChatComposer: View {
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .strokeBorder(Theme.border, lineWidth: 1))
 
-            if store.running {
+            if store.running || store.sending {
                 ChatRoundButton(
-                    symbol: "stop.fill", help: "Stop", isEnabled: !store.busy,
+                    symbol: "stop.fill", help: "Stop", isEnabled: !store.stopping,
                     action: { store.stop() })
             } else {
                 ChatRoundButton(
@@ -654,6 +684,10 @@ private struct ChatRoundButton: View {
 /// close the sheet while the caret is in the field.
 private struct ChatComposerField: NSViewRepresentable {
     @Binding var text: String
+    /// What the field is for, said to assistive technology. The visible
+    /// placeholder is a separate view that leaves once there is text, so
+    /// the field carries its own name.
+    let label: String
     let isEnabled: Bool
     let send: () -> Void
     let escape: () -> Void
@@ -712,6 +746,7 @@ private struct ChatComposerField: NSViewRepresentable {
             view.string = text
         }
         view.isEditable = isEnabled
+        view.setAccessibilityLabel(label)
         Self.focus(view, context.coordinator, isEnabled: isEnabled)
     }
 

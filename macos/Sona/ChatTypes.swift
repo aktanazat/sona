@@ -205,13 +205,13 @@ enum AgentPanelActionState: String, Decodable {
 /// One corpus change an answer offered: what it changes, and why.
 enum AgentChatAction: Decodable {
     case resolveLoop(reason: String)
-    case assignLoop(reason: String)
+    case assignLoop(reason: String, personId: String)
     case setSeriesTemplate(reason: String, template: String)
     case addVocabularyTerm(reason: String, term: String)
     case renameSpeaker(reason: String, name: String)
 
     private enum Key: String, CodingKey {
-        case kind, reason, templateId, term, replacement, name
+        case kind, reason, templateId, term, replacement, name, personId
     }
 
     init(from decoder: Decoder) throws {
@@ -222,7 +222,7 @@ enum AgentChatAction: Decodable {
         case "resolve_loop":
             self = .resolveLoop(reason: reason)
         case "assign_loop":
-            self = .assignLoop(reason: reason)
+            self = .assignLoop(reason: reason, personId: try container.decode(String.self, forKey: .personId))
         case "set_series_template":
             let template = try container.decode(String.self, forKey: .templateId)
             self = .setSeriesTemplate(
@@ -244,18 +244,26 @@ enum AgentChatAction: Decodable {
     /// says which commitment or which meeting this is about.
     var reason: String {
         switch self {
-        case let .resolveLoop(reason), let .assignLoop(reason): reason
-        case let .setSeriesTemplate(reason, _), let .addVocabularyTerm(reason, _),
-             let .renameSpeaker(reason, _): reason
+        case let .resolveLoop(reason): reason
+        case let .assignLoop(reason, _), let .setSeriesTemplate(reason, _),
+             let .addVocabularyTerm(reason, _), let .renameSpeaker(reason, _): reason
         }
+    }
+
+    /// The person this change hands a commitment to, when it is that kind.
+    var personId: String? {
+        if case let .assignLoop(_, personId) = self { return personId }
+        return nil
     }
 
     /// What the card says it will change. The kind of change, never the row
     /// id: an id is a digest, and printing one would tell the reader nothing.
-    var line: String {
+    /// An owner is named when the people list has a name for the id.
+    func line(naming people: [String: String]) -> String {
         switch self {
         case .resolveLoop: "Mark a commitment done"
-        case .assignLoop: "Give a commitment an owner"
+        case let .assignLoop(_, personId):
+            people[personId].map { "Give a commitment to \($0)" } ?? "Give a commitment an owner"
         case let .setSeriesTemplate(_, template): "Use the \(template) template for this series"
         case let .addVocabularyTerm(_, term): "Add \"\(term)\" to your vocabulary"
         case let .renameSpeaker(_, name): "Rename a speaker to \(name)"
@@ -352,10 +360,53 @@ enum AgentPanelConfirmation: String, Decodable {
     case automatic, review, explicit
 }
 
-/// One setting a proposal would move. The key stays verbatim: it is an
-/// identifier, and naming the set is what makes one Apply honest.
-struct AgentPanelSettingChange: Decodable {
+/// One setting a proposal would move: which one, and to what. The value is
+/// kept because the card is where the reader decides, and a summary that
+/// says "make it quieter" is not the same disclosure as "Audio volume: 0.3".
+struct AgentPanelSettingChange: Decodable, Identifiable {
     let key: String
+    /// The target, in the reader's words: a switch says On or Off, a list of
+    /// switches says which, and everything else is what the wire said.
+    let value: String
+
+    var id: String { key }
+
+    private enum Key: String, CodingKey { case key, value }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        key = try container.decode(String.self, forKey: .key)
+        value = try Self.render(container)
+    }
+
+    /// What the card says: the setting's name as Settings spells it, then
+    /// the target.
+    var line: String { "\(Self.name(key)): \(value)" }
+
+    private static func render(_ container: KeyedDecodingContainer<Key>) throws -> String {
+        if let flag = try? container.decode(Bool.self, forKey: .value) {
+            return flag ? "On" : "Off"
+        }
+        if let number = try? container.decode(Double.self, forKey: .value) {
+            return number.formatted(.number.precision(.fractionLength(0...2)))
+        }
+        if let text = try? container.decode(String.self, forKey: .value) {
+            return name(text)
+        }
+        let toggles = try container.decode([String: Bool].self, forKey: .value)
+        return toggles.sorted { $0.key < $1.key }
+            .map { "\(name($0.key)) \($0.value ? "on" : "off")" }
+            .joined(separator: ", ")
+    }
+
+    /// `overlay_style` reads as "Overlay style"; an id that is not a word
+    /// list, such as a device id, comes back as it was.
+    private static func name(_ key: String) -> String {
+        guard key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return key }
+        let words = key.split(separator: "_").map(String.init)
+        guard let first = words.first else { return key }
+        return ([first.capitalized] + words.dropFirst()).joined(separator: " ")
+    }
 }
 
 struct AgentPanelProposal: Decodable {
@@ -369,9 +420,6 @@ struct AgentPanelProposal: Decodable {
     let state: AgentPanelProposalState
     let receiptId: String?
     let appliedRevision: UInt64?
-
-    /// The settings one Apply moves.
-    var changeKeys: String { actions.map(\.key).joined(separator: ", ") }
 
     /// Undo puts back the revision the apply produced, or the one it was
     /// built against when nothing has been applied yet.
@@ -424,6 +472,9 @@ struct AgentPanelStatus: Decodable {
     let relayStatus: AgentPanelRelayStatus
     let conversationId: String?
     let conversation: [AgentChatTurn]
+    /// The last write of this conversation to disk did not land. What is on
+    /// screen is whole; it is the next launch that would not have it.
+    let unsaved: Bool
     /// An action's command answers with the turn alone, so the held status is
     /// patched at the one field that moved rather than re-read.
     var turn: AgentPanelTurnStatus?

@@ -349,6 +349,7 @@ final class AgentBridgeStore {
         "RuleMismatch": "the rule does not match this request",
         "PermissionResponseUnsupported": "nothing is waiting for an answer",
         "AlreadyHandled": "it was already handled",
+        "Unauthorized": "that project or agent is no longer authorized",
         "PersistenceFailed": "the change could not be saved",
     ]
 }

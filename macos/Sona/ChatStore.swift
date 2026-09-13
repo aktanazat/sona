@@ -21,8 +21,15 @@ final class ChatStore {
     var draft = ""
     /// Which brain the next turn goes to.
     var workspace: AgentPanelWorkspace = .sonaChat
-    /// A send, stop, apply, undo or history read is in flight.
-    private(set) var busy = false
+    /// A send, stop, apply, undo or history read is in flight. A count, not
+    /// a flag: a stop overlaps the send it stops, and the first to finish
+    /// must not open the composer under the other.
+    var busy: Bool { inFlight > 0 }
+    /// A question is on its way: the pack is being built or the turn is
+    /// being sent. Stop is offered for this as it is for a running turn.
+    private(set) var sending = false
+    /// A stop is on its way. One is enough.
+    private(set) var stopping = false
     private(set) var error: String?
     /// The pack the current Ask turn carried quoted at least one row, so the
     /// work line can say the corpus was read.
@@ -35,6 +42,10 @@ final class ChatStore {
     /// Which read is the newest. An event storm can start several, and only
     /// the last one's answer describes the present.
     @ObservationIgnored private var reads = 0
+    private var inFlight = 0
+    /// The send in flight, so a stop pressed while the pack is still being
+    /// built can end it here, before there is a turn to cancel.
+    @ObservationIgnored private var sendTask: Task<Bool, Never>?
     @ObservationIgnored private var clock: Task<Void, Never>?
 
     init(core: Core) {
@@ -66,6 +77,9 @@ final class ChatStore {
     var turn: AgentPanelTurnStatus? { status?.turn }
     var proposal: AgentPanelProposal? { status?.proposal }
     var conversationId: String? { status?.conversationId }
+    /// The chat on screen is not on disk. Said once, in the foot, for as long
+    /// as it stays true.
+    var unsaved: Bool { status?.unsaved ?? false }
     var rows: [ChatRow] { ChatRow.rows(conversation) }
 
     /// A turn that has not reached a terminal state. Stop is offered for
@@ -133,10 +147,17 @@ final class ChatStore {
 
     // MARK: - Reading
 
-    /// Re-reads the whole panel. The notice's Retry is this and nothing else:
-    /// a relay that came back is a status that reads differently.
+    /// Tries the relay again and re-reads the panel. The notice's Retry is
+    /// this: the core publishes what the attempt found, so a relay that came
+    /// back reads as ready and one still away keeps the notice. The receipt
+    /// is the pairing screen's; here the status is the answer.
     func reread() {
-        Task { await read() }
+        Task {
+            inFlight += 1
+            defer { inFlight -= 1 }
+            _ = try? await core.request("agent_panel_test_connection") as AgentPairingReceipt
+            await read()
+        }
     }
 
     private func read() async {
@@ -175,14 +196,24 @@ final class ChatStore {
 
     // MARK: - Asking
 
+    /// The most a question may be, as the core measures it. Named here so
+    /// the composer can say so before the turn goes anywhere.
+    static let maxMessageBytes = 8 * 1024
+
     /// Sends what is in the field.
     func send() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !composerDisabled, !running else { return }
-        Task {
-            if await submit(message) {
+        guard message.utf8.count <= Self.maxMessageBytes else {
+            error = "That question is too long. Keep it under 8,000 characters."
+            return
+        }
+        sendTask = Task {
+            let sent = await submit(message)
+            if sent {
                 draft = ""
             }
+            return sent
         }
     }
 
@@ -190,7 +221,7 @@ final class ChatStore {
     /// the question is the row above, not what the reader was typing next.
     func retry(_ message: String) {
         guard !composerDisabled, !running else { return }
-        Task { _ = await submit(message) }
+        sendTask = Task { await submit(message) }
     }
 
     private func submit(_ message: String) async -> Bool {
@@ -200,11 +231,16 @@ final class ChatStore {
          * settings change is not a question about a meeting. */
         let allowed = packs
         searchedCorpus = false
+        sending = true
+        defer { sending = false }
         /* Building the pack and sending the turn are one act, so they share
          * one closed composer: a second Return while the pack is still being
-         * assembled would ask the same question twice. */
+         * assembled would ask the same question twice. A stop pressed while
+         * the pack is being built ends the act here, and the field keeps
+         * the question. */
         let sent = await run {
             let pack = allowed ? await self.buildPack(message) : nil
+            try Task.checkCancellation()
             return try await self.core.request(
                 "agent_panel_send_turn",
                 Envelope(
@@ -238,11 +274,21 @@ final class ChatStore {
         }
     }
 
-    /// Stops the live turn. What it had already done stays on screen, because
-    /// it happened.
+    /// Stops the live turn, or the send that has not become one yet. What
+    /// it had already done stays on screen, because it happened.
+    ///
+    /// Not held off by a send in flight: the send is the thing being
+    /// stopped, and a relay that is rate limiting the submission would
+    /// otherwise keep this button dead for the whole of its wait.
     func stop() {
-        guard let turnId = turn?.turnId, !busy else { return }
+        guard !stopping else { return }
+        guard let turnId = turn?.turnId, running else {
+            sendTask?.cancel()
+            return
+        }
+        stopping = true
         Task {
+            defer { stopping = false }
             _ = await run {
                 try await self.core.request(
                     "agent_panel_cancel_turn", Envelope(request: TurnRequest(turnId: turnId)))
@@ -300,10 +346,10 @@ final class ChatStore {
     /// keeps everything else it already had.
     private func settle(_ method: String, _ index: UInt32) {
         guard let turnId = turn?.turnId, !busy else { return }
-        busy = true
+        inFlight += 1
         error = nil
         Task {
-            defer { busy = false }
+            defer { inFlight -= 1 }
             do {
                 let next: AgentPanelTurnStatus = try await core.request(
                     method, Envelope(request: ActionRequest(turnId: turnId, actionIndex: index)))
@@ -362,10 +408,10 @@ final class ChatStore {
     /// Turns on the one switch that lets an Ask turn carry quotes.
     func allowRemoteIntelligence() {
         guard !busy else { return }
-        busy = true
+        inFlight += 1
         error = nil
         Task {
-            defer { busy = false }
+            defer { inFlight -= 1 }
             do {
                 try await core.request(
                     "change_meeting_remote_intelligence_enabled_setting", ["enabled": true])
@@ -378,14 +424,18 @@ final class ChatStore {
 
     // MARK: - Plumbing
 
-    /// One shape for every command that answers with a status.
+    /// One shape for every command that answers with a status. A send that
+    /// was stopped before it left is not a failure to report: the field
+    /// still holds the question, and that is the whole of what happened.
     private func run(_ work: () async throws -> AgentPanelStatus) async -> Bool {
-        busy = true
+        inFlight += 1
         error = nil
-        defer { busy = false }
+        defer { inFlight -= 1 }
         do {
             hold(try await work())
             return true
+        } catch is CancellationError {
+            return false
         } catch {
             report(error)
             return false
@@ -399,6 +449,23 @@ final class ChatStore {
         if switched {
             // Another window can start a conversation; the menu follows it.
             Task { await loadHistory() }
+        }
+        name(next.turn?.actions ?? [])
+    }
+
+    /// Display names for the people an answer's cards hand commitments to.
+    /// The wire carries ids, and a card that says "an owner" where it could
+    /// say "Steven" has not told the reader what Apply does.
+    private(set) var people: [String: String] = [:]
+
+    private func name(_ actions: [AgentPanelAction]) {
+        let wanted = actions.compactMap(\.action.personId).filter { people[$0] == nil }
+        guard !wanted.isEmpty else { return }
+        Task {
+            guard let list: PeopleListResult = try? await core.request("people_list") else { return }
+            for entry in list.entries {
+                people[entry.person.id] = entry.person.displayName
+            }
         }
     }
 
@@ -518,6 +585,9 @@ final class AgentPairingStore {
     private(set) var settings: ChatSettings?
     /// This Mac's public half. The private half never leaves the keychain.
     private(set) var identity: AgentPanelPublicIdentity?
+    /// Why the key could not be read, when the panel is on and it should
+    /// have been. Off is not a failure: the key is minted at switch-on.
+    private(set) var identityError: String?
     var relayUrl = ""
     var relayKeyId = ""
     var relayPublicKey = ""
@@ -659,12 +729,27 @@ final class AgentPairingStore {
     private func readIdentity() async {
         do {
             identity = try await core.request("agent_panel_public_identity")
+            identityError = nil
         } catch {
+            identity = nil
             /* The panel mints the key when it is switched on, so a missing
              * identity is the expected state while it is off rather than a
-             * failure worth a red line. */
-            identity = nil
+             * failure worth a red line. Anything else — the keychain
+             * refusing, the core gone — is one. */
+            let refusal = (error as? CoreError)?.remote(as: AgentPanelCommandError.self)
+            if refusal == .disabled {
+                identityError = nil
+            } else {
+                identityError = refusal?.message
+                    ?? (error as? CoreError)?.remote(as: String.self)
+                    ?? error.localizedDescription
+            }
         }
+    }
+
+    /// Reads the key again after a failure.
+    func retryIdentity() {
+        Task { await readIdentity() }
     }
 
     private func hold(_ next: ChatSettings) {

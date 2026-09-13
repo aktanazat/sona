@@ -107,10 +107,11 @@ struct AgentPairingView: View {
     }
 
     /// The stored stamp is written in exactly one place — the Test button's
-    /// command — so it is the last successful test, not the last turn.
+    /// command, when the server answered — so it is the last time this Mac
+    /// reached it, not the last turn.
     private var lastTested: some View {
         CardRow {
-            Text("Last tested").bodyText()
+            Text("Last connected").bodyText()
         } trailing: {
             Text(stamp).metaText(Theme.inkSecondary)
         }
@@ -133,21 +134,33 @@ struct AgentPairingView: View {
                     .metaText()
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: 10) {
-                    Text(store.identity?.publicKey ?? "Turn the agent panel on to create a key.")
-                        .font(
-                            store.identity == nil ? TypeScale.body(13) : TypeScale.mono(13)
-                        )
-                        .foregroundStyle(Theme.inkSecondary)
-                        .lineLimit(1)
-                        /* A key is checked end by end against the one in the
-                         * relay's allowlist, so both ends stay on screen. */
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                    Spacer(minLength: 8)
-                    Button(store.copied ? "Copied" : "Copy") { store.copyIdentity() }
-                        .buttonStyle(.compact)
-                        .disabled(store.identity == nil)
+                if let failure = store.identityError {
+                    HStack(spacing: 10) {
+                        Text(failure)
+                            .font(TypeScale.body(13))
+                            .foregroundStyle(Theme.live)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button("Retry") { store.retryIdentity() }
+                            .buttonStyle(.compact)
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        Text(store.identity?.publicKey ?? "Turn the agent panel on to create a key.")
+                            .font(
+                                store.identity == nil ? TypeScale.body(13) : TypeScale.mono(13)
+                            )
+                            .foregroundStyle(Theme.inkSecondary)
+                            .lineLimit(1)
+                            /* A key is checked end by end against the one in the
+                             * relay's allowlist, so both ends stay on screen. */
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 8)
+                        Button(store.copied ? "Copied" : "Copy") { store.copyIdentity() }
+                            .buttonStyle(.compact)
+                            .disabled(store.identity == nil)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

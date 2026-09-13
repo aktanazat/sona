@@ -206,24 +206,40 @@ struct AgentBridgeView: View {
 
 /// One observed hook invocation. Allow and Deny appear only where an answer
 /// reaches the agent; where the hook already returned, the row says so
-/// instead of offering an answer nobody is waiting to claim.
+/// instead of offering an answer nobody is waiting to claim. The row shows
+/// what is being approved: the command or input, and which session asked.
 private struct AgentBridgeRequestRow: View {
     let store: AgentBridgeStore
     let request: AgentBridgeObservedRequest
 
     var body: some View {
+        let canRespond = request.canRespond(interactiveReady: store.interactiveReady)
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
                 Text(request.headline).bodyText()
-                Text("Expires \(AgentBridgeFormat.expiry.string(from: request.expiresAt))").metaText()
+                if let preview = request.toolInputPreview, !preview.isEmpty {
+                    Text(preview)
+                        .font(TypeScale.mono(12))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .lineLimit(6)
+                        .textSelection(.enabled)
+                }
+                Text(
+                    "Session \(AgentBridgeFormat.short(request.sessionId)) · Expires \(AgentBridgeFormat.expiry.string(from: request.expiresAt))"
+                )
+                .metaText()
                 if request.observeOnly {
                     Text("Sona can only watch this request. Answer it in \(request.agent.label).")
+                        .metaText(Theme.inkSecondary)
+                }
+                if canRespond {
+                    Text("Answering saves an exact rule for this call in this project.")
                         .metaText(Theme.inkSecondary)
                 }
             }
         } trailing: {
             HStack(spacing: 12) {
-                if request.canRespond(interactiveReady: store.interactiveReady) {
+                if canRespond {
                     Button("Allow exactly this") { store.decidePermission(request, .allow) }
                         .buttonStyle(.compact)
                     Button("Deny exactly this") { store.decidePermission(request, .deny) }

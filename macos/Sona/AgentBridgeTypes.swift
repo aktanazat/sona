@@ -67,6 +67,9 @@ struct AgentBridgeStatus: Decodable, Sendable {
     let policyGeneration: UInt64
     let observedSessions: Int
     let pendingMessages: Int
+    /// Advances on every change the console lists, so a request landing in
+    /// a session already shown still reaches the screen.
+    let revision: UInt64
 }
 
 /// One agent session the hook has reported. The project is a hash: the bridge
@@ -78,12 +81,11 @@ struct AgentBridgeObservedSession: Decodable, Identifiable, Sendable {
     let sessionGeneration: UInt64
     let policyGeneration: UInt64
     let lastSeenAtMs: UInt64
+    /// The core's own answer: a prompt was submitted and no stop has been
+    /// seen since, so there is a turn end for a reply to continue.
+    let acceptsReply: Bool
 
     var lastSeen: Date { Date(timeIntervalSince1970: TimeInterval(lastSeenAtMs) / 1000) }
-
-    /// The bridge writes a reply by continuing a stopped turn, and only these
-    /// two agents have a channel for it.
-    var acceptsReply: Bool { agent == .claude || agent == .omp }
 }
 
 enum AgentBridgeRequestKind: String, Decodable, Sendable {
@@ -126,6 +128,9 @@ struct AgentBridgeObservedRequest: Decodable, Identifiable, Sendable {
     let agent: AgentBridgeAgent
     let kind: AgentBridgeRequestKind
     let toolName: String?
+    /// What the tool is about to do: a shell command verbatim, any other
+    /// input as compact JSON, cut to one screenful by the core.
+    let toolInputPreview: String?
     let permissionMode: String?
     let expiresAtMs: UInt64
     let state: AgentBridgeRequestState
