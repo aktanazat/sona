@@ -443,6 +443,7 @@ const PANEL_STATUS: AgentPanelStatusV1 = {
   conversation_id: "conversation-1",
   conversation: [],
   turn: null,
+  unsaved: false,
   proposal: null,
 };
 

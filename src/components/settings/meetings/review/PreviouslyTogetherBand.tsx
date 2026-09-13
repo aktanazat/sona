@@ -24,7 +24,7 @@ export const previouslyTogetherRows = (
       {
         personId: row.person_id,
         displayName: row.display_name,
-        meetingsCount: Math.max(0, row.meetings_together - 1),
+        meetingsCount: row.prior_meetings,
         lastMeetingAtUtcMs: row.last_prior_meeting.at_utc_ms,
         openLoop: row.top_open_loop?.text ?? null,
       },

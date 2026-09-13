@@ -61,6 +61,7 @@ const request = (
   agent: "codex",
   kind: "permission_request",
   tool_name: "Bash",
+  tool_input_preview: null,
   permission_mode: "default",
   expires_at_ms: 1_764_000_000_000,
   state: "observed",

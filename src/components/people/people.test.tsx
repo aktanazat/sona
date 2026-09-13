@@ -523,7 +523,7 @@ describe("People projections", () => {
       person_id: PERSON.id,
       display_name: PERSON.display_name,
       evidence_source: "speaker",
-      meetings_together: 2,
+      prior_meetings: 1,
       last_prior_meeting: {
         id: CONFIRMED_LINK.meeting.id,
         title: CONFIRMED_LINK.meeting.title,

@@ -64,6 +64,11 @@ export const AgentBridgeRequests: React.FC<AgentBridgeRequestsProps> = ({
                   {t("settings.agents.observed.requestKinds." + request.kind)}
                   {request.tool_name ? " · " + request.tool_name : ""}
                 </p>
+                {request.tool_input_preview ? (
+                  <pre className="mt-1 max-h-32 overflow-hidden font-mono text-[12px] leading-[18px] break-all whitespace-pre-wrap text-gray-900">
+                    {request.tool_input_preview}
+                  </pre>
+                ) : null}
                 <Microlabel className="mt-1 block">
                   {t("settings.agents.observed.expires", {
                     time: expiryTimeFormatter.format(
