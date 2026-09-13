@@ -1748,12 +1748,21 @@
         "status": {
           "checking": "Vérification du moteur local…",
           "appleAvailable": "Apple Intelligence est disponible.",
-          "appleUnavailable": "Apple Intelligence n’est pas disponible sur ce Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence est désactivé sur ce Mac.",
+            "model_not_ready": "Apple Intelligence télécharge encore son modèle.",
+            "device_not_eligible": "Apple Intelligence ne peut pas fonctionner sur ce Mac.",
+            "os_too_old": "Apple Intelligence nécessite macOS 26 ou une version ultérieure.",
+            "unknown": "Apple Intelligence n’est pas disponible sur ce Mac."
+          },
           "endpointReachable": "Le point de terminaison local est accessible avec {{count}} modèle(s).",
           "endpointUnreachable": "Le point de terminaison local est inaccessible.",
           "endpointInvalid": "L’adresse du point de terminaison local n’est pas valide.",
           "endpointInvalidResponse": "Le point de terminaison local a renvoyé une réponse invalide.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Le point de terminaison local est accessible. Choisissez un modèle dans les réglages des réunions.",
+          "endpointNoModels": "Le point de terminaison local est accessible, mais il ne propose aucun modèle.",
+          "endpointModelNotServed": "Le point de terminaison local est accessible, mais il ne propose pas le modèle choisi. Choisissez-en un dans sa liste, dans les réglages des réunions.",
+          "endpointContextUnknown": "Le point de terminaison local est accessible, mais sa fenêtre de contexte n’est pas définie.",
           "endpointNotConfigured": "Le point de terminaison local n’est pas encore configuré.",
           "endpointUnknown": "L’état du point de terminaison local est inconnu."
         }

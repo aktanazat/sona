@@ -1734,12 +1734,21 @@
         "status": {
           "checking": "正在檢查本機引擎…",
           "appleAvailable": "Apple Intelligence 可用。",
-          "appleUnavailable": "此 Mac 無法使用 Apple Intelligence。",
+          "apple": {
+            "not_enabled": "此 Mac 上的 Apple Intelligence 已關閉。",
+            "model_not_ready": "Apple Intelligence 仍在下載其模型。",
+            "device_not_eligible": "此 Mac 無法執行 Apple Intelligence。",
+            "os_too_old": "Apple Intelligence 需要 macOS 26 或更新版本。",
+            "unknown": "此 Mac 無法使用 Apple Intelligence。"
+          },
           "endpointReachable": "本機端點可用，提供 {{count}} 個模型。",
           "endpointUnreachable": "本機端點無法連線。",
           "endpointInvalid": "本機端點地址無效。",
           "endpointInvalidResponse": "本機端點傳回無效回應。",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "本機端點可用。請在會議設定中選擇一個模型。",
+          "endpointNoModels": "本機端點可用，但沒有可供選擇的模型。",
+          "endpointModelNotServed": "本機端點可用，但未提供所選模型。請在會議設定中從其清單選擇一個模型。",
+          "endpointContextUnknown": "本機端點可用，但尚未設定其上下文視窗。",
           "endpointNotConfigured": "本機端點尚未設定。",
           "endpointUnknown": "本機端點狀態未知。"
         }

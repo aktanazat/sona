@@ -1755,12 +1755,21 @@
         "status": {
           "checking": "Kontroluje se lokální engine…",
           "appleAvailable": "Apple Intelligence je dostupná.",
-          "appleUnavailable": "Apple Intelligence není na tomto Macu dostupná.",
+          "apple": {
+            "not_enabled": "Apple Intelligence je na tomto Macu vypnutá.",
+            "model_not_ready": "Apple Intelligence stále stahuje svůj model.",
+            "device_not_eligible": "Apple Intelligence na tomto Macu nemůže běžet.",
+            "os_too_old": "Apple Intelligence vyžaduje macOS 26 nebo novější.",
+            "unknown": "Apple Intelligence není na tomto Macu dostupná."
+          },
           "endpointReachable": "Lokální koncový bod je dostupný s {{count}} modely.",
           "endpointUnreachable": "Místní koncový bod není dostupný.",
           "endpointInvalid": "Adresa místního koncového bodu je neplatná.",
           "endpointInvalidResponse": "Místní koncový bod vrátil neplatnou odpověď.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Místní koncový bod je dostupný. Vyberte model v nastavení schůzek.",
+          "endpointNoModels": "Místní koncový bod je dostupný, ale nenabízí žádné modely k výběru.",
+          "endpointModelNotServed": "Místní koncový bod je dostupný, ale zvolený model nenabízí. Vyberte model z jeho seznamu v nastavení schůzek.",
+          "endpointContextUnknown": "Místní koncový bod je dostupný, ale jeho kontextové okno není nastaveno.",
           "endpointNotConfigured": "Místní koncový bod zatím není nakonfigurován.",
           "endpointUnknown": "Stav místního koncového bodu není znám."
         }

@@ -125,6 +125,12 @@ const commitMeetingLocalEndpoint = (
 
 const meetingLocalEngineStatusKey = (error: string | null): string => {
   switch (error) {
+    case "model_not_selected":
+      return "settings.meetings.localEngine.status.endpointModelNotSelected";
+    case "no_models":
+      return "settings.meetings.localEngine.status.endpointNoModels";
+    case "model_not_served":
+      return "settings.meetings.localEngine.status.endpointModelNotServed";
     case "context_window_not_configured":
       return "settings.meetings.localEngine.status.endpointContextUnknown";
     case "invalid_endpoint":
@@ -296,7 +302,7 @@ const MeetingLocalEngineSettings: React.FC = () => {
       : status.kind === "apple_intelligence"
         ? status.blocker === null
           ? t("settings.meetings.localEngine.status.appleAvailable")
-          : t("settings.meetings.localEngine.status.appleUnavailable")
+          : t(`settings.meetings.localEngine.status.apple.${status.blocker}`)
         : status.error
           ? endpointStatusText(status.error)
           : t("settings.meetings.localEngine.status.endpointReachable", {

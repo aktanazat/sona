@@ -1741,12 +1741,21 @@
         "status": {
           "checking": "Yerel motor kontrol ediliyor…",
           "appleAvailable": "Apple Intelligence kullanılabilir.",
-          "appleUnavailable": "Apple Intelligence bu Mac’te kullanılamıyor.",
+          "apple": {
+            "not_enabled": "Apple Intelligence bu Mac’te kapalı.",
+            "model_not_ready": "Apple Intelligence modelini hâlâ indiriyor.",
+            "device_not_eligible": "Apple Intelligence bu Mac’te çalışamaz.",
+            "os_too_old": "Apple Intelligence için macOS 26 veya üzeri gerekir.",
+            "unknown": "Apple Intelligence bu Mac’te kullanılamıyor."
+          },
           "endpointReachable": "Yerel uç noktada {{count}} model kullanılabilir.",
           "endpointUnreachable": "Yerel uç noktaya ulaşılamıyor.",
           "endpointInvalid": "Yerel uç nokta adresi geçersiz.",
           "endpointInvalidResponse": "Yerel uç nokta geçersiz bir yanıt döndürdü.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Yerel uç noktaya ulaşılabiliyor. Toplantı ayarlarından bir model seçin.",
+          "endpointNoModels": "Yerel uç noktaya ulaşılabiliyor ancak seçilebilecek model sunmuyor.",
+          "endpointModelNotServed": "Yerel uç noktaya ulaşılabiliyor ancak seçilen modeli sunmuyor. Toplantı ayarlarından listesindeki bir modeli seçin.",
+          "endpointContextUnknown": "Yerel uç noktaya ulaşılabiliyor ancak bağlam penceresi ayarlanmamış.",
           "endpointNotConfigured": "Yerel uç nokta henüz yapılandırılmadı.",
           "endpointUnknown": "Yerel uç noktanın durumu bilinmiyor."
         }

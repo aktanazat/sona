@@ -1748,12 +1748,21 @@
         "status": {
           "checking": "Controllo del motore locale…",
           "appleAvailable": "Apple Intelligence è disponibile.",
-          "appleUnavailable": "Apple Intelligence non è disponibile su questo Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence è disattivata su questo Mac.",
+            "model_not_ready": "Apple Intelligence sta ancora scaricando il suo modello.",
+            "device_not_eligible": "Apple Intelligence non può essere eseguita su questo Mac.",
+            "os_too_old": "Apple Intelligence richiede macOS 26 o versioni successive.",
+            "unknown": "Apple Intelligence non è disponibile su questo Mac."
+          },
           "endpointReachable": "L’endpoint locale è raggiungibile con {{count}} modello/i.",
           "endpointUnreachable": "Il punto di accesso locale non è raggiungibile.",
           "endpointInvalid": "L’indirizzo del punto di accesso locale non è valido.",
           "endpointInvalidResponse": "Il punto di accesso locale ha restituito una risposta non valida.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "L’endpoint locale è raggiungibile. Scegli un modello nelle impostazioni delle riunioni.",
+          "endpointNoModels": "L’endpoint locale è raggiungibile, ma non offre modelli tra cui scegliere.",
+          "endpointModelNotServed": "L’endpoint locale è raggiungibile, ma non offre il modello scelto. Scegline uno dal suo elenco nelle impostazioni delle riunioni.",
+          "endpointContextUnknown": "L’endpoint locale è raggiungibile, ma la sua finestra di contesto non è impostata.",
           "endpointNotConfigured": "Il punto di accesso locale non è ancora configurato.",
           "endpointUnknown": "Lo stato del punto di accesso locale è sconosciuto."
         }

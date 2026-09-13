@@ -1748,12 +1748,21 @@
         "status": {
           "checking": "Comprobando el motor local…",
           "appleAvailable": "Apple Intelligence está disponible.",
-          "appleUnavailable": "Apple Intelligence no está disponible en este Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence está desactivado en este Mac.",
+            "model_not_ready": "Apple Intelligence todavía está descargando su modelo.",
+            "device_not_eligible": "Apple Intelligence no puede ejecutarse en este Mac.",
+            "os_too_old": "Apple Intelligence necesita macOS 26 o posterior.",
+            "unknown": "Apple Intelligence no está disponible en este Mac."
+          },
           "endpointReachable": "El punto final local está disponible con {{count}} modelo(s).",
           "endpointUnreachable": "El endpoint local no está disponible.",
           "endpointInvalid": "La dirección del endpoint local no es válida.",
           "endpointInvalidResponse": "El endpoint local devolvió una respuesta no válida.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "El endpoint local está disponible. Elige un modelo en los ajustes de reuniones.",
+          "endpointNoModels": "El endpoint local está disponible, pero no ofrece ningún modelo para elegir.",
+          "endpointModelNotServed": "El endpoint local está disponible, pero no ofrece el modelo elegido. Elige uno de su lista en los ajustes de reuniones.",
+          "endpointContextUnknown": "El endpoint local está disponible, pero su ventana de contexto no está configurada.",
           "endpointNotConfigured": "El endpoint local aún no está configurado.",
           "endpointUnknown": "Se desconoce el estado del endpoint local."
         }

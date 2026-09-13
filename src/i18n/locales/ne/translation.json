@@ -1741,12 +1741,21 @@
         "status": {
           "checking": "स्थानीय इन्जिन जाँच गर्दै…",
           "appleAvailable": "Apple Intelligence उपलब्ध छ।",
-          "appleUnavailable": "यस Mac मा Apple Intelligence उपलब्ध छैन।",
+          "apple": {
+            "not_enabled": "यस Mac मा Apple Intelligence बन्द छ।",
+            "model_not_ready": "Apple Intelligence ले अझै आफ्नो मोडेल डाउनलोड गर्दैछ।",
+            "device_not_eligible": "यस Mac मा Apple Intelligence चल्न सक्दैन।",
+            "os_too_old": "Apple Intelligence लाई macOS 26 वा नयाँ संस्करण चाहिन्छ।",
+            "unknown": "यस Mac मा Apple Intelligence उपलब्ध छैन।"
+          },
           "endpointReachable": "स्थानीय endpoint मा {{count}} मोडेल उपलब्ध छन्।",
           "endpointUnreachable": "स्थानीय एन्डपोइन्ट पहुँचयोग्य छैन।",
           "endpointInvalid": "स्थानीय एन्डपोइन्टको ठेगाना अमान्य छ।",
           "endpointInvalidResponse": "स्थानीय एन्डपोइन्टले अमान्य प्रतिक्रिया फर्कायो।",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "स्थानीय एन्डपोइन्ट पहुँचयोग्य छ। बैठक सेटिङमा एउटा मोडेल छान्नुहोस्।",
+          "endpointNoModels": "स्थानीय एन्डपोइन्ट पहुँचयोग्य छ, तर छान्नका लागि कुनै मोडेल देखाउँदैन।",
+          "endpointModelNotServed": "स्थानीय एन्डपोइन्ट पहुँचयोग्य छ, तर छानिएको मोडेल उपलब्ध गराउँदैन। बैठक सेटिङमा यसको सूचीबाट एउटा मोडेल छान्नुहोस्।",
+          "endpointContextUnknown": "स्थानीय एन्डपोइन्ट पहुँचयोग्य छ, तर यसको कन्टेक्स्ट विन्डो सेट गरिएको छैन।",
           "endpointNotConfigured": "स्थानीय एन्डपोइन्ट अझै कन्फिगर गरिएको छैन।",
           "endpointUnknown": "स्थानीय एन्डपोइन्टको स्थिति अज्ञात छ।"
         }

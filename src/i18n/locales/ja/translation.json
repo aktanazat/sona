@@ -1734,12 +1734,21 @@
         "status": {
           "checking": "ローカルエンジンを確認中…",
           "appleAvailable": "Apple Intelligence は利用できます。",
-          "appleUnavailable": "この Mac では Apple Intelligence を利用できません。",
+          "apple": {
+            "not_enabled": "この Mac では Apple Intelligence がオフになっています。",
+            "model_not_ready": "Apple Intelligence はまだモデルをダウンロード中です。",
+            "device_not_eligible": "この Mac では Apple Intelligence を実行できません。",
+            "os_too_old": "Apple Intelligence には macOS 26 以降が必要です。",
+            "unknown": "この Mac では Apple Intelligence を利用できません。"
+          },
           "endpointReachable": "ローカルエンドポイントに {{count}} 個のモデルがあります。",
           "endpointUnreachable": "ローカルエンドポイントに接続できません。",
           "endpointInvalid": "ローカルエンドポイントのアドレスが無効です。",
           "endpointInvalidResponse": "ローカルエンドポイントが無効な応答を返しました。",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "ローカルエンドポイントに接続できます。ミーティング設定でモデルを選んでください。",
+          "endpointNoModels": "ローカルエンドポイントに接続できますが、選べるモデルがありません。",
+          "endpointModelNotServed": "ローカルエンドポイントに接続できますが、選択したモデルを提供していません。ミーティング設定で一覧にあるモデルを選んでください。",
+          "endpointContextUnknown": "ローカルエンドポイントに接続できますが、コンテキストウィンドウが設定されていません。",
           "endpointNotConfigured": "ローカルエンドポイントはまだ設定されていません。",
           "endpointUnknown": "ローカルエンドポイントの状態は不明です。"
         }

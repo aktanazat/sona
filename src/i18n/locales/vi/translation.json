@@ -1734,12 +1734,21 @@
         "status": {
           "checking": "Đang kiểm tra công cụ cục bộ…",
           "appleAvailable": "Apple Intelligence khả dụng.",
-          "appleUnavailable": "Apple Intelligence không khả dụng trên máy Mac này.",
+          "apple": {
+            "not_enabled": "Apple Intelligence đang tắt trên máy Mac này.",
+            "model_not_ready": "Apple Intelligence vẫn đang tải mô hình của nó.",
+            "device_not_eligible": "Apple Intelligence không thể chạy trên máy Mac này.",
+            "os_too_old": "Apple Intelligence cần macOS 26 trở lên.",
+            "unknown": "Apple Intelligence không khả dụng trên máy Mac này."
+          },
           "endpointReachable": "Điểm cuối cục bộ có thể truy cập với {{count}} mô hình.",
           "endpointUnreachable": "Không thể truy cập điểm cuối cục bộ.",
           "endpointInvalid": "Địa chỉ điểm cuối cục bộ không hợp lệ.",
           "endpointInvalidResponse": "Điểm cuối cục bộ trả về phản hồi không hợp lệ.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Có thể truy cập điểm cuối cục bộ. Hãy chọn một mô hình trong cài đặt cuộc họp.",
+          "endpointNoModels": "Có thể truy cập điểm cuối cục bộ, nhưng nó không đưa ra mô hình nào để chọn.",
+          "endpointModelNotServed": "Có thể truy cập điểm cuối cục bộ, nhưng nó không cung cấp mô hình đã chọn. Hãy chọn một mô hình trong danh sách của nó ở cài đặt cuộc họp.",
+          "endpointContextUnknown": "Có thể truy cập điểm cuối cục bộ, nhưng cửa sổ ngữ cảnh của nó chưa được đặt.",
           "endpointNotConfigured": "Điểm cuối cục bộ chưa được cấu hình.",
           "endpointUnknown": "Trạng thái điểm cuối cục bộ không xác định."
         }

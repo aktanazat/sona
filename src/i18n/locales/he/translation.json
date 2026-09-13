@@ -1748,12 +1748,21 @@
         "status": {
           "checking": "בודק את המנוע המקומי…",
           "appleAvailable": "Apple Intelligence זמין.",
-          "appleUnavailable": "Apple Intelligence אינו זמין ב-Mac הזה.",
+          "apple": {
+            "not_enabled": "Apple Intelligence כבוי ב-Mac הזה.",
+            "model_not_ready": "Apple Intelligence עדיין מוריד את המודל שלו.",
+            "device_not_eligible": "Apple Intelligence לא יכול לפעול ב-Mac הזה.",
+            "os_too_old": "Apple Intelligence דורש macOS 26 ומעלה.",
+            "unknown": "Apple Intelligence אינו זמין ב-Mac הזה."
+          },
           "endpointReachable": "נקודת הקצה המקומית נגישה עם {{count}} מודלים.",
           "endpointUnreachable": "נקודת הקצה המקומית אינה נגישה.",
           "endpointInvalid": "כתובת נקודת הקצה המקומית אינה חוקית.",
           "endpointInvalidResponse": "נקודת הקצה המקומית החזירה תגובה לא חוקית.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "נקודת הקצה המקומית נגישה. יש לבחור מודל בהגדרות הפגישות.",
+          "endpointNoModels": "נקודת הקצה המקומית נגישה, אך אינה מציעה מודלים לבחירה.",
+          "endpointModelNotServed": "נקודת הקצה המקומית נגישה, אך אינה מציעה את המודל שנבחר. יש לבחור מודל מהרשימה שלה בהגדרות הפגישות.",
+          "endpointContextUnknown": "נקודת הקצה המקומית נגישה, אך חלון ההקשר שלה אינו מוגדר.",
           "endpointNotConfigured": "נקודת הקצה המקומית עדיין לא מוגדרת.",
           "endpointUnknown": "מצב נקודת הקצה המקומית אינו ידוע."
         }

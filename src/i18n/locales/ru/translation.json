@@ -1755,12 +1755,21 @@
         "status": {
           "checking": "Проверяем локальный движок…",
           "appleAvailable": "Apple Intelligence доступна.",
-          "appleUnavailable": "Apple Intelligence недоступна на этом Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence выключена на этом Mac.",
+            "model_not_ready": "Apple Intelligence всё ещё загружает свою модель.",
+            "device_not_eligible": "Apple Intelligence не может работать на этом Mac.",
+            "os_too_old": "Apple Intelligence требует macOS 26 или новее.",
+            "unknown": "Apple Intelligence недоступна на этом Mac."
+          },
           "endpointReachable": "Локальная конечная точка доступна, моделей: {{count}}.",
           "endpointUnreachable": "Локальная конечная точка недоступна.",
           "endpointInvalid": "Адрес локальной конечной точки недействителен.",
           "endpointInvalidResponse": "Локальная конечная точка вернула недопустимый ответ.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Локальная конечная точка доступна. Выберите модель в настройках встреч.",
+          "endpointNoModels": "Локальная конечная точка доступна, но не предлагает моделей для выбора.",
+          "endpointModelNotServed": "Локальная конечная точка доступна, но не предлагает выбранную модель. Выберите модель из её списка в настройках встреч.",
+          "endpointContextUnknown": "Локальная конечная точка доступна, но её контекстное окно не задано.",
           "endpointNotConfigured": "Локальная конечная точка еще не настроена.",
           "endpointUnknown": "Состояние локальной конечной точки неизвестно."
         }

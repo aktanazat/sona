@@ -131,6 +131,16 @@ const DYNAMIC_KEYS = {
     "meeting_activity.name",
   ],
   "settings.workflows.status": ["ok", "failed", "skipped"],
+  /* `MeetingRemoteIntelligence` names the Apple Intelligence blocker the core
+   * reports, one sentence per reason. The Swift shell answers the same five
+   * reasons with its own copy, which also says what to do about each. */
+  "settings.meetings.localEngine.status.apple": [
+    "not_enabled",
+    "model_not_ready",
+    "device_not_eligible",
+    "os_too_old",
+    "unknown",
+  ],
   /* The five-tab mode editor is gone: one screen plus one Advanced
    * disclosure, so `settings.modes.tabs` has no call site left. */
   "settings.modes.views": ["modes", "vocabulary"],

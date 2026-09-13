@@ -1755,12 +1755,21 @@
         "status": {
           "checking": "Sprawdzanie lokalnego silnika…",
           "appleAvailable": "Apple Intelligence jest dostępne.",
-          "appleUnavailable": "Apple Intelligence nie jest dostępne na tym Macu.",
+          "apple": {
+            "not_enabled": "Apple Intelligence jest wyłączone na tym Macu.",
+            "model_not_ready": "Apple Intelligence wciąż pobiera swój model.",
+            "device_not_eligible": "Apple Intelligence nie może działać na tym Macu.",
+            "os_too_old": "Apple Intelligence wymaga systemu macOS 26 lub nowszego.",
+            "unknown": "Apple Intelligence nie jest dostępne na tym Macu."
+          },
           "endpointReachable": "Lokalny punkt końcowy jest dostępny; modeli: {{count}}.",
           "endpointUnreachable": "Lokalny punkt końcowy jest nieosiągalny.",
           "endpointInvalid": "Adres lokalnego punktu końcowego jest nieprawidłowy.",
           "endpointInvalidResponse": "Lokalny punkt końcowy zwrócił nieprawidłową odpowiedź.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Lokalny punkt końcowy jest dostępny. Wybierz model w ustawieniach spotkań.",
+          "endpointNoModels": "Lokalny punkt końcowy jest dostępny, ale nie udostępnia żadnych modeli do wyboru.",
+          "endpointModelNotServed": "Lokalny punkt końcowy jest dostępny, ale nie udostępnia wybranego modelu. Wybierz model z jego listy w ustawieniach spotkań.",
+          "endpointContextUnknown": "Lokalny punkt końcowy jest dostępny, ale jego okno kontekstu nie jest ustawione.",
           "endpointNotConfigured": "Lokalny punkt końcowy nie jest jeszcze skonfigurowany.",
           "endpointUnknown": "Stan lokalnego punktu końcowego jest nieznany."
         }

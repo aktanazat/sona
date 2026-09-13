@@ -1741,12 +1741,21 @@
         "status": {
           "checking": "Проверка на локалния енджин…",
           "appleAvailable": "Apple Intelligence е наличен.",
-          "appleUnavailable": "Apple Intelligence не е наличен на този Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence е изключен на този Mac.",
+            "model_not_ready": "Apple Intelligence все още изтегля своя модел.",
+            "device_not_eligible": "Apple Intelligence не може да работи на този Mac.",
+            "os_too_old": "Apple Intelligence изисква macOS 26 или по-нова версия.",
+            "unknown": "Apple Intelligence не е наличен на този Mac."
+          },
           "endpointReachable": "Локалната крайна точка е достъпна с {{count}} модела.",
           "endpointUnreachable": "Локалната крайна точка не е достъпна.",
           "endpointInvalid": "Адресът на локалната крайна точка е невалиден.",
           "endpointInvalidResponse": "Локалната крайна точка върна невалиден отговор.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Локалната крайна точка е достъпна. Изберете модел в настройките за срещи.",
+          "endpointNoModels": "Локалната крайна точка е достъпна, но не предлага модели за избор.",
+          "endpointModelNotServed": "Локалната крайна точка е достъпна, но не предлага избрания модел. Изберете модел от списъка ѝ в настройките за срещи.",
+          "endpointContextUnknown": "Локалната крайна точка е достъпна, но контекстният ѝ прозорец не е зададен.",
           "endpointNotConfigured": "Локалната крайна точка все още не е конфигурирана.",
           "endpointUnknown": "Състоянието на локалната крайна точка е неизвестно."
         }

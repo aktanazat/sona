@@ -1741,12 +1741,21 @@
         "status": {
           "checking": "Kontrollerar lokal motor…",
           "appleAvailable": "Apple Intelligence är tillgängligt.",
-          "appleUnavailable": "Apple Intelligence är inte tillgängligt på denna Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence är avstängt på denna Mac.",
+            "model_not_ready": "Apple Intelligence laddar fortfarande ner sin modell.",
+            "device_not_eligible": "Apple Intelligence kan inte köras på denna Mac.",
+            "os_too_old": "Apple Intelligence kräver macOS 26 eller senare.",
+            "unknown": "Apple Intelligence är inte tillgängligt på denna Mac."
+          },
           "endpointReachable": "Lokal slutpunkt är nåbar med {{count}} modell(er).",
           "endpointUnreachable": "Den lokala slutpunkten kan inte nås.",
           "endpointInvalid": "Adressen till den lokala slutpunkten är ogiltig.",
           "endpointInvalidResponse": "Den lokala slutpunkten returnerade ett ogiltigt svar.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Den lokala slutpunkten kan nås. Välj en modell i mötesinställningarna.",
+          "endpointNoModels": "Den lokala slutpunkten kan nås, men den erbjuder inga modeller att välja bland.",
+          "endpointModelNotServed": "Den lokala slutpunkten kan nås, men den erbjuder inte den valda modellen. Välj en från dess lista i mötesinställningarna.",
+          "endpointContextUnknown": "Den lokala slutpunkten kan nås, men dess kontextfönster är inte angivet.",
           "endpointNotConfigured": "Den lokala slutpunkten är inte konfigurerad ännu.",
           "endpointUnknown": "Statusen för den lokala slutpunkten är okänd."
         }

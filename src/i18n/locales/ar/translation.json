@@ -1769,12 +1769,21 @@
         "status": {
           "checking": "جارٍ التحقق من المحرك المحلي…",
           "appleAvailable": "Apple Intelligence متاح.",
-          "appleUnavailable": "Apple Intelligence غير متاح على هذا الـ Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence مُعطَّل على هذا الـ Mac.",
+            "model_not_ready": "لا يزال Apple Intelligence يُنزّل نموذجه.",
+            "device_not_eligible": "لا يمكن تشغيل Apple Intelligence على هذا الـ Mac.",
+            "os_too_old": "يتطلب Apple Intelligence نظام macOS 26 أو أحدث.",
+            "unknown": "Apple Intelligence غير متاح على هذا الـ Mac."
+          },
           "endpointReachable": "نقطة النهاية المحلية متاحة مع {{count}} من النماذج.",
           "endpointUnreachable": "يتعذر الوصول إلى نقطة النهاية المحلية.",
           "endpointInvalid": "عنوان نقطة النهاية المحلية غير صالح.",
           "endpointInvalidResponse": "أعادت نقطة النهاية المحلية استجابة غير صالحة.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "نقطة النهاية المحلية متاحة. اختر نموذجًا في إعدادات الاجتماعات.",
+          "endpointNoModels": "نقطة النهاية المحلية متاحة، لكنها لا تعرض أي نماذج للاختيار منها.",
+          "endpointModelNotServed": "نقطة النهاية المحلية متاحة، لكنها لا تقدّم النموذج المختار. اختر نموذجًا من قائمتها في إعدادات الاجتماعات.",
+          "endpointContextUnknown": "نقطة النهاية المحلية متاحة، لكن نافذة السياق الخاصة بها غير مضبوطة.",
           "endpointNotConfigured": "لم يتم إعداد نقطة النهاية المحلية بعد.",
           "endpointUnknown": "حالة نقطة النهاية المحلية غير معروفة."
         }

@@ -1741,12 +1741,21 @@
         "status": {
           "checking": "Lokale engine controleren…",
           "appleAvailable": "Apple Intelligence is beschikbaar.",
-          "appleUnavailable": "Apple Intelligence is niet beschikbaar op deze Mac.",
+          "apple": {
+            "not_enabled": "Apple Intelligence staat uit op deze Mac.",
+            "model_not_ready": "Apple Intelligence downloadt zijn model nog.",
+            "device_not_eligible": "Apple Intelligence kan niet op deze Mac draaien.",
+            "os_too_old": "Apple Intelligence vereist macOS 26 of nieuwer.",
+            "unknown": "Apple Intelligence is niet beschikbaar op deze Mac."
+          },
           "endpointReachable": "Lokaal eindpunt is bereikbaar met {{count}} model(len).",
           "endpointUnreachable": "Het lokale eindpunt is niet bereikbaar.",
           "endpointInvalid": "Het adres van het lokale eindpunt is ongeldig.",
           "endpointInvalidResponse": "Het lokale eindpunt gaf een ongeldig antwoord.",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "Het lokale eindpunt is bereikbaar. Kies een model in de vergaderinstellingen.",
+          "endpointNoModels": "Het lokale eindpunt is bereikbaar, maar biedt geen modellen om uit te kiezen.",
+          "endpointModelNotServed": "Het lokale eindpunt is bereikbaar, maar biedt het gekozen model niet aan. Kies er een uit zijn lijst in de vergaderinstellingen.",
+          "endpointContextUnknown": "Het lokale eindpunt is bereikbaar, maar het contextvenster is niet ingesteld.",
           "endpointNotConfigured": "Het lokale eindpunt is nog niet geconfigureerd.",
           "endpointUnknown": "De status van het lokale eindpunt is onbekend."
         }

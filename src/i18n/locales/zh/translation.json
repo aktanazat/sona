@@ -1734,12 +1734,21 @@
         "status": {
           "checking": "正在检查本地引擎…",
           "appleAvailable": "Apple Intelligence 可用。",
-          "appleUnavailable": "此 Mac 无法使用 Apple Intelligence。",
+          "apple": {
+            "not_enabled": "此 Mac 上的 Apple Intelligence 已关闭。",
+            "model_not_ready": "Apple Intelligence 仍在下载其模型。",
+            "device_not_eligible": "此 Mac 无法运行 Apple Intelligence。",
+            "os_too_old": "Apple Intelligence 需要 macOS 26 或更高版本。",
+            "unknown": "此 Mac 无法使用 Apple Intelligence。"
+          },
           "endpointReachable": "本地端点可用，提供 {{count}} 个模型。",
           "endpointUnreachable": "本地端点无法访问。",
           "endpointInvalid": "本地端点地址无效。",
           "endpointInvalidResponse": "本地端点返回了无效响应。",
-          "endpointContextUnknown": "Local endpoint is reachable, but its context window is not configured.",
+          "endpointModelNotSelected": "本地端点可用。请在会议设置中选择一个模型。",
+          "endpointNoModels": "本地端点可用，但没有可供选择的模型。",
+          "endpointModelNotServed": "本地端点可用，但未提供所选模型。请在会议设置中从其列表选择一个模型。",
+          "endpointContextUnknown": "本地端点可用，但尚未设置其上下文窗口。",
           "endpointNotConfigured": "本地端点尚未配置。",
           "endpointUnknown": "本地端点状态未知。"
         }
