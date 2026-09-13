@@ -18,7 +18,6 @@ final class CloudSyncStore {
         case bootstrap
         case recover
         case offer
-        case approveOffer
         case approveCandidate
         case accept
         case pause
@@ -43,20 +42,27 @@ final class CloudSyncStore {
 
     /// Shown once and never again: the core does not store it.
     private(set) var recoveryCode: String?
-    /// The record this Mac minted for another device to read.
+    /// The record this Mac minted for the vault's owner to approve. Joining
+    /// is finished with this same record once the owner has done so.
     private(set) var offer: PairingOffer?
     /// The record another device showed, and this Mac's own reading of it.
     private(set) var candidate: PairingCandidate = .empty
     private(set) var candidateOffer = ""
     private(set) var bundle: CloudShareFile?
     private(set) var browserShare: CloudShareLink?
+    /// Every share of each meeting whose row has been opened, keyed by
+    /// session id. Reloaded whenever the core says something changed, so a
+    /// revocation reads as revoking until the server has acknowledged it.
+    private(set) var shares: [String: [CloudShareSummary]] = [:]
     private(set) var importedSessionId: String?
+    /// True while the panel asks whether to replace the vault this Mac already
+    /// belongs to with the one a recovery code named.
+    private(set) var recoveryConflict = false
 
     var endpoint = ""
     var bootstrapSecret = ""
     var recoveryInput = ""
     var vaultId = ""
-    var receivedOffer = ""
     /// A week out, the default the old panel opened with.
     var shareExpiry = Date().addingTimeInterval(7 * 24 * 60 * 60)
 
@@ -102,13 +108,16 @@ final class CloudSyncStore {
 
     // MARK: reading
 
-    /// Everything the panel shows, in one pass.
+    /// Everything the panel shows, in one pass. Open rows' shares come last:
+    /// a revocation the server just acknowledged lands here.
     func refresh() async {
         refreshTicket += 1
         let ticket = refreshTicket
         await loadOverview(ticket)
         await loadService(ticket)
         await loadMeetings(ticket)
+        guard ticket == refreshTicket else { return }
+        await reloadShares()
     }
 
     private func loadOverview(_ ticket: Int) async {
@@ -169,7 +178,7 @@ final class CloudSyncStore {
             uniquingKeysWith: { first, _ in first })
     }
 
-    /// One meeting, read again: the row that just opened.
+    /// One meeting, read again: the row that just opened, and its shares.
     func refreshStatus(_ sessionId: String) async {
         do {
             let status: CloudSyncMeetingStatus = try await core.request(
@@ -177,6 +186,27 @@ final class CloudSyncStore {
             patch(status)
         } catch let failure {
             resourceError = reason(failure)
+        }
+        await loadShares(sessionId)
+    }
+
+    /// The shares of one meeting, with where each stands. A refusal keeps the
+    /// last list rather than emptying a row that was showing something.
+    private func loadShares(_ sessionId: String) async {
+        do {
+            let result: [CloudShareSummary] = try await core.request(
+                "cloud_share_list",
+                CloudSyncRequest(request: CloudShareListBody(sessionId: sessionId)))
+            shares[sessionId] = result
+        } catch let failure {
+            resourceError = reason(failure)
+        }
+    }
+
+    /// Every open row's shares, read again after a change.
+    private func reloadShares() async {
+        for sessionId in shares.keys.sorted() {
+            await loadShares(sessionId)
         }
     }
 
@@ -197,18 +227,32 @@ final class CloudSyncStore {
         }
     }
 
-    func recover() async {
+    /// Joins the vault a recovery code names. The core refuses a code for a
+    /// vault other than the one this Mac already belongs to; that refusal
+    /// becomes a question here, and `replace` is the reader's answer. Only
+    /// then does the core swap the current vault's stored root.
+    func recover(replace: Bool = false) async {
         let address = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !address.isEmpty, !recoveryInput.isEmpty else { return }
         let code = recoveryInput
+        recoveryConflict = false
         await call(.recover) {
-            let result: CloudSyncOverview = try await core.request(
-                "cloud_sync_recover",
-                CloudSyncRequest(request: CloudSyncRecoveryBody(endpoint: address, recoveryCode: code)))
-            recoveryInput = ""
-            overview = result
-            await refresh()
+            do {
+                let result: CloudSyncOverview = try await core.request(
+                    "cloud_sync_recover",
+                    CloudSyncRequest(request: CloudSyncRecoveryBody(
+                        endpoint: address, recoveryCode: code, replace: replace)))
+                recoveryInput = ""
+                overview = result
+                await refresh()
+            } catch let failure where !replace && kind(failure) == .conflict {
+                recoveryConflict = true
+            }
         }
+    }
+
+    func dismissRecoveryConflict() {
+        recoveryConflict = false
     }
 
     func togglePaused() async {
@@ -223,7 +267,10 @@ final class CloudSyncStore {
 
     // MARK: pairing
 
-    /// This Mac's own offer, for a device that will read it off this screen.
+    /// Joining, step one. This Mac mints its own offer for the given vault
+    /// and shows it; the device that owns the vault approves it, and step two
+    /// (`finishJoin`) collects the vault root that approval left on the
+    /// server. The offer is this Mac's, so it is kept for that second step.
     func createOffer() async {
         let address = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let vault = vaultId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -236,15 +283,35 @@ final class CloudSyncStore {
         }
     }
 
-    /// Hands the vault root to the device the offer on screen names.
-    func approveOffer() async {
-        guard let current = offer else { return }
-        await call(.approveOffer) {
-            let result: CloudSyncOverview = try await core.request(
-                "cloud_sync_pairing_approve",
-                CloudSyncRequest(request: PairingApproveBody(offer: current)))
-            overview = result
-            await refresh()
+    /// Joining, step two: the vault's owner has approved this Mac's offer,
+    /// so the core fetches the sealed vault root the approval left for this
+    /// device and turns sync on. Until the owner has approved, the server
+    /// has no envelope for this device and the core reports an integrity
+    /// failure; on this step that means "not yet", so it is said that way.
+    func finishJoin() async {
+        guard let own = offer else { return }
+        let address = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { return }
+        await call(.accept) {
+            do {
+                let result: CloudSyncOverview = try await core.request(
+                    "cloud_sync_pairing_accept",
+                    CloudSyncRequest(request: PairingAcceptBody(endpoint: address, offer: own)))
+                offer = nil
+                overview = result
+                await refresh()
+            } catch let failure as CoreError
+                where failure.remote(as: CloudSyncErrorKind.self) == .integrityFailure
+            {
+                throw CloudSyncStore.JoinNotApproved()
+            }
+        }
+    }
+
+    /// The one refusal `finishJoin` reads differently from the core's line.
+    private struct JoinNotApproved: LocalizedError {
+        var errorDescription: String? {
+            "That device has not approved this offer yet, or the offer expired. Approve it there, then finish here."
         }
     }
 
@@ -289,26 +356,6 @@ final class CloudSyncStore {
             candidateRead += 1
             candidateOffer = ""
             candidate = .approved
-            overview = result
-            await refresh()
-        }
-    }
-
-    /// Takes an offer another device minted, so this Mac joins that vault.
-    func acceptOffer() async {
-        let address = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !address.isEmpty, !receivedOffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
-        }
-        guard let parsed = PairingOffer.parse(receivedOffer) else {
-            commandError = CloudSyncStore.invalidOffer
-            return
-        }
-        await call(.accept) {
-            let result: CloudSyncOverview = try await core.request(
-                "cloud_sync_pairing_accept",
-                CloudSyncRequest(request: PairingAcceptBody(endpoint: address, offer: parsed)))
-            receivedOffer = ""
             overview = result
             await refresh()
         }
@@ -379,14 +426,18 @@ final class CloudSyncStore {
         }
     }
 
-    /// Kills a link other people already hold. The view confirms first.
-    func revokeBrowserShare() async {
-        guard let link = browserShare else { return }
+    /// Asks the server to stop serving a share other people already hold. The
+    /// view confirms first. The row reads as revoking until the server has
+    /// acknowledged it, so the reload reads the row's shares rather than
+    /// assuming the link is gone.
+    func revoke(_ shareId: String) async {
         await call(.revoke) {
             let result: CloudSyncOverview = try await core.request(
                 "cloud_share_revoke",
-                CloudSyncRequest(request: CloudShareRevokeBody(shareId: link.result.shareId)))
-            browserShare = nil
+                CloudSyncRequest(request: CloudShareRevokeBody(shareId: shareId)))
+            if browserShare?.result.shareId == shareId {
+                browserShare = nil
+            }
             overview = result
             await refresh()
         }
@@ -394,7 +445,6 @@ final class CloudSyncStore {
 
     // MARK: plumbing
 
-    private static let invalidOffer = "The pairing offer is incomplete or invalid."
     private static let pastExpiry = "Choose a future expiry."
 
     /// The one extension the core reads and writes. A type the system has
@@ -452,10 +502,12 @@ final class CloudSyncStore {
     /// The core's own reason for refusing: the command's typed error where it
     /// has one, the bridge's message otherwise.
     private func reason(_ failure: Error) -> String {
-        if let failure = failure as? CoreError, let kind = failure.remote(as: CloudSyncErrorKind.self) {
-            return kind.guidance
-        }
-        return failure.localizedDescription
+        kind(failure)?.guidance ?? failure.localizedDescription
+    }
+
+    /// The command's typed refusal, when it has one.
+    private func kind(_ failure: Error) -> CloudSyncErrorKind? {
+        (failure as? CoreError)?.remote(as: CloudSyncErrorKind.self)
     }
 
     private func patch(_ status: CloudSyncMeetingStatus) {
@@ -506,10 +558,12 @@ struct CloudSyncBootstrapBody: Encodable {
 struct CloudSyncRecoveryBody: Encodable {
     let endpoint: String
     let recoveryCode: String
+    let replace: Bool
 
     enum CodingKeys: String, CodingKey {
         case endpoint
         case recoveryCode = "recovery_code"
+        case replace
     }
 }
 
@@ -569,6 +623,14 @@ struct CloudShareRevokeBody: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case shareId = "share_id"
+    }
+}
+
+struct CloudShareListBody: Encodable {
+    let sessionId: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
     }
 }
 

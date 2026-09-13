@@ -241,6 +241,73 @@ struct CloudShareLink {
     let result: CloudShareBrowserResult
 }
 
+/// One share of a meeting, without its link material: `CloudShareSummary`.
+struct CloudShareSummary: Decodable, Identifiable, Equatable {
+    enum Kind: String, Decodable {
+        case file
+        case browser
+
+        var word: String {
+            switch self {
+            case .file: ".sona file"
+            case .browser: "Browser link"
+            }
+        }
+    }
+
+    /// `CloudShareLifecycle`. Revoking is the state the row must not hide:
+    /// the reader has asked, and the server has not yet stopped serving it.
+    enum Lifecycle: String, Decodable {
+        case uploading
+        case active
+        case revoking
+        case revoked
+        case failed
+
+        var word: String {
+            switch self {
+            case .uploading: "Uploading"
+            case .active: "Active"
+            case .revoking: "Revoking…"
+            case .revoked: "Revoked"
+            case .failed: "Failed"
+            }
+        }
+
+        var tone: Color {
+            switch self {
+            case .uploading, .revoking: Theme.accent
+            case .active: Theme.inkSecondary
+            case .revoked: Theme.inkTertiary
+            case .failed: Theme.live
+            }
+        }
+
+        /// A share the reader can still take back.
+        var revocable: Bool { self == .active || self == .uploading }
+    }
+
+    let shareId: String
+    let kind: Kind
+    let expiresAtUtcMs: Int64
+    let state: Lifecycle
+    let revokedAtUtcMs: Int64?
+
+    var id: String { shareId }
+
+    /// The one line under the kind: when it ends, or when it was taken back.
+    var detail: String {
+        switch state {
+        case .revoking:
+            "Revoked here. The link may still open until the server confirms."
+        case .revoked:
+            revokedAtUtcMs.map { "Revoked \(CloudSyncClock.moment($0))" } ?? "Revoked"
+        case .uploading, .active, .failed:
+            "Expires \(CloudSyncClock.moment(expiresAtUtcMs))"
+        }
+    }
+}
+
 /// The candidate record a phone shows and this Mac approves:
 /// `CloudPairingOffer`. `mobile/Shared/Pairing.swift` mints the same shape.
 struct PairingOffer: Codable, Equatable {

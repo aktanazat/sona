@@ -17,6 +17,21 @@ struct CloudSyncView: View {
             tasks
             meetings
         }
+        .sheet(isPresented: replacingVault) {
+            CloudVaultReplaceSheet(busy: store.busy) {
+                Task { await store.recover(replace: true) }
+            } cancel: {
+                store.dismissRecoveryConflict()
+            }
+        }
+    }
+
+    /// The sheet's own switch: on while the core has asked, off by either
+    /// button, and a swipe away counts as cancel.
+    private var replacingVault: Binding<Bool> {
+        Binding(
+            get: { store.recoveryConflict },
+            set: { shown in if !shown { store.dismissRecoveryConflict() } })
     }
 
     // MARK: the account
@@ -112,11 +127,20 @@ struct CloudSyncView: View {
                 ) {
                     recoveryFields
                 }
-                CloudSyncDisclosure(
-                    label: "Pair a device",
-                    detail: "Add an iPhone or Watch to this vault, or join a vault another device owns."
-                ) {
-                    pairingFields
+                if store.overview?.enabled == true {
+                    CloudSyncDisclosure(
+                        label: "Add a device to this vault",
+                        detail: "Approve the code an iPhone, Watch, or another Mac shows while it joins."
+                    ) {
+                        PairingApproveField(store: store)
+                    }
+                } else {
+                    CloudSyncDisclosure(
+                        label: "Join a vault another device owns",
+                        detail: "This Mac shows a code, the vault's device approves it, and this Mac finishes here."
+                    ) {
+                        joinFields
+                    }
                 }
             }
         }
@@ -154,39 +178,28 @@ struct CloudSyncView: View {
         }
     }
 
+    /// The joining Mac's side of pairing, in the order the protocol runs it:
+    /// mint an offer for the vault, show it to the device that owns the
+    /// vault, then collect the root that device's approval left behind.
     @ViewBuilder
-    private var pairingFields: some View {
+    private var joinFields: some View {
         @Bindable var store = store
         CloudSyncFieldRow(label: "Server address") {
             InputField(prompt: "https://sona.example.workers.dev", text: $store.endpoint)
         }
         CloudSyncFieldRow(label: "Vault ID") {
-            InputField(prompt: "Vault ID", text: $store.vaultId)
+            InputField(prompt: "From the device that owns the vault", text: $store.vaultId)
         }
         CloudSyncTaskAction {
-            Button("Create pairing offer") { Task { await store.createOffer() } }
-                .buttonStyle(.secondary)
-                .disabled(store.busy || blank(store.endpoint) || blank(store.vaultId))
+            Button(store.offer == nil ? "Create pairing offer" : "Create a new offer") {
+                Task { await store.createOffer() }
+            }
+            .buttonStyle(.secondary)
+            .disabled(store.busy || blank(store.endpoint) || blank(store.vaultId))
         }
         if let offer = store.offer {
             PairingOfferCard(offer: offer, busy: store.busy) {
-                Task { await store.approveOffer() }
-            }
-        }
-        PairingApproveField(store: store)
-        CloudSyncBlock(label: "Offer from another device") {
-            VStack(alignment: .leading, spacing: 10) {
-                CloudSyncCodeField(
-                    text: $store.receivedOffer,
-                    prompt: "Paste the offer that device created")
-                HStack(spacing: 12) {
-                    Button("Paste") { store.receivedOffer = CloudSyncClipboard.text() }
-                        .buttonStyle(.quiet)
-                    Spacer()
-                    Button("Accept offer") { Task { await store.acceptOffer() } }
-                        .buttonStyle(.secondary)
-                        .disabled(store.busy || blank(store.endpoint) || blank(store.receivedOffer))
-                }
+                Task { await store.finishJoin() }
             }
         }
     }
@@ -238,7 +251,8 @@ private struct CloudSyncMeetingRow: View {
     let status: CloudSyncMeetingStatus
     let openMeeting: (String) -> Void
     @State private var open = false
-    @State private var confirmingRevoke = false
+    /// The share the reader is about to take back, while the sheet asks.
+    @State private var revoking: CloudShareSummary?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -260,12 +274,12 @@ private struct CloudSyncMeetingRow: View {
                 share
             }
         }
-        .sheet(isPresented: $confirmingRevoke) {
-            CloudShareRevokeSheet(busy: store.busy) {
-                confirmingRevoke = false
-                Task { await store.revokeBrowserShare() }
+        .sheet(item: $revoking) { share in
+            CloudShareRevokeSheet(share: share, busy: store.busy) {
+                revoking = nil
+                Task { await store.revoke(share.shareId) }
             } cancel: {
-                confirmingRevoke = false
+                revoking = nil
             }
         }
     }
@@ -336,8 +350,11 @@ private struct CloudSyncMeetingRow: View {
                 tone: Theme.inkSecondary)
         }
         if let link = store.browserShare, link.sessionId == status.sessionId {
-            CloudShareLinkBlock(link: link.result, busy: store.busy) {
-                confirmingRevoke = true
+            CloudShareLinkBlock(link: link.result)
+        }
+        if let shares = store.shares[status.sessionId], !shares.isEmpty {
+            CloudShareList(shares: shares, busy: store.busy, paused: store.overview?.paused == true) { share in
+                revoking = share
             }
         }
     }
@@ -350,12 +367,10 @@ private struct CloudSyncMeetingRow: View {
     }
 }
 
-/// The link, what its viewer can see, and the one action here that has to be
-/// confirmed.
+/// The link just made, what its viewer can see, and how to hand it on. Taking
+/// it back happens in the list below, where every share of the meeting sits.
 private struct CloudShareLinkBlock: View {
     let link: CloudShareBrowserResult
-    let busy: Bool
-    let revoke: () -> Void
 
     var body: some View {
         CloudSyncBlock(label: "Browser share") {
@@ -373,27 +388,74 @@ private struct CloudShareLinkBlock: View {
                     Button("Copy link") { CloudSyncClipboard.copy(link.shareUrl) }
                         .buttonStyle(.quiet)
                     Spacer()
-                    Button("Revoke browser share", action: revoke)
-                        .buttonStyle(.secondary)
-                        .disabled(busy)
                 }
             }
         }
     }
 }
 
+/// Every share of the meeting, newest first as the core lists them, with
+/// where each stands. A revoked share stays listed as revoking until the
+/// server has stopped serving it, because until then it still opens.
+private struct CloudShareList: View {
+    let shares: [CloudShareSummary]
+    let busy: Bool
+    /// Sync paused means nothing leaves this Mac, revocations included, and
+    /// a row waiting on the server should say why.
+    let paused: Bool
+    let revoke: (CloudShareSummary) -> Void
+
+    var body: some View {
+        CloudSyncBlock(label: "Shares") {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(shares) { share in
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(share.kind.word).bodyText()
+                            Text(detail(share)).metaText()
+                        }
+                        Spacer()
+                        Text(share.state.word).metaText(share.state.tone)
+                        if share.state.revocable {
+                            Button("Revoke") { revoke(share) }
+                                .buttonStyle(.secondary)
+                                .disabled(busy)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .accessibilityElement(children: .combine)
+                    if share.id != shares.last?.id {
+                        Divider().overlay(Theme.hairline)
+                    }
+                }
+            }
+        }
+    }
+
+    private func detail(_ share: CloudShareSummary) -> String {
+        if share.state == .revoking, paused {
+            return "Revoked here. Resume sync to tell the server; until then the link may still open."
+        }
+        return share.detail
+    }
+}
+
 /// Revoking kills a link other people already hold, and nothing in the button
-/// says so. The dialog states the consequence, so the row does not.
+/// says so. The dialog states the consequence, so the row does not. It does
+/// not promise the cutoff is instant: the server has to hear about it first.
 private struct CloudShareRevokeSheet: View {
+    let share: CloudShareSummary
     let busy: Bool
     let revoke: () -> Void
     let cancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Revoke browser share").headlineText()
-            Text("Anyone holding this link loses access the moment you revoke it.")
-                .bodyText(14, Theme.inkSecondary)
+            Text("Revoke this \(share.kind == .browser ? "link" : "share")?").headlineText()
+            Text(
+                "Anyone holding it loses access once the server confirms. Until then, it may still open."
+            )
+            .bodyText(14, Theme.inkSecondary)
             HStack(spacing: 12) {
                 Spacer()
                 Button("Cancel", action: cancel).buttonStyle(.secondary)
@@ -407,15 +469,46 @@ private struct CloudShareRevokeSheet: View {
     }
 }
 
+// MARK: - recovery
+
+/// A recovery code for a vault this Mac does not belong to. Going ahead swaps
+/// the current vault's only stored key, so the dialog names what is lost
+/// before the button does it.
+private struct CloudVaultReplaceSheet: View {
+    let busy: Bool
+    let replace: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Replace this Mac's vault?").headlineText()
+            Text(
+                "This recovery code belongs to a different vault. Replacing drops this Mac's key to its current vault, so anything synced only there can no longer be read from this Mac. Meetings stored on this Mac stay."
+            )
+            .bodyText(14, Theme.inkSecondary)
+            HStack(spacing: 12) {
+                Spacer()
+                Button("Keep current vault", action: cancel).buttonStyle(.secondary)
+                Button("Replace vault", action: replace).buttonStyle(.primary).disabled(busy)
+            }
+        }
+        .padding(24)
+        .frame(width: 440, alignment: .leading)
+        .background(Theme.page)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
+    }
+}
+
 // MARK: - pairing
 
-/// The record this Mac minted, in both the forms a phone can read it: the
-/// code to scan, and the text to type. The fingerprint beside it is what the
-/// phone must be showing before this offer is approved.
+/// This Mac's own offer, in both the forms the vault's device can read it:
+/// the code to scan, and the text to paste. That device approves it after
+/// checking the fingerprint against this one; then, and only then, the
+/// button below collects the vault root that approval left on the server.
 private struct PairingOfferCard: View {
     let offer: PairingOffer
     let busy: Bool
-    let approve: () -> Void
+    let finish: () -> Void
     @State private var payload = ""
     @State private var code: NSImage?
 
@@ -431,7 +524,9 @@ private struct PairingOfferCard: View {
                         .accessibilityLabel(Text("Pairing code for device \(offer.deviceId)"))
                 }
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Scan this on the device, or type the code below into it.").metaText()
+                    Text("On the device that owns the vault, scan this or paste the code below, check the fingerprint matches, and approve it.")
+                        .metaText()
+                        .fixedSize(horizontal: false, vertical: true)
                     PairingFact(label: "Fingerprint", value: offer.fingerprint)
                     PairingFact(label: "Vault", value: offer.vaultId)
                     PairingFact(label: "Device", value: offer.deviceId)
@@ -443,7 +538,8 @@ private struct PairingOfferCard: View {
                 Button("Copy code") { CloudSyncClipboard.copy(payload) }
                     .buttonStyle(.quiet)
                 Spacer()
-                Button("Approve this offer", action: approve)
+                Text("Once it is approved there:").metaText()
+                Button("Finish joining", action: finish)
                     .buttonStyle(.secondary)
                     .disabled(busy)
             }
