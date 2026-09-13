@@ -63,9 +63,10 @@ use super::{
         CloudConflictResolveRequest, CloudMeetingStatus, CloudObjectState,
         CloudPairingAcceptRequest, CloudPairingApproveRequest, CloudPairingOffer,
         CloudPairingOfferRequest, CloudShareCreateRequest, CloudShareImportRequest,
-        CloudShareImportResult, CloudShareResult, CloudShareRevokeRequest,
-        CloudSyncBootstrapRequest, CloudSyncBootstrapResult, CloudSyncChangedEvent,
-        CloudSyncChangedPayload, CloudSyncErrorKind, CloudSyncOverview, CloudSyncRecoveryRequest,
+        CloudShareImportResult, CloudShareKind, CloudShareLifecycle, CloudShareListRequest,
+        CloudShareResult, CloudShareRevokeRequest, CloudShareSummary, CloudSyncBootstrapRequest,
+        CloudSyncBootstrapResult, CloudSyncChangedEvent, CloudSyncChangedPayload,
+        CloudSyncErrorKind, CloudSyncOverview, CloudSyncRecoveryRequest,
         BROWSER_SHARE_TRUST_DISCLOSURE, CLOUD_SYNC_EVENT_SCHEMA_VERSION,
     },
 };
@@ -875,6 +876,12 @@ impl CloudSyncRuntime {
         })
     }
 
+    /// Joins the vault a recovery code names. The existing vault is read
+    /// first: a code for another vault is refused unless the reader has
+    /// confirmed the replacement, so a pasted code cannot silently swap the
+    /// only stored root of the vault this Mac belongs to. The root is
+    /// replaced only after that check, and if the state write behind it fails
+    /// the previous root is put back, so root and state never disagree.
     pub(crate) async fn recover(
         &self,
         request: CloudSyncRecoveryRequest,
@@ -883,10 +890,6 @@ impl CloudSyncRuntime {
         let endpoint = canonical_endpoint(&request.endpoint)?;
         let recovery = decode_recovery_code(request.recovery_code.trim())
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-        self.secrets
-            .replace_cloud_vault_root(recovery.vault_root)
-            .await
-            .map_err(|_| CloudRuntimeError::SecretUnavailable)?;
         let store = self
             .meetings
             .cloud_store()
@@ -898,6 +901,7 @@ impl CloudSyncRuntime {
                 state.endpoint = endpoint;
                 state
             }
+            Some(_) if !request.replace => return Err(CloudRuntimeError::Conflict),
             Some(_) | None => crate::meeting::store::CloudState {
                 vault_id: recovery.vault_id,
                 device_id: random_opaque_id()?,
@@ -908,7 +912,22 @@ impl CloudSyncRuntime {
                 paused: true,
             },
         };
-        store.upsert_cloud_state(&state).map_err(map_store_error)?;
+        let previous = self
+            .secrets
+            .cloud_sync_keys()
+            .await
+            .map_err(|_| CloudRuntimeError::SecretUnavailable)?;
+        self.secrets
+            .replace_cloud_vault_root(recovery.vault_root)
+            .await
+            .map_err(|_| CloudRuntimeError::SecretUnavailable)?;
+        if let Err(error) = store.upsert_cloud_state(&state) {
+            let _ = self
+                .secrets
+                .replace_cloud_vault_root(*previous.vault_root)
+                .await;
+            return Err(map_store_error(error));
+        }
         self.emit_changed(None, None);
         self.overview().await
     }
@@ -1378,6 +1397,42 @@ impl CloudSyncRuntime {
             Some(CloudObjectState::PendingDeletion),
         );
         self.overview().await
+    }
+
+    /// Every share of one meeting, with where each stands. A revoked share
+    /// reads as revoking until the outbox item carrying the revocation has
+    /// completed: until then the server is still serving the link, and the
+    /// row must not say otherwise.
+    pub(crate) async fn share_list(
+        &self,
+        request: CloudShareListRequest,
+    ) -> Result<Vec<CloudShareSummary>, CloudRuntimeError> {
+        let store = self
+            .meetings
+            .cloud_store()
+            .await
+            .map_err(|_| CloudRuntimeError::SetupRequired)?;
+        let records = store
+            .cloud_shares_for_session(request.session_id)
+            .map_err(map_store_error)?;
+        let mut shares = Vec::with_capacity(records.len());
+        for record in records {
+            let outbox = match &record.outbox_id {
+                Some(outbox_id) => store.cloud_outbox(outbox_id).map_err(map_store_error)?,
+                None => None,
+            };
+            shares.push(CloudShareSummary {
+                share_id: record.share_id,
+                kind: match record.content_kind {
+                    CloudShareContentKind::CapabilityBundle => CloudShareKind::File,
+                    CloudShareContentKind::BrowserMarkdown => CloudShareKind::Browser,
+                },
+                expires_at_utc_ms: record.expires_at_utc_ms,
+                state: share_lifecycle(record.state, outbox.map(|item| item.state)),
+                revoked_at_utc_ms: record.revoked_at_utc_ms,
+            });
+        }
+        Ok(shares)
     }
 
     pub(crate) async fn share_import(
@@ -3358,6 +3413,32 @@ fn map_store_error(_error: StoreError) -> CloudRuntimeError {
     CloudRuntimeError::Storage
 }
 
+/// A share's state as the panel reads it. The local record says "revoked"
+/// the moment the reader asks; whether the server has stopped serving the
+/// link is what the revocation's outbox item says. An item that is still
+/// queued, in flight, or waiting for a retry has not been acknowledged. An
+/// item that was cancelled or has given up never will be, so that reads as
+/// revoking too rather than as done: the link may still open.
+fn share_lifecycle(
+    state: CloudShareState,
+    outbox: Option<CloudOutboxState>,
+) -> CloudShareLifecycle {
+    match state {
+        CloudShareState::Pending => CloudShareLifecycle::Uploading,
+        CloudShareState::Active => CloudShareLifecycle::Active,
+        CloudShareState::Failed => CloudShareLifecycle::Failed,
+        CloudShareState::Revoked => match outbox {
+            None | Some(CloudOutboxState::Completed) => CloudShareLifecycle::Revoked,
+            Some(
+                CloudOutboxState::Pending
+                | CloudOutboxState::Claimed
+                | CloudOutboxState::Cancelled
+                | CloudOutboxState::Terminal,
+            ) => CloudShareLifecycle::Revoking,
+        },
+    }
+}
+
 fn random_opaque_id() -> Result<String, CloudRuntimeError> {
     Ok(base64_url_encode(&random_array::<24>()?))
 }
@@ -4248,6 +4329,40 @@ mod tests {
         stopped.store(true, Ordering::Release);
         gate.wake();
         worker.join().expect("scan gate worker");
+    }
+
+    #[test]
+    fn revoked_share_reads_as_revoking_until_the_server_acknowledged_it() {
+        let cases = [
+            (None, CloudShareLifecycle::Revoked),
+            (
+                Some(CloudOutboxState::Completed),
+                CloudShareLifecycle::Revoked,
+            ),
+            (
+                Some(CloudOutboxState::Pending),
+                CloudShareLifecycle::Revoking,
+            ),
+            (
+                Some(CloudOutboxState::Claimed),
+                CloudShareLifecycle::Revoking,
+            ),
+            (
+                Some(CloudOutboxState::Cancelled),
+                CloudShareLifecycle::Revoking,
+            ),
+            (
+                Some(CloudOutboxState::Terminal),
+                CloudShareLifecycle::Revoking,
+            ),
+        ];
+        for (outbox, expected) in cases {
+            assert_eq!(
+                share_lifecycle(CloudShareState::Revoked, outbox),
+                expected,
+                "revoked record with outbox {outbox:?}"
+            );
+        }
     }
 
     #[test]

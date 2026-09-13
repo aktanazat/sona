@@ -2,8 +2,9 @@ use crate::cloud_sync::types::{
     CloudBrowserShareCreateRequest, CloudBrowserShareResult, CloudConflictResolveRequest,
     CloudMeetingStatus, CloudPairingAcceptRequest, CloudPairingApproveRequest, CloudPairingOffer,
     CloudPairingOfferRequest, CloudShareCreateRequest, CloudShareImportRequest,
-    CloudShareImportResult, CloudShareResult, CloudShareRevokeRequest, CloudSyncBootstrapRequest,
-    CloudSyncBootstrapResult, CloudSyncOverview, CloudSyncRecoveryRequest,
+    CloudShareImportResult, CloudShareListRequest, CloudShareResult, CloudShareRevokeRequest,
+    CloudShareSummary, CloudSyncBootstrapRequest, CloudSyncBootstrapResult, CloudSyncOverview,
+    CloudSyncRecoveryRequest,
 };
 use crate::cloud_sync::{CloudSyncErrorKind, CloudSyncRuntime};
 use crate::meeting::types::MeetingSessionId;
@@ -186,6 +187,18 @@ pub async fn cloud_share_revoke(
 ) -> Result<CloudSyncOverview, CloudSyncErrorKind> {
     runtime
         .share_revoke(request)
+        .await
+        .map_err(|error| error.kind())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cloud_share_list(
+    runtime: State<'_, Arc<CloudSyncRuntime>>,
+    request: CloudShareListRequest,
+) -> Result<Vec<CloudShareSummary>, CloudSyncErrorKind> {
+    runtime
+        .share_list(request)
         .await
         .map_err(|error| error.kind())
 }

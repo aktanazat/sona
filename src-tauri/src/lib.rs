@@ -1890,6 +1890,7 @@ pub fn run(cli_args: CliArgs) {
             commands::cloud_sync::cloud_share_create,
             commands::cloud_sync::cloud_browser_share_create,
             commands::cloud_sync::cloud_share_revoke,
+            commands::cloud_sync::cloud_share_list,
             commands::cloud_sync::cloud_share_import_file,
             commands::cloud_sync::cloud_sync_service_status,
             commands::updates::check_for_updates,

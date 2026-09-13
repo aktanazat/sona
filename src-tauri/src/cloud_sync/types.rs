@@ -85,6 +85,11 @@ pub struct CloudSyncBootstrapResult {
 pub struct CloudSyncRecoveryRequest {
     pub endpoint: String,
     pub recovery_code: String,
+    /// True only once the reader has confirmed that the vault this Mac already
+    /// belongs to is to be replaced. Without it, a code for another vault is
+    /// refused before anything is written.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -161,6 +166,50 @@ pub struct CloudBrowserShareResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct CloudShareRevokeRequest {
     pub share_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CloudShareListRequest {
+    pub session_id: MeetingSessionId,
+}
+
+/// What a share is, as the panel names it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudShareKind {
+    /// A `.sona` file another Sona imports.
+    File,
+    /// A link a browser opens.
+    Browser,
+}
+
+/// Where a share stands, including the two waits the local record alone
+/// cannot tell apart: a revocation the server has acknowledged and one that
+/// is still queued to reach it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudShareLifecycle {
+    /// Created here, not yet accepted by the server.
+    Uploading,
+    /// Live on the server until it expires.
+    Active,
+    /// Revoked here; the server has not acknowledged it yet, so the link
+    /// may still open.
+    Revoking,
+    /// Revoked, and the server has acknowledged it.
+    Revoked,
+    /// Never reached the server.
+    Failed,
+}
+
+/// One share of a meeting, without its link material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CloudShareSummary {
+    pub share_id: String,
+    pub kind: CloudShareKind,
+    pub expires_at_utc_ms: i64,
+    pub state: CloudShareLifecycle,
+    pub revoked_at_utc_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

@@ -2686,6 +2686,11 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::cloud_sync::cloud_share_revoke(app.state(), request).await)
         }
+        "cloud_share_list" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::cloud_sync::cloud_share_list(app.state(), request).await)
+        }
         "cloud_share_import_file" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

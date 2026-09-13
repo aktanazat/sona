@@ -2952,6 +2952,25 @@ impl MeetingStore {
             .map_err(Into::into)
     }
 
+    /// Every share of one meeting, newest first, in whatever state it is in.
+    /// A revoked share is listed too: the reader who revoked it wants to see
+    /// that it went, and the panel needs it until the server says so.
+    pub(crate) fn cloud_shares_for_session(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<CloudShareRecord>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT share_id, object_id, source_session_id, expires_at_utc_ms, state,
+                    content_kind, encrypted_link_material, outbox_id, revoked_at_utc_ms
+             FROM meeting_cloud_shares
+             WHERE source_session_id = ?1
+             ORDER BY created_at_utc_ms DESC, share_id",
+        )?;
+        let rows = statement.query_map(params![id(session_id)], cloud_share_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub(crate) fn cloud_share_count_for_session(
         &self,
         session_id: MeetingSessionId,
