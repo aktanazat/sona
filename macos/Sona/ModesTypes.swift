@@ -595,10 +595,17 @@ struct ModeLlmDestination: Equatable {
     /// The mode named no provider of its own and took the app-wide one.
     let inherited: Bool
 
+    /// The fixed identifier Apple Intelligence runs under. Its row offers no
+    /// model field, so an explicit choice with an empty id resolves to this,
+    /// as the core's `ModeLlmSettings::destination` does.
+    static let appleIntelligenceModelId = "Apple Intelligence"
+
     init(_ llm: ModeLlm, _ settings: ModeAppSettings?) {
         if let override = llm.providerId {
             providerId = override
-            modelId = llm.modelId
+            let fixed = override == ProviderCatalog.appleIntelligenceId
+                && llm.modelId.trimmingCharacters(in: .whitespaces).isEmpty
+            modelId = fixed ? Self.appleIntelligenceModelId : llm.modelId
             inherited = false
             return
         }

@@ -24,6 +24,9 @@ struct ModesView: View {
         .sheet(item: Binding(get: { store.pendingDelete }, set: { store.pendingDelete = $0 })) { mode in
             ModeDeleteSheet(store: store, mode: mode)
         }
+        .sheet(item: Binding(get: { store.pendingSwitch }, set: { _ in store.keepEditing() })) { switching in
+            ModeSwitchSheet(store: store, switching: switching)
+        }
         .sheet(item: Binding(get: { store.pendingConsent }, set: { _ in store.cancelConsent() })) { provider in
             ModeConsentSheet(store: store, provider: provider)
         }
@@ -570,6 +573,7 @@ struct ModeShortcutRow: View {
                     let preview = store.recording?.preview ?? ""
                     Text(preview.isEmpty ? "Press keys…" : preview).metaText(Theme.accent)
                     Button("Cancel") { store.cancelRecording() }.buttonStyle(.quiet)
+                        .help("Press Escape to keep the current shortcut")
                 } else {
                     ModeChord(shortcut.currentBinding)
                     Button("Change") { store.record(shortcut) }.buttonStyle(.secondary)
@@ -579,6 +583,9 @@ struct ModeShortcutRow: View {
                 }
             }
         }
+        /// Leaving the row mid-capture would leave the core streaming keys
+        /// with nothing reading them, and every other shortcut suspended.
+        .onDisappear { if isRecording { store.cancelRecording() } }
     }
 }
 
@@ -905,6 +912,44 @@ struct ModeDeleteSheet: View {
         }
         .padding(24)
         .frame(width: 420)
+        .background(Theme.page)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
+    }
+}
+
+/// The editor holds edits the core has not seen, and the list asked to move
+/// on. Saving is offered only when the draft can be saved; a draft the core
+/// would refuse has "keep editing" and "discard" left.
+struct ModeSwitchSheet: View {
+    let store: ModesStore
+    let switching: ModeSwitch
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Unsaved changes").headlineText()
+            Text("Save the changes to \(store.editing?.name ?? "this mode") before moving to \(switching.destination)?")
+                .bodyText()
+            if let blocking = store.blockingReason {
+                Text(blocking).metaText(Theme.live)
+            } else {
+                Text("Discarded changes cannot be recovered.").metaText()
+            }
+            HStack {
+                Button("Discard changes") { store.discardAndSwitch() }.buttonStyle(.quiet)
+                Spacer()
+                Button("Keep editing") { store.keepEditing() }
+                    .buttonStyle(.secondary)
+                    .keyboardShortcut(.cancelAction)
+                if store.canSave {
+                    Button("Save and continue") { store.saveAndSwitch() }
+                        .buttonStyle(.primary)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(.top, 8)
+        }
+        .padding(24)
+        .frame(width: 440)
         .background(Theme.page)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
     }

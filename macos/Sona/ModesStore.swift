@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -38,9 +39,15 @@ extension CoreEvent {
     /// second one's contents.
     private(set) var vocabularyRowIds: [UUID] = []
     private(set) var busy = false
+    /// The version a save sent to the core. Typing while the reply is on its
+    /// way is an edit on top of it, not something the reply may overwrite.
+    private var submitted: ModeDefinition?
     /// Set when the core refused on revision: the list below has been
     /// reloaded, and the draft is the user's, unsaved.
     private(set) var conflict = false
+    /// Where the user asked to go while the draft had unsaved edits, waiting
+    /// on the sheet that asks what to do with them.
+    var pendingSwitch: ModeSwitch?
 
     // Rewrite model discovery, for a provider the mode names itself.
     private(set) var catalog: ModeLlmCatalog?
@@ -59,7 +66,7 @@ extension CoreEvent {
     init(core: Core) {
         self.core = core
         core.observe(CoreEvent.modesChanged) { [weak self] line in
-            guard let snapshot = try? Core.decoder.decode(ModesSnapshot.self, from: line) else { return }
+            guard let snapshot: ModesSnapshot = try? Core.payload(line) else { return }
             self?.adopt(snapshot)
         }
         core.observe(CoreEvent.modesSettingsChanged) { [weak self] _ in
@@ -69,7 +76,7 @@ extension CoreEvent {
             self?.refreshModels()
         }
         core.observe(CoreEvent.handyKeys) { [weak self] line in
-            guard let event = try? Core.decoder.decode(HandyKeysEvent.self, from: line) else { return }
+            guard let event: HandyKeysEvent = try? Core.payload(line) else { return }
             self?.handle(event)
         }
     }
@@ -159,7 +166,9 @@ extension CoreEvent {
     }
 
     var dirty: Bool {
-        guard let editing, let saved = editingSaved else { return draft != nil }
+        guard let editing else { return false }
+        if editing == submitted { return false }
+        guard let saved = editingSaved else { return true }
         return ModeDefinition(saved) != editing
     }
 
@@ -238,7 +247,7 @@ extension CoreEvent {
     }
 
     /// Apple Intelligence publishes no model list and takes no model ID.
-    var explicitProviderIsFixed: Bool { editing?.llm.providerId == "apple_intelligence" }
+    var explicitProviderIsFixed: Bool { editing?.llm.providerId == ProviderCatalog.appleIntelligenceId }
 
     /// The ceiling clamps what a mode may ask for; the mode keeps its own
     /// setting, but only this much of it happens.
@@ -307,11 +316,47 @@ extension CoreEvent {
 
     // MARK: - Editing the draft
 
+    /// Pick a mode to edit. Unsaved work in the editor is never dropped by
+    /// a click on the list: it asks first.
     func select(_ mode: Mode) {
+        guard mode.id != editing?.id else { return }
+        if dirty {
+            pendingSwitch = .open(mode)
+            return
+        }
+        open(mode)
+    }
+
+    private func open(_ mode: Mode) {
         draft = ModeDefinition(mode)
         conflict = false
         resetRowIds()
         loadCatalogIfNeeded()
+    }
+
+    private func perform(_ switching: ModeSwitch) {
+        switch switching {
+        case .open(let mode): open(mode)
+        case .duplicate(let mode): copyAndOpen(mode)
+        }
+    }
+
+    /// The sheet's answers: keep the edits and stay, drop them and move, or
+    /// save them and move once the core has them.
+    func keepEditing() {
+        pendingSwitch = nil
+    }
+
+    func discardAndSwitch() {
+        guard let target = pendingSwitch else { return }
+        pendingSwitch = nil
+        perform(target)
+    }
+
+    func saveAndSwitch() {
+        guard let target = pendingSwitch else { return }
+        pendingSwitch = nil
+        save { [weak self] in self?.perform(target) }
     }
 
     func discard() {
@@ -416,6 +461,7 @@ extension CoreEvent {
                 self.error = error.localizedDescription
             }
             busy = false
+            submitted = nil
         }
     }
 
@@ -435,7 +481,9 @@ extension CoreEvent {
         mutate { [core] in try await core.request("set_active_mode", ModeIdRequest(modeId: mode.id)) }
     }
 
-    func save() {
+    /// Send the draft to the core. `then` runs once it is stored, for the
+    /// caller that wants to move on to another mode afterwards.
+    func save(then follow: (() -> Void)? = nil) {
         guard let editing, canSave else { return }
         var mode = editing
         // A cloud transcript arrives without timing unless it is asked for,
@@ -446,34 +494,52 @@ extension CoreEvent {
             draft = mode
         }
         conflict = false
+        submitted = mode
         let expected = revision
         mutate {
             [core] in try await core.request(
                 "upsert_mode", ModeUpsertRequest(mode: try mode.params(), expectedRevision: expected))
         } then: { [weak self] snapshot in
+            guard let self else { return }
             // Adopt the stored mode, so a name the core normalised does not
-            // read as an unsaved change the moment it is saved.
-            guard let self, let saved = snapshot.modes.first(where: { $0.id == mode.id }) else { return }
-            self.draft = ModeDefinition(saved)
+            // read as an unsaved change the moment it is saved. Only when the
+            // editor still shows what was sent: keystrokes that landed while
+            // the reply was on its way are the newer version.
+            if self.draft == mode, let saved = snapshot.modes.first(where: { $0.id == mode.id }) {
+                self.draft = ModeDefinition(saved)
+            }
+            follow?()
         }
     }
 
     /// Duplicate a mode and open the copy. The "New mode" button duplicates
     /// the default one, so there is one path and it always starts from
-    /// something that works.
+    /// something that works. Unsaved edits ask first, as a click on the list
+    /// does.
     func duplicate(_ source: Mode) {
+        if dirty {
+            pendingSwitch = .duplicate(source)
+            return
+        }
+        copyAndOpen(source)
+    }
+
+    private func copyAndOpen(_ source: Mode) {
         var copy = ModeDefinition(source)
         copy.id = "mode-\(UUID().uuidString.lowercased())"
         copy.name = "\(source.name) copy"
         let expected = revision
         draft = copy
         conflict = false
+        submitted = copy
         resetRowIds()
         mutate {
             [core] in try await core.request(
                 "upsert_mode", ModeUpsertRequest(mode: try copy.params(), expectedRevision: expected))
         } then: { [weak self] snapshot in
-            guard let self, let created = snapshot.modes.first(where: { $0.id == copy.id }) else { return }
+            guard let self, self.draft == copy,
+                  let created = snapshot.modes.first(where: { $0.id == copy.id })
+            else { return }
             self.draft = ModeDefinition(created)
             self.resetRowIds()
         }
@@ -523,9 +589,11 @@ extension CoreEvent {
     func captureApp(for modeId: String) {
         let expected = revision
         mutate { [core] in
-            try await core.request(
-                "capture_mode_activation_rule",
-                ModeRevisionRequest(modeId: modeId, expectedRevision: expected))
+            try await Self.behindOwnWindow {
+                try await core.request(
+                    "capture_mode_activation_rule",
+                    ModeRevisionRequest(modeId: modeId, expectedRevision: expected))
+            }
         }
     }
 
@@ -541,11 +609,27 @@ extension CoreEvent {
     func captureWebsite(for modeId: String, match: ModeWebsiteHostMatch) {
         let expected = revision
         mutate { [core] in
-            try await core.request(
-                "capture_mode_website_activation_rule",
-                ModeWebsiteCaptureRequest(
-                    modeId: modeId, matchKind: match.rawValue, expectedRevision: expected))
+            try await Self.behindOwnWindow {
+                try await core.request(
+                    "capture_mode_website_activation_rule",
+                    ModeWebsiteCaptureRequest(
+                        modeId: modeId, matchKind: match.rawValue, expectedRevision: expected))
+            }
         }
+    }
+
+    /// The core reads what is in front after it has waited for macOS to
+    /// hand focus back, so this window has to be gone before it is asked.
+    /// The webview shell's window is the core's to hide; this one is ours.
+    /// Sona comes back either way, with the answer or the refusal.
+    @MainActor
+    private static func behindOwnWindow<T>(_ ask: () async throws -> T) async throws -> T {
+        NSApp.hide(nil)
+        defer {
+            NSApp.unhide(nil)
+            NSApp.activate()
+        }
+        return try await ask()
     }
 
     func removeWebsiteRule(_ host: String, match: ModeWebsiteHostMatch) {
@@ -621,27 +705,40 @@ extension CoreEvent {
 
     func loadCatalogIfNeeded() {
         guard let providerId = editing?.llm.providerId,
-              providerId != "apple_intelligence",
+              providerId != ProviderCatalog.appleIntelligenceId,
               catalogProviderId != providerId,
               !catalogLoading
         else { return }
         discoverCatalog()
     }
 
+    /// Ask the core what the edited provider offers. The answer belongs to
+    /// the provider it was asked for: when the editor has moved to another
+    /// provider by the time it lands, it is dropped and the new provider's
+    /// own request goes out, rather than the first provider's models being
+    /// offered under the second one's name.
     func discoverCatalog() {
         guard let providerId = editing?.llm.providerId, !catalogLoading else { return }
         catalogLoading = true
         catalogProviderId = providerId
         Task {
+            var answer: ModeLlmCatalog?
+            var failure: String?
             do {
-                catalog = try await core.request(
+                answer = try await core.request(
                     "discover_post_process_model_catalog",
                     ModeProviderRequest(providerId: providerId))
             } catch {
-                catalog = nil
-                self.error = error.localizedDescription
+                failure = error.localizedDescription
             }
             catalogLoading = false
+            guard editing?.llm.providerId == providerId else {
+                catalogProviderId = nil
+                loadCatalogIfNeeded()
+                return
+            }
+            catalog = answer
+            if let failure { error = failure }
         }
     }
 
@@ -674,8 +771,14 @@ extension CoreEvent {
     /// A chord is whatever was held when the first key came back up. Holding
     /// modifiers alone is a chord too, which is why the last modifier-only
     /// string is kept: it is the answer when nothing else was pressed.
+    /// Escape alone keeps the chord that was there, the same way out the
+    /// dictation shortcut rows give; the core names the key in lowercase.
     private func handle(_ event: HandyKeysEvent) {
         guard var live = recording else { return }
+        if event.isKeyDown, event.key == "escape", event.modifiers.isEmpty {
+            cancelRecording()
+            return
+        }
         if event.isKeyDown {
             if !event.hotkeyString.isEmpty {
                 if event.key != nil {
@@ -758,6 +861,28 @@ struct ModeRecording: Equatable {
     var modifierOnly = ""
     /// What to show while the keys are still down.
     var preview = ""
+}
+
+/// Where the list wanted to take the editor while it still held unsaved
+/// edits: to another mode, or to a fresh copy of one.
+enum ModeSwitch: Identifiable {
+    case open(Mode)
+    case duplicate(Mode)
+
+    var id: String {
+        switch self {
+        case .open(let mode): "open-\(mode.id)"
+        case .duplicate(let mode): "duplicate-\(mode.id)"
+        }
+    }
+
+    /// The name the sheet says the edits are on the way to.
+    var destination: String {
+        switch self {
+        case .open(let mode): mode.name
+        case .duplicate(let mode): "a copy of \(mode.name)"
+        }
+    }
 }
 
 /// A vocabulary row with an identity that survives its neighbours moving.
