@@ -1801,10 +1801,12 @@ mod tests {
     #[test]
     fn every_modifier_outside_the_read_group_is_bound_to_a_verb() {
         // What is left on `CliArgs` once the verbs and their modifiers are
-        // out: the window flags, the transcription CLI, and clap's own two.
+        // out: the window flags (including the native shell's socket), the
+        // transcription CLI, and clap's own two.
         const UNREAD: &[&str] = &[
             "start_hidden",
             "no_tray",
+            "native_socket",
             "toggle_transcription",
             "toggle_post_process",
             "cancel",
