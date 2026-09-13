@@ -21,6 +21,7 @@ the generated file, so a stale one fails to compile rather than misroutes.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -233,6 +234,8 @@ def main() -> None:
     events = load_events()
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(render(commands, events))
+    # The crate's `cargo fmt -- --check` gate reads this file like any other.
+    subprocess.run(["rustfmt", "--edition", "2021", str(OUT)], check=True)
     sync = sum(not command.is_async for command in commands)
     print(f"{OUT.relative_to(ROOT)}: {len(commands)} commands ({sync} sync), {len(events)} events")
 
