@@ -465,16 +465,6 @@ pub fn change_keyboard_implementation_setting(
     let reset_bindings = register_all_shortcuts_for_implementation(&app, new_impl);
     crate::secure_input::reconcile_fallback(&app);
 
-    // Emit event to notify frontend of the change
-    let _ = app.emit(
-        "settings-changed",
-        serde_json::json!({
-            "setting": "keyboard_implementation",
-            "value": implementation,
-            "reset_bindings": reset_bindings
-        }),
-    );
-
     info!("Keyboard implementation switched to {:?}", new_impl);
 
     persisted?;
@@ -1051,15 +1041,6 @@ pub fn change_debug_mode_setting(app: AppHandle, enabled: bool) -> Result<(), St
     // debug mode, so logs are forwarded to the frontend only while it is on.
     crate::WEBVIEW_LOG_STREAMING.store(enabled, std::sync::atomic::Ordering::Relaxed);
 
-    // Emit event to notify frontend of debug mode change
-    let _ = app.emit(
-        "settings-changed",
-        serde_json::json!({
-            "setting": "debug_mode",
-            "value": enabled
-        }),
-    );
-
     Ok(())
 }
 
@@ -1069,15 +1050,6 @@ pub fn change_start_hidden_setting(app: AppHandle, enabled: bool) -> Result<(), 
     settings::update_settings(&app, |settings| {
         settings.start_hidden = enabled;
     })?;
-    // Notify frontend
-    let _ = app.emit(
-        "settings-changed",
-        serde_json::json!({
-            "setting": "start_hidden",
-            "value": enabled
-        }),
-    );
-
     Ok(())
 }
 
@@ -1089,15 +1061,6 @@ pub fn change_autostart_setting(app: AppHandle, enabled: bool) -> Result<(), Str
     })?;
     // Apply the autostart setting immediately
     crate::autostart::apply_autostart(&app, enabled);
-
-    // Notify frontend
-    let _ = app.emit(
-        "settings-changed",
-        serde_json::json!({
-            "setting": "autostart_enabled",
-            "value": enabled
-        }),
-    );
 
     Ok(())
 }
@@ -1111,14 +1074,6 @@ pub fn change_show_whats_new_on_update_setting(
     settings::update_settings(&app, |settings| {
         settings.show_whats_new_on_update = enabled;
     })?;
-    let _ = app.emit(
-        "settings-changed",
-        serde_json::json!({
-            "setting": "show_whats_new_on_update",
-            "value": enabled
-        }),
-    );
-
     Ok(())
 }
 
@@ -1130,16 +1085,8 @@ pub fn change_whats_new_last_seen_version_setting(
 ) -> Result<(), String> {
     let version = version.trim().to_string();
     settings::update_settings(&app, |settings| {
-        settings.whats_new_last_seen_version = version.clone();
+        settings.whats_new_last_seen_version = version;
     })?;
-    let _ = app.emit(
-        "settings-changed",
-        serde_json::json!({
-            "setting": "whats_new_last_seen_version",
-            "value": version
-        }),
-    );
-
     Ok(())
 }
 

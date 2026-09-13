@@ -9,7 +9,6 @@ use super::protocol::{
 use crate::audio_toolkit::audio::{list_input_devices, list_output_devices};
 use crate::managers::model::ModelManager;
 use crate::settings::{self, AppSettings, RecordingRetentionPeriod};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
@@ -150,11 +149,6 @@ impl SettingUndo {
             Self::UpdateNoteVisibility(_) => SettingKind::UpdateNoteVisibility,
         }
     }
-}
-
-#[derive(Clone, Serialize)]
-struct SettingsChangedEvent {
-    setting: &'static str,
 }
 
 pub(crate) async fn build_snapshot(app: &AppHandle) -> Result<SnapshotContext, ConfigError> {
@@ -830,12 +824,6 @@ fn apply_runtime_effects(app: &AppHandle, kinds: &[SettingKind]) {
     {
         crate::modes::emit_modes_changed(app, &crate::modes::mode_settings_snapshot(&settings));
     }
-    let _ = app.emit(
-        "settings-changed",
-        SettingsChangedEvent {
-            setting: "agent_panel",
-        },
-    );
 }
 
 const fn setting_kind_index(kind: SettingKind) -> u8 {

@@ -3084,8 +3084,8 @@ fn write_settings_locked<R: tauri::Runtime>(
 /// being dropped with a refused write: the store's memory takes the mutation
 /// whether or not the disk does, and the wrappers below decide who needs to
 /// hear about the memory before the refusal.
-fn try_update_settings_inner<R, E>(
-    app: &AppHandle,
+fn try_update_settings_inner<Rt: tauri::Runtime, R, E>(
+    app: &AppHandle<Rt>,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
 ) -> Result<(R, u64, Result<(), SettingsPersistError>), E> {
     let (result, revision, settings, persisted) = {
@@ -3118,10 +3118,10 @@ fn try_update_settings_inner<R, E>(
     // record again; the native shell's stores and the webview's settings store
     // both take it as "something was written, ask again". Emitted here, from
     // the one seam every write passes through, so a page cannot show a value
-    // another page has already replaced. The few writers that also name the
-    // setting and its value keep doing so for the readers that act on the name
-    // without a read; those paths announce twice, and a second read is what
-    // they cost.
+    // another page has already replaced. Two writers also announce by name,
+    // for a reader that acts on the name without a read: the microphone reset
+    // and the overlay material. Those paths announce twice, and a second read
+    // is what they cost.
     let _ = app.emit("settings-changed", serde_json::json!({ "setting": null }));
     if let Err(error) = &persisted {
         // The caller may only be able to say *that* the write failed, so the
@@ -3131,8 +3131,8 @@ fn try_update_settings_inner<R, E>(
     Ok((result, revision, persisted))
 }
 
-pub(crate) fn try_update_settings_with_revision<R, E>(
-    app: &AppHandle,
+pub(crate) fn try_update_settings_with_revision<Rt: tauri::Runtime, R, E>(
+    app: &AppHandle<Rt>,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
 ) -> Result<(R, u64), E>
 where
@@ -3148,15 +3148,15 @@ where
 /// took the mutation and whatever tracks that memory - a registered shortcut,
 /// a window listening for the change - has to be brought into line before the
 /// refusal is reported.
-pub(crate) fn try_update_settings_committed<R, E>(
-    app: &AppHandle,
+pub(crate) fn try_update_settings_committed<Rt: tauri::Runtime, R, E>(
+    app: &AppHandle<Rt>,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
 ) -> Result<(R, Result<(), SettingsPersistError>), E> {
     try_update_settings_inner(app, update).map(|(result, _, persisted)| (result, persisted))
 }
 
-pub fn try_update_settings<R, E>(
-    app: &AppHandle,
+pub fn try_update_settings<Rt: tauri::Runtime, R, E>(
+    app: &AppHandle<Rt>,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
 ) -> Result<R, E>
 where
@@ -3170,8 +3170,8 @@ where
 /// The write for a closure that cannot fail on its own. The store still can,
 /// so this reports whether the mutation reached the disk - a settings row that
 /// answers `Ok` is a row telling its reader the value survives a restart.
-pub fn update_settings<R>(
-    app: &AppHandle,
+pub fn update_settings<Rt: tauri::Runtime, R>(
+    app: &AppHandle<Rt>,
     update: impl FnOnce(&mut AppSettings) -> R,
 ) -> Result<R, SettingsPersistError> {
     try_update_settings(app, |settings| {
@@ -3266,6 +3266,41 @@ mod tests {
             .build()
             .expect("temporary settings store");
         (app, store)
+    }
+
+    /// Every window that mirrors a setting reads the record again when it
+    /// hears `settings-changed`. A write that goes quiet leaves a page showing
+    /// a value another page has already replaced, so the announcement is part
+    /// of what a write means.
+    #[test]
+    fn a_settings_write_announces_itself() {
+        use tauri::Listener;
+
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        let announced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heard = Arc::clone(&announced);
+        handle.listen("settings-changed", move |_| {
+            heard.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        update_settings(handle, |settings| settings.debug_mode = true).expect("persist the write");
+
+        assert_eq!(
+            announced.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a settings write must announce itself once to the windows that mirror it"
+        );
+        assert!(
+            get_settings(handle).debug_mode,
+            "the announced write is the one readable"
+        );
     }
 
     /// Every field must survive a partial store: a missing key must never fail
