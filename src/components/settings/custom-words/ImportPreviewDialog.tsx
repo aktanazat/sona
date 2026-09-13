@@ -141,7 +141,7 @@ export const ImportPreviewDialog: React.FC<ImportPreviewDialogProps> = ({
                   "settings.advanced.customWords.importPreview.replaceSummary",
                   {
                     defaultValue:
-                      "Applying replaces the {{savedCount}} saved pairs with the {{importedCount}} pairs from this file.",
+                      "Applying adds the {{importedCount}} pairs from this file and keeps the {{savedCount}} saved pairs.",
                     savedCount,
                     importedCount: preview.entries.length,
                   },

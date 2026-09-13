@@ -260,9 +260,9 @@ export const useVocabularyRules = (): VocabularyRulesState => {
     [runWrite],
   );
 
-  /* The backend replaces the persisted list with the CSV rows. Local rows the
-   * CSV does not define are not in that answer, so merge them back instead of
-   * silently discarding them. */
+  /* The backend adds the CSV rows to the persisted list and answers with that
+   * list. Local rows the CSV does not define are not in that answer, so merge
+   * them back instead of silently discarding them. */
   const applyCsvRows = useCallback(
     async (rows: VocabularyEntry[]) => {
       setEntries((current) => mergeAppliedCsv(current, rows));

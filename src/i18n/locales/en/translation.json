@@ -416,7 +416,7 @@
           "unsavedWarning": "You have unsaved vocabulary changes. Applying this import replaces them.",
           "back": "Back",
           "continue": "Continue",
-          "replaceSummary": "Applying replaces the {{savedCount}} saved pairs with the {{importedCount}} pairs from this file."
+          "replaceSummary": "Applying adds the {{importedCount}} pairs from this file and keeps the {{savedCount}} saved pairs."
         },
         "actions": "Vocabulary actions",
         "audioImport": {

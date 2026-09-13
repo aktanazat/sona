@@ -23,6 +23,7 @@ fn build_match_key(word: &str) -> String {
 pub(crate) fn vocabulary_spoken_key(spoken: &str) -> String {
     build_match_key(spoken)
 }
+
 fn starts_with_spoken_character(candidate: &str, entry: &VocabularyEntry) -> bool {
     let Some(candidate_first) = candidate.chars().next() else {
         return false;
@@ -34,7 +35,9 @@ fn starts_with_spoken_character(candidate: &str, entry: &VocabularyEntry) -> boo
     else {
         return false;
     };
-    candidate_first == spoken_first.to_ascii_lowercase()
+    // The candidate key is built lowercase in every script, so the spoken
+    // form's first letter has to be lowered the same way before comparing.
+    spoken_first.to_lowercase().next() == Some(candidate_first)
 }
 
 struct VocabularyMatchKey {
@@ -49,10 +52,10 @@ fn build_vocabulary_match_keys(
     let primary_key = build_match_key(&entry.spoken);
     let mut keys = Vec::with_capacity(2);
 
-    // The fallback matcher is intentionally limited to ASCII terms. Its
-    // whitespace tokenization and Soundex scoring are not suitable for CJK
-    // scripts. Unicode entries still participate in Whisper prompt biasing.
-    if is_supported_fuzzy_key(&primary_key) {
+    // Every usable entry gets its key: an exact match is found in any script.
+    // Only the fuzzy scoring below is limited to ASCII keys, whose whitespace
+    // tokenization and Soundex are not suitable for CJK scripts.
+    if !primary_key.is_empty() {
         keys.push(VocabularyMatchKey {
             entry_index,
             key: primary_key.clone(),
@@ -87,14 +90,24 @@ fn fuzzy_count_as_f64(value: usize) -> Option<f64> {
     u32::try_from(value).ok().map(f64::from)
 }
 
-/// Finds the best spoken-form match for a candidate string.
+/// Finds the best spoken-form match for a candidate string. An exact key
+/// match wins in any script; the fuzzy scoring that follows is ASCII only.
 fn find_best_vocabulary_match<'a>(
     candidate: &str,
     entries: &'a [VocabularyEntry],
     match_keys: &[VocabularyMatchKey],
     threshold: f64,
 ) -> Option<(&'a VocabularyEntry, f64)> {
-    if !is_supported_fuzzy_key(candidate) || candidate.chars().count() > 50 {
+    if candidate.is_empty() || candidate.chars().count() > 50 {
+        return None;
+    }
+    if let Some(exact) = match_keys
+        .iter()
+        .find(|match_key| match_key.key == candidate)
+    {
+        return Some((&entries[exact.entry_index], 0.0));
+    }
+    if !is_supported_fuzzy_key(candidate) {
         return None;
     }
 
@@ -102,6 +115,9 @@ fn find_best_vocabulary_match<'a>(
     let mut best_score = f64::MAX;
 
     for match_key in match_keys {
+        if !is_supported_fuzzy_key(&match_key.key) {
+            continue;
+        }
         let candidate_len = candidate.chars().count();
         let spoken_len = match_key.key.chars().count();
         let Some(len_diff) = fuzzy_count_as_f64(candidate_len.abs_diff(spoken_len)) else {
@@ -1947,6 +1963,31 @@ mod tests {
         assert_eq!(
             apply_vocabulary_entries("「charge bee, open ai。」", &entries, 0.18),
             "「ChargeBee, OpenAI。」"
+        );
+    }
+
+    /// A spelling the editor accepts must be one the matcher can find. Exact
+    /// matches are found in every script, in one word or several, with the
+    /// case folded the way the candidate key is; the fuzzy scoring stays
+    /// ASCII, so a near miss in another script is left alone.
+    #[test]
+    fn non_ascii_spellings_are_corrected_exactly_in_every_script() {
+        let entries = vec![
+            pair("café", "CAFÉ_BRAND"),
+            pair("Éric Dupont", "Éric Dupont-Moretti"),
+            pair("東京タワー", "Tokyo Tower"),
+        ];
+        assert_eq!(
+            apply_exact_vocabulary_entries("Meet at Café, then éric dupont.", &entries),
+            "Meet at CAFÉ_BRAND, then Éric Dupont-Moretti."
+        );
+        assert_eq!(
+            apply_vocabulary_entries("東京タワー を見る", &entries, 0.5),
+            "Tokyo Tower を見る"
+        );
+        assert_eq!(
+            apply_vocabulary_entries("cafe caff", &entries, 0.5),
+            "cafe caff"
         );
     }
 
