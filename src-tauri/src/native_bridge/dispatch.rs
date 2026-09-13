@@ -724,7 +724,8 @@ pub(super) async fn call(
         "hud_toggle_recording" => {
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(crate::commands::hud::hud_toggle_recording(handle.clone()))
+                crate::commands::hud::hud_toggle_recording(handle.clone());
+                encode_plain(())
             })
             .await?
         }
@@ -1568,14 +1569,16 @@ pub(super) async fn call(
         "cancel_operation" => {
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(crate::commands::cancel_operation(handle.clone()))
+                crate::commands::cancel_operation(handle.clone());
+                encode_plain(())
             })
             .await?
         }
         "finish_recording" => {
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(crate::commands::finish_recording(handle.clone()))
+                crate::commands::finish_recording(handle.clone());
+                encode_plain(())
             })
             .await?
         }
@@ -1790,7 +1793,10 @@ pub(super) async fn call(
         "play_test_sound" => {
             let mut args = Args::parse(params)?;
             let sound_type = args.take("soundType")?;
-            encode_plain(crate::commands::audio::play_test_sound(app.clone(), sound_type).await)
+            {
+                crate::commands::audio::play_test_sound(app.clone(), sound_type).await;
+                encode_plain(())
+            }
         }
         "check_custom_sounds" => {
             let handle = app.clone();
@@ -2149,12 +2155,11 @@ pub(super) async fn call(
             let note = args.take("note")?;
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(
-                    crate::commands::meeting::meeting_consent_panel_fit_disclosure(
-                        handle.clone(),
-                        note,
-                    ),
-                )
+                crate::commands::meeting::meeting_consent_panel_fit_disclosure(
+                    handle.clone(),
+                    note,
+                );
+                encode_plain(())
             })
             .await?
         }
@@ -2737,11 +2742,12 @@ pub(super) async fn call(
             let accepted = args.take("accepted")?;
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(crate::commands::detection::detection_prompt_respond(
+                crate::commands::detection::detection_prompt_respond(
                     handle.state(),
                     prompt_id,
                     accepted,
-                ))
+                );
+                encode_plain(())
             })
             .await?
         }
@@ -2750,10 +2756,8 @@ pub(super) async fn call(
             let prompt_id = args.take("promptId")?;
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(crate::commands::detection::detection_prompt_panel_ack(
-                    handle.state(),
-                    prompt_id,
-                ))
+                crate::commands::detection::detection_prompt_panel_ack(handle.state(), prompt_id);
+                encode_plain(())
             })
             .await?
         }
@@ -2762,10 +2766,8 @@ pub(super) async fn call(
             let ritual_id = args.take("ritualId")?;
             let handle = app.clone();
             on_main_thread(app, move || {
-                encode_plain(crate::commands::detection::meeting_ritual_panel_ack(
-                    handle.state(),
-                    ritual_id,
-                ))
+                crate::commands::detection::meeting_ritual_panel_ack(handle.state(), ritual_id);
+                encode_plain(())
             })
             .await?
         }

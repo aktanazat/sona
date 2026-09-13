@@ -181,17 +181,24 @@ def arm(command: Command) -> str:
             local = param.name.removeprefix("r#")
             lines.append(f'            let {local} = args.take("{param.wire_name}")?;')
     finish = "reply" if command.returns_result else "encode_plain"
+
+    def finished(call: str) -> str:
+        # A unit command has nothing to encode: run it, then answer `null`.
+        if command.ret == "()":
+            return f"{{ {call}; encode_plain(()) }}"
+        return f"{finish}({call})"
+
     if command.is_async:
         call = call_expression(command, "app")
-        lines.append(f"            {finish}({call}.await)")
+        lines.append(f"            {finished(call + '.await')}")
     else:
         call = call_expression(command, "handle")
         if any(param.injection for param in command.params):
             lines.append("            let handle = app.clone();")
         if command.forced_async:
-            lines.append(f"            off_main_thread(move || {finish}({call})).await?")
+            lines.append(f"            off_main_thread(move || {finished(call)}).await?")
         else:
-            lines.append(f"            on_main_thread(app, move || {finish}({call})).await?")
+            lines.append(f"            on_main_thread(app, move || {finished(call)}).await?")
     lines.append("        }")
     return "\n".join(lines)
 
