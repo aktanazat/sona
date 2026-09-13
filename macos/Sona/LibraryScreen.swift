@@ -20,18 +20,24 @@ struct LibraryScreen: View {
 
     var body: some View {
         @Bindable var store = store
-        Page {
-            LibraryHeader(
-                store: store,
-                query: $store.query,
-                importAudio: importAudio)
-            ErrorNote(store.error)
-            LibraryActivity(store: store)
-            LibraryFeed(
-                store: store,
-                correct: { correcting = $0 },
-                processAgain: { reprocessing = $0 })
-            LibraryRetentionSection(store: store)
+        ScrollViewReader { proxy in
+            Page {
+                LibraryHeader(
+                    store: store,
+                    query: $store.query,
+                    importAudio: importAudio)
+                ErrorNote(store.error)
+                LibraryActivity(store: store)
+                LibraryFeed(
+                    store: store,
+                    correct: { correcting = $0 },
+                    processAgain: { reprocessing = $0 })
+                LibraryRetentionSection(store: store)
+            }
+            .onChange(of: store.revealed) { _, _ in
+                guard let id = store.expanded else { return }
+                withAnimation { proxy.scrollTo(id, anchor: .center) }
+            }
         }
         .task { await store.start() }
         .sheet(item: $correcting) { row in
@@ -334,6 +340,7 @@ private struct HistoryDaySection: View {
                         row: row,
                         correct: correct,
                         processAgain: processAgain)
+                        .id(row.id)
                 }
                 if !day.silent.isEmpty {
                     HistorySilentGroup(
@@ -532,8 +539,9 @@ private enum HistoryEmptyLine {
     }
 }
 
-/// The open row: why the mode wrote nothing when it did, the recording, the
-/// two things you open a row to do, and the receipts underneath.
+/// The open row: why the words are as spoken when the mode meant to rewrite
+/// them, the recording, the two things you open a row to do, and the
+/// receipts underneath.
 private struct HistoryRowDetail: View {
     let store: LibraryStore
     let row: HistoryRow
@@ -543,11 +551,20 @@ private struct HistoryRowDetail: View {
     let correct: (HistoryRow) -> Void
     let processAgain: (HistoryRow) -> Void
 
+    /// The receipt names the reason; an entry whose receipt has not loaded
+    /// or that predates the field gets the neutral line.
+    private var rewriteNote: String? {
+        guard row.processedMissing(store.textView), !retrying else { return nil }
+        return store.latestReceipt(for: row.id)?.mode.rewrite.skippedText
+            ?? "Post-processing produced no text, so this is the raw transcript."
+    }
+
+    @State private var confirmingDelete = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if row.processedMissing(store.textView), !retrying {
-                Text("Post-processing produced no text, so this is the raw transcript.")
-                    .metaText()
+            if let rewriteNote {
+                Text(rewriteNote).metaText()
             }
             if store.playable(row.id) {
                 PlaybackBar(store: store, id: row.id)
@@ -556,6 +573,14 @@ private struct HistoryRowDetail: View {
             ReceiptInspector(store: store, row: row)
         }
         .padding(20)
+        .alert("Delete this dictation?", isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) { store.delete(row.id) }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text(store.playable(row.id)
+                ? "The words and the recording are removed for good."
+                : "The words are removed for good.")
+        }
     }
 
     private var controls: some View {
@@ -580,7 +605,7 @@ private struct HistoryRowDetail: View {
                 Button("Process again") { processAgain(row) }
                     .disabled(busy)
                 Divider()
-                Button("Delete", role: .destructive) { store.delete(row.id) }
+                Button("Delete", role: .destructive) { confirmingDelete = true }
                     .disabled(busy)
             } label: {
                 Image(systemName: "ellipsis")
@@ -632,7 +657,7 @@ private struct PlaybackBar: View {
             .buttonStyle(.plain)
             .disabled(loading)
 
-            PlaybackScrubber(fraction: fraction) { store.seek($0) }
+            PlaybackScrubber(fraction: fraction, total: total) { store.seek($0) }
 
             Text("\(LibraryClock.short(active ? store.position : 0)) / \(LibraryClock.short(total))")
                 .font(TypeScale.mono(13))
@@ -642,10 +667,22 @@ private struct PlaybackBar: View {
     }
 }
 
-/// The scrubber: the page's own meter, with the head draggable along it.
+/// The scrubber: the page's own meter, with the head draggable along it. It
+/// is also a slider to the keyboard and to VoiceOver: focus it and the arrow
+/// keys move the head five seconds, or a twentieth of a short recording.
 private struct PlaybackScrubber: View {
     let fraction: Double
+    /// The recording's length, so a keystroke moves the head by time, not by
+    /// a fraction that means nothing on a two-hour file.
+    let total: TimeInterval
     let seek: (Double) -> Void
+
+    /// Five seconds, or a twentieth of a recording shorter than a minute
+    /// and forty, as a fraction of the whole.
+    private var step: Double {
+        guard total > 0 else { return 0.05 }
+        return min(5 / total, 0.05)
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -660,6 +697,21 @@ private struct PlaybackScrubber: View {
                         })
         }
         .frame(height: 20)
+        .focusable()
+        .onKeyPress(.leftArrow) { seek(fraction - step); return .handled }
+        .onKeyPress(.rightArrow) { seek(fraction + step); return .handled }
+        .onKeyPress(.home) { seek(0); return .handled }
+        .onKeyPress(.end) { seek(1); return .handled }
+        .accessibilityElement()
+        .accessibilityLabel("Playback position")
+        .accessibilityValue(LibraryClock.short(fraction * total))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: seek(fraction + step)
+            case .decrement: seek(fraction - step)
+            @unknown default: break
+            }
+        }
     }
 }
 
@@ -791,6 +843,12 @@ private struct ReceiptCard: View {
             let model = receipt.mode.modelId.map { " · \($0)" } ?? ""
             list.append(ReceiptPair(id: "provider", label: "AI route", value: provider + model))
         }
+        if receipt.mode.rewrite != .notRequested {
+            list.append(
+                ReceiptPair(
+                    id: "rewrite", label: "Rewrite", value: receipt.mode.rewrite.label,
+                    tone: receipt.mode.rewrite == .applied ? Theme.ink : Theme.accent))
+        }
         return list
     }
 
@@ -863,9 +921,10 @@ private struct ReceiptTable: View {
 
 // MARK: - What is kept
 
-/// How much of this survives: how many entries the core keeps, how long their
-/// recordings live after the words were written, and whether the log is
-/// encrypted where it sits.
+/// How much of this survives: how many unsaved dictations the core keeps,
+/// how long their recordings stay after the words were written, and whether
+/// the log is encrypted where it sits. The two policies never read each
+/// other; a saved entry is outside both.
 private struct LibraryRetentionSection: View {
     let store: LibraryStore
 
@@ -878,7 +937,9 @@ private struct LibraryRetentionSection: View {
                 CardRow {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Dictations to keep").bodyText()
-                        Text("Set 0 to disable saved history.").metaText()
+                        Text("Only the newest stay, and a saved entry always stays. 0 keeps none.")
+                            .metaText()
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 } trailing: {
                     InputField(prompt: "5", text: $limitText)
@@ -888,7 +949,8 @@ private struct LibraryRetentionSection: View {
                         .onSubmit { commit() }
                 }
                 ChoiceRow(
-                    title: "Delete recordings after",
+                    title: "Recordings",
+                    detail: "The audio behind each dictation. The words stay either way.",
                     choices: LibraryRetention.allCases,
                     label: { $0.label },
                     selection: Binding(

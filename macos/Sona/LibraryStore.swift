@@ -47,6 +47,8 @@ final class LibraryStore {
     /// The one open row. The store owns it because a row cannot close its
     /// neighbour, and thirty open rows is not a log any more.
     private(set) var expanded: Int64?
+    /// Ticks when `reveal` has the open row on screen.
+    private(set) var revealed = 0
     /// The rows whose transcription is being run again, and the rows being
     /// deleted: both change what the row is allowed to say and do.
     private(set) var retrying: Set<Int64> = []
@@ -86,7 +88,7 @@ final class LibraryStore {
     // MARK: What is kept
 
     private(set) var limit = 0
-    private(set) var retention: LibraryRetention = .never
+    private(set) var retention: LibraryRetention = .preserveLimit
     private(set) var storage: HistoryStorageState?
     private(set) var savingRetention = false
 
@@ -345,6 +347,28 @@ final class LibraryStore {
         }
     }
 
+    /// One row open, wherever it is in the log: the search goes, the log is
+    /// read from the top, and read on until the page holding the row lands.
+    /// A dictation just kept is on the first page; one reached from a search
+    /// result or a notice may be pages down, and ids fall as the pages do, so
+    /// the read stops the moment a page ends past it. `revealed` ticks when
+    /// the row is on screen, so the feed can scroll to it.
+    func reveal(_ id: Int64) {
+        searchTask?.cancel()
+        query = ""
+        activeQuery = ""
+        expanded = id
+        Task {
+            await fetchPage(cursor: nil)
+            while phase == .ready, hasMore, let last = rows.last, last.id > id, expanded == id {
+                await fetchPage(cursor: last.id)
+            }
+            if expanded == id, rows.contains(where: { $0.id == id }) {
+                revealed += 1
+            }
+        }
+    }
+
     func toggleSaved(_ id: Int64) {
         call { [self] in
             try await core.request("toggle_history_entry_saved", HistoryIdParam(id: id))
@@ -544,7 +568,7 @@ final class LibraryStore {
         do {
             let settings: LibrarySettings = try await core.request("get_app_settings")
             limit = settings.historyLimit ?? 5
-            retention = settings.recordingRetentionPeriod ?? .never
+            retention = settings.recordingRetentionPeriod ?? .preserveLimit
         } catch {
             self.error = error.localizedDescription
         }

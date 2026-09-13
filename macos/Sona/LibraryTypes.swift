@@ -129,6 +129,9 @@ struct ReceiptMode: Decodable {
     let modeId: String
     let contextPolicy: ReceiptContextPolicy
     let promptPreset: ReceiptPromptPreset
+    /// How the mode's rewrite ended. Receipts written before the field
+    /// existed decode as `notRequested`.
+    let rewrite: RewriteOutcome
     let providerId: String?
     let modelId: String?
     let engineRequested: ReceiptEngine?
@@ -139,6 +142,69 @@ struct ReceiptMode: Decodable {
     let inputRms: Double?
     /// Audio seconds per decode second for the local batch decode.
     let realtimeFactor: Double?
+
+    private enum Key: String, CodingKey {
+        case settingsRevision, modeId, contextPolicy, promptPreset, rewrite, providerId, modelId
+        case engineRequested, engineUsed, cloudStatus, inputPeak, inputRms, realtimeFactor
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: Key.self)
+        settingsRevision = try values.decode(Int.self, forKey: .settingsRevision)
+        modeId = try values.decode(String.self, forKey: .modeId)
+        contextPolicy = try values.decode(ReceiptContextPolicy.self, forKey: .contextPolicy)
+        promptPreset = try values.decode(ReceiptPromptPreset.self, forKey: .promptPreset)
+        rewrite = try values.decodeIfPresent(RewriteOutcome.self, forKey: .rewrite) ?? .notRequested
+        providerId = try values.decodeIfPresent(String.self, forKey: .providerId)
+        modelId = try values.decodeIfPresent(String.self, forKey: .modelId)
+        engineRequested = try values.decodeIfPresent(ReceiptEngine.self, forKey: .engineRequested)
+        engineUsed = try values.decodeIfPresent(ReceiptEngine.self, forKey: .engineUsed)
+        cloudStatus = try values.decodeIfPresent(ReceiptCloudStatus.self, forKey: .cloudStatus)
+        inputPeak = try values.decodeIfPresent(Double.self, forKey: .inputPeak)
+        inputRms = try values.decodeIfPresent(Double.self, forKey: .inputRms)
+        realtimeFactor = try values.decodeIfPresent(Double.self, forKey: .realtimeFactor)
+    }
+}
+
+/// How a mode's rewrite ended, on the receipt and in the capture notice.
+/// Every reason a dictation went out as spoken names a different thing to
+/// do about it, so each has its own sentence.
+enum RewriteOutcome: String, Decodable {
+    case notRequested = "not_requested"
+    case applied
+    case unavailable
+    case noCredential = "no_credential"
+    case tooLong = "too_long"
+    case failed
+
+    /// What the receipt inspector prints beside the mode's provider.
+    var label: String {
+        switch self {
+        case .notRequested: "Not requested"
+        case .applied: "Applied"
+        case .unavailable: "Provider unavailable"
+        case .noCredential: "No API key"
+        case .tooLong: "Dictation too long"
+        case .failed: "Failed"
+        }
+    }
+
+    /// The sentence for a dictation the rewrite did not touch: the cause and
+    /// the way out. Nil for the two outcomes that are the plan working.
+    var skippedText: String? {
+        switch self {
+        case .notRequested, .applied:
+            nil
+        case .unavailable:
+            "The mode's AI provider is not set up, so the words were typed as spoken. Check the mode's provider in Settings."
+        case .noCredential:
+            "The mode's AI provider has no API key, so the words were typed as spoken. Add the key under Providers."
+        case .tooLong:
+            "The dictation was too long for the AI model to rewrite whole, so the words were typed as spoken."
+        case .failed:
+            "The AI rewrite failed, so the words were typed as spoken."
+        }
+    }
 }
 
 struct ReceiptContext: Decodable {
@@ -419,13 +485,15 @@ enum LibraryRetention: String, CaseIterable, Decodable {
     case weeks2 = "weeks_2"
     case months3 = "months_3"
 
+    /// Every choice says what happens to the audio; the words are the count
+    /// setting's business, and none of these ever touches them.
     var label: String {
         switch self {
-        case .never: "Do not retain recordings"
-        case .preserveLimit: "Keep recordings with history"
-        case .days3: "3 days"
-        case .weeks2: "2 weeks"
-        case .months3: "3 months"
+        case .never: "Not kept"
+        case .preserveLimit: "Kept with the dictation"
+        case .days3: "Kept for 3 days"
+        case .weeks2: "Kept for 2 weeks"
+        case .months3: "Kept for 3 months"
         }
     }
 }
