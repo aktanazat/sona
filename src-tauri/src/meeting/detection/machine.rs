@@ -527,9 +527,13 @@ pub fn evaluate(inputs: &DetectionInputs, policy: &DetectionPolicy) -> Detection
 /// plays nothing, but Spotify behind it plays plenty. The frontmost qualifier
 /// is what bounds it: background audio while the operator works in another
 /// window never reaches this rule, so the residue is "the operator is looking
-/// at FaceTime, with no call, while audio plays". A prompt is the outcome there
-/// unless they also granted standing consent for that app, and the recording
-/// card offers Stop and a one-click revocation of the grant.
+/// at FaceTime, with no call, while audio plays". That residue is why the
+/// output clause is an offer and never a start: playback on a device-global
+/// property is not evidence anybody is on a call, so a standing grant for the
+/// app is spent only on the input clause (`call_participation`), and the
+/// output clause raises the same prompt whether or not one was given. The
+/// prompt is one press, and the recording card offers Stop and a one-click
+/// revocation of the grant.
 ///
 /// **Why frontmost rather than "recently launched".** Both bound the same
 /// clauses. Frontmost is the stronger of the two for the case this exists for:
@@ -558,12 +562,24 @@ pub fn call_is_live(
     else {
         return false;
     };
-    // A meeting app that is only open still explains the microphone here:
-    // attribution to the call app is a guess either way, and a guess must not
-    // become a recording under that app's standing grant.
+    call_participation(call, app, mic) || output == OutputSignal::Active
+}
+
+/// The input clause on its own: the one reading that says somebody is talking
+/// rather than that something is playing. A meeting app that is only open
+/// still explains the microphone here: attribution to the call app is a guess
+/// either way, and a guess must not become a recording under that app's
+/// standing grant.
+pub fn call_participation(call: &CallSignal, app: &AppSignal, mic: MicSignal) -> bool {
+    let CallSignal::Running {
+        frontmost: true, ..
+    } = call
+    else {
+        return false;
+    };
     let other_meeting_app_running =
         matches!(app, AppSignal::Known { .. } | AppSignal::Present { .. });
-    (mic == MicSignal::Active && !other_meeting_app_running) || output == OutputSignal::Active
+    mic == MicSignal::Active && !other_meeting_app_running
 }
 
 /// The first live call seen by a hand-started capture. An adopted call is
@@ -609,7 +625,8 @@ pub fn call_evidence(call: &CallSignal, mic: MicSignal, output: OutputSignal) ->
 }
 
 /// The call dimension. `None` means it had nothing to say and the rest of the
-/// table still applies.
+/// table still applies. A standing grant starts the recording only on
+/// participation evidence; playback alone is offered, never started.
 fn call_path(inputs: &DetectionInputs) -> Option<DetectionOutcome> {
     let CallSignal::Running {
         bundle_id,
@@ -622,7 +639,7 @@ fn call_path(inputs: &DetectionInputs) -> Option<DetectionOutcome> {
     if !call_is_live(&inputs.call, &inputs.app, inputs.mic, inputs.output) {
         return None;
     }
-    if inputs.standing_app_consent {
+    if inputs.standing_app_consent && call_participation(&inputs.call, &inputs.app, inputs.mic) {
         return Some(DetectionOutcome::AutoStartCall {
             bundle_id: bundle_id.clone(),
             app_name: display_name.clone(),
@@ -1967,22 +1984,25 @@ mod tests {
         );
     }
 
+    /* The output device is device-global: an idle FaceTime in front of Spotify
+     * raises it exactly as a call does. So the output clause is an offer, and
+     * the standing grant the inputs carry buys nothing here. */
     #[test]
-    fn a_call_is_live_on_the_output_signal_alone() {
+    fn a_call_on_the_output_signal_alone_is_offered_not_started() {
         let outcome = evaluate(&granted_call_on_output_only(), &DetectionPolicy::default());
 
         assert_eq!(
             outcome,
-            DetectionOutcome::AutoStartCall {
+            DetectionOutcome::Prompt(PromptKind::AppCall {
                 bundle_id: "com.apple.facetime".to_string(),
                 app_name: "FaceTime".to_string(),
-            }
+            })
         );
     }
 
     /* The output clause's whole false-positive envelope, and its bound: music
      * behind a call app is audio on the same device, so the only thing keeping
-     * Spotify from starting a recording is that FaceTime is not in front. */
+     * Spotify from raising an offer is that FaceTime is not in front. */
     #[test]
     fn playback_behind_a_backgrounded_call_app_is_not_a_call() {
         let background = DetectionInputs {
@@ -2224,7 +2244,9 @@ mod tests {
     }
 
     /* Bringing the call app to the front resolves the same ambiguity the other
-     * way: now the operator is looking at the call. */
+     * way: now the operator is looking at the call, so the offer names it. The
+     * microphone is still one a running Zoom explains just as well, so the
+     * grant is not spent: the offer is a press, not a start. */
     #[test]
     fn a_frontmost_call_app_wins_over_a_running_meeting_app() {
         let both = DetectionInputs {
@@ -2238,10 +2260,10 @@ mod tests {
 
         assert_eq!(
             evaluate(&both, &DetectionPolicy::default()),
-            DetectionOutcome::AutoStartCall {
+            DetectionOutcome::Prompt(PromptKind::AppCall {
                 bundle_id: "com.apple.facetime".to_string(),
                 app_name: "FaceTime".to_string(),
-            }
+            })
         );
     }
 

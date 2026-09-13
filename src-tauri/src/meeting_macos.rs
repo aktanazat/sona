@@ -256,28 +256,62 @@ mod suggestion_observer {
         })
     }
 
+    /// The provider a focused window is a call in, or `None` when it is only
+    /// the app. Coming to the front is not evidence of a call: Zoom's home
+    /// window, Teams' chat, a webex.com marketing page and an idle FaceTime all
+    /// activate the same way a call does, and an offer raised from presence
+    /// alone is the false positive this rule exists to refuse. Each branch
+    /// names what its in-call window says; a call whose title says none of it
+    /// still reaches the microphone-gated path in `detection`. A configured
+    /// app is the one exception: the person named it, so its presence is the
+    /// evidence they asked for.
     fn meeting_provider(
         app_bundle_id: &str,
         title: Option<&str>,
         url_host: Option<&str>,
         configured_application_ids: &BTreeSet<String>,
     ) -> Option<MeetingProvider> {
+        let title = title.map(str::to_ascii_lowercase);
+        let url_host = url_host.map(str::to_ascii_lowercase);
+        let title_has = |needles: &[&str]| {
+            title
+                .as_deref()
+                .is_some_and(|value| needles.iter().any(|needle| value.contains(needle)))
+        };
         match app_bundle_id {
-            "us.zoom.xos" => return Some(MeetingProvider::Zoom),
+            // The meeting window is "Zoom Meeting" or "Zoom Webinar"; the home
+            // window is "Zoom Workplace".
+            "us.zoom.xos" => {
+                return title_has(&["meeting", "webinar"]).then_some(MeetingProvider::Zoom)
+            }
+            // Every Teams window ends in "| Microsoft Teams"; the call window
+            // starts with the meeting's subject or "Call with".
             "com.microsoft.teams" | "com.microsoft.teams2" => {
-                return Some(MeetingProvider::MicrosoftTeams);
+                return title_has(&["meeting", "call with"])
+                    .then_some(MeetingProvider::MicrosoftTeams);
             }
             "com.cisco.webex" | "com.cisco.webexmeetingsapp" => {
-                return Some(MeetingProvider::Webex);
+                return title_has(&["meeting"]).then_some(MeetingProvider::Webex);
             }
-            "com.apple.facetime" => return Some(MeetingProvider::FaceTime),
-            "com.tinyspeck.slackmacgap" => return Some(MeetingProvider::SlackHuddle),
+            // FaceTime's idle window is titled "FaceTime"; in a call the title
+            // is the other party.
+            "com.apple.facetime" => {
+                return title
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty() && value != "facetime")
+                    .then_some(MeetingProvider::FaceTime);
+            }
+            // A huddle is a mode inside a chat app that is in front all day,
+            // so Slack coming forward says nothing on its own; its huddle
+            // window does. A huddle that never gets a window of its own still
+            // reaches the microphone path in `detection`.
+            "com.tinyspeck.slackmacgap" => {
+                return title_has(&["huddle"]).then_some(MeetingProvider::SlackHuddle);
+            }
             _ => {}
         }
 
-        let title = title.map(str::to_ascii_lowercase);
-        let url_host = url_host.map(str::to_ascii_lowercase);
-        if is_browser_bundle_id(app_bundle_id) && matches_browser_meeting(&title, &url_host) {
+        if crate::meeting::detection::apps::is_browser_bundle_id(app_bundle_id) {
             return provider_from_browser_evidence(title.as_deref(), url_host.as_deref());
         }
         configured_application_ids
@@ -285,71 +319,42 @@ mod suggestion_observer {
             .then_some(MeetingProvider::ConfiguredApp)
     }
 
-    /// Mirrors `detection::apps::BROWSER_BUNDLE_IDS` and the Swift observer's
-    /// `supportedMeetingBundleIDs`: a browser missing from any of the three
-    /// never produces a match.
-    fn is_browser_bundle_id(app_bundle_id: &str) -> bool {
-        matches!(
-            app_bundle_id,
-            "com.apple.safari"
-                | "com.google.chrome"
-                | "com.google.chrome.canary"
-                | "com.microsoft.edgemac"
-                | "org.mozilla.firefox"
-                | "company.thebrowser.browser"
-        )
-    }
-
-    fn matches_browser_meeting(title: &Option<String>, url_host: &Option<String>) -> bool {
-        url_host.as_deref().is_some_and(is_meeting_host)
-            || title.as_deref().is_some_and(|value| {
-                value.contains("google meet")
-                    || value.contains("microsoft teams")
-                    || value.contains("webex")
-                    || value.contains("zoom")
-                    || value.contains("slack huddle")
-            })
-    }
-
+    /// A call page in a browser, by host and tab title together. The host
+    /// alone is the provider's whole site — zoom.us is a store front, and a
+    /// title alone is any page that mentions the product — so a match needs
+    /// the call host and a title the landing page does not carry.
     fn provider_from_browser_evidence(
         title: Option<&str>,
         url_host: Option<&str>,
     ) -> Option<MeetingProvider> {
-        if url_host.is_some_and(|host| host == "meet.google.com")
-            || title.is_some_and(|value| value.contains("google meet"))
-        {
+        let host = url_host?;
+        let title = title?;
+        let title_has = |needles: &[&str]| needles.iter().any(|needle| title.contains(needle));
+        // A Meet call's tab is "Meet – <code or name>"; the landing page is
+        // "Google Meet".
+        if host == "meet.google.com" && !title.starts_with("google meet") {
             return Some(MeetingProvider::GoogleMeet);
         }
-        if url_host.is_some_and(|host| {
-            host == "teams.microsoft.com" || host.ends_with(".teams.microsoft.com")
-        }) || title.is_some_and(|value| value.contains("microsoft teams"))
+        if (host == "teams.microsoft.com"
+            || host.ends_with(".teams.microsoft.com")
+            || host == "teams.live.com")
+            && title_has(&["meeting", "call with"])
         {
             return Some(MeetingProvider::MicrosoftTeams);
         }
-        if url_host.is_some_and(|host| host == "webex.com" || host.ends_with(".webex.com"))
-            || title.is_some_and(|value| value.contains("webex"))
-        {
+        if host.ends_with(".webex.com") && host != "www.webex.com" && title_has(&["meeting"]) {
             return Some(MeetingProvider::Webex);
         }
-        if url_host.is_some_and(|host| host == "zoom.us" || host.ends_with(".zoom.us"))
-            || title.is_some_and(|value| value.contains("zoom"))
+        // The web client lives on app.zoom.us and the vanity subdomains; the
+        // bare and www hosts are the store front.
+        if host.ends_with(".zoom.us") && host != "www.zoom.us" && title_has(&["meeting", "webinar"])
         {
             return Some(MeetingProvider::Zoom);
         }
-        if title.is_some_and(|value| value.contains("slack huddle")) {
+        if host.ends_with(".slack.com") && title_has(&["huddle"]) {
             return Some(MeetingProvider::SlackHuddle);
         }
         None
-    }
-
-    fn is_meeting_host(host: &str) -> bool {
-        host == "meet.google.com"
-            || host == "teams.microsoft.com"
-            || host.ends_with(".teams.microsoft.com")
-            || host == "webex.com"
-            || host.ends_with(".webex.com")
-            || host == "zoom.us"
-            || host.ends_with(".zoom.us")
     }
 
     #[cfg(test)]
@@ -377,17 +382,110 @@ mod suggestion_observer {
             assert!(!signal.evidence_flags.ax_unavailable);
         }
 
+        /* With Accessibility untrusted no title is readable, and a native
+         * provider coming to the front is presence alone. The flag survives
+         * on the one branch presence is enough for: an app the person named. */
         #[test]
-        fn direct_provider_signal_marks_ax_unavailable_without_content() {
-            let signal =
+        fn configured_app_signal_marks_ax_unavailable_without_content() {
+            let configured = BTreeSet::from(["com.example.call".to_string()]);
+            assert!(
                 normalize_meeting_signal("us.zoom.xos", None, None, true, 7, &BTreeSet::new())
-                    .expect("Zoom activation should produce a suggestion");
+                    .is_none()
+            );
+            let signal =
+                normalize_meeting_signal("com.example.call", None, None, true, 7, &configured)
+                    .expect("a configured app should produce a suggestion");
 
-            assert_eq!(signal.provider, MeetingProvider::Zoom);
+            assert_eq!(signal.provider, MeetingProvider::ConfiguredApp);
             assert!(signal.evidence_flags.app_only);
             assert!(signal.evidence_flags.ax_unavailable);
             assert!(!signal.evidence_flags.ax_title);
             assert!(!signal.evidence_flags.ax_host);
+        }
+
+        /* Switching to Zoom's home window, Teams' chat, or an idle FaceTime
+         * raised "A meeting may be active" with nobody on a call. The in-call
+         * window of each is what offers. */
+        #[test]
+        fn native_providers_offer_only_from_a_call_window() {
+            let native = |bundle_id: &str, title: Option<&str>| {
+                normalize_meeting_signal(bundle_id, title, None, false, 9, &BTreeSet::new())
+                    .map(|signal| signal.provider)
+            };
+
+            assert_eq!(native("us.zoom.xos", Some("Zoom Workplace")), None);
+            assert_eq!(native("us.zoom.xos", None), None);
+            assert_eq!(
+                native("us.zoom.xos", Some("Zoom Meeting")),
+                Some(MeetingProvider::Zoom)
+            );
+            assert_eq!(
+                native("com.microsoft.teams2", Some("Chat | Microsoft Teams")),
+                None
+            );
+            assert_eq!(
+                native(
+                    "com.microsoft.teams2",
+                    Some("Weekly sync | Meeting | Microsoft Teams")
+                ),
+                Some(MeetingProvider::MicrosoftTeams)
+            );
+            assert_eq!(native("com.cisco.webex", Some("Webex")), None);
+            assert_eq!(
+                native("com.cisco.webex", Some("Cisco Webex Meetings")),
+                Some(MeetingProvider::Webex)
+            );
+            assert_eq!(native("com.apple.facetime", Some("FaceTime")), None);
+            assert_eq!(
+                native("com.apple.facetime", Some("Jane Doe")),
+                Some(MeetingProvider::FaceTime)
+            );
+        }
+
+        /* zoom.us and webex.com are store fronts, and "zoom" in a title is any
+         * page that mentions the product; the web clients are the offers. */
+        #[test]
+        fn browser_offers_need_a_call_host_and_a_call_title() {
+            let chrome = |title: &str, host: &str| {
+                normalize_meeting_signal(
+                    "com.google.chrome",
+                    Some(title),
+                    Some(host),
+                    false,
+                    9,
+                    &BTreeSet::new(),
+                )
+                .map(|signal| signal.provider)
+            };
+
+            assert_eq!(chrome("Zoom: One platform to connect", "zoom.us"), None);
+            assert_eq!(chrome("Zoom: One platform to connect", "www.zoom.us"), None);
+            assert_eq!(
+                chrome("Zoom Meeting", "app.zoom.us"),
+                Some(MeetingProvider::Zoom)
+            );
+            assert_eq!(chrome("Zoom lens review", "example.com"), None);
+            assert_eq!(chrome("Google Meet", "meet.google.com"), None);
+            assert_eq!(
+                chrome("Meet – abc-defg-hij", "meet.google.com"),
+                Some(MeetingProvider::GoogleMeet)
+            );
+            assert_eq!(chrome("Webex | Video conferencing", "www.webex.com"), None);
+            assert_eq!(
+                chrome("Weekly sync – Webex Meetings", "acme.webex.com"),
+                Some(MeetingProvider::Webex)
+            );
+            assert_eq!(
+                chrome("Chat | Microsoft Teams", "teams.microsoft.com"),
+                None
+            );
+            assert_eq!(
+                chrome(
+                    "Call with Jane Doe | Microsoft Teams",
+                    "teams.microsoft.com"
+                ),
+                Some(MeetingProvider::MicrosoftTeams)
+            );
         }
 
         #[test]
@@ -437,6 +535,28 @@ mod suggestion_observer {
             assert_eq!(signal.provider, MeetingProvider::GoogleMeet);
             assert_eq!(signal.app_bundle_id, "company.thebrowser.browser");
             assert!(signal.evidence_flags.ax_host);
+        }
+
+        /* Observed 2026-09-13: switching to Slack to read a channel raised
+         * "A meeting may be active in Slack huddle." for two minutes. */
+        #[test]
+        fn slack_offers_only_from_its_huddle_window() {
+            let slack = |title: Option<&str>| {
+                normalize_meeting_signal(
+                    "com.tinyspeck.slackmacgap",
+                    title,
+                    None,
+                    false,
+                    9,
+                    &BTreeSet::new(),
+                )
+            };
+
+            assert!(slack(Some("general - Acme - Slack")).is_none());
+            assert!(slack(None).is_none());
+            let signal = slack(Some("Huddle: general")).expect("a huddle window should offer");
+            assert_eq!(signal.provider, MeetingProvider::SlackHuddle);
+            assert!(signal.evidence_flags.ax_title);
         }
     }
 }
