@@ -100,13 +100,19 @@ impl AgentBridgeRequestKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Type)]
 pub struct AgentBridgeStatus {
     pub running: bool,
     pub diagnostic: AgentBridgeDiagnostic,
     pub policy_generation: u64,
     pub observed_sessions: usize,
     pub pending_messages: usize,
+    /// Advances whenever anything the console lists changes: a request
+    /// arriving, expiring or being answered, a session's turn opening or
+    /// closing, a reply changing state. The worker announces a status only
+    /// when it differs from the last one it announced, so this is what makes
+    /// a second request in a session the console already knows reach it.
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -117,6 +123,11 @@ pub struct AgentBridgeObservedSession {
     pub session_generation: u64,
     pub policy_generation: u64,
     pub last_seen_at_ms: u64,
+    /// A reply can be held for this session: a prompt was submitted and no
+    /// stop has been seen since, so there is a turn end to continue. Every
+    /// agent Sona bridges continues a stopped turn the same way; this is the
+    /// one fact that decides whether a session belongs in the reply picker.
+    pub accepts_reply: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -126,6 +137,11 @@ pub struct AgentBridgeObservedRequest {
     pub agent: AgentBridgeAgent,
     pub kind: AgentBridgeRequestKind,
     pub tool_name: Option<String>,
+    /// The exact action an answer approves, bounded to one screenful and
+    /// stripped of control characters. A shell tool shows its command line;
+    /// any other tool shows its input as compact JSON. The full input stays
+    /// bound to the rule through its hash.
+    pub tool_input_preview: Option<String>,
     pub permission_mode: Option<String>,
     pub expires_at_ms: u64,
     pub state: AgentBridgeRequestState,
@@ -167,6 +183,7 @@ pub enum AgentBridgeError {
     RuleMismatch,
     PermissionResponseUnsupported,
     AlreadyHandled,
+    Unauthorized,
     PersistenceFailed,
 }
 
@@ -200,7 +217,8 @@ pub struct AgentBridgeCore {
     observed_sessions: BTreeMap<String, AgentBridgeObservedSession>,
     observed_requests: BTreeMap<String, ObservedRequestRecord>,
     pending_messages: BTreeMap<String, PendingMessageRecord>,
-    prepared_sessions: BTreeSet<String>,
+    /// See [`AgentBridgeStatus::revision`].
+    revision: u64,
     next_id: u64,
 }
 
@@ -218,7 +236,7 @@ impl AgentBridgeCore {
             observed_sessions: BTreeMap::new(),
             observed_requests: BTreeMap::new(),
             pending_messages: BTreeMap::new(),
-            prepared_sessions: BTreeSet::new(),
+            revision: 0,
             next_id: 0,
         })
     }
@@ -322,6 +340,7 @@ impl AgentBridgeCore {
             self.write_control_state(settings, now_ms)?;
         }
         self.expire_pending(now_ms);
+        self.withdraw_ungranted(settings);
         self.scan_sessions(settings, now_ms)?;
         Ok(())
     }
@@ -342,6 +361,7 @@ impl AgentBridgeCore {
                     )
                 })
                 .count(),
+            revision: self.revision,
         }
     }
 
@@ -380,7 +400,7 @@ impl AgentBridgeCore {
             .ok_or(AgentBridgeError::UnknownSession)?;
         // Every agent Sona bridges continues a stopped turn the same way, but
         // only a session that reached a prompt has a turn to reply to.
-        if !self.prepared_sessions.contains(session_id) {
+        if !session.accepts_reply {
             return Err(AgentBridgeError::UnknownSession);
         }
         if self.pending_messages.values().any(|pending| {
@@ -389,13 +409,7 @@ impl AgentBridgeCore {
         }) {
             return Err(AgentBridgeError::DuplicatePending);
         }
-        let binding = SessionBinding {
-            agent: wire_agent(session.agent),
-            session_handle: session.id.clone(),
-            project_hash: session.canonical_project_hash,
-            session_generation: session.session_generation,
-            policy_generation: session.policy_generation,
-        };
+        let binding = session_binding(&session);
         let id = self.next_opaque_id(b"pending", session_id.as_bytes(), now_ms);
         let pending = PendingMessageRecord {
             public: AgentBridgePendingMessage {
@@ -412,6 +426,7 @@ impl AgentBridgeCore {
         };
         let public = pending.public.clone();
         self.pending_messages.insert(id, pending);
+        self.touch();
         Ok(public)
     }
 
@@ -431,6 +446,7 @@ impl AgentBridgeCore {
         }
         if pending.public.expires_at_ms < now_ms {
             pending.public.state = AgentBridgePendingState::CopyOnly;
+            self.touch();
             return Err(AgentBridgeError::Expired);
         }
         if pending.public.session_id != session_id {
@@ -443,8 +459,11 @@ impl AgentBridgeCore {
             return Err(AgentBridgeError::AlreadyHandled);
         }
         pending.public.confirmed = true;
-        Ok(pending.public.clone())
+        let public = pending.public.clone();
+        self.touch();
+        Ok(public)
     }
+
     pub fn cancel_pending(&mut self, pending_id: &str) -> Result<(), AgentBridgeError> {
         let pending = self
             .pending_messages
@@ -453,6 +472,7 @@ impl AgentBridgeCore {
         match pending.public.state {
             AgentBridgePendingState::Held | AgentBridgePendingState::CopyOnly => {
                 pending.public.state = AgentBridgePendingState::Cancelled;
+                self.touch();
                 Ok(())
             }
             _ => Err(AgentBridgeError::AlreadyHandled),
@@ -468,6 +488,7 @@ impl AgentBridgeCore {
             return Err(AgentBridgeError::AlreadyHandled);
         }
         request.public.state = AgentBridgeRequestState::Dismissed;
+        self.touch();
         Ok(())
     }
 
@@ -476,6 +497,7 @@ impl AgentBridgeCore {
         request_id: &str,
         rule_id: String,
         decision: AgentBridgePermissionDecision,
+        settings: &AgentBridgeSettings,
     ) -> Result<AgentBridgePermissionRule, AgentBridgeError> {
         let record = self
             .observed_requests
@@ -483,6 +505,9 @@ impl AgentBridgeCore {
             .ok_or(AgentBridgeError::UnknownRequest)?;
         if !record.public.awaiting_response {
             return Err(AgentBridgeError::PermissionResponseUnsupported);
+        }
+        if !policy_grants(settings, &record.request.binding) {
+            return Err(AgentBridgeError::Unauthorized);
         }
 
         if !matches!(
@@ -531,6 +556,9 @@ impl AgentBridgeCore {
         if record.request.expires_at_ms < now_ms {
             return Err(AgentBridgeError::Expired);
         }
+        if !policy_grants(settings, &record.request.binding) {
+            return Err(AgentBridgeError::Unauthorized);
+        }
         let rule = settings
             .permission_rules
             .iter()
@@ -547,6 +575,7 @@ impl AgentBridgeCore {
         if let Some(request) = self.observed_requests.get_mut(request_id) {
             request.public.state = AgentBridgeRequestState::Responded;
         }
+        self.touch();
         Ok(())
     }
 
@@ -641,9 +670,23 @@ impl AgentBridgeCore {
         request.is_valid_at(now_ms)
             && request.app_instance_id == self.app_instance_id
             && request.binding.policy_generation == settings.policy_generation
-            && settings.master_enabled
-            && setting_agent_enabled(settings, request.binding.agent)
-            && settings.allows_project_hash(&request.binding.project_hash)
+            && policy_grants(settings, &request.binding)
+    }
+
+    /// A request whose project or agent lost its grant after it was seen is
+    /// dropped while it is still unanswered, so the console never offers an
+    /// answer the settings no longer authorize. The hook keeps waiting until
+    /// its own deadline and fails closed. Its file stays, so restoring the
+    /// grant inside that window brings the request back on the next scan.
+    fn withdraw_ungranted(&mut self, settings: &AgentBridgeSettings) {
+        let before = self.observed_requests.len();
+        self.observed_requests.retain(|_, record| {
+            record.public.state != AgentBridgeRequestState::Observed
+                || policy_grants(settings, &record.request.binding)
+        });
+        if self.observed_requests.len() != before {
+            self.touch();
+        }
     }
 
     fn observe_request(
@@ -653,9 +696,10 @@ impl AgentBridgeCore {
     ) -> Result<(), AgentBridgeError> {
         let agent = setting_agent(request.binding.agent);
         let session_id = request.binding.session_handle.clone();
-        self.observed_sessions
+        let kind = request_kind(request.event.event);
+        let session = self
+            .observed_sessions
             .entry(session_id.clone())
-            .and_modify(|session| session.last_seen_at_ms = now_ms)
             .or_insert_with(|| AgentBridgeObservedSession {
                 id: session_id.clone(),
                 agent,
@@ -663,22 +707,37 @@ impl AgentBridgeCore {
                 session_generation: request.binding.session_generation,
                 policy_generation: request.binding.policy_generation,
                 last_seen_at_ms: now_ms,
+                accepts_reply: false,
             });
-        let kind = request_kind(request.event.event);
+        session.last_seen_at_ms = now_ms;
+        // The handle fixes the agent and the project, so a re-observation can
+        // only move the generations. A request is admitted only under the
+        // current policy generation, which makes this the session's newest
+        // authorized binding.
+        session.session_generation = request.binding.session_generation;
+        session.policy_generation = request.binding.policy_generation;
         match kind {
-            AgentBridgeRequestKind::UserPromptSubmit => {
-                self.prepared_sessions.insert(session_id.clone());
-            }
-            AgentBridgeRequestKind::Stop => {
-                self.prepared_sessions.remove(&session_id);
-            }
+            AgentBridgeRequestKind::UserPromptSubmit => session.accepts_reply = true,
+            AgentBridgeRequestKind::Stop => session.accepts_reply = false,
             _ => {}
         }
-        let tool_input_hash = request
+        let binding = session_binding(session);
+        // A reply held under an older generation would wait for a stop it can
+        // never match: the stop carries the generation the settings moved to.
+        // The session is still authorized, so the reply follows it.
+        for pending in self.pending_messages.values_mut() {
+            if pending.public.session_id == session_id
+                && pending.public.state == AgentBridgePendingState::Held
+            {
+                pending.binding = binding.clone();
+            }
+        }
+        let tool_input = request
             .event
             .tool
             .as_ref()
-            .and_then(|tool| tool.input.as_ref())
+            .and_then(|tool| tool.input.as_ref());
+        let tool_input_hash = tool_input
             .and_then(|input| serde_json::to_vec(input).ok())
             .map(|bytes| opaque_hash(&[b"tool-input", &bytes]))
             .unwrap_or_else(|| opaque_hash(&[b"tool-input-none"]));
@@ -689,6 +748,7 @@ impl AgentBridgeCore {
             agent,
             kind,
             tool_name: request.event.tool_name().map(ToOwned::to_owned),
+            tool_input_preview: tool_input.map(tool_input_preview),
             permission_mode: request.event.permission_mode.clone(),
             expires_at_ms: request.expires_at_ms,
             state: AgentBridgeRequestState::Observed,
@@ -702,6 +762,7 @@ impl AgentBridgeCore {
                 tool_input_hash,
             },
         );
+        self.touch();
         if kind == AgentBridgeRequestKind::Stop && awaiting_response {
             self.respond_to_stop(&request, now_ms)?;
         }
@@ -736,6 +797,7 @@ impl AgentBridgeCore {
         if let Some(observed) = self.observed_requests.get_mut(&request.invocation_id) {
             observed.public.state = AgentBridgeRequestState::Responded;
         }
+        self.touch();
         Ok(())
     }
 
@@ -773,22 +835,29 @@ impl AgentBridgeCore {
     }
 
     fn apply_ack(&mut self, ack: &HookAck) {
+        let mut changed = false;
         for pending in self.pending_messages.values_mut() {
             if pending.response_invocation_id.as_deref() == Some(&ack.invocation_id)
                 && pending.binding == ack.binding
                 && pending.public.state == AgentBridgePendingState::ResponseWritten
             {
                 pending.public.state = AgentBridgePendingState::Emitted;
+                changed = true;
             }
+        }
+        if changed {
+            self.touch();
         }
     }
 
     fn expire_pending(&mut self, now_ms: u64) {
+        let mut changed = false;
         for pending in self.pending_messages.values_mut() {
             if pending.public.state == AgentBridgePendingState::Held
                 && pending.public.expires_at_ms < now_ms
             {
                 pending.public.state = AgentBridgePendingState::CopyOnly;
+                changed = true;
             }
         }
         for observed in self.observed_requests.values_mut() {
@@ -796,8 +865,17 @@ impl AgentBridgeCore {
                 && observed.public.expires_at_ms < now_ms
             {
                 observed.public.state = AgentBridgeRequestState::Expired;
+                changed = true;
             }
         }
+        if changed {
+            self.touch();
+        }
+    }
+
+    /// Marks a change the console can see. See [`AgentBridgeStatus::revision`].
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn next_opaque_id(&mut self, kind: &[u8], binding: &[u8], now_ms: u64) -> String {
@@ -966,6 +1044,57 @@ fn setting_agent(agent: Agent) -> AgentBridgeAgent {
 
 fn setting_agent_enabled(settings: &AgentBridgeSettings, agent: Agent) -> bool {
     settings.agent_enabled(setting_agent(agent))
+}
+
+/// The standing grants a request needs: the master switch, its agent, and
+/// its project. Checked when a request is observed and again when it is
+/// answered, because a grant removed in between withdraws the answer. The
+/// policy generation is not part of this on purpose: saving the exact rule
+/// an answer needs advances it.
+fn policy_grants(settings: &AgentBridgeSettings, binding: &SessionBinding) -> bool {
+    settings.master_enabled
+        && setting_agent_enabled(settings, binding.agent)
+        && settings.allows_project_hash(&binding.project_hash)
+}
+
+/// The wire binding a reply for this session must match at its stop.
+fn session_binding(session: &AgentBridgeObservedSession) -> SessionBinding {
+    SessionBinding {
+        agent: wire_agent(session.agent),
+        session_handle: session.id.clone(),
+        project_hash: session.canonical_project_hash.clone(),
+        session_generation: session.session_generation,
+        policy_generation: session.policy_generation,
+    }
+}
+
+/// One screenful: enough to read a command or an edit, not a transcript.
+const TOOL_INPUT_PREVIEW_CHARS: usize = 400;
+
+/// See [`AgentBridgeObservedRequest::tool_input_preview`].
+fn tool_input_preview(input: &serde_json::Value) -> String {
+    let text = match input {
+        // A shell tool's whole action is its command line; the description
+        // and timeout beside it are not what is being approved.
+        serde_json::Value::Object(fields) => match fields.get("command") {
+            Some(serde_json::Value::String(command)) => command.clone(),
+            _ => input.to_string(),
+        },
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let mut visible = text.chars().map(|ch| {
+        if ch == '\n' || !ch.is_control() {
+            ch
+        } else {
+            ' '
+        }
+    });
+    let mut preview: String = visible.by_ref().take(TOOL_INPUT_PREVIEW_CHARS).collect();
+    if visible.next().is_some() {
+        preview.push('…');
+    }
+    preview.trim().to_string()
 }
 
 fn request_kind(kind: CanonicalEventKind) -> AgentBridgeRequestKind {
@@ -1139,7 +1268,7 @@ impl AgentBridgeManager {
             use std::sync::atomic::Ordering;
             use tauri::Emitter as _;
             use tauri_specta::Event as _;
-            let mut previous: Option<(bool, usize, usize, u64)> = None;
+            let mut previous: Option<AgentBridgeStatus> = None;
             let mut recorded_workflow_requests = BTreeSet::new();
             while !worker_stop.load(Ordering::Acquire) {
                 let settings = crate::settings::get_settings(&app).agent_bridge;
@@ -1171,20 +1300,17 @@ impl AgentBridgeManager {
                         }
                     }
                 }
-                let signature = (
-                    status.running,
-                    status.observed_sessions,
-                    status.pending_messages,
-                    status.policy_generation,
-                );
-                if previous != Some(signature) {
+                // The status carries the revision, so a request landing in a
+                // session the console already lists, or a row expiring, is a
+                // difference here and not a change nobody announces.
+                if previous.as_ref() != Some(&status) {
                     let _ = app.emit(
                         AgentBridgeUpdateEvent::NAME,
                         AgentBridgeUpdateEvent {
                             status: status.clone(),
                         },
                     );
-                    previous = Some(signature);
+                    previous = Some(status);
                 }
                 listener.wait();
             }
@@ -1400,8 +1526,9 @@ pub fn create_agent_bridge_permission_rule(
         request_id.as_bytes(),
         &now_ms().to_be_bytes(),
     ]);
+    let settings = crate::settings::get_settings(&app).agent_bridge;
     let rule = lock_recover(&manager.core)
-        .exact_rule_for_request(&request_id, rule_id, decision)
+        .exact_rule_for_request(&request_id, rule_id, decision, &settings)
         .map_err(|error| error.to_string())?;
     let saved = rule.clone();
     mutate_bridge_settings(&app, &manager, |bridge| {
@@ -1781,6 +1908,62 @@ mod tests {
         Ok(())
     }
 
+    /// The worker republishes when the status differs, so the status has to
+    /// differ for every change the console shows. A second request landing
+    /// in a session already listed, and a listed request passing its
+    /// deadline, both leave the session and pending counts where they were.
+    #[test]
+    fn status_changes_when_a_listed_session_gains_or_loses_a_request() -> Result<(), Box<dyn Error>>
+    {
+        let root = test_root("status-revision")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-status-revision"]);
+        let binding = binding(&root)?;
+        let settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let permission = |command: &str| {
+            event(
+                CanonicalEventKind::PermissionRequest,
+                &root,
+                Some(CanonicalTool {
+                    name: "Bash".to_string(),
+                    use_id: None,
+                    input: Some(json!({ "command": command })),
+                }),
+            )
+        };
+        persist_event(
+            &paths,
+            &app_id,
+            binding.clone(),
+            permission("cargo build"),
+            b"first",
+            1_001,
+        )?;
+        core.tick(&settings, 1_002)?;
+        let listed = core.status(&settings);
+
+        let second = persist_event(
+            &paths,
+            &app_id,
+            binding,
+            permission("cargo test"),
+            b"second",
+            1_003,
+        )?;
+        core.tick(&settings, 1_004)?;
+        let with_second = core.status(&settings);
+        assert_eq!(with_second.observed_sessions, listed.observed_sessions);
+        assert_ne!(with_second, listed);
+
+        core.tick(&settings, second.expires_at_ms.saturating_add(1))?;
+        assert_ne!(core.status(&settings), with_second);
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn policy_change_under_a_running_worker_is_republished_at_once() -> Result<(), Box<dyn Error>> {
         let root = test_root("policy-change")?;
@@ -2132,6 +2315,59 @@ mod tests {
         Ok(())
     }
 
+    /// A settings change advances the policy generation, and every hook
+    /// event after it carries the new one. A reply confirmed before the
+    /// change is still for the same authorized session, so the stop that
+    /// arrives under the new generation must deliver it rather than leave
+    /// it held until it expires.
+    #[test]
+    fn a_confirmed_reply_follows_its_session_across_a_policy_change() -> Result<(), Box<dyn Error>>
+    {
+        let root = test_root("policy-move")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-policy-move"]);
+        let binding = binding(&root)?;
+        let mut settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let prompt = event(CanonicalEventKind::UserPromptSubmit, &root, None);
+        persist_event(&paths, &app_id, binding, prompt, b"prompt", 1_001)?;
+        core.tick(&settings, 1_002)?;
+        let session_id = core.sessions()[0].id.clone();
+        let preview =
+            core.create_reply_preview(&session_id, "carry on".to_string(), 1_003, None)?;
+        core.confirm_reply_preview(&preview.id, &session_id, "carry on", 1_004)?;
+
+        settings.advance_policy_generation();
+        core.tick(&settings, 1_005)?;
+        let moved = SessionBinding::new(
+            Agent::Claude,
+            "provider-session",
+            &root,
+            2,
+            settings.policy_generation,
+        )?;
+        let stop = persist_event(
+            &paths,
+            &app_id,
+            moved,
+            event(CanonicalEventKind::Stop, &root, None),
+            b"stop-after-move",
+            1_006,
+        )?;
+        core.tick(&settings, 1_007)?;
+        let response: HookResponse = wire::read_json_bounded(
+            &paths
+                .session(&stop.binding)?
+                .response_path(&stop.invocation_id)?,
+            wire::MAX_RESPONSE_BYTES,
+        )?;
+        assert_eq!(response.reason.as_deref(), Some("carry on"));
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn omp_reply_requires_confirmation_and_stays_bound_to_one_project() -> Result<(), Box<dyn Error>>
     {
@@ -2268,6 +2504,7 @@ mod tests {
                 &request.invocation_id,
                 "omp-rule".to_string(),
                 AgentBridgePermissionDecision::Allow,
+                &settings,
             ),
             Err(AgentBridgeError::PermissionResponseUnsupported)
         );
@@ -2363,6 +2600,84 @@ mod tests {
         Ok(())
     }
 
+    /// Removing a project withdraws the answer to a request seen while it
+    /// was authorized: the request leaves the console on the next tick, and
+    /// neither a rule nor a response can be made for it, even though the
+    /// hook is still holding the agent open inside its deadline.
+    #[test]
+    fn revoking_a_project_withdraws_its_outstanding_request() -> Result<(), Box<dyn Error>> {
+        let root = test_root("revoked")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-revoked"]);
+        let binding = binding(&root)?;
+        let mut settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let tool_input = json!({"command": "cargo test"});
+        let tool_hash = opaque_hash(&[b"tool-input", &serde_json::to_vec(&tool_input)?]);
+        let request = persist_event(
+            &paths,
+            &app_id,
+            binding,
+            event(
+                CanonicalEventKind::PermissionRequest,
+                &root,
+                Some(CanonicalTool {
+                    name: "Bash".to_string(),
+                    use_id: None,
+                    input: Some(tool_input),
+                }),
+            ),
+            b"permission",
+            1_001,
+        )?;
+        core.tick(&settings, 1_002)?;
+        assert_eq!(core.requests().len(), 1);
+
+        settings.allowed_projects.clear();
+        settings.permission_rules.push(AgentBridgePermissionRule {
+            id: "rule-1".to_string(),
+            agent: AgentBridgeAgent::Claude,
+            canonical_project_hash: request.binding.project_hash.clone(),
+            tool_name: "Bash".to_string(),
+            permission_mode: Some("default".to_string()),
+            tool_input_hash: tool_hash,
+            decision: AgentBridgePermissionDecision::Allow,
+            user_created: true,
+        });
+        assert_eq!(
+            core.exact_rule_for_request(
+                &request.invocation_id,
+                "rule-2".to_string(),
+                AgentBridgePermissionDecision::Allow,
+                &settings,
+            ),
+            Err(AgentBridgeError::Unauthorized)
+        );
+        assert_eq!(
+            core.respond_permission(
+                &request.invocation_id,
+                "rule-1",
+                AgentBridgePermissionDecision::Allow,
+                &settings,
+                1_003,
+            ),
+            Err(AgentBridgeError::Unauthorized)
+        );
+        assert!(!paths
+            .session(&request.binding)?
+            .response_path(&request.invocation_id)?
+            .exists());
+
+        settings.policy_generation += 1;
+        core.tick(&settings, 1_004)?;
+        assert!(core.requests().is_empty());
+
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     /// The app writes a response only where the hook is holding its agent open
     /// for one. Claude's pre-tool gate answers exactly two tools, so an ordinary
     /// tool call is observed and nothing else — a response for it would sit in
@@ -2401,6 +2716,7 @@ mod tests {
                 &request.invocation_id,
                 "rule-1".to_string(),
                 AgentBridgePermissionDecision::Allow,
+                &settings,
             )
             .unwrap_err(),
             AgentBridgeError::PermissionResponseUnsupported
@@ -2408,6 +2724,66 @@ mod tests {
         core.stop();
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    /// The list shows what the agent is about to do. For a shell tool that
+    /// is the command line; the description and timeout beside it are not
+    /// what is being approved.
+    #[test]
+    fn a_permission_request_is_listed_with_its_command_line() -> Result<(), Box<dyn Error>> {
+        let root = test_root("preview")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-preview"]);
+        let binding = binding(&root)?;
+        let settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        persist_event(
+            &paths,
+            &app_id,
+            binding,
+            event(
+                CanonicalEventKind::PermissionRequest,
+                &root,
+                Some(CanonicalTool {
+                    name: "Bash".to_string(),
+                    use_id: None,
+                    input: Some(json!({
+                        "command": "cargo test --lib agent_bridge",
+                        "description": "Run the bridge tests",
+                        "timeout": 120_000
+                    })),
+                }),
+            ),
+            b"preview",
+            1_001,
+        )?;
+        core.tick(&settings, 1_002)?;
+        assert_eq!(
+            core.requests()[0].tool_input_preview.as_deref(),
+            Some("cargo test --lib agent_bridge")
+        );
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    macro_rules! preview_cases {
+        ($($name:ident: $input:expr => $want:expr;)*) => { $(
+            #[test]
+            fn $name() {
+                assert_eq!(tool_input_preview(&$input), $want);
+            }
+        )* };
+    }
+    preview_cases! {
+        preview_of_a_tool_without_a_command_is_its_compact_json:
+            json!({"file_path": "/tmp/a.rs"}) => r#"{"file_path":"/tmp/a.rs"}"#;
+        preview_keeps_one_screenful_whole:
+            json!("x".repeat(TOOL_INPUT_PREVIEW_CHARS)) => "x".repeat(TOOL_INPUT_PREVIEW_CHARS);
+        preview_marks_what_it_cut:
+            json!("x".repeat(TOOL_INPUT_PREVIEW_CHARS + 1))
+            => format!("{}…", "x".repeat(TOOL_INPUT_PREVIEW_CHARS));
     }
 
     /// The setup code is pasted straight into `hooks.json`, so a wrong shape is
