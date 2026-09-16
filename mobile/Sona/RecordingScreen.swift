@@ -1,10 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// The whole phone app: elapsed time, one control, one line of status.
-///
-/// Everything else the phone can do is either automatic or lives behind the one line
-/// at the bottom, which is only reachable while the phone is unpaired.
+/// Meeting capture: elapsed time, one control, and upload status.
 struct RecordingScreen: View {
     @ObservedObject var model: AppModel
     /* Observed separately: `AppModel` holds the recorder but does not republish its
@@ -31,10 +28,6 @@ struct RecordingScreen: View {
         .background(Theme.background)
         .sheet(isPresented: $showsPairing) {
             PairingScreen(model: model)
-        }
-        .sheet(isPresented: .constant(!model.consentAccepted)) {
-            ConsentScreen(model: model)
-                .interactiveDismissDisabled()
         }
         .task { await model.refresh() }
     }
@@ -75,6 +68,8 @@ struct RecordingScreen: View {
             .contentShape(Circle())
         }
         .buttonStyle(PressScaleButtonStyle(reduceMotion: reduceMotion))
+        /* A second tap before the microphone answers is not a new recording. */
+        .disabled(model.startingRecording)
         .accessibilityLabel(Text(recorder.isRecording ? "a11y.stop" : "a11y.record"))
         .accessibilityIdentifier(recorder.isRecording ? "stop" : "record")
     }

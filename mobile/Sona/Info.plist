@@ -2,9 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Everything else is generated from INFOPLIST_KEY_* build settings. Background
-	     modes are not among the keys Xcode's generator maps, and capture has to survive
-	     the app leaving the foreground, so this one key is declared here. -->
+	<!-- Only what the build settings cannot express: the usage strings live beside the
+	     other INFOPLIST_KEY_ settings in the project file. -->
+	<!-- The keyboard's one way back into the app, matching Shared/DictationLink.swift. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.aktanazat.sona.mobile</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>sona</string></array>
+		</dict>
+	</array>
+	<!-- Meeting capture continues when the app leaves the foreground. -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

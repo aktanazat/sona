@@ -26,8 +26,12 @@ final class AppModel: NSObject, ObservableObject {
     @Published var endpointDraft: String
     @Published var vaultIdDraft: String
     @Published var consentAccepted: Bool
+    @Published private(set) var startingRecording = false
+    /// The draft the keyboard can insert, or nothing waiting for it.
+    @Published private(set) var keyboardDraft: UUID?
 
     let recorder = PhoneRecorder()
+    let dictation = PhoneDictation()
     let callOffers = CallOfferService()
 
     /// Set when this recording was started from a call notification.
@@ -91,8 +95,24 @@ final class AppModel: NSObject, ObservableObject {
 
     // MARK: - Recording
 
+    /// False while the microphone belongs to a recording, so the dictation screen can say
+    /// so before the operator taps.
+    var canStartDictation: Bool { !recorder.isRecording && !startingRecording }
+
+    func startDictation() {
+        guard canStartDictation else { return }
+        dictation.start()
+    }
+
     func startRecording() {
+        guard !startingRecording, !recorder.isRecording else { return }
+        /* A recording takes the microphone from dictation instead of refusing: the
+         * transcript so far stays on the dictation screen, and an offer the operator
+         * accepted from a call notification must not fail with a microphone error. */
+        dictation.cancel()
+        startingRecording = true
         Task {
+            defer { startingRecording = false }
             let granted =
                 PhoneRecorder.hasPermission
                 ? true
@@ -108,6 +128,21 @@ final class AppModel: NSObject, ObservableObject {
                 recorder.notice = .microphoneUnavailable
             }
         }
+    }
+
+    // MARK: - Keyboard draft
+
+    /* The approved draft outlives the dictation screen, so the identity of what the
+     * keyboard can insert is held here rather than in that view's state. */
+    func approveForKeyboard(_ text: String) throws {
+        keyboardDraft = try KeyboardDraftStore.shared().save(text: text).id
+    }
+
+    /// Withdraw what the keyboard has not taken yet. Already inserted is the same outcome.
+    func withdrawKeyboardDraft() {
+        guard let id = keyboardDraft else { return }
+        keyboardDraft = nil
+        try? KeyboardDraftStore.shared().discard(id: id)
     }
 
     func stopRecording() {

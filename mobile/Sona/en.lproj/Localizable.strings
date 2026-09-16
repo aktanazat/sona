@@ -18,7 +18,7 @@
 "pairing.line.hint" = "Tap to pair";
 
 "consent.title" = "Before you record";
-"consent.body1" = "Sona records this phone's microphone, and only while a recording is open. Nothing is captured until you tap record, and no transcript is made here.";
+"consent.body1" = "Sona uses this phone's microphone only while a recording or a dictation is open. Nothing is captured until you start one of them. Meetings are transcribed on your Mac. Dictation is transcribed on this iPhone.";
 "consent.body2" = "Recordings are encrypted on this phone and uploaded to your own vault, which only your devices can read. They wait here until they upload. Everyone in the room should know they are being recorded.";
 "consent.action" = "Start";
 
@@ -56,3 +56,39 @@
 "title.phone" = "Phone recording";
 "title.watch" = "Watch recording";
 "title.afterCall" = "After a call,";
+
+"tab.recording" = "Recordings";
+"tab.dictation" = "Dictate";
+"dictation.title" = "Dictate into other apps";
+"dictation.privacy" = "Dictation stays on this iPhone. Sona uses on-device speech recognition and does not upload dictation audio or text.";
+"dictation.transcript" = "Dictation text";
+"dictation.start" = "Start dictating";
+"dictation.stop" = "Finish dictation";
+"dictation.cancel" = "Cancel";
+"dictation.authorizing" = "Waiting for permission";
+"dictation.finishing" = "Finishing transcript";
+"dictation.stopMeeting" = "A recording is using the microphone. Stop it to dictate.";
+"dictation.useKeyboard" = "Use in keyboard";
+"dictation.saved" = "Ready. Return to your other app, switch to the Sona keyboard, and tap Insert.";
+"dictation.setupTitle" = "Set up the keyboard";
+"dictation.setup" = "In Settings, open General, Keyboard, Keyboards, then Add New Keyboard. Choose Sona Dictation and enable Allow Full Access. Use the globe key in Messages, Mail, or another text field to switch to Sona.";
+"dictation.fullAccess" = "Full Access lets the keyboard read the draft you approve here. The keyboard sends no keystrokes to a server. Your draft expires after ten minutes and is removed when you insert or discard it. Secure fields and apps that block third-party keyboards use the system keyboard.";
+"dictation.speechOff" = "Speech recognition access is off in Settings.";
+"dictation.onDeviceUnavailable" = "On-device speech recognition is unavailable for this iPhone's language. Enable Dictation in Settings, General, Keyboard, then try again. Sona will not switch to a remote speech service.";
+"dictation.interrupted" = "Dictation stopped because another app took the microphone. Review the text before using it.";
+"dictation.empty" = "There is no dictation text to insert.";
+"dictation.storageUnavailable" = "Sona cannot reach the storage it shares with its keyboard, so the draft was not saved.";
+"dictation.draftExpired" = "That draft is more than ten minutes old, so it was removed. Dictate it again in Sona.";
+"dictation.draftChanged" = "That draft has changed or has already been inserted. Refresh to see the current one.";
+"keyboard.title" = "Sona Dictation";
+"keyboard.refresh" = "Refresh draft";
+"keyboard.needsFullAccess" = "Enable Allow Full Access for Sona Dictation in Settings, General, Keyboard, Keyboards. This lets the keyboard read your approved draft.";
+"keyboard.empty" = "Open Sona, dictate, then choose Use in keyboard. Return here to review and insert the text.";
+"keyboard.openApp" = "Open Sona to dictate";
+"keyboard.insert" = "Insert";
+"keyboard.discard" = "Discard";
+"keyboard.inserted" = "Text inserted.";
+"keyboard.next" = "Next keyboard";
+"keyboard.space" = "Space";
+"keyboard.delete" = "Delete";
+"keyboard.return" = "Return";
