@@ -43,6 +43,15 @@ struct DictationSettingsView<DataRows: View>: View {
                 if store.settings.commandModeEnabled {
                     ShortcutCaptureRow(store: store, id: "command")
                 }
+                ToggleRow(
+                    title: "Learn from corrections in other apps",
+                    detail: "Locally watches the last dictated passage for up to one minute in supported text fields. Repeated corrections become suggestions for you to review in Learning.",
+                    isOn: Binding(
+                        get: { store.settings.learnDestinationCorrections },
+                        set: { value in Task { await store.setLearnDestinationCorrections(value) } }
+                    )
+                )
+                projectFolderRow
                 /// The microphone end of the same path, and only on a device
                 /// with more than one channel — on most machines there is no
                 /// row here at all.
@@ -123,6 +132,35 @@ struct DictationSettingsView<DataRows: View>: View {
                 }
             }
         }
+    }
+
+    private var projectFolderRow: some View {
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Project vocabulary").font(TypeScale.label(14)).foregroundStyle(Theme.ink)
+                Text("Filenames and identifiers can be sent to your cleanup model. Requires Full context in Privacy and your dictation style. Ignored and hidden files stay out.")
+                    .bodyText(13, Theme.inkSecondary)
+                if let root = store.settings.dictationProjectRoot {
+                    Text(URL(fileURLWithPath: root).lastPathComponent)
+                        .font(TypeScale.mono(12)).foregroundStyle(Theme.inkSecondary)
+                        .help(root)
+                } else {
+                    Text("No folder selected").bodyText(13, Theme.inkTertiary)
+                }
+            }
+        } trailing: {
+            HStack(spacing: 12) {
+                if store.settings.dictationProjectRoot != nil {
+                    Button("Clear") { Task { await store.setDictationProjectRoot(nil) } }
+                        .buttonStyle(.quiet)
+                        .accessibilityLabel("Clear dictation project folder")
+                }
+                Button("Choose…", action: store.chooseDictationProject)
+                    .buttonStyle(.compact)
+                    .accessibilityLabel("Choose dictation project folder")
+            }
+        }
+        .disabled(store.choosingProject || store.isBusy("dictation_project_root"))
     }
 
     /// Fifteen seconds is only useful for watching an unload happen, so it is

@@ -32,6 +32,7 @@ Sona is a local-first desktop app for spoken words: dictation delivered into any
 ### Agents
 
 - A chat that answers from your corpus. Once you allow it to send matching quotes to your server, it can search recordings, read a meeting or transcript, look up a person, check open loops and the calendar, and count words and activity, at most three lookups per question, each shown as a step. It can also offer changes (close a commitment, assign an owner, rename a speaker, add a vocabulary term) that apply only when you press Apply, each with a receipt and an undo.
+- In native macOS chat, choose ChatGPT or Claude, then a model and one of its supported thinking levels. The paired server supplies the model list. `Use server default` clears the saved choice.
 - A `sona` CLI and MCP server for reading meetings, people, loops, and the upcoming calendar, plus a consent-gated write to close a loop. `skills/sona/SKILL.md` documents the surface.
 - Local agent hooks for Claude Code, Codex, Grok, and OMP, with permission requests answerable from Sona where the tool has a reply channel.
 

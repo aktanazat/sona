@@ -34,7 +34,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_specta::Event as _;
 
 pub use history::AgentChatConversationSummaryV1;
-pub use protocol::AgentPanelTurnFailureV1;
+pub use protocol::{AgentModelCatalogV1, AgentModelSelectionV1, AgentPanelTurnFailureV1};
 pub use relay::AgentPanelPublicIdentityV1;
 pub use wire::{
     AgentPanelActionRequestV1, AgentPanelActionStateV1, AgentPanelActionV1, AgentPanelActorV1,
@@ -673,6 +673,28 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         outcome.map_err(map_relay_error)
     }
 
+    pub(crate) async fn models(&self) -> Result<AgentModelCatalogV1, AgentPanelCommandErrorV1> {
+        let client = RelayClient::from_settings(&self.app, self.nonce_cache.clone())
+            .await
+            .map_err(map_relay_error)?;
+        client.subscription_models().await.map_err(map_relay_error)
+    }
+
+    pub(crate) async fn select_model(
+        &self,
+        selection: Option<AgentModelSelectionV1>,
+    ) -> Result<(), AgentPanelCommandErrorV1> {
+        if let Some(selection) = selection.as_ref() {
+            if !self.models().await?.supports(selection) {
+                return Err(AgentPanelCommandErrorV1::InvalidRequest);
+            }
+        }
+        crate::settings::update_settings(&self.app, |settings| {
+            settings.agent_panel_model_selection = selection;
+        })
+        .map_err(|_| AgentPanelCommandErrorV1::ActionFailed)
+    }
+
     pub(crate) async fn send_turn(
         &self,
         request: AgentPanelSendTurnRequestV1,
@@ -680,7 +702,9 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     where
         R: NativeAgentPanelRuntime,
     {
-        if !is_opaque_id(&request.turn_id) {
+        if !is_opaque_id(&request.turn_id)
+            || (request.workspace != AgentPanelWorkspaceV1::SonaChat && request.screenshot.is_some())
+        {
             return Err(AgentPanelCommandErrorV1::InvalidRequest);
         }
 
@@ -694,6 +718,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         /* Only the settings proposer is shown the settings. Building that
          * snapshot enumerates audio devices and permissions, so a question
          * about last week's meeting neither pays for it nor sends it. */
+        let model_selection = crate::settings::get_settings(&self.app).agent_panel_model_selection;
         let context = match request.workspace {
             AgentPanelWorkspaceV1::SonaConfig => {
                 let app = R::native_handle(&self.app);
@@ -729,6 +754,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             let (turn, allowed) = match context {
                 Some(context) => (
                     PanelTurnV1::Config(SonaAgentTurnV1 {
+                        model_selection,
                         protocol_version: SONA_AGENT_TURN_VERSION.to_string(),
                         conversation_id,
                         turn_id: turn_id.clone(),
@@ -744,12 +770,14 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                 ),
                 None => (
                     PanelTurnV1::Chat(SonaChatTurnV2 {
+                        model_selection,
                         protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
                         conversation_id,
                         turn_id: turn_id.clone(),
                         user_message: request.message.clone(),
                         recent_turns,
                         context_pack: request.context_pack,
+                        screenshot: request.screenshot,
                         tools_allowed: request.tools_allowed,
                         locale: request.locale,
                         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -822,6 +850,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             || active.request.user_message() != request.message
             || active.request.locale() != request.locale
             || active.base_pack.as_deref() != request.context_pack.as_deref()
+            || active.request.screenshot() != request.screenshot.as_ref()
         {
             return Err(AgentPanelCommandErrorV1::InvalidRequest);
         }
@@ -2436,6 +2465,8 @@ pub(crate) async fn run_chat_turn(
     );
     let idempotency_key = relay::new_idempotency_key().map_err(chat_turn_error)?;
     let turn = PanelTurnV1::Chat(SonaChatTurnV2 {
+        model_selection: None,
+        screenshot: None,
         protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
         conversation_id: format!("headless-{idempotency_key}"),
         turn_id: format!("turn-{idempotency_key}"),
@@ -2665,6 +2696,23 @@ pub fn agent_panel_status(
     manager: State<'_, AgentPanelManager>,
 ) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
     Ok(manager.status())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_panel_models(
+    manager: State<'_, AgentPanelManager>,
+) -> Result<AgentModelCatalogV1, AgentPanelCommandErrorV1> {
+    manager.models().await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn agent_panel_select_model(
+    manager: State<'_, AgentPanelManager>,
+    selection: Option<AgentModelSelectionV1>,
+) -> Result<(), AgentPanelCommandErrorV1> {
+    manager.select_model(selection).await
 }
 
 #[tauri::command]
@@ -2996,6 +3044,8 @@ mod tests {
 
     fn active_chat_state(conversation_id: &str, turn_id: &str, message: &str) -> PanelState {
         let request = PanelTurnV1::Chat(SonaChatTurnV2 {
+            model_selection: None,
+            screenshot: None,
             protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
             conversation_id: conversation_id.to_string(),
             turn_id: turn_id.to_string(),

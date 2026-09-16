@@ -1,6 +1,7 @@
 use super::protocol::{
-    AgentPanelWorkspaceV1, PanelTurnV1, SonaAgentResponseV1, SonaModelCatalogV1, SonaSubmissionV1,
-    MAX_CHAT_SUBMISSION_BYTES, MAX_PROPOSAL_BYTES, SONA_MODEL_ALIAS,
+    AgentModelCatalogV1, AgentPanelWorkspaceV1, PanelTurnV1, SonaAgentResponseV1,
+    SonaModelCatalogV1, SonaSubmissionV1, MAX_CHAT_SUBMISSION_BYTES, MAX_PROPOSAL_BYTES,
+    SONA_MODEL_ALIAS,
 };
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -360,6 +361,11 @@ impl RelayClient {
             .ok()
             .and_then(|catalog| choose_model_alias(&catalog))
             .unwrap_or_else(|| SONA_MODEL_ALIAS.to_string())
+    }
+
+    pub(crate) async fn subscription_models(&self) -> Result<AgentModelCatalogV1, RelayError> {
+        self.request(Method::GET, "/v1/sona/models", None::<&()>)
+            .await
     }
 
     pub(crate) async fn get_events(
@@ -1562,6 +1568,8 @@ mod tests {
 
     fn chat_turn(turn_id: &str) -> PanelTurnV1 {
         PanelTurnV1::Chat(SonaChatTurnV2 {
+            model_selection: None,
+            screenshot: None,
             protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
             conversation_id: format!("conversation-{turn_id}"),
             turn_id: turn_id.to_string(),
@@ -2552,6 +2560,7 @@ mod tests {
             let snapshot = config::snapshot_from_parts(&settings, &[], &device_names);
             let allowed = snapshot.allowed_values(&device_names);
             let turn = PanelTurnV1::Config(SonaAgentTurnV1 {
+                model_selection: None,
                 protocol_version: SONA_AGENT_TURN_VERSION.to_string(),
                 conversation_id: "conversation-config-e2e".to_string(),
                 turn_id: "config-e2e".to_string(),
@@ -2668,6 +2677,8 @@ The deck was sent.",
                 original.loop_id.as_str()
             );
             let turn = PanelTurnV1::Chat(SonaChatTurnV2 {
+                model_selection: None,
+                screenshot: None,
                 protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
                 conversation_id: "conversation-action-e2e".to_string(),
                 turn_id: "action-e2e".to_string(),

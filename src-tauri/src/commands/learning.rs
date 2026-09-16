@@ -1,4 +1,4 @@
-//! The two commands the learning feed uses.
+//! Commands for the learning feed and its optional destination-edit source.
 //!
 //! Accepting a suggestion is the only place a loop touches real settings, and it
 //! happens here rather than in the store: the store owns evidence and decision
@@ -19,6 +19,21 @@ use crate::meeting::types::MeetingCommandError;
 use crate::settings::{self, ReplacementRule, VocabularyEntry};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_learn_destination_corrections_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let persisted = settings::update_settings(&app, |settings| {
+        settings.learn_destination_corrections = enabled;
+    });
+    #[cfg(target_os = "macos")]
+    crate::context::macos::corrections::cancel();
+    persisted?;
+    Ok(())
+}
 
 #[tauri::command]
 #[specta::specta]

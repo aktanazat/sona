@@ -239,6 +239,10 @@ impl MeetingSessionManager {
     /// The dedupe key is the rewrite on the local day it happened, which is what
     /// makes "three days running" the evidence rather than "three clicks in one
     /// afternoon".
+    ///
+    /// macOS-only with its caller: the destination observer is the only source
+    /// of a dictation correction, so on the other platforms nothing records one.
+    #[cfg(target_os = "macos")]
     pub(crate) async fn record_dictation_correction(&self, spoken: String, written: String) {
         let Ok(store) = self.store().await else {
             return;

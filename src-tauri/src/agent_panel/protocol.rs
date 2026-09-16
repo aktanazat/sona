@@ -1,3 +1,4 @@
+use crate::chat_screenshot::{ChatScreenshot, MAX_SCREENSHOT_BASE64_BYTES};
 use crate::meeting::analytics::MeetingNotesTemplate;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::people_types::PersonId;
@@ -46,6 +47,41 @@ pub(crate) struct SonaModelCatalogEntryV1 {
     pub(crate) alias: String,
     pub(crate) default: bool,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct AgentModelSelectionV1 {
+    pub model: String,
+    pub thinking_effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSubscriptionModelV1 {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub thinking: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct AgentModelCatalogV1 {
+    pub models: Vec<AgentSubscriptionModelV1>,
+    pub default_selection: Option<AgentModelSelectionV1>,
+}
+
+impl AgentModelCatalogV1 {
+    pub(crate) fn supports(&self, selection: &AgentModelSelectionV1) -> bool {
+        self.models.iter().any(|model| {
+            model.id == selection.model
+                && selection
+                    .thinking_effort
+                    .as_ref()
+                    .is_none_or(|effort| model.thinking.contains(effort))
+        })
+    }
+}
 /// The largest context pack the panel accepts on the wire, in bytes.
 ///
 /// 128 KiB because a pack has to carry the evidence of a whole meeting rather
@@ -70,17 +106,14 @@ pub(crate) const MAX_CONTEXT_PACK_BYTES: usize = 128 * 1024;
 const SUBMISSION_ENVELOPE_BYTES: usize = 16 * 1024;
 /// The largest whole chat submission the relay accepts, in bytes, measured as
 /// JSON.
-///
-/// Derived rather than chosen, because a submission is exactly a context pack,
-/// a user message and the recent turns. A number picked beside its parts goes
-/// stale the first time one part moves, and the failure it produces is the
-/// worst kind: a pack that every check on this side accepted, refused on the
-/// wire. `omp_bridge/sona_chat.py` enforces the same ceiling fail-closed, and
-/// deriving it here is what makes that mirror checkable rather than hopeful.
+/// Derived from the context pack, message, recent turns and optional screenshot.
+/// A number picked beside its parts can refuse a turn the client accepted.
+/// omp_bridge/sona_chat.py enforces the same ceiling.
 pub(crate) const MAX_CHAT_SUBMISSION_BYTES: usize = MAX_CONTEXT_PACK_BYTES
     + MAX_USER_MESSAGE_BYTES
     + MAX_RECENT_TURN_BYTES
-    + SUBMISSION_ENVELOPE_BYTES;
+    + SUBMISSION_ENVELOPE_BYTES
+    + MAX_SCREENSHOT_BASE64_BYTES;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_RESPONSE_STEPS: usize = 32;
 pub(crate) const MAX_STEP_LABEL_BYTES: usize = 256;
@@ -308,6 +341,8 @@ pub struct SonaAgentTurnV1 {
     pub proposal_schema: serde_json::Value,
     pub locale: String,
     pub app_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<AgentModelSelectionV1>,
 }
 
 /// The assistant turn. Same conversation machinery as the config turn, with
@@ -323,6 +358,8 @@ pub struct SonaChatTurnV2 {
     pub user_message: String,
     pub recent_turns: Vec<SonaAgentChatTurnV1>,
     pub context_pack: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<ChatScreenshot>,
     /// Whether the model may ask this Mac to run Sona tools during this turn
     /// (`query::tools`). The name and wire type are the ones the relay
     /// already checks; the meaning moved from "the worker's own MCP servers",
@@ -353,6 +390,8 @@ pub struct SonaChatTurnV2 {
     ///
     /// [`RELAY_OUTPUT_RULE`]: crate::meeting
     pub reply_is_json: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<AgentModelSelectionV1>,
 }
 
 /// One turn, addressed to one workspace. Untagged because the workspace is
@@ -403,6 +442,13 @@ impl PanelTurnV1 {
         match self {
             Self::Config(turn) => &turn.user_message,
             Self::Chat(turn) => &turn.user_message,
+        }
+    }
+
+    pub(crate) fn screenshot(&self) -> Option<&ChatScreenshot> {
+        match self {
+            Self::Config(_) => None,
+            Self::Chat(turn) => turn.screenshot.as_ref(),
         }
     }
 
@@ -1227,6 +1273,7 @@ mod tests {
     fn turn_matches_the_relay_schema_contract() {
         let (config_snapshot, _) = snapshot();
         let turn = SonaAgentTurnV1 {
+            model_selection: None,
             protocol_version: SONA_AGENT_TURN_VERSION.to_string(),
             conversation_id: "conversation-0001".to_string(),
             turn_id: "turn-00000001".to_string(),
@@ -1280,6 +1327,8 @@ mod tests {
 
     fn chat_turn() -> SonaChatTurnV2 {
         SonaChatTurnV2 {
+            model_selection: None,
+            screenshot: None,
             protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
             conversation_id: "conversation-0001".to_string(),
             turn_id: "turn-00000002".to_string(),
@@ -1331,6 +1380,7 @@ mod tests {
     fn config_turn() -> SonaAgentTurnV1 {
         let (config_snapshot, _) = snapshot();
         SonaAgentTurnV1 {
+            model_selection: None,
             protocol_version: SONA_AGENT_TURN_VERSION.to_string(),
             conversation_id: "conversation-0001".to_string(),
             turn_id: "turn-00000001".to_string(),
@@ -1398,11 +1448,12 @@ mod tests {
     #[test]
     fn the_wires_ceilings_are_what_the_relay_was_told_they_are() {
         assert_eq!(MAX_CONTEXT_PACK_BYTES, 131_072);
-        assert_eq!(MAX_CHAT_SUBMISSION_BYTES, 188_416);
+        assert_eq!(MAX_CHAT_SUBMISSION_BYTES, 2_984_620);
         assert_eq!(
             MAX_CHAT_SUBMISSION_BYTES,
-            MAX_CONTEXT_PACK_BYTES + MAX_USER_MESSAGE_BYTES + MAX_RECENT_TURN_BYTES + 16 * 1024,
-            "a submission is a pack, a message and the recent turns, and nothing else varies"
+            MAX_CONTEXT_PACK_BYTES + MAX_USER_MESSAGE_BYTES + MAX_RECENT_TURN_BYTES
+                + 16 * 1024 + MAX_SCREENSHOT_BASE64_BYTES,
+            "the submission includes the base64-encoded screenshot budget"
         );
     }
 
@@ -1440,6 +1491,8 @@ mod tests {
     #[test]
     fn a_maximal_chat_submission_fits_the_ceiling_it_declares() {
         let turn = SonaChatTurnV2 {
+            model_selection: None,
+            screenshot: None,
             protocol_version: SONA_CHAT_TURN_VERSION.to_string(),
             conversation_id: dense("conversation-0001-", 128),
             turn_id: dense("turn-00000002-", 128),

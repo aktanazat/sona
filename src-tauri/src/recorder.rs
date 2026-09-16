@@ -1,4 +1,4 @@
-use crate::managers::audio::{AudioRecordingManager, RecorderMicrophoneLease};
+use crate::managers::audio::{AudioRecordingManager, NativeMicrophoneLease};
 use crate::managers::history::HistoryManager;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -158,7 +158,7 @@ struct RecorderState {
     partial_path: Option<PathBuf>,
     final_path: Option<PathBuf>,
     native: Option<NativeRecorder>,
-    microphone_lease: Option<RecorderMicrophoneLease>,
+    microphone_lease: Option<NativeMicrophoneLease>,
 }
 
 impl Default for RecorderState {
@@ -286,7 +286,7 @@ impl ScreenRecorderManager {
                 // out of a device this recording may never use. Preflight already reports
                 // CaptureBusy before the sheet appears.
                 let microphone_lease = if request.microphone_enabled {
-                    match self.audio.try_acquire_recorder_microphone() {
+                    match self.audio.try_acquire_native_microphone() {
                         Some(lease) => Some(lease),
                         None => {
                             native_cancel(&mut native);

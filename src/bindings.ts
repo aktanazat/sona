@@ -160,9 +160,49 @@ async getAgentBridgeHookSnippet() : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async chatVoiceStart(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_voice_start", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async chatVoiceStop(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_voice_stop", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async chatVoiceSpeak(sessionId: string, utteranceId: number, text: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_voice_speak", { sessionId, utteranceId, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async agentPanelStatus() : Promise<Result<AgentPanelStatusV1, AgentPanelCommandErrorV1>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("agent_panel_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async agentPanelModels() : Promise<Result<AgentModelCatalogV1, AgentPanelCommandErrorV1>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("agent_panel_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async agentPanelSelectModel(selection: AgentModelSelectionV1 | null) : Promise<Result<null, AgentPanelCommandErrorV1>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("agent_panel_select_model", { selection }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -260,12 +300,12 @@ async agentPanelPublicIdentity() : Promise<Result<AgentPanelPublicIdentityV1, Ag
 }
 },
 /**
- * Switching the agent off stops the poll loop with it.
+ * Switching the agent off ends the turn in flight and stops the poll loop;
+ * switching it on publishes the status the pairing now reads, so a sheet
+ * that is open sees the notice change without a command of its own.
  *
- * A loop left running would keep signing requests to a relay the reader has
- * just said no to, and would keep doing it until the turn finished. Nothing
- * else needs closing: the sheet is a fold in the main window's layout, and
- * the pill that opens it disappears with the setting.
+ * Nothing else needs closing: the sheet is a fold in the main window's
+ * layout, and the pill that opens it disappears with the setting.
  */
 async changeAgentPanelEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
@@ -357,8 +397,7 @@ async listVocabularyEntries(scope: VocabularyScope) : Promise<Result<VocabularyE
 },
 /**
  * Captures the application that was active immediately before the mode editor
- * became visible. Hiding the window briefly lets macOS return focus to that
- * application without reading Accessibility data or a browser URL.
+ * became visible, without reading Accessibility data or a browser URL.
  */
 async captureModeActivationRule(modeId: string, expectedRevision: number) : Promise<Result<ModeSettingsSnapshot, ModeMutationError>> {
     try {
@@ -607,6 +646,14 @@ async changeContextPolicyCeilingSetting(ceiling: ContextPolicy) : Promise<Result
 async changeContextUrlCaptureEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_context_url_capture_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeDictationProjectRootSetting(path: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_dictation_project_root_setting", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -963,6 +1010,11 @@ async deletePostProcessPrompt(id: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The library's "Use": the active mode takes this prompt as its
+ * instructions. Returns the snapshot like every other mode mutation, so a
+ * modes page open beside the library follows the change.
+ */
 async setPostProcessSelectedPrompt(id: string) : Promise<Result<ModeSettingsSnapshot, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_post_process_selected_prompt", { id }) };
@@ -1738,6 +1790,12 @@ async historyStorageStatus() : Promise<HistoryStorageStatus> {
 async meetingSuggestionsList() : Promise<MeetingSuggestion[]> {
     return await TAURI_INVOKE("meeting_suggestions_list");
 },
+/**
+ * A start that names a calendar occurrence carries the occurrence in. The
+ * event detection is looking at answers first; any other row of the week
+ * ahead is read back from the calendar, which blocks like every EventKit
+ * read and so runs off the async workers.
+ */
 async meetingPreflightCreate(request: MeetingPreflightCreateRequest) : Promise<Result<MeetingMutationResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_preflight_create", { request }) };
@@ -2167,9 +2225,9 @@ async meetingCatchUp(sessionId: MeetingSessionId) : Promise<Result<MeetingCatchU
 }
 },
 /**
- * The words the running capture's live pass has recognized so far, for
- * the live screen: empty when nothing has been recognized or the session
- * is not capturing.
+ * The words the running capture has recognized so far, for the live screen.
+ * Empty once the meeting has stopped: the stored transcript is then the one
+ * reading, and `meeting_get` carries it.
  */
 async meetingLiveTranscript(sessionId: MeetingSessionId) : Promise<MeetingProvisionalTranscript> {
     return await TAURI_INVOKE("meeting_live_transcript", { sessionId });
@@ -2508,6 +2566,14 @@ async workflowRunTrend(request: DashboardTrendRequest) : Promise<Result<Workflow
 async learningSuggestions() : Promise<Result<LearningSuggestionsResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("learning_suggestions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeLearnDestinationCorrectionsSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_learn_destination_corrections_setting", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2984,6 +3050,7 @@ agentPanelStatusChanged: AgentPanelStatusChangedEvent,
 agentPanelTurnChanged: AgentPanelTurnChangedEvent,
 audioImportRoutedEvent: AudioImportRoutedEvent,
 audioImportUpdateEvent: AudioImportUpdateEvent,
+chatVoiceEvent: ChatVoiceEvent,
 cloudSyncChanged: CloudSyncChangedEvent,
 detectionPrompt: DetectionPromptEvent,
 detectionPromptRetracted: DetectionPromptRetractedEvent,
@@ -3018,6 +3085,7 @@ agentPanelStatusChanged: "agent-panel://status-changed",
 agentPanelTurnChanged: "agent-panel://turn-changed",
 audioImportRoutedEvent: "audio-import-routed-event",
 audioImportUpdateEvent: "audio-import-update-event",
+chatVoiceEvent: "chat-voice-event",
 cloudSyncChanged: "cloud-sync:changed",
 detectionPrompt: "detection-prompt",
 detectionPromptRetracted: "detection-prompt-retracted",
@@ -3129,6 +3197,8 @@ export type AgentBridgeUpdateEvent = { status: AgentBridgeStatus }
  * One row of the history popover: enough to choose by, and no transcript.
  */
 export type AgentChatConversationSummaryV1 = { conversation_id: string; title: string; updated_at_utc_ms: number }
+export type AgentModelCatalogV1 = { models: AgentSubscriptionModelV1[]; default_selection: AgentModelSelectionV1 | null }
+export type AgentModelSelectionV1 = { model: string; thinking_effort: string | null }
 /**
  * Apply, or put back, one of a turn's offered changes.
  *
@@ -3219,14 +3289,14 @@ export type AgentPanelSendTurnRequestV1 = { turn_id: string; message: string; lo
  * by whoever is asking. The panel does not assemble packs, and a turn
  * without one is an ordinary question.
  */
-context_pack: string | null;
+context_pack: string | null; screenshot?: ChatScreenshot | null;
 /**
  * Whether this one turn may reach the operator's own MCP servers. Off
  * unless the reader turned it on for this send.
  */
 tools_allowed: boolean }
 export type AgentPanelStatusChangedEvent = { invalidation_id: number; status: AgentPanelRelayStatusV1 }
-export type AgentPanelStatusV1 = { invalidation_id: number; relay_status: AgentPanelRelayStatusV1; conversation_id: string | null; conversation: SonaAgentChatTurnV1[]; 
+export type AgentPanelStatusV1 = { invalidation_id: number; relay_status: AgentPanelRelayStatusV1; conversation_id: string | null; conversation: SonaAgentChatTurnV1[];
 /**
  * The last write of this conversation to the history file did not land.
  * The sheet says so; the conversation on screen is still whole.
@@ -3302,6 +3372,7 @@ export type AgentPanelUndoChangeRequestV1 = { receipt_id: string; expected_revis
  * than either job needs.
  */
 export type AgentPanelWorkspaceV1 = "sona_chat" | "sona_config"
+export type AgentSubscriptionModelV1 = { id: string; name: string; provider: string; thinking: string[] }
 export type AllowedMeetingAction = "refresh_preflight" | "cancel_preflight" | "start" | "pause" | "resume" | "stop" | "discard" | "finalize_partial" | "edit" | "regenerate" | "export" | "delete" | "cancel_remote"
 /**
  * The container-level `serde(default)` (backed by the `Default` impl below)
@@ -3364,7 +3435,11 @@ selected_channel?: number | null; clamshell_microphone?: string | null; selected
  * An explicit, global choice for final English spelling. This belongs to
  * the user's writing preference rather than a mode or ASR engine.
  */
-english_spelling?: EnglishSpelling; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; custom_words?: VocabularyEntry[]; emoji_replacements?: EmojiReplacement[]; emoji_replacements_enabled?: boolean; model_unload_timeout?: ModelUnloadTimeout; word_correction_threshold?: number; history_limit?: number; recording_retention_period?: RecordingRetentionPeriod; paste_method?: PasteMethod; clipboard_handling?: ClipboardHandling; auto_submit?: boolean; auto_submit_key?: AutoSubmitKey; post_process_enabled?: boolean; post_process_provider_id?: string; post_process_providers?: PostProcessProvider[]; post_process_secret_states?: Partial<{ [key in string]: SecretState }>;
+english_spelling?: EnglishSpelling; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; custom_words?: VocabularyEntry[]; learn_destination_corrections?: boolean;
+/**
+ * Explicit local folder grant; imports cannot enable project context.
+ */
+dictation_project_root?: string | null; emoji_replacements?: EmojiReplacement[]; emoji_replacements_enabled?: boolean; model_unload_timeout?: ModelUnloadTimeout; word_correction_threshold?: number; history_limit?: number; recording_retention_period?: RecordingRetentionPeriod; paste_method?: PasteMethod; clipboard_handling?: ClipboardHandling; auto_submit?: boolean; auto_submit_key?: AutoSubmitKey; post_process_enabled?: boolean; post_process_provider_id?: string; post_process_providers?: PostProcessProvider[]; post_process_secret_states?: Partial<{ [key in string]: SecretState }>;
 /**
  * Exact remote LLM destinations acknowledged by the user. This map never
  * contains credentials, prompts, transcripts, or provider response bodies.
@@ -3436,7 +3511,7 @@ update_check_enabled?: boolean;
  * Attached-panel relay configuration. This contains routing and public-key
  * material only; the panel signing seed remains in SecretManager.
  */
-agent_panel_enabled?: boolean; agent_panel_relay_url?: string | null; agent_panel_relay_key_id?: string | null; agent_panel_relay_public_key?: string | null; agent_panel_paired?: boolean; agent_panel_last_successful_connection_at?: number | null; agent_panel_safe_appearance_auto_apply?: boolean;
+agent_panel_enabled?: boolean; agent_panel_relay_url?: string | null; agent_panel_relay_key_id?: string | null; agent_panel_relay_public_key?: string | null; agent_panel_paired?: boolean; agent_panel_last_successful_connection_at?: number | null; agent_panel_safe_appearance_auto_apply?: boolean; agent_panel_model_selection?: AgentModelSelectionV1 | null;
 /**
  * Literal phrase lists scanned against every finished meeting transcript.
  * Empty means no tracker is watching, which is the shipped state.
@@ -3593,7 +3668,27 @@ export type AppearanceMaterial = "solid" | "glass"
  * a switch to flip, a download to wait for, or hardware that will never
  * qualify. The codes come from `swift/apple_intelligence_bridge.h`.
  */
-export type AppleIntelligenceBlocker = "not_enabled" | "model_not_ready" | "device_not_eligible" | "os_too_old" | "unknown"
+export type AppleIntelligenceBlocker =
+/**
+ * The switch in System Settings > Apple Intelligence & Siri is off.
+ */
+"not_enabled" |
+/**
+ * Switched on, and the model is still downloading.
+ */
+"model_not_ready" |
+/**
+ * This machine will never run it.
+ */
+"device_not_eligible" |
+/**
+ * macOS older than 26.
+ */
+"os_too_old" |
+/**
+ * A reason this build does not know.
+ */
+"unknown"
 export type ArtifactCitation = { segment_id: TranscriptSegmentId; start_offset_ns: number; end_offset_ns: number }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type AudioFormat = { sample_rate_hz: number; channels: number }
@@ -3745,6 +3840,11 @@ export type CaptureRequestedEvent = null
  * capture run only; retries and imported rows have no capture status.
  */
 export type CaptureStatus = "complete" | "truncated" | "no_speech_detected"
+/**
+ * One explicitly shared PNG. Validation happens before a turn can own it.
+ */
+export type ChatScreenshot = string
+export type ChatVoiceEvent = { session_id: string; utterance_id: number; phase: VoicePhase; text: string | null; error: string | null }
 export type CitationKind = "transcript" | "manual_note" | "title"
 export type CitedArtifactText = { text: string; citations: ArtifactCitation[] }
 export type ClipboardHandling = "dont_modify" | "copy_to_clipboard"
@@ -3767,19 +3867,48 @@ export type CloudReceiptStatus = "not_requested" | "final" | "fallback" | "held_
 export type CloudShareCreateRequest = { session_id: MeetingSessionId; expires_at_utc_ms: number; destination_path: string }
 export type CloudShareImportRequest = { path: string }
 export type CloudShareImportResult = { session_id: MeetingSessionId }
-export type CloudShareResult = { share_id: string; expires_at_utc_ms: number; file_path: string }
-export type CloudShareRevokeRequest = { share_id: string }
 /**
  * What a share is, as the panel names it.
  */
-export type CloudShareKind = "file" | "browser"
+export type CloudShareKind =
+/**
+ * A `.sona` file another Sona imports.
+ */
+"file" |
+/**
+ * A link a browser opens.
+ */
+"browser"
 /**
  * Where a share stands, including the two waits the local record alone
  * cannot tell apart: a revocation the server has acknowledged and one that
  * is still queued to reach it.
  */
-export type CloudShareLifecycle = "uploading" | "active" | "revoking" | "revoked" | "failed"
+export type CloudShareLifecycle =
+/**
+ * Created here, not yet accepted by the server.
+ */
+"uploading" |
+/**
+ * Live on the server until it expires.
+ */
+"active" |
+/**
+ * Revoked here; the server has not acknowledged it yet, so the link
+ * may still open.
+ */
+"revoking" |
+/**
+ * Revoked, and the server has acknowledged it.
+ */
+"revoked" |
+/**
+ * Never reached the server.
+ */
+"failed"
 export type CloudShareListRequest = { session_id: MeetingSessionId }
+export type CloudShareResult = { share_id: string; expires_at_utc_ms: number; file_path: string }
+export type CloudShareRevokeRequest = { share_id: string }
 /**
  * One share of a meeting, without its link material.
  */
@@ -3809,7 +3938,13 @@ export type CloudSyncChangedEvent = CloudSyncChangedPayload
 export type CloudSyncChangedPayload = { event_schema_version: number; session_id: MeetingSessionId | null; state: CloudObjectState | null }
 export type CloudSyncErrorKind = "portable_unavailable" | "secret_unavailable" | "setup_required" | "auth_required" | "quota" | "integrity_failure" | "conflict" | "unsupported_protocol" | "transient"
 export type CloudSyncOverview = { enabled: boolean; portable_mode: boolean; paused: boolean; queued_objects: number; pending_deletions: number; terminal_error: CloudSyncErrorKind | null }
-export type CloudSyncRecoveryRequest = { endpoint: string; recovery_code: string; replace?: boolean }
+export type CloudSyncRecoveryRequest = { endpoint: string; recovery_code: string;
+/**
+ * True only once the reader has confirmed that the vault this Mac already
+ * belongs to is to be replaced. Without it, a code for another vault is
+ * refused before anything is written.
+ */
+replace?: boolean }
 /**
  * What the privacy page says about cloud sync on this device. Derived from
  * stored settings and the runtime's last access result: reads no network and
@@ -3935,7 +4070,7 @@ export type ContextSourceStatus =
 /**
  * Per-source outcome of one context capture.
  */
-export type ContextSources = { target: ContextSourceStatus; focused_field: ContextSourceStatus; selected_text: ContextSourceStatus; browser_url: ContextSourceStatus; clipboard: ContextSourceStatus }
+export type ContextSources = { target: ContextSourceStatus; focused_field: ContextSourceStatus; selected_text: ContextSourceStatus; browser_url: ContextSourceStatus; clipboard: ContextSourceStatus; project?: ContextSourceStatus }
 export type CustomSounds = { start: boolean; stop: boolean }
 /**
  * The only calendar windows exposed by dashboard trend commands.
@@ -4879,11 +5014,7 @@ title_query?: string }
  * OpenAI-compatible route.
  */
 export type MeetingLocalEngine = { kind: "apple_intelligence" } | { kind: "local_endpoint"; base_url: string; model: string; context_window_tokens?: number | null }
-export type MeetingLocalEngineStatus = { kind: "apple_intelligence";
-/**
- * `None` when it can answer.
- */
-blocker: AppleIntelligenceBlocker | null } | { kind: "local_endpoint"; reachable: boolean; model_count: number; error: string | null }
+export type MeetingLocalEngineStatus = { kind: "apple_intelligence"; blocker: AppleIntelligenceBlocker | null } | { kind: "local_endpoint"; reachable: boolean; model_count: number; error: string | null }
 export type MeetingLoopAssignRequest = { operation_id: MeetingOperationId; loop_id: MeetingLoopId; expected_revision: number;
 /**
  * `None` clears the owner.
@@ -5060,13 +5191,15 @@ export type MeetingPrepCard = { eventKey: string; seriesKey: string; title: stri
 export type MeetingPrepParticipant = { name: string; meetingsCount: number; organization: string | null }
 export type MeetingProvider = "zoom" | "google_meet" | "microsoft_teams" | "webex" | "slack_huddle" | "face_time" | "configured_app"
 /**
- * One stretch of words the live pass has recognized so far. Not yet a
- * transcript segment: those are written when the meeting stops.
+ * One utterance recognized while the capture was still running. No segment
+ * id, no speaker and no revision: those belong to the stored transcript the
+ * post-stop pass writes, and this reading is thrown away when capture ends.
  */
 export type MeetingProvisionalSegment = { start_offset_ns: number; end_offset_ns: number; text: string }
 /**
- * What `meeting_live_transcript` answers: the words recognized so far,
- * in order, for a session that is still capturing.
+ * The words a running capture has recognized so far, in start order. Empty
+ * for a meeting that is not capturing now: after the stop the stored
+ * revision is the only transcript there is.
  */
 export type MeetingProvisionalTranscript = { session_id: MeetingSessionId; segments: MeetingProvisionalSegment[] }
 export type MeetingQuestionId = string
@@ -5241,8 +5374,8 @@ export type MeetingSeriesRemoteRow = { series_key: string; title: string; last_m
 export type MeetingSeriesTemplateSetRequest = { operation_id: MeetingOperationId; series_key: string; template: MeetingNotesTemplate | null; expected_revision: number }
 export type MeetingSessionChangedEvent = MeetingEventPayload
 /**
- * What one recording's disclosure — the line the consent panel offers to post
- * in the meeting's own chat — is doing.
+ * What one recording's disclosure — the line the consent panel offers to type
+ * into the meeting's own chat box — is doing.
  */
 export type MeetingSessionDisclosure =
 /**
@@ -5250,19 +5383,27 @@ export type MeetingSessionDisclosure =
  */
 { kind: "not_asked" } |
 /**
- * Asked for and not posted yet. `notetaker` is the name the room is told
+ * Asked for and not typed yet. `notetaker` is the name the room is told
  * the notes are for: the calendar account's own attendee entry, which is
  * the only place this app learns its operator's name.
+ *
+ * `composer_app` is the bundle id of the application whose chat box the
+ * line belongs in: the app that raised the offer, or the meeting app in
+ * front when a calendar offer was accepted. The one attempt goes to that
+ * application's focused composer and nowhere else; `None` means no such
+ * application was in front, and the attempt is refused rather than aimed
+ * at whatever is focused.
  *
  * ponytail: falls back to the meeting's title when the calendar names
  * nobody, so the one sentence always has something to interpolate. The
  * upgrade path is an account name in settings, not a second phrasing.
  */
-{ kind: "pending"; notetaker: string } |
+{ kind: "pending"; notetaker: string; composer_app?: string | null } |
 /**
- * Posted, or refused. Delivery's own receipt says which: a target that
+ * Typed, or refused. Delivery's own receipt says which: a target that
  * cannot accept an insertion is `definitely_not_dispatched`, and that is
- * the case the live surface mentions.
+ * the case the live surface mentions. Typed is not sent: the line sits
+ * in the composer until the person sends it.
  */
 { kind: "attempted"; receipt: DeliveryReceipt }
 export type MeetingSessionId = string
@@ -5578,7 +5719,8 @@ export type ModePromptSettings = { preset: PromptPreset; source_prompt_id: strin
  */
 export type ModeReceipt = { run_id: number; settings_revision: number; mode_selection_source?: ModeSelectionSource; mode_id: string; tone: Tone; requested_context_policy: ContextPolicy; context_policy_ceiling: ContextPolicy; context_policy: ContextPolicy; prompt_preset: PromptPreset; post_process_requested: boolean;
 /**
- * How the rewrite ended. Absent on receipts written before the field existed.
+ * How the rewrite ended. Rows written before the field existed read as
+ * not requested, which is the only claim they can support.
  */
 rewrite?: RewriteOutcome; provider_id: string | null; model_id: string | null;
 /**
@@ -5822,8 +5964,26 @@ model_id: string }
  * word to say why nothing new appeared rather than reporting a success it
  * cannot show.
  */
-export type PersonSummaryOutcome = "written" | "no_evidence" | "engine_unavailable" | "failed"
-export type PersonSummaryRegenerateResult = { outcome: PersonSummaryOutcome; 
+export type PersonSummaryOutcome =
+/**
+ * A new paragraph was written and is in `detail`.
+ */
+"written" |
+/**
+ * No confirmed meeting and no loop: nothing to write a relationship
+ * out of, and a paragraph from an empty pack would be invention.
+ */
+"no_evidence" |
+/**
+ * The meeting's engine could not be resolved: none on this Mac, or the
+ * chosen one is not ready.
+ */
+"engine_unavailable" |
+/**
+ * The engine ran and answered nothing usable.
+ */
+"failed"
+export type PersonSummaryRegenerateResult = { outcome: PersonSummaryOutcome;
 /**
  * The page after the attempt, whichever way it went.
  */
@@ -6184,9 +6344,35 @@ export type ReplacementRule = { spoken: string; written: string; enabled: boolea
 export type RequestedEngine = "local" | "deepgram_nova_3" | "eleven_labs_scribe_v2"
 /**
  * How a mode's rewrite ended, kept apart from whether it was asked for so a
- * dictation delivered raw can say why.
+ * dictation delivered raw can say why. Each variant names a different thing
+ * for the user to do about it.
  */
-export type RewriteOutcome = "not_requested" | "applied" | "unavailable" | "no_credential" | "too_long" | "failed"
+export type RewriteOutcome =
+/**
+ * The mode asked for none, or the run admits none (an import, a retry
+ * of a raw run).
+ */
+"not_requested" | "applied" |
+/**
+ * The mode named a destination that cannot be used: a provider that is
+ * not configured, an invalid address, or a remote one without consent.
+ * Decided before the microphone opened.
+ */
+"unavailable" |
+/**
+ * The provider needs a key that is not saved, or the vault could not be
+ * read.
+ */
+"no_credential" |
+/**
+ * The dictation is longer than the model can be handed in one request,
+ * and a rewrite of part of it would have lost the rest.
+ */
+"too_long" |
+/**
+ * The request failed, or the answer was nothing usable.
+ */
+"failed"
 /**
  * One prompt the operator wrote.
  */
@@ -6440,6 +6626,7 @@ export type VocabularyEntry = { spoken: string; written: string }
 export type VocabularyScope = { kind: "global" } | { kind: "current_mode" } | { kind: "mode"; mode_id: string }
 export type VoiceIdentityStatus = { unresolved_active_speaker_ids: SpeakerId[] }
 export type VoiceIdentityTarget = { kind: "existing"; person_id: PersonId } | { kind: "create"; display_name: string }
+export type VoicePhase = "listening" | "speech_started" | "transcribing" | "transcript" | "speaking" | "stopped" | "failed"
 export type VoiceProfileEnrollmentRequest = { person_id: PersonId; session_id: MeetingSessionId; speaker_id: SpeakerId; expected_meeting_revision: number; expected_speaker_revision: number; expected_people_revision: number; consent_version: number }
 export type VoiceProfileEnrollmentStatus = { enrolled: boolean; sample_count: number }
 export type VoiceProfileMergeResolution = "discard_source" | "replace_target_with_source" | "combine_compatible"

@@ -1761,6 +1761,7 @@ impl RunPlan {
             post_process_override,
             mode_selection_source,
             false,
+            settings.dictation_project_root.as_deref(),
         )
     }
 
@@ -1851,6 +1852,7 @@ impl RunPlan {
         post_process_override: Option<bool>,
         mode_selection_source: ModeSelectionSource,
         rewrite_required: bool,
+        project_root: Option<&str>,
     ) -> Result<Self, RunPlanError> {
         let mut post_process_requested = post_process_override.unwrap_or(mode.llm.enabled);
         let mut rewrite_unavailable = false;
@@ -1953,6 +1955,9 @@ impl RunPlan {
                     url_capture_enabled: settings.context_url_capture_enabled,
                     clipboard_preroll_ms: settings.context_capture_clipboard_preroll_ms,
                 },
+                project_root
+                    .filter(|_| post_process_requested)
+                    .map(std::path::PathBuf::from),
             )),
         };
 
@@ -1999,6 +2004,7 @@ impl RunPlan {
             Some(post_process_requested),
             ModeSelectionSource::ActiveMode,
             false,
+            None,
         )?;
         run.context.without_live_capture();
         Ok(run)
@@ -2036,6 +2042,7 @@ impl RunPlan {
             Some(true),
             ModeSelectionSource::ActiveMode,
             true,
+            None,
         )?;
         // A rewritten selection is a replacement, not an insertion: a trailing
         // space or a submit key would corrupt the text it replaced.
@@ -2066,6 +2073,7 @@ impl RunPlan {
             None,
             ModeSelectionSource::ExplicitModeShortcut,
             false,
+            None,
         )?;
         run.context.without_live_capture();
         Ok(run)
@@ -2335,6 +2343,7 @@ mod tests {
                 selected_text: context::ContextSourceStatus::DisabledByCeiling,
                 browser_url: context::ContextSourceStatus::DisabledByCeiling,
                 clipboard: context::ContextSourceStatus::DisabledByCeiling,
+                project: context::ContextSourceStatus::DisabledByCeiling,
             }
         );
     }
@@ -2993,6 +3002,7 @@ mod tests {
                 Some(true),
                 ModeSelectionSource::ActiveMode,
                 true,
+                None,
             )
         };
 

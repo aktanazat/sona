@@ -11,6 +11,8 @@ mod audio_feedback;
 pub mod audio_toolkit;
 mod autostart;
 mod catalog;
+mod chat_screenshot;
+mod chat_voice;
 pub mod cli;
 mod clipboard;
 #[cfg(feature = "cloud-realtime")]
@@ -740,6 +742,13 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
 
     // Add managers to Tauri's managed state
     app_handle.manage(recording_manager.clone());
+    #[cfg(target_os = "macos")]
+    app_handle.manage(chat_voice::VoiceManager::new(
+        app_handle,
+        Arc::clone(&recording_manager),
+        Arc::clone(&model_manager),
+        Arc::clone(&transcription_manager),
+    ));
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
@@ -1599,7 +1608,12 @@ pub fn run(cli_args: CliArgs) {
             agent_bridge::delete_agent_bridge_permission_rule,
             agent_bridge::respond_agent_bridge_permission,
             agent_bridge::get_agent_bridge_hook_snippet,
+            chat_voice::chat_voice_start,
+            chat_voice::chat_voice_stop,
+            chat_voice::chat_voice_speak,
             agent_panel::agent_panel_status,
+            agent_panel::agent_panel_models,
+            agent_panel::agent_panel_select_model,
             agent_panel::agent_panel_send_turn,
             agent_panel::agent_panel_cancel_turn,
             agent_panel::agent_panel_apply_change,
@@ -1650,6 +1664,7 @@ pub fn run(cli_args: CliArgs) {
             commands::snippets::set_snippets_enabled,
             settings::change_context_policy_ceiling_setting,
             settings::change_context_url_capture_enabled_setting,
+            settings::change_dictation_project_root_setting,
             settings::change_external_query_enabled_setting,
             settings::change_external_mutations_enabled_setting,
             settings::change_meeting_local_engine_setting,
@@ -1873,6 +1888,7 @@ pub fn run(cli_args: CliArgs) {
             commands::workflows::workflow_runs,
             commands::workflows::workflow_run_trend,
             commands::learning::learning_suggestions,
+            commands::learning::change_learn_destination_corrections_setting,
             commands::learning::learning_decide,
             commands::documents::doc_ingest,
             commands::documents::doc_list,
@@ -1924,6 +1940,7 @@ pub fn run(cli_args: CliArgs) {
             commands::prompts::saved_prompt_runs,
         ])
         .events(collect_events![
+            chat_voice::ChatVoiceEvent,
             upstream_import::UpstreamImportProgressEvent,
             agent_bridge::AgentBridgeUpdateEvent,
             agent_panel::AgentPanelStatusChangedEvent,

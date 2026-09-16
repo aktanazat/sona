@@ -2,6 +2,7 @@ use super::protocol::{
     AgentPanelTurnFailureV1, AgentPanelWorkspaceV1, SonaAgentChatTurnV1, SonaAgentStepStateV1,
     SonaChatActionV1, SonaConfirmationClassV1, SonaSettingChangeV1,
 };
+use crate::chat_screenshot::ChatScreenshot;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -179,6 +180,8 @@ pub struct AgentPanelSendTurnRequestV1 {
     /// by whoever is asking. The panel does not assemble packs, and a turn
     /// without one is an ordinary question.
     pub context_pack: Option<String>,
+    #[serde(default)]
+    pub screenshot: Option<ChatScreenshot>,
     /// Whether this one turn may reach the operator's own MCP servers. Off
     /// unless the reader turned it on for this send.
     pub tools_allowed: bool,

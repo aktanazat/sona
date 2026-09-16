@@ -387,9 +387,20 @@ pub fn update_emoji_replacements_enabled(app: AppHandle, enabled: bool) -> Resul
     Ok(())
 }
 
-/// The only correction-learning write path. It changes one user-chosen scope
-/// after an explicit history action; no history read, keypress, or background
-/// event calls this helper.
+/// Adds one correction rule to a user-chosen scope after an explicit action —
+/// a history correction, or an Apply in the chat panel. No history read,
+/// keypress, or background event calls this helper.
+///
+/// Saving the rule is the whole effect. The correction loop is not told, and
+/// not because it would filter the pair out: for a phrase rule the candidate
+/// is the narrowed delta, not the saved spoken side, so `handy app -> sona
+/// app` arrives as `handy -> sona` and no vocabulary check sees it. It is not
+/// told because the pair is not evidence. The loop looks for a rewrite the
+/// user has *not* turned into a rule; this one they have, so recording it
+/// would propose what they already did, and propose it again if they ever
+/// deleted the rule. The Apply path adds a second reason: that text is a term
+/// the model proposed, and [`crate::meeting::store::learning`] takes
+/// human-authored deltas only.
 #[tauri::command]
 #[specta::specta]
 pub fn add_vocabulary_correction(
@@ -404,9 +415,6 @@ pub fn add_vocabulary_correction(
         touch_mode_revision(settings, &scope);
         Ok::<_, String>(saved)
     })?;
-    // A human rewrote a dictation. That is the only kind of delta the
-    // correction loop learns from, and this is where one happens.
-    crate::meeting::learning::notify_dictation_corrected(&app, &saved.spoken, &saved.written);
     Ok(saved)
 }
 

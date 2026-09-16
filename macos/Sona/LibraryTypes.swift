@@ -218,8 +218,9 @@ struct ReceiptContextSources: Decodable {
     let selectedText: ReceiptSourceStatus
     let browserUrl: ReceiptSourceStatus
     let clipboard: ReceiptSourceStatus
+    let project: ReceiptSourceStatus?
 
-    /// The five, in the order the inspector prints them.
+    /// Sources in the order the inspector prints them.
     var listed: [(String, String)] {
         [
             ("App", target.label),
@@ -227,6 +228,7 @@ struct ReceiptContextSources: Decodable {
             ("Selected text", selectedText.label),
             ("Browser URL", browserUrl.label),
             ("Recent clipboard", clipboard.label),
+            ("Project names", (project ?? .notRequested).label),
         ]
     }
 }

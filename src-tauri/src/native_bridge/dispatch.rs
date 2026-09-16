@@ -11,7 +11,8 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 33] = [
+pub(super) const TYPED_EVENTS: [&str; 34] = [
+    crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
     crate::agent_panel::AgentPanelStatusChangedEvent::NAME,
@@ -292,12 +293,58 @@ pub(super) async fn call(
             })
             .await?
         }
+        "chat_voice_start" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::chat_voice::chat_voice_start(
+                    handle.clone(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
+        "chat_voice_stop" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::chat_voice::chat_voice_stop(
+                    handle.clone(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
+        "chat_voice_speak" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let utterance_id = args.take("utteranceId")?;
+            let text = args.take("text")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::chat_voice::chat_voice_speak(
+                    handle.clone(),
+                    session_id,
+                    utterance_id,
+                    text,
+                ))
+            })
+            .await?
+        }
         "agent_panel_status" => {
             let handle = app.clone();
             on_main_thread(app, move || {
                 reply(crate::agent_panel::agent_panel_status(handle.state()))
             })
             .await?
+        }
+        "agent_panel_models" => reply(crate::agent_panel::agent_panel_models(app.state()).await),
+        "agent_panel_select_model" => {
+            let mut args = Args::parse(params)?;
+            let selection = args.take("selection")?;
+            reply(crate::agent_panel::agent_panel_select_model(app.state(), selection).await)
         }
         "agent_panel_send_turn" => {
             let mut args = Args::parse(params)?;
@@ -834,6 +881,18 @@ pub(super) async fn call(
                 reply(crate::settings::change_context_url_capture_enabled_setting(
                     handle.clone(),
                     enabled,
+                ))
+            })
+            .await?
+        }
+        "change_dictation_project_root_setting" => {
+            let mut args = Args::parse(params)?;
+            let path = args.take("path")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::settings::change_dictation_project_root_setting(
+                    handle.clone(),
+                    path,
                 ))
             })
             .await?
@@ -2600,6 +2659,20 @@ pub(super) async fn call(
         }
         "learning_suggestions" => {
             reply(crate::commands::learning::learning_suggestions(app.state()).await)
+        }
+        "change_learn_destination_corrections_setting" => {
+            let mut args = Args::parse(params)?;
+            let enabled = args.take("enabled")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(
+                    crate::commands::learning::change_learn_destination_corrections_setting(
+                        handle.clone(),
+                        enabled,
+                    ),
+                )
+            })
+            .await?
         }
         "learning_decide" => {
             let mut args = Args::parse(params)?;

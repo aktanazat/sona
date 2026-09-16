@@ -264,6 +264,8 @@ struct AppSettings: Decodable {
     var fillerWordRemovalEnabled = true
     var vadEnabled = true
     var commandModeEnabled = true
+    var learnDestinationCorrections = false
+    var dictationProjectRoot: String?
     var transcribeAccelerator: AcceleratorTranscribe = .auto
     var ortAccelerator: AcceleratorOrt = .auto
     var transcribeGpuDevice: String?
@@ -282,7 +284,8 @@ struct AppSettings: Decodable {
         case experimentalEnabled, lazyStreamClose, keyboardImplementation, showTrayIcon
         case typingTool, externalScriptPath, fillerWordRemovalEnabled, vadEnabled
         case commandModeEnabled, transcribeAccelerator, ortAccelerator, transcribeGpuDevice
-        case hudPillEnabled, hudPillPosition, debugMode
+        case hudPillEnabled, hudPillPosition, debugMode, learnDestinationCorrections
+        case dictationProjectRoot
     }
 
     init() {}
@@ -329,6 +332,8 @@ struct AppSettings: Decodable {
         fillerWordRemovalEnabled = value(.fillerWordRemovalEnabled, fillerWordRemovalEnabled)
         vadEnabled = value(.vadEnabled, vadEnabled)
         commandModeEnabled = value(.commandModeEnabled, commandModeEnabled)
+        learnDestinationCorrections = value(.learnDestinationCorrections, learnDestinationCorrections)
+        dictationProjectRoot = try? box.decodeIfPresent(String.self, forKey: .dictationProjectRoot)
         transcribeAccelerator = choice(.transcribeAccelerator, transcribeAccelerator)
         ortAccelerator = choice(.ortAccelerator, ortAccelerator)
         transcribeGpuDevice = try? box.decodeIfPresent(String.self, forKey: .transcribeGpuDevice)

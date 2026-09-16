@@ -16,11 +16,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
-/// The two seams that wake the learning loops from outside the meeting module.
+/// The seams that wake the learning loops from outside the meeting module.
 ///
 /// Both are fire-and-forget: a loop that does not run now runs on the next
-/// signal, and neither the dictation pipeline nor the vocabulary editor should
-/// wait on a background miner.
+/// signal, and the dictation pipeline should not wait on a background miner.
 pub(crate) fn notify_dictation_history_changed(app: &AppHandle) {
     let Some(manager) = app.try_state::<Arc<super::session::MeetingSessionManager>>() else {
         return;
@@ -32,13 +31,21 @@ pub(crate) fn notify_dictation_history_changed(app: &AppHandle) {
 }
 
 /// Records the rewrite a human just performed on a dictation.
+///
+/// Not a filter: the store works out which words a passage changed. Its one
+/// caller narrows the pair before calling for a different reason, so that a
+/// passage it cannot bound never reaches an event payload at all.
+///
+/// macOS-only because its one caller is: the destination observer in
+/// [`crate::context::macos`] is the only thing that produces a dictation
+/// correction. Nothing on the other platforms has an editor to watch.
+#[cfg(target_os = "macos")]
 pub(crate) fn notify_dictation_corrected(app: &AppHandle, spoken: &str, written: &str) {
+    let (spoken, written) = (spoken.to_owned(), written.to_owned());
     let Some(manager) = app.try_state::<Arc<super::session::MeetingSessionManager>>() else {
         return;
     };
     let manager = Arc::clone(&manager);
-    let spoken = spoken.to_string();
-    let written = written.to_string();
     tauri::async_runtime::spawn(async move {
         manager.record_dictation_correction(spoken, written).await;
     });

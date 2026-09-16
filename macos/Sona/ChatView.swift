@@ -31,6 +31,10 @@ struct ChatView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
         .onExitCommand(perform: onClose)
         .task { await store.start() }
+        .onDisappear {
+            store.stopVoice()
+            store.cancelScreenshotSelection()
+        }
     }
 
     // MARK: - Head
@@ -43,7 +47,7 @@ struct ChatView: View {
             .buttonStyle(.quiet)
             .help("Close chat")
 
-            Text("Sona agent").font(TypeScale.label()).foregroundStyle(Theme.ink)
+            ChatModelPicker(store: store, openSettings: openSettings)
 
             Spacer(minLength: 8)
 
@@ -204,7 +208,39 @@ struct ChatView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
         }
+        if let screenshot = store.screenshot {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(screenshot.name).metaText(Theme.inkSecondary).lineLimit(1)
+                    Spacer()
+                    Button("Remove") { store.removeScreenshot() }
+                        .buttonStyle(.quiet)
+                        .disabled(store.busy)
+                        .accessibilityLabel("Remove screenshot")
+                }
+                Image(nsImage: screenshot.image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: 150)
+                    .overlay(Rectangle().strokeBorder(Theme.border, lineWidth: 1))
+                    .accessibilityLabel("Screenshot to share with your next question")
+                Text("Sent to your selected model when you press Send. Add it again for follow-up questions.")
+                    .metaText(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
 
+        if store.workspace == .sonaChat {
+            Text(store.voice?.phase.label ?? (store.stoppingVoice
+                ? "Stopping microphone…"
+                : "Voice: audio stays on this Mac. Questions go to your server."))
+                .metaText(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+        }
         Hairline()
         ChatComposer(store: store, onClose: onClose)
     }
@@ -626,9 +662,9 @@ private struct ChatComposer: View {
                         .allowsHitTesting(false)
                 }
                 ChatComposerField(
-                    text: Binding(get: { store.draft }, set: { store.draft = $0 }),
+                    text: Binding(get: { store.draft }, set: { store.editDraft($0) }),
                     label: store.workspace.prompt,
-                    isEnabled: !store.composerDisabled && !store.running,
+                    isEnabled: store.phase != .loading && store.phase != .disabled && !store.savingModel,
                     send: { store.send() },
                     escape: onClose)
             }
@@ -639,6 +675,27 @@ private struct ChatComposer: View {
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
                     .strokeBorder(Theme.border, lineWidth: 1))
 
+            if store.workspace == .sonaChat {
+                Menu {
+                    Button("Use a window…") { store.chooseScreenshot(window: true) }
+                    Button("Choose screenshot…") { store.chooseScreenshot(window: false) }
+                } label: {
+                    Image(systemName: "photo.badge.plus")
+                        .font(.system(size: 14))
+                        .frame(width: 30, height: 30)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .disabled(!store.canAttachScreenshot)
+                .help("Attach a screenshot")
+                .accessibilityLabel("Attach a screenshot")
+                ChatRoundButton(
+                    symbol: store.voiceActive ? "waveform" : "mic",
+                    help: store.voiceActive ? "End voice conversation" : "Start voice conversation",
+                    isEnabled: store.voiceActive || store.canStartVoice,
+                    action: { if store.voiceActive { store.stopVoice() } else { store.startVoice() } })
+            }
             if store.running || store.sending {
                 ChatRoundButton(
                     symbol: "stop.fill", help: "Stop", isEnabled: !store.stopping,
@@ -672,6 +729,7 @@ private struct ChatRoundButton: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .help(help)
+        .accessibilityLabel(help)
     }
 }
 

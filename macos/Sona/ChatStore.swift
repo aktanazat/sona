@@ -16,11 +16,35 @@ final class ChatStore {
     /// The titles the history menu lists, newest first, as the core orders them.
     private(set) var history: [AgentChatConversationSummary] = []
     private(set) var settings: ChatSettings?
+    private(set) var modelCatalog: AgentModelCatalog?
+    private(set) var loadingModels = false
+    private(set) var savingModel = false
+    private(set) var modelError: String?
     /// What the reader is typing. Held here so that opening another
     /// conversation can drop it.
     var draft = ""
     /// Which brain the next turn goes to.
-    var workspace: AgentPanelWorkspace = .sonaChat
+    var workspace: AgentPanelWorkspace = .sonaChat {
+        didSet {
+            if workspace != oldValue {
+                stopVoice()
+                cancelScreenshotSelection()
+                screenshot = nil
+                submittedScreenshot = nil
+            }
+        }
+    }
+    private(set) var voice: ChatVoiceSession?
+    private(set) var screenshot: ChatScreenshotDraft?
+    var canAttachScreenshot: Bool {
+        !composerDisabled && !running && !voiceActive && !stoppingVoice && workspace == .sonaChat
+    }
+    private(set) var stoppingVoice = false
+    var voiceActive: Bool { voice != nil }
+    var canStartVoice: Bool {
+        !stoppingVoice && !busy && !running && !savingModel && screenshot == nil
+            && phase == .ready && workspace == .sonaChat
+    }
     /// A send, stop, apply, undo or history read is in flight. A count, not
     /// a flag: a stop overlaps the send it stops, and the first to finish
     /// must not open the composer under the other.
@@ -47,6 +71,10 @@ final class ChatStore {
     /// built can end it here, before there is a turn to cancel.
     @ObservationIgnored private var sendTask: Task<Bool, Never>?
     @ObservationIgnored private var clock: Task<Void, Never>?
+    @ObservationIgnored private var voiceStartTask: Task<Void, Never>?
+    @ObservationIgnored private var screenshotPicker: ChatScreenshotPicker?
+    @ObservationIgnored private var screenshotTask: Task<Void, Never>?
+    @ObservationIgnored private var submittedScreenshot: (turnId: String, image: ChatScreenshotDraft)?
 
     init(core: Core) {
         self.core = core
@@ -62,12 +90,18 @@ final class ChatStore {
         core.observe(CoreEvent.chatSettingsChanged) { [weak self] _ in
             Task { await self?.readSettings() }
         }
+        core.observe(CoreEvent.chatVoice) { [weak self] line in
+            guard let self else { return }
+            do { self.receiveVoice(try Core.payload(line)) }
+            catch { self.stopVoice(); self.report(error) }
+        }
     }
 
     func start() async {
         await readSettings()
         await read()
         await loadHistory()
+        await loadModels()
     }
 
     // MARK: - What the views read
@@ -88,7 +122,7 @@ final class ChatStore {
 
     /// The field and the send button are shut while a command is in flight,
     /// before the first status has arrived, and while the agent is off.
-    var composerDisabled: Bool { busy || phase == .loading || phase == .disabled }
+    var composerDisabled: Bool { busy || savingModel || phase == .loading || phase == .disabled }
 
     var canSend: Bool {
         !composerDisabled && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -188,10 +222,77 @@ final class ChatStore {
 
     private func readSettings() async {
         do {
+            let pairing = modelPairing
             settings = try await core.request("get_app_settings")
+            if pairing != modelPairing {
+                modelCatalog = nil
+                modelError = nil
+            }
         } catch {
             report(error)
         }
+    }
+
+    // MARK: - Model selection
+
+    var modelSelection: AgentModelSelection? { settings?.agentPanelModelSelection }
+    var effectiveModelSelection: AgentModelSelection? {
+        modelSelection ?? modelCatalog?.defaultSelection
+    }
+    var selectedModel: AgentModel? {
+        modelCatalog?.models.first { $0.id == effectiveModelSelection?.model }
+    }
+    var modelPickerDisabled: Bool { busy || running || sending || savingModel }
+
+    private var modelPairing: [String] {
+        [settings?.relayUrl ?? "", settings?.relayKeyId ?? "", settings?.relayPublicKey ?? ""]
+    }
+
+    func loadModels(force: Bool = false) async {
+        guard !loadingModels, force || modelCatalog == nil else { return }
+        guard isPaired else {
+            modelError = "Connect your server in Settings to choose a model."
+            return
+        }
+        let pairing = modelPairing
+        loadingModels = true
+        defer { loadingModels = false }
+        do {
+            let catalog: AgentModelCatalog = try await core.request("agent_panel_models")
+            guard pairing == modelPairing else { return }
+            modelCatalog = catalog
+            modelError = nil
+        } catch {
+            guard pairing == modelPairing else { return }
+            modelError = "Couldn't load your models. Try refreshing."
+        }
+    }
+
+    func selectModel(_ selection: AgentModelSelection?) {
+        guard !modelPickerDisabled else { return }
+        savingModel = true
+        modelError = nil
+        Task {
+            defer { savingModel = false }
+            do {
+                try await core.request("agent_panel_select_model", ["selection": selection])
+                await readSettings()
+            } catch {
+                modelError = "Couldn't save that model choice. Try again."
+            }
+        }
+    }
+
+    func selectModel(_ model: AgentModel) {
+        let previous = effectiveModelSelection?.thinkingEffort
+        let effort = previous.flatMap { model.thinking.contains($0) ? $0 : nil }
+            ?? model.thinking.first
+        selectModel(AgentModelSelection(model: model.id, thinkingEffort: effort))
+    }
+
+    func selectEffort(_ effort: String) {
+        guard let model = selectedModel, model.thinking.contains(effort) else { return }
+        selectModel(AgentModelSelection(model: model.id, thinkingEffort: effort))
     }
 
     // MARK: - Asking
@@ -202,16 +303,19 @@ final class ChatStore {
 
     /// Sends what is in the field.
     func send() {
-        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let submittedDraft = draft
+        let message = submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !composerDisabled, !running else { return }
         guard message.utf8.count <= Self.maxMessageBytes else {
             error = "That question is too long. Keep it under 8,000 characters."
             return
         }
+        let image = screenshot
         sendTask = Task {
-            let sent = await submit(message)
+            let sent = await submit(message, screenshot: image)
             if sent {
-                draft = ""
+                if draft == submittedDraft { draft = "" }
+                if screenshot?.id == image?.id { screenshot = nil }
             }
             return sent
         }
@@ -221,10 +325,14 @@ final class ChatStore {
     /// the question is the row above, not what the reader was typing next.
     func retry(_ message: String) {
         guard !composerDisabled, !running else { return }
-        sendTask = Task { await submit(message) }
+        let image = submittedScreenshot.flatMap { $0.turnId == turn?.turnId ? $0.image : nil }
+        sendTask = Task { await submit(message, screenshot: image) }
     }
 
-    private func submit(_ message: String) async -> Bool {
+    private func submit(
+        _ message: String, turnId: String = UUID().uuidString, screenshot: ChatScreenshotDraft? = nil
+    ) async -> Bool {
+        submittedScreenshot = screenshot.map { (turnId, $0) }
         /* The panel assembles no packs, by design: whoever asks decides what
          * evidence the question carries. Ask turns get the reader's own rows
          * quoted with `sona://` links; Configure turns get none, because a
@@ -232,7 +340,10 @@ final class ChatStore {
         let allowed = packs
         searchedCorpus = false
         sending = true
-        defer { sending = false }
+        defer {
+            sending = false
+            sendPendingVoice()
+        }
         /* Building the pack and sending the turn are one act, so they share
          * one closed composer: a second Return while the pack is still being
          * assembled would ask the same question twice. A stop pressed while
@@ -245,12 +356,13 @@ final class ChatStore {
                 "agent_panel_send_turn",
                 Envelope(
                     request: SendTurnRequest(
-                        turnId: UUID().uuidString,
+                        turnId: turnId,
                         message: message,
                         locale: self.settings?.language ?? "en",
                         workspace: self.workspace.rawValue,
                         contextPack: pack,
-                        toolsAllowed: allowed)))
+                        toolsAllowed: allowed,
+                        screenshot: screenshot?.png)))
         }
         if sent {
             // A first question gives the conversation its title.
@@ -281,19 +393,189 @@ final class ChatStore {
     /// stopped, and a relay that is rate limiting the submission would
     /// otherwise keep this button dead for the whole of its wait.
     func stop() {
+        endVoice()
+        stopTurn()
+    }
+
+    private func stopTurn() {
+        sendTask?.cancel()
         guard !stopping else { return }
-        guard let turnId = turn?.turnId, running else {
-            sendTask?.cancel()
-            return
-        }
+        guard let turnId = turn?.turnId, running else { return }
         stopping = true
         Task {
-            defer { stopping = false }
+            defer { stopping = false; sendPendingVoice() }
             _ = await run {
                 try await self.core.request(
                     "agent_panel_cancel_turn", Envelope(request: TurnRequest(turnId: turnId)))
             }
         }
+    }
+    // MARK: - Explicit image sharing
+
+    func chooseScreenshot(window: Bool) {
+        guard canAttachScreenshot else { return }
+        let picker = ChatScreenshotPicker()
+        screenshotPicker = picker
+        // The picker outlives the state it was opened in. An image belongs to
+        // the conversation and the brain that asked for it, and to nothing
+        // else: what comes back after either changed is dropped.
+        let asking = status?.conversationId
+        let askedOf = workspace
+        inFlight += 1
+        error = nil
+        screenshotTask = Task {
+            defer { inFlight -= 1; screenshotTask = nil; screenshotPicker = nil }
+            do {
+                try Task.checkCancellation()
+                let selected = try await (window ? picker.window() : picker.file())
+                try Task.checkCancellation()
+                guard status?.conversationId == asking, workspace == askedOf else { return }
+                if let selected { screenshot = selected }
+            } catch is CancellationError {
+                return
+            } catch {
+                report(error)
+            }
+        }
+    }
+
+    func cancelScreenshotSelection() {
+        screenshotTask?.cancel()
+        screenshotPicker?.cancel()
+    }
+
+    func removeScreenshot() {
+        guard !busy else { return }
+        screenshot = nil
+    }
+
+
+    // MARK: - Spoken conversation
+
+    func startVoice() {
+        guard canStartVoice, !voiceActive else { return }
+        let id = UUID().uuidString
+        voice = ChatVoiceSession(id: id, conversationId: conversationId)
+        error = nil
+        voiceStartTask = Task {
+            do { try await core.request("chat_voice_start", ["sessionId": id]) }
+            catch {
+                guard voice?.id == id else { return }
+                voice = nil
+                report(error)
+            }
+        }
+    }
+
+    func stopVoice() {
+        guard voiceActive else { return }
+        stop()
+    }
+
+    private func endVoice() {
+        guard let current = voice else { return }
+        voice = nil
+        sendTask?.cancel()
+        stoppingVoice = true
+        let start = voiceStartTask
+        Task {
+            // A close during microphone setup must also close a late start.
+            await start?.value
+            defer { stoppingVoice = false }
+            do { try await core.request("chat_voice_stop", ["sessionId": current.id]) }
+            catch { report(error) }
+        }
+    }
+
+    func editDraft(_ text: String) {
+        if voiceActive { stopVoice() }
+        draft = text
+    }
+
+    private func receiveVoice(_ event: ChatVoiceEvent) {
+        guard voice?.receive(event) == true else { return }
+        switch event.phase {
+        case .speechStarted:
+            voice?.pendingTranscript = nil
+            voice?.turnId = nil
+            stopTurn()
+        case .transcript:
+            guard let message = event.text, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            voice?.pendingTranscript = message
+            voice?.phase = .thinking
+            sendPendingVoice()
+        case .failed, .stopped:
+            stopVoice()
+            if let failure = event.error { error = failure }
+        case .starting, .listening, .transcribing, .thinking, .speaking:
+            break
+        }
+    }
+
+    private func sendPendingVoice() {
+        guard !composerDisabled, !running, !sending, !stopping,
+              let current = voice, let message = current.pendingTranscript else { return }
+        guard message.utf8.count <= Self.maxMessageBytes else {
+            endVoice()
+            draft = message
+            error = "That spoken question is too long. Shorten it before sending."
+            return
+        }
+        let turnId = UUID().uuidString
+        voice?.pendingTranscript = nil
+        voice?.turnId = turnId
+        sendTask = Task {
+            let sent = await submit(message, turnId: turnId)
+            guard voice?.id == current.id, voice?.utteranceId == current.utteranceId else {
+                // A send already accepted by the core needs an explicit cancel,
+                // even when the local task was interrupted before its reply.
+                if sent {
+                    _ = await run {
+                        try await self.core.request(
+                            "agent_panel_cancel_turn", Envelope(request: TurnRequest(turnId: turnId)))
+                    }
+                }
+                sendPendingVoice()
+                return false
+            }
+            if !sent {
+                if draft.isEmpty { draft = message }
+                endVoice()
+            }
+            return sent
+        }
+    }
+
+    private func speakAnswer() {
+        guard let current = voice, let turn, current.turnId == turn.turnId else { return }
+        if turn.failure != nil || turn.state == .canceled {
+            endVoice()
+            return
+        }
+        guard turn.state == .succeeded, let answer = conversation.last, answer.role == .assistant else { return }
+        voice?.turnId = nil
+        let text = ChatSegment.scan(answer.message).compactMap { segment -> String? in
+            if case let .text(text) = segment { return text }
+            return nil
+        }.joined()
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task {
+            guard voice?.id == current.id, voice?.utteranceId == current.utteranceId else { return }
+            do {
+                try await core.request("chat_voice_speak", VoiceSpeechRequest(
+                    sessionId: current.id, utteranceId: current.utteranceId, text: text))
+            } catch {
+                guard voice?.id == current.id, voice?.utteranceId == current.utteranceId else { return }
+                endVoice()
+                report(error)
+            }
+        }
+    }
+
+    private struct VoiceSpeechRequest: Encodable {
+        let sessionId: String
+        let utteranceId: UInt64
+        let text: String
     }
 
     // MARK: - Settings proposals
@@ -365,7 +647,10 @@ final class ChatStore {
 
     func newChat() {
         guard !busy, !running else { return }
+        stopVoice()
         draft = ""
+        screenshot = nil
+        submittedScreenshot = nil
         Task {
             if await run({ try await self.core.request("agent_chat_new") }) {
                 /* The work line belonged to the turn that was on screen, and
@@ -377,7 +662,10 @@ final class ChatStore {
 
     func open(_ conversationId: String) {
         guard !busy, !running, conversationId != self.conversationId else { return }
+        stopVoice()
         draft = ""
+        screenshot = nil
+        submittedScreenshot = nil
         Task {
             if await run({
                 try await self.core.request("agent_chat_open", ["conversationId": conversationId])
@@ -444,6 +732,27 @@ final class ChatStore {
 
     private func hold(_ next: AgentPanelStatus) {
         let switched = next.conversationId != status?.conversationId
+        if switched, voiceActive {
+            if voice?.conversationId == nil, voice?.turnId == next.turn?.turnId {
+                voice?.conversationId = next.conversationId
+            } else {
+                endVoice()
+            }
+        }
+        // A conversation change takes the image with it, pending selection
+        // included. The one exception is the image the incoming turn was sent
+        // with: a first question is what gives a conversation its id, so that
+        // switch is the same act.
+        let carriedByTurn = submittedScreenshot.map { $0.turnId == next.turn?.turnId } ?? false
+        if switched, !carriedByTurn {
+            cancelScreenshotSelection()
+            screenshot = nil
+            submittedScreenshot = nil
+        }
+        if next.turn?.turnId == submittedScreenshot?.turnId,
+           next.turn?.isRunning == false, next.turn?.failure == nil {
+            submittedScreenshot = nil
+        }
         status = next
         tick()
         if switched {
@@ -451,6 +760,8 @@ final class ChatStore {
             Task { await loadHistory() }
         }
         name(next.turn?.actions ?? [])
+        speakAnswer()
+        sendPendingVoice()
     }
 
     /// Display names for the people an answer's cards hand commitments to.
@@ -521,6 +832,7 @@ final class ChatStore {
         let workspace: String
         let contextPack: String?
         let toolsAllowed: Bool
+        let screenshot: Data?
 
         enum CodingKeys: String, CodingKey {
             case turnId = "turn_id"
@@ -529,6 +841,7 @@ final class ChatStore {
             case workspace
             case contextPack = "context_pack"
             case toolsAllowed = "tools_allowed"
+            case screenshot
         }
     }
 

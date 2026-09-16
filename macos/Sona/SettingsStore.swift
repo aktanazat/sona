@@ -41,6 +41,7 @@ final class SettingsStore {
     private(set) var notice: String?
     /// Rows with a write in flight, by the key the row disables on.
     private(set) var busy: Set<String> = []
+    private(set) var choosingProject = false
     /// Where this bundle's login item stands against `autostart_enabled`:
     /// what the row says under its switch when the two are not the same.
     private(set) var loginItem: LoginItemState = .matching
@@ -419,6 +420,44 @@ final class SettingsStore {
         await write(
             \.commandModeEnabled, enabled, "change_command_mode_enabled_setting",
             ["enabled": .bool(enabled)], key: "command_mode_enabled"
+        )
+    }
+
+    func setLearnDestinationCorrections(_ enabled: Bool) async {
+        await write(
+            \.learnDestinationCorrections, enabled, "change_learn_destination_corrections_setting",
+            ["enabled": .bool(enabled)], key: "learn_destination_corrections"
+        )
+    }
+
+    func chooseDictationProject() {
+        guard !choosingProject, !isBusy("dictation_project_root") else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Allow Sona to read filenames and identifiers here for dictation cleanup. Those names may be sent to your cleanup model; source text stays on this Mac."
+        panel.prompt = "Use folder"
+        choosingProject = true
+        panel.begin { [weak self] response in
+            MainActor.assumeIsolated {
+                guard let store = self else { return }
+                guard response == .OK, let folder = panel.url else {
+                    store.choosingProject = false
+                    return
+                }
+                Task {
+                    await store.setDictationProjectRoot(folder.path(percentEncoded: false))
+                    store.choosingProject = false
+                }
+            }
+        }
+    }
+
+    func setDictationProjectRoot(_ path: String?) async {
+        await write(
+            \.dictationProjectRoot, path, "change_dictation_project_root_setting",
+            ["path": path.map(JSONValue.string) ?? .null], key: "dictation_project_root"
         )
     }
 

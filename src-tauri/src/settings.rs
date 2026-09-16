@@ -1215,6 +1215,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub custom_words: Vec<VocabularyEntry>,
     #[serde(default)]
+    pub learn_destination_corrections: bool,
+    /// Explicit local folder grant; imports cannot enable project context.
+    #[serde(default)]
+    pub dictation_project_root: Option<String>,
+    #[serde(default)]
     pub emoji_replacements: Vec<EmojiReplacement>,
     #[serde(default)]
     pub emoji_replacements_enabled: bool,
@@ -1362,6 +1367,8 @@ pub struct AppSettings {
     pub agent_panel_last_successful_connection_at: Option<i64>,
     #[serde(default)]
     pub agent_panel_safe_appearance_auto_apply: bool,
+    #[serde(default)]
+    pub agent_panel_model_selection: Option<crate::agent_panel::AgentModelSelectionV1>,
     /// Literal phrase lists scanned against every finished meeting transcript.
     /// Empty means no tracker is watching, which is the shipped state.
     #[serde(default)]
@@ -2007,6 +2014,8 @@ pub fn get_default_settings() -> AppSettings {
             spoken: "Sona".to_string(),
             written: "Sona".to_string(),
         }],
+        learn_destination_corrections: false,
+        dictation_project_root: None,
         emoji_replacements: Vec::new(),
         emoji_replacements_enabled: false,
         model_unload_timeout: ModelUnloadTimeout::default(),
@@ -2063,6 +2072,7 @@ pub fn get_default_settings() -> AppSettings {
         agent_panel_paired: false,
         agent_panel_last_successful_connection_at: None,
         agent_panel_safe_appearance_auto_apply: false,
+        agent_panel_model_selection: None,
         trackers_list: Vec::new(),
         meeting_notes_template: MeetingNotesTemplate::General,
         replacements_enabled: default_replacements_enabled(),
@@ -2863,6 +2873,34 @@ pub fn change_context_url_capture_enabled_setting(
 ) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.context_url_capture_enabled = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_dictation_project_root_setting(
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<(), String> {
+    let root = path
+        .map(|path| {
+            let path = std::path::Path::new(&path);
+            if !path.is_absolute() {
+                return Err("Choose an absolute project folder path".to_string());
+            }
+            let root = path
+                .canonicalize()
+                .map_err(|_| "The project folder is unavailable".to_string())?;
+            std::fs::read_dir(&root)
+                .map_err(|_| "The project folder cannot be read".to_string())?;
+            root.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "The folder path is not valid Unicode".to_string())
+        })
+        .transpose()?;
+    update_settings(&app, |settings| {
+        settings.dictation_project_root = root;
     })?;
     Ok(())
 }

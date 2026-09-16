@@ -69,15 +69,34 @@ impl DeliveryReceipt {
     }
 }
 
-/// Dispatches text from one frozen mode. No setting is read from the store.
+/// Dispatches text from one frozen mode. Optional learning reads its own consent.
 ///
 /// This function owns the two decisions every route shares: the exact text
 /// that gets dispatched, and what still has to happen once a route dispatched
 /// it. Routes below only move bytes.
 pub fn deliver(app: &AppHandle, text: String, settings: &DeliveryPlan) -> DeliveryReceipt {
-    let primary = primary_method(settings);
     let text = compose_final_text(text, settings);
+    #[cfg(target_os = "macos")]
+    let observation = if !settings.auto_submit
+        && !matches!(
+            settings.paste_method,
+            PasteMethod::None | PasteMethod::ExternalScript
+        ) {
+        crate::context::macos::corrections::prepare(app, &text)
+    } else {
+        crate::context::macos::corrections::cancel();
+        None
+    };
+    let receipt = dispatch(app, &text, settings);
+    #[cfg(target_os = "macos")]
+    if let Some(observation) = observation {
+        let _ = observation.send(receipt.outcome);
+    }
+    receipt
+}
 
+fn dispatch(app: &AppHandle, text: &str, settings: &DeliveryPlan) -> DeliveryReceipt {
+    let primary = primary_method(settings);
     #[cfg(target_os = "macos")]
     if should_prefer_accessibility(settings) {
         match crate::context::macos::insert_into_focused_editable(&text) {

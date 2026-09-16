@@ -575,7 +575,7 @@ fn escape_string(s: &str) -> String {
 fn build_swift_capture_bridges() {
     build_capture_bridge("swift/meeting_capture.swift", "meeting_capture");
     build_capture_bridge("swift/screen_recorder.swift", "screen_recorder");
-
+    build_capture_bridge("swift/chat_voice.swift", "chat_voice");
     for framework in [
         "ScreenCaptureKit",
         "AVFoundation",

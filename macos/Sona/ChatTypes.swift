@@ -1,5 +1,96 @@
 import Foundation
 
+enum ChatVoicePhase: String, Decodable {
+    case starting, listening, transcribing, transcript, thinking, speaking, stopped, failed
+    case speechStarted = "speech_started"
+
+    var label: String {
+        switch self {
+        case .starting: "Starting microphone…"
+        case .listening: "Listening. Speak or type to continue."
+        case .speechStarted: "Listening…"
+        case .transcribing: "Transcribing on this Mac…"
+        case .transcript, .thinking: "Thinking. Speak to interrupt."
+        case .speaking: "Speaking. Talk to interrupt."
+        case .stopped: "Microphone off."
+        case .failed: "Voice chat stopped."
+        }
+    }
+}
+
+struct ChatVoiceEvent: Decodable {
+    let sessionId: String
+    let utteranceId: UInt64
+    let phase: ChatVoicePhase
+    let text: String?
+    let error: String?
+}
+
+struct ChatVoiceSession {
+    let id: String
+    var conversationId: String?
+    var utteranceId: UInt64 = 0
+    var phase: ChatVoicePhase = .starting
+    var pendingTranscript: String?
+    var turnId: String?
+
+    mutating func receive(_ event: ChatVoiceEvent) -> Bool {
+        guard event.sessionId == id, event.utteranceId >= utteranceId else { return false }
+        utteranceId = event.utteranceId
+        phase = event.phase
+        return true
+    }
+}
+
+struct AgentModelSelection: Codable, Equatable, Sendable {
+    let model: String
+    let thinkingEffort: String?
+
+    private enum WireKey: String, CodingKey {
+        case model
+        case thinkingEffort = "thinking_effort"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: WireKey.self)
+        try values.encode(model, forKey: .model)
+        try values.encode(thinkingEffort, forKey: .thinkingEffort)
+    }
+}
+
+struct AgentModelCatalog: Decodable, Sendable {
+    let models: [AgentModel]
+    let defaultSelection: AgentModelSelection?
+}
+
+struct AgentModel: Decodable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let provider: String
+    let thinking: [String]
+
+    var providerName: String {
+        switch provider {
+        case "openai-codex": "ChatGPT"
+        case "anthropic": "Claude"
+        default: provider
+        }
+    }
+
+    static func effortName(_ effort: String) -> String {
+        switch effort {
+        case "off": "Off"
+        case "minimal": "Minimal"
+        case "low": "Low"
+        case "medium": "Medium"
+        case "high": "High"
+        case "xhigh": "Extra high"
+        case "max": "Max"
+        default: effort.capitalized
+        }
+    }
+}
+
 /// The shapes the agent panel sends, mirroring `src-tauri/src/agent_panel/wire.rs`
 /// and `protocol.rs` with snake_case turned into camelCase by `Core.decoder`.
 /// Enum values are the wire strings verbatim.
@@ -14,6 +105,7 @@ extension CoreEvent {
     /// Carries nothing the chat can use, so it is only a cue to re-read
     /// `get_app_settings`.
     static let chatSettingsChanged = "settings-changed"
+    static let chatVoice = "chat-voice-event"
 }
 
 /// Which capability-scoped brain a turn is addressed to. The reader chooses:
@@ -583,6 +675,7 @@ struct ChatSettings: Decodable {
     let agentPanelRelayPublicKey: String?
     let agentPanelPaired: Bool?
     let agentPanelLastSuccessfulConnectionAt: Int64?
+    let agentPanelModelSelection: AgentModelSelection?
     let meetingRemoteIntelligenceEnabled: Bool?
     /// The language the reader chose for the app, which is the language a
     /// turn asks to be answered in.

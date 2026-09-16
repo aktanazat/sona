@@ -41,8 +41,11 @@ mod deadline;
 mod linux;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+mod project;
 #[cfg(target_os = "windows")]
 mod windows;
+
+pub use project::ProjectContext;
 
 // One name for "the reader this build talks to". Sona ships on these three
 // desktops and nowhere else, so the list is exhaustive rather than a fallback
@@ -248,6 +251,10 @@ impl ContextPolicy {
     pub(crate) fn wants_clipboard(self) -> bool {
         matches!(self, Self::Full)
     }
+
+    pub(crate) fn wants_project(self) -> bool {
+        matches!(self, Self::Full)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
@@ -272,6 +279,8 @@ pub struct ContextPacket {
     pub selected_text: Option<String>,
     pub clipboard_content: Option<String>,
     pub names_and_usernames: Vec<ContextName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectContext>,
 }
 
 impl ContextPacket {
@@ -335,6 +344,8 @@ pub struct ContextSources {
     pub selected_text: ContextSourceStatus,
     pub browser_url: ContextSourceStatus,
     pub clipboard: ContextSourceStatus,
+    #[serde(default)]
+    pub project: ContextSourceStatus,
 }
 
 /// Whether the platform's accessibility API is usable right now. Determined by
@@ -382,6 +393,7 @@ pub(crate) struct StartCapture {
     pub(crate) accessibility: AccessibilityAccess,
     pub(crate) selected_text: SourceOutcome,
     pub(crate) clipboard: SourceOutcome,
+    pub(crate) project: SourceOutcome<ProjectContext>,
 }
 
 /// What the application stage read: the frontmost application and the control
@@ -400,12 +412,12 @@ pub(crate) struct ApplicationCapture {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceOutcome {
-    Captured(String),
+pub(crate) enum SourceOutcome<T = String> {
+    Captured(T),
     Unavailable(ContextSourceStatus),
 }
 
-impl Default for SourceOutcome {
+impl<T> Default for SourceOutcome<T> {
     fn default() -> Self {
         Self::Unavailable(ContextSourceStatus::NotRequested)
     }
@@ -419,8 +431,10 @@ impl SourceOutcome {
             _ => Self::Unavailable(ContextSourceStatus::Empty),
         }
     }
+}
 
-    fn split(self) -> (Option<String>, ContextSourceStatus) {
+impl<T> SourceOutcome<T> {
+    fn split(self) -> (Option<T>, ContextSourceStatus) {
         match self {
             Self::Captured(text) => (Some(text), ContextSourceStatus::Captured),
             Self::Unavailable(status) => (None, status),
@@ -471,6 +485,7 @@ impl ContextSnapshot {
             accessibility,
             selected_text,
             clipboard,
+            project,
         } = start;
         let ApplicationCapture {
             captured_at_ms: application_captured_at_ms,
@@ -505,6 +520,11 @@ impl ContextSnapshot {
             requested_policy.wants_clipboard(),
             clipboard_allowed,
         );
+        let (project, project_status) = gate_source(
+            project,
+            requested_policy.wants_project(),
+            policy.wants_project(),
+        );
 
         let raw_packet = ContextPacket {
             target: TargetMetadata {
@@ -518,6 +538,7 @@ impl ContextSnapshot {
             selected_text,
             clipboard_content: clipboard,
             names_and_usernames: Vec::new(),
+            project,
         };
 
         Self {
@@ -531,6 +552,7 @@ impl ContextSnapshot {
                     selected_text: selected_status,
                     browser_url: browser_url_status,
                     clipboard: clipboard_status,
+                    project: project_status,
                 },
                 captured_at_ms,
                 application_captured_at_ms,
@@ -549,7 +571,7 @@ impl ContextSnapshot {
         reason: ContextSourceStatus,
     ) -> Self {
         let policy = requested_policy.clamp_to(policy_ceiling);
-        let source = SourceOutcome::Unavailable(reason);
+        let source: SourceOutcome = SourceOutcome::Unavailable(reason);
         let sources = ContextSources {
             target: gate_status(
                 &source,
@@ -575,6 +597,11 @@ impl ContextSnapshot {
                 &source,
                 requested_policy.wants_clipboard(),
                 policy.wants_clipboard(),
+            ),
+            project: gate_status(
+                &source,
+                requested_policy.wants_project(),
+                policy.wants_project(),
             ),
         };
         Self {
@@ -603,11 +630,11 @@ impl ContextSnapshot {
     }
 }
 
-fn gate_source(
-    source: SourceOutcome,
+fn gate_source<T>(
+    source: SourceOutcome<T>,
     requested: bool,
     allowed: bool,
-) -> (Option<String>, ContextSourceStatus) {
+) -> (Option<T>, ContextSourceStatus) {
     if !requested {
         (None, ContextSourceStatus::NotRequested)
     } else if !allowed {
@@ -617,7 +644,11 @@ fn gate_source(
     }
 }
 
-fn gate_status(source: &SourceOutcome, requested: bool, allowed: bool) -> ContextSourceStatus {
+fn gate_status<T>(
+    source: &SourceOutcome<T>,
+    requested: bool,
+    allowed: bool,
+) -> ContextSourceStatus {
     if !requested {
         ContextSourceStatus::NotRequested
     } else if !allowed {
@@ -733,13 +764,18 @@ pub fn start_capture(
     requested_policy: ContextPolicy,
     policy_ceiling: ContextPolicy,
     options: CaptureOptions,
+    project_root: Option<std::path::PathBuf>,
 ) -> PendingContext {
     start_capture_with_sources(
         requested_policy,
         policy_ceiling,
         options,
         clipboard_recency::observe_clipboard_generation,
-        read_start,
+        move |policy, options, generation| {
+            let mut start = read_start(policy, options, generation);
+            start.project = project::read(policy, project_root.as_deref());
+            start
+        },
         now_ms,
     )
 }
@@ -950,6 +986,11 @@ mod tests {
             accessibility: AccessibilityAccess::Granted,
             selected_text: SourceOutcome::Captured("private selection contents".to_string()),
             clipboard: SourceOutcome::Captured("copied".to_string()),
+            project: SourceOutcome::Captured(ProjectContext {
+                files: vec!["src/ChatStore.swift".to_string()],
+                identifiers: vec!["ChatStore".to_string()],
+                truncated: false,
+            }),
         }
     }
 
@@ -1074,7 +1115,7 @@ mod tests {
             ContextSourceStatus::DisabledByCeiling
         );
 
-        let public_capture = start_capture(ContextPolicy::Full, ContextPolicy::None, options);
+        let public_capture = start_capture(ContextPolicy::Full, ContextPolicy::None, options, None);
         let public_snapshot = public_capture.snapshot();
         assert_eq!(public_snapshot.packet(), &ContextPacket::default());
     }
@@ -1100,6 +1141,7 @@ mod tests {
         assert_eq!(packet.focused_element_content, None);
         assert_eq!(packet.focused_element_name, None);
         assert_eq!(packet.clipboard_content, None);
+        assert_eq!(packet.project, None);
 
         let sources = snapshot.receipt().sources;
         assert_eq!(sources.target, ContextSourceStatus::Captured);
@@ -1121,6 +1163,11 @@ mod tests {
         assert_eq!(packet.selected_text, None);
         assert_eq!(packet.focused_element_content, None);
         assert_eq!(packet.clipboard_content, None);
+        assert_eq!(packet.project, None);
+        assert_eq!(
+            snapshot.receipt().sources.project,
+            ContextSourceStatus::DisabledByCeiling
+        );
         assert_eq!(
             snapshot.receipt().sources.selected_text,
             ContextSourceStatus::DisabledByCeiling
@@ -1142,6 +1189,7 @@ mod tests {
             accessibility: AccessibilityAccess::Denied,
             selected_text: SourceOutcome::Unavailable(ContextSourceStatus::PermissionDenied),
             clipboard: SourceOutcome::Unavailable(ContextSourceStatus::Stale),
+            project: SourceOutcome::default(),
         };
         let application = ApplicationCapture {
             captured_at_ms: Some(9),
@@ -1307,6 +1355,7 @@ mod tests {
             ContextPolicy::Target,
             ContextPolicy::Target,
             CaptureOptions::default(),
+            None,
         );
         std::thread::sleep(Duration::from_millis(20));
 

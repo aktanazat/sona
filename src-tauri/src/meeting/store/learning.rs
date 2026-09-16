@@ -45,6 +45,9 @@ use std::collections::{BTreeMap, HashSet};
 
 pub(super) use advice::mine_capture_advice_in;
 pub(super) use corrections::{mine_dictation_correction_in, mine_meeting_edits_in};
+// Only the macOS destination observer narrows a pair before submitting it.
+#[cfg(target_os = "macos")]
+pub(crate) use corrections::rewrite_span;
 pub(super) use habits::mine_mode_habits_in;
 pub(super) use priming::{prime_series_in, series_priming_for_session_in};
 pub(super) use spoken::mine_spoken_punctuation_in;

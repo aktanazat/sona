@@ -574,6 +574,31 @@ fn loop_two_learns_a_human_rewrite_that_recurs_across_days() {
     );
 }
 
+/// A dictation correction arrives as the whole passage the human re-read. The
+/// word they changed is the evidence; the sentence around it is not.
+#[test]
+fn loop_two_learns_the_word_a_dictation_correction_changed() {
+    let (_directory, store) = new_store();
+    let inputs = FakeInputs::empty();
+    for (index, day) in [(0_i64, 0_i64), (1, 1), (2, 2)] {
+        correction(
+            &store,
+            &inputs,
+            "please open the handy project",
+            "please open the Sona project",
+            day,
+            index,
+        );
+    }
+    assert_eq!(
+        suggestions(&store, &inputs),
+        vec![LearningSuggestion::VocabularyCorrection {
+            spoken: "handy".to_string(),
+            written: "Sona".to_string(),
+        }]
+    );
+}
+
 /// A rewrite already in the user's vocabulary is not news.
 #[test]
 fn loop_two_skips_a_rewrite_the_vocabulary_already_covers() {

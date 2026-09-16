@@ -7,6 +7,8 @@
 //! unresponsive target therefore degrades the sources it owns instead of
 //! starving the whole capture or delaying the recording hotkey.
 
+pub(crate) mod corrections;
+
 use super::deadline::{CaptureDeadline, ReadBudget};
 use super::{
     clipboard_recency, website_host_from_url, AccessibilityAccess, ApplicationCapture,
@@ -14,8 +16,10 @@ use super::{
     StartCapture, WebsiteHostCapture,
 };
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSWorkspace};
-use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement};
-use objc2_core_foundation::{CFGetTypeID, CFRetained, CFString, CFType, ConcreteType, CFURL};
+use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
+use objc2_core_foundation::{
+    CFGetTypeID, CFRange, CFRetained, CFString, CFType, ConcreteType, CFURL,
+};
 use std::ptr::{self, NonNull};
 use std::time::Duration;
 
@@ -37,6 +41,7 @@ enum AccessibilityAttributeValue {
     Text(CFRetained<CFString>),
     Url(CFRetained<CFURL>),
     Element(CFRetained<AXUIElement>),
+    Range(CFRange),
     Other,
 }
 
@@ -57,6 +62,15 @@ impl AccessibilityAttributeValue {
             // SAFETY: CFGetTypeID proved that this retained Core Foundation value is exactly an AXUIElement.
             let element: CFRetained<AXUIElement> = unsafe { CFRetained::cast_unchecked(value) };
             return Self::Element(element);
+        }
+        if type_id == AXValue::type_id() {
+            // SAFETY: the type ID above proves this is an AXValue.
+            let value: CFRetained<AXValue> = unsafe { CFRetained::cast_unchecked(value) };
+            let mut range = CFRange::new(0, 0);
+            // SAFETY: the output points to a live CFRange of the requested type.
+            if unsafe { value.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) } {
+                return Self::Range(range);
+            }
         }
         Self::Other
     }
@@ -406,6 +420,7 @@ fn attribute_string(
         Some(AccessibilityAttributeValue::Text(text)) => Ok(Some(text.to_string())),
         Some(AccessibilityAttributeValue::Url(url)) => Ok(Some(url.string().to_string())),
         Some(AccessibilityAttributeValue::Element(_))
+        | Some(AccessibilityAttributeValue::Range(_))
         | Some(AccessibilityAttributeValue::Other)
         | None => Ok(None),
     }

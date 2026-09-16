@@ -22,7 +22,6 @@ use crate::utils;
 use log::{debug, error, info, trace, warn};
 use serde::Serialize;
 use specta::Type;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -411,29 +410,37 @@ struct MicrophoneResolution {
 
 /* ──────────────────────────────────────────────────────────────── */
 
+pub fn create_voice_detector(
+    app_handle: &tauri::AppHandle,
+    hangover_frames: usize,
+) -> Result<SmoothedVad, anyhow::Error> {
+    let resolve = |name: &str| {
+        app_handle
+            .path()
+            .resolve(name, tauri::path::BaseDirectory::Resource)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve {name}: {e}"))
+    };
+    let detector = vad::open_detector(
+        &resolve("resources/models/ten-vad.onnx")?,
+        TEN_VAD_THRESHOLD,
+        &resolve("resources/models/silero_vad_v4.onnx")?,
+        SILERO_VAD_THRESHOLD,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to create voice activity detector: {}", e))?;
+    Ok(SmoothedVad::new(
+        detector,
+        VAD_PREFILL_FRAMES,
+        hangover_frames,
+        VAD_ONSET_FRAMES,
+    ))
+}
+
 fn create_audio_recorder(
-    ten_vad_path: &Path,
-    silero_vad_path: &Path,
     app_handle: &tauri::AppHandle,
     selected_channel: Option<u16>,
     stream_router: Arc<StreamRouter>,
 ) -> Result<AudioRecorder, anyhow::Error> {
-    // A single engine covers both the offline and streaming policies (never
-    // active at once within a recording), so the recorder reconfigures its
-    // hangover tail per session rather than keeping two ONNX sessions resident.
-    let detector = vad::open_detector(
-        ten_vad_path,
-        TEN_VAD_THRESHOLD,
-        silero_vad_path,
-        SILERO_VAD_THRESHOLD,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to create voice activity detector: {}", e))?;
-    let smoothed_vad = SmoothedVad::new(
-        detector,
-        VAD_PREFILL_FRAMES,
-        VAD_OFFLINE_HANGOVER_FRAMES,
-        VAD_ONSET_FRAMES,
-    );
+    let smoothed_vad = create_voice_detector(app_handle, VAD_OFFLINE_HANGOVER_FRAMES)?;
 
     // Recorder with VAD, a spectrum-level callback that forwards level updates to
     // the frontend, and an audio-frame callback that feeds live streaming via a
@@ -481,12 +488,12 @@ impl RecordingReadiness {
     }
 }
 
-/// Tracks exclusive microphone ownership across dictation, meetings, and recorder capture.
+/// Tracks exclusive microphone ownership across dictation, meetings, and native capture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureOwner {
     Dictation,
     Meeting,
-    Recorder,
+    Native,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -571,20 +578,20 @@ pub struct MeetingMicrophoneSource {
     phase: MeetingMicrophonePhase,
     epoch: Option<SourceEpoch>,
 }
-/// Holds the shared microphone authority while AVFoundation owns recorder input.
+/// Holds the shared microphone authority while AVFoundation owns microphone input.
 ///
 /// It raises `SelfInputDeviceLease` for the same span. That lease is what meeting detection reads
 /// to discount Sona's own microphone use, and AVFoundation raises the device-in-use property just
 /// as cpal does, so without it the recorder's own capture looks like a third-party call and
 /// prompts the user to take notes on themselves.
-pub struct RecorderMicrophoneLease {
+pub struct NativeMicrophoneLease {
     audio: Arc<AudioRecordingManager>,
     token: CaptureLeaseToken,
 }
 
-impl Drop for RecorderMicrophoneLease {
+impl Drop for NativeMicrophoneLease {
     fn drop(&mut self) {
-        self.audio.release_recorder_microphone(self.token);
+        self.audio.release_native_microphone(self.token);
     }
 }
 
@@ -690,6 +697,14 @@ impl AudioRecordingManager {
         match &settings.selected_microphone {
             Some(name) => DesiredMicrophone::Selected(name.clone()),
             None => DesiredMicrophone::Default,
+        }
+    }
+
+    /// The same selected or clamshell microphone used by dictation.
+    pub fn native_microphone_name(&self) -> Option<String> {
+        match self.desired_microphone(&get_settings(&self.app_handle)) {
+            DesiredMicrophone::Default => None,
+            DesiredMicrophone::Selected(name) | DesiredMicrophone::Clamshell(name) => Some(name),
         }
     }
 
@@ -843,16 +858,16 @@ impl AudioRecordingManager {
         })
     }
 
-    /// Reserve the microphone while the native screen recorder owns AVFoundation input.
-    pub fn try_acquire_recorder_microphone(self: &Arc<Self>) -> Option<RecorderMicrophoneLease> {
+    /// Reserve the microphone for a native recorder or spoken conversation.
+    pub fn try_acquire_native_microphone(self: &Arc<Self>) -> Option<NativeMicrophoneLease> {
         let state = lock_recover(&self.state);
         if !matches!(*state, RecordingState::Idle) {
             return None;
         }
-        let token = self.capture_lease.try_acquire(CaptureOwner::Recorder)?;
+        let token = self.capture_lease.try_acquire(CaptureOwner::Native)?;
         self.self_lease.acquire();
         drop(state);
-        Some(RecorderMicrophoneLease {
+        Some(NativeMicrophoneLease {
             audio: Arc::clone(self),
             token,
         })
@@ -875,7 +890,7 @@ impl AudioRecordingManager {
         }
     }
 
-    fn release_recorder_microphone(&self, token: CaptureLeaseToken) {
+    fn release_native_microphone(&self, token: CaptureLeaseToken) {
         let _ = self.capture_lease.release(token);
         self.self_lease.release();
     }
@@ -931,18 +946,8 @@ impl AudioRecordingManager {
     pub fn preload_vad(&self) -> Result<(), anyhow::Error> {
         let mut recorder_opt = lock_recover(&self.recorder);
         if recorder_opt.is_none() {
-            let resolve = |name: &str| {
-                self.app_handle
-                    .path()
-                    .resolve(name, tauri::path::BaseDirectory::Resource)
-                    .map_err(|e| anyhow::anyhow!("Failed to resolve {name}: {e}"))
-            };
-            let ten_vad_path = resolve("resources/models/ten-vad.onnx")?;
-            let silero_vad_path = resolve("resources/models/silero_vad_v4.onnx")?;
             let settings = get_settings(&self.app_handle);
             *recorder_opt = Some(create_audio_recorder(
-                &ten_vad_path,
-                &silero_vad_path,
                 &self.app_handle,
                 settings.selected_channel,
                 Arc::clone(&self.stream_router),
@@ -1775,7 +1780,7 @@ mod microphone_capture_lease_tests {
             .expect("meeting acquires the microphone");
 
         assert!(lease.owns(meeting));
-        assert!(lease.try_acquire(CaptureOwner::Recorder).is_none());
+        assert!(lease.try_acquire(CaptureOwner::Native).is_none());
         assert!(lease.try_acquire(CaptureOwner::Dictation).is_none());
         assert!(lease.release(meeting));
 
@@ -1787,7 +1792,7 @@ mod microphone_capture_lease_tests {
         assert!(lease.release(next_meeting));
 
         let recorder = lease
-            .try_acquire(CaptureOwner::Recorder)
+            .try_acquire(CaptureOwner::Native)
             .expect("recorder acquires after meeting releases");
         assert!(lease.release(recorder));
 
@@ -1808,7 +1813,7 @@ mod microphone_capture_lease_tests {
             .expect("meeting acquires the microphone");
 
         assert!(!lease.release_owner(CaptureOwner::Dictation));
-        assert!(!lease.release_owner(CaptureOwner::Recorder));
+        assert!(!lease.release_owner(CaptureOwner::Native));
         assert!(lease.owns(meeting));
         assert!(lease.release_owner(CaptureOwner::Meeting));
         assert!(!lease.is_active());

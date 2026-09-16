@@ -7,8 +7,10 @@
 //!
 //! * a meeting review segment edit — `meeting_segment_edits.replacement_text`
 //!   against the immutable `base_text` it replaced;
-//! * a dictation correction — the `spoken -> written` pair the history
-//!   correction surface submits.
+//! * a dictation correction — the `spoken -> written` pair the macOS
+//!   destination observer submits when a person edits a dictation in the app
+//!   it landed in. That observation is opt-in and off by default, so on every
+//!   other platform the segment edit above is the only source.
 //!
 //! A retry or a reprocess produces a *second machine reading* of audio a model
 //! already read. The difference between two model outputs says something about
@@ -42,6 +44,12 @@ const MAX_MEETING_EDITS_PER_RUN: usize = 300;
 const MAX_DELTA_TOKENS: usize = 3;
 
 /// Records one human dictation correction and re-checks the floors.
+///
+/// The pair arrives from a stored event payload rather than from the observer
+/// that saw the edit, so its shape is whatever the build that wrote the row
+/// sent: a live caller narrows it first, an older row can still hold the
+/// whole passage. Working out which words changed is therefore this layer's
+/// job. The reduction is idempotent, so narrowing twice costs nothing.
 pub(in crate::meeting::store) fn mine_dictation_correction_in(
     connection: &Connection,
     inputs: &dyn LearningInputs,
@@ -50,7 +58,7 @@ pub(in crate::meeting::store) fn mine_dictation_correction_in(
     occurred_at_utc_ms: i64,
     now_utc_ms: i64,
 ) -> Result<u64, StoreError> {
-    if let Some(delta) = Delta::new(spoken, written) {
+    for delta in deltas_between(spoken, written) {
         record_observation_in(
             connection,
             LearningLoopKind::VocabularyCorrection,
@@ -187,12 +195,18 @@ struct Delta {
 }
 
 impl Delta {
+    /// The observation a pair becomes, or nothing when the corpus should not
+    /// hold it.
+    ///
+    /// This is the only way to build a [`Delta`], so what the corpus will hold
+    /// is decided here: no side longer than [`MAX_DELTA_TOKENS`], and a rewrite
+    /// the matcher cannot tell from the original is not a correction. The
+    /// production path arrives through [`rewrite_span`], which has already
+    /// bounded both sides for its own caller's reason, so identity is the only
+    /// rule left to fire there.
     fn new(spoken: &str, written: &str) -> Option<Self> {
         let spoken = spoken.trim();
         let written = written.trim();
-        if spoken.is_empty() || written.is_empty() {
-            return None;
-        }
         if spoken.split_whitespace().count() > MAX_DELTA_TOKENS
             || written.split_whitespace().count() > MAX_DELTA_TOKENS
         {
@@ -200,7 +214,6 @@ impl Delta {
         }
         let spoken_key = normalized(spoken);
         let written_key = normalized(written);
-        // A rewrite that changes nothing a matcher can see is not a correction.
         if spoken_key.is_empty() || written_key.is_empty() || spoken_key == written_key {
             return None;
         }
@@ -211,11 +224,16 @@ impl Delta {
     }
 }
 
-/// The rewrites one segment edit performed.
+/// The words one edit actually changed, for a caller that has only the two
+/// passages and has to work out what the change was.
 ///
-/// Common leading and trailing tokens are dropped, so an edit that fixed one
-/// word inside a long utterance yields that word rather than the utterance.
-fn deltas_between(base: &str, replacement: &str) -> Vec<Delta> {
+/// Common leading and trailing tokens are dropped, so fixing one word inside a
+/// sentence yields that word. Both remaining sides have to be non-empty and at
+/// most [`MAX_DELTA_TOKENS`] long, and that bound is the whole of what keeps a
+/// reworded passage out — not the shape of the edit. An insertion that sits
+/// against the tokens it kept leaves a side empty and yields nothing, but one
+/// that adds words on either side of a kept token is a pair like any other.
+pub(crate) fn rewrite_span(base: &str, replacement: &str) -> Option<(String, String)> {
     let base: Vec<&str> = base.split_whitespace().collect();
     let replacement: Vec<&str> = replacement.split_whitespace().collect();
     let mut prefix = 0;
@@ -233,8 +251,23 @@ fn deltas_between(base: &str, replacement: &str) -> Vec<Delta> {
     {
         suffix += 1;
     }
-    let from = base[prefix..base.len() - suffix].join(" ");
-    let to = replacement[prefix..replacement.len() - suffix].join(" ");
+    let from = &base[prefix..base.len() - suffix];
+    let to = &replacement[prefix..replacement.len() - suffix];
+    if from.is_empty()
+        || to.is_empty()
+        || from.len() > MAX_DELTA_TOKENS
+        || to.len() > MAX_DELTA_TOKENS
+    {
+        return None;
+    }
+    Some((from.join(" "), to.join(" ")))
+}
+
+/// The rewrites one segment edit performed.
+fn deltas_between(base: &str, replacement: &str) -> Vec<Delta> {
+    let Some((from, to)) = rewrite_span(base, replacement) else {
+        return Vec::new();
+    };
     Delta::new(&from, &to).into_iter().collect()
 }
 
@@ -276,8 +309,16 @@ mod tests {
     fn a_rewrite_the_matcher_cannot_see_is_not_a_correction() {
         assert!(Delta::new("Sona", "sona").is_none(), "case-only");
         assert!(Delta::new("Sona", "  Sona ").is_none(), "whitespace-only");
-        assert!(Delta::new("", "Sona").is_none(), "empty spoken");
-        assert!(Delta::new("Sona", "").is_none(), "empty written");
+    }
+
+    #[test]
+    fn a_side_that_disappears_is_not_a_correction() {
+        // Deleting the dictation, or typing into an empty field, leaves one
+        // side with nothing in it. Spans refuse it, and so does the
+        // constructor, which is the only way a delta reaches the corpus.
+        assert!(deltas_between("Sona", "").is_empty(), "written deleted");
+        assert!(deltas_between("", "Sona").is_empty(), "spoken absent");
+        assert!(rewrite_span("Sona", "").is_none(), "no span to record");
     }
 
     #[test]
