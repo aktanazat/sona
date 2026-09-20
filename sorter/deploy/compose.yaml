@@ -1,0 +1,17 @@
+# On the VPS: /opt/sona-sorter holds this file, sorter.env (the model key) and
+# the state volume. Pair once with
+#   docker compose run --rm sorter pair https://<worker> <vault_id>
+# then `docker compose up -d` runs the loop.
+services:
+  sorter:
+    build:
+      context: ../..
+      dockerfile: sorter/deploy/Dockerfile
+    image: sona-sorter:local
+    env_file: sorter.env
+    volumes:
+      - state:/state
+    restart: unless-stopped
+    mem_limit: 256m
+volumes:
+  state:

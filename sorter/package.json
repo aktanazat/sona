@@ -1,0 +1,20 @@
+{
+  "name": "sona-sorter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "pair": "bun src/main.ts pair",
+    "once": "bun src/main.ts once",
+    "start": "bun src/main.ts run",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.8.3"
+  }
+}

@@ -52,7 +52,7 @@ function field(value: number | string | Uint8Array): Uint8Array {
   return utf8(String(value));
 }
 
-function record(
+export function record(
   ...fields: readonly (number | string | Uint8Array)[]
 ): Uint8Array {
   return lengthPrefixed(fields.map(field));
@@ -223,7 +223,7 @@ function objectRevisionAad(input: ObjectRevisionCryptoContext): Uint8Array {
   );
 }
 
-async function deriveAesGcmKey(
+export async function deriveAesGcmKey(
   material: Uint8Array,
   salt: Uint8Array,
   info: Uint8Array,
