@@ -147,20 +147,21 @@ final class AppModel: NSObject, ObservableObject {
 
     func stopRecording() {
         guard recorder.isRecording else { return }
+        let wasAfterCall = afterCall
+        afterCall = false
         guard let finished = recorder.stop() else {
             /* Stopping with nothing to keep is the one outcome that must never pass in
              * silence: the operator watched a clock run and has to be told it is gone. */
             if recorder.notice == nil { recorder.notice = .notSaved }
             return
         }
-        afterCall = false
         AppModel.tap()
         Task {
             await enqueue(
                 audio: finished.audio,
                 recordedAtUtcMs: finished.recordedAtUtcMs,
                 title: AppModel.title(
-                    prefix: afterCall
+                    prefix: wasAfterCall
                         ? NSLocalizedString("title.afterCall", comment: "")
                         : NSLocalizedString("title.phone", comment: ""),
                     utcMs: finished.recordedAtUtcMs
