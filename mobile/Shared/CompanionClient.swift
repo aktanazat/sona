@@ -28,6 +28,58 @@ struct UploadCommittedResponse: Decodable {
     var changeSequence: Int64?
 }
 
+/// One head or change row; the same shape on `/v1/changes` and `/v1/snapshot`.
+struct ChangeRow: Decodable, Equatable {
+    var objectId: String
+    var revisionId: String
+    var sequence: Int64
+    var tombstone: Bool
+}
+
+struct ChangesPage: Decodable {
+    var changes: [ChangeRow]
+    var hasMore: Bool
+    var nextCursor: String
+}
+
+struct SnapshotPage: Decodable {
+    var heads: [ChangeRow]
+    var hasMore: Bool
+    var after: String?
+    var highWater: String
+}
+
+struct RevisionEnvelope: Decodable {
+    var objectId: String
+    var revisionId: String
+    var chunkCount: Int
+    var cryptoVersion: Int
+    var manifestSha256: String
+    var totalBytes: Int64
+    var writerDeviceId: String
+}
+
+struct RevisionManifestResponse: Decodable {
+    var envelope: RevisionEnvelope
+    /// The sealed manifest, base64url.
+    var manifest: String
+}
+
+struct TombstoneResponse: Decodable {
+    var objectId: String
+    var revisionId: String
+    var tombstone: Bool
+}
+
+/// The `DELETE /v1/objects/{id}` body; camelCase like every request body.
+struct TombstoneRequest: Encodable {
+    var baseRevisionId: String
+    var formatVersion: Int
+    var reason: String
+    var tombstoneRevisionId: String
+    var writerSignature: String
+}
+
 enum CompanionError: Error, Equatable {
     case invalidEndpoint
     case transport
@@ -146,6 +198,7 @@ actor CompanionClient {
             vaultId: vaultId,
             method: "PUT",
             segments: ["v1", "uploads", uploadId, "chunks", String(index)],
+            query: [],
             body: ciphertext,
             contentType: "application/octet-stream",
             idempotencyKey: idempotencyKey
@@ -172,6 +225,98 @@ actor CompanionClient {
         )
     }
 
+    // MARK: - Reading the vault
+
+    /// Every change after `cursor`, oldest first; nil starts from the beginning.
+    func changes(
+        identity: DeviceIdentity, vaultId: String, cursor: String?
+    ) async throws -> ChangesPage {
+        var query = [("limit", String(CompanionClient.pageLimit))]
+        if let cursor { query.append(("cursor", cursor)) }
+        return try await json(
+            identity: identity, vaultId: vaultId, method: "GET",
+            segments: ["v1", "changes"], query: query
+        )
+    }
+
+    /// One page of the vault's heads at one high water; the first call passes neither.
+    func snapshot(
+        identity: DeviceIdentity, vaultId: String, highWater: String?, after: String?
+    ) async throws -> SnapshotPage {
+        var query = [("limit", String(CompanionClient.pageLimit))]
+        if let highWater { query.append(("highWater", highWater)) }
+        if let after { query.append(("after", after)) }
+        return try await json(
+            identity: identity, vaultId: vaultId, method: "GET",
+            segments: ["v1", "snapshot"], query: query
+        )
+    }
+
+    func manifest(
+        identity: DeviceIdentity, vaultId: String, objectId: String, revisionId: String
+    ) async throws -> RevisionManifestResponse {
+        try await json(
+            identity: identity, vaultId: vaultId, method: "GET",
+            segments: ["v1", "objects", objectId, "revisions", revisionId, "manifest"]
+        )
+    }
+
+    /// One sealed chunk, exactly as its writer uploaded it.
+    func chunk(
+        identity: DeviceIdentity, vaultId: String, objectId: String, revisionId: String,
+        index: Int
+    ) async throws -> Data {
+        try await send(try signedRequest(
+            identity: identity, vaultId: vaultId, method: "GET",
+            segments: ["v1", "objects", objectId, "revisions", revisionId, "chunks", String(index)],
+            query: [], body: Data(), contentType: nil, idempotencyKey: nil
+        ))
+    }
+
+    /// Tombstone an object over its current head; the Worker refuses a stale base.
+    func tombstone(
+        identity: DeviceIdentity,
+        vaultId: String,
+        idempotencyKey: String,
+        objectId: String,
+        baseRevisionId: String,
+        tombstoneRevisionId: String
+    ) async throws -> TombstoneResponse {
+        let reason = "user_request"
+        guard let signature = try? signEd25519(
+            signingSeed: identity.signingSeed,
+            message: canonicalTombstoneBytes(
+                CanonicalTombstoneInput(
+                    vaultId: vaultId,
+                    objectId: objectId,
+                    tombstoneRevisionId: tombstoneRevisionId,
+                    baseRevisionId: baseRevisionId,
+                    reason: reason,
+                    formatVersion: UInt64(SonaProtocol.protocolVersion)
+                )
+            )
+        ) else { throw CompanionError.signing }
+        let request = TombstoneRequest(
+            baseRevisionId: baseRevisionId,
+            formatVersion: SonaProtocol.protocolVersion,
+            reason: reason,
+            tombstoneRevisionId: tombstoneRevisionId,
+            writerSignature: Base64URL.encode(signature)
+        )
+        guard let body = try? JSONEncoder().encode(request) else { throw CompanionError.signing }
+        return try await json(
+            identity: identity,
+            vaultId: vaultId,
+            method: "DELETE",
+            segments: ["v1", "objects", objectId],
+            body: body,
+            contentType: "application/json",
+            idempotencyKey: idempotencyKey
+        )
+    }
+
+    private static let pageLimit = 100
+
     // MARK: - Internals
 
     private func json<Value: Decodable>(
@@ -179,6 +324,7 @@ actor CompanionClient {
         vaultId: String,
         method: String,
         segments: [String],
+        query: [(String, String)] = [],
         body: Data = Data(),
         contentType: String? = nil,
         idempotencyKey: String? = nil
@@ -188,6 +334,7 @@ actor CompanionClient {
             vaultId: vaultId,
             method: method,
             segments: segments,
+            query: query,
             body: body,
             contentType: contentType,
             idempotencyKey: idempotencyKey
@@ -200,6 +347,7 @@ actor CompanionClient {
         vaultId: String,
         method: String,
         segments: [String],
+        query: [(String, String)],
         body: Data,
         contentType: String?,
         idempotencyKey: String?
@@ -208,6 +356,9 @@ actor CompanionClient {
         for segment in segments {
             url = url.appending(path: segment)
         }
+        if !query.isEmpty {
+            url.append(queryItems: query.map { URLQueryItem(name: $0.0, value: $0.1) })
+        }
         let nonce = randomBytes(16)
         let timestamp = nextTimestampMs()
         let input = CanonicalRequestInput(
@@ -215,7 +366,7 @@ actor CompanionClient {
             deviceId: identity.deviceId,
             method: method,
             path: url.path(),
-            query: [],
+            query: query,
             bodyDigest: sha256Base64URL(body),
             contentType: contentType ?? "",
             idempotencyKey: idempotencyKey ?? "",

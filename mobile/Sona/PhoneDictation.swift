@@ -16,6 +16,11 @@ final class PhoneDictation: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published var text = ""
     @Published private(set) var notice: String?
+    /// Runs when a session ends, however it ended, after `phase` is idle again.
+    var onEnded: (() -> Void)?
+    /// The audio of the last session started with `keepingAudio`, once it ended well.
+    /// Set for one session at a time; `takeAudio()` hands it over.
+    private var kept: (audio: CapturedAudio, startedAtUtcMs: Int64)?
 
     var isBusy: Bool { phase != .idle }
 
@@ -33,6 +38,9 @@ final class PhoneDictation: ObservableObject {
     private var recognizer: SFSpeechRecognizer?
     private var recognition: SFSpeechRecognitionTask?
     private var interruptionObserver: NSObjectProtocol?
+    private var keepsAudio = false
+    private var resampler: PCMResampler?
+    private var startedAt: Date?
 
     init() {
         interruptionObserver = NotificationCenter.default.addObserver(
@@ -43,7 +51,13 @@ final class PhoneDictation: ObservableObject {
             guard kind == AVAudioSession.InterruptionType.began.rawValue else { return }
             MainActor.assumeIsolated {
                 guard let self, self.isBusy else { return }
-                self.end(error: NSLocalizedString("dictation.interrupted", comment: ""))
+                /* A voice thought ends where it stands: what was heard is the thought.
+                 * Plain dictation has an editor to check, so it is told instead. */
+                if self.keepsAudio {
+                    self.end(error: nil)
+                } else {
+                    self.end(error: NSLocalizedString("dictation.interrupted", comment: ""))
+                }
             }
         }
     }
@@ -54,13 +68,17 @@ final class PhoneDictation: ObservableObject {
         }
     }
 
-    func start() {
+    /// `keepingAudio` also writes what the microphone hears in the recording capture
+    /// format, so a voice thought keeps its sound beside its transcript.
+    func start(keepingAudio: Bool = false) {
         guard !isBusy else { return }
         let id = UUID()
         sessionID = id
         phase = .authorizing
         notice = nil
         text = ""
+        keepsAudio = keepingAudio
+        kept = nil
         preparation = Task { [weak self] in
             guard let self else { return }
             let microphoneGranted = PhoneRecorder.hasPermission
@@ -101,9 +119,17 @@ final class PhoneDictation: ObservableObject {
         stopAudio()
     }
 
+    /// The kept audio of the session that just ended, once.
+    func takeAudio() -> (audio: CapturedAudio, startedAtUtcMs: Int64)? {
+        defer { kept = nil }
+        return kept
+    }
+
     /// Called when the operator cancels, when a recording takes the microphone away, and
     /// when the dictation screen goes away underneath a running session.
     func cancel() {
+        /* A cancelled session has no thought to keep; the file is dropped with it. */
+        keepsAudio = false
         end(error: nil)
     }
 
@@ -121,8 +147,15 @@ final class PhoneDictation: ObservableObject {
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
         request.taskHint = .dictation
+        if keepsAudio {
+            let url = FileManager.default.temporaryDirectory
+                .appending(path: "thought-\(id.uuidString).pcm")
+            resampler = try PCMResampler(url: url, inputFormat: format)
+        }
+        let resampler = self.resampler
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
+            try? resampler?.append(buffer)
         }
         self.engine = engine
         self.request = request
@@ -137,6 +170,7 @@ final class PhoneDictation: ObservableObject {
         }
         engine.prepare()
         try engine.start()
+        startedAt = Date()
         phase = .listening
     }
 
@@ -144,8 +178,10 @@ final class PhoneDictation: ObservableObject {
         guard sessionID == id else { return }
         if let text { self.text = text }
         if final {
+            /* With audio kept, silence is still a thought: the sound is what is saved
+             * and the sorter files it unread. Without it, nothing was captured. */
             let empty = self.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            end(error: empty ? NSLocalizedString("dictation.empty", comment: "") : nil)
+            end(error: empty && !keepsAudio ? NSLocalizedString("dictation.empty", comment: "") : nil)
         } else if let error {
             end(error: error)
         }
@@ -170,7 +206,21 @@ final class PhoneDictation: ObservableObject {
         recognition?.cancel()
         recognition = nil
         recognizer = nil
+        if let resampler, let startedAt {
+            /* The tap is gone, so the file is complete. Anything heard is kept; a cancel
+             * cleared `keepsAudio` and drops it. */
+            let finished = try? resampler.finish()
+            if keepsAudio, let finished, finished.byteLength > 0 {
+                kept = (finished, Int64(startedAt.timeIntervalSince1970 * 1000))
+            } else if let finished {
+                try? FileManager.default.removeItem(at: finished.url)
+            }
+        }
+        resampler = nil
+        startedAt = nil
+        keepsAudio = false
         notice = error
         phase = .idle
+        onEnded?()
     }
 }

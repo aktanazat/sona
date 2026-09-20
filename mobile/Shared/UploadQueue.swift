@@ -1,18 +1,37 @@
 import Foundation
 
-/// One recording on its way into the vault.
-///
-/// Every id is minted when the recording is enqueued and never regenerated, so a retry
-/// is the same write to the Worker rather than a second object.
-struct QueuedRecording: Codable, Equatable, Identifiable {
-    var objectId: String
-    var revisionId: String
-    var uploadId: String
-    var recordedAtUtcMs: Int64
+/// A meeting recording's part of a queued object.
+struct QueuedRecording: Codable, Equatable {
     var durationMs: Int64
     var title: String
     var audioByteLength: Int
     var audioSha256: String
+}
+
+/// A thought's part of a queued object. Attachment files live in the item directory
+/// under the names the attachments carry.
+struct QueuedThought: Codable, Equatable {
+    var origin: ThoughtOrigin
+    var text: String
+    var link: String?
+    var attachments: [ThoughtAttachment]
+}
+
+enum QueuedPayload: Codable, Equatable {
+    case recording(QueuedRecording)
+    case thought(QueuedThought)
+}
+
+/// One object on its way into the vault.
+///
+/// Every id is minted when the object is enqueued and never regenerated, so a retry is
+/// the same write to the Worker rather than a second object.
+struct QueuedObject: Codable, Equatable, Identifiable {
+    var objectId: String
+    var revisionId: String
+    var uploadId: String
+    var capturedAtUtcMs: Int64
+    var payload: QueuedPayload
     /// The vault whose root the staged ciphertext is bound to, once staged.
     var stagedForVaultId: String?
     var chunkSizes: [Int]
@@ -32,9 +51,11 @@ enum UploadQueueError: Error, Equatable {
     case commitIncomplete(state: String)
 }
 
-/// The on-disk outbox. Recording writes into it; uploading drains it; nothing else
-/// owns a recording's lifetime.
+/// The on-disk outbox. Capture writes into it; uploading drains it; nothing else owns
+/// a queued object's lifetime.
 actor UploadQueue {
+    private static let recordingAudioFile = "audio.pcm"
+
     private let root: URL
     private let identity: DeviceIdentity
     private var credentials: VaultCredentials?
@@ -54,8 +75,8 @@ actor UploadQueue {
         client = nil
     }
 
-    func items() -> [QueuedRecording] {
-        itemDirectories().compactMap(loadItem).sorted { $0.recordedAtUtcMs < $1.recordedAtUtcMs }
+    func items() -> [QueuedObject] {
+        itemDirectories().compactMap(loadItem).sorted { $0.capturedAtUtcMs < $1.capturedAtUtcMs }
     }
 
     /// Take ownership of a finished capture. The audio file is moved, not copied, so
@@ -64,31 +85,38 @@ actor UploadQueue {
         audio: CapturedAudio,
         recordedAtUtcMs: Int64,
         title: String
-    ) throws -> QueuedRecording {
+    ) throws -> QueuedObject {
         let objectId = randomOpaqueId()
-        let directory = root.appending(path: directoryName(objectId))
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = directory.appending(path: "audio.pcm")
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.moveItem(at: audio.url, to: destination)
-        let item = QueuedRecording(
+        try adopt(audio.url, as: UploadQueue.recordingAudioFile, objectId: objectId)
+        let item = newItem(
             objectId: objectId,
-            revisionId: randomOpaqueId(),
-            uploadId: randomOpaqueId(),
-            recordedAtUtcMs: recordedAtUtcMs,
-            durationMs: audio.durationMs,
-            title: title,
-            audioByteLength: audio.byteLength,
-            audioSha256: audio.sha256,
-            stagedForVaultId: nil,
-            chunkSizes: [],
-            chunkDigests: [],
-            attempts: 0,
-            nextAttemptUtcMs: 0,
-            lastError: nil,
-            parked: false
+            capturedAtUtcMs: recordedAtUtcMs,
+            payload: .recording(
+                QueuedRecording(
+                    durationMs: audio.durationMs,
+                    title: title,
+                    audioByteLength: audio.byteLength,
+                    audioSha256: audio.sha256
+                )
+            )
+        )
+        try save(item)
+        return item
+    }
+
+    /// Take ownership of a captured thought and every file behind its attachments.
+    func enqueue(
+        thought: QueuedThought,
+        capturedAtUtcMs: Int64,
+        files: [URL]
+    ) throws -> QueuedObject {
+        precondition(files.count == thought.attachments.count)
+        let objectId = randomOpaqueId()
+        for (file, attachment) in zip(files, thought.attachments) {
+            try adopt(file, as: attachment.file, objectId: objectId)
+        }
+        let item = newItem(
+            objectId: objectId, capturedAtUtcMs: capturedAtUtcMs, payload: .thought(thought)
         )
         try save(item)
         return item
@@ -139,18 +167,17 @@ actor UploadQueue {
     // MARK: - Upload
 
     private func upload(
-        _ item: QueuedRecording,
+        _ item: QueuedObject,
         credentials: VaultCredentials,
         client: CompanionClient
     ) async throws {
         let item = try stage(item, credentials: credentials)
         let plan = try plan(item, credentials: credentials)
+        let scope = idempotencyScope(item)
         let created = try await client.createObjectUpload(
             identity: identity,
             vaultId: credentials.vaultId,
-            idempotencyKey: stableIdempotencyKey([
-                "device-recording", item.objectId, item.revisionId, "create",
-            ]),
+            idempotencyKey: stableIdempotencyKey([scope, item.objectId, item.revisionId, "create"]),
             plan: plan
         )
         let accepted = Set(created.acceptedIndexes)
@@ -160,7 +187,7 @@ actor UploadQueue {
                 identity: identity,
                 vaultId: credentials.vaultId,
                 idempotencyKey: stableIdempotencyKey([
-                    "device-recording", item.objectId, item.revisionId, "chunk-\(index)",
+                    scope, item.objectId, item.revisionId, "chunk-\(index)",
                 ]),
                 uploadId: item.uploadId,
                 index: index,
@@ -170,9 +197,7 @@ actor UploadQueue {
         let committed = try await client.commitUpload(
             identity: identity,
             vaultId: credentials.vaultId,
-            idempotencyKey: stableIdempotencyKey([
-                "device-recording", item.objectId, item.revisionId, "commit",
-            ]),
+            idempotencyKey: stableIdempotencyKey([scope, item.objectId, item.revisionId, "commit"]),
             uploadId: item.uploadId
         )
         guard committed.state == "committed" else {
@@ -186,34 +211,20 @@ actor UploadQueue {
     /// Nonces are random, so ciphertext cannot be reproduced: staging it makes a retry
     /// byte-identical, which is what the Worker's chunk digests require.
     private func stage(
-        _ item: QueuedRecording, credentials: VaultCredentials
-    ) throws -> QueuedRecording {
+        _ item: QueuedObject, credentials: VaultCredentials
+    ) throws -> QueuedObject {
         var item = item
         if item.stagedForVaultId == credentials.vaultId, !item.chunkDigests.isEmpty {
             return item
         }
         if item.stagedForVaultId != nil {
-            /* A re-pairing moved the vault under this recording; its AAD names the old
-             * one, so the staged bytes are unusable and the revision starts over. */
+            /* A re-pairing moved the vault under this object; its AAD names the old one,
+             * so the staged bytes are unusable and the revision starts over. */
             try? removeStagedFiles(item)
             item.revisionId = randomOpaqueId()
             item.uploadId = randomOpaqueId()
         }
-        let audioURL = self.audioURL(item)
-        guard let handle = try? FileHandle(forReadingFrom: audioURL) else {
-            throw UploadQueueError.missingAudio
-        }
-        defer { try? handle.close() }
-        let manifest = DeviceRecordingObject.manifest(
-            deviceId: identity.deviceId,
-            recordedAtUtcMs: item.recordedAtUtcMs,
-            durationMs: item.durationMs,
-            title: item.title,
-            audioByteLength: item.audioByteLength,
-            audioSha256: item.audioSha256
-        )
-        let chunkCount = DeviceRecordingObject.chunkCount(audioByteLength: item.audioByteLength)
-        let manifestPlaintext = try DeviceRecordingObject.encodeManifest(manifest)
+        let chunkCount = self.chunkCount(item)
         let sealedManifest = try sealObjectRevisionPayload(
             vaultRoot: credentials.vaultRoot,
             context: context(
@@ -221,17 +232,12 @@ actor UploadQueue {
                 index: 0, total: chunkCount, contentKind: .manifest
             ),
             nonce: randomBytes(12),
-            plaintext: manifestPlaintext
+            plaintext: try manifestPlaintext(item)
         )
         try sealedManifest.write(to: manifestURL(item), options: .atomic)
         var sizes: [Int] = []
         var digests: [String] = []
         for index in 0..<chunkCount {
-            let range = DeviceRecordingObject.chunkRange(
-                index: index, audioByteLength: item.audioByteLength
-            )
-            try handle.seek(toOffset: UInt64(range.lowerBound))
-            let plaintext = try handle.read(upToCount: range.count) ?? Data()
             let sealed = try sealObjectRevisionPayload(
                 vaultRoot: credentials.vaultRoot,
                 context: context(
@@ -239,7 +245,7 @@ actor UploadQueue {
                     index: index, total: chunkCount, contentKind: .chunk
                 ),
                 nonce: randomBytes(12),
-                plaintext: plaintext
+                plaintext: try chunkPlaintext(item, index: index)
             )
             try sealed.write(to: chunkURL(item, index: index), options: .atomic)
             sizes.append(sealed.count)
@@ -253,7 +259,7 @@ actor UploadQueue {
     }
 
     private func plan(
-        _ item: QueuedRecording, credentials: VaultCredentials
+        _ item: QueuedObject, credentials: VaultCredentials
     ) throws -> ObjectUploadPlan {
         let manifest = try Data(contentsOf: manifestURL(item))
         let manifestDigest = sha256Base64URL(manifest)
@@ -301,8 +307,10 @@ actor UploadQueue {
         )
     }
 
+    // MARK: - What each payload seals
+
     private func context(
-        _ item: QueuedRecording,
+        _ item: QueuedObject,
         credentials: VaultCredentials,
         index: Int,
         total: Int,
@@ -315,13 +323,118 @@ actor UploadQueue {
             index: UInt64(index),
             total: UInt64(total),
             contentKind: contentKind,
-            sourceFormat: DeviceRecordingObject.sourceFormat
+            sourceFormat: sourceFormat(item)
         )
+    }
+
+    private func sourceFormat(_ item: QueuedObject) -> String {
+        switch item.payload {
+        case .recording: return DeviceRecordingObject.sourceFormat
+        case .thought: return ThoughtObject.sourceFormat
+        }
+    }
+
+    /// The first idempotency-key part, which keeps a recording's keys byte-identical
+    /// to the ones the app derived before thoughts existed.
+    private func idempotencyScope(_ item: QueuedObject) -> String {
+        switch item.payload {
+        case .recording: return "device-recording"
+        case .thought: return "thought"
+        }
+    }
+
+    private func chunkCount(_ item: QueuedObject) -> Int {
+        switch item.payload {
+        case let .recording(recording):
+            return DeviceRecordingObject.chunkCount(audioByteLength: recording.audioByteLength)
+        case let .thought(thought):
+            return ThoughtObject.chunkCount(thought.attachments)
+        }
+    }
+
+    private func manifestPlaintext(_ item: QueuedObject) throws -> Data {
+        switch item.payload {
+        case let .recording(recording):
+            return try DeviceRecordingObject.encodeManifest(
+                DeviceRecordingObject.manifest(
+                    deviceId: identity.deviceId,
+                    recordedAtUtcMs: item.capturedAtUtcMs,
+                    durationMs: recording.durationMs,
+                    title: recording.title,
+                    audioByteLength: recording.audioByteLength,
+                    audioSha256: recording.audioSha256
+                )
+            )
+        case let .thought(thought):
+            return try ThoughtObject.encodeManifest(
+                ThoughtObject.manifest(
+                    deviceId: identity.deviceId,
+                    capturedAtUtcMs: item.capturedAtUtcMs,
+                    origin: thought.origin,
+                    text: thought.text,
+                    link: thought.link.flatMap(URL.init(string:)),
+                    attachments: thought.attachments
+                )
+            )
+        }
+    }
+
+    private func chunkPlaintext(_ item: QueuedObject, index: Int) throws -> Data {
+        switch item.payload {
+        case let .recording(recording):
+            let range = DeviceRecordingObject.chunkRange(
+                index: index, audioByteLength: recording.audioByteLength
+            )
+            return try readSlice(itemFile(item, UploadQueue.recordingAudioFile), range)
+        case let .thought(thought):
+            guard let (attachment, range) = ThoughtObject.slice(thought.attachments, index: index)
+            else { return Data() }
+            return try readSlice(itemFile(item, attachment.file), range)
+        }
+    }
+
+    private func readSlice(_ url: URL, _ range: Range<Int>) throws -> Data {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            throw UploadQueueError.missingAudio
+        }
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(range.lowerBound))
+        return try handle.read(upToCount: range.count) ?? Data()
     }
 
     // MARK: - Persistence
 
-    private func record(failure: Error, on item: QueuedRecording, retryable: Bool) {
+    private func newItem(
+        objectId: String, capturedAtUtcMs: Int64, payload: QueuedPayload
+    ) -> QueuedObject {
+        QueuedObject(
+            objectId: objectId,
+            revisionId: randomOpaqueId(),
+            uploadId: randomOpaqueId(),
+            capturedAtUtcMs: capturedAtUtcMs,
+            payload: payload,
+            stagedForVaultId: nil,
+            chunkSizes: [],
+            chunkDigests: [],
+            attempts: 0,
+            nextAttemptUtcMs: 0,
+            lastError: nil,
+            parked: false
+        )
+    }
+
+    /// Move a captured file into the item directory under its outbox name.
+    private func adopt(_ source: URL, as name: String, objectId: String) throws {
+        let directory = root.appending(path: directoryName(objectId))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: name)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+    }
+
+    private func record(failure: Error, on item: QueuedObject, retryable: Bool) {
         guard var stored = loadItem(root.appending(path: directoryName(item.objectId))) else {
             return
         }
@@ -341,14 +454,23 @@ actor UploadQueue {
         )) ?? []
     }
 
-    private func loadItem(_ directory: URL) -> QueuedRecording? {
+    private func loadItem(_ directory: URL) -> QueuedObject? {
         guard let bytes = try? Data(contentsOf: directory.appending(path: "item.json")) else {
             return nil
         }
-        return try? JSONDecoder().decode(QueuedRecording.self, from: bytes)
+        let decoder = JSONDecoder()
+        if let item = try? decoder.decode(QueuedObject.self, from: bytes) {
+            return item
+        }
+        guard let legacy = try? decoder.decode(LegacyQueuedRecording.self, from: bytes) else {
+            return nil
+        }
+        let item = legacy.object
+        try? save(item)
+        return item
     }
 
-    private func save(_ item: QueuedRecording) throws {
+    private func save(_ item: QueuedObject) throws {
         let directory = root.appending(path: directoryName(item.objectId))
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(item).write(
@@ -356,7 +478,7 @@ actor UploadQueue {
         )
     }
 
-    private func removeStagedFiles(_ item: QueuedRecording) throws {
+    private func removeStagedFiles(_ item: QueuedObject) throws {
         let directory = root.appending(path: directoryName(item.objectId))
         for name in try FileManager.default.contentsOfDirectory(atPath: directory.path)
         where name.hasPrefix("chunk-") || name == "manifest.bin" {
@@ -367,16 +489,60 @@ actor UploadQueue {
     /// Object ids are base64url, which is already a safe directory name.
     private func directoryName(_ objectId: String) -> String { objectId }
 
-    private func audioURL(_ item: QueuedRecording) -> URL {
-        root.appending(path: directoryName(item.objectId)).appending(path: "audio.pcm")
+    private func itemFile(_ item: QueuedObject, _ name: String) -> URL {
+        root.appending(path: directoryName(item.objectId)).appending(path: name)
     }
 
-    private func manifestURL(_ item: QueuedRecording) -> URL {
-        root.appending(path: directoryName(item.objectId)).appending(path: "manifest.bin")
+    private func manifestURL(_ item: QueuedObject) -> URL {
+        itemFile(item, "manifest.bin")
     }
 
-    private func chunkURL(_ item: QueuedRecording, index: Int) -> URL {
-        root.appending(path: directoryName(item.objectId))
-            .appending(path: String(format: "chunk-%06d.bin", index))
+    private func chunkURL(_ item: QueuedObject, index: Int) -> URL {
+        itemFile(item, String(format: "chunk-%06d.bin", index))
+    }
+}
+
+/// The item shape the app wrote before thoughts existed. A phone that updates with
+/// recordings still in its outbox keeps them: the ids, the staged ciphertext, and the
+/// idempotency keys all carry over unchanged.
+private struct LegacyQueuedRecording: Decodable {
+    var objectId: String
+    var revisionId: String
+    var uploadId: String
+    var recordedAtUtcMs: Int64
+    var durationMs: Int64
+    var title: String
+    var audioByteLength: Int
+    var audioSha256: String
+    var stagedForVaultId: String?
+    var chunkSizes: [Int]
+    var chunkDigests: [String]
+    var attempts: Int
+    var nextAttemptUtcMs: Int64
+    var lastError: String?
+    var parked: Bool
+
+    var object: QueuedObject {
+        QueuedObject(
+            objectId: objectId,
+            revisionId: revisionId,
+            uploadId: uploadId,
+            capturedAtUtcMs: recordedAtUtcMs,
+            payload: .recording(
+                QueuedRecording(
+                    durationMs: durationMs,
+                    title: title,
+                    audioByteLength: audioByteLength,
+                    audioSha256: audioSha256
+                )
+            ),
+            stagedForVaultId: stagedForVaultId,
+            chunkSizes: chunkSizes,
+            chunkDigests: chunkDigests,
+            attempts: attempts,
+            nextAttemptUtcMs: nextAttemptUtcMs,
+            lastError: lastError,
+            parked: parked
+        )
     }
 }

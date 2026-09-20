@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import Network
+import PhotosUI
 import SwiftUI
 import UIKit
 import WatchConnectivity
@@ -14,13 +15,34 @@ enum OutboxState: Equatable {
     case saved
 }
 
+/// What the board's one status line can say about the vault.
+enum BoardState: Equatable {
+    case idle
+    case syncing
+    case offline
+}
+
+/// A photo or screenshot on its way into a thought, already on disk.
+struct CapturedImage {
+    var url: URL
+    var mime: String
+    var byteLength: Int
+    var sha256: String
+    var width: Int
+    var height: Int
+}
+
 /// One owner of everything that outlives a screen: the vault state, the outbox, the
 /// microphone, connectivity and the watch link.
 @MainActor
 final class AppModel: NSObject, ObservableObject {
     @Published private(set) var vault: VaultState
-    @Published private(set) var queued: [QueuedRecording] = []
+    @Published private(set) var queued: [QueuedObject] = []
     @Published private(set) var outbox: OutboxState = .empty
+    @Published private(set) var board: BoardIndex?
+    @Published private(set) var boardState: BoardState = .idle
+    /// How many thoughts this run has queued; the capture screen watches it change.
+    @Published private(set) var thoughtsKept = 0
     @Published private(set) var pairingOffer: PairingOffer?
     @Published var pairingMessage: LocalizedStringKey?
     @Published var endpointDraft: String
@@ -37,6 +59,7 @@ final class AppModel: NSObject, ObservableObject {
     /// Set when this recording was started from a call notification.
     private var afterCall = false
     private let queue: UploadQueue
+    private let reader: VaultReader
     private let monitor = NWPathMonitor()
     private static let consentKey = "sona.consent.version"
     private static let consentVersion = 1
@@ -50,13 +73,23 @@ final class AppModel: NSObject, ObservableObject {
         consentAccepted =
             UserDefaults.standard.integer(forKey: AppModel.consentKey) >= AppModel.consentVersion
         queue = UploadQueue(
-            root: AppModel.outboxRoot(),
+            root: AppModel.supportDirectory("outbox"),
+            identity: state.identity,
+            credentials: state.credentials
+        )
+        reader = VaultReader(
+            root: AppModel.supportDirectory("board"),
             identity: state.identity,
             credentials: state.credentials
         )
         super.init()
         recorder.onInterrupted = { [weak self] in
             self?.stopRecording()
+        }
+        /* A voice thought ends where dictation ends: the transcript and the sound it was
+         * read from are queued together the moment the session settles. */
+        dictation.onEnded = { [weak self] in
+            self?.collectVoiceThought()
         }
         /* Tapping either call notification is the operator asking to record now, and
          * the note is titled after the call it followed. */
@@ -256,6 +289,7 @@ final class AppModel: NSObject, ObservableObject {
             vault = state
             pairingOffer = nil
             await queue.setCredentials(credentials)
+            await reader.setCredentials(credentials)
             pairingMessage = "pair.done"
             await drain()
         } catch PairingError.notApprovedYet {
@@ -263,6 +297,154 @@ final class AppModel: NSObject, ObservableObject {
         } catch {
             pairingMessage = "pair.failed"
         }
+    }
+
+    // MARK: - Thoughts
+
+    /// A voice thought is a dictation session that keeps its audio.
+    func startVoiceThought() {
+        guard canStartDictation else { return }
+        dictation.start(keepingAudio: true)
+    }
+
+    private func collectVoiceThought() {
+        guard let kept = dictation.takeAudio() else { return }
+        let audio = kept.audio
+        let thought = QueuedThought(
+            origin: .voice,
+            text: dictation.insertableText,
+            link: nil,
+            attachments: [
+                ThoughtAttachment(
+                    kind: .audio(durationMs: audio.durationMs),
+                    file: "audio.pcm",
+                    byteLength: audio.byteLength,
+                    sha256: audio.sha256
+                ),
+            ]
+        )
+        AppModel.tap()
+        thoughtsKept += 1
+        Task { await enqueue(thought: thought, capturedAtUtcMs: kept.startedAtUtcMs, files: [audio.url]) }
+    }
+
+    /// Typed text, with any photos already on disk. Text that is one address is a link.
+    /// Returns false when there is nothing to keep.
+    @discardableResult
+    func captureTyped(_ text: String, images: [CapturedImage]) -> Bool {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !images.isEmpty else { return false }
+        let thought = QueuedThought(
+            origin: .typed,
+            text: text,
+            link: AppModel.link(in: text),
+            attachments: images.enumerated().map { index, image in
+                ThoughtAttachment(
+                    kind: .image(mime: image.mime, width: image.width, height: image.height),
+                    file: "image-\(index).jpg",
+                    byteLength: image.byteLength,
+                    sha256: image.sha256
+                )
+            }
+        )
+        AppModel.tap()
+        thoughtsKept += 1
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        Task { await enqueue(thought: thought, capturedAtUtcMs: now, files: images.map(\.url)) }
+        return true
+    }
+
+    /// Read one picked photo into the capture format: JPEG, at most 2048 px on its long
+    /// edge, on disk. Nil when the item is not an image this device can decode.
+    nonisolated static func prepare(_ item: PhotosPickerItem) async -> CapturedImage? {
+        guard let data = try? await item.loadTransferable(type: Data.self),
+              let image = UIImage(data: data)
+        else { return nil }
+        let longest = max(image.size.width, image.size.height)
+        let scale = min(1, 2048 / max(longest, 1))
+        let size = CGSize(
+            width: (image.size.width * scale).rounded(.down),
+            height: (image.size.height * scale).rounded(.down)
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let jpeg = UIGraphicsImageRenderer(size: size, format: format).jpegData(
+            withCompressionQuality: 0.85
+        ) { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "thought-image-\(UUID().uuidString).jpg")
+        guard (try? jpeg.write(to: url, options: .atomic)) != nil else { return nil }
+        return CapturedImage(
+            url: url,
+            mime: "image/jpeg",
+            byteLength: jpeg.count,
+            sha256: sha256Base64URL(jpeg),
+            width: Int(size.width),
+            height: Int(size.height)
+        )
+    }
+
+    /// The one address `text` is, or nil when it is prose.
+    static func link(in text: String) -> String? {
+        guard !text.contains(where: \.isWhitespace),
+              let url = URL(string: text),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty
+        else { return nil }
+        return text
+    }
+
+    private func enqueue(thought: QueuedThought, capturedAtUtcMs: Int64, files: [URL]) async {
+        _ = try? await queue.enqueue(
+            thought: thought, capturedAtUtcMs: capturedAtUtcMs, files: files
+        )
+        await drain()
+    }
+
+    // MARK: - Board
+
+    /// Fold what the vault has written since the last look. The board keeps what it had
+    /// through a failed sync; only the status line says the vault was out of reach.
+    func refreshBoard() async {
+        guard isPaired, boardState != .syncing else { return }
+        boardState = .syncing
+        if board == nil { board = await reader.current() }
+        do {
+            board = try await reader.sync()
+            boardState = .idle
+        } catch {
+            boardState = .offline
+        }
+    }
+
+    /// Remove a thought and every card written about it, from the vault and the board.
+    func deleteThought(id: String) async {
+        do {
+            try await reader.deleteThought(id)
+            board = await reader.current()
+        } catch {
+            boardState = .offline
+        }
+    }
+
+    /// One image attachment's bytes, from the on-disk copy or the vault.
+    func image(objectId: String, head: BoardHead, image: ThoughtManifest.Image) async -> UIImage? {
+        let cached = AppModel.supportDirectory("images").appending(path: "\(image.sha256).jpg")
+        if let bytes = try? Data(contentsOf: cached) {
+            return UIImage(data: bytes)
+        }
+        guard let bytes = try? await reader.attachment(
+            objectId: objectId,
+            head: head,
+            chunkStart: image.chunk_start,
+            chunkCount: image.chunk_count,
+            sha256: image.sha256
+        ) else { return nil }
+        try? bytes.write(to: cached, options: .atomic)
+        return UIImage(data: bytes)
     }
 
     // MARK: - Connectivity and watch
@@ -281,10 +463,13 @@ final class AppModel: NSObject, ObservableObject {
         WCSession.default.activate()
     }
 
-    private static func outboxRoot() -> URL {
+    /// One directory under Application Support, made on first use.
+    private static func supportDirectory(_ name: String) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? FileManager.default.temporaryDirectory
-        return base.appending(path: "outbox")
+        let directory = base.appending(path: name)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
     }
 
     /// A short tap on both edges of a recording, so the phone can stay in a pocket.

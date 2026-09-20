@@ -208,6 +208,28 @@ func canonicalUploadEnvelopeBytes(_ input: CanonicalUploadEnvelopeInput) -> Data
     ])
 }
 
+struct CanonicalTombstoneInput {
+    var vaultId: String
+    var objectId: String
+    var tombstoneRevisionId: String
+    var baseRevisionId: String
+    var reason: String
+    var formatVersion: UInt64
+}
+
+/// The record a writer signs to tombstone an object, as `crypto.ts` lays it out.
+func canonicalTombstoneBytes(_ input: CanonicalTombstoneInput) -> Data {
+    canonicalRecord([
+        .text("sona-tombstone-v1"),
+        .text(input.vaultId),
+        .text(input.objectId),
+        .text(input.tombstoneRevisionId),
+        .text(input.baseRevisionId),
+        .text(input.reason),
+        .decimal(input.formatVersion),
+    ])
+}
+
 // MARK: - Object revision payloads
 
 enum ObjectContentKind: String {

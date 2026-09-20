@@ -3,13 +3,19 @@ import SwiftUI
 @main
 struct SonaApp: App {
     @StateObject private var model = AppModel()
-    @State private var page = Page.recording
+    @State private var page = Page.capture
 
-    private enum Page { case recording, dictation }
+    private enum Page { case board, capture, recording, dictation }
 
     var body: some Scene {
         WindowGroup {
             TabView(selection: $page) {
+                BoardScreen(model: model)
+                    .tabItem { Label("tab.board", systemImage: "square.grid.2x2") }
+                    .tag(Page.board)
+                CaptureScreen(model: model, dictation: model.dictation, recorder: model.recorder)
+                    .tabItem { Label("tab.capture", systemImage: "plus.bubble") }
+                    .tag(Page.capture)
                 RecordingScreen(model: model, recorder: model.recorder)
                     .tabItem { Label("tab.recording", systemImage: "waveform") }
                     .tag(Page.recording)

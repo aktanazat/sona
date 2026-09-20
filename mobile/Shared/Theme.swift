@@ -33,6 +33,12 @@ enum Theme {
     /// `--radius-card`
     static let cardRadius: CGFloat = 12
 
+    /// A cluster's colour on the board, from the hue the sorter chose for it. The one
+    /// colour that comes from data rather than the desktop's tokens.
+    static func cluster(hue: Int) -> Color {
+        Color(hue: Double(((hue % 360) + 360) % 360) / 360, saturation: 0.55, brightness: 0.8)
+    }
+
     /* watchOS has one appearance and no trait-resolved colours, so the dark twin is
      * the only one it can ever show. */
     #if os(watchOS)

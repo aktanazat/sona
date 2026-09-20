@@ -113,7 +113,7 @@ struct RecordingScreen: View {
 }
 
 /// The only motion in the app: a press settles the control slightly.
-private struct PressScaleButtonStyle: ButtonStyle {
+struct PressScaleButtonStyle: ButtonStyle {
     let reduceMotion: Bool
 
     func makeBody(configuration: Configuration) -> some View {

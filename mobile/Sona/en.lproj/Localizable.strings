@@ -1,57 +1,54 @@
-/* Every string the phone shows. Sentence case, plain words, no exclamation marks. */
+/* Every string the phone shows. Sentence case, plain words, as short as the fact allows, no exclamation marks. */
 
 "status.ready" = "Ready";
 "status.recording" = "Recording";
 "status.uploading" = "Uploading";
-"status.waiting" = "Waiting for a connection";
+"status.waiting" = "Waiting for network";
 "status.saved" = "Saved to your Mac";
-"status.notSaved" = "That recording was not saved";
-"status.microphoneOff" = "Microphone access is off in Settings";
-"status.microphoneUnavailable" = "The microphone did not start";
+"status.notSaved" = "Recording not saved";
+"status.microphoneOff" = "Microphone off in Settings";
+"status.microphoneUnavailable" = "Microphone did not start";
 "status.interrupted" = "Another app took the microphone";
 
-"control.record" = "Record";
-"control.stop" = "Stop";
-
-"pairing.line.notPaired" = "Not paired with a Mac";
-"pairing.line.paired" = "Paired with your Mac";
+"pairing.line.notPaired" = "Not paired";
+"pairing.line.paired" = "Paired";
 "pairing.line.hint" = "Tap to pair";
 
 "consent.title" = "Before you record";
-"consent.body1" = "Sona uses this phone's microphone only while a recording or a dictation is open. Nothing is captured until you start one of them. Meetings are transcribed on your Mac. Dictation is transcribed on this iPhone.";
-"consent.body2" = "Recordings are encrypted on this phone and uploaded to your own vault, which only your devices can read. They wait here until they upload. Everyone in the room should know they are being recorded.";
+"consent.body1" = "Sona uses the microphone only while you record or dictate. Meetings are transcribed on your Mac, dictation on this iPhone.";
+"consent.body2" = "Recordings are encrypted here and uploaded to your vault, which only your devices can read. Tell everyone in the room they are being recorded.";
 "consent.action" = "Start";
 
 "pair.title" = "Pair with your Mac";
 "pair.address" = "Vault address";
 "pair.vaultId" = "Vault id";
-"pair.where" = "Both are on your Mac under Settings, Advanced, Sync.";
-"pair.create" = "Create a pairing code";
+"pair.where" = "On your Mac: Settings, Advanced, Sync.";
+"pair.create" = "Create pairing code";
 "pair.finish" = "Finish pairing";
-"pair.show" = "Show this code to your Mac, then approve it there.";
+"pair.show" = "Approve this code on your Mac.";
 "pair.fingerprint" = "Fingerprint";
-"pair.copy" = "Copy the code";
+"pair.copy" = "Copy code";
 "pair.close" = "Close";
-"pair.needFields" = "Enter the vault address and id from your Mac first.";
-"pair.badEndpoint" = "That is not a vault address.";
-"pair.notApproved" = "Not approved yet. Approve this phone on your Mac, then try again.";
-"pair.done" = "Paired. Recordings will upload to your vault.";
-"pair.failed" = "Pairing did not finish.";
+"pair.needFields" = "Enter the vault address and id first.";
+"pair.badEndpoint" = "Not a vault address.";
+"pair.notApproved" = "Not approved yet. Approve this phone on your Mac.";
+"pair.done" = "Paired.";
+"pair.failed" = "Pairing failed.";
 
 "a11y.record" = "Start recording";
 "a11y.stop" = "Stop recording";
 "a11y.elapsed" = "Elapsed time";
-"a11y.pair" = "Pair this phone with your Mac";
-"a11y.qr" = "Pairing code as a QR code";
+"a11y.pair" = "Pair with your Mac";
+"a11y.qr" = "Pairing QR code";
 
-"consent.notifications" = "Sona also asks to send notifications, so it can offer to record a note after a phone call. It cannot hear calls.";
+"consent.notifications" = "Notifications let Sona offer a note after a call. It cannot hear calls.";
 
 "call.onCall.title" = "On a call";
-"call.onCall.body" = "Sona can't hear calls on iPhone, but tap here when it ends to record what mattered.";
+"call.onCall.body" = "Sona cannot hear the call. Tap when it ends to record a note.";
 "call.afterCall.title" = "Call ended, %d min";
-"call.afterCall.body" = "Record a note about it?";
+"call.afterCall.body" = "Record a note?";
 "call.toggle" = "Offer to record after calls";
-"call.toggle.detail" = "A notification when a call ends. Sona never hears the call itself.";
+"call.toggle.detail" = "A notification when a call ends. Sona never hears the call.";
 
 "title.phone" = "Phone recording";
 "title.watch" = "Watch recording";
@@ -59,35 +56,70 @@
 
 "tab.recording" = "Recordings";
 "tab.dictation" = "Dictate";
+"tab.board" = "Board";
+"tab.capture" = "Capture";
+
+"capture.title" = "What's on your mind";
+"capture.voiceHint" = "Tap to say it. Audio is kept too.";
+"capture.listening" = "Listening";
+"capture.voiceStart" = "Say a thought";
+"capture.voiceStop" = "Finish";
+"capture.cancel" = "Cancel";
+"capture.placeholder" = "Type a thought or a link";
+"capture.addPhotos" = "Add photos";
+"capture.removePhoto" = "Remove photo";
+"capture.save" = "Keep";
+"capture.kept" = "Kept. On the board once sorted.";
+"capture.notPaired" = "Pair on the Recordings tab. Thoughts wait until then.";
+"capture.stopMeeting" = "Stop the recording to say a thought.";
+
+"board.empty" = "Nothing yet. Thoughts land here once sorted.";
+"board.notPaired" = "Pair with your Mac to see your board.";
+"board.unsorted" = "Not sorted yet";
+"board.syncing" = "Checking the vault";
+"board.offline" = "Vault out of reach. Showing the last copy.";
+"board.voice" = "Voice note";
+"board.photo" = "Photo";
+"board.photos" = "%d photos";
+"board.link" = "Link";
+"board.audio" = "Voice, %@";
+"board.captured" = "Captured %@";
+"board.delete" = "Delete";
+"board.deleteConfirm" = "Delete this thought?";
+"board.deleteDetail" = "Removed from your vault and every device.";
+"board.done" = "Done";
+"board.pinned" = "Pinned";
+
+"a11y.thought" = "Open thought";
 "dictation.title" = "Dictate into other apps";
-"dictation.privacy" = "Dictation stays on this iPhone. Sona uses on-device speech recognition and does not upload dictation audio or text.";
+"dictation.privacy" = "Speech is recognized on this iPhone. Nothing is uploaded.";
 "dictation.transcript" = "Dictation text";
-"dictation.start" = "Start dictating";
-"dictation.stop" = "Finish dictation";
+"dictation.start" = "Dictate";
+"dictation.stop" = "Finish";
 "dictation.cancel" = "Cancel";
 "dictation.authorizing" = "Waiting for permission";
-"dictation.finishing" = "Finishing transcript";
-"dictation.stopMeeting" = "A recording is using the microphone. Stop it to dictate.";
+"dictation.finishing" = "Finishing";
+"dictation.stopMeeting" = "Stop the recording to dictate.";
 "dictation.useKeyboard" = "Use in keyboard";
-"dictation.saved" = "Ready. Return to your other app, switch to the Sona keyboard, and tap Insert.";
+"dictation.saved" = "Ready. In your other app, switch to the Sona keyboard and tap Insert.";
 "dictation.setupTitle" = "Set up the keyboard";
-"dictation.setup" = "In Settings, open General, Keyboard, Keyboards, then Add New Keyboard. Choose Sona Dictation and enable Allow Full Access. Use the globe key in Messages, Mail, or another text field to switch to Sona.";
-"dictation.fullAccess" = "Full Access lets the keyboard read the draft you approve here. The keyboard sends no keystrokes to a server. Your draft expires after ten minutes and is removed when you insert or discard it. Secure fields and apps that block third-party keyboards use the system keyboard.";
-"dictation.speechOff" = "Speech recognition access is off in Settings.";
-"dictation.onDeviceUnavailable" = "On-device speech recognition is unavailable for this iPhone's language. Enable Dictation in Settings, General, Keyboard, then try again. Sona will not switch to a remote speech service.";
-"dictation.interrupted" = "Dictation stopped because another app took the microphone. Review the text before using it.";
-"dictation.empty" = "There is no dictation text to insert.";
-"dictation.storageUnavailable" = "Sona cannot reach the storage it shares with its keyboard, so the draft was not saved.";
-"dictation.draftExpired" = "That draft is more than ten minutes old, so it was removed. Dictate it again in Sona.";
-"dictation.draftChanged" = "That draft has changed or has already been inserted. Refresh to see the current one.";
+"dictation.setup" = "Settings, General, Keyboard, Keyboards, Add New Keyboard: choose Sona Dictation and turn on Allow Full Access. Switch to it with the globe key.";
+"dictation.fullAccess" = "Full Access only lets the keyboard read the draft you approve here. Nothing goes to a server. A draft expires after ten minutes or once used. Secure fields use the system keyboard.";
+"dictation.speechOff" = "Speech recognition is off in Settings.";
+"dictation.onDeviceUnavailable" = "No on-device speech for this language. Turn on Dictation in Settings, General, Keyboard. Nothing is sent to a server.";
+"dictation.interrupted" = "Another app took the microphone. Check the text before using it.";
+"dictation.empty" = "Nothing to insert.";
+"dictation.storageUnavailable" = "Draft not saved. Sona cannot reach the storage it shares with the keyboard.";
+"dictation.draftExpired" = "That draft expired after ten minutes. Dictate it again.";
+"dictation.draftChanged" = "That draft changed or was already inserted. Refresh.";
 "keyboard.title" = "Sona Dictation";
 "keyboard.refresh" = "Refresh draft";
-"keyboard.needsFullAccess" = "Enable Allow Full Access for Sona Dictation in Settings, General, Keyboard, Keyboards. This lets the keyboard read your approved draft.";
-"keyboard.empty" = "Open Sona, dictate, then choose Use in keyboard. Return here to review and insert the text.";
+"keyboard.needsFullAccess" = "Allow Full Access is off. Turn it on in Settings, General, Keyboard, Keyboards, Sona Dictation.";
+"keyboard.empty" = "No draft yet. In Sona, dictate and tap Use in keyboard.";
 "keyboard.openApp" = "Open Sona to dictate";
 "keyboard.insert" = "Insert";
 "keyboard.discard" = "Discard";
-"keyboard.inserted" = "Text inserted.";
+"keyboard.inserted" = "Inserted.";
 "keyboard.next" = "Next keyboard";
 "keyboard.space" = "Space";
 "keyboard.delete" = "Delete";
