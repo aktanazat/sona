@@ -215,10 +215,11 @@ struct MeetingLiveView: View {
 
 // MARK: - The consent panel
 
-/// The floating panel, with exactly one card on it. `ConsentPanel.tsx` decides
-/// that in one order — a recording ritual, then the session it is recording,
-/// then an offer, then prep, then wrap — and the store computes it, so this
-/// view only draws what it is handed.
+/// The floating panel, which is the card: one surface at the panel radius,
+/// 340 wide as the Tauri window was, with exactly one card's rows on it.
+/// `ConsentPanel.tsx` decides which in one order — a recording ritual, then
+/// the session it is recording, then an offer, then prep, then wrap — and
+/// the store computes it, so this view only draws what it is handed.
 struct MeetingConsentPanelView: View {
     let store: MeetingLiveStore
 
@@ -250,8 +251,10 @@ struct MeetingConsentPanelView: View {
             }
             ErrorNote(store.error)
         }
-        .frame(width: 360)
         .padding(16)
+        .frame(width: 340)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Theme.border, lineWidth: 1))
     }
 }
 
@@ -263,89 +266,89 @@ struct DetectionPromptView: View {
     let prompt: DetectionPromptEvent
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(prompt.prompt.consentTitle).headlineText()
-                Text(
-                    prompt.showIntroduction
-                        ? "Sona records on this Mac and keeps you in control."
-                        : "Audio stays on this Mac. Nothing joins the call."
-                )
-                .bodyText(13, Theme.inkSecondary)
-                if let brief = store.seriesBrief {
-                    Text(brief).bodyText(13, Theme.inkSecondary)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    if prompt.prompt.isCalendar {
-                        Toggle(
-                            "Always record this meeting",
-                            isOn: Binding(
-                                get: { store.alwaysRecordSeries(prompt) },
-                                set: { store.setAlwaysRecordSeries($0, for: prompt) }))
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            Text(prompt.prompt.consentTitle).headlineText()
+            Text(
+                prompt.showIntroduction
+                    ? "Sona records on this Mac and keeps you in control."
+                    : "Audio stays on this Mac. Nothing joins the call."
+            )
+            .bodyText(13, Theme.inkSecondary)
+            if let brief = store.seriesBrief {
+                Text(brief).bodyText(13, Theme.inkSecondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                if prompt.prompt.isCalendar {
                     Toggle(
-                        "Put a notice in the chat",
+                        "Always record this meeting",
                         isOn: Binding(
-                            get: { store.announceInChat(prompt) },
-                            set: { store.setAnnounceInChat($0, for: prompt) }))
-                    if store.announceInChat(prompt) {
-                        Text("Typed into the meeting's chat box for you to send.")
-                            .metaText(Theme.inkTertiary)
-                            .padding(.leading, 20)
-                    }
+                            get: { store.alwaysRecordSeries(prompt) },
+                            set: { store.setAlwaysRecordSeries($0, for: prompt) }))
                 }
-                .toggleStyle(.checkbox)
-                .font(TypeScale.body(13))
-                HStack {
-                    Spacer()
-                    Button("Ignore") { store.answer(prompt, accepted: false) }
-                        .buttonStyle(.secondary)
-                        .disabled(store.pending != nil)
-                    Button(store.pending ?? "Record") { store.record(prompt) }
-                        .buttonStyle(.primary)
-                        .disabled(store.pending != nil)
+                Toggle(
+                    "Put a notice in the chat",
+                    isOn: Binding(
+                        get: { store.announceInChat(prompt) },
+                        set: { store.setAnnounceInChat($0, for: prompt) }))
+                if store.announceInChat(prompt) {
+                    Text("Typed into the meeting's chat box for you to send.")
+                        .metaText(Theme.inkTertiary)
+                        .padding(.leading, 20)
                 }
             }
-            .padding(16)
+            .toggleStyle(.checkbox)
+            .font(TypeScale.body(13))
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Ignore") { store.answer(prompt, accepted: false) }
+                    .buttonStyle(QuietButton(compact: true))
+                    .disabled(store.pending != nil)
+                Button(store.pending ?? "Record") { store.record(prompt) }
+                    .buttonStyle(PrimaryButton(compact: true))
+                    .disabled(store.pending != nil)
+            }
         }
     }
 }
 
 /// The session the panel is watching: the clock, and the two things a person
-/// does from here — stop it, or stop it recording this series by itself.
+/// does from here — stop it, or stop it recording this series by itself. The
+/// dot carries the colour; the word beside it is plain ink.
 struct MeetingConsentActiveCard: View {
     let store: MeetingLiveStore
     let state: MeetingConsentPanelSessionState
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    let paused = state.snapshot.phase == .capturingPaused
-                    LiveDot(state: paused ? .idle : .recording(since: Date()))
-                    Text(paused ? "Paused" : "Recording").metaText(paused ? Theme.inkSecondary : Theme.live)
-                    Spacer()
-                    Text((state.snapshot.elapsedOffsetNs ?? 0).meetingOffsetClock)
-                        .font(TypeScale.mono(12))
-                        .foregroundStyle(Theme.inkSecondary)
-                }
-                Text(state.snapshot.title).bodyText(14)
-                if let line = state.disclosure.outcomeLine {
-                    Text(line).bodyText(12, Theme.inkSecondary)
-                }
-                HStack {
-                    if state.standingSeriesKey != nil {
-                        Button("Forget this series") { store.forgetSeries() }
-                            .buttonStyle(.quiet)
-                            .disabled(store.pending != nil)
-                    }
-                    Spacer()
-                    Button("Stop") { store.stopFromPanel() }
-                        .buttonStyle(.primary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                let paused = state.snapshot.phase == .capturingPaused
+                LiveDot(state: paused ? .idle : .recording(since: Date()))
+                Text(paused ? "Paused" : "Recording")
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
+                Spacer()
+                Text((state.snapshot.elapsedOffsetNs ?? 0).meetingOffsetClock)
+                    .font(TypeScale.mono(12))
+                    .foregroundStyle(Theme.inkSecondary)
+            }
+            Text(state.snapshot.title)
+                .font(TypeScale.label(14))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+            if let line = state.disclosure.outcomeLine {
+                Text(line).bodyText(12, Theme.inkSecondary)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                if state.standingSeriesKey != nil {
+                    Button("Forget this series") { store.forgetSeries() }
+                        .buttonStyle(QuietButton(compact: true))
                         .disabled(store.pending != nil)
                 }
+                Button("Stop") { store.stopFromPanel() }
+                    .buttonStyle(.compact)
+                    .disabled(store.pending != nil)
             }
-            .padding(16)
         }
     }
 }
@@ -360,35 +363,36 @@ struct RitualRecordingView: View {
     let card: RitualRecordingCard
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    // The card is an event; the phase is the session's. Paused
-                    // is the one state the card would otherwise misreport.
-                    let paused = store.active?.snapshot.sessionId == card.sessionId
-                        && store.active?.snapshot.phase == .capturingPaused
-                    LiveDot(state: paused ? .idle : .recording(since: Date()))
-                    Text(paused ? "Paused" : "Recording started")
-                        .metaText(paused ? Theme.inkSecondary : Theme.live)
-                    Spacer()
-                    Text(card.startedAtUtcMs.meetingElapsed(since: Date()))
-                        .font(TypeScale.mono(12))
-                        .foregroundStyle(Theme.inkSecondary)
-                }
-                Text(card.appName).bodyText(14)
-                HStack {
-                    Button("Don't record this app automatically") {
-                        store.respond(event, action: .recordingForgetApp)
-                    }
-                    .buttonStyle(.quiet)
-                    .disabled(store.pending != nil)
-                    Spacer()
-                    Button("Stop") { store.respond(event, action: .recordingStop) }
-                        .buttonStyle(.primary)
-                        .disabled(store.pending != nil)
-                }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                // The card is an event; the phase is the session's. Paused
+                // is the one state the card would otherwise misreport.
+                let paused = store.active?.snapshot.sessionId == card.sessionId
+                    && store.active?.snapshot.phase == .capturingPaused
+                LiveDot(state: paused ? .idle : .recording(since: Date()))
+                Text(paused ? "Paused" : "Recording started")
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
+                Spacer()
+                Text(card.startedAtUtcMs.meetingElapsed(since: Date()))
+                    .font(TypeScale.mono(12))
+                    .foregroundStyle(Theme.inkSecondary)
             }
-            .padding(16)
+            Text(card.appName)
+                .font(TypeScale.label(14))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Don't record this app automatically") {
+                    store.respond(event, action: .recordingForgetApp)
+                }
+                .buttonStyle(QuietButton(compact: true))
+                .disabled(store.pending != nil)
+                Button("Stop") { store.respond(event, action: .recordingStop) }
+                    .buttonStyle(.compact)
+                    .disabled(store.pending != nil)
+            }
         }
     }
 }
@@ -406,54 +410,51 @@ struct RitualPrepView: View {
     }
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Prep").metaText(Theme.accent)
-                Text("\(card.title) — in \(minutes) minutes").bodyText(14)
-                if !card.headline.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Last time:").metaText()
-                        Text(card.headline).bodyText(13, Theme.inkSecondary)
-                    }
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Prep").metaText(Theme.accent)
+            Text("\(card.title) — in \(minutes) minutes").bodyText(14)
+            if !card.headline.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Last time:").metaText()
+                    Text(card.headline).bodyText(13, Theme.inkSecondary)
                 }
-                if card.mineOpenLoopCount > 0 {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("My open loops (\(card.mineOpenLoopCount))").metaText()
-                        ForEach(Array(card.mineOpenLoops.prefix(2).enumerated()), id: \.offset) {
-                            _, loop in
-                            Text(loop).bodyText(13, Theme.inkSecondary)
-                        }
-                    }
-                }
-                if card.waitingOnCount > 0 {
-                    Text("Waiting on (\(card.waitingOnCount))").metaText()
-                }
-                if !card.participants.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Participants:").metaText()
-                        ForEach(Array(card.participants.enumerated()), id: \.offset) { _, person in
-                            Text(person.line).bodyText(13, Theme.inkSecondary)
-                        }
-                    }
-                }
-                HStack {
-                    Button("Open brief") {
-                        store.respond(event, action: .prepOpenBrief)
-                        onOpenBrief(card.lastMeetingId)
-                    }
-                    .buttonStyle(.secondary)
-                    .disabled(store.pending != nil)
-                    Spacer()
-                    if card.canRecordWhenStarts {
-                        Button("Record when it starts") {
-                            store.respond(event, action: .prepRecordWhenStarts)
-                        }
-                        .buttonStyle(.primary)
-                        .disabled(store.pending != nil)
+            }
+            if card.mineOpenLoopCount > 0 {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("My open loops (\(card.mineOpenLoopCount))").metaText()
+                    ForEach(Array(card.mineOpenLoops.prefix(2).enumerated()), id: \.offset) {
+                        _, loop in
+                        Text(loop).bodyText(13, Theme.inkSecondary)
                     }
                 }
             }
-            .padding(16)
+            if card.waitingOnCount > 0 {
+                Text("Waiting on (\(card.waitingOnCount))").metaText()
+            }
+            if !card.participants.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Participants:").metaText()
+                    ForEach(Array(card.participants.enumerated()), id: \.offset) { _, person in
+                        Text(person.line).bodyText(13, Theme.inkSecondary)
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Open brief") {
+                    store.respond(event, action: .prepOpenBrief)
+                    onOpenBrief(card.lastMeetingId)
+                }
+                .buttonStyle(QuietButton(compact: true))
+                .disabled(store.pending != nil)
+                if card.canRecordWhenStarts {
+                    Button("Record when it starts") {
+                        store.respond(event, action: .prepRecordWhenStarts)
+                    }
+                    .buttonStyle(PrimaryButton(compact: true))
+                    .disabled(store.pending != nil)
+                }
+            }
         }
     }
 }
@@ -497,37 +498,34 @@ struct RitualWrapView: View {
     }
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Wrap").metaText(Theme.accent)
-                Text("\(card.title) — saved").bodyText(14)
-                if !card.headline.isEmpty {
-                    Text(card.headline).bodyText(13, Theme.inkSecondary)
-                }
-                if !delta.isEmpty {
-                    Text(delta).metaText()
-                }
-                HStack(spacing: 8) {
-                    Button("Open notes") {
-                        store.respond(event, action: .wrapOpenNotes)
-                        onOpenNotes(card.sessionId)
-                    }
-                    .buttonStyle(.secondary)
-                    .disabled(store.pending != nil)
-                    if let followUp {
-                        Button(followUpLabel) {
-                            store.copyFollowUp(event, for: card.sessionId, draft: followUp)
-                        }
-                        .buttonStyle(.secondary)
-                        .disabled(store.pending != nil || store.followUpDrafting)
-                    }
-                    Spacer()
-                    Button("Done") { store.respond(event, action: .wrapDone) }
-                        .buttonStyle(.primary)
-                        .disabled(store.pending != nil)
-                }
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Wrap").metaText(Theme.accent)
+            Text("\(card.title) — saved").bodyText(14)
+            if !card.headline.isEmpty {
+                Text(card.headline).bodyText(13, Theme.inkSecondary)
             }
-            .padding(16)
+            if !delta.isEmpty {
+                Text(delta).metaText()
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Open notes") {
+                    store.respond(event, action: .wrapOpenNotes)
+                    onOpenNotes(card.sessionId)
+                }
+                .buttonStyle(QuietButton(compact: true))
+                .disabled(store.pending != nil)
+                if let followUp {
+                    Button(followUpLabel) {
+                        store.copyFollowUp(event, for: card.sessionId, draft: followUp)
+                    }
+                    .buttonStyle(.compact)
+                    .disabled(store.pending != nil || store.followUpDrafting)
+                }
+                Button("Done") { store.respond(event, action: .wrapDone) }
+                    .buttonStyle(PrimaryButton(compact: true))
+                    .disabled(store.pending != nil)
+            }
         }
     }
 }

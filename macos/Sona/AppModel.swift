@@ -647,8 +647,9 @@ final class AppModel {
     }
 
     /// The consent panel: an offer to record, the recording in progress, a
-    /// prep or wrap card. Floats at the top right of the screen the pointer
-    /// is on, as the Tauri window did.
+    /// prep or wrap card. The view draws its own surface; this only floats
+    /// it at the top right of the screen the pointer is on, as the Tauri
+    /// window did.
     private func syncConsent() {
         guard live.card != nil else {
             consent.hide()
@@ -670,8 +671,6 @@ final class AppModel {
                 return draft.body
             }
         )
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
         .padding(8)
         .environment(self)
         consent.show(view, at: .topTrailing)

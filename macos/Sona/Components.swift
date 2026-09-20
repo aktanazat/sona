@@ -108,14 +108,17 @@ struct CardLine: View {
     }
 }
 
-/// The primary button: ink fill, page text, 10-point corners.
+/// The primary button: ink fill, page text, 10-point corners. Compact is the
+/// panel size, the same 30 points as a compact secondary beside it.
 struct PrimaryButton: ButtonStyle {
+    var compact = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label())
+            .font(TypeScale.label(compact ? 13 : 15))
             .foregroundStyle(Theme.onInvert)
-            .padding(.horizontal, 16)
-            .frame(height: 36)
+            .padding(.horizontal, compact ? 12 : 16)
+            .frame(height: compact ? 30 : 36)
             .background(Theme.invert.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
     }
 }
@@ -135,13 +138,15 @@ struct SecondaryButton: ButtonStyle {
     }
 }
 
-/// A bare text button in quiet ink, for the third action in a row.
+/// A bare text button in quiet ink, for the third action in a row. Compact
+/// matches the label size of the compact buttons it sits beside.
 struct QuietButton: ButtonStyle {
     var color: Color = Theme.inkSecondary
+    var compact = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label())
+            .font(TypeScale.label(compact ? 13 : 15))
             .foregroundStyle(configuration.isPressed ? Theme.ink : color)
             .contentShape(Rectangle())
     }
