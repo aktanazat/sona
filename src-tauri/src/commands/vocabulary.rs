@@ -393,8 +393,8 @@ pub fn update_emoji_replacements_enabled(app: AppHandle, enabled: bool) -> Resul
 ///
 /// Saving the rule is the whole effect. The correction loop is not told, and
 /// not because it would filter the pair out: for a phrase rule the candidate
-/// is the narrowed delta, not the saved spoken side, so `handy app -> sona
-/// app` arrives as `handy -> sona` and no vocabulary check sees it. It is not
+/// is the narrowed delta, not the saved spoken side, so `sonar app -> sona
+/// app` arrives as `sonar -> sona` and no vocabulary check sees it. It is not
 /// told because the pair is not evidence. The loop looks for a rewrite the
 /// user has *not* turned into a rule; this one they have, so recording it
 /// would propose what they already did, and propose it again if they ever

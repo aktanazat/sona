@@ -257,12 +257,15 @@ fn build_headers(
 /// because that load does not fit in any bound a dictation can afford. A warm
 /// local answer lands in well under a second; a cold 7.7 GB `gemma4:12b-mlx`
 /// measured over three minutes on a loaded machine. So the first dictation
-/// after a cold start does not wait for the model: it skips post-processing and
-/// delivers the raw transcript, with only a log line saying so — nothing in the
-/// UI reports the dropped rewrite. That is the intended trade, since unpolished
-/// words beat words that arrive minutes late, and `post_process_transcription`
-/// already reads the failure as "no rewrite". Raising the bound to cover a cold
-/// load would buy nothing except making that first dictation hang for it.
+/// after a cold start does not wait for the model: it skips post-processing,
+/// delivers the raw transcript, and says so in the skipped-rewrite notice the
+/// caller records beside the words. That is the intended trade, since
+/// unpolished words beat words that arrive minutes late, and
+/// `post_process_transcription` already reads the failure as "no rewrite".
+/// Raising the bound to cover a cold load would buy nothing except making that
+/// first dictation hang for it. What the bound cannot say on its own is
+/// whether a second request would wait it out again; `ChatCompletionFailure`
+/// carries that.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Create an HTTP client with provider-specific headers. Redirects are disabled
@@ -345,9 +348,49 @@ fn endpoint_matches_provider(
         .is_ok_and(|current| current == *endpoint)
 }
 
+/// Why a chat completion produced no usable reply. The two cases decide
+/// whether the caller can afford to ask the same endpoint again: an endpoint
+/// that answered is there, and a second, simpler question costs one more round
+/// trip. An endpoint that never answered charges the full `REQUEST_TIMEOUT`
+/// again for the same silence, and a dictation held back from its raw
+/// transcript pays that wait twice.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChatCompletionFailure {
+    /// A complete reply arrived and could not be used: an error status, an
+    /// oversized body, a body that would not parse, a reply clipped at the
+    /// output-token ceiling.
+    Answered(String),
+    /// No complete reply arrived: the connection was refused, the request
+    /// timed out, or it was never sent.
+    Unanswered(String),
+}
+
+impl std::fmt::Display for ChatCompletionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Answered(message) | Self::Unanswered(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// A connect failure or timeout cannot justify another request. This includes
+/// a body that stalls after headers arrive: the full request budget is spent
+/// without a usable completion. Other transport errors preserve the existing
+/// retry for a reply that arrived but could not be read.
+fn transport_failure(context: &str, error: &reqwest::Error) -> ChatCompletionFailure {
+    let message = report_reqwest_error(context, error);
+    if error.is_connect() || error.is_timeout() {
+        ChatCompletionFailure::Unanswered(message)
+    } else {
+        ChatCompletionFailure::Answered(message)
+    }
+}
+
 /// Send a chat completion request to an OpenAI-compatible API
 /// Returns Ok(Some(content)) on success, Ok(None) if response has no content,
-/// or Err on actual errors (HTTP, parsing, etc.)
+/// or Err on actual errors. The error says whether the endpoint answered:
+/// `Answered` failures came back from a reachable server and another request
+/// may fare better, while `Unanswered` ones spent the full wait on silence.
 pub async fn send_chat_completion(
     provider: &PostProcessProvider,
     endpoint: &PostProcessEndpoint,
@@ -355,7 +398,7 @@ pub async fn send_chat_completion(
     model: &str,
     prompt: String,
     disable_reasoning: bool,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ChatCompletionFailure> {
     send_chat_completion_with_schema(ChatCompletionInput {
         provider,
         endpoint,
@@ -548,7 +591,7 @@ pub(crate) async fn probe_loopback_models(
 }
 pub(crate) async fn send_chat_completion_with_schema(
     input: ChatCompletionInput<'_>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ChatCompletionFailure> {
     match input.provider.execution_protocol() {
         PostProcessExecutionProtocol::OpenAiChatCompletions => {
             send_openai_chat_completion_with_schema(input).await
@@ -561,7 +604,7 @@ pub(crate) async fn send_chat_completion_with_schema(
 /// reasoning controls.
 async fn send_openai_chat_completion_with_schema(
     input: ChatCompletionInput<'_>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ChatCompletionFailure> {
     let ChatCompletionInput {
         provider,
         endpoint,
@@ -573,11 +616,13 @@ async fn send_openai_chat_completion_with_schema(
         disable_reasoning,
     } = input;
     if !endpoint_matches_provider(provider, endpoint) {
-        return Err("Post-processing destination changed".to_string());
+        return Err(ChatCompletionFailure::Unanswered(
+            "Post-processing destination changed".to_string(),
+        ));
     }
 
     debug!("Sending OpenAI-compatible chat completion request");
-    let client = create_client(provider, secret)?;
+    let client = create_client(provider, secret).map_err(ChatCompletionFailure::Unanswered)?;
     let mut messages = Vec::new();
     if let Some(system) = system_prompt {
         messages.push(ChatMessage {
@@ -630,7 +675,9 @@ async fn send_openai_chat_completion_with_schema(
     // reads an error as "no rewrite" and delivers the raw transcript. The
     // Anthropic path makes the same call on `max_tokens`.
     if choice.and_then(|choice| choice.finish_reason.as_deref()) == Some("length") {
-        return Err("The endpoint stopped the reply at the output-token ceiling".to_string());
+        return Err(ChatCompletionFailure::Answered(
+            "The endpoint stopped the reply at the output-token ceiling".to_string(),
+        ));
     }
     Ok(choice.and_then(|choice| choice.message.content.clone()))
 }
@@ -748,27 +795,29 @@ async fn execute_openai_chat_completion(
     serde_json::from_slice(&bytes).map_err(OpenAiChatCompletionError::Decode)
 }
 
-fn openai_completion_error(error: OpenAiChatCompletionError) -> String {
+fn openai_completion_error(error: OpenAiChatCompletionError) -> ChatCompletionFailure {
     match error {
         OpenAiChatCompletionError::Request(error) => {
-            report_reqwest_error("HTTP request failed", &error)
+            transport_failure("HTTP request failed", &error)
         }
         OpenAiChatCompletionError::RetryRequest(error) => {
-            report_reqwest_error("HTTP retry failed", &error)
+            transport_failure("HTTP retry failed", &error)
         }
         OpenAiChatCompletionError::Body(error) => {
-            report_reqwest_error("Failed to read API response", &error)
+            transport_failure("Failed to read API response", &error)
         }
         OpenAiChatCompletionError::Status(status) => {
-            format!("API request failed with status {status}")
+            ChatCompletionFailure::Answered(format!("API request failed with status {status}"))
         }
         OpenAiChatCompletionError::TooLarge => {
             error!("API response exceeded the decoded response limit");
-            "API response exceeded the decoded response limit".to_string()
+            ChatCompletionFailure::Answered(
+                "API response exceeded the decoded response limit".to_string(),
+            )
         }
-        OpenAiChatCompletionError::Decode(error) => {
-            report_json_decode_error("Failed to parse API response", &error)
-        }
+        OpenAiChatCompletionError::Decode(error) => ChatCompletionFailure::Answered(
+            report_json_decode_error("Failed to parse API response", &error),
+        ),
     }
 }
 
@@ -776,7 +825,9 @@ const ANTHROPIC_MAX_OUTPUT_TOKENS: u32 = 4096;
 
 /// Anthropic's Messages API has a different path, request body, and response
 /// envelope from the OpenAI-compatible providers.
-async fn send_anthropic_message(input: ChatCompletionInput<'_>) -> Result<Option<String>, String> {
+async fn send_anthropic_message(
+    input: ChatCompletionInput<'_>,
+) -> Result<Option<String>, ChatCompletionFailure> {
     let ChatCompletionInput {
         provider,
         endpoint,
@@ -788,10 +839,12 @@ async fn send_anthropic_message(input: ChatCompletionInput<'_>) -> Result<Option
         disable_reasoning: _,
     } = input;
     if !endpoint_matches_provider(provider, endpoint) {
-        return Err("Post-processing destination changed".to_string());
+        return Err(ChatCompletionFailure::Unanswered(
+            "Post-processing destination changed".to_string(),
+        ));
     }
 
-    let client = create_client(provider, secret)?;
+    let client = create_client(provider, secret).map_err(ChatCompletionFailure::Unanswered)?;
     let request = AnthropicMessageRequest {
         model: model.to_string(),
         max_tokens: ANTHROPIC_MAX_OUTPUT_TOKENS,
@@ -807,7 +860,7 @@ async fn send_anthropic_message(input: ChatCompletionInput<'_>) -> Result<Option
         .json(&request)
         .send()
         .await
-        .map_err(|error| report_reqwest_error("Anthropic Messages request failed", &error))?;
+        .map_err(|error| transport_failure("Anthropic Messages request failed", &error))?;
     let status = response.status();
     debug!(
         "Anthropic Messages response received with status {} over {:?}",
@@ -815,18 +868,22 @@ async fn send_anthropic_message(input: ChatCompletionInput<'_>) -> Result<Option
         response.version()
     );
     if !status.is_success() {
-        return Err(format!("API request failed with status {status}"));
+        return Err(ChatCompletionFailure::Answered(format!(
+            "API request failed with status {status}"
+        )));
     }
 
     let response: AnthropicMessageResponse = response
         .json()
         .await
-        .map_err(|error| report_reqwest_error("Failed to parse Anthropic response", &error))?;
+        .map_err(|error| transport_failure("Failed to parse Anthropic response", &error))?;
     // A reply clipped at the ceiling is a partial rewrite, and
     // `post_process_transcription` reads an error as "no rewrite" and delivers the
     // raw transcript. Unpolished words beat a dictation missing its tail.
     if response.stop_reason.as_deref() == Some("max_tokens") {
-        return Err("Anthropic stopped the reply at the output-token ceiling".to_string());
+        return Err(ChatCompletionFailure::Answered(
+            "Anthropic stopped the reply at the output-token ceiling".to_string(),
+        ));
     }
     Ok(response
         .content
@@ -1385,7 +1442,8 @@ mod tests {
             disable_reasoning: false,
         })
         .await
-        .expect_err("malformed response");
+        .expect_err("malformed response")
+        .to_string();
         assert!(decode_details.contains("kind: Data"));
         assert!(decode_details.contains("line: 1"));
         assert!(decode_details.contains("column:"));
@@ -1587,8 +1645,11 @@ mod tests {
         .await
         .expect_err("changed endpoint must be rejected");
 
-        assert_eq!(error, "Post-processing destination changed");
-        assert!(!error.contains(CANARY));
+        assert!(
+            matches!(error, ChatCompletionFailure::Unanswered(_)),
+            "a request that was never sent cannot have been answered: {error:?}"
+        );
+        assert!(!error.to_string().contains(CANARY));
     }
 
     /// The JSON body of a captured HTTP request; empty until the headers end.
@@ -1688,6 +1749,10 @@ mod tests {
     /// substitutes only what the provider returned, so anything else would
     /// deliver a failure message in place of the user's dictation. This is the
     /// one test that pins that mapping through `send_chat_completion`.
+    ///
+    /// Which class it is matters as much as that it failed. A status came from
+    /// an endpoint that answered, so the caller may still ask it the simpler
+    /// prose question; silence gets no second request.
     #[tokio::test]
     async fn a_failed_status_is_an_error_not_text() {
         let base_url = serve_one_response("500 Internal Server Error", "upstream is down").await;
@@ -1706,9 +1771,14 @@ mod tests {
         })
         .await;
 
-        assert_eq!(
-            answer,
-            Err("API request failed with status 500 Internal Server Error".to_string())
+        let failure = answer.expect_err("a failed status is an error, not text");
+        assert!(
+            matches!(failure, ChatCompletionFailure::Answered(_)),
+            "a status is an answer: {failure:?}"
+        );
+        assert!(
+            failure.to_string().contains("500"),
+            "the status the endpoint sent has to survive: {failure}"
         );
     }
 
@@ -2145,7 +2215,7 @@ mod tests {
         .await;
 
         let error = answer.expect_err("a clipped reply is refused");
-        assert!(!error.contains(CLIPPED));
+        assert!(!error.to_string().contains(CLIPPED));
     }
 
     #[tokio::test]
@@ -2487,6 +2557,44 @@ mod tests {
         assert!(!text.trim().is_empty());
     }
 
+    /// The fast half of the split the rewrite path depends on: silence is not
+    /// a bad answer. A refused connect produces the same class as an elapsed
+    /// `REQUEST_TIMEOUT` and costs the suite nothing, so this is where the
+    /// class is pinned. `request_rewrite` reads it as "do not send the prose
+    /// request", which is what stops one unreachable endpoint from charging a
+    /// dictation two waits before it gives back the raw transcript.
+    #[tokio::test]
+    async fn a_refused_connection_is_unanswered_not_a_bad_answer() {
+        // Bind to claim a port and drop the listener: connecting is refused
+        // at once, with nothing there to answer.
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind closed-port fixture");
+            listener.local_addr().expect("closed-port fixture address")
+        };
+
+        let provider = provider("custom", &format!("http://{closed}"));
+        let endpoint = endpoint(&provider);
+        let failure = send_chat_completion_with_schema(ChatCompletionInput {
+            provider: &provider,
+            endpoint: &endpoint,
+            secret: None,
+            model: "any",
+            user_content: "{}".to_string(),
+            system_prompt: None,
+            json_schema: None,
+            disable_reasoning: false,
+        })
+        .await
+        .expect_err("a refused connection is an error, not text");
+
+        assert!(
+            matches!(failure, ChatCompletionFailure::Unanswered(_)),
+            "nothing answered: {failure:?}"
+        );
+    }
+
     /// The check behind `REQUEST_TIMEOUT`. A refused connect already fails
     /// fast, so it proves nothing about the bound; the state that needed one is
     /// an endpoint that accepts the connection, reads the request, and then
@@ -2520,8 +2628,15 @@ mod tests {
         let elapsed = started.elapsed();
         println!("gave up after {elapsed:?}: {answer:?}");
 
-        let error = answer.expect_err("a silent endpoint is an error, not text");
-        assert!(error.contains("timeout"), "unexpected failure: {error}");
+        let failure = answer.expect_err("a silent endpoint is an error, not text");
+        assert!(
+            matches!(failure, ChatCompletionFailure::Unanswered(_)),
+            "an endpoint that never answered is unanswered: {failure:?}"
+        );
+        assert!(
+            failure.to_string().contains("timeout"),
+            "unexpected failure: {failure}"
+        );
         assert!(elapsed >= REQUEST_TIMEOUT, "gave up early: {elapsed:?}");
         assert!(
             elapsed < REQUEST_TIMEOUT + Duration::from_secs(5),

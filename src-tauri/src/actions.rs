@@ -690,6 +690,45 @@ pub(crate) async fn post_process_transcription(
         }
     };
 
+    let attempt = request_rewrite(
+        &provider,
+        &endpoint,
+        secret.as_ref(),
+        &model,
+        rendered,
+        disable_reasoning,
+    )
+    .await;
+    if attempt.credential_proved {
+        crate::settings::mark_post_process_secret_verified(app, &provider.id);
+    }
+    attempt.text
+}
+
+/// What the rewrite requests produced, held apart from the app-state write a
+/// success implies. Splitting them leaves the request sequence drivable
+/// without a running app, which is where the decision below is worth pinning.
+struct RewriteAttempt {
+    text: Result<String, RewriteOutcome>,
+    /// A reply came back over the configured credential, which is what marks
+    /// that credential verified. An answer the rewrite could not use still
+    /// proves the credential.
+    credential_proved: bool,
+}
+
+/// Ask the frozen endpoint for the rewrite: structured output first where the
+/// provider supports it, prose otherwise or as the one retry.
+async fn request_rewrite(
+    provider: &crate::settings::PostProcessProvider,
+    endpoint: &crate::settings::PostProcessEndpoint,
+    secret: Option<&crate::secrets::SecretValue>,
+    model: &str,
+    rendered: &RenderedPrompt,
+    disable_reasoning: bool,
+) -> RewriteAttempt {
+    use crate::llm_client::ChatCompletionFailure;
+
+    let mut credential_proved = false;
     if provider.supports_structured_output {
         let json_schema = serde_json::json!({
             "type": "object",
@@ -705,10 +744,10 @@ pub(crate) async fn post_process_transcription(
 
         match crate::llm_client::send_chat_completion_with_schema(
             crate::llm_client::ChatCompletionInput {
-                provider: &provider,
-                endpoint: &endpoint,
-                secret: secret.as_ref(),
-                model: &model,
+                provider,
+                endpoint,
+                secret,
+                model,
                 user_content: rendered.user_message.clone(),
                 system_prompt: Some(rendered.system_message.clone()),
                 json_schema: Some(crate::llm_client::StructuredOutputSchema(json_schema)),
@@ -718,11 +757,14 @@ pub(crate) async fn post_process_transcription(
         .await
         {
             Ok(Some(content)) => {
-                if secret.is_some() {
-                    crate::settings::mark_post_process_secret_verified(app, &provider.id);
-                }
+                credential_proved = secret.is_some();
                 match structured_rewrite(&content) {
-                    Ok(text) => return accept_rewrite(&text),
+                    Ok(text) => {
+                        return RewriteAttempt {
+                            text: accept_rewrite(&text),
+                            credential_proved,
+                        }
+                    }
                     // The endpoint honoured the request and answered the
                     // wrong thing; asking again in prose is the one retry
                     // that can still produce the rewrite.
@@ -735,38 +777,60 @@ pub(crate) async fn post_process_transcription(
                 warn!(
                     "Structured post-processing returned no content; delivering the raw transcript"
                 );
-                return Err(RewriteOutcome::Failed);
+                return RewriteAttempt {
+                    text: Err(RewriteOutcome::Failed),
+                    credential_proved,
+                };
             }
-            Err(error) => {
-                warn!("Structured post-processing failed ({error}); retrying without a schema");
+            // An endpoint that answered is there to answer again, and the
+            // prose request asks it something simpler.
+            Err(ChatCompletionFailure::Answered(message)) => {
+                warn!("Structured post-processing failed ({message}); retrying without a schema");
+            }
+            // Nothing came back, so a second request buys the same silence at
+            // the same price: another `REQUEST_TIMEOUT` before words that were
+            // transcribed long ago reach the user. Deliver them now and let
+            // the skipped-rewrite notice say the rewrite failed.
+            Err(ChatCompletionFailure::Unanswered(message)) => {
+                warn!(
+                    "Structured post-processing got no reply ({message}); delivering the raw transcript"
+                );
+                return RewriteAttempt {
+                    text: Err(RewriteOutcome::Failed),
+                    credential_proved,
+                };
             }
         }
     }
 
     let processed_prompt = format!("{}\n\n{}", rendered.system_message, rendered.user_message);
     match crate::llm_client::send_chat_completion(
-        &provider,
-        &endpoint,
-        secret.as_ref(),
-        &model,
+        provider,
+        endpoint,
+        secret,
+        model,
         processed_prompt,
         disable_reasoning,
     )
     .await
     {
-        Ok(Some(content)) => {
-            if secret.is_some() {
-                crate::settings::mark_post_process_secret_verified(app, &provider.id);
-            }
-            accept_rewrite(&content)
-        }
+        Ok(Some(content)) => RewriteAttempt {
+            text: accept_rewrite(&content),
+            credential_proved: secret.is_some(),
+        },
         Ok(None) => {
             warn!("Post-processing returned no content; delivering the raw transcript");
-            Err(RewriteOutcome::Failed)
+            RewriteAttempt {
+                text: Err(RewriteOutcome::Failed),
+                credential_proved,
+            }
         }
-        Err(error) => {
-            warn!("Post-processing failed ({error}); delivering the raw transcript");
-            Err(RewriteOutcome::Failed)
+        Err(failure) => {
+            warn!("Post-processing failed ({failure}); delivering the raw transcript");
+            RewriteAttempt {
+                text: Err(RewriteOutcome::Failed),
+                credential_proved,
+            }
         }
     }
 }
@@ -2076,7 +2140,7 @@ mod tests {
     use super::{ensure_cloud_fallback_is_installed, resolve_cloud_finalization, FrozenTranscript};
     use crate::settings::OverlayStyle;
     use std::future;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -2752,5 +2816,152 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// What a counting endpoint does with each connection it accepts.
+    enum FixtureReply {
+        /// Plaintext only. Reached over `https://` the handshake fails, which
+        /// reqwest reports as a connect failure: nothing answered. A refused
+        /// connect is the same class, and an elapsed request timeout is too —
+        /// but a refused port cannot count the attempts made against it, and
+        /// the timeout costs twenty seconds a side.
+        Plaintext,
+        /// One complete HTTP response per connection, the last repeating.
+        Http(Vec<String>),
+    }
+
+    /// Whether these bytes hold a whole HTTP request: the headers, then as
+    /// much body as `Content-Length` promised.
+    fn request_is_complete(request: &[u8]) -> bool {
+        let Some(head) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let length: usize = String::from_utf8_lossy(&request[..head])
+            .to_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .map(str::trim)
+                    .and_then(|value| value.parse().ok())
+            })
+            .unwrap_or(0);
+        request.len() >= head + 4 + length
+    }
+
+    /// A loopback server that counts every connection it accepts. Each send
+    /// builds its own client, so the count is the number of rewrite requests
+    /// that reached the network.
+    async fn counting_endpoint(reply: FixtureReply) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting endpoint");
+        let address = listener.local_addr().expect("counting endpoint address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&connections);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let index = served.fetch_add(1, Ordering::SeqCst);
+                match &reply {
+                    FixtureReply::Plaintext => {
+                        let mut hello = [0_u8; 512];
+                        let _ = stream.read(&mut hello).await;
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+                    }
+                    FixtureReply::Http(responses) => {
+                        let Some(response) = responses.get(index).or_else(|| responses.last())
+                        else {
+                            continue;
+                        };
+                        // Drain the request first: closing a socket that still
+                        // holds unread bytes can cost the client the reply.
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 1024];
+                        while !request_is_complete(&request) {
+                            match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(read) => request.extend_from_slice(&chunk[..read]),
+                            }
+                        }
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                }
+            }
+        });
+        (address, connections)
+    }
+
+    fn structured_provider(base_url: &str) -> crate::settings::PostProcessProvider {
+        crate::settings::PostProcessProvider {
+            id: "custom".to_string(),
+            label: "Custom".to_string(),
+            base_url: base_url.to_string(),
+            allow_base_url_edit: true,
+            supports_structured_output: true,
+        }
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// The rewrite asks a second time only when a second question can be
+    /// answered. An endpoint that answered badly gets the prose retry, and
+    /// that retry is how a provider which rejects the schema still rewrites.
+    /// An endpoint that never answered gets nothing further: the same silence
+    /// costs the same wait again, and a finished dictation is sitting behind
+    /// it.
+    ///
+    /// Counting connections is the only way to see the difference. Both
+    /// endpoints here refuse the structured request, and the delivered text
+    /// cannot tell one request from two.
+    #[tokio::test]
+    async fn only_an_endpoint_that_answered_gets_a_second_rewrite_request() {
+        use super::request_rewrite;
+        use crate::modes::RewriteOutcome;
+
+        let rendered = crate::prompt_renderer::render_instruction(
+            crate::prompt_renderer::InstructionRenderInput {
+                instruction: "make that a question",
+                input: "The plan is ready by Friday.",
+                language: "en",
+                target: &crate::context::TargetMetadata::default(),
+            },
+        );
+
+        let (silent, silent_requests) = counting_endpoint(FixtureReply::Plaintext).await;
+        let provider = structured_provider(&format!("https://{silent}/v1"));
+        let endpoint = provider.endpoint().expect("silent endpoint");
+        let attempt = request_rewrite(&provider, &endpoint, None, "any", &rendered, false).await;
+
+        assert_eq!(attempt.text, Err(RewriteOutcome::Failed));
+        assert_eq!(
+            silent_requests.load(Ordering::SeqCst),
+            1,
+            "an endpoint that never answered is asked once"
+        );
+
+        let rewritten = "Is the plan ready by Friday?";
+        let completion =
+            serde_json::json!({ "choices": [{ "message": { "content": rewritten } }] }).to_string();
+        let (answering, answering_requests) = counting_endpoint(FixtureReply::Http(vec![
+            http_response("500 Internal Server Error", "the schema is not supported"),
+            http_response("200 OK", &completion),
+        ]))
+        .await;
+        let provider = structured_provider(&format!("http://{answering}/v1"));
+        let endpoint = provider.endpoint().expect("answering endpoint");
+        let attempt = request_rewrite(&provider, &endpoint, None, "any", &rendered, false).await;
+
+        assert_eq!(attempt.text, Ok(rewritten.to_string()));
+        assert_eq!(
+            answering_requests.load(Ordering::SeqCst),
+            2,
+            "an endpoint that answered is asked the simpler question"
+        );
     }
 }
