@@ -308,6 +308,7 @@ describe("the compact HUD preserves failure and cancel behavior", () => {
     ["microphone_permission_denied", "Microphone access denied"],
     ["no_input_device", "No microphone found"],
     ["no_model_selected", "No model selected"],
+    ["model_not_downloaded", "Model not downloaded"],
     ["no_speech_save_failed", "Sample not saved"],
     ["capture_overrun", "Recording cut short"],
     ["cloud_unavailable", "Cloud unavailable"],

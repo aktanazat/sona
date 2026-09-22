@@ -814,6 +814,8 @@ final class AppModel {
             "No speech was detected. A sample of the recording was saved to History."
         case "no_model_selected":
             "No speech model is selected. Choose one in Settings > Models."
+        case "model_not_downloaded":
+            "The selected speech model isn't downloaded. Download it in Settings > Models."
         case "command_no_selection":
             "Select the text you want to change, then hold the command shortcut and say the change."
         case "command_rewrite_unavailable":

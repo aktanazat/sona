@@ -1681,6 +1681,25 @@ impl ModelManager {
         models.get(model_id).cloned()
     }
 
+    /// Whether `model_id`'s files are on disk right now, read from disk and
+    /// stored; `None` for a model id Sona does not know. The registry is
+    /// otherwise refreshed only at launch and when Sona changes models
+    /// itself, so a disk cleanup that deletes a cached model while Sona runs
+    /// leaves it answering "downloaded" until this runs.
+    pub fn recheck_downloaded(&self, model_id: &str) -> Option<bool> {
+        let (present, changed) = {
+            let mut models = lock_model_state(&self.available_models);
+            let model = models.get_mut(model_id)?;
+            let present = self.files_present(model);
+            let changed = std::mem::replace(&mut model.is_downloaded, present) != present;
+            (present, changed)
+        };
+        if changed {
+            let _ = self.app_handle.emit("models-updated", ());
+        }
+        Some(present)
+    }
+
     /// Reconcile a model's advertised capabilities with the ground truth from the
     /// loaded model (transcribe-cpp's GGUF-derived capabilities), overwriting the
     /// pre-download view (catalog metadata or a header probe — see

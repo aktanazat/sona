@@ -225,15 +225,28 @@ fn check_cloud_preconditions(
     }
 }
 
-/// Whether this run would open the microphone for a decode that cannot happen:
-/// a local run with no model selected. Cloud runs answer for their own frozen
-/// fallback in the cloud preflight, and a cloud run without a fallback still
-/// has a provider to transcribe with.
-fn local_model_is_missing(run: &RunPlan) -> bool {
-    run.cloud().is_none()
-        && run
-            .local_asr()
-            .is_none_or(|local| local.model_id.trim().is_empty())
+/// Why this run must not open the microphone, when its local decode cannot
+/// happen: `no_model_selected` when no model is selected or the selected one
+/// is unknown, `model_not_downloaded` when its file is not on disk.
+/// `is_downloaded` answers `None` for a model id Sona does not know. Cloud
+/// runs answer for their own frozen fallback in the cloud preflight, and a
+/// cloud run without a fallback still has a provider to transcribe with.
+fn local_model_refusal(
+    run: &RunPlan,
+    is_downloaded: impl FnOnce(&str) -> Option<bool>,
+) -> Option<&'static str> {
+    if run.cloud().is_some() {
+        return None;
+    }
+    let model_id = run.local_asr().map_or("", |local| local.model_id.as_str());
+    if model_id.trim().is_empty() {
+        return Some("no_model_selected");
+    }
+    match is_downloaded(model_id) {
+        None => Some("no_model_selected"),
+        Some(false) => Some("model_not_downloaded"),
+        Some(true) => None,
+    }
 }
 
 /// Code on the coordinator thread must not perform keychain, network, or other
@@ -1465,12 +1478,12 @@ impl TranscribeAction {
             emit_cloud_run_error(app, error);
             return;
         }
-        if local_model_is_missing(&self.run) {
-            warn!("Refusing to record: no local transcription model is selected");
-            let _ = app.emit(
-                "recording-error",
-                RecordingErrorEvent::typed("no_model_selected"),
-            );
+        if let Some(error_type) = local_model_refusal(&self.run, |model_id| {
+            app.state::<Arc<ModelManager>>()
+                .recheck_downloaded(model_id)
+        }) {
+            warn!("Refusing to record: the local transcription model cannot load ({error_type})");
+            let _ = app.emit("recording-error", RecordingErrorEvent::typed(error_type));
             return;
         }
         let cloud_requested = self.run.cloud().is_some();
@@ -2464,35 +2477,42 @@ mod tests {
         .expect("valid cloud run")
     }
 
-    /// A local run with no model selected can only fail after the microphone
+    /// A local run whose model cannot load can only fail after the microphone
     /// has opened and the user has already spoken, so it is refused before
-    /// capture instead.
+    /// capture, and the refusal says whether a model must be chosen or
+    /// downloaded.
     #[test]
-    fn a_local_run_without_a_selected_model_is_refused() {
-        use super::local_model_is_missing;
+    fn a_local_run_whose_model_cannot_load_is_refused_before_capture() {
+        use super::local_model_refusal;
         use crate::modes::{RunPlan, TranscriptionIntent};
 
-        let mut settings = crate::settings::get_default_settings();
-        settings
-            .modes
-            .first_mut()
-            .expect("default mode")
-            .asr
-            .model_id
-            .clear();
-        let without_model = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
-            .expect("local run without a model");
-        assert!(local_model_is_missing(&without_model));
+        let refusal = |model_id: &str, is_downloaded: Option<bool>| {
+            let mut settings = crate::settings::get_default_settings();
+            settings
+                .modes
+                .first_mut()
+                .expect("default mode")
+                .asr
+                .model_id = model_id.to_string();
+            let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+                .expect("local run");
+            local_model_refusal(&run, |_| is_downloaded)
+        };
 
-        settings
-            .modes
-            .first_mut()
-            .expect("default mode")
-            .asr
-            .model_id = "parakeet-tdt-0.6b-v3".to_string();
-        let with_model = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
-            .expect("local run with a model");
-        assert!(!local_model_is_missing(&with_model));
+        assert_eq!(
+            [
+                refusal("", Some(true)),
+                refusal("retired-model", None),
+                refusal("parakeet-tdt-0.6b-v3", Some(false)),
+                refusal("parakeet-tdt-0.6b-v3", Some(true)),
+            ],
+            [
+                Some("no_model_selected"),
+                Some("no_model_selected"),
+                Some("model_not_downloaded"),
+                None,
+            ]
+        );
     }
 
     /// The user's text passes are settings, not engine features: a

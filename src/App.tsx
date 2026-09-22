@@ -585,6 +585,13 @@ const AppEventListeners: React.FC = () => {
             "No transcription model selected. Choose one in Settings > Models.",
           ),
         );
+      } else if (error_type === "model_not_downloaded") {
+        toast.error(
+          t(
+            "errors.modelNotDownloaded",
+            "The selected transcription model isn't downloaded. Download it in Settings > Models.",
+          ),
+        );
       } else if (error_type === "command_no_selection") {
         toast.error(
           t(
