@@ -170,12 +170,6 @@ final class PermissionsStore {
         }
     }
 
-    /// Brings this window forward, the way the web app asked the backend to
-    /// reveal itself when a returning user had lost a permission.
-    func revealWindow() {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-    }
-
     private func startPoll() {
         guard poll == nil else { return }
         poll = Task { [weak self] in

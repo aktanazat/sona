@@ -190,9 +190,6 @@ final class OnboardingStore {
             permissionsSettled()
             return
         }
-        if returning {
-            permissions.revealWindow()
-        }
         step = .permissions
         permissions.recheck()
     }

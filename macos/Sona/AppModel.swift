@@ -199,9 +199,10 @@ final class AppModel {
     @ObservationIgnored private let pill = FloatingPanel()
     @ObservationIgnored private let consent = FloatingPanel()
     /// Presents the main window, as the scene's `openWindow` does. Only a
-    /// view reaches that action, so the shell hands it over when it first
-    /// appears, which is at launch: the scene presents the window then.
-    @ObservationIgnored var presentMainWindow: () -> Void = {}
+    /// view reaches that action, and the window stays closed at launch, so
+    /// the menu bar mark hands it over when it first appears. Observed, so a
+    /// reveal the core asked for before then runs again once it can.
+    var presentMainWindow: () -> Void = {}
 
     init() {
         settings = SettingsStore(core: core)
@@ -305,9 +306,11 @@ final class AppModel {
     /// The main window, in front and key. A floating card, the menu bar, a
     /// link, or the core sends a person somewhere in the window: this comes
     /// first, so the place is not set on a window that is closed or behind.
+    /// Sona is a menu bar app, so another app is in front when this runs, and
+    /// macOS turns down a plain `activate()` then: the window opened behind.
     func reveal() {
         presentMainWindow()
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// The settings, on the tab last shown, from the app menu or the menu bar.
@@ -676,8 +679,9 @@ final class AppModel {
         consent.show(view, at: .topTrailing)
     }
 
-    /// The cues the meeting store leaves for the shell: a stopped or imported
-    /// meeting to read, the digest asking for Capture.
+    /// The cues the stores leave for the shell: a stopped or imported
+    /// meeting to read, the digest asking for Capture, and a first run or a
+    /// lost permission, which only the window can walk through.
     private func syncNavigation() {
         if let opened = live.opened {
             reveal()
@@ -688,6 +692,12 @@ final class AppModel {
             reveal()
             go(.capture)
             live.clearCaptureRequest()
+        }
+        switch onboarding.step {
+        case .permissions, .model:
+            reveal()
+        case .probing, .done:
+            break
         }
     }
 

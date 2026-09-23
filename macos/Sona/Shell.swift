@@ -5,7 +5,6 @@ import SwiftUI
 /// the pages.
 struct Shell: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack {
@@ -54,9 +53,6 @@ struct Shell: View {
                     model.sheet = nil
                 }
             }
-        }
-        .onAppear {
-            model.presentMainWindow = { openWindow(id: "main") }
         }
     }
 
