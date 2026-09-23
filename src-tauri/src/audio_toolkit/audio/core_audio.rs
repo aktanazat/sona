@@ -95,8 +95,8 @@ fn device_name(device_id: AudioObjectID) -> Option<String> {
     let mut property = address(kAudioObjectPropertyName);
     let mut name: *const CFString = std::ptr::null();
     let mut size = u32::try_from(std::mem::size_of::<*const CFString>()).ok()?;
-    // SAFETY: `property` and `name` are live stack slots for this call, and
-    // `size` states `name`'s exact byte length.
+    // `size` states `name`'s exact byte length, as CoreAudio requires.
+    // SAFETY: `property` and `name` are live stack slots for this call.
     let status = unsafe {
         AudioObjectGetPropertyData(
             device_id,
@@ -110,8 +110,8 @@ fn device_name(device_id: AudioObjectID) -> Option<String> {
     if status != 0 {
         return None;
     }
-    // SAFETY: CoreAudio hands the caller a retained CFString it must release;
-    // `CFRetained` takes that reference and releases it on drop.
+    // CoreAudio hands the caller a retained CFString it must release.
+    // SAFETY: `name` is that owned reference; `CFRetained` releases it on drop.
     let name = unsafe { CFRetained::from_raw(NonNull::new(name.cast_mut())?) };
     Some(name.to_string())
 }
