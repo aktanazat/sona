@@ -23,10 +23,16 @@ const HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 const APP_LEASE_TTL_MS: u64 = 30_000;
 const HEARTBEAT_TTL_MS: u64 = 30_000;
 const POLICY_TTL_MS: u64 = 30_000;
-/// The worker sleeps on the wake socket; this bounds how long the heartbeat,
-/// lease check, and expiry sweeps wait when no hook has written anything.
-/// It must stay well inside `HEARTBEAT_TTL_MS - HEARTBEAT_INTERVAL_MS`.
-const IDLE_FALLBACK: std::time::Duration = std::time::Duration::from_secs(1);
+/// The worker sleeps on the wake socket until the core next has work of its
+/// own ([`AgentBridgeCore::idle_wait`]); hooks and settings changes wake it
+/// sooner. The socket's timeout runs only while the Mac is awake, so a wait
+/// that spans a system sleep ends that much later in wall-clock time, with
+/// the heartbeat already expired and hooks passing through until the next
+/// tick republishes it. This cap bounds that window after every wake.
+const MAX_IDLE_WAIT_MS: u64 = 5_000;
+/// How soon a worker whose tick failed tries again. A lease it could not
+/// read or a heartbeat it could not write has no deadline to wait for.
+const TICK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The app is the only reader of hook acknowledgements.
 const MAX_ACK_BYTES: usize = 8 * 1024;
 /// The only reply lifetime comes from the existing hook request boundary.
@@ -343,6 +349,33 @@ impl AgentBridgeCore {
         self.withdraw_ungranted(settings);
         self.scan_sessions(settings, now_ms)?;
         Ok(())
+    }
+
+    /// How long the worker can sleep before this core has work of its own:
+    /// the heartbeat falling due, or a held reply or an unanswered request
+    /// passing its deadline (each expires once `now` is past it). Meant for
+    /// the moment after a successful tick, when all of those lie ahead.
+    fn idle_wait(&self, now_ms: u64) -> std::time::Duration {
+        let held = self
+            .pending_messages
+            .values()
+            .filter(|pending| pending.public.state == AgentBridgePendingState::Held)
+            .map(|pending| pending.public.expires_at_ms);
+        let unanswered = self
+            .observed_requests
+            .values()
+            .filter(|record| record.public.state == AgentBridgeRequestState::Observed)
+            .map(|record| record.public.expires_at_ms);
+        let due_ms = held
+            .chain(unanswered)
+            .map(|expires_at_ms| expires_at_ms.saturating_add(1))
+            .fold(
+                self.last_heartbeat_ms.saturating_add(HEARTBEAT_INTERVAL_MS),
+                u64::min,
+            );
+        // A socket refuses a zero timeout, so an overdue deadline gets the
+        // shortest one it takes.
+        std::time::Duration::from_millis(due_ms.saturating_sub(now_ms).clamp(1, MAX_IDLE_WAIT_MS))
     }
 
     pub fn status(&self, settings: &AgentBridgeSettings) -> AgentBridgeStatus {
@@ -1170,13 +1203,11 @@ struct BridgeWorker {
 struct WakeListener {
     #[cfg(unix)]
     socket: std::os::unix::net::UnixDatagram,
-    #[cfg(not(unix))]
-    fallback: std::time::Duration,
 }
 
 impl WakeListener {
     #[cfg(unix)]
-    fn bind(path: &Path, fallback: std::time::Duration) -> io::Result<Self> {
+    fn bind(path: &Path) -> io::Result<Self> {
         // A killed app leaves its socket file behind; the lease already
         // proves nobody else is listening, so the stale entry is replaced.
         match fs::remove_file(path) {
@@ -1185,26 +1216,33 @@ impl WakeListener {
             Err(error) => return Err(error),
         }
         let socket = std::os::unix::net::UnixDatagram::bind(path)?;
-        socket.set_read_timeout(Some(fallback))?;
         Ok(Self { socket })
     }
 
     #[cfg(not(unix))]
-    fn bind(_path: &Path, fallback: std::time::Duration) -> io::Result<Self> {
-        Ok(Self { fallback })
+    fn bind(_path: &Path) -> io::Result<Self> {
+        Ok(Self {})
     }
 
-    /// Blocks until a writer wakes the listener or the fallback interval
-    /// elapses, and says which one happened.
-    fn wait(&self) -> bool {
+    /// Blocks until a writer wakes the listener or `timeout` elapses, and
+    /// says which one happened. The timeout is set per wait because the
+    /// worker's next deadline moves with every tick.
+    fn wait(&self, timeout: std::time::Duration) -> bool {
         #[cfg(unix)]
         {
+            // Receiving without the timeout could block past the heartbeat,
+            // so a socket that refuses it still gets the wait, just not the
+            // early wake.
+            if self.socket.set_read_timeout(Some(timeout)).is_err() {
+                std::thread::sleep(timeout);
+                return false;
+            }
             let mut byte = [0u8; 1];
             self.socket.recv(&mut byte).is_ok()
         }
         #[cfg(not(unix))]
         {
-            std::thread::sleep(self.fallback);
+            std::thread::sleep(timeout);
             false
         }
     }
@@ -1241,13 +1279,17 @@ impl AgentBridgeManager {
         }
 
         if lock_recover(&self.worker).is_some() {
+            // The running worker reads the settings on every tick; waking it
+            // puts a new policy generation in front of hooks at once instead
+            // of at its next deadline.
+            wire::send_wake(&lock_recover(&self.core).paths.wake_path());
             return Ok(());
         }
         let listener = {
             let mut core = lock_recover(&self.core);
             core.start(&settings, now_ms())
                 .map_err(|error| error.to_string())?;
-            match WakeListener::bind(&core.paths.wake_path(), IDLE_FALLBACK) {
+            match WakeListener::bind(&core.paths.wake_path()) {
                 Ok(listener) => listener,
                 Err(error) => {
                     core.stop();
@@ -1275,10 +1317,14 @@ impl AgentBridgeManager {
                 if !settings.master_enabled {
                     break;
                 }
-                let (status, requests) = {
+                let (status, requests, wait) = {
                     let mut core = lock_recover(&core);
-                    let _ = core.tick(&settings, now_ms());
-                    (core.status(&settings), core.requests())
+                    let now = now_ms();
+                    let wait = match core.tick(&settings, now) {
+                        Ok(()) => core.idle_wait(now),
+                        Err(_) => TICK_RETRY,
+                    };
+                    (core.status(&settings), core.requests(), wait)
                 };
                 let active_request_ids = requests
                     .iter()
@@ -1312,7 +1358,7 @@ impl AgentBridgeManager {
                     );
                     previous = Some(status);
                 }
-                listener.wait();
+                listener.wait(wait);
             }
         });
         *lock_recover(&self.worker) = Some(BridgeWorker { stop, join });
@@ -1987,15 +2033,91 @@ mod tests {
         Ok(())
     }
 
-    /// A hook that writes a request must wake the worker at once; the timer
-    /// is only the fallback for a socket the hook could not reach.
+    /// Idle, the worker's only work is keeping the heartbeat alive, so it
+    /// wakes as often as the cap on one wait allows and no more, and a hook
+    /// arriving just before any of those wakes still finds the app alive.
+    #[test]
+    fn an_idle_worker_wakes_twelve_times_a_minute_and_keeps_its_heartbeat(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = test_root("idle-wait")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let settings = enabled_settings(wire::project_hash(&root)?);
+        let mut core = AgentBridgeCore::new(paths.clone(), opaque_hash(&[b"idle-wait"]))?;
+        core.start(&settings, 1_000)?;
+        let mut now = 1_000;
+        let mut wakes = 0;
+        while now < 61_000 {
+            now += u64::try_from(core.idle_wait(now).as_millis())?;
+            // Validity only runs out, so the moment before this wake's tick
+            // is when a hook finds the app's records stalest.
+            let lease = paths.read_lease()?;
+            assert!(lease.is_valid_at(now), "the lease lapsed before {now}");
+            assert!(
+                paths.read_heartbeat()?.is_valid_for(&lease, now),
+                "the heartbeat lapsed before {now}"
+            );
+            core.tick(&settings, now)?;
+            wakes += 1;
+        }
+        assert_eq!(wakes, 12);
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A held reply and an unanswered request each change state the moment
+    /// their deadline passes, however far off the heartbeat is: the worker's
+    /// first wake after either deadline is the millisecond after it.
+    #[test]
+    fn the_worker_wakes_as_each_reply_or_request_expires() -> Result<(), Box<dyn Error>> {
+        let root = test_root("expiry-wake")?;
+        let paths = RuntimePaths::from_root(root.clone(), true)?;
+        let app_id = opaque_hash(&[b"app-expiry-wake"]);
+        let binding = binding(&root)?;
+        let settings = enabled_settings(binding.project_hash.clone());
+        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
+        core.start(&settings, 1_000)?;
+        let prompt = event(CanonicalEventKind::UserPromptSubmit, &root, None);
+        persist_event(&paths, &app_id, binding, prompt, b"prompt", 1_001)?;
+        core.tick(&settings, 1_002)?;
+        let session_id = core.sessions()[0].id.clone();
+        core.create_reply_preview(&session_id, "hold me".to_string(), 1_003, Some(2_000))?;
+        let reply_deadline = core.pending_messages()[0].expires_at_ms;
+        let request_deadline = core.requests()[0].expires_at_ms;
+
+        let mut now = 1_003;
+        let mut wakes = Vec::new();
+        while now <= request_deadline {
+            now += u64::try_from(core.idle_wait(now).as_millis())?;
+            core.tick(&settings, now)?;
+            wakes.push(now);
+        }
+        let first_wake_after = |deadline: u64| wakes.iter().copied().find(|&wake| wake > deadline);
+        assert_eq!(first_wake_after(reply_deadline), Some(reply_deadline + 1));
+        assert_eq!(
+            first_wake_after(request_deadline),
+            Some(request_deadline + 1)
+        );
+        assert_eq!(
+            core.pending_messages()[0].state,
+            AgentBridgePendingState::CopyOnly
+        );
+        assert_eq!(core.requests()[0].state, AgentBridgeRequestState::Expired);
+        core.stop();
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A hook that writes a request must wake the worker at once, long before
+    /// the wait it is in would have run out.
     #[cfg(unix)]
     #[test]
-    fn persisting_a_request_wakes_the_worker_before_its_fallback() -> Result<(), Box<dyn Error>> {
+    fn persisting_a_request_wakes_the_worker_before_its_wait_runs_out() -> Result<(), Box<dyn Error>>
+    {
         let root = test_root("wake")?;
         let paths = RuntimePaths::from_root(root.clone(), true)?;
-        let fallback = std::time::Duration::from_secs(30);
-        let listener = WakeListener::bind(&paths.wake_path(), fallback)?;
+        let listener = WakeListener::bind(&paths.wake_path())?;
+        let long_wait = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
         persist_event(
             &paths,
@@ -2006,13 +2128,15 @@ mod tests {
             1_000,
         )?;
         assert!(
-            listener.wait(),
+            listener.wait(long_wait),
             "the request write did not wake the listener"
         );
-        assert!(started.elapsed() < fallback);
-        // Nothing else was written, so the next wait is the plain timeout.
-        let quiet = WakeListener::bind(&paths.wake_path(), std::time::Duration::from_millis(20))?;
-        assert!(!quiet.wait());
+        assert!(started.elapsed() < long_wait);
+        // Nothing else was written, so a short wait runs out on its own
+        // timeout rather than the one set before it.
+        let quiet = std::time::Instant::now();
+        assert!(!listener.wait(std::time::Duration::from_millis(20)));
+        assert!(quiet.elapsed() < long_wait);
         fs::remove_dir_all(root)?;
         Ok(())
     }
