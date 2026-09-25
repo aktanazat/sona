@@ -145,6 +145,28 @@ fn remember_rejection(key: String) {
     }
 }
 
+/// The reasoning-disable fields a request to `endpoint` carries, and the key
+/// that retires them once the endpoint rejects them. Requests that must agree
+/// on what they ask for, such as a warm-up and the rewrite it prepares, get
+/// the same answer here.
+fn reasoning_options(
+    provider: &PostProcessProvider,
+    endpoint: &PostProcessEndpoint,
+    model: &str,
+    disable_reasoning: bool,
+) -> (ReasoningParams, Option<String>) {
+    if !disable_reasoning {
+        return (ReasoningParams::default(), None);
+    }
+    let key = endpoint_key(endpoint, model);
+    let reasoning = if is_known_rejected(&key) {
+        ReasoningParams::default()
+    } else {
+        reasoning_disable_params(provider, endpoint)
+    };
+    (reasoning, Some(key))
+}
+
 #[derive(Debug, Serialize)]
 struct ChatCompletionRequest {
     model: String,
@@ -256,14 +278,16 @@ fn build_headers(
 /// cold one — it does not protect a model that is still loading its weights,
 /// because that load does not fit in any bound a dictation can afford. A warm
 /// local answer lands in well under a second; a cold 7.7 GB `gemma4:12b-mlx`
-/// measured over three minutes on a loaded machine. So the first dictation
-/// after a cold start does not wait for the model: it skips post-processing,
-/// delivers the raw transcript, and says so in the skipped-rewrite notice the
-/// caller records beside the words. That is the intended trade, since
-/// unpolished words beat words that arrive minutes late, and
-/// `post_process_transcription` already reads the failure as "no rewrite".
-/// Raising the bound to cover a cold load would buy nothing except making that
-/// first dictation hang for it. What the bound cannot say on its own is
+/// loads in about 4 s on an idle machine and measured over three minutes on a
+/// loaded one. Recording start asks the model to load
+/// (`warm_up_chat_completion`), so a load shorter than the dictation plus this
+/// bound finishes under it. A longer one does not hold the words: that
+/// dictation skips post-processing, delivers the raw transcript, and says so
+/// in the skipped-rewrite notice the caller records beside the words. That is
+/// the intended trade, since unpolished words beat words that arrive minutes
+/// late, and `post_process_transcription` already reads the failure as "no
+/// rewrite". Raising the bound to cover a cold load would buy nothing except
+/// making that dictation hang for it. What the bound cannot say on its own is
 /// whether a second request would wait it out again; `ChatCompletionFailure`
 /// carries that.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -554,6 +578,57 @@ pub(crate) async fn send_loopback_chat_completion(
     })
 }
 
+/// How long a warm-up waits for a local model to load and read its prompt.
+/// A cold load has measured over three minutes on a loaded machine (see
+/// `REQUEST_TIMEOUT`), so a shorter bound would abandon loads that finish.
+/// Five minutes is also how long Ollama lets a load stall before it gives up
+/// (`OLLAMA_LOAD_TIMEOUT`).
+const WARM_UP_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Asks a keyless loopback endpoint for one token over `prompt`, the way
+/// `send_chat_completion` asks for a prose rewrite: same message shape, same
+/// reasoning fields. A local server loads the model on the first request that
+/// names it and keeps the prompt it read, so a rewrite that opens with the
+/// same `prompt` finds the model resident and only reads what follows.
+pub(crate) async fn warm_up_chat_completion(
+    provider: &PostProcessProvider,
+    endpoint: &PostProcessEndpoint,
+    model: &str,
+    prompt: String,
+    disable_reasoning: bool,
+) -> Result<(), ChatCompletionFailure> {
+    if endpoint.is_remote() {
+        return Err(ChatCompletionFailure::Unanswered(
+            "A warm-up only goes to a local endpoint".to_string(),
+        ));
+    }
+    let client = create_loopback_client(endpoint, WARM_UP_TIMEOUT)
+        .map_err(ChatCompletionFailure::Unanswered)?;
+    let (reasoning, rejection_key) =
+        reasoning_options(provider, endpoint, model, disable_reasoning);
+    execute_openai_chat_completion(
+        &client,
+        &endpoint.request_url("chat/completions"),
+        model,
+        vec![ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+        OpenAiChatCompletionOptions {
+            max_tokens: Some(1),
+            response_format: None,
+            reasoning,
+            retry_reasoning: disable_reasoning,
+            rejection_key,
+            max_response_bytes: Some(MAX_COMPLETION_RESPONSE_BYTES),
+            response_log_context: "Rewrite warm-up",
+        },
+    )
+    .await
+    .map(drop)
+    .map_err(openai_completion_error)
+}
+
 pub(crate) async fn probe_loopback_model_info(
     endpoint: &PostProcessEndpoint,
 ) -> Result<Vec<LoopbackModel>, PostProcessModelDiscovery> {
@@ -635,12 +710,8 @@ async fn send_openai_chat_completion_with_schema(
         content: user_content,
     });
 
-    let key = endpoint_key(endpoint, model);
-    let reasoning = if disable_reasoning && !is_known_rejected(&key) {
-        reasoning_disable_params(provider, endpoint)
-    } else {
-        ReasoningParams::default()
-    };
+    let (reasoning, rejection_key) =
+        reasoning_options(provider, endpoint, model, disable_reasoning);
     let response_format = json_schema.map(|schema| {
         ChatResponseFormat::Schema(ResponseFormat {
             format_type: "json_schema".to_string(),
@@ -662,7 +733,7 @@ async fn send_openai_chat_completion_with_schema(
             response_format,
             reasoning,
             retry_reasoning: disable_reasoning,
-            rejection_key: disable_reasoning.then_some(key),
+            rejection_key,
             max_response_bytes: None,
             response_log_context: "Chat completion",
         },
