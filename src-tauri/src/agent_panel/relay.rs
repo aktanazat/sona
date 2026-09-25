@@ -2325,18 +2325,10 @@ mod tests {
             let cached = manager.model_alias(&client, false).await;
             let forced = manager.model_alias(&client, true).await;
 
-            let store = app
-                .handle()
-                .store(crate::portable::store_path(
-                    crate::settings::SETTINGS_STORE_PATH,
-                ))
-                .expect("settings store");
-            let mut settings = crate::settings::get_settings(app.handle());
-            settings.agent_panel_relay_key_id = Some("relay-test-rotated".to_string());
-            store.set(
-                "settings",
-                serde_json::to_value(&settings).expect("serialize rotated settings"),
-            );
+            crate::settings::update_settings(app.handle(), |settings| {
+                settings.agent_panel_relay_key_id = Some("relay-test-rotated".to_string());
+            })
+            .expect("persist the rotated pairing");
             let rotated = manager.model_alias(&client, false).await;
             assert_eq!(first, "fast");
             assert_eq!(cached, "fast");

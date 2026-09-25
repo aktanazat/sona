@@ -30,6 +30,34 @@ fn lock_settings_store() -> MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// The typed document the last read produced, kept until the next write.
+///
+/// Every dictation reads settings many times, and so do the idle loops. A read
+/// from the store clones the whole JSON document, deserializes it, runs the
+/// migrations and default merges again, and asks the system for its locale.
+/// The document only changes through this module, so every write clears this
+/// copy and the next read parses once. It is only touched under
+/// `SETTINGS_STORE_LOCK`, which keeps a read that parsed an older document from
+/// caching it over a newer write.
+#[derive(Default)]
+struct SettingsCache(Mutex<Option<AppSettings>>);
+
+impl SettingsCache {
+    fn slot(&self) -> MutexGuard<'_, Option<AppSettings>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Called by every writer, before it touches the store, with the store lock
+/// held.
+fn forget_cached_settings<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if let Some(cache) = app.try_state::<SettingsCache>() {
+        *cache.slot() = None;
+    }
+}
 pub const APPLE_INTELLIGENCE_DEFAULT_MODEL_ID: &str = "Apple Intelligence";
 /// Agents known to the local hook bridge. This is deliberately a closed enum:
 /// settings cannot turn a new provider into an interactive bridge by naming it.
@@ -2224,13 +2252,27 @@ pub fn get_settings<R: tauri::Runtime>(app: &AppHandle<R>) -> AppSettings {
 }
 
 fn get_settings_locked<R: tauri::Runtime>(app: &AppHandle<R>) -> AppSettings {
+    // Managed by the first read rather than by the app builder, so every app
+    // handle, a test's included, reads the way the running app does.
+    let cache = match app.try_state::<SettingsCache>() {
+        Some(cache) => cache,
+        None => {
+            app.manage(SettingsCache::default());
+            app.state::<SettingsCache>()
+        }
+    };
+    if let Some(settings) = cache.slot().clone() {
+        return settings;
+    }
     let store = match app.store(crate::portable::store_path(SETTINGS_STORE_PATH)) {
         Ok(store) => store,
         Err(error) => {
             panic!("Settings store must be available after its plugin is registered: {error}");
         }
     };
-    read_settings_from_store(&store)
+    let settings = read_settings_from_store(&store);
+    *cache.slot() = Some(settings.clone());
+    settings
 }
 
 fn read_settings_from_store<R: tauri::Runtime>(
@@ -2328,6 +2370,7 @@ pub(crate) fn mutate_raw_settings_value<R>(
     mutate: impl FnOnce(&mut serde_json::Value) -> R,
 ) -> Result<R, RawSettingsSaveError> {
     let _settings_lock = lock_settings_store();
+    forget_cached_settings(app);
     let store = app
         .store(crate::portable::store_path(SETTINGS_STORE_PATH))
         .map_err(|_| RawSettingsSaveError)?;
@@ -3101,6 +3144,7 @@ fn write_settings_locked<R: tauri::Runtime>(
     app: &AppHandle<R>,
     settings: &mut AppSettings,
 ) -> Result<(), SettingsPersistError> {
+    forget_cached_settings(app);
     let store = match app.store(crate::portable::store_path(SETTINGS_STORE_PATH)) {
         Ok(store) => store,
         Err(error) => {
@@ -3328,6 +3372,46 @@ mod tests {
         assert!(
             get_settings(handle).debug_mode,
             "the announced write is the one readable"
+        );
+    }
+
+    /// Dictation and the idle loops read settings dozens of times a minute,
+    /// and reading the store means parsing the whole document again. After the
+    /// first read the store is not parsed until this module writes: a value
+    /// put into the store behind the module's back stays unread, and a write
+    /// through the module is read back at once.
+    #[test]
+    fn a_settings_read_is_served_from_memory_until_the_next_write() {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        assert!(!get_settings(handle).debug_mode);
+
+        let mut planted = get_default_settings();
+        planted.debug_mode = true;
+        handle
+            .store(crate::portable::store_path(SETTINGS_STORE_PATH))
+            .expect("settings store")
+            .set(
+                "settings",
+                serde_json::to_value(&planted).expect("settings JSON"),
+            );
+        assert!(
+            !get_settings(handle).debug_mode,
+            "a read after the first must not parse the store again"
+        );
+
+        update_settings(handle, |settings| settings.theme = Theme::Dark)
+            .expect("persist the write");
+        assert_eq!(
+            get_settings(handle).theme,
+            Theme::Dark,
+            "a write through the module is read back at once"
         );
     }
 
