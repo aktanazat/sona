@@ -404,7 +404,7 @@ fn start_meeting_detection(
                 }
             };
         (
-            Arc::new(apps::WorkspaceApps) as Arc<dyn apps::RunningAppsSource>,
+            Arc::new(apps::WorkspaceApps::default()) as Arc<dyn apps::RunningAppsSource>,
             calendar::platform_calendar(),
             prompts,
             browser_titles,
