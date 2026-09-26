@@ -4,6 +4,7 @@ struct KeyboardDraft: Codable, Identifiable, Equatable {
     let id: UUID
     let text: String
     let createdAt: Date
+    var documentID: UUID?
 }
 
 enum KeyboardDraftError: LocalizedError {
@@ -32,7 +33,7 @@ enum KeyboardDraftState: Equatable {
     case waiting(KeyboardDraft)
 }
 
-/// The app and keyboard share only the draft the user has approved for insertion.
+/// The app and keyboard share only text explicitly sent to the keyboard.
 struct KeyboardDraftStore {
     static let group = "group.com.aktanazat.sona.mobile"
     static let fileName = "keyboard-draft.json"
@@ -48,10 +49,10 @@ struct KeyboardDraftStore {
     }
 
     @discardableResult
-    func save(text: String, now: Date = Date()) throws -> KeyboardDraft {
+    func save(text: String, documentID: UUID? = nil, now: Date = Date()) throws -> KeyboardDraft {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw KeyboardDraftError.empty }
-        let draft = KeyboardDraft(id: UUID(), text: text, createdAt: now)
+        let draft = KeyboardDraft(id: UUID(), text: text, createdAt: now, documentID: documentID)
         try coordinated { file in
             let bytes = try JSONEncoder().encode(draft)
             try bytes.write(to: file, options: [.atomic, .completeFileProtection])
@@ -62,6 +63,7 @@ struct KeyboardDraftStore {
             values.isExcludedFromBackup = true
             try? file.setResourceValues(values)
         }
+        KeyboardSignal.post(.state)
         return draft
     }
 

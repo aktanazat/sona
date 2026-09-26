@@ -7,6 +7,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
+use tauri_specta::Event as _;
+
+mod duration;
+use duration::{DurationAction, RecordingDeadline};
+
+#[derive(Clone, Debug, serde::Serialize, specta::Type, tauri_specta::Event)]
+pub struct DictationDurationWarningEvent {
+    /// None clears the warning when the recording leaves its active stage.
+    pub remaining_seconds: Option<u32>,
+}
 
 const DEBOUNCE: Duration = Duration::from_millis(30);
 const RELEASE_GRACE: Duration = Duration::from_millis(50);
@@ -137,6 +147,7 @@ enum Stage {
         pressed_at: Instant,
         /// Releases no longer stop this recording; the next press does.
         latched: bool,
+        duration: RecordingDeadline,
     },
     Processing,
 }
@@ -158,6 +169,7 @@ enum Effect {
         shortcut_label: String,
         run_plan: Box<RunPlan>,
     },
+    DurationWarning,
 }
 
 /// Turn a press edge into the start it triggers. Signals and CLI toggles have
@@ -231,6 +243,35 @@ impl CoordinatorState {
         self.pending_release
             .as_ref()
             .map(|pending| pending.deadline)
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        let recording_deadline = match &self.stage {
+            Stage::Recording { duration, .. } => Some(duration.next_deadline()),
+            Stage::Idle | Stage::Processing => None,
+        };
+        self.grace_deadline().into_iter().chain(recording_deadline).min()
+    }
+
+    /// Check on every loop, not just receive timeouts: repeated keyboard
+    /// events cannot keep a held dictation running beyond the duration cap.
+    fn on_timer(&mut self, now: Instant) -> Option<Effect> {
+        let action = match &mut self.stage {
+            Stage::Recording { duration, .. } => duration.action(now),
+            Stage::Idle | Stage::Processing => None,
+        };
+        match action {
+            Some(DurationAction::Finish) => {
+                return self.on_finish("duration-limit".to_string());
+            }
+            Some(DurationAction::Warn) => return Some(Effect::DurationWarning),
+            None => {}
+        }
+        if self.grace_deadline().is_some_and(|deadline| now >= deadline) {
+            self.on_grace_expired()
+        } else {
+            None
+        }
     }
 
     /// How the recording in flight relates to `intent` at `now`.
@@ -448,6 +489,7 @@ impl CoordinatorState {
         intent: TranscriptionIntent,
         pressed_at: Instant,
         latched: bool,
+        recording_started_at: Instant,
         run_plan: Option<Box<RunPlan>>,
     ) {
         if let Some(run_plan) = run_plan {
@@ -456,6 +498,7 @@ impl CoordinatorState {
                 run_plan,
                 pressed_at,
                 latched,
+                duration: RecordingDeadline::new(recording_started_at),
             };
         }
     }
@@ -518,18 +561,17 @@ impl TranscriptionCoordinator {
                 let mut state = CoordinatorState::new();
 
                 loop {
-                    let cmd = match state.grace_deadline() {
+                    if let Some(effect) = state.on_timer(Instant::now()) {
+                        execute(&app, &mut state, effect);
+                        continue;
+                    }
+                    let cmd = match state.next_deadline() {
                         Some(deadline) => {
                             match rx
                                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                             {
                                 Ok(cmd) => cmd,
-                                Err(mpsc::RecvTimeoutError::Timeout) => {
-                                    if let Some(effect) = state.on_grace_expired() {
-                                        execute(&app, &mut state, effect);
-                                    }
-                                    continue;
-                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
                                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                             }
                         }
@@ -546,6 +588,10 @@ impl TranscriptionCoordinator {
                             recording_was_active,
                         } => {
                             state.on_cancel(recording_was_active);
+                            let _ = DictationDurationWarningEvent {
+                                remaining_seconds: None,
+                            }
+                            .emit(&app);
                             None
                         }
                         Command::ProcessingFinished => state.on_processing_finished(Instant::now()),
@@ -645,15 +691,29 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             pressed_at,
             latched,
         } => {
+            let _ = DictationDurationWarningEvent {
+                remaining_seconds: None,
+            }
+            .emit(app);
             let run_plan = start(app, &intent, &shortcut_label);
-            state.on_started(intent, pressed_at, latched, run_plan);
+            state.on_started(intent, pressed_at, latched, Instant::now(), run_plan);
         }
         Effect::Stop {
             intent,
             shortcut_label,
             run_plan,
         } => {
+            let _ = DictationDurationWarningEvent {
+                remaining_seconds: None,
+            }
+            .emit(app);
             actions::stop_transcription(app, &intent.recording_id(), &shortcut_label, *run_plan);
+        }
+        Effect::DurationWarning => {
+            let _ = DictationDurationWarningEvent {
+                remaining_seconds: Some(60),
+            }
+            .emit(app);
         }
     }
 }
@@ -895,6 +955,7 @@ mod tests {
         clock: Instant,
         starts: u32,
         stops: u32,
+        warnings: u32,
         microphone_opens: bool,
     }
 
@@ -905,6 +966,7 @@ mod tests {
                 clock: Instant::now(),
                 starts: 0,
                 stops: 0,
+                warnings: 0,
                 microphone_opens: true,
             }
         }
@@ -927,9 +989,10 @@ mod tests {
                 }) => {
                     self.starts += 1;
                     let plan = self.microphone_opens.then(Self::run_plan);
-                    self.state.on_started(intent, pressed_at, latched, plan);
+                    self.state.on_started(intent, pressed_at, latched, self.clock, plan);
                 }
                 Some(Effect::Stop { .. }) => self.stops += 1,
+                Some(Effect::DurationWarning) => self.warnings += 1,
                 None => {}
             }
         }
@@ -1201,6 +1264,9 @@ mod tests {
             harness.is_idle(),
             "a start that never recorded must not arm a stop"
         );
+        assert_eq!(harness.state.next_deadline(), None);
+        harness.advance(Duration::from_secs(20 * 60));
+        assert!(harness.state.on_timer(harness.clock).is_none());
     }
 
     #[test]
@@ -1377,5 +1443,67 @@ mod tests {
         assert_eq!(classify_busy_input(true, true, true), BusyAction::Remember);
         assert_eq!(classify_busy_input(false, true, true), BusyAction::Forget);
         assert_eq!(classify_busy_input(false, true, false), BusyAction::Ignore);
+    }
+
+    #[test]
+    fn a_held_dictation_warns_once_and_hands_its_capture_to_processing_at_twenty_minutes() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        harness.advance(Duration::from_secs(19 * 60));
+        let warning = harness.state.on_timer(harness.clock);
+        harness.apply(warning);
+        let repeated = harness.state.on_timer(harness.clock);
+        harness.apply(repeated);
+        assert_eq!(harness.warnings, 1);
+        assert!(harness.is_recording());
+
+        harness.advance(Duration::from_secs(60));
+        let finish = harness.state.on_timer(harness.clock);
+        assert!(matches!(&finish, Some(Effect::Stop { intent, .. }) if intent == &active_mode()));
+        harness.apply(finish);
+        assert_eq!(harness.stops, 1);
+        assert!(harness.is_processing());
+        assert_eq!(harness.state.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_hands_free_dictation_also_finishes_at_twenty_minutes() {
+        let mut harness = Harness::new();
+        harness.external_press(active_mode(), false);
+        harness.advance(Duration::from_secs(20 * 60));
+        let finish = harness.state.on_timer(harness.clock);
+        harness.apply(finish);
+        assert_eq!(harness.stops, 1);
+        assert!(harness.is_processing());
+    }
+
+    #[test]
+    fn cancel_and_manual_stop_remove_duration_deadlines() {
+        let mut harness = Harness::new();
+        harness.input(active_mode(), true, false);
+        harness.state.on_cancel(true);
+        assert_eq!(harness.state.next_deadline(), None);
+        harness.advance(Duration::from_secs(20 * 60));
+        assert!(harness.state.on_timer(harness.clock).is_none());
+
+        harness.input(active_mode(), true, false);
+        harness.finish();
+        harness.advance(Duration::from_secs(20 * 60));
+        assert!(harness.state.on_timer(harness.clock).is_none());
+        assert_eq!(harness.stops, 1);
+    }
+
+    #[test]
+    fn duration_finish_clears_a_pending_key_release() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        harness.advance(Duration::from_secs(20 * 60) - RELEASE_GRACE);
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        let finish = harness.state.on_timer(harness.clock);
+        harness.apply(finish);
+        assert_eq!(harness.stops, 1);
+        assert_eq!(harness.state.next_deadline(), None);
+        assert!(harness.state.on_grace_expired().is_none());
     }
 }

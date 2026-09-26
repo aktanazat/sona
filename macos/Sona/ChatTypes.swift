@@ -335,7 +335,7 @@ struct AgentPanelStep: Decodable, Identifiable {
 /// Where one offered corpus change has got to. An action that has been undone
 /// is an action that is not in effect, which is what dismissed already means.
 enum AgentPanelActionState: String, Decodable {
-    case pending, applied, dismissed
+    case pending, applied, dismissed, failed
 }
 
 /// One corpus change an answer offered: what it changes, and why.
@@ -345,6 +345,10 @@ enum AgentChatAction: Decodable {
     case setSeriesTemplate(reason: String, template: String)
     case addVocabularyTerm(reason: String, term: String)
     case renameSpeaker(reason: String, name: String)
+    case draftEmail(ChatEmailDraft)
+    case postSlack(ChatSlackDraft)
+    case createCalendarEvent(ChatCalendarDraft)
+    case sendNotes(ChatNotesSend)
 
     private enum Key: String, CodingKey {
         case kind, reason, templateId, term, replacement, name, personId
@@ -370,6 +374,10 @@ enum AgentChatAction: Decodable {
                 term: try container.decodeIfPresent(String.self, forKey: .replacement) ?? term)
         case "rename_speaker":
             self = .renameSpeaker(reason: reason, name: try container.decode(String.self, forKey: .name))
+        case "draft_email": self = .draftEmail(try ChatEmailDraft(from: decoder))
+        case "post_slack": self = .postSlack(try ChatSlackDraft(from: decoder))
+        case "create_calendar_event": self = .createCalendarEvent(try ChatCalendarDraft(from: decoder))
+        case "send_notes": self = .sendNotes(try ChatNotesSend(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown chat action \(kind)")
@@ -383,6 +391,10 @@ enum AgentChatAction: Decodable {
         case let .resolveLoop(reason): reason
         case let .assignLoop(reason, _), let .setSeriesTemplate(reason, _),
              let .addVocabularyTerm(reason, _), let .renameSpeaker(reason, _): reason
+        case let .draftEmail(draft): draft.reason
+        case let .postSlack(draft): draft.reason
+        case let .createCalendarEvent(draft): draft.reason
+        case let .sendNotes(draft): draft.reason
         }
     }
 
@@ -403,6 +415,26 @@ enum AgentChatAction: Decodable {
         case let .setSeriesTemplate(_, template): "Use the \(template) template for this series"
         case let .addVocabularyTerm(_, term): "Add \"\(term)\" to your vocabulary"
         case let .renameSpeaker(_, name): "Rename a speaker to \(name)"
+        case .draftEmail: "Draft an email in Mail"
+        case .postSlack: "Post a message to Slack"
+        case .createCalendarEvent: "Create a calendar event"
+        case .sendNotes: "Send generated meeting notes"
+        }
+    }
+
+    var needsReview: Bool {
+        switch self {
+        case .draftEmail, .postSlack, .createCalendarEvent, .sendNotes: true
+        default: false
+        }
+    }
+
+    var appliedLabel: String {
+        switch self {
+        case .draftEmail: "Draft opened in Mail. Nothing was sent."
+        case .createCalendarEvent: "Event created. No invitations were sent."
+        case .postSlack, .sendNotes: "Sent"
+        default: "Applied"
         }
     }
 
@@ -424,6 +456,8 @@ struct AgentPanelAction: Decodable, Identifiable {
     let action: AgentChatAction
     let state: AgentPanelActionState
     let operationId: String?
+    let canUndo: Bool
+    let detail: String?
 
     var id: UInt32 { actionIndex }
 }

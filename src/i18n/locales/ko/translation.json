@@ -3114,7 +3114,6 @@
     "seriesBrief_other": "{{person}}님과의 미팅 {{nth}} · 미해결 항목 {{count}}개",
     "alwaysRecord": "이 미팅은 항상 녹음",
     "announceInChat": "채팅에 알리기",
-    "announceLine": "Sona가 {{name}}을(를) 위해 메모를 작성하고 있습니다. 원하지 않으시면 말씀해 주세요.",
     "announceRefused": "고지가 게시되지 않았습니다. 이 앱이 받아들이지 않았습니다.",
     "assurance": "오디오는 이 Mac에만 저장됩니다. 통화에 참여하는 봇은 없습니다.",
     "record": "녹음",

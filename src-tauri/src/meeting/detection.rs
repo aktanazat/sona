@@ -35,6 +35,7 @@ pub mod calendar;
 pub mod input_device;
 pub mod machine;
 pub mod notify;
+mod preparation;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -143,7 +144,7 @@ pub struct MeetingPrepCard {
     pub series_key: String,
     pub title: String,
     pub start_utc_ms: i64,
-    pub last_meeting_id: MeetingSessionId,
+    pub last_meeting_id: Option<MeetingSessionId>,
     pub headline: String,
     pub mine_open_loops: Vec<String>,
     pub mine_open_loop_count: u64,
@@ -187,6 +188,9 @@ pub enum MeetingRitual {
 #[serde(rename_all = "snake_case")]
 pub enum MeetingRitualAction {
     PrepRecordWhenStarts,
+    /// Put the ready-to-record screen for this occurrence in front now. A
+    /// meeting with no standing grant has no other way to record from here.
+    PrepRecord,
     PrepOpenBrief,
     PrepDismiss,
     WrapOpenNotes,
@@ -819,6 +823,7 @@ impl DetectionRuntime {
     /// concrete type, and a trait object cannot be downcast to it. The thread
     /// owns the monitor for exactly as long as the loop runs.
     pub fn spawn_loop(self: &Arc<Self>, level: Arc<InputDeviceLevel>) {
+        self.spawn_preparation_loop();
         self.enabled.store(
             crate::settings::get_settings(&self.app).detection_enabled,
             Ordering::Release,
@@ -1000,7 +1005,7 @@ impl DetectionRuntime {
         let calendar = if policy.enabled && policy.calendar_enabled {
             calendar::calendar_signal(
                 self.calendar
-                    .next_event(now_utc_ms, calendar::lookahead_ms()),
+                    .next_event(now_utc_ms, calendar::lookahead_ms(), policy.lead_seconds),
                 now_utc_ms,
             )
         } else {
@@ -1351,7 +1356,15 @@ impl DetectionRuntime {
         });
     }
 
+    /// Runs once per occurrence when the reminder lead is reached. The in-app
+    /// countdown always gets its people rows; the Prep card is the reminder
+    /// the operator can turn off.
     fn schedule_calendar_briefing(self: &Arc<Self>, event: CalendarEventSummary, now_utc_ms: i64) {
+        let preferences = crate::settings::get_settings(&self.app).meeting_prep;
+        let lead_ms = i64::from(preferences.alert_minutes.clamp(1, 60)) * 60_000;
+        if event.start_utc_ms.saturating_sub(now_utc_ms) > lead_ms {
+            return;
+        }
         if !self.lock().briefing_events.insert(event.event_key.clone()) {
             return;
         }
@@ -1363,7 +1376,9 @@ impl DetectionRuntime {
                 .calendar_briefing(event.clone(), now_utc_ms)
                 .await;
             runtime.publish_calendar_briefing(&event_key, briefing);
-            runtime.present_prep(event, now_utc_ms).await;
+            if preferences.upcoming_alerts_enabled {
+                runtime.present_prep(event, now_utc_ms).await;
+            }
         });
     }
 
@@ -1394,15 +1409,13 @@ impl DetectionRuntime {
             return None;
         }
         let store = self.meetings.store().await.ok()?;
-        let previous = store
-            .previous_series_brief(&event.series_key, event.start_utc_ms)
-            .ok()
-            .flatten()?;
-        let loops = store.meeting_loops(previous.session_id).ok()?;
+        let previous = store.previous_series_brief(&event.series_key, event.start_utc_ms).ok().flatten();
+        let loops = previous.as_ref().and_then(|previous| store.meeting_loops(previous.session_id).ok())
+            .map(|loops| loops.rows).unwrap_or_default();
         let mut mine_open_loop_count = 0_u64;
         let mut waiting_on_count = 0_u64;
         let mut mine_open_loops = Vec::with_capacity(2);
-        for row in &loops.rows {
+        for row in &loops {
             if row.is_open() && row.is_mine() {
                 mine_open_loop_count += 1;
                 if mine_open_loops.len() < 2 {
@@ -1469,8 +1482,9 @@ impl DetectionRuntime {
             series_key: event.series_key.clone(),
             title: event.title.clone(),
             start_utc_ms: event.start_utc_ms,
-            last_meeting_id: previous.session_id,
-            headline: previous.headline,
+            last_meeting_id: previous.as_ref().map(|previous| previous.session_id),
+            headline: previous.map(|previous| previous.headline)
+                .unwrap_or_else(|| "Open the brief for people, past conversations and a suggested agenda.".into()),
             mine_open_loops,
             mine_open_loop_count,
             waiting_on_count,
@@ -1487,17 +1501,10 @@ impl DetectionRuntime {
             return;
         }
         let ritual_id = format!("prep:{}", card.event_key);
-        if !self
-            .meetings
-            .record_ritual_activity(
-                WorkflowEventKind::MeetingPrepPresented,
-                &ritual_id,
-                card.last_meeting_id,
-                &card.event_key,
-            )
-            .await
-        {
-            return;
+        if let Some(session_id) = card.last_meeting_id {
+            if !self.meetings.record_ritual_activity(
+                WorkflowEventKind::MeetingPrepPresented, &ritual_id, session_id, &card.event_key,
+            ).await { return; }
         }
         if self.active_capture().await.is_some() {
             return;
@@ -1508,8 +1515,9 @@ impl DetectionRuntime {
             .saturating_add(59_999)
             / 60_000;
         let minutes = minutes.max(1);
+        let when = if minutes == 1 { "in 1 minute".to_string() } else { format!("in {minutes} minutes") };
         let pending = PendingPanel::Ritual(PendingRitual {
-            notification_title: format!("{} — in {minutes} minutes", event.title),
+            notification_title: format!("{} — {when}", event.title),
             ritual: MeetingRitual::Prep(card),
             idle_generation: 0,
         });
@@ -1579,6 +1587,7 @@ impl DetectionRuntime {
     }
 
     pub(crate) async fn present_wrap(self: &Arc<Self>, session_id: MeetingSessionId) {
+        if !crate::settings::get_settings(&self.app).meeting_prep.notes_ready_enabled { return; }
         let Some(card) = self.wrap_card(session_id).await else {
             return;
         };
@@ -1717,15 +1726,17 @@ impl DetectionRuntime {
     /// a row for tomorrow lives in the calendar alone, which is where a start
     /// from that row has to find it. Blocking, like every EventKit read.
     pub fn calendar_event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary> {
-        let start_utc_ms = calendar::occurrence_start(event_key)?;
-        self.calendar
-            .events_between(start_utc_ms, start_utc_ms.checked_add(1)?)
-            .into_iter()
-            .map(|occurrence| occurrence.summary)
-            .find(|event| event.event_key == event_key)
+        self.calendar.event_by_key(event_key)
     }
 
     fn raise(self: &Arc<Self>, prompt: PromptKind, calendar_event: Option<CalendarEventSummary>) {
+        // A calendar meeting that has started with the microphone live is a
+        // detection, not a reminder, so only unscheduled calls follow this switch.
+        if !matches!(prompt, PromptKind::CalendarEvent { .. })
+            && !crate::settings::get_settings(&self.app).meeting_prep.ad_hoc_alerts_enabled
+        {
+            return;
+        }
         let prompt_id = Uuid::new_v4().to_string();
         // The panel window logs nothing and sets NSWindowSharingType::None, so
         // it cannot be screenshotted either. Without this line the only trace a
@@ -1960,53 +1971,52 @@ impl DetectionRuntime {
                 {
                     return false;
                 }
-                if !self
-                    .meetings
-                    .record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepRecordArmed,
-                        ritual_id,
-                        card.last_meeting_id,
-                        ritual_id,
-                    )
-                    .await
-                {
-                    return false;
+                if let Some(session_id) = card.last_meeting_id {
+                    if !self.meetings.record_ritual_activity(
+                        WorkflowEventKind::MeetingPrepRecordArmed, ritual_id, session_id, ritual_id,
+                    ).await { return false; }
                 }
                 self.finish_ritual(ritual_id);
                 true
             }
-            (MeetingRitual::Prep(card), MeetingRitualAction::PrepOpenBrief) => {
-                if !self
-                    .meetings
-                    .record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepBriefOpened,
-                        ritual_id,
-                        card.last_meeting_id,
-                        ritual_id,
-                    )
-                    .await
-                {
+            (MeetingRitual::Prep(card), MeetingRitualAction::PrepRecord) => {
+                // The card carries only the key. A meeting moved or cancelled
+                // since it appeared has nothing left to record.
+                let calendar = Arc::clone(&self.calendar);
+                let event_key = card.event_key.clone();
+                let Ok(Some(event)) =
+                    tauri::async_runtime::spawn_blocking(move || calendar.event_by_key(&event_key)).await
+                else {
                     return false;
+                };
+                if let Some(session_id) = card.last_meeting_id {
+                    if !self.meetings.record_ritual_activity(
+                        WorkflowEventKind::MeetingPrepRecordArmed, ritual_id, session_id, ritual_id,
+                    ).await { return false; }
                 }
-                let opened = crate::dispatch_deep_link(
-                    &self.app,
-                    &crate::query::meeting_link(card.last_meeting_id),
-                );
                 self.finish_ritual(ritual_id);
-                opened
+                let prompt = PromptKind::CalendarEvent {
+                    event_key: event.event_key.clone(),
+                    event_title: event.title.clone(),
+                };
+                self.open_capture(&prompt, Some(event.end_utc_ms), utc_now_ms(), Some(event)).await;
+                true
+            }
+            (MeetingRitual::Prep(card), MeetingRitualAction::PrepOpenBrief) => {
+                if let Some(session_id) = card.last_meeting_id {
+                    if !self.meetings.record_ritual_activity(
+                        WorkflowEventKind::MeetingPrepBriefOpened, ritual_id, session_id, ritual_id,
+                    ).await { return false; }
+                }
+                // The native surface opens the occurrence, not the last recording.
+                self.finish_ritual(ritual_id);
+                true
             }
             (MeetingRitual::Prep(card), MeetingRitualAction::PrepDismiss) => {
-                if !self
-                    .meetings
-                    .record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepDismissed,
-                        ritual_id,
-                        card.last_meeting_id,
-                        ritual_id,
-                    )
-                    .await
-                {
-                    return false;
+                if let Some(session_id) = card.last_meeting_id {
+                    if !self.meetings.record_ritual_activity(
+                        WorkflowEventKind::MeetingPrepDismissed, ritual_id, session_id, ritual_id,
+                    ).await { return false; }
                 }
                 self.finish_ritual(ritual_id);
                 true
@@ -2729,15 +2739,14 @@ fn ritual_is_stale(ritual: &MeetingRitual, now_utc_ms: i64) -> bool {
     matches!(ritual, MeetingRitual::Prep(card) if now_utc_ms >= card.start_utc_ms)
 }
 
-/// Reads the operator's settings into the decision table's policy. The timing
-/// constants are fixed by the brief and are not settings.
+/// Reads the operator's reminder lead and detection choices.
 pub fn policy_from_settings(settings: &AppSettings) -> DetectionPolicy {
     DetectionPolicy {
         enabled: settings.detection_enabled,
         calendar_enabled: settings.detection_calendar_enabled,
         any_mic_activity: settings.detection_any_mic_activity,
         auto_start_on_open_pane: settings.detection_auto_start_on_open_pane,
-        lead_seconds: machine::CALENDAR_LEAD_SECONDS,
+        lead_seconds: i64::from(settings.meeting_prep.alert_minutes.clamp(1, 60)) * 60,
         attendee_floor: machine::ATTENDEE_FLOOR,
         cross_link_window_ms: machine::CROSS_LINK_WINDOW_MS,
     }
@@ -3142,7 +3151,7 @@ mod tests {
             series_key: "series-1".to_string(),
             title: "Weekly sync".to_string(),
             start_utc_ms,
-            last_meeting_id: MeetingSessionId::from_uuid(Uuid::nil()),
+            last_meeting_id: Some(MeetingSessionId::from_uuid(Uuid::nil())),
             headline: "Pricing stayed open.".to_string(),
             mine_open_loops: vec!["One".to_string(), "Two".to_string()],
             mine_open_loop_count: 2,
@@ -3253,6 +3262,7 @@ mod tests {
             processing_status: ProcessingStatus::Pending,
             preflight_local_processing: None,
             retention_deadline_utc_ms: None,
+            transcript_purged_at_utc_ms: None,
             allowed_actions: Vec::new(),
         }
     }

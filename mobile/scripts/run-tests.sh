@@ -26,8 +26,7 @@ xcodebuild -project "$project_dir/Sona.xcodeproj" -target SonaTests \
 
 xcrun simctl bootstatus "$device" -b >/dev/null 2>&1 || xcrun simctl boot "$device" || true
 
-runtime_root=$(xcrun simctl spawn "$device" /usr/bin/env \
-  | sed -n 's/^IPHONE_SIMULATOR_ROOT=//p')
+runtime_root=$(xcrun simctl getenv "$device" IPHONE_SIMULATOR_ROOT)
 platform=$(xcode-select -p)/Platforms/iPhoneSimulator.platform/Developer
 
 SIMCTL_CHILD_DYLD_FRAMEWORK_PATH="$platform/Library/Frameworks" \

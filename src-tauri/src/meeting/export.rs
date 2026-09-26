@@ -38,6 +38,111 @@ struct JsonExport<'a> {
     user_notes: &'a str,
 }
 
+/// Small rows gathered up front; each full review is released after its CSV
+/// record is written, rather than retaining every transcript at once.
+pub(crate) struct CsvMeeting {
+    pub session_id: super::types::MeetingSessionId,
+    pub created_at_utc_ms: i64,
+    pub recorded_duration_ns: Option<i64>,
+}
+
+impl super::session::MeetingSessionManager {
+    pub async fn export_all_csv(&self) -> Result<String, super::types::MeetingCommandError> {
+        let store = self.store().await?;
+        tauri::async_runtime::spawn_blocking(move || render_csv(&store))
+            .await
+            .map_err(|_| super::types::MeetingCommandError::ExportFailed)?
+    }
+}
+
+/// All retained meetings, including unfinished ones with whatever content
+/// exists now. Trash is not retained meeting content. Fail the whole export
+/// on a read error, so an incomplete file cannot look like a complete backup.
+fn render_csv(store: &super::store::MeetingStore) -> Result<String, super::types::MeetingCommandError> {
+    use super::types::MeetingCommandError;
+    use super::workflow_engine::map_store_error;
+
+    let meetings = store.csv_meetings().map_err(map_store_error)?;
+    let mut writer = csv_writer().map_err(|_| MeetingCommandError::ExportFailed)?;
+    for meeting in meetings {
+        let review = store.review_snapshot(meeting.session_id).map_err(map_store_error)?;
+        if review.session.phase == MeetingPhase::Deleting {
+            return Err(MeetingCommandError::DeletionInProgress);
+        }
+        write_csv_meeting(&mut writer, &meeting, &review)
+            .map_err(|_| MeetingCommandError::ExportFailed)?;
+    }
+    let bytes = writer.into_inner().map_err(|_| MeetingCommandError::ExportFailed)?;
+    String::from_utf8(bytes).map_err(|_| MeetingCommandError::ExportFailed)
+}
+
+fn csv_writer() -> Result<csv::Writer<Vec<u8>>, ExportError> {
+    let mut writer = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::CRLF)
+        .from_writer(Vec::new());
+    writer.write_record([
+        "title", "date", "duration", "participants", "summary", "action items", "transcript",
+    ]).map_err(|_| ExportError::Render)?;
+    Ok(writer)
+}
+
+/// Dates are UTC ISO 8601; duration is hh:mm:ss.mmm of recorded capture
+/// windows, excluding pauses. The CSV crate quotes commas, quotes, CR and LF
+/// and doubles quotes, with CRLF record separators as RFC 4180 requires.
+fn write_csv_meeting(
+    writer: &mut csv::Writer<Vec<u8>>,
+    meeting: &CsvMeeting,
+    review: &MeetingReviewSnapshot,
+) -> Result<(), ExportError> {
+    let date = chrono::DateTime::from_timestamp_millis(
+        review.session.started_at_utc_ms.unwrap_or(meeting.created_at_utc_ms),
+    )
+    .ok_or(ExportError::Render)?
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let duration = meeting.recorded_duration_ns
+        .map(|value| u64::try_from(value).map(format_offset).map_err(|_| ExportError::Render))
+        .transpose()?
+        .unwrap_or_default();
+    let mut participants = String::new();
+    let mut speakers = HashMap::with_capacity(review.speakers.len());
+    for speaker in &review.speakers {
+        if !participants.is_empty() {
+            participants.push_str("; ");
+        }
+        participants.push_str(&speaker.display_name);
+        speakers.insert(speaker.speaker_id, speaker.display_name.as_str());
+    }
+    let content = current_artifact(review);
+    let summary = content.map_or("", |notes| notes.summary.text.as_str());
+    let mut actions = String::new();
+    if let Some(content) = content {
+        for item in &content.action_items {
+            if !actions.is_empty() {
+                actions.push('\n');
+            }
+            actions.push_str(&item.text.text);
+            if let Some(owner) = item.owner_text.as_deref().filter(|owner| !owner.is_empty()) {
+                let _ = write!(actions, " — {owner}");
+            }
+            if let Some(due) = item.due_text.as_deref().filter(|due| !due.is_empty()) {
+                let _ = write!(actions, " (due {due})");
+            }
+        }
+    }
+    let mut transcript = String::new();
+    for segment in review.transcript.iter().filter(|segment| !segment.removed) {
+        if !transcript.is_empty() {
+            transcript.push('\n');
+        }
+        let speaker = speakers.get(&segment.assigned_speaker_id).copied().unwrap_or("Unknown speaker");
+        let text = segment.replacement_text.as_deref().unwrap_or(&segment.base.text);
+        let _ = write!(transcript, "[{}] {speaker}: {text}", format_offset(segment.base.start_offset_ns));
+    }
+    writer.write_record([
+        review.session.title.as_str(), &date, &duration, &participants, summary, &actions, &transcript,
+    ]).map_err(|_| ExportError::Render)
+}
+
 pub fn render(
     format: MeetingExportFormat,
     document: &ExportDocument<'_>,
@@ -185,6 +290,18 @@ fn render_markdown(document: &ExportDocument<'_>) -> String {
             let _ = writeln!(markdown, "- {:?}", gap.reason);
         }
     }
+    if !review.snapshots.is_empty() {
+        let _ = writeln!(markdown, "\n## Screen snapshots");
+        for (index, snapshot) in review.snapshots.iter().enumerate() {
+            let _ = writeln!(
+                markdown,
+                "- {} — {}",
+                format_offset(snapshot.offset_ns),
+                super::snapshots::export_image_name(index, snapshot.offset_ns),
+            );
+        }
+        let _ = writeln!(markdown, "\nThe images are saved in a snapshots folder beside the exported file.");
+    }
 
     markdown
 }
@@ -202,7 +319,7 @@ fn current_artifact(review: &MeetingReviewSnapshot) -> Option<&GeneratedMeetingA
 /// The sections a reader looks for, in the order the review page shows them.
 /// An empty section is left out rather than written as "none": the file is
 /// something a person hands to someone else.
-fn render_generated_notes(markdown: &mut String, content: &GeneratedMeetingArtifacts) {
+pub(crate) fn render_generated_notes(markdown: &mut String, content: &GeneratedMeetingArtifacts) {
     let summary = content.summary.text.trim();
     if !summary.is_empty() {
         let _ = writeln!(markdown, "{summary}");
@@ -379,6 +496,7 @@ mod tests {
                 },
                 preflight_local_processing: None,
                 retention_deadline_utc_ms: None,
+                transcript_purged_at_utc_ms: None,
                 allowed_actions: vec![AllowedMeetingAction::Export],
             },
             tracks: Vec::new(),
@@ -397,7 +515,58 @@ mod tests {
             },
             can_export: true,
             remote_cancellation_pending: false,
+            snapshots: Vec::new(),
         }
+    }
+
+    /// A spreadsheet must retain field boundaries and embedded line breaks,
+    /// while exporting the edited transcript and only the current notes.
+    #[test]
+    fn csv_export_quotes_fields_and_keeps_current_content() {
+        use crate::meeting::types::{
+            EffectiveTranscriptSegment, MeetingSpeaker, SourceKind, SourceTrackId,
+            SpeakerAssignmentKind, SpeakerId, TranscriptSegment, TranscriptSegmentId,
+        };
+        let mut review = review();
+        review.session.title = "Launch, \"Q3\"\r\nplan".to_string();
+        let session_id = review.session.session_id;
+        let speaker_id = SpeakerId::new();
+        review.speakers = vec![MeetingSpeaker {
+            speaker_id, session_id, source_kind: SourceKind::Microphone,
+            display_name: "Priya".to_string(), revision: 1,
+        }];
+        review.artifacts = vec![
+            revision(session_id, MeetingArtifactState::OutOfDate, 20, "Do not export this."),
+            revision(session_id, MeetingArtifactState::Current, 10, "Said \"yes\", then\nshipped."),
+        ];
+        let segment = EffectiveTranscriptSegment {
+            base: TranscriptSegment {
+                segment_id: TranscriptSegmentId::new(), transcript_revision_id: TranscriptRevisionId::new(),
+                track_id: SourceTrackId::new(), ordinal: 0, start_offset_ns: 0, end_offset_ns: 1_000_000_000,
+                speaker_id, text: "Uncorrected words".to_string(), confidence_milli: None,
+            },
+            replacement_text: Some("Send \"it\", today\nplease.".to_string()),
+            removed: false, edit_revision: Some(1), assigned_speaker_id: speaker_id,
+            speaker_assignment: SpeakerAssignmentKind::LocalSpeaker,
+        };
+        let mut removed = segment.clone();
+        removed.base.segment_id = TranscriptSegmentId::new();
+        removed.removed = true;
+        removed.replacement_text = Some("Removed words".to_string());
+        review.transcript = vec![segment, removed];
+        let metadata = CsvMeeting {
+            session_id, created_at_utc_ms: 0, recorded_duration_ns: Some(3_723_456_000_000),
+        };
+        // PANIC: the fixture has a valid timestamp and an in-memory CSV sink.
+        let mut writer = csv_writer().expect("CSV header");
+        write_csv_meeting(&mut writer, &metadata, &review).expect("CSV meeting");
+        let actual = String::from_utf8(writer.into_inner().expect("CSV bytes")).expect("UTF-8");
+        assert_eq!(actual, concat!(
+            "title,date,duration,participants,summary,action items,transcript\r\n",
+            "\"Launch, \"\"Q3\"\"\r\nplan\",1970-01-01T00:00:00.000Z,01:02:03.456,Priya,",
+            "\"Said \"\"yes\"\", then\nshipped.\",Draft the launch note — Priya (due Friday),",
+            "\"[00:00:00.000] Priya: Send \"\"it\"\", today\nplease.\"\r\n",
+        ));
     }
 
     #[test]

@@ -14,6 +14,9 @@ use specta::Type;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
+mod call_chat;
+pub use call_chat::{announce, CallChatResult};
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryMethod {
@@ -182,48 +185,6 @@ fn secure_input_holds_keys_now() -> bool {
     }
 }
 
-/// Posts one line into whatever the frontmost application has focused, and
-/// never anywhere else.
-///
-/// This is [`deliver`]'s Accessibility branch on its own, with no clipboard
-/// route behind it. It is not a second delivery path: it is the one insertion
-/// mechanism this module already prefers, asked for a case where a fallback
-/// would be wrong.
-///
-/// A recording disclosure is text Sona puts in somebody else's chat. AX
-/// insertion is the only route that asks the target whether it can accept text
-/// at the caret and answers honestly; a clipboard chord would take the
-/// operator's clipboard and press ⌘V at an application that may have no
-/// composer open — into a document, a search field, or nothing. So a target that
-/// cannot accept an insertion is a refusal to record, not a reason to try
-/// harder.
-pub fn announce(text: &str) -> DeliveryReceipt {
-    #[cfg(target_os = "macos")]
-    {
-        match crate::context::macos::insert_into_focused_editable(text) {
-            crate::context::macos::AccessibilityInsertion::Delivered => DeliveryReceipt::new(
-                DeliveryMethod::AccessibilityInsertion,
-                DeliveryOutcome::Delivered,
-            ),
-            crate::context::macos::AccessibilityInsertion::DispatchedButUnconfirmed => {
-                DeliveryReceipt::new(
-                    DeliveryMethod::AccessibilityInsertion,
-                    DeliveryOutcome::DispatchedButUnconfirmed,
-                )
-            }
-            crate::context::macos::AccessibilityInsertion::NotDispatched => {
-                DeliveryReceipt::not_dispatched()
-            }
-        }
-    }
-
-    // No Accessibility API, so nothing can be told it is being recorded.
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = text;
-        DeliveryReceipt::not_dispatched()
-    }
-}
 
 /// The one place a trailing space is added, so every route dispatches the same
 /// string and the receipt describes the same delivery.

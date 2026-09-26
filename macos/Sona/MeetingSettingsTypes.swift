@@ -230,6 +230,42 @@ struct MeetingRetentionMutation: Decodable {
     let snapshot: MeetingRetentionSnapshot
 }
 
+struct MeetingTranscriptRetentionSnapshot: Decodable {
+    let policy: MeetingRetentionPolicy
+    let revision: Int
+    let changedAtUtcMs: Int64
+    let deletionBeginsAtUtcMs: Int64?
+
+    static let choices: [MeetingRetentionPolicy] =
+        [.forever] + [1, 7, 30, 90, 180, 365].map { .deleteAfter(days: $0) }
+
+    static func label(_ policy: MeetingRetentionPolicy) -> String {
+        switch policy {
+        case .forever: "Keep until I delete them"
+        case .deleteAfter(days: 1): "1 day"
+        case .deleteAfter(days: 7): "1 week"
+        case .deleteAfter(days: 180): "6 months"
+        case .deleteAfter(days: 365): "1 year"
+        case let .deleteAfter(days): "\(days) days"
+        }
+    }
+
+    var detail: String {
+        guard case let .deleteAfter(days) = policy, let begins = deletionBeginsAtUtcMs else {
+            return "Keep audio and transcripts. Deleting a whole meeting still removes everything."
+        }
+        let date = Date(timeIntervalSince1970: Double(begins) / 1_000)
+            .formatted(.dateTime.month(.abbreviated).day())
+        let age = days == 1 ? "1 day" : "\(days) days"
+        return "Transcripts older than \(age) are deleted from \(date). Deletes recordings and transcripts on this Mac. Notes stay. Links you already shared keep what they showed."
+    }
+}
+
+struct MeetingTranscriptRetentionMutation: Decodable {
+    let receipt: MeetingSettingsReceipt
+    let snapshot: MeetingTranscriptRetentionSnapshot
+}
+
 // MARK: - Receipts and errors
 
 /// Where a fenced write got to. `rejected` means somebody else moved the
@@ -313,6 +349,9 @@ struct MeetingSeriesPreferences: Decodable {
     /// `nil` when the meeting belongs to no series.
     let seriesKey: String?
     let template: MeetingSeriesTemplate?
+    /// One of the person's own templates, by id. When it is set, `template`
+    /// is nil: the custom choice is the series' whole answer.
+    let customTemplateId: String?
     let digestIncluded: Bool
     let alwaysRecord: Bool
     let remoteIntelligenceOptOut: Bool
@@ -578,6 +617,7 @@ struct MeetingPromptList: Decodable {
 struct MeetingSettingsSnapshot: Decodable {
     var digestEnabled = false
     var digestMinuteOfDay = MeetingDigestClock.defaultMinuteOfDay
+    var transcriptionLanguage = "auto"
     var remoteIntelligenceEnabled = false
     var localEngine: MeetingRemoteEngine?
     var agentPanelEnabled = false
@@ -585,6 +625,13 @@ struct MeetingSettingsSnapshot: Decodable {
     var relayUrl: String?
     var relayKeyId: String?
     var relayPublicKey: String?
+    /// The built-in new notes are written with, and the custom template that
+    /// stands in for it when one is set and still exists.
+    var notesTemplate: MeetingNotesTemplate = .general
+    var notesCustomTemplateId: String?
+    var notesLanguage: MeetingNotesLanguage = .auto
+    var disclosureEnabled = false
+    var disclosureMessage = ""
 
     /// The same four fields the backend's own readiness check reads: a relay
     /// is reachable only when the panel is on, a pairing was saved, and the
@@ -596,6 +643,7 @@ struct MeetingSettingsSnapshot: Decodable {
     private enum Key: String, CodingKey {
         case digestEnabled = "meetingDigestEnabled"
         case digestMinuteOfDay = "meetingDigestMinuteOfDay"
+        case transcriptionLanguage = "meetingTranscriptionLanguage"
         case remoteIntelligenceEnabled = "meetingRemoteIntelligenceEnabled"
         case localEngine = "meetingLocalEngine"
         case agentPanelEnabled = "agentPanelEnabled"
@@ -603,6 +651,11 @@ struct MeetingSettingsSnapshot: Decodable {
         case relayUrl = "agentPanelRelayUrl"
         case relayKeyId = "agentPanelRelayKeyId"
         case relayPublicKey = "agentPanelRelayPublicKey"
+        case notesTemplate = "meetingNotesTemplate"
+        case notesCustomTemplateId = "meetingNotesCustomTemplateId"
+        case notesLanguage = "meetingNotesLanguage"
+        case disclosureEnabled = "meetingDisclosureEnabled"
+        case disclosureMessage = "meetingDisclosureMessage"
     }
 
     /// The unread state: what the rows show before the first read lands, and
@@ -614,6 +667,7 @@ struct MeetingSettingsSnapshot: Decodable {
         digestEnabled = try container.decodeIfPresent(Bool.self, forKey: .digestEnabled) ?? false
         digestMinuteOfDay = try container.decodeIfPresent(Int.self, forKey: .digestMinuteOfDay)
             ?? MeetingDigestClock.defaultMinuteOfDay
+        transcriptionLanguage = try container.decodeIfPresent(String.self, forKey: .transcriptionLanguage) ?? "auto"
         remoteIntelligenceEnabled = try container.decodeIfPresent(Bool.self, forKey: .remoteIntelligenceEnabled) ?? false
         localEngine = try container.decodeIfPresent(MeetingRemoteEngine.self, forKey: .localEngine)
         agentPanelEnabled = try container.decodeIfPresent(Bool.self, forKey: .agentPanelEnabled) ?? false
@@ -621,6 +675,15 @@ struct MeetingSettingsSnapshot: Decodable {
         relayUrl = try container.decodeIfPresent(String.self, forKey: .relayUrl)
         relayKeyId = try container.decodeIfPresent(String.self, forKey: .relayKeyId)
         relayPublicKey = try container.decodeIfPresent(String.self, forKey: .relayPublicKey)
+        // A built-in or a language this build does not know costs one row,
+        // never the whole settings read.
+        notesTemplate = try container.decodeIfPresent(String.self, forKey: .notesTemplate)
+            .flatMap(MeetingNotesTemplate.init(rawValue:)) ?? .general
+        notesCustomTemplateId = try container.decodeIfPresent(String.self, forKey: .notesCustomTemplateId)
+        notesLanguage = try container.decodeIfPresent(String.self, forKey: .notesLanguage)
+            .flatMap(MeetingNotesLanguage.init(rawValue:)) ?? .auto
+        disclosureEnabled = try container.decodeIfPresent(Bool.self, forKey: .disclosureEnabled) ?? false
+        disclosureMessage = try container.decodeIfPresent(String.self, forKey: .disclosureMessage) ?? ""
     }
 }
 

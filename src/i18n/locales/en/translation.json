@@ -3131,7 +3131,6 @@
     "seriesBrief_other": "Meeting {{nth}} with {{person}} · {{count}} open loops",
     "alwaysRecord": "Always record this meeting",
     "announceInChat": "Announce in chat",
-    "announceLine": "Sona is taking notes for {{name}}. Say so if you'd rather it didn't.",
     "announceRefused": "The disclosure wasn't posted: this app wouldn't take it.",
     "assurance": "Audio stays on this Mac. Nothing joins the call.",
     "record": "Record",

@@ -7,7 +7,7 @@
 //! re-deriving, but the transcript remains the only source of truth: every
 //! value below can be recomputed from it at any time.
 
-use super::types::{MeetingArtifactId, MeetingSessionId, SpeakerId, TranscriptSegmentId};
+use super::types::{MeetingArtifactId, MeetingSessionId, MeetingTemplateId, SpeakerId, TranscriptSegmentId};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -162,6 +162,8 @@ pub struct MeetingUserNotes {
     pub session_id: MeetingSessionId,
     pub body: String,
     pub template: MeetingNotesTemplate,
+    #[serde(default)]
+    pub custom_template_id: Option<MeetingTemplateId>,
     /// Bumped on every save; a save must supply the revision it is replacing.
     pub revision: u64,
     pub updated_at_utc_ms: i64,
@@ -175,6 +177,7 @@ impl MeetingUserNotes {
             session_id,
             body: String::new(),
             template,
+            custom_template_id: None,
             revision: 0,
             updated_at_utc_ms: 0,
         }
@@ -235,6 +238,74 @@ impl MeetingCatchUp {
         Self {
             state,
             bullets: Vec::new(),
+            through_offset_ns: None,
+            segment_count,
+            provisional,
+        }
+    }
+}
+
+/// Which help the live screen asked for while a meeting records.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingLiveHelpKind {
+    /// What was said in the last few minutes.
+    Recent,
+    /// Questions worth asking next.
+    Questions,
+    /// One or two points worth saying next.
+    Say,
+    /// An answer to a question typed about the call.
+    Ask,
+}
+
+/// Why a live-help request produced what it did. `NothingFound` is an
+/// answer, not a failure: the call has not touched the question that was
+/// asked. Only `Ask` can end there; every other kind has a floor of one point.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingLiveHelpState {
+    Ready,
+    NoTranscriptYet,
+    NothingFound,
+    ModelUnavailable,
+    Failed,
+}
+
+/// One point of live help and the stretch of the call its cited lines span.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingLiveHelpItem {
+    pub text: String,
+    pub start_offset_ns: u64,
+    pub end_offset_ns: u64,
+}
+
+/// Help for a meeting while it records. Never saved: it reads the words
+/// recognized so far, which the stored transcript replaces after the stop.
+/// `from_offset_ns` and `through_offset_ns` bound what the model read.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingLiveHelp {
+    pub kind: MeetingLiveHelpKind,
+    pub state: MeetingLiveHelpState,
+    pub items: Vec<MeetingLiveHelpItem>,
+    pub from_offset_ns: Option<u64>,
+    pub through_offset_ns: Option<u64>,
+    pub segment_count: u32,
+    pub provisional: bool,
+}
+
+impl MeetingLiveHelp {
+    pub fn empty(
+        kind: MeetingLiveHelpKind,
+        state: MeetingLiveHelpState,
+        segment_count: u32,
+        provisional: bool,
+    ) -> Self {
+        Self {
+            kind,
+            state,
+            items: Vec::new(),
+            from_offset_ns: None,
             through_offset_ns: None,
             segment_count,
             provisional,

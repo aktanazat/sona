@@ -442,24 +442,6 @@ export default function ConsentPanel() {
     }
   }, []);
 
-  /* The disclosure is posted from here because the words come from the i18next
-   * catalog and the backend cannot reach it. The backend decides whether one is
-   * owed and records what the paste did, so this fires once per recording even
-   * though the live state is re-read on every change to the meeting. */
-  useEffect(() => {
-    if (active?.disclosure.kind !== "pending") return;
-    const sessionId = active.snapshot.session_id;
-    const line = t("consentPanel.announceLine", {
-      name: active.disclosure.notetaker,
-    });
-    void commands
-      .meetingAnnounceDisclosure(sessionId, line)
-      .then(() => refreshActive())
-      .catch((error) => {
-        console.error("Could not announce the recording", error);
-      });
-  }, [active, refreshActive, t]);
-
   useEffect(() => {
     void commands
       .detectionStatusGet()

@@ -78,7 +78,8 @@ const CURRENT_ARTIFACT_ID: &str = "SELECT a.artifact_id
 /// the meeting's words change: a regenerated artifact mints a new id, and an
 /// edited transcript mints a new revision.
 const SEMANTIC_INDEX_KEY: &str = "COALESCE(({CURRENT_ARTIFACT_ID}), '-') || ':' ||
-                     COALESCE(m.current_transcript_revision_id, '-')";
+                     COALESCE(m.current_transcript_revision_id, '-') || ':' ||
+                     COALESCE(m.transcript_purged_at_utc_ms, '-')";
 
 /// The longest snippet the plane will carry per row. Evidence, not payload:
 /// every row of every page rides into a context pack eventually, and the
@@ -370,6 +371,13 @@ impl MeetingStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let session = super::id(session_id);
+        let current_key: String = transaction.query_row(
+            &format!("SELECT ({}) FROM meeting_sessions m WHERE m.id = ?1", semantic_index_key_sql()),
+            params![session], |row| row.get(0),
+        )?;
+        if current_key != key {
+            return Err(StoreError::Conflict);
+        }
         transaction.execute(
             "DELETE FROM meeting_semantic_chunks WHERE session_id = ?1",
             params![session],

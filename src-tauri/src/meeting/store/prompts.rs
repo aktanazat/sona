@@ -204,6 +204,24 @@ impl MeetingStore {
         rows.into_iter().map(run_from_columns).collect()
     }
 
+    /// A completed or failed attempt both count: folder defaults must not
+    /// silently spend another model call when finalization is delivered again.
+    pub(crate) fn has_prompt_run_for_artifact(
+        &self,
+        prompt_id: SavedPromptId,
+        session_id: MeetingSessionId,
+        artifact_id: MeetingArtifactId,
+    ) -> Result<bool, StoreError> {
+        self.connection()?.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM saved_prompt_runs
+                 WHERE prompt_id = ?1 AND target_kind = 'meeting'
+                   AND target_id = ?2 AND artifact_id = ?3)",
+            params![id(prompt_id), id(session_id), id(artifact_id)],
+            |row| row.get(0),
+        ).map_err(Into::into)
+    }
+
     /// The notes revision a meeting currently shows, or `None` when nothing has
     /// been generated for it yet.
     pub(crate) fn current_artifact_id(

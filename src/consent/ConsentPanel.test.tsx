@@ -100,18 +100,6 @@ describe("meeting ritual cards", () => {
     expect(wrapMarkup(null)).not.toContain("speaker to label");
   });
 
-  /* The disclosure the panel pastes into the meeting's chat is a catalog line
-   * with the notetaker's name in it. The name is the whole reason the sentence
-   * exists, so a placeholder that stops interpolating — a rename, a typo — would
-   * put "{{name}}" in somebody else's chat. */
-  test("the recording disclosure names the person the notes are for", () => {
-    expect(i18n.t("consentPanel.announceLine", { name: "Aktan" })).toBe(
-      "Sona is taking notes for Aktan. Say so if you'd rather it didn't.",
-    );
-    expect(i18n.t("consentPanel.announceInChat")).toBe("Announce in chat");
-    expect(i18n.t("consentPanel.announceRefused")).not.toContain("{{");
-  });
-
   /* The card an operator sees for a recording nobody asked for out loud. It
    * has to say what is being recorded, for how long, and offer both ways out —
    * ending this recording, and ending the standing grant behind it. */

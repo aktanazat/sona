@@ -26,6 +26,20 @@ struct DictationSettingsView<DataRows: View>: View {
                         .buttonStyle(.quiet)
                 }
             }
+            PageSection("Recording") {
+                Card {
+                    ToggleRow(
+                        title: "Quiet speech",
+                        detail: "Hears soft speech and whispers. Turns the microphone up and listens more closely.",
+                        isOn: Binding(
+                            get: { store.settings.quietSpeechEnabled },
+                            set: { value in Task { await store.setQuietSpeechEnabled(value) } }
+                        )
+                    )
+                    .disabled(store.isBusy("quiet_speech_enabled"))
+                    CardLine("Dictations can last up to 20 minutes. Sona warns you with one minute left, then stops and transcribes what you said.")
+                }
+            }
             Card {
                 /// The cancel chord exists only when a tap-to-start binding
                 /// can leave a recording running with nothing holding it.
@@ -34,7 +48,7 @@ struct DictationSettingsView<DataRows: View>: View {
                 }
                 ToggleRow(
                     title: "Voice command mode",
-                    detail: "Hold the command shortcut and say what to change about the text you have selected.",
+                    detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",
                     isOn: Binding(
                         get: { store.settings.commandModeEnabled },
                         set: { value in Task { await store.setCommandMode(value) } }
@@ -42,6 +56,14 @@ struct DictationSettingsView<DataRows: View>: View {
                 )
                 if store.settings.commandModeEnabled {
                     ShortcutCaptureRow(store: store, id: "command")
+                    ToggleRow(
+                        title: "Show answers in chat",
+                        detail: "A question opens the chat with its answer. Nothing is typed over your text. Off, every command edits the selection.",
+                        isOn: Binding(
+                            get: { store.settings.commandAnswersInChat },
+                            set: { value in Task { await store.setCommandAnswersInChat(value) } }
+                        )
+                    )
                 }
                 ToggleRow(
                     title: "Learn from corrections in other apps",
@@ -92,6 +114,15 @@ struct DictationSettingsView<DataRows: View>: View {
                 /// Beside the recording overlay, because both are what Sona
                 /// puts on screen outside its own window.
                 HudPillRow(store: store)
+                ToggleRow(
+                    title: "Mute other audio while dictating",
+                    detail: "Turns the Mac's sound off while you record, when something is playing, and back on when you stop. Sound you muted yourself stays muted.",
+                    isOn: Binding(
+                        get: { store.settings.muteWhileRecording },
+                        set: { value in Task { await store.setMuteWhileRecording(value) } }
+                    )
+                )
+                .disabled(store.isBusy("mute_while_recording"))
                 ChoiceRow(
                     title: "Unload model",
                     choices: unloadChoices,
@@ -198,10 +229,11 @@ struct AudioChannelRow: View {
     }
 }
 
-/// The idle pill, and where it sits.
+/// The idle pill, where it sits, and the hour it is away.
 ///
 /// One row, two controls: where the pill sits is not a second setting, it is
-/// the rest of this one, and it only exists once the pill does.
+/// the rest of this one, and it only exists once the pill does. An hour away,
+/// asked for from the pill itself, shows here with the way to end it early.
 struct HudPillRow: View {
     let store: SettingsStore
 
@@ -209,18 +241,27 @@ struct HudPillRow: View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Show the idle pill").bodyText()
-                Text("Keep a small pill on screen between dictations. Click it to start, right-click it to switch modes.")
+                Text("Keep a small pill on screen between dictations. Click it to start, right-click it to switch modes, drag it to another edge of the screen.")
                     .metaText()
+                if let back = hiddenUntil {
+                    Text("Hidden until \(back.formatted(date: .omitted, time: .shortened)).")
+                        .metaText()
+                }
             }
         } trailing: {
             HStack(spacing: 12) {
+                if hiddenUntil != nil {
+                    Button("Show now") { Task { await store.showHudPillNow() } }
+                        .buttonStyle(.quiet)
+                        .disabled(store.isBusy("hud_pill_hidden_until_ms"))
+                }
                 if store.settings.hudPillEnabled {
                     Picker("Idle pill position", selection: Binding(
                         get: { store.settings.hudPillPosition },
                         set: { value in Task { await store.setHudPillPosition(value) } }
                     )) {
-                        ForEach(OverlayPosition.allCases, id: \.self) { position in
-                            Text(position.label).tag(position)
+                        ForEach(HudPillEdge.allCases, id: \.self) { edge in
+                            Text(edge.label).tag(edge)
                         }
                     }
                     .labelsHidden()
@@ -238,6 +279,14 @@ struct HudPillRow: View {
                 .disabled(store.isBusy("hud_pill_enabled"))
             }
         }
+    }
+
+    /// When the pill comes back, while it is on and away. A time already
+    /// passed is not an hour away, whatever the record still says.
+    private var hiddenUntil: Date? {
+        guard store.settings.hudPillEnabled, let ms = store.settings.hudPillHiddenUntilMs else { return nil }
+        let back = Date(timeIntervalSince1970: Double(ms) / 1000)
+        return back > .now ? back : nil
     }
 }
 

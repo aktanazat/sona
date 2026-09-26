@@ -143,6 +143,10 @@ struct MeetingStartAppSettings: Decodable {
     /// The template the preview card names for a series. Absent means the app
     /// default, which the card reads as "App default".
     let meetingNotesTemplate: MeetingNotesTemplate?
+    /// The person's own template standing in for it, when one is set.
+    let meetingNotesCustomTemplateId: String?
+    let meetingDisclosureEnabled: Bool?
+    let meetingDisclosureMessage: String?
 }
 
 // MARK: - The store
@@ -188,7 +192,10 @@ final class MeetingLiveStore {
     // MARK: The panel's own recording
 
     private(set) var active: MeetingConsentPanelSessionState? {
-        didSet { anchorClocks(read: active?.snapshot) }
+        didSet {
+            anchorClocks(read: active?.snapshot)
+            CameraWatermarkController.shared.setRecording(active?.snapshot.phase == .capturingRecording)
+        }
     }
     /// The two boxes an offer carries, kept for the one prompt they were
     /// ticked on. Part of the consent that prompt's Record expresses, so a
@@ -247,6 +254,25 @@ final class MeetingLiveStore {
     /// commits, when an import lands, and when a recovery finalizes.
     private(set) var opened: MeetingSessionId?
 
+    /// The same notes layer the review screen edits. Kept separate from the
+    /// timestamped `noteBody`; a stop flushes this layer before generation.
+    private(set) var userNotes: MeetingUserNotes?
+    private(set) var notesBody = ""
+    private(set) var notesState: MeetingNotesSaveState = .idle
+    private(set) var notesLoading = false
+    private(set) var notesError: String?
+    @ObservationIgnored private var notesSessionId: MeetingSessionId?
+    @ObservationIgnored private var notesTask: Task<Void, Never>?
+    @ObservationIgnored private var notesWrite: Task<Bool, Never>?
+
+    private(set) var liveHelp: MeetingLiveHelp?
+    private(set) var helpKind: MeetingLiveHelpKind?
+    private(set) var helpLoading = false
+    private(set) var helpError: String?
+    private(set) var helpQuestion = ""
+    private(set) var helpQuestionShown: String?
+    @ObservationIgnored private var helpGeneration = 0
+
     // MARK: The unfinished, the imported and the week ahead
 
     private(set) var recovery: [MeetingHistorySummary] = []
@@ -271,6 +297,7 @@ final class MeetingLiveStore {
 
     init(core: Core) {
         self.core = core
+        CameraWatermarkController.shared.attach(core: core)
 
         core.observe(CoreEvent.meetingSuggestionChanged) { [weak self] _ in
             self?.reloadSuggestionsSoon()
@@ -436,7 +463,6 @@ final class MeetingLiveStore {
             let state: MeetingConsentPanelSessionState? =
                 try await core.request("meeting_consent_panel_active_state")
             active = state
-            await announceIfPending()
             await fitDisclosure()
         } catch {
             self.error = reason(error)
@@ -511,6 +537,9 @@ final class MeetingLiveStore {
         if whileShown, live?.session.sessionId != sessionId { return }
         live = snapshot
         provisional = snapshot.session.phase.isActive ? await readProvisional(sessionId) : []
+        if notesSessionId != sessionId {
+            await loadLiveNotes(sessionId)
+        }
     }
 
     private func read(_ sessionId: MeetingSessionId) async -> MeetingReviewSnapshot? {
@@ -640,25 +669,6 @@ final class MeetingLiveStore {
 
     // MARK: - The panel's recording
 
-    /// The room is told once, and only when the core asked for it.
-    private func announceIfPending() async {
-        guard let state = active, let notetaker = state.disclosure.notetaker else { return }
-        do {
-            try await core.request(
-                "meeting_announce_disclosure",
-                MeetingLiveRequest.announceDisclosure(
-                    state.snapshot.sessionId,
-                    line: "Sona is taking notes for \(notetaker). Say so if you'd rather it didn't."))
-            let refreshed: MeetingConsentPanelSessionState? =
-                try await core.request("meeting_consent_panel_active_state")
-            active = refreshed
-        } catch {
-            // A room that would not take the line is a sentence on the card,
-            // not a failure of the recording.
-            self.error = reason(error)
-        }
-    }
-
     /// The panel is a fixed-height window: the core is told whether the card
     /// carries the refusal line, because that line changes its height.
     private func fitDisclosure() async {
@@ -675,7 +685,7 @@ final class MeetingLiveStore {
 
     /// The box for the chat notice, starting from what the series remembers.
     func announceInChat(_ prompt: DetectionPromptEvent) -> Bool {
-        choices(for: prompt).announceInChat
+        settings?.meetingDisclosureEnabled == true && choices(for: prompt).announceInChat
     }
 
     func setAlwaysRecordSeries(_ on: Bool, for prompt: DetectionPromptEvent) {
@@ -693,7 +703,8 @@ final class MeetingLiveStore {
     private func choices(for prompt: DetectionPromptEvent) -> PromptChoices {
         if let choices, choices.promptId == prompt.promptId { return choices }
         return PromptChoices(
-            promptId: prompt.promptId, alwaysRecordSeries: false, announceInChat: prompt.announceInChat)
+            promptId: prompt.promptId, alwaysRecordSeries: false,
+            announceInChat: prompt.prompt.isCalendar ? prompt.announceInChat : settings?.meetingDisclosureEnabled == true)
     }
 
     /// Record, from the panel. The consent is the press on this card: both
@@ -743,6 +754,8 @@ final class MeetingLiveStore {
         guard let session = active?.snapshot else { return }
         Task {
             await act("Stopping") {
+                let savedNotes = self.live?.session.sessionId == session.sessionId
+                    ? await self.flushLiveNotes() : true
                 let result: MeetingMutationResult = try await self.core.request(
                     "meeting_stop",
                     MeetingLiveRequest.stop(
@@ -752,7 +765,14 @@ final class MeetingLiveStore {
                     return
                 }
                 self.active = nil
-                if self.live?.session.sessionId == session.sessionId { self.closeLive() }
+                if self.live?.session.sessionId == session.sessionId {
+                    guard savedNotes else {
+                        await self.adoptLive(session.sessionId)
+                        self.error = "Recording stopped. Your notes have not saved; they are still here."
+                        return
+                    }
+                    self.closeLive()
+                }
                 self.opened = session.sessionId
             }
         }
@@ -950,6 +970,16 @@ final class MeetingLiveStore {
     }
 
     func closeLive() {
+        notesTask?.cancel()
+        notesTask = nil
+        notesSessionId = nil
+        userNotes = nil
+        notesBody = ""
+        notesState = .idle
+        notesLoading = false
+        notesError = nil
+        dismissLiveHelp()
+        helpQuestion = ""
         live = nil
         provisional = []
         noteBody = ""
@@ -968,14 +998,19 @@ final class MeetingLiveStore {
     /// window to the review page, where the notes arrive: the live screen has
     /// nothing left to say once the capture has ended.
     func stop() {
-        guard let session = live?.session, session.allows(.stop) || pending != nil else { return }
+        guard let session = live?.session, session.allows(.stop), pending == nil else { return }
         Task {
             await act("Stopping") {
+                let savedNotes = await self.flushLiveNotes()
                 let result: MeetingMutationResult = try await self.core.request(
                     "meeting_stop",
                     MeetingLiveRequest.stop(
                         session.sessionId, revision: session.revision, surface: .meetingLive))
                 guard await self.settle(result, session) else { return }
+                guard savedNotes else {
+                    self.error = "Recording stopped. Your notes have not saved; they are still here."
+                    return
+                }
                 self.closeLive()
                 self.opened = session.sessionId
             }
@@ -985,6 +1020,7 @@ final class MeetingLiveStore {
     /// Stop and throw it away. Everything the meeting wrote goes with it.
     func discard() {
         guard let session = live?.session else { return }
+        notesTask?.cancel()
         Task {
             await act("Discarding") {
                 let result: MeetingRemovalResult = try await self.core.request(
@@ -1000,6 +1036,202 @@ final class MeetingLiveStore {
                 await self.loadRecovery()
             }
         }
+    }
+
+    // MARK: Your own notes
+
+    private func loadLiveNotes(_ sessionId: MeetingSessionId) async {
+        userNotes = nil
+        notesBody = ""
+        notesState = .idle
+        notesSessionId = sessionId
+        notesLoading = true
+        notesError = nil
+        do {
+            let notes: MeetingUserNotes = try await core.request(
+                "get_meeting_user_notes", MeetingRequest.session(sessionId))
+            guard live?.session.sessionId == sessionId else { return }
+            userNotes = notes
+            notesBody = notes.body
+            notesState = .idle
+        } catch {
+            guard live?.session.sessionId == sessionId else { return }
+            notesError = reason(error)
+        }
+        if live?.session.sessionId == sessionId { notesLoading = false }
+    }
+
+    func reloadLiveNotes() {
+        guard let sessionId = live?.session.sessionId, userNotes == nil else { return }
+        Task { await loadLiveNotes(sessionId) }
+    }
+
+    func typeLiveNotes(_ text: String) {
+        guard userNotes != nil else { return }
+        notesBody = text
+        notesState = .unsaved
+        notesTask?.cancel()
+        notesTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(1_200)) } catch { return }
+            guard let self else { return }
+            _ = await self.persistLiveNotes()
+        }
+    }
+
+    /// Serialized writes avoid a Stop racing an autosave with the same note
+    /// revision. The editor can change while a save is out; a flush keeps
+    /// going until the current body, not just the first draft, is on disk.
+    @discardableResult
+    func flushLiveNotes() async -> Bool {
+        notesTask?.cancel()
+        notesTask = nil
+        repeat {
+            guard await persistLiveNotes() else { return false }
+        } while userNotes?.sessionId == live?.session.sessionId
+            && userNotes != nil && notesBody != userNotes?.body
+        return true
+    }
+
+    /// Used by the quit handshake after its other saves finish, since a
+    /// person can keep typing while those requests are outstanding.
+    var hasPendingLiveNotes: Bool {
+        if notesWrite != nil { return true }
+        guard let notes = userNotes, live?.session.sessionId == notes.sessionId else { return false }
+        return notesBody != notes.body
+    }
+
+    private func persistLiveNotes() async -> Bool {
+        while let write = notesWrite { _ = await write.value }
+        guard let notes = userNotes, live?.session.sessionId == notes.sessionId else { return true }
+        guard notesBody != notes.body else {
+            notesState = .saved
+            notesError = nil
+            return true
+        }
+        let body = notesBody
+        notesState = .saving
+        let write = Task { () -> Bool in
+            defer { self.notesWrite = nil }
+            do {
+                let saved: MeetingUserNotes = try await self.core.request(
+                    "save_meeting_user_notes",
+                    MeetingRequest.userNotesSave(
+                        notes.sessionId, body: body, template: notes.template,
+                        customTemplateId: notes.customTemplateId, expectedNoteRevision: notes.revision))
+                if self.live?.session.sessionId == notes.sessionId {
+                    self.userNotes = saved
+                    self.notesState = self.notesBody == body ? .saved : .unsaved
+                    self.notesError = nil
+                }
+                return true
+            } catch {
+                if self.live?.session.sessionId == notes.sessionId {
+                    self.notesState = .conflict
+                    self.notesError = self.reason(error)
+                }
+                return false
+            }
+        }
+        notesWrite = write
+        return await write.value
+    }
+
+    /// An explicit choice after a refused save, never an automatic overwrite
+    /// of edits the review screen may have made.
+    func keepLiveNotes() {
+        guard let sessionId = live?.session.sessionId, userNotes != nil else { return }
+        Task {
+            while let write = notesWrite { _ = await write.value }
+            do {
+                let saved: MeetingUserNotes = try await core.request(
+                    "get_meeting_user_notes", MeetingRequest.session(sessionId))
+                guard live?.session.sessionId == sessionId else { return }
+                userNotes = saved
+                _ = await flushLiveNotes()
+            } catch {
+                notesError = reason(error)
+            }
+        }
+    }
+
+    func copyLiveNotes() { copy(notesBody) }
+
+    var liveNotesSavedLine: String? {
+        guard let label = notesState.label else { return nil }
+        guard notesState == .saved, let notes = userNotes else { return label }
+        return "\(label) \(notes.updatedAtUtcMs.meetingDate.time)"
+    }
+
+    /// A failed notes save does not trap the microphone in recording, and
+    /// does not discard the draft. After resolving it, this opens the review.
+    func readStoppedMeeting() {
+        guard let session = live?.session, !session.phase.isActive else { return }
+        Task {
+            guard await flushLiveNotes() else { return }
+            closeLive()
+            opened = session.sessionId
+        }
+    }
+
+    // MARK: Help during the call
+
+    func setHelpQuestion(_ text: String) { helpQuestion = text }
+
+    var canAskLiveHelp: Bool {
+        let question = helpQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Matches LIVE_HELP_QUESTION_MAX_CHARS in the core.
+        return !helpLoading && !question.isEmpty && question.unicodeScalars.count <= 500
+    }
+
+    func askLiveHelp(_ kind: MeetingLiveHelpKind) {
+        guard kind != .ask || canAskLiveHelp else { return }
+        runLiveHelp(
+            kind, question: kind == .ask
+                ? helpQuestion.trimmingCharacters(in: .whitespacesAndNewlines) : nil)
+    }
+
+    func retryLiveHelp() {
+        guard let kind = helpKind else { return }
+        runLiveHelp(kind, question: helpQuestionShown)
+    }
+
+    private func runLiveHelp(_ kind: MeetingLiveHelpKind, question: String?) {
+        guard let sessionId = live?.session.sessionId, !helpLoading else { return }
+        helpGeneration += 1
+        let generation = helpGeneration
+        helpKind = kind
+        helpQuestionShown = question
+        liveHelp = nil
+        helpError = nil
+        helpLoading = true
+        Task {
+            do {
+                let result: MeetingLiveHelp = try await core.request(
+                    "meeting_live_help",
+                    MeetingLiveRequest.help(sessionId, kind: kind, question: question))
+                guard live?.session.sessionId == sessionId, helpGeneration == generation else { return }
+                if live?.session.phase.isActive == true {
+                    let words = await readProvisional(sessionId)
+                    guard live?.session.sessionId == sessionId, helpGeneration == generation else { return }
+                    provisional = words
+                }
+                liveHelp = result
+                helpLoading = false
+            } catch {
+                guard live?.session.sessionId == sessionId, helpGeneration == generation else { return }
+                helpError = reason(error)
+                helpLoading = false
+            }
+        }
+    }
+
+    func dismissLiveHelp() {
+        helpGeneration += 1
+        liveHelp = nil
+        helpKind = nil
+        helpLoading = false
+        helpError = nil
+        helpQuestionShown = nil
     }
 
     func setNote(_ text: String) {
@@ -1191,9 +1423,13 @@ final class MeetingLiveStore {
         return gate.phase == .preflight && gate.allows(.refreshPreflight)
     }
 
-    /// The words this meeting will be read with: what the preview card names
-    /// for the series, or the app default.
-    var notesTemplate: MeetingNotesTemplate? { settings?.meetingNotesTemplate }
+    /// The words this meeting will be read with, as the preview card names
+    /// them: the app default, which is the person's own template when one is
+    /// set, else the built-in; nil while the settings have not been read.
+    var notesTemplateChoice: MeetingTemplateChoice<MeetingNotesTemplate>? {
+        MeetingTemplateChoice(
+            builtIn: settings?.meetingNotesTemplate, customTemplateId: settings?.meetingNotesCustomTemplateId)
+    }
 
     /// The transcript as it reads: an editor's removal is honoured even live.
     var lines: [TranscriptEffectiveSegment] {

@@ -1125,6 +1125,11 @@ impl PendingHistoryEntry {
                 source_kind: crate::managers::history::HistorySourceKind::Microphone,
                 has_audio: self.has_audio,
                 capture_status: self.capture_status,
+                // Where the words are about to land: delivery follows this
+                // save, so the frontmost application is the target. The same
+                // bundle-id read mode activation already does, with no
+                // Accessibility access and no content.
+                application_identifier: crate::context::frontmost_application_identifier(),
             }),
         ) {
             Ok(entry) => entry.map(|entry| entry.id),
@@ -1391,15 +1396,21 @@ async fn persist_no_speech_receipt(
 }
 
 /// Resolve the frozen language intent against the model selected for this run.
-fn resolve_effective_language(app: &AppHandle, asr: &AsrPlan) -> String {
+fn resolve_effective_language(app: &AppHandle, asr: &AsrPlan, transcription: &str) -> String {
     let model_manager = app.state::<Arc<ModelManager>>();
+    let language = crate::audio_toolkit::lang_id::restrict_detected_language(
+        None,
+        transcription,
+        &asr.language_candidates,
+    )
+    .unwrap_or(&asr.language);
     match model_manager.get_model_info(&asr.model_id) {
         Some(info) => crate::managers::model::effective_language(
-            &asr.language,
+            language,
             &info.supported_languages,
             info.supports_language_detection,
         ),
-        None => asr.language.clone(),
+        None => language.to_string(),
     }
 }
 
@@ -1411,12 +1422,13 @@ pub(crate) async fn process_transcription_output(
     let asr = run.asr();
     // Resolve the language from the frozen ASR plan rather than a later
     // settings write.
-    let effective_language = resolve_effective_language(app, asr);
+    let effective_language = resolve_effective_language(app, asr, transcription);
 
-    // A command run's transcript is an instruction, not text to clean up: it is
-    // never delivered, so no variant conversion or preset rewrite applies to it.
+    // A command run's transcript is an instruction or a question, not text to
+    // clean up: it is never delivered, so no variant conversion or preset
+    // rewrite applies to it.
     if let Some(command) = run.command() {
-        return crate::command_mode::rewrite_selection(
+        return crate::command_mode::process_command(
             app,
             run,
             command,
@@ -1674,7 +1686,7 @@ impl TranscribeAction {
                         play_feedback_sound_blocking(&app_clone, SoundType::Start);
                     }
                     if rm_clone.is_recording_readiness_current(generation) {
-                        rm_clone.apply_mute();
+                        rm_clone.apply_mute(generation);
                     }
                 });
             }

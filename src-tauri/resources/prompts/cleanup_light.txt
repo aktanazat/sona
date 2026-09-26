@@ -1,0 +1,2 @@
+[CLEANUP_LEVEL: LIGHT]
+Remove filler words and fix grammar, punctuation, capitalization, and spacing. Keep the speaker's wording and order except for the smallest grammatical repair or a clear self-correction. Do not paraphrase, shorten, summarize, or reorganize the text. Preserve existing paragraphs, lists, numbers, dates, times, email addresses, URLs, and explicit punctuation or line-break commands; do not introduce new list structure or speculative formatting.

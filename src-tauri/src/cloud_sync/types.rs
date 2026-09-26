@@ -149,10 +149,25 @@ pub struct CloudShareResult {
     pub file_path: String,
 }
 
+/// How much of a meeting a browser link carries. Notes are the ones Sona
+/// wrote plus the person's own; the transcript, then the notes typed during
+/// the meeting, are added on top, never instead.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudBrowserShareInclude {
+    #[default]
+    Notes,
+    NotesAndTranscript,
+    Everything,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct CloudBrowserShareCreateRequest {
     pub session_id: MeetingSessionId,
     pub expires_at_utc_ms: i64,
+    /// Absent from older callers, which then share the notes only.
+    #[serde(default)]
+    pub include: CloudBrowserShareInclude,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -161,6 +176,18 @@ pub struct CloudBrowserShareResult {
     pub expires_at_utc_ms: i64,
     pub share_url: String,
     pub trust_disclosure: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CloudNoteShareCreateRequest {
+    pub note_id: String,
+    pub expires_at_utc_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CloudNoteShareListRequest {
+    /// Omit to manage all note links, including links to deleted notes.
+    pub note_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

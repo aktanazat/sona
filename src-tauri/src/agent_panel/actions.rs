@@ -27,6 +27,7 @@ use crate::meeting::loop_types::{
 use crate::meeting::people_types::PersonId;
 use crate::meeting::series_types::MeetingSeriesTemplateSetRequest;
 use crate::meeting::session::{MeetingSessionManager, MeetingSpeakerRenameRequest};
+use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::types::{MeetingOperationId, MeetingSessionId, OperationReceipt, SpeakerId};
 use crate::settings::VocabularyEntry;
 use tauri::AppHandle;
@@ -48,6 +49,7 @@ pub(crate) enum ActionUndo {
     SeriesTemplate {
         series_key: String,
         template: Option<MeetingNotesTemplate>,
+        custom_template_id: Option<MeetingTemplateId>,
     },
     /// The entry that held this spoken form before, or `None` when the term
     /// was new and putting it back means removing it.
@@ -60,6 +62,9 @@ pub(crate) enum ActionUndo {
         speaker_id: SpeakerId,
         display_name: String,
     },
+    ConnectionSend { receipt_id: String },
+    CalendarEvent { event_id: String },
+    Unavailable,
 }
 
 /// What a committed action left behind.
@@ -90,8 +95,9 @@ pub(crate) async fn apply(
     app: &AppHandle,
     manager: &MeetingSessionManager,
     action: &SonaChatActionV1,
-) -> Outcome<AppliedAction> {
-    match action {
+    operation_id: &str,
+) -> Result<AppliedAction, String> {
+    let result = match action {
         SonaChatActionV1::ResolveLoop { loop_id, .. } => resolve_loop(manager, loop_id).await,
         SonaChatActionV1::AssignLoop {
             loop_id, person_id, ..
@@ -100,7 +106,7 @@ pub(crate) async fn apply(
             series_key,
             template_id,
             ..
-        } => set_series_template(manager, series_key, Some(*template_id)).await,
+        } => set_series_template(manager, series_key, Some(*template_id), None).await,
         SonaChatActionV1::AddVocabularyTerm {
             term, replacement, ..
         } => add_vocabulary_term(app, term, replacement.as_deref()),
@@ -110,15 +116,46 @@ pub(crate) async fn apply(
             name,
             ..
         } => rename_speaker(manager, *session_id, *speaker_id, name).await,
-    }
+        SonaChatActionV1::DraftEmail { recipients, subject, body, .. } => {
+            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
+            if !store.connection_preferences().map_err(|_| "Could not read connection permissions.")?.email_drafts_enabled {
+                return Err("Enable email drafts in Settings > Connections first.".into());
+            }
+            let result = crate::meeting::mail_context::compose(recipients, subject, body).await;
+            if result.state != crate::meeting::mail_context::MailContextState::Ready {
+                return Err(result.status_text().into());
+            }
+            return Ok(AppliedAction { operation_id: None, undo: ActionUndo::Unavailable });
+        }
+        SonaChatActionV1::CreateCalendarEvent { title, start_utc_ms, end_utc_ms, notes, location, .. } => {
+            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
+            if !store.connection_preferences().map_err(|_| "Could not read connection permissions.")?.calendar_actions_enabled {
+                return Err("Enable calendar actions in Settings > Connections first.".into());
+            }
+            let event_id = crate::integrations::calendar::create(title, *start_utc_ms, *end_utc_ms, notes, location).await?;
+            return Ok(AppliedAction { operation_id: Some(event_id.clone()), undo: ActionUndo::CalendarEvent { event_id } });
+        }
+        SonaChatActionV1::PostSlack { connection_id, text, .. } => {
+            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
+            return applied_send(crate::integrations::send_slack(app, &store, connection_id, text, operation_id).await?);
+        }
+        SonaChatActionV1::SendNotes { connection_id, session_id, .. } => {
+            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
+            let request = crate::integrations::types::SendNotesRequest {
+                connection_id: connection_id.clone(), session_id: *session_id, operation_id: operation_id.into(),
+            };
+            return applied_send(crate::integrations::send_notes(app, &store, &request, None).await?);
+        }
+    };
+    result.map_err(|_| "This change could not be applied. The meeting may have changed.".into())
 }
 
 pub(crate) async fn undo(
     app: &AppHandle,
     manager: &MeetingSessionManager,
     undo: &ActionUndo,
-) -> Outcome<()> {
-    match undo {
+) -> Result<(), String> {
+    let result = match undo {
         ActionUndo::ReopenLoop { loop_id } => reopen_loop(manager, loop_id).await.map(drop),
         ActionUndo::AssignLoop {
             loop_id,
@@ -129,7 +166,8 @@ pub(crate) async fn undo(
         ActionUndo::SeriesTemplate {
             series_key,
             template,
-        } => set_series_template(manager, series_key, *template)
+            custom_template_id,
+        } => set_series_template(manager, series_key, *template, *custom_template_id)
             .await
             .map(drop),
         ActionUndo::Vocabulary { spoken, prior } => restore_vocabulary(app, spoken, prior.as_ref()),
@@ -140,7 +178,24 @@ pub(crate) async fn undo(
         } => rename_speaker(manager, *session_id, *speaker_id, display_name)
             .await
             .map(drop),
+        ActionUndo::ConnectionSend { receipt_id } => {
+            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
+            return crate::integrations::undo_send(app, &store, receipt_id).await;
+        }
+        ActionUndo::CalendarEvent { event_id } => return crate::integrations::calendar::undo(event_id).await,
+        ActionUndo::Unavailable => return Err("This action cannot be undone in Sona. Close the draft in Mail or remove the message at its destination.".into()),
+    };
+    result.map_err(|_| "This change could not be undone. The meeting may have changed.".into())
+}
+
+fn applied_send(receipt: crate::integrations::types::SendReceipt) -> Result<AppliedAction, String> {
+    if receipt.state != crate::integrations::types::SendState::Sent {
+        return Err(receipt.detail);
     }
+    let undo = if receipt.undo.is_some() {
+        ActionUndo::ConnectionSend { receipt_id: receipt.id.clone() }
+    } else { ActionUndo::Unavailable };
+    Ok(AppliedAction { operation_id: Some(receipt.id), undo })
 }
 
 /// The revision every write against a loop must carry, and its current owner.
@@ -240,6 +295,7 @@ async fn set_series_template(
     manager: &MeetingSessionManager,
     series_key: &str,
     template: Option<MeetingNotesTemplate>,
+    custom_template_id: Option<MeetingTemplateId>,
 ) -> Outcome<AppliedAction> {
     let preferences = manager
         .series_preferences(series_key.to_string())
@@ -255,6 +311,7 @@ async fn set_series_template(
             operation_id: MeetingOperationId::new(),
             series_key: series_key.to_string(),
             template,
+            custom_template_id,
             expected_revision: preferences.revision,
         })
         .await
@@ -264,6 +321,7 @@ async fn set_series_template(
         undo: ActionUndo::SeriesTemplate {
             series_key: series_key.to_string(),
             template: preferences.template,
+            custom_template_id: preferences.custom_template_id,
         },
     })
 }

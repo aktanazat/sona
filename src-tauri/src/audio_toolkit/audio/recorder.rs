@@ -427,6 +427,7 @@ struct VadConfig {
     detector: Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>,
     offline_hangover_frames: usize,
     streaming_hangover_frames: usize,
+    quiet_speech_enabled: Arc<AtomicBool>,
 }
 
 impl VadConfig {
@@ -524,8 +525,16 @@ impl AudioRecorder {
             detector: Arc::new(Mutex::new(detector)),
             offline_hangover_frames,
             streaming_hangover_frames,
+            quiet_speech_enabled: Arc::new(AtomicBool::new(false)),
         });
         self
+    }
+
+    /// Update dictation gain without replacing the open microphone stream.
+    pub fn set_quiet_speech_enabled(&self, enabled: bool) {
+        if let Some(config) = &self.vad {
+            config.quiet_speech_enabled.store(enabled, Ordering::Relaxed);
+        }
     }
 
     pub fn with_level_callback<F>(mut self, cb: F) -> Self
@@ -1448,14 +1457,19 @@ fn observe_meeting_packet(
     }
 }
 
+/// Hand each committed packet to the meeting sink, then to `dictation_tap`:
+/// a dictation taken during the meeting hears the same native-rate samples
+/// without touching the meeting's stop barrier.
 fn drain_meeting_lane(
     lane: &mut CaptureConsumer,
     capture: &mut ActiveMeetingCapture,
     wrapped_packet_scratch: &mut Vec<f32>,
+    dictation_tap: &mut dyn FnMut(&[f32]),
 ) -> usize {
     lane.drain_timed(|descriptor, first, second| {
         if second.is_empty() {
             observe_meeting_packet(capture, descriptor, first);
+            dictation_tap(first);
             return;
         }
 
@@ -1463,6 +1477,7 @@ fn drain_meeting_lane(
         wrapped_packet_scratch.extend_from_slice(first);
         wrapped_packet_scratch.extend_from_slice(second);
         observe_meeting_packet(capture, descriptor, wrapped_packet_scratch);
+        dictation_tap(wrapped_packet_scratch);
     })
 }
 
@@ -1515,6 +1530,7 @@ fn close_meeting_callback(
     wrapped_packet_scratch: &mut Vec<f32>,
     meeting_control: &MeetingCallbackControl,
     sample_rate: u32,
+    dictation_tap: &mut dyn FnMut(&[f32]),
 ) -> bool {
     // Close the lane before the callback mode, so the next callback is still
     // dispatched as a capture and commits the block it took before the stop.
@@ -1527,7 +1543,7 @@ fn close_meeting_callback(
 
     loop {
         let acknowledged = lane.stop_acks() != acknowledgements_before;
-        drain_meeting_lane(lane, capture, wrapped_packet_scratch);
+        drain_meeting_lane(lane, capture, wrapped_packet_scratch, dictation_tap);
         observe_meeting_lane_overrun(lane, capture, sample_rate);
         if acknowledged {
             return true;
@@ -1548,6 +1564,28 @@ fn report_unacknowledged_meeting_stop(capture: &mut ActiveMeetingCapture) {
         reason: SourceGapReason::SourceStopped,
         dropped_frames: None,
     });
+}
+
+/// Close the untimed lane and hand `consume` every sample committed before the
+/// callback acknowledged the stop. False when no acknowledgement came in time.
+fn drain_until_stop_ack(lane: &mut CaptureConsumer, consume: &mut dyn FnMut(&[f32])) -> bool {
+    let acks_before = lane.stop_acks();
+    lane.request_stop();
+    let deadline = Instant::now() + STOP_ACK_TIMEOUT;
+    loop {
+        // Check before draining: observing the acknowledgement also publishes
+        // everything committed ahead of it, so the drain below cannot miss a
+        // sample.
+        let acknowledged = lane.stop_acks() != acks_before;
+        lane.drain(&mut *consume);
+        if acknowledged {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(STOP_ACK_POLL_INTERVAL);
+    }
 }
 
 fn run_consumer(inputs: ConsumerInputs) {
@@ -1638,6 +1676,24 @@ fn run_consumer(inputs: ConsumerInputs) {
             }
         }
 
+        let quiet_speech = vad
+            .as_ref()
+            .is_some_and(|config| config.quiet_speech_enabled.load(Ordering::Relaxed));
+        // FrameResampler emits 30 ms at 16 kHz, including its padded final
+        // frame. Use stack storage only for dictation; meeting packets retain
+        // the original native-rate slice.
+        let mut amplified;
+        let samples = if quiet_speech {
+            amplified = [0.0; 480];
+            let frame = &mut amplified[..samples.len()];
+            for (output, input) in frame.iter_mut().zip(samples) {
+                *output = vad::quiet_speech::amplify_sample(*input);
+            }
+            &*frame
+        } else {
+            samples
+        };
+
         if vad_policy == VadPolicy::Disabled {
             emit_frame(samples, audio_cb, out_buf, silence_until_speech);
             return;
@@ -1645,6 +1701,7 @@ fn run_consumer(inputs: ConsumerInputs) {
 
         if let Some(cfg) = vad {
             let mut det = lock_recover(&cfg.detector);
+            det.set_quiet_speech(quiet_speech);
             match det.push_frame(samples).unwrap_or(VadFrame::Speech(samples)) {
                 VadFrame::Speech(buf) => emit_frame(buf, audio_cb, out_buf, silence_until_speech),
                 VadFrame::Noise => {
@@ -1680,6 +1737,26 @@ fn run_consumer(inputs: ConsumerInputs) {
         });
     }
 
+    // Every drain that may carry a dictation's samples feeds them through
+    // this one call over the consumer's dictation state.
+    macro_rules! absorb_dictation {
+        ($chunk:expr) => {
+            absorb(
+                $chunk,
+                vad_policy,
+                &vad,
+                &audio_cb,
+                &mut frame_resampler,
+                &mut processed_samples,
+                &mut silence_until_speech,
+            )
+        };
+    }
+
+    // An overrun a meeting command cleared while a dictation was riding the
+    // meeting's lane. The dictation still lost that audio, so its stop says so.
+    let mut dictation_overrun: Option<CaptureOverrun> = None;
+
     // Poll rather than block: the lane has no blocking primitive by design, and
     // commands must keep flowing even when a disconnected device stops producing
     // samples without closing its stream.
@@ -1699,18 +1776,27 @@ fn run_consumer(inputs: ConsumerInputs) {
 
             match cmd {
                 Cmd::Start(policy, sent_at, ready_tx) => {
-                    if active_meeting.is_some() {
-                        drop(ready_tx);
-                        continue;
+                    if let Some(capture) = active_meeting.as_ref() {
+                        // A dictation during a meeting shares the meeting's
+                        // lane: the meeting keeps its stop barrier, its overrun
+                        // and every packet, and the drain hands the dictation a
+                        // copy. A paused meeting's callback commits nothing, so
+                        // the idle downmix feeds the dictation until it resumes.
+                        if capture.paused {
+                            lane.clear_overrun();
+                            meeting_control.idle();
+                        }
+                    } else {
+                        // A poisoned lane here means the consumer stalled while
+                        // idle, so the lane holds stale pre-keypress audio. Drop
+                        // it rather than prepend it to the new recording.
+                        if let Some(stale) = lane.overrun(in_sample_rate) {
+                            log::warn!("Dropping stale capture backlog before recording: {stale}");
+                            lane.clear_overrun();
+                        }
+                        lane.reset_high_water();
                     }
-                    // A poisoned lane here means the consumer stalled while
-                    // idle, so the lane holds stale pre-keypress audio. Drop it
-                    // rather than prepend it to the new recording.
-                    if let Some(stale) = lane.overrun(in_sample_rate) {
-                        log::warn!("Dropping stale capture backlog before recording: {stale}");
-                        lane.clear_overrun();
-                    }
-                    lane.reset_high_water();
+                    dictation_overrun = None;
 
                     log::debug!(
                         "Cmd::Start processed {:?} after send; capture begins with the {} samples already in the lane",
@@ -1739,7 +1825,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                     }
                 }
                 Cmd::Stop(reply_tx) => {
-                    if active_meeting.is_some() {
+                    if !recording && active_meeting.is_some() {
                         let _ = reply_tx.send(Err(CaptureError::NotCapturing));
                         continue;
                     }
@@ -1749,40 +1835,44 @@ fn run_consumer(inputs: ConsumerInputs) {
                     capture_ready_tx = None;
                     awaiting_first_captured_chunk = None;
 
-                    // Close the lane, then wait for the device callback to
-                    // acknowledge it. That acknowledgement is what guarantees
-                    // every captured sample is already in the lane.
-                    let acks_before = lane.stop_acks();
-                    lane.request_stop();
-
-                    let deadline = Instant::now() + STOP_ACK_TIMEOUT;
-                    loop {
-                        // Check before draining: observing the acknowledgement
-                        // also publishes everything committed ahead of it, so
-                        // the drain below cannot miss a sample.
-                        let acknowledged = lane.stop_acks() != acks_before;
-                        lane.drain(|chunk| {
-                            absorb(
-                                chunk,
-                                vad_policy,
-                                &vad,
-                                &audio_cb,
-                                &mut frame_resampler,
-                                &mut processed_samples,
-                                &mut silence_until_speech,
-                            )
-                        });
-                        if acknowledged {
-                            break;
+                    let mut dictate = |chunk: &[f32]| absorb_dictation!(chunk);
+                    let meeting_capturing = if let Some(capture) =
+                        active_meeting.as_mut().filter(|capture| !capture.paused)
+                    {
+                        // The meeting owns this lane's stop barrier, and closing
+                        // it would cut the meeting. Take every packet committed
+                        // so far, then wait for the next one: like the barrier's
+                        // boundary block, it holds audio captured before the stop.
+                        let deadline = Instant::now() + STOP_ACK_TIMEOUT;
+                        drain_meeting_lane(
+                            &mut lane,
+                            capture,
+                            &mut wrapped_packet_scratch,
+                            &mut dictate,
+                        );
+                        while lane.overrun(in_sample_rate).is_none()
+                            && drain_meeting_lane(
+                                &mut lane,
+                                capture,
+                                &mut wrapped_packet_scratch,
+                                &mut dictate,
+                            ) == 0
+                            && Instant::now() < deadline
+                        {
+                            std::thread::sleep(STOP_ACK_POLL_INTERVAL);
                         }
-                        if Instant::now() >= deadline {
+                        true
+                    } else {
+                        // Close the lane, then wait for the device callback to
+                        // acknowledge it. That acknowledgement is what guarantees
+                        // every captured sample is already in the lane.
+                        if !drain_until_stop_ack(&mut lane, &mut dictate) {
                             log::warn!(
                                 "Timed out waiting for the capture callback to acknowledge stop"
                             );
-                            break;
                         }
-                        std::thread::sleep(STOP_ACK_POLL_INTERVAL);
-                    }
+                        false
+                    };
 
                     frame_resampler.finish(&mut |frame: &[f32]| {
                         handle_frame(
@@ -1805,13 +1895,18 @@ fn run_consumer(inputs: ConsumerInputs) {
                     // lane could not take. The drained samples are a contiguous
                     // prefix before that gap. Return them for WAV persistence,
                     // but make the gap explicit so no caller can auto-decode
-                    // them into a plausible, incomplete transcript.
-                    let reply = match lane.overrun(in_sample_rate) {
+                    // them into a plausible, incomplete transcript. A meeting
+                    // command may already have cleared one this dictation
+                    // crossed, and a capturing meeting clears its own.
+                    let lane_overrun = lane.overrun(in_sample_rate);
+                    let reply = match dictation_overrun.take().or(lane_overrun) {
                         Some(overrun) => {
                             log::error!("{overrun}");
                             let prefix_samples = std::mem::take(&mut processed_samples);
                             silence_until_speech = None;
-                            lane.clear_overrun();
+                            if lane_overrun.is_some() && !meeting_capturing {
+                                lane.clear_overrun();
+                            }
                             Err(CaptureError::Overrun {
                                 overrun,
                                 prefix_samples,
@@ -1834,9 +1929,16 @@ fn run_consumer(inputs: ConsumerInputs) {
                     };
                     let _ = reply_tx.send(reply);
 
-                    // Resume the audio callback so the consumer loop can continue
-                    // receiving samples (important for always-on microphone mode).
-                    lane.resume();
+                    // A capturing meeting's callback never stopped. Otherwise
+                    // resume the audio callback so the consumer loop can continue
+                    // receiving samples (important for always-on microphone
+                    // mode), after a paused meeting's callback goes quiet again.
+                    if !meeting_capturing {
+                        if active_meeting.is_some() {
+                            meeting_control.pause();
+                        }
+                        lane.resume();
+                    }
                 }
                 Cmd::StartMeeting {
                     plan,
@@ -1890,6 +1992,11 @@ fn run_consumer(inputs: ConsumerInputs) {
                         &mut wrapped_packet_scratch,
                         &meeting_control,
                         in_sample_rate,
+                        &mut |chunk: &[f32]| {
+                            if recording {
+                                absorb_dictation!(chunk);
+                            }
+                        },
                     );
                     capture.paused = true;
                     capture.paused_at_offset_ns = capture.final_offset_ns;
@@ -1897,7 +2004,15 @@ fn run_consumer(inputs: ConsumerInputs) {
                         report_unacknowledged_meeting_stop(capture);
                         capture.fail_start(MeetingCaptureError::StreamFailure);
                     }
-                    meeting_control.pause();
+                    if recording {
+                        dictation_overrun = dictation_overrun.or(lane.overrun(in_sample_rate));
+                        // The dictation keeps hearing the room on the idle
+                        // downmix while the meeting is paused. The closed lane
+                        // refuses that downmix until it resumes below.
+                        meeting_control.idle();
+                    } else {
+                        meeting_control.pause();
+                    }
                     lane.clear_overrun();
                     lane.resume();
                     let _ = reply.send(if acknowledged {
@@ -1921,6 +2036,21 @@ fn run_consumer(inputs: ConsumerInputs) {
                         let _ = reply.send(Err(error));
                         continue;
                     }
+                    if recording {
+                        // Hand the dictation everything the idle downmix
+                        // committed, and quiet the callback before the lane
+                        // carries timed packets again: an untimed block among
+                        // them would poison the meeting's drain.
+                        if !drain_until_stop_ack(&mut lane, &mut |chunk: &[f32]| {
+                            absorb_dictation!(chunk);
+                        }) {
+                            log::warn!(
+                                "Timed out waiting for the capture callback to acknowledge stop"
+                            );
+                        }
+                        meeting_control.pause();
+                        dictation_overrun = dictation_overrun.or(lane.overrun(in_sample_rate));
+                    }
                     lane.clear_overrun();
                     lane.resume();
                     capture.paused = false;
@@ -1932,20 +2062,34 @@ fn run_consumer(inputs: ConsumerInputs) {
                         let _ = reply.send(Err(MeetingCaptureError::InvalidState));
                         continue;
                     };
-                    let acknowledged = close_meeting_callback(
-                        &mut lane,
-                        &mut capture,
-                        &mut wrapped_packet_scratch,
-                        &meeting_control,
-                        in_sample_rate,
-                    );
+                    // While the meeting is paused a dictation owns the lane's
+                    // idle downmix, and the meeting callback closed at the pause.
+                    let dictation_owns_lane = capture.paused && recording;
+                    let acknowledged = dictation_owns_lane
+                        || close_meeting_callback(
+                            &mut lane,
+                            &mut capture,
+                            &mut wrapped_packet_scratch,
+                            &meeting_control,
+                            in_sample_rate,
+                            &mut |chunk: &[f32]| {
+                                if recording {
+                                    absorb_dictation!(chunk);
+                                }
+                            },
+                        );
                     if !acknowledged {
                         report_unacknowledged_meeting_stop(&mut capture);
                         capture.fail_start(MeetingCaptureError::StreamFailure);
                     }
-                    meeting_control.idle();
-                    lane.clear_overrun();
-                    lane.resume();
+                    if !dictation_owns_lane {
+                        if recording {
+                            dictation_overrun = dictation_overrun.or(lane.overrun(in_sample_rate));
+                        }
+                        meeting_control.idle();
+                        lane.clear_overrun();
+                        lane.resume();
+                    }
                     let _ = reply.send(if acknowledged {
                         Ok(capture.stop_report())
                     } else {
@@ -1954,20 +2098,33 @@ fn run_consumer(inputs: ConsumerInputs) {
                 }
                 Cmd::AbortMeeting(reply) => {
                     let result = if let Some(mut capture) = active_meeting.take() {
-                        let acknowledged = close_meeting_callback(
-                            &mut lane,
-                            &mut capture,
-                            &mut wrapped_packet_scratch,
-                            &meeting_control,
-                            in_sample_rate,
-                        );
+                        let dictation_owns_lane = capture.paused && recording;
+                        let acknowledged = dictation_owns_lane
+                            || close_meeting_callback(
+                                &mut lane,
+                                &mut capture,
+                                &mut wrapped_packet_scratch,
+                                &meeting_control,
+                                in_sample_rate,
+                                &mut |chunk: &[f32]| {
+                                    if recording {
+                                        absorb_dictation!(chunk);
+                                    }
+                                },
+                            );
                         if !acknowledged {
                             report_unacknowledged_meeting_stop(&mut capture);
                         }
                         capture.fail_start(MeetingCaptureError::StreamFailure);
-                        meeting_control.idle();
-                        lane.clear_overrun();
-                        lane.resume();
+                        if !dictation_owns_lane {
+                            if recording {
+                                dictation_overrun =
+                                    dictation_overrun.or(lane.overrun(in_sample_rate));
+                            }
+                            meeting_control.idle();
+                            lane.clear_overrun();
+                            lane.resume();
+                        }
                         if acknowledged {
                             Ok(())
                         } else {
@@ -1988,9 +2145,34 @@ fn run_consumer(inputs: ConsumerInputs) {
         // Dictation keeps its existing VAD path. A meeting skips every
         // resampler, VAD, meter, event, and streaming-ASR callback here; its
         // worker forwards native-rate descriptor/sample pairs to PacketSink.
-        let drained = if let Some(capture) = active_meeting.as_mut() {
+        // A dictation taken during a capturing meeting hears a copy of each
+        // packet after the sink has it; while the meeting is paused, the
+        // dictation drains the idle downmix like any other.
+        let listen_for_sound = ready_on == ReadyOn::FirstSound && capture_ready_tx.is_some();
+        let mut dictate = |chunk: &[f32]| {
+            heard_sound |= listen_for_sound && chunk.iter().any(|&sample| sample != 0.0);
+            if let Some(buckets) = visualizer.feed(chunk) {
+                if let Some(cb) = &level_cb {
+                    cb(buckets);
+                }
+            }
+            absorb_dictation!(chunk);
+        };
+        let drained = if let Some(capture) = active_meeting
+            .as_mut()
+            .filter(|capture| !(capture.paused && recording))
+        {
             let overrun_was_reported = capture.overrun_reported;
-            let drained = drain_meeting_lane(&mut lane, capture, &mut wrapped_packet_scratch);
+            let drained = drain_meeting_lane(
+                &mut lane,
+                capture,
+                &mut wrapped_packet_scratch,
+                &mut |chunk: &[f32]| {
+                    if recording {
+                        dictate(chunk);
+                    }
+                },
+            );
             observe_meeting_lane_overrun(&lane, capture, in_sample_rate);
             if !overrun_was_reported && capture.overrun_reported {
                 // The callback has already stopped accepting after the sticky
@@ -2001,24 +2183,7 @@ fn run_consumer(inputs: ConsumerInputs) {
             }
             drained
         } else if recording {
-            let listen_for_sound = ready_on == ReadyOn::FirstSound && capture_ready_tx.is_some();
-            lane.drain(|chunk| {
-                heard_sound |= listen_for_sound && chunk.iter().any(|&sample| sample != 0.0);
-                if let Some(buckets) = visualizer.feed(chunk) {
-                    if let Some(cb) = &level_cb {
-                        cb(buckets);
-                    }
-                }
-                absorb(
-                    chunk,
-                    vad_policy,
-                    &vad,
-                    &audio_cb,
-                    &mut frame_resampler,
-                    &mut processed_samples,
-                    &mut silence_until_speech,
-                );
-            })
+            lane.drain(dictate)
         } else {
             lane.discard()
         };
@@ -2089,7 +2254,7 @@ mod tests {
     use cpal::{InputCallbackInfo, InputStreamTimestamp, StreamInstant};
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc, Arc, Mutex,
         },
         thread,
@@ -2196,6 +2361,7 @@ mod tests {
             }))),
             offline_hangover_frames: 0,
             streaming_hangover_frames: 0,
+            quiet_speech_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2761,6 +2927,7 @@ mod tests {
             }))),
             offline_hangover_frames: 0,
             streaming_hangover_frames: 0,
+            quiet_speech_enabled: Arc::new(AtomicBool::new(true)),
         };
         let worker = thread::spawn(move || {
             run_consumer(ConsumerInputs {
@@ -2829,7 +2996,11 @@ mod tests {
         let mut scratch = Vec::new();
         let mut drain = |reader: &mut PacketLaneReader| {
             let mut packets = 0;
-            while let Ok(Some(_)) = reader.pop_into(&mut scratch) {
+            while reader.pop_into(&mut scratch).expect("read meeting packet").is_some() {
+                assert!(
+                    scratch == speech || scratch == silence,
+                    "quiet dictation gain changed a raw meeting packet"
+                );
                 packets += 1;
             }
             packets
@@ -2886,6 +3057,302 @@ mod tests {
 
         cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
         worker.join().expect("join consumer");
+    }
+
+    /// One device callback, dispatched on the meeting mode the way
+    /// `build_stream` dispatches it: timed packets while a meeting captures,
+    /// only an acknowledgement while one closes, nothing while it is paused,
+    /// and the idle downmix otherwise.
+    fn device_callback(
+        control: &MeetingCallbackControl,
+        producer: &mut CaptureProducer,
+        buffer: &[f32],
+        timestamp_ns: i64,
+        last_timestamp: &mut Option<i64>,
+    ) {
+        use super::{
+            MEETING_CALLBACK_CAPTURING, MEETING_CALLBACK_PAUSED, MEETING_CALLBACK_STOP_REQUESTED,
+        };
+        match control.mode.load(Ordering::Acquire) {
+            MEETING_CALLBACK_CAPTURING => capture_into_timed_lane(
+                buffer,
+                &callback_info(timestamp_ns),
+                TimedCaptureState {
+                    channels: 1,
+                    use_channel: None,
+                    sample_rate: NATIVE_RATE,
+                    meeting_control: control,
+                    last_timestamp_value: last_timestamp,
+                    producer,
+                },
+            ),
+            MEETING_CALLBACK_STOP_REQUESTED => {
+                producer.acknowledge_stop();
+            }
+            MEETING_CALLBACK_PAUSED => {}
+            _ => capture_into_lane(buffer, 1, None, producer),
+        }
+    }
+
+    /// A consumer worker with a microphone meeting capturing, fed 10 ms
+    /// buffers of speech through `device_callback`.
+    struct MeetingRig {
+        cmd_tx: mpsc::Sender<Cmd>,
+        worker: thread::JoinHandle<()>,
+        control: Arc<MeetingCallbackControl>,
+        producer: CaptureProducer,
+        reader: PacketLaneReader,
+        speech: Vec<f32>,
+        timestamp_ns: i64,
+        last_timestamp: Option<i64>,
+        scratch: Vec<f32>,
+    }
+
+    impl MeetingRig {
+        /// A meeting that has started, with every packet fed so far read.
+        fn capturing() -> Self {
+            use super::MEETING_CALLBACK_CAPTURING;
+            let (producer, consumer) = capture_lane::timed_lane_with_descriptor_capacity(
+                native_rate_samples() * super::LANE_SECONDS,
+                native_rate_samples() * super::LANE_SECONDS,
+            );
+            let (cmd_tx, cmd_rx) = mpsc::channel();
+            let control = Arc::new(MeetingCallbackControl::new());
+            let meeting_control = Arc::clone(&control);
+            let worker = thread::spawn(move || {
+                run_consumer(ConsumerInputs {
+                    in_sample_rate: NATIVE_RATE,
+                    vad: None,
+                    lane: consumer,
+                    cmd_rx,
+                    level_cb: None,
+                    audio_cb: None,
+                    stream_running_at: Instant::now(),
+                    meeting_control,
+                    ready_on: ReadyOn::FirstBuffer,
+                });
+            });
+            let track_id = SourceTrackId::new();
+            let (sink, reader) = PacketSink::new(track_id, native_rate_samples() * 4, 1024);
+            let mut rig = Self {
+                cmd_tx,
+                worker,
+                control,
+                producer,
+                reader,
+                speech: interleaved(480, 1, 0),
+                timestamp_ns: 1_000_000,
+                last_timestamp: None,
+                scratch: Vec::new(),
+            };
+            let (reply, started) = mpsc::channel();
+            rig.cmd_tx
+                .send(Cmd::StartMeeting {
+                    plan: SourceStartPlan {
+                        session_id: MeetingSessionId::new(),
+                        track_id,
+                        source_kind: SourceKind::Microphone,
+                        required: true,
+                        frozen_application_bundle_ids: Vec::new(),
+                        source_epoch: SourceEpoch::new(1),
+                    },
+                    anchor: SessionClockAnchor {
+                        host_monotonic_anchor_ns: 0,
+                        wall_start_utc_ms: 0,
+                        clock_policy_version: 1,
+                    },
+                    sink,
+                    reply,
+                })
+                .expect("send start meeting");
+            // Feed nothing before the callback is armed: an idle downmix block
+            // ahead of the first timed packet is not what a real start sees.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while rig.control.mode.load(Ordering::Acquire) != MEETING_CALLBACK_CAPTURING {
+                assert!(Instant::now() < deadline, "the meeting callback was never armed");
+                thread::sleep(Duration::from_millis(1));
+            }
+            let (start, fed) = rig.pump_until(&started);
+            assert!(start.is_ok(), "the meeting source never started");
+            assert_eq!(rig.wait_for_packets(fed), fed, "the meeting lost its first packets");
+            rig
+        }
+
+        fn pump(&mut self, buffers: usize) {
+            for _ in 0..buffers {
+                self.timestamp_ns += 10_000_000;
+                device_callback(
+                    &self.control,
+                    &mut self.producer,
+                    &self.speech,
+                    self.timestamp_ns,
+                    &mut self.last_timestamp,
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// Feed buffers until `reply` answers, with how many were fed. The
+        /// callback is what acknowledges a stop, so waiting without feeding
+        /// would deadlock.
+        fn pump_until<T>(&mut self, reply: &mpsc::Receiver<T>) -> (T, usize) {
+            for fed in 1..=200 {
+                self.pump(1);
+                match reply.recv_timeout(Duration::from_millis(20)) {
+                    Ok(answer) => return (answer, fed),
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        panic!("the consumer dropped the reply")
+                    }
+                }
+            }
+            panic!("the consumer never answered");
+        }
+
+        /// Read the meeting's packets until `expected` have arrived or two
+        /// seconds pass: the consumer drains on its own schedule.
+        fn wait_for_packets(&mut self, expected: usize) -> usize {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut packets = 0;
+            loop {
+                while let Ok(Some(_)) = self.reader.pop_into(&mut self.scratch) {
+                    packets += 1;
+                }
+                if packets >= expected || Instant::now() >= deadline {
+                    return packets;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Read every packet the consumer has, stopping once none has arrived
+        /// for 50 ms: ten of its polls with no callback feeding it.
+        fn settle(&mut self) {
+            let mut quiet_since = Instant::now();
+            while quiet_since.elapsed() < Duration::from_millis(50) {
+                while let Ok(Some(_)) = self.reader.pop_into(&mut self.scratch) {
+                    quiet_since = Instant::now();
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn stop_dictation(&mut self) -> Result<RecordedAudio, CaptureError> {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            self.cmd_tx.send(Cmd::Stop(reply_tx)).expect("send stop");
+            self.pump_until(&reply_rx).0
+        }
+
+        fn shutdown(self) {
+            self.cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
+            self.worker.join().expect("join consumer");
+        }
+    }
+
+    /// The dictation shortcut works while a meeting records: the dictation
+    /// hears the room from its start to its stop, and the meeting keeps every
+    /// packet, before, during and after it.
+    #[test]
+    fn a_dictation_during_a_meeting_hears_the_room_and_the_meeting_keeps_every_packet() {
+        let mut rig = MeetingRig::capturing();
+
+        let ready = start(&rig.cmd_tx);
+        rig.pump(20);
+        assert!(
+            ready.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "the dictation never heard the meeting's stream"
+        );
+        let (reply_tx, reply_rx) = mpsc::channel();
+        rig.cmd_tx.send(Cmd::Stop(reply_tx)).expect("send stop");
+        let (reply, fed_through_stop) = rig.pump_until(&reply_rx);
+        let recording = reply.expect("a dictation during a meeting stops cleanly");
+        // Twenty 10 ms buffers at 48 kHz are 3,200 samples at 16 kHz.
+        assert!(
+            recording.samples.len() >= 20 * 480 / 3,
+            "the dictation kept {} samples of 200 ms of speech",
+            recording.samples.len()
+        );
+
+        rig.pump(8);
+        let fed = 20 + fed_through_stop + 8;
+        assert_eq!(
+            rig.wait_for_packets(fed),
+            fed,
+            "the meeting lost packets to the dictation"
+        );
+        assert!(
+            rig.reader.pop_gap().is_none() && !rig.reader.take_gap_overflow(),
+            "the dictation put a break in the meeting's capture"
+        );
+        rig.shutdown();
+    }
+
+    /// Pausing the meeting mid-dictation hands the dictation the idle downmix,
+    /// and resuming hands the lane back to timed packets. An untimed block left
+    /// in the lane at the resume would poison the meeting's drain: no packet
+    /// after it, and a break in the capture that is not the pause.
+    #[test]
+    fn a_dictation_across_a_meeting_pause_keeps_hearing_and_the_meeting_resumes_whole() {
+        use crate::meeting::types::SourceGapReason;
+
+        let mut rig = MeetingRig::capturing();
+        let ready = start(&rig.cmd_tx);
+        rig.pump(5);
+        assert!(
+            ready.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "the dictation never heard the meeting's stream"
+        );
+
+        let (pause_tx, paused) = mpsc::channel();
+        rig.cmd_tx
+            .send(Cmd::PauseMeeting(pause_tx))
+            .expect("send pause");
+        assert!(
+            rig.pump_until(&paused).0.is_ok(),
+            "the meeting did not pause under a dictation"
+        );
+        // The paused meeting takes none of these; only the dictation hears them.
+        rig.pump(10);
+
+        let (resume_tx, resumed) = mpsc::channel();
+        rig.cmd_tx
+            .send(Cmd::ResumeMeeting {
+                epoch: SourceEpoch::new(2),
+                reply: resume_tx,
+            })
+            .expect("send resume");
+        assert!(
+            rig.pump_until(&resumed).0.is_ok(),
+            "the meeting did not resume under a dictation"
+        );
+        rig.settle();
+        rig.pump(5);
+        assert_eq!(
+            rig.wait_for_packets(5),
+            5,
+            "the meeting stopped receiving packets after it resumed"
+        );
+
+        let recording = rig
+            .stop_dictation()
+            .expect("a dictation across a pause stops cleanly");
+        assert!(
+            recording.samples.len() >= 20 * 480 / 3,
+            "the dictation kept {} samples of 200 ms of speech",
+            recording.samples.len()
+        );
+
+        let mut breaks = Vec::new();
+        while let Some(gap) = rig.reader.pop_gap() {
+            breaks.push(gap.reason);
+        }
+        assert_eq!(
+            breaks,
+            [SourceGapReason::Paused],
+            "the meeting's capture broke for more than its pause"
+        );
+        assert!(!rig.reader.take_gap_overflow());
+        rig.shutdown();
     }
 
     /// The overlay's listening state, the start chime, and the forced mute all
@@ -3015,6 +3482,42 @@ mod tests {
 
         cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
         worker.join().expect("join consumer");
+    }
+
+    #[test]
+    fn quiet_gain_reaches_recorded_audio_even_when_vad_is_disabled() {
+        for (quiet, expected_sample) in [(false, 0.03125), (true, 0.125)] {
+            let (mut producer, consumer) = capture_lane::lane(16_000 * super::LANE_SECONDS);
+            let (cmd_tx, cmd_rx) = mpsc::channel();
+            let vad = deterministic_vad(1);
+            vad.quiet_speech_enabled.store(quiet, Ordering::Relaxed);
+            let worker = thread::spawn(move || {
+                run_consumer(ConsumerInputs {
+                    in_sample_rate: 16_000,
+                    vad: Some(vad),
+                    lane: consumer,
+                    cmd_rx,
+                    level_cb: None,
+                    audio_cb: None,
+                    stream_running_at: Instant::now(),
+                    meeting_control: Arc::new(MeetingCallbackControl::new()),
+                    ready_on: ReadyOn::FirstBuffer,
+                });
+            });
+            let ready = start_with_policy(&cmd_tx, VadPolicy::Disabled);
+            let input = [0.03125; 480];
+            capture_into_lane(&input, 1, None, &mut producer);
+            ready.recv_timeout(Duration::from_secs(1)).expect("recording ready");
+            let recorded = stop_and_collect(&cmd_tx, &mut producer, &input).expect("recorded audio");
+            cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
+            worker.join().expect("join consumer");
+
+            assert_eq!(recorded.first(), Some(&expected_sample));
+            assert!(
+                recorded.iter().all(|sample| *sample == expected_sample),
+                "quiet={quiet}: stored audio did not preserve the selected gain"
+            );
+        }
     }
 
     #[test]

@@ -51,6 +51,37 @@ enum ModePromptPreset: String, Codable, CaseIterable, Hashable, Identifiable {
     }
 }
 
+enum ModeCleanupLevel: String, Codable, CaseIterable, Hashable, Identifiable {
+    case none
+    case light
+    case medium
+    case heavy
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .none: "None"
+        case .light: "Light"
+        case .medium: "Medium"
+        case .heavy: "Heavy"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .none:
+            "No AI rewrite. Your other text settings still apply."
+        case .light:
+            "Remove fillers and fix grammar and punctuation. Keep your wording."
+        case .medium:
+            "Tighten your wording and format lists, numbers, dates, and links."
+        case .heavy:
+            "Reshape your words into polished paragraphs or lists. Keep every fact."
+        }
+    }
+}
+
 /// Least to most revealing: the order the privacy ceiling clamps against.
 enum ModeContextPolicy: String, Codable, CaseIterable, Hashable, Identifiable {
     case none
@@ -248,6 +279,8 @@ struct ModeAsr: Codable, Hashable {
 
 struct ModeLlm: Codable, Hashable {
     var enabled: Bool
+    /// Nil leaves an existing mode's instructions unchanged until a level is chosen.
+    var cleanupLevel: ModeCleanupLevel?
     /// Nil inherits the app-wide post-processing provider.
     var providerId: String?
     /// Inert while the provider is inherited.
@@ -255,15 +288,39 @@ struct ModeLlm: Codable, Hashable {
     var spokenInstructions: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case enabled, providerId, modelId, spokenInstructions
+        case enabled, cleanupLevel, providerId, modelId, spokenInstructions
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decode(Bool.self, forKey: .enabled)
+        cleanupLevel = try container.decodeIfPresent(ModeCleanupLevel.self, forKey: .cleanupLevel)
         providerId = try container.decodeIfPresent(String.self, forKey: .providerId)
         modelId = try container.decode(String.self, forKey: .modelId)
         spokenInstructions = try container.decodeIfPresent(Bool.self, forKey: .spokenInstructions) ?? false
+    }
+
+    var rewriteEnabled: Bool { enabled && cleanupLevel != ModeCleanupLevel.none }
+
+    var cleanupChoices: [ModeCleanupLevel?] {
+        let levels = ModeCleanupLevel.allCases.map { Optional($0) }
+        return cleanupLevel == nil ? [nil] + levels : levels
+    }
+
+    var cleanupDetail: String {
+        cleanupLevel?.detail ?? "Your current instructions stay unchanged until you choose a level."
+    }
+
+    mutating func chooseCleanupLevel(_ level: ModeCleanupLevel) {
+        cleanupLevel = level
+        enabled = level != .none
+    }
+
+    mutating func setCleanupEnabled(_ value: Bool) {
+        enabled = value
+        if value, cleanupLevel == ModeCleanupLevel.none {
+            cleanupLevel = .light
+        }
     }
 }
 

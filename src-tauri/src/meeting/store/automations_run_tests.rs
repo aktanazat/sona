@@ -430,7 +430,7 @@ fn a_webhook_is_posted_the_same_document_the_export_action_writes() {
     assert_eq!(url, TAILNET_URL);
     let review = store.review_snapshot(session_id).unwrap();
     let user_notes = store
-        .user_notes(session_id, MeetingNotesTemplate::default())
+        .user_notes(session_id, MeetingNotesTemplate::default().into())
         .unwrap();
     assert_eq!(
         body,

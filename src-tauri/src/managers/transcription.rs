@@ -1,3 +1,4 @@
+use crate::audio_toolkit::lang_id::restrict_detected_language;
 use crate::audio_toolkit::ort_session::{
     capability_label as ort_capability_label, configure_transcribe_provider,
     report_transcribe_session, OrtProvider, DEFAULT_ASR_PROVIDER,
@@ -47,6 +48,9 @@ use transcribe_rs::{
 };
 #[cfg(feature = "cloud-realtime")]
 use zeroize::Zeroizing;
+
+mod audio_chunks;
+use audio_chunks::transcribe_windows;
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1643,7 +1647,6 @@ impl TranscriptionManager {
     /// The caller supplies both values from the immutable meeting plan, so later
     /// settings edits cannot change an in-flight or recovered meeting.
     pub fn meeting_asr_plan_for(&self, model_id: &str, language: &str) -> Option<AsrPlan> {
-        let mut plan = AsrPlan::from_settings(&get_settings(&self.app_handle));
         if !self
             .model_manager
             .get_model_info(model_id)
@@ -1651,11 +1654,11 @@ impl TranscriptionManager {
         {
             return None;
         }
-        plan.model_id = model_id.to_string();
-        if language != "und" {
-            plan.language = language.to_string();
-        }
-        Some(plan)
+        Some(AsrPlan::from_meeting(
+            &get_settings(&self.app_handle),
+            model_id,
+            language,
+        ))
     }
 
     /// Whether the one native engine is already committed to work somebody is
@@ -1937,7 +1940,9 @@ impl TranscriptionManager {
             }
         };
 
-        if !supports_streaming {
+        // A restricted set needs a short draft before one language is chosen.
+        // Do not accept an unrestricted stream as this dictation's final.
+        if !supports_streaming || asr.language_candidates.len() > 1 {
             self.return_engine(engine, &model_id);
             self.router.clear();
             drain_until_finalize(lanes);
@@ -2394,6 +2399,13 @@ impl TranscriptionManager {
             }
 
             let transcribe_result = catch_unwind(AssertUnwindSafe(|| -> Result<String> {
+                let restricted_language = restricted_language_for_audio(
+                    &mut engine,
+                    audio,
+                    &asr.language_candidates,
+                    &model_languages,
+                )?;
+                let validated_language = restricted_language.unwrap_or(validated_language);
                 match &mut engine {
                     LoadedEngine::TranscribeCpp(session) => {
                         // Only actual whisper-family sessions receive a decode
@@ -2428,17 +2440,21 @@ impl TranscriptionManager {
                             run_options.family.is_some()
                         );
 
-                        session
-                            .run(audio, &run_options)
-                            .map(|t| {
-                                // Whisper's audio-based LID (auto mode only;
-                                // `None` when a language hint was passed).
-                                model_detected_language = t.language;
-                                t.text
-                            })
-                            .map_err(|e| {
-                                anyhow::anyhow!("transcribe-cpp transcription failed: {}", e)
-                            })
+                        let limit_ms = session.limits()?.effective_max_audio_ms;
+                        let max_samples = if limit_ms > 0 {
+                            usize::try_from(limit_ms)?.saturating_mul(16)
+                        } else {
+                            audio.len()
+                        };
+                        transcribe_windows(audio, max_samples, |window| {
+                            transcribe_cpp_window(
+                                session,
+                                window,
+                                &run_options,
+                                &mut model_detected_language,
+                                3,
+                            )
+                        })
                     }
                     LoadedEngine::Parakeet(parakeet_engine) => {
                         let params = ParakeetParams {
@@ -2450,16 +2466,27 @@ impl TranscriptionManager {
                             .map(|r| r.text)
                             .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {}", e))
                     }
-                    LoadedEngine::Moonshine(moonshine_engine) => moonshine_engine
-                        .transcribe(audio, &TranscribeOptions::default())
-                        .map(|r| r.text)
-                        .map_err(|e| anyhow::anyhow!("Moonshine transcription failed: {}", e)),
-                    LoadedEngine::MoonshineStreaming(streaming_engine) => streaming_engine
-                        .transcribe(audio, &TranscribeOptions::default())
-                        .map(|r| r.text)
-                        .map_err(|e| {
-                            anyhow::anyhow!("Moonshine streaming transcription failed: {}", e)
-                        }),
+                    // Moonshine rejects input longer than 64 seconds.
+                    LoadedEngine::Moonshine(moonshine_engine) => {
+                        transcribe_windows(audio, 64 * 16_000, |window| {
+                            moonshine_engine
+                                .transcribe(window, &TranscribeOptions::default())
+                                .map(|r| r.text)
+                                .map_err(|e| anyhow::anyhow!("Moonshine transcription failed: {}", e))
+                        })
+                    }
+                    // Streaming encoding still has a finite batch decoder
+                    // token budget. Long captures need separate utterances.
+                    LoadedEngine::MoonshineStreaming(streaming_engine) => {
+                        transcribe_windows(audio, 30 * 16_000, |window| {
+                            streaming_engine
+                                .transcribe(window, &TranscribeOptions::default())
+                                .map(|r| r.text)
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Moonshine streaming transcription failed: {}", e)
+                                })
+                        })
+                    }
                     LoadedEngine::SenseVoice(sense_voice_engine) => {
                         let language = match normalize_cjk_language(&validated_language) {
                             "zh" => Some("zh".to_string()),
@@ -2474,15 +2501,23 @@ impl TranscriptionManager {
                             language,
                             use_itn: Some(true),
                         };
-                        sense_voice_engine
-                            .transcribe_with(audio, &params)
-                            .map(|r| r.text)
-                            .map_err(|e| anyhow::anyhow!("SenseVoice transcription failed: {}", e))
+                        // Match the model's trained 30-second utterance window.
+                        transcribe_windows(audio, 30 * 16_000, |window| {
+                            sense_voice_engine
+                                .transcribe_with(window, &params)
+                                .map(|r| r.text)
+                                .map_err(|e| anyhow::anyhow!("SenseVoice transcription failed: {}", e))
+                        })
                     }
-                    LoadedEngine::GigaAM(gigaam_engine) => gigaam_engine
-                        .transcribe(audio, &TranscribeOptions::default())
-                        .map(|r| r.text)
-                        .map_err(|e| anyhow::anyhow!("GigaAM transcription failed: {}", e)),
+                    // GigaAM's upstream inference window is 25 seconds.
+                    LoadedEngine::GigaAM(gigaam_engine) => {
+                        transcribe_windows(audio, 25 * 16_000, |window| {
+                            gigaam_engine
+                                .transcribe(window, &TranscribeOptions::default())
+                                .map(|r| r.text)
+                                .map_err(|e| anyhow::anyhow!("GigaAM transcription failed: {}", e))
+                        })
+                    }
                     LoadedEngine::Canary(canary_engine) => {
                         output_was_translated = asr.translate_to_english;
                         let lang = if validated_language == "auto" {
@@ -2496,10 +2531,14 @@ impl TranscriptionManager {
                             translate: asr.translate_to_english,
                             ..Default::default()
                         };
-                        canary_engine
-                            .transcribe(audio, &options)
-                            .map(|r| r.text)
-                            .map_err(|e| anyhow::anyhow!("Canary transcription failed: {}", e))
+                        // The decoder's position table has 1,024 entries;
+                        // it cannot emit a whole long dictation in one call.
+                        transcribe_windows(audio, 30 * 16_000, |window| {
+                            canary_engine
+                                .transcribe(window, &options)
+                                .map(|r| r.text)
+                                .map_err(|e| anyhow::anyhow!("Canary transcription failed: {}", e))
+                        })
                     }
                     LoadedEngine::Cohere(cohere_engine) => {
                         let lang = if validated_language == "auto" {
@@ -2512,10 +2551,13 @@ impl TranscriptionManager {
                             language: lang,
                             ..Default::default()
                         };
-                        cohere_engine
-                            .transcribe(audio, &options)
-                            .map(|r| r.text)
-                            .map_err(|e| anyhow::anyhow!("Cohere transcription failed: {}", e))
+                        // Cohere's per-call output budget is 512 tokens.
+                        transcribe_windows(audio, 30 * 16_000, |window| {
+                            cohere_engine
+                                .transcribe(window, &options)
+                                .map(|r| r.text)
+                                .map_err(|e| anyhow::anyhow!("Cohere transcription failed: {}", e))
+                        })
                     }
                 }
             }));
@@ -2617,6 +2659,40 @@ impl TranscriptionManager {
             realtime_factor: finite_realtime_factor(speedup),
             model_produced_text,
         })
+    }
+}
+
+/// Input bounds are advisory for models whose prompt and audio share context.
+/// Split only when the native decoder reports that a real limit was reached;
+/// never accept its incomplete transcript as the completed dictation.
+/// At most three halving levels are allowed; another failure keeps the engine's
+/// original error rather than repeatedly decoding an unusable fragment.
+fn transcribe_cpp_window(
+    session: &mut Session,
+    audio: &[f32],
+    options: &RunOptions,
+    detected_language: &mut Option<String>,
+    splits_left: u8,
+) -> Result<String> {
+    match session.run(audio, options) {
+        Ok(transcript) => {
+            if detected_language.is_none() {
+                *detected_language = transcript.language;
+            }
+            Ok(transcript.text)
+        }
+        Err(transcribe_cpp::Error::InputTooLong(_)
+            | transcribe_cpp::Error::OutputTruncated { .. })
+            if splits_left > 0 && audio.len() > 16_000 =>
+        {
+            transcribe_windows(audio, audio.len() / 2, |window| {
+                transcribe_cpp_window(session, window, options, detected_language, splits_left - 1)
+            })
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "transcribe-cpp transcription failed: {}",
+            error
+        )),
     }
 }
 
@@ -3019,6 +3095,83 @@ fn normalize_cjk_language(language: &str) -> &str {
 
 fn base_language_code(language: &str) -> &str {
     language.split(&['-', '_'][..]).next().unwrap_or(language)
+}
+
+/// The bindings expose a detected language, not per-language probabilities.
+/// Decode at most five seconds without translation, identify its text within
+/// the selected set, then pass one fixed hint to the complete decode. Engines
+/// with no hint input retain their own automatic recognition.
+fn restricted_language_for_audio(
+    engine: &mut LoadedEngine,
+    audio: &[f32],
+    selected: &[String],
+    supported: &[String],
+) -> Result<Option<String>> {
+    if selected.len() < 2 {
+        return Ok(None);
+    }
+    if !matches!(
+        engine,
+        LoadedEngine::TranscribeCpp(_)
+            | LoadedEngine::SenseVoice(_)
+            | LoadedEngine::Canary(_)
+            | LoadedEngine::Cohere(_)
+    ) {
+        return Ok(None);
+    }
+    let candidates: Vec<String> = selected
+        .iter()
+        .filter(|code| {
+            supported.is_empty()
+                || supported.iter().any(|language| {
+                    base_language_code(language).eq_ignore_ascii_case(base_language_code(code))
+                })
+        })
+        .cloned()
+        .collect();
+    let Some(primary) = candidates.first() else {
+        return Ok(None);
+    };
+    if candidates.len() == 1 {
+        return Ok(Some(primary.clone()));
+    }
+    let sample = &audio[..audio.len().min(5 * 16_000)];
+    let fixed_probe_options = || TranscribeOptions {
+        language: Some(normalize_cjk_language(primary).to_string()),
+        ..Default::default()
+    };
+    let (text, detected) = match engine {
+        LoadedEngine::TranscribeCpp(session) => {
+            let model = session.model();
+            // CTC/TDT Parakeet variants choose their own output language.
+            if model.arch() == "parakeet" {
+                return Ok(None);
+            }
+            let options = RunOptions {
+                language: (!model.capabilities().supports_language_detect)
+                    .then(|| normalize_cjk_language(primary).to_string()),
+                ..Default::default()
+            };
+            let draft = session.run(sample, &options)?;
+            (draft.text, draft.language)
+        }
+        LoadedEngine::SenseVoice(model) => {
+            let draft = model.transcribe_with(sample, &SenseVoiceParams::default())?;
+            (draft.text, None)
+        }
+        LoadedEngine::Canary(model) => {
+            let draft = model.transcribe(sample, &fixed_probe_options())?;
+            (draft.text, None)
+        }
+        LoadedEngine::Cohere(model) => {
+            let draft = model.transcribe(sample, &fixed_probe_options())?;
+            (draft.text, None)
+        }
+        _ => return Ok(None),
+    };
+    Ok(restrict_detected_language(detected.as_deref(), &text, &candidates).map(|language| {
+        crate::managers::model::effective_language(language, supported, true)
+    }))
 }
 
 /// Resolve the persisted language intent into the language a specific model can
@@ -3730,6 +3883,84 @@ mod tests {
 
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()
+    }
+
+    #[test]
+    fn meeting_language_reaches_engine_options_without_dictation_translation() {
+        let settings = AppSettings {
+            selected_language: "auto".to_string(),
+            dictation_languages: languages(&["en", "fr"]),
+            translate_to_english: true,
+            ..Default::default()
+        };
+        let meeting = AsrPlan::from_meeting(&settings, "meeting-model", "ja");
+        let options = transcribe_cpp_run_plan(
+            meeting.translate_to_english,
+            &meeting.language,
+            &languages(&["en", "fr", "ja"]),
+            true,
+        );
+        assert_eq!(options.language.as_deref(), Some("ja"));
+        assert_eq!(options.task, Task::Transcribe);
+        assert_eq!(options.target_language, None);
+        assert!(meeting.language_candidates.is_empty());
+    }
+
+    #[test]
+    fn meeting_transcript_applies_vocabulary_and_enabled_replacements() {
+        let settings = AppSettings {
+            custom_words: vec![VocabularyEntry {
+                spoken: "north star".to_string(),
+                written: "Northstar".to_string(),
+            }],
+            replacements_rules: vec![ReplacementRule {
+                spoken: "our company".to_string(),
+                written: "north star".to_string(),
+                enabled: true,
+            }],
+            replacements_enabled: true,
+            filler_word_removal_enabled: false,
+            ..Default::default()
+        };
+        let meeting = AsrPlan::from_meeting(&settings, "meeting-model", "en");
+        assert_eq!(
+            post_process_transcription_text(
+                "our company met north star yesterday.".to_string(),
+                &meeting,
+                true,
+                &OutputLanguageEvidence::UserSelected("en".to_string()),
+                &languages(&["en"]),
+            ),
+            "Northstar met Northstar yesterday."
+        );
+    }
+
+    #[test]
+    fn mode_language_overrides_dictation_candidates() {
+        let settings = AppSettings {
+            dictation_languages: languages(&["en", "fr"]),
+            ..Default::default()
+        };
+        let mut mode = settings.modes[0].asr.clone();
+        mode.language = "ja".to_string();
+        let plan = AsrPlan::from_mode(&settings, &mode);
+        assert_eq!(plan.language, "ja");
+        assert!(plan.language_candidates.is_empty());
+        mode.language = "auto".to_string();
+        let automatic = AsrPlan::from_mode(&settings, &mode);
+        assert_eq!(automatic.language, "auto");
+        assert_eq!(automatic.language_candidates, languages(&["en", "fr"]));
+    }
+
+    #[test]
+    fn one_dictation_language_is_fixed_without_detection() {
+        let settings = AppSettings {
+            dictation_languages: languages(&["uk"]),
+            ..Default::default()
+        };
+        let plan = AsrPlan::from_settings(&settings);
+        assert_eq!(plan.language, "uk");
+        assert!(plan.language_candidates.is_empty());
     }
 
     /// The whole point of the deterministic-replacement stage is that the text

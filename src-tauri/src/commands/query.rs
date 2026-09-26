@@ -1,6 +1,7 @@
 use crate::managers::history::HistoryManager;
 use crate::meeting::detection::calendar::CalendarSource;
 use crate::meeting::session::MeetingSessionManager;
+use crate::meeting::types::MeetingFolderId;
 use crate::query::pack::QueryPack;
 use crate::query::{QueryCursor, QueryError, QueryEventsPage, QueryScope, QuerySearchPage};
 use std::sync::Arc;
@@ -44,6 +45,9 @@ pub async fn sona_query_events(
 /// rows from a series the operator kept on this Mac are not in it, and the
 /// card neither names nor counts that series. See
 /// `query::pack::without_excluded_series`.
+///
+/// With `folder_id`, only that folder's meetings are searched and one line
+/// naming the folder replaces the corpus card. Omitted or null is unscoped.
 #[tauri::command]
 #[specta::specta]
 pub async fn sona_query_pack(
@@ -51,8 +55,9 @@ pub async fn sona_query_pack(
     history: State<'_, Arc<HistoryManager>>,
     calendar: State<'_, Arc<dyn CalendarSource>>,
     question: String,
+    folder_id: Option<MeetingFolderId>,
 ) -> Result<QueryPack, QueryError> {
-    crate::query::pack::for_question(&meetings, &history, &calendar, &question).await
+    crate::query::pack::for_question(&meetings, &history, &calendar, &question, folder_id).await
 }
 
 /// Open one `sona://` address from inside the app.

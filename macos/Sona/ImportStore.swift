@@ -405,7 +405,10 @@ final class QueryStore {
     /// answered from the model's own priors and cited to nothing.
     func pack(question: String) async -> QueryPack? {
         do {
-            let pack: QueryPack = try await core.request("sona_query_pack", ["question": question])
+            let pack: QueryPack = try await core.request("sona_query_pack", [
+                "question": JSONValue.string(question),
+                "folderId": .null,
+            ])
             error = nil
             return pack
         } catch let failure as CoreError {

@@ -27,6 +27,7 @@ mod fs_util;
 mod helpers;
 mod identity_adoption;
 mod input;
+mod integrations;
 mod launch_trace;
 mod llm_client;
 mod managers;
@@ -45,6 +46,7 @@ pub mod query;
 pub mod recorder;
 #[cfg(target_os = "macos")]
 pub mod recorder_macos;
+mod scratchpad;
 mod secrets;
 mod secure_input;
 mod settings;
@@ -755,6 +757,11 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     app_handle.manage(Arc::clone(&screen_recorder_manager));
     app_handle.manage(media_import_manager.clone());
     app_handle.manage(Arc::clone(&meeting_manager));
+    let snapshot_service = meeting::snapshots::MeetingSnapshotService::start(
+        app_handle.clone(),
+        Arc::clone(&meeting_manager),
+    );
+    app_handle.manage(snapshot_service);
     app_handle.manage(Arc::clone(&cloud_runtime));
     // The startup orchestrator calls this only after the launch shell's DOM
     // paint. Recovery can now open the keyring and sweep without occupying it.
@@ -1587,6 +1594,17 @@ pub fn run(cli_args: CliArgs) {
 
     let specta_builder = Builder::<tauri::Wry>::new()
         .commands(collect_commands![
+            integrations::connections_snapshot,
+            integrations::connections_save,
+            integrations::connections_disconnect,
+            integrations::connections_test,
+            integrations::connections_preferences_save,
+            integrations::connections_rule_save,
+            integrations::connections_rule_delete,
+            integrations::connections_preview_notes,
+            integrations::connections_send_notes,
+            integrations::connections_undo_send,
+            integrations::connections_edit_chat_action,
             upstream_import::get_upstream_import_status,
             upstream_import::import_legacy_app,
             upstream_import::revert_upstream_import_settings,
@@ -1653,6 +1671,8 @@ pub fn run(cli_args: CliArgs) {
             commands::hud::hud_pill_state,
             commands::hud::set_hud_pill_enabled,
             commands::hud::set_hud_pill_position,
+            commands::hud::hide_hud_pill_for_an_hour,
+            commands::hud::show_hud_pill_now,
             commands::hud::hud_toggle_recording,
             commands::hud::hud_open_mode_menu,
             commands::persona::get_persona_samples,
@@ -1667,13 +1687,21 @@ pub fn run(cli_args: CliArgs) {
             settings::change_dictation_project_root_setting,
             settings::change_external_query_enabled_setting,
             settings::change_external_mutations_enabled_setting,
+            settings::change_count_words_per_app_setting,
             settings::change_meeting_local_engine_setting,
             settings::change_meeting_remote_intelligence_enabled_setting,
             settings::change_meeting_digest_enabled_setting,
+            settings::change_meeting_disclosure_setting,
+            settings::change_meeting_screen_snapshots_enabled_setting,
             settings::change_meeting_digest_minute_of_day_setting,
+            settings::change_meeting_transcription_language_setting,
+            settings::change_meeting_notes_template_setting,
+            settings::change_meeting_notes_language_setting,
+            settings::change_dictation_languages_setting,
             settings::accept_cloud_stt_provider_consent,
             settings::accept_post_process_provider_consent,
             command_mode::change_command_mode_enabled_setting,
+            command_mode::change_command_answers_in_chat_setting,
             shortcut::change_binding,
             shortcut::reset_binding,
             shortcut::change_ptt_setting,
@@ -1736,6 +1764,7 @@ pub fn run(cli_args: CliArgs) {
             commands::get_app_dir_path,
             commands::get_app_settings,
             commands::get_default_settings,
+            settings::change_quiet_speech_enabled_setting,
             context::get_context_diagnostics,
             commands::get_log_dir_path,
             commands::set_log_level,
@@ -1793,6 +1822,7 @@ pub fn run(cli_args: CliArgs) {
             commands::voice_identity::voice_remove_profile,
             commands::history::get_history_stats,
             commands::history::get_history_trend,
+            commands::history::get_history_usage_stats,
             commands::history::get_history_entries,
             commands::history::search_history_entries,
             commands::history::get_history_run_receipts,
@@ -1816,6 +1846,15 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_announce_disclosure,
             commands::meeting::meeting_trash_list,
             commands::meeting::meeting_trash_restore,
+            commands::meeting::meeting_trash_delete_forever,
+            commands::meeting::meeting_folder_list,
+            commands::meeting::meeting_folder_create,
+            commands::meeting::meeting_folder_rename,
+            commands::meeting::meeting_folder_delete,
+            commands::meeting::meeting_folder_add_meeting,
+            commands::meeting::meeting_folder_remove_meeting,
+            commands::meeting::meeting_folder_set_defaults,
+            commands::meeting::meeting_folders_for_session,
             commands::meeting::meeting_pause,
             commands::meeting::meeting_resume,
             commands::meeting::meeting_stop,
@@ -1830,6 +1869,10 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_search,
             commands::meeting::meeting_title_set,
             commands::meeting::meeting_speaker_rename,
+            commands::call_names::meeting_call_name_targets,
+            commands::call_names::meeting_call_name_status,
+            commands::call_names::meeting_call_names_set,
+            commands::call_names::meeting_call_name_dismiss,
             commands::meeting::meeting_speaker_merge,
             commands::meeting::meeting_segment_edit,
             commands::meeting::meeting_note_create,
@@ -1838,12 +1881,15 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_artifacts_regenerate,
             commands::meeting::meeting_question_forget,
             commands::meeting::meeting_export,
+            commands::meeting::meeting_export_all_csv,
             commands::meeting::produce_ledger_html,
             commands::meeting::meeting_delete,
             commands::meeting::meeting_retention_get,
             commands::meeting::meeting_local_engine_status,
             commands::meeting::meeting_text_engine_for_next_meeting,
             commands::meeting::meeting_retention_set,
+            commands::meeting::meeting_transcript_retention_get,
+            commands::meeting::meeting_transcript_retention_set,
             commands::meeting::meeting_remote_cancel,
             commands::meeting::get_meeting_analytics,
             commands::meeting::list_keyword_trackers,
@@ -1853,6 +1899,7 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::save_meeting_user_notes,
             commands::meeting::reenhance_meeting_with_notes,
             commands::meeting::meeting_catch_up,
+            commands::meeting::meeting_live_help,
             commands::meeting::meeting_live_transcript,
             commands::meeting::meeting_series_template_get,
             commands::meeting::meeting_series_template_for_session,
@@ -1861,10 +1908,17 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_series_always_record_set,
             commands::meeting::meeting_series_remote_opt_out_set,
             commands::meeting::meeting_series_remote_roster,
+            commands::meeting_snapshots::meeting_snapshot_take,
+            commands::meeting_snapshots::meeting_snapshot_list,
+            commands::meeting_snapshots::meeting_snapshot_image,
+            commands::meeting_snapshots::meeting_snapshot_delete,
+            commands::meeting_snapshots::meeting_snapshot_status,
+            commands::meeting_snapshots::meeting_snapshot_automatic_set,
             commands::upcoming::meeting_upcoming_events,
             commands::people::people_list,
             commands::people::person_detail,
             commands::people::organization_detail,
+            commands::people::companies_list,
             commands::people::person_summary_regenerate,
             commands::people::person_context,
             commands::people::meeting_people_context,
@@ -1883,6 +1937,15 @@ pub fn run(cli_args: CliArgs) {
             commands::loops::meeting_loop_assign,
             commands::followup::meeting_follow_up_draft,
             commands::followup::meeting_follow_up_mail,
+            meeting::prep::meeting_prep_preferences_get,
+            meeting::prep::meeting_prep_preferences_set,
+            meeting::prep::meeting_mail_context_check,
+            meeting::prep::meeting_brief_get,
+            meeting::prep::meeting_follow_up_compose,
+            meeting::prep_web::meeting_web_research_connection,
+            meeting::prep_web::meeting_web_research_key_set,
+            meeting::prep_web::meeting_web_research_key_remove,
+            meeting::prep_web::meeting_web_research_test,
             commands::workflows::workflows_list,
             commands::workflows::workflow_set_enabled,
             commands::workflows::workflow_runs,
@@ -1908,6 +1971,9 @@ pub fn run(cli_args: CliArgs) {
             commands::cloud_sync::cloud_sync_conflict_resolve,
             commands::cloud_sync::cloud_share_create,
             commands::cloud_sync::cloud_browser_share_create,
+            commands::cloud_sync::cloud_note_share_create,
+            commands::cloud_sync::cloud_note_share_list,
+            commands::cloud_sync::cloud_browser_share_link,
             commands::cloud_sync::cloud_share_revoke,
             commands::cloud_sync::cloud_share_list,
             commands::cloud_sync::cloud_share_import_file,
@@ -1938,6 +2004,17 @@ pub fn run(cli_args: CliArgs) {
             commands::prompts::saved_prompt_delete,
             commands::prompts::saved_prompt_run,
             commands::prompts::saved_prompt_runs,
+            commands::templates::meeting_custom_templates_list,
+            commands::templates::meeting_custom_template_save,
+            commands::templates::meeting_custom_template_delete,
+            scratchpad::scratchpad_list,
+            scratchpad::scratchpad_get,
+            scratchpad::scratchpad_create,
+            scratchpad::scratchpad_update_body,
+            scratchpad::scratchpad_set_pinned,
+            scratchpad::scratchpad_delete,
+            scratchpad::scratchpad_versions,
+            scratchpad::scratchpad_restore_version,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -1946,8 +2023,10 @@ pub fn run(cli_args: CliArgs) {
             agent_panel::AgentPanelStatusChangedEvent,
             agent_panel::AgentPanelTurnChangedEvent,
             agent_panel::AgentPanelProposalChangedEvent,
+            command_mode::CommandAnsweredEvent,
             modes::ModesChangedEvent,
             managers::audio::DictationRecordingChangedEvent,
+            transcription_coordinator::DictationDurationWarningEvent,
             managers::history::HistoryUpdatePayload,
             managers::transcription::StreamTextEvent,
             managers::transcription::StreamPhaseEvent,
@@ -1965,6 +2044,7 @@ pub fn run(cli_args: CliArgs) {
             meeting::types::MeetingRemovedEvent,
             cloud_sync::types::CloudSyncChangedEvent,
             meeting::types::MeetingNavigationRequestedEvent,
+            meeting::snapshots::MeetingSnapshotChangedEvent,
             meeting::detection::DetectionPromptEvent,
             meeting::detection::DetectionPromptRetractedEvent,
             meeting::detection::MeetingRitualEvent,
@@ -1974,6 +2054,7 @@ pub fn run(cli_args: CliArgs) {
             tray::TraySettingsRequestedEvent,
             tray::TrayCopyFailedEvent,
             query::QueryLinkRequestedEvent,
+            scratchpad::ScratchpadChangedEvent,
         ]);
 
     // The export keeps `src/bindings.ts` in step for the webview. A core the

@@ -599,6 +599,7 @@ pub(crate) fn map_store_error(error: StoreError) -> MeetingCommandError {
             MeetingCommandError::NotFound
         }
         StoreError::ConsentStale => MeetingCommandError::ConsentStale,
+        StoreError::TranscriptDeleted => MeetingCommandError::TranscriptDeleted,
         StoreError::ExplicitConsentRequired => MeetingCommandError::ConsentRequired,
         StoreError::Conflict | StoreError::StaleRevision => MeetingCommandError::StaleRevision,
         StoreError::Invalid => MeetingCommandError::InvalidRequest,

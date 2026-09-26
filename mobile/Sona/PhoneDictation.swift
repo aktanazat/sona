@@ -1,91 +1,127 @@
 import AVFoundation
 import Combine
 import Foundation
+import FoundationModels
 import Speech
 
-/// Dictation stays on this phone. The keyboard never owns microphone access.
-@MainActor
-final class PhoneDictation: ObservableObject {
-    enum Phase {
-        case idle
-        case authorizing
-        case listening
-        case finishing
+struct DictationCapture {
+    let audio: CapturedAudio?
+    let startedAt: Date
+    let text: String
+    let isThought: Bool
+    let error: String?
+}
+
+/// The tap and its owner serialize access to the changing recognition request and file.
+private final class DictationAudioSink {
+    private let lock = NSLock()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var writer: PCMResampler?
+    private var writeError: Error?
+
+    func begin(request: SFSpeechAudioBufferRecognitionRequest, writer: PCMResampler) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.request = request
+        self.writer = writer
+        writeError = nil
     }
 
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        request?.append(buffer)
+        do { try writer?.append(buffer) } catch { writeError = error }
+    }
+
+    func finish() throws -> CapturedAudio? {
+        lock.lock()
+        defer { lock.unlock() }
+        request?.endAudio()
+        request = nil
+        let finishedWriter = writer
+        writer = nil
+        let audio = try finishedWriter?.finish()
+        if let writeError {
+            if let audio { try? FileManager.default.removeItem(at: audio.url) }
+            throw writeError
+        }
+        return audio
+    }
+}
+
+/// One microphone owner. A warm session runs the tap but discards buffers between dictations.
+@MainActor
+final class PhoneDictation: ObservableObject {
+    enum Phase { case idle, authorizing, listening, finishing }
     @Published private(set) var phase: Phase = .idle
     @Published var text = ""
     @Published private(set) var notice: String?
-    /// Runs when a session ends, however it ended, after `phase` is idle again.
-    var onEnded: (() -> Void)?
-    /// The audio of the last session started with `keepingAudio`, once it ended well.
-    /// Set for one session at a time; `takeAudio()` hands it over.
-    private var kept: (audio: CapturedAudio, startedAtUtcMs: Int64)?
+    @Published private(set) var warmUntil: Date?
+    var onEnded: ((DictationCapture) -> Void)?
+    var onStateChanged: (() -> Void)?
+    @Published var profile = DictationProfile.empty
 
     var isBusy: Bool { phase != .idle }
+    var insertableText: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var isWarm: Bool { engine?.isRunning == true && (warmUntil ?? .distantPast) > Date() }
+    static var stylesAvailable: Bool { SystemLanguageModel.default.isAvailable }
 
-    /* Where the trim rule lives: the screen's save action and the state of the button
-     * that triggers it have to agree on what counts as empty. The store keeps its own
-     * guard, as the boundary it is. */
-    var insertableText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
+    private let sink = DictationAudioSink()
     private var sessionID: UUID?
     private var preparation: Task<Void, Never>?
+    private var deadline: Task<Void, Never>?
+    private var finishDeadline: Task<Void, Never>?
     private var engine: AVAudioEngine?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
     private var recognizer: SFSpeechRecognizer?
     private var recognition: SFSpeechRecognitionTask?
-    private var interruptionObserver: NSObjectProtocol?
-    private var keepsAudio = false
-    private var resampler: PCMResampler?
-    private var startedAt: Date?
+    private var observers: [NSObjectProtocol] = []
+    private var startedAt = Date()
+    private var isThought = false
+    private var audio: CapturedAudio?
+    private var completion: Task<Void, Never>?
+    private var sessionProfile = DictationProfile.empty
+    private var sessionStyle: DictationProfile.Style?
 
     init() {
-        interruptionObserver = NotificationCenter.default.addObserver(
+        observers.append(NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(), queue: .main
         ) { [weak self] notification in
             let kind = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             guard kind == AVAudioSession.InterruptionType.began.rawValue else { return }
-            MainActor.assumeIsolated {
-                guard let self, self.isBusy else { return }
-                /* A voice thought ends where it stands: what was heard is the thought.
-                 * Plain dictation has an editor to check, so it is told instead. */
-                if self.keepsAudio {
-                    self.end(error: nil)
-                } else {
-                    self.end(error: NSLocalizedString("dictation.interrupted", comment: ""))
-                }
-            }
-        }
+            MainActor.assumeIsolated { self?.interrupt() }
+        })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.interrupt() }
+        })
     }
 
-    deinit {
-        if let interruptionObserver {
-            NotificationCenter.default.removeObserver(interruptionObserver)
-        }
-    }
+    deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
 
-    /// `keepingAudio` also writes what the microphone hears in the recording capture
-    /// format, so a voice thought keeps its sound beside its transcript.
-    func start(keepingAudio: Bool = false) {
+    func start(keepingAudio: Bool = false, keyboard: Bool = false) {
         guard !isBusy else { return }
         let id = UUID()
         sessionID = id
         phase = .authorizing
         notice = nil
         text = ""
-        keepsAudio = keepingAudio
-        kept = nil
+        isThought = keepingAudio
+        audio = nil
+        startedAt = Date()
+        sessionProfile = profile
+        let styleID = UserDefaults.standard.string(forKey: DictationPreferences.styleKey)
+        sessionStyle = profile.styles.first { $0.id == styleID }
+        onStateChanged?()
         preparation = Task { [weak self] in
             guard let self else { return }
-            let microphoneGranted = PhoneRecorder.hasPermission
-                ? true : await PhoneRecorder.requestPermission()
+            let microphoneGranted = PhoneRecorder.hasPermission ? true : await PhoneRecorder.requestPermission()
             guard !Task.isCancelled, sessionID == id else { return }
             guard microphoneGranted else {
-                end(error: NSLocalizedString("status.microphoneOff", comment: ""))
+                settle(error: NSLocalizedString("status.microphoneOff", comment: ""))
                 return
             }
             let speechGranted = await withCheckedContinuation { continuation in
@@ -95,20 +131,19 @@ final class PhoneDictation: ObservableObject {
             }
             guard !Task.isCancelled, sessionID == id else { return }
             guard speechGranted else {
-                end(error: NSLocalizedString("dictation.speechOff", comment: ""))
+                settle(error: NSLocalizedString("dictation.speechOff", comment: ""))
                 return
             }
-            guard let recognizer = SFSpeechRecognizer(locale: .current),
+            guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: DictationPreferences.activeLanguage)),
                   recognizer.isAvailable, recognizer.supportsOnDeviceRecognition
             else {
-                end(error: NSLocalizedString("dictation.onDeviceUnavailable", comment: ""))
+                settle(error: NSLocalizedString("dictation.onDeviceUnavailable", comment: ""))
                 return
             }
             do {
                 try capture(recognizer: recognizer, id: id)
-            } catch {
-                end(error: error.localizedDescription)
-            }
+                if keyboard { extendWarmSession() }
+            } catch { settle(error: error.localizedDescription) }
             preparation = nil
         }
     }
@@ -116,111 +151,185 @@ final class PhoneDictation: ObservableObject {
     func finish() {
         guard phase == .listening else { return }
         phase = .finishing
-        stopAudio()
+        closeCapture()
+        onStateChanged?()
+        // A speech service that never returns a final result must not strand the keyboard.
+        finishDeadline = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let self, phase == .finishing, completion == nil else { return }
+            completeRecognition(error: nil)
+        }
     }
 
-    /// The kept audio of the session that just ended, once.
-    func takeAudio() -> (audio: CapturedAudio, startedAtUtcMs: Int64)? {
-        defer { kept = nil }
-        return kept
-    }
-
-    /// Called when the operator cancels, when a recording takes the microphone away, and
-    /// when the dictation screen goes away underneath a running session.
     func cancel() {
-        /* A cancelled session has no thought to keep; the file is dropped with it. */
-        keepsAudio = false
-        end(error: nil)
+        guard isBusy else { return }
+        closeCapture()
+        if let audio { try? FileManager.default.removeItem(at: audio.url) }
+        audio = nil
+        stopRecognition()
+        phase = .idle
+        notice = nil
+        if !isWarm { stopEngine() }
+        onStateChanged?()
+    }
+
+    func endWarmSession() {
+        warmUntil = nil
+        deadline?.cancel()
+        deadline = nil
+        switch phase {
+        case .authorizing: cancel()
+        case .listening: finish()
+        case .finishing, .idle: stopEngine()
+        }
+        onStateChanged?()
+    }
+
+    private func extendWarmSession() {
+        warmUntil = Date().addingTimeInterval(TimeInterval(DictationPreferences.warmMinutes * 60))
+        deadline?.cancel()
+        deadline = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(DictationPreferences.warmMinutes * 60))
+            guard !Task.isCancelled, let self else { return }
+            warmUntil = nil
+            if phase == .listening { finish() } else if phase == .idle { stopEngine() }
+            onStateChanged?()
+        }
+        onStateChanged?()
     }
 
     private func capture(recognizer: SFSpeechRecognizer, id: UUID) throws {
-        let audio = AVAudioSession.sharedInstance()
-        try audio.setCategory(.record, mode: .measurement)
-        try audio.setActive(true)
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        /* Read after the session is active, through the same accessor the recorder uses:
-         * an inactive session can report a format the tap will not deliver. */
-        let format = input.inputFormat(forBus: 0)
+        if engine?.isRunning != true {
+            stopEngine()
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+            try session.setActive(true)
+            let engine = AVAudioEngine()
+            let input = engine.inputNode
+            let format = input.inputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0 else { throw CaptureError.unsupportedFormat }
+            let sink = self.sink
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in sink.append(buffer) }
+            self.engine = engine
+            engine.prepare()
+            try engine.start()
+        }
+        guard let engine else { throw CaptureError.unsupportedFormat }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
         request.taskHint = .dictation
-        if keepsAudio {
-            let url = FileManager.default.temporaryDirectory
-                .appending(path: "thought-\(id.uuidString).pcm")
-            resampler = try PCMResampler(url: url, inputFormat: format)
-        }
-        let resampler = self.resampler
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
-            try? resampler?.append(buffer)
-        }
-        self.engine = engine
-        self.request = request
+        request.contextualStrings = sessionProfile.recognitionHints
+        let file = FileManager.default.temporaryDirectory.appending(path: "dictation-\(id.uuidString).pcm")
+        let writer = try PCMResampler(url: file, inputFormat: engine.inputNode.inputFormat(forBus: 0))
         self.recognizer = recognizer
         recognition = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let final = result?.isFinal ?? false
             let failure = error?.localizedDescription
-            Task { @MainActor in
-                self?.receive(text: text, final: final, error: failure, id: id)
-            }
+            Task { @MainActor in self?.receive(text: text, final: final, error: failure, id: id) }
         }
-        engine.prepare()
-        try engine.start()
+        sink.begin(request: request, writer: writer)
         startedAt = Date()
         phase = .listening
+        onStateChanged?()
     }
 
     private func receive(text: String?, final: Bool, error: String?, id: UUID) {
-        guard sessionID == id else { return }
+        guard sessionID == id, completion == nil else { return }
         if let text { self.text = text }
-        if final {
-            /* With audio kept, silence is still a thought: the sound is what is saved
-             * and the sorter files it unread. Without it, nothing was captured. */
-            let empty = self.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            end(error: empty && !keepsAudio ? NSLocalizedString("dictation.empty", comment: "") : nil)
-        } else if let error {
-            end(error: error)
+        if final || error != nil { completeRecognition(error: final ? nil : error) }
+    }
+
+    private func completeRecognition(error: String?) {
+        guard isBusy, completion == nil else { return }
+        closeCapture()
+        phase = .finishing
+        finishDeadline?.cancel()
+        finishDeadline = nil
+        let corrected = sessionProfile.apply(to: insertableText)
+        text = corrected
+        onStateChanged?()
+        guard error == nil, !corrected.isEmpty, let style = sessionStyle else {
+            settle(error: error)
+            return
+        }
+        guard Self.stylesAvailable else {
+            settle(error: nil, styleNotice: NSLocalizedString("dictation.styleUnavailable", comment: ""))
+            return
+        }
+        completion = Task { [weak self] in
+            guard let self else { return }
+            do {
+                struct Envelope: Encodable {
+                    let transcript: String
+                    let language: String
+                    let target: [String: String] = [:]
+                    let context: [String: String] = [:]
+                }
+                let envelope = try JSONEncoder().encode(Envelope(transcript: corrected, language: DictationPreferences.activeLanguage))
+                let session = LanguageModelSession(instructions: style.prompt + "\nReturn only the rewritten text. An empty response is valid when there are no words to keep.")
+                let response = try await session.respond(to: String(decoding: envelope, as: UTF8.self))
+                guard !Task.isCancelled else { return }
+                text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                settle(error: nil)
+            } catch {
+                guard !Task.isCancelled else { return }
+                settle(error: nil, styleNotice: NSLocalizedString("dictation.styleFailed", comment: ""))
+            }
         }
     }
 
-    private func stopAudio() {
-        if let engine {
-            engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
-            self.engine = nil
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
-        request?.endAudio()
-        request = nil
+    private func interrupt() {
+        warmUntil = nil
+        deadline?.cancel()
+        if isBusy {
+            closeCapture()
+            settle(error: NSLocalizedString("dictation.interrupted", comment: ""))
+        } else { stopEngine(); onStateChanged?() }
     }
 
-    private func end(error: String?) {
+    private func closeCapture() {
+        do {
+            if let captured = try sink.finish() { audio = captured }
+        } catch { notice = NSLocalizedString("status.notSaved", comment: "") }
+        if !isWarm { stopEngine() }
+    }
+
+    private func settle(error: String?, styleNotice: String? = nil) {
+        guard isBusy else { return }
+        closeCapture()
+        let capture = DictationCapture(audio: audio, startedAt: startedAt, text: insertableText,
+                                       isThought: isThought, error: error)
+        audio = nil
+        stopRecognition()
+        phase = .idle
+        notice = error ?? styleNotice ?? (insertableText.isEmpty ? NSLocalizedString("dictation.empty", comment: "") : notice)
+        if error != nil { warmUntil = nil; stopEngine() }
+        onEnded?(capture)
+        onStateChanged?()
+    }
+
+    private func stopRecognition() {
         sessionID = nil
         preparation?.cancel()
         preparation = nil
-        stopAudio()
+        finishDeadline?.cancel()
+        finishDeadline = nil
+        completion?.cancel()
+        completion = nil
         recognition?.cancel()
         recognition = nil
         recognizer = nil
-        if let resampler, let startedAt {
-            /* The tap is gone, so the file is complete. Anything heard is kept; a cancel
-             * cleared `keepsAudio` and drops it. */
-            let finished = try? resampler.finish()
-            if keepsAudio, let finished, finished.byteLength > 0 {
-                kept = (finished, Int64(startedAt.timeIntervalSince1970 * 1000))
-            } else if let finished {
-                try? FileManager.default.removeItem(at: finished.url)
-            }
+    }
+
+    private func stopEngine() {
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            self.engine = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
-        resampler = nil
-        startedAt = nil
-        keepsAudio = false
-        notice = error
-        phase = .idle
-        onEnded?()
     }
 }

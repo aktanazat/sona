@@ -94,45 +94,58 @@ struct MeetingConsentInput {
 /// meeting's own chat is doing.
 enum MeetingConsentDisclosure: Decodable {
     case notAsked
-    /// Asked for and not posted yet. `notetaker` is the name the room is told
-    /// the notes are for.
-    case pending(notetaker: String)
-    /// Posted, or refused: the receipt says which.
-    case attempted(receipt: MeetingConsentDeliveryReceipt)
+    case disabled
+    case pending(line: String)
+    case posting(line: String)
+    case attempted(receipt: MeetingConsentDeliveryReceipt, line: String, reason: String?)
 
-    private enum Key: String, CodingKey { case kind, notetaker, receipt }
+    private enum Key: String, CodingKey { case kind, line, reason, receipt }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
         let kind = try container.decode(String.self, forKey: .kind)
         switch kind {
         case "not_asked": self = .notAsked
-        case "pending": self = .pending(notetaker: try container.decode(String.self, forKey: .notetaker))
+        case "disabled": self = .disabled
+        case "pending": self = .pending(line: try container.decodeIfPresent(String.self, forKey: .line) ?? "")
+        case "posting": self = .posting(line: try container.decode(String.self, forKey: .line))
         case "attempted":
-            self = .attempted(receipt: try container.decode(MeetingConsentDeliveryReceipt.self, forKey: .receipt))
+            self = .attempted(
+                receipt: try container.decode(MeetingConsentDeliveryReceipt.self, forKey: .receipt),
+                line: try container.decodeIfPresent(String.self, forKey: .line) ?? "",
+                reason: try container.decodeIfPresent(String.self, forKey: .reason))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown disclosure \(kind)")
         }
     }
 
-    /// What the one attempt did, as the card says it. Typed is not sent: the
-    /// line waits in the chat box for the person, and the card says so rather
-    /// than claiming the room was told.
     var outcomeLine: String? {
-        guard case let .attempted(receipt) = self else { return nil }
-        switch receipt.outcome {
-        case .delivered, .dispatchedUnderSecureInput:
-            return "The notice is in the chat box. Send it when you're ready."
-        case .dispatchedButUnconfirmed:
-            return "Sona may have typed the notice. Check the chat box."
-        case .definitelyNotDispatched:
-            return "The notice wasn't typed: the meeting's chat box wasn't open when recording started."
+        switch self {
+        case .notAsked, .disabled: return nil
+        case .pending: return "Not posted. Sona did not reach the meeting chat."
+        case .posting: return "The notice could not be confirmed. Check the chat before sending it yourself."
+        case let .attempted(receipt, _, reason):
+            if let reason {
+                return receipt.outcome == .definitelyNotDispatched ? "Not posted. \(reason)" : reason
+            }
+            switch receipt.outcome {
+            case .delivered:
+                return "An earlier version typed this notice but did not send it. Check the chat."
+            case .dispatchedButUnconfirmed, .dispatchedUnderSecureInput:
+                return "Sona could not confirm the notice. Check the chat."
+            case .definitelyNotDispatched:
+                return "The notice was not posted. Copy it and send it yourself."
+            }
         }
     }
 
-    var notetaker: String? {
-        if case let .pending(notetaker) = self { notetaker } else { nil }
+    var noticeText: String? {
+        switch self {
+        case let .pending(line), let .posting(line), let .attempted(_, line, _):
+            return line.isEmpty ? nil : line
+        case .notAsked, .disabled: return nil
+        }
     }
 }
 
@@ -369,10 +382,6 @@ enum MeetingLiveRequest {
         ])
     }
 
-    static func announceDisclosure(_ sessionId: MeetingSessionId, line: String) -> [String: JSONValue] {
-        ["sessionId": .string(sessionId), "line": .string(line)]
-    }
-
     static func prompt(_ promptId: String) -> [String: JSONValue] {
         ["promptId": .string(promptId)]
     }
@@ -396,6 +405,66 @@ enum MeetingLiveRequest {
 enum MeetingLiveStopSurface: String {
     case meetingLive = "meeting_live"
     case consentPanel = "consent_panel"
+}
+
+// MARK: - Help during a call
+
+enum MeetingLiveHelpKind: String, Decodable {
+    case recent, questions, say, ask
+
+    var label: String {
+        switch self {
+        case .recent: "What did I miss?"
+        case .questions: "Questions to ask"
+        case .say: "Something to say"
+        case .ask: "Ask about this call"
+        }
+    }
+}
+
+enum MeetingLiveHelpState: String, Decodable {
+    case ready
+    case noTranscriptYet = "no_transcript_yet"
+    case nothingFound = "nothing_found"
+    case modelUnavailable = "model_unavailable"
+    case failed
+
+    var label: String? {
+        switch self {
+        case .ready: nil
+        case .noTranscriptYet: "No words have been recognized yet. Try again in a moment."
+        case .nothingFound: "This part of the call has not covered that."
+        case .modelUnavailable: "No model is available to answer. Check your meeting settings."
+        case .failed: "Sona could not answer this time. Try again."
+        }
+    }
+}
+
+struct MeetingLiveHelpItem: Decodable {
+    let text: String
+    let startOffsetNs: Int64
+    let endOffsetNs: Int64
+}
+
+struct MeetingLiveHelp: Decodable {
+    let kind: MeetingLiveHelpKind
+    let state: MeetingLiveHelpState
+    let items: [MeetingLiveHelpItem]
+    let fromOffsetNs: Int64?
+    let throughOffsetNs: Int64?
+    let segmentCount: Int
+    let provisional: Bool
+}
+
+extension MeetingLiveRequest {
+    static func help(_ sessionId: MeetingSessionId, kind: MeetingLiveHelpKind,
+                     question: String?) -> [String: JSONValue] {
+        [
+            "sessionId": .string(sessionId),
+            "kind": .string(kind.rawValue),
+            "question": question.map(JSONValue.string) ?? .null,
+        ]
+    }
 }
 
 // MARK: - Detection
@@ -722,6 +791,8 @@ struct DetectionPromptRetractedEvent: Decodable {
 /// `MeetingRitualAction`: what a press on a ritual card asks for.
 enum RitualAction: String {
     case prepRecordWhenStarts = "prep_record_when_starts"
+    /// Open the ready-to-record screen for this meeting now.
+    case prepRecord = "prep_record"
     case prepOpenBrief = "prep_open_brief"
     case prepDismiss = "prep_dismiss"
     case wrapOpenNotes = "wrap_open_notes"
@@ -753,7 +824,7 @@ struct RitualPrepCard: Decodable {
     let seriesKey: String
     let title: String
     let startUtcMs: Int64
-    let lastMeetingId: MeetingSessionId
+    let lastMeetingId: MeetingSessionId?
     let headline: String
     let mineOpenLoops: [String]
     let mineOpenLoopCount: Int
@@ -835,7 +906,16 @@ struct UpcomingSeries: Decodable {
     /// themselves.
     let alwaysRecord: Bool
     let template: MeetingNotesTemplate?
+    /// One of the person's own templates, by id. Optional on the wire, so a
+    /// core that does not send it still fills the row.
+    let customTemplateId: String?
     let digestIncluded: Bool
+
+    /// The series' choice: the custom template when it has one, else the
+    /// built-in, else nil for the app default.
+    var templateChoice: MeetingTemplateChoice<MeetingNotesTemplate>? {
+        MeetingTemplateChoice(builtIn: template, customTemplateId: customTemplateId)
+    }
 }
 
 /// `MeetingUpcomingAttendee`.

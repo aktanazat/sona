@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt,
     fs::{self, File, OpenOptions},
     io::Write,
@@ -22,6 +21,7 @@ use crate::{
         cloud_bundle::CloudMeetingBundleV1,
         session::{ImportRecordingRequest, MeetingSessionManager, RecordingOrigin},
         store::{
+            cloud_phone_notes_object_id,
             CloudCapabilitiesCache, CloudConflict, CloudHead, CloudOutboxChunk, CloudOutboxInput,
             CloudOutboxKind, CloudOutboxRecord, CloudOutboxState, CloudOutboxUpdate,
             CloudShareContentKind, CloudShareInput, CloudShareRecord, CloudShareState,
@@ -29,7 +29,7 @@ use crate::{
         },
         types::{
             MeetingCommandError, MeetingConsentProvenance, MeetingListFilter,
-            MeetingNavigationDestination, MeetingPhase, MeetingReviewSnapshot, MeetingSessionId,
+            MeetingNavigationDestination, MeetingPhase, MeetingSessionId,
             MANUAL_DEFAULT_TITLE,
         },
     },
@@ -57,9 +57,11 @@ use super::{
         PairingEnvelopeSealInput, SharePayloadContext, SharePayloadDomain, StreamingSha256,
         UploadChunk, UploadKind,
     },
+    share_document::{meeting_document, SHARE_DOCUMENT_KIND, SHARE_DOCUMENT_SOURCE_FORMAT},
     share_file::{parse_worker_share_transport, read_share_file, write_share_file},
     types::{
-        CloudBrowserShareCreateRequest, CloudBrowserShareResult, CloudConflictChoice,
+        CloudBrowserShareCreateRequest, CloudBrowserShareResult,
+        CloudConflictChoice,
         CloudConflictResolveRequest, CloudMeetingStatus, CloudObjectState,
         CloudPairingAcceptRequest, CloudPairingApproveRequest, CloudPairingOffer,
         CloudPairingOfferRequest, CloudShareCreateRequest, CloudShareImportRequest,
@@ -71,13 +73,18 @@ use super::{
     },
 };
 
+#[path = "dictation_profile.rs"]
+mod dictation_profile;
+
+#[path = "note_shares.rs"]
+mod note_shares;
+
 const PROTOCOL_AUDIENCE: &str = "sona-companion";
 const PROTOCOL_VERSION: u32 = 1;
 const CRYPTO_VERSION: u32 = 1;
 const OBJECT_SOURCE_FORMAT: &str = "sona-meeting-bundle-json-v1";
+const PHONE_NOTES_SOURCE_FORMAT: &str = "sona-phone-meeting-v1";
 const CAPABILITY_SHARE_KIND: &str = "meeting_bundle";
-const BROWSER_SHARE_KIND: &str = "markdown";
-const BROWSER_SOURCE_FORMAT: &str = "markdown-utf8";
 const OBJECT_MANIFEST_FILE: &str = "manifest.bin";
 const MAX_ENCRYPTED_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PLAINTEXT_CHUNK_BYTES: usize = MAX_ENCRYPTED_CHUNK_BYTES - 28;
@@ -295,6 +302,8 @@ struct DeviceRecordingManifest {
     duration_ms: i64,
     title: String,
     audio: DeviceRecordingAudio,
+    #[serde(default)]
+    personal_notes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +342,7 @@ struct DeviceRecordingImport {
     title: String,
     recorded_at_utc_ms: i64,
     device_id: String,
+    personal_notes: Option<String>,
 }
 
 impl DeviceRecordingImport {
@@ -1290,7 +1300,7 @@ impl CloudSyncRuntime {
                 CloudShareContentKind::CapabilityBundle,
             )
             .await?;
-        let (root, payload) = self.stage_share(&store, &share.outbox, &share.record)?;
+        let (root, payload) = self.stage_share(&store, &share.outbox, &share.record, None)?;
         let writer_signature =
             self.share_writer_signature(&share.access, &share.record, &payload)?;
         let transport = worker_share_transport(&share.record, &payload, &writer_signature)?;
@@ -1317,6 +1327,12 @@ impl CloudSyncRuntime {
     ) -> Result<CloudBrowserShareResult, CloudRuntimeError> {
         self.reject_portable()?;
         let store = self.queueable_store().await?;
+        let review = store.review_snapshot(request.session_id).map_err(map_store_error)?;
+        let user_notes = store
+            .user_notes(request.session_id, crate::meeting::analytics::MeetingNotesTemplate::default().into())
+            .map_err(map_store_error)?;
+        let document = meeting_document(&review, &user_notes.body, request.include)
+            .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
         let share = self
             .create_share_intent(
                 &store,
@@ -1325,12 +1341,16 @@ impl CloudSyncRuntime {
                 CloudShareContentKind::BrowserMarkdown,
             )
             .await?;
-        let (root, _) = self.stage_share(&store, &share.outbox, &share.record)?;
-        let endpoint = share.access.state.endpoint.trim_end_matches('/');
-        let share_url = format!(
-            "{endpoint}/s/{}#{}",
-            share.record.share_id,
-            base64_url_encode(&root)
+        let (root, _) = self.stage_share(
+            &store,
+            &share.outbox,
+            &share.record,
+            Some(document),
+        )?;
+        let share_url = browser_share_url(
+            &share.access.state.endpoint,
+            &share.record.share_id,
+            &root,
         );
         self.emit_changed(Some(request.session_id), Some(CloudObjectState::Queued));
         Ok(CloudBrowserShareResult {
@@ -1415,24 +1435,7 @@ impl CloudSyncRuntime {
         let records = store
             .cloud_shares_for_session(request.session_id)
             .map_err(map_store_error)?;
-        let mut shares = Vec::with_capacity(records.len());
-        for record in records {
-            let outbox = match &record.outbox_id {
-                Some(outbox_id) => store.cloud_outbox(outbox_id).map_err(map_store_error)?,
-                None => None,
-            };
-            shares.push(CloudShareSummary {
-                share_id: record.share_id,
-                kind: match record.content_kind {
-                    CloudShareContentKind::CapabilityBundle => CloudShareKind::File,
-                    CloudShareContentKind::BrowserMarkdown => CloudShareKind::Browser,
-                },
-                expires_at_utc_ms: record.expires_at_utc_ms,
-                state: share_lifecycle(record.state, outbox.map(|item| item.state)),
-                revoked_at_utc_ms: record.revoked_at_utc_ms,
-            });
-        }
-        Ok(shares)
+        note_shares::share_summaries(&store, records)
     }
 
     pub(crate) async fn share_import(
@@ -1483,6 +1486,7 @@ impl CloudSyncRuntime {
         self.drain_outbox(&access).await?;
         if self.request_permitted(&access.state).await {
             self.pull_changes(&access).await?;
+            dictation_profile::sync(self, &access).await?;
         }
         Ok(())
     }
@@ -2048,7 +2052,7 @@ impl CloudSyncRuntime {
             return Err(CloudRuntimeError::IntegrityFailure);
         }
         let mut record = original.clone();
-        self.stage_share(&access.store, &record, &share)?;
+        self.stage_share(&access.store, &record, &share, None)?;
         if !self.request_permitted(&access.state).await {
             return Err(CloudRuntimeError::Deferred);
         }
@@ -2299,6 +2303,11 @@ impl CloudSyncRuntime {
             .remote_revision_id
             .as_deref()
             .ok_or(CloudRuntimeError::IntegrityFailure)?;
+        let source_format = if record.object_id == cloud_phone_notes_object_id(session_id) {
+            PHONE_NOTES_SOURCE_FORMAT
+        } else {
+            OBJECT_SOURCE_FORMAT
+        };
         let bundle =
             CloudMeetingBundleV1::export_from_store(store, session_id).map_err(map_store_error)?;
         let mut plaintext = bundle.to_json_bytes().map_err(map_store_error)?;
@@ -2311,7 +2320,7 @@ impl CloudSyncRuntime {
             let manifest_plaintext = serde_json::to_vec(&ObjectPayloadManifest {
                 version: PROTOCOL_VERSION,
                 kind: CAPABILITY_SHARE_KIND.to_owned(),
-                source_format: OBJECT_SOURCE_FORMAT.to_owned(),
+                source_format: source_format.to_owned(),
                 chunk_count,
                 plaintext_bytes: u64::try_from(plaintext.len())
                     .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
@@ -2325,7 +2334,7 @@ impl CloudSyncRuntime {
                 index: 0,
                 total: u64::from(chunk_count),
                 content_kind: ObjectContentKind::Manifest,
-                source_format: OBJECT_SOURCE_FORMAT,
+                source_format,
             };
             let manifest = seal_object_revision_payload(
                 &*keys.vault_root,
@@ -2334,46 +2343,42 @@ impl CloudSyncRuntime {
                 &manifest_plaintext,
             )
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-            let directory = store
-                .cloud_outbox_payload_directory(&record.outbox_id)
-                .map_err(map_store_error)?;
-            write_staged_file(&directory, OBJECT_MANIFEST_FILE, &manifest)?;
-            let mut chunks = Vec::with_capacity(
-                usize::try_from(chunk_count).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
-            );
-            for (index, plaintext_chunk) in plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
-            {
-                let index =
-                    u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-                let context = ObjectRevisionCryptoContext {
-                    vault_id: &state.vault_id,
-                    object_id: &record.object_id,
-                    revision_id,
-                    index: u64::from(index),
-                    total: u64::from(chunk_count),
-                    content_kind: ObjectContentKind::Chunk,
-                    source_format: OBJECT_SOURCE_FORMAT,
-                };
-                let encrypted = seal_object_revision_payload(
-                    &*keys.vault_root,
-                    &context,
-                    &random_array::<12>()?,
-                    plaintext_chunk,
-                )
-                .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-                write_staged_file(&directory, &chunk_file_name(index), &encrypted)?;
-                chunks.push(CloudOutboxChunk {
-                    chunk_index: index,
-                    size_bytes: u64::try_from(encrypted.len())
-                        .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
-                    sha256: sha256_base64url(&encrypted),
-                    accepted: false,
-                });
-            }
-            store
-                .stage_cloud_outbox_chunks(&record.outbox_id, &chunks)
-                .map_err(map_store_error)?;
-            Ok(())
+            store.stage_cloud_outbox_chunks(&record.outbox_id, |directory| {
+                write_staged_file(directory, OBJECT_MANIFEST_FILE, &manifest)?;
+                let mut chunks = Vec::with_capacity(
+                    usize::try_from(chunk_count).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+                );
+                for (index, plaintext_chunk) in plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
+                {
+                    let index =
+                        u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
+                    let context = ObjectRevisionCryptoContext {
+                        vault_id: &state.vault_id,
+                        object_id: &record.object_id,
+                        revision_id,
+                        index: u64::from(index),
+                        total: u64::from(chunk_count),
+                        content_kind: ObjectContentKind::Chunk,
+                        source_format,
+                    };
+                    let encrypted = seal_object_revision_payload(
+                        &*keys.vault_root,
+                        &context,
+                        &random_array::<12>()?,
+                        plaintext_chunk,
+                    )
+                    .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
+                    write_staged_file(directory, &chunk_file_name(index), &encrypted)?;
+                    chunks.push(CloudOutboxChunk {
+                        chunk_index: index,
+                        size_bytes: u64::try_from(encrypted.len())
+                            .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+                        sha256: sha256_base64url(&encrypted),
+                        accepted: false,
+                    });
+                }
+                Ok::<_, CloudRuntimeError>(chunks)
+            })
         })();
         plaintext.zeroize();
         result
@@ -2384,6 +2389,7 @@ impl CloudSyncRuntime {
         store: &MeetingStore,
         record: &CloudOutboxRecord,
         share: &CloudShareRecord,
+        browser_document: Option<(String, Vec<u8>)>,
     ) -> Result<([u8; 32], StagedPayload), CloudRuntimeError> {
         let root = fixed_array_32(
             base64_url_decode(&share.encrypted_link_material)
@@ -2401,11 +2407,11 @@ impl CloudSyncRuntime {
         {
             return Ok((root, load_staged_payload(store, record)?));
         }
-        let session_id = share
-            .source_session_id
-            .ok_or(CloudRuntimeError::IntegrityFailure)?;
         let (mut plaintext, manifest_plaintext) = match share.content_kind {
             CloudShareContentKind::CapabilityBundle => {
+                let session_id = share
+                    .source_session_id
+                    .ok_or(CloudRuntimeError::IntegrityFailure)?;
                 let bundle = CloudMeetingBundleV1::export_from_store(store, session_id)
                     .map_err(map_store_error)?;
                 let plaintext = bundle.to_json_bytes().map_err(map_store_error)?;
@@ -2424,21 +2430,23 @@ impl CloudSyncRuntime {
                 (plaintext, manifest)
             }
             CloudShareContentKind::BrowserMarkdown => {
-                let review = store.review_snapshot(session_id).map_err(map_store_error)?;
-                let (title, markdown) = strict_browser_markdown(&review)?;
-                let chunk_count = u32::try_from(markdown.chunks(MAX_PLAINTEXT_CHUNK_BYTES).len())
+                // Capture the selected content at creation, never re-read it
+                // after someone holds the link.
+                let (title, document) =
+                    browser_document.ok_or(CloudRuntimeError::IntegrityFailure)?;
+                let chunk_count = u32::try_from(document.chunks(MAX_PLAINTEXT_CHUNK_BYTES).len())
                     .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
                 let manifest = serde_json::to_vec(&BrowserShareManifest {
                     version: PROTOCOL_VERSION,
-                    kind: BROWSER_SHARE_KIND.to_owned(),
-                    source_format: BROWSER_SOURCE_FORMAT.to_owned(),
+                    kind: SHARE_DOCUMENT_KIND.to_owned(),
+                    source_format: SHARE_DOCUMENT_SOURCE_FORMAT.to_owned(),
                     title,
                     chunk_count,
-                    plaintext_bytes: u64::try_from(markdown.len())
+                    plaintext_bytes: u64::try_from(document.len())
                         .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
                 })
                 .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-                (markdown, manifest)
+                (document, manifest)
             }
         };
         let result = (|| {
@@ -2459,41 +2467,38 @@ impl CloudSyncRuntime {
                 &manifest_plaintext,
             )
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-            let directory = store
-                .cloud_outbox_payload_directory(&record.outbox_id)
-                .map_err(map_store_error)?;
-            write_staged_file(&directory, OBJECT_MANIFEST_FILE, &manifest)?;
-            let mut chunks = Vec::with_capacity(
-                usize::try_from(chunk_count).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
-            );
-            for (index, plaintext_chunk) in plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
-            {
-                let index =
-                    u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-                let encrypted = seal_share_payload(
-                    &root,
-                    &SharePayloadContext {
-                        share_id: &share.share_id,
-                        index: u64::from(index),
-                        total: u64::from(chunk_count),
-                        domain: SharePayloadDomain::Chunk,
-                    },
-                    &random_array::<12>()?,
-                    plaintext_chunk,
-                )
-                .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
-                write_staged_file(&directory, &chunk_file_name(index), &encrypted)?;
-                chunks.push(CloudOutboxChunk {
-                    chunk_index: index,
-                    size_bytes: u64::try_from(encrypted.len())
-                        .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
-                    sha256: sha256_base64url(&encrypted),
-                    accepted: false,
-                });
-            }
-            store
-                .stage_cloud_outbox_chunks(&record.outbox_id, &chunks)
-                .map_err(map_store_error)?;
+            store.stage_cloud_outbox_chunks(&record.outbox_id, |directory| {
+                write_staged_file(directory, OBJECT_MANIFEST_FILE, &manifest)?;
+                let mut chunks = Vec::with_capacity(
+                    usize::try_from(chunk_count).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+                );
+                for (index, plaintext_chunk) in plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
+                {
+                    let index =
+                        u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
+                    let encrypted = seal_share_payload(
+                        &root,
+                        &SharePayloadContext {
+                            share_id: &share.share_id,
+                            index: u64::from(index),
+                            total: u64::from(chunk_count),
+                            domain: SharePayloadDomain::Chunk,
+                        },
+                        &random_array::<12>()?,
+                        plaintext_chunk,
+                    )
+                    .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
+                    write_staged_file(directory, &chunk_file_name(index), &encrypted)?;
+                    chunks.push(CloudOutboxChunk {
+                        chunk_index: index,
+                        size_bytes: u64::try_from(encrypted.len())
+                            .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+                        sha256: sha256_base64url(&encrypted),
+                        accepted: false,
+                    });
+                }
+                Ok::<_, CloudRuntimeError>(chunks)
+            })?;
             load_staged_payload(store, record)
         })();
         plaintext.zeroize();
@@ -2775,8 +2780,12 @@ impl CloudSyncRuntime {
         {
             let mut head = current.ok_or(CloudRuntimeError::IntegrityFailure)?;
             head.change_sequence = sequence;
-            head.tombstone = tombstone;
-            head.acknowledged_revision_id = Some(revision_id.to_owned());
+            // A restored local meeting deliberately cleared its acknowledgement.
+            // Replaying the deletion we already know must not cancel resurrection.
+            if !(tombstone && !head.tombstone && head.acknowledged_revision_id.is_none()) {
+                head.tombstone = tombstone;
+                head.acknowledged_revision_id = Some(revision_id.to_owned());
+            }
             access
                 .store
                 .upsert_cloud_head(&head)
@@ -3049,6 +3058,7 @@ impl CloudSyncRuntime {
             title: manifest.title,
             recorded_at_utc_ms: manifest.recorded_at_utc_ms,
             device_id: manifest.device_id,
+            personal_notes: manifest.personal_notes,
         })
     }
 
@@ -3160,7 +3170,7 @@ impl CloudSyncRuntime {
                 .and_then(|head| head.source_session_id)
                 .or_else(|| existing_session.as_ref().map(|session| session.session_id));
             let source_revision = existing_session.as_ref().map(|session| session.revision);
-            self.cache_conflict(
+            let cached = Self::cache_conflict(
                 &access.store,
                 ConflictCacheInput {
                     object_id,
@@ -3171,7 +3181,9 @@ impl CloudSyncRuntime {
                     bundle: &bundle,
                 },
             )?;
-            self.emit_changed(source_session_id, Some(CloudObjectState::Conflict));
+            if cached {
+                self.emit_changed(source_session_id, Some(CloudObjectState::Conflict));
+            }
             return Ok(());
         }
         let snapshot = self
@@ -3227,7 +3239,7 @@ impl CloudSyncRuntime {
         }
         let snapshot = self
             .meetings
-            .import_recording(recording.request())
+            .import_recording_with_notes(recording.request(), recording.personal_notes.as_deref())
             .await
             .map_err(|error| {
                 log::warn!("Cloud recording {object_id} would not import: {error:?}");
@@ -3249,25 +3261,29 @@ impl CloudSyncRuntime {
     }
 
     fn cache_conflict(
-        &self,
         store: &MeetingStore,
         input: ConflictCacheInput<'_>,
-    ) -> Result<(), CloudRuntimeError> {
-        let path = store
-            .cloud_conflict_staging_path(input.object_id)
-            .map_err(map_store_error)?;
-        let bytes = input.bundle.to_json_bytes().map_err(map_store_error)?;
-        write_path_atomically(&path, &bytes)?;
-        store
-            .cache_cloud_conflict(&CloudConflict {
+    ) -> Result<bool, CloudRuntimeError> {
+        let result = store.cache_cloud_conflict(
+            &CloudConflict {
                 object_id: input.object_id.to_owned(),
                 source_session_id: input.source_session_id,
                 source_revision: input.source_revision,
                 remote_revision_id: input.revision_id.to_owned(),
                 remote_sequence: input.sequence,
                 remote_bundle_relative_path: format!(".cloud-conflicts/{}.bundle", input.object_id),
-            })
-            .map_err(map_store_error)
+            },
+            input.bundle,
+            |path, bytes| write_path_atomically(path, bytes).map_err(|_| StoreError::Io),
+        );
+        match result {
+            Ok(()) => Ok(true),
+            Err(StoreError::TranscriptDeleted) => {
+                acknowledge_remote_revision(store, input.object_id, input.revision_id, input.sequence)?;
+                Ok(false)
+            }
+            Err(error) => Err(map_store_error(error)),
+        }
     }
 
     fn meeting_status_from_store(
@@ -3411,6 +3427,12 @@ impl From<crate::settings::SettingsPersistError> for CloudRuntimeError {
 
 fn map_store_error(_error: StoreError) -> CloudRuntimeError {
     CloudRuntimeError::Storage
+}
+
+impl From<StoreError> for CloudRuntimeError {
+    fn from(error: StoreError) -> Self {
+        map_store_error(error)
+    }
 }
 
 /// A share's state as the panel reads it. The local record says "revoked"
@@ -3738,13 +3760,10 @@ fn utc_now_ms() -> i64 {
 /// Enqueue a reviewed meeting's current revision as an object upload. Returns
 /// whether anything was queued.
 ///
-/// A meeting over a paired device's recording never queues. Its head points
-/// at the device's object, so this would upload the Mac's bundle as a second
-/// revision of an object the device wrote in another format, and a second
-/// Mac importing the same recording would then find its own head and file a
-/// conflict on every phone recording. The consent row is where an import
-/// says where its recording came from.
-fn queue_session_upload(
+/// Phone recordings keep their original audio head. The processed notes go to
+/// a separate read-only phone view, so another Mac never imports a replacement
+/// bundle over the same audio and turns every phone recording into a conflict.
+pub(crate) fn queue_session_upload(
     store: &MeetingStore,
     session_id: MeetingSessionId,
 ) -> Result<bool, CloudRuntimeError> {
@@ -3759,7 +3778,7 @@ fn queue_session_upload(
     ) {
         return Ok(false);
     }
-    if store
+    let phone_recording = store
         .latest_consent_for_session(session_id)
         .map_err(map_store_error)?
         .is_some_and(|consent| {
@@ -3767,18 +3786,18 @@ fn queue_session_upload(
                 consent.provenance,
                 MeetingConsentProvenance::PairedDevice { .. }
             )
-        })
-    {
-        return Ok(false);
-    }
-    let existing_head = store
-        .cloud_head_for_session(session_id)
-        .map_err(map_store_error)?;
+        });
+    let phone_object_id = cloud_phone_notes_object_id(session_id);
+    let existing_head = if phone_recording {
+        store.cloud_head(&phone_object_id)
+    } else {
+        store.cloud_head_for_session(session_id)
+    }.map_err(map_store_error)?;
     let object_id = match existing_head.as_ref() {
         Some(head) if head.tombstone => return Ok(false),
         Some(head) => head.object_id.clone(),
         None => {
-            let object_id = random_opaque_id()?;
+            let object_id = if phone_recording { phone_object_id } else { random_opaque_id()? };
             store
                 .upsert_cloud_head(&CloudHead {
                     object_id: object_id.clone(),
@@ -3810,8 +3829,11 @@ fn queue_session_upload(
         base_remote_revision_id = previous.remote_revision_id.clone();
     }
     let revision = random_opaque_id()?;
-    let idempotency_key =
-        stable_idempotency_value(&["object", &object_id, &snapshot.revision.to_string()]);
+    let notes = store.user_notes(session_id, crate::meeting::analytics::MeetingNotesTemplate::General.into())
+        .map_err(map_store_error)?;
+    let idempotency_key = stable_idempotency_value(&[
+        "object", &object_id, &snapshot.revision.to_string(), &notes.revision.to_string(),
+    ]);
     store
         .enqueue_cloud_outbox(CloudOutboxInput {
             kind: CloudOutboxKind::Object,
@@ -4223,73 +4245,15 @@ fn decrypt_capability_bundle(
     bundle
 }
 
-fn strict_browser_markdown(
-    review: &MeetingReviewSnapshot,
-) -> Result<(String, Vec<u8>), CloudRuntimeError> {
-    let title = strict_text(&review.session.title);
-    if title.is_empty() || title.len() > 240 {
-        return Err(CloudRuntimeError::IntegrityFailure);
-    }
-    let speakers = review
-        .speakers
-        .iter()
-        .map(|speaker| (speaker.speaker_id, strict_text(&speaker.display_name)))
-        .collect::<HashMap<_, _>>();
-    let mut markdown = String::new();
-    markdown.push_str("# ");
-    markdown.push_str(&title);
-    markdown.push_str("\n\n## Transcript\n");
-    let mut has_transcript = false;
-    for segment in review.transcript.iter().filter(|segment| !segment.removed) {
-        has_transcript = true;
-        let text = segment
-            .replacement_text
-            .as_deref()
-            .unwrap_or(segment.base.text.as_str());
-        let speaker = speakers
-            .get(&segment.assigned_speaker_id)
-            .map(String::as_str)
-            .unwrap_or("Unknown speaker");
-        markdown.push_str("- ");
-        markdown.push_str(speaker);
-        markdown.push_str(": ");
-        markdown.push_str(&strict_text(text));
-        markdown.push('\n');
-    }
-    if !has_transcript {
-        markdown.push_str("No transcript is available.\n");
-    }
-    markdown.push_str("\n## Notes\n");
-    if review.notes.is_empty() {
-        markdown.push_str("No manual notes.\n");
-    } else {
-        for note in &review.notes {
-            markdown.push_str("- ");
-            markdown.push_str(&strict_text(&note.body));
-            markdown.push('\n');
-        }
-    }
-    if markdown.len() > MAX_BUNDLE_BYTES {
-        return Err(CloudRuntimeError::IntegrityFailure);
-    }
-    Ok((title, markdown.into_bytes()))
-}
-
-fn strict_text(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.replace(['\r', '\n'], " ").chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '!' | '|' => {
-                escaped.push('\\');
-                escaped.push(character);
-            }
-            _ => escaped.push(character),
-        }
-    }
-    escaped.trim().to_owned()
+/// The link a browser share hands out. The viewer opens it only when the
+/// fragment is exactly `v=1` and `k=<root>` (`parseFragment` in the
+/// companion's `public/viewer.js`); the fragment never reaches the server.
+fn browser_share_url(endpoint: &str, share_id: &str, root: &[u8; 32]) -> String {
+    format!(
+        "{}/s/{share_id}#v=1&k={}",
+        endpoint.trim_end_matches('/'),
+        base64_url_encode(root)
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -4430,8 +4394,8 @@ mod tests {
         };
         let manifest = serde_json::to_vec(&BrowserShareManifest {
             version: PROTOCOL_VERSION,
-            kind: BROWSER_SHARE_KIND.to_owned(),
-            source_format: BROWSER_SOURCE_FORMAT.to_owned(),
+            kind: SHARE_DOCUMENT_KIND.to_owned(),
+            source_format: SHARE_DOCUMENT_SOURCE_FORMAT.to_owned(),
             title: "Safe title".to_owned(),
             chunk_count: 1,
             plaintext_bytes: 8,
@@ -4496,6 +4460,16 @@ mod tests {
         ));
     }
 
+    /// A link whose fragment is the bare root, as every browser share used to
+    /// be, reads "This share cannot be opened." in the viewer.
+    #[test]
+    fn browser_share_url_carries_the_fragment_the_viewer_parses() {
+        assert_eq!(
+            browser_share_url("https://sync.example.test/", "shareid123456789", &[7; 32]),
+            "https://sync.example.test/s/shareid123456789#v=1&k=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+        );
+    }
+
     #[test]
     fn retries_are_bounded_and_honor_retry_after() {
         assert_eq!(backoff_ms(0, None), 1_000);
@@ -4528,15 +4502,6 @@ mod tests {
         let chunk = operation_key(&record, "chunk-0").expect("chunk key");
         assert_eq!(first.as_str(), second.as_str());
         assert_ne!(first.as_str(), chunk.as_str());
-    }
-
-    #[test]
-    fn strict_markdown_escapes_markup_and_newlines() {
-        let text = strict_text("<script>alert(1)</script>\n# heading");
-        assert!(!text.contains('<'));
-        assert!(!text.contains('>'));
-        assert!(!text.contains('\n'));
-        assert!(text.contains("&lt;script&gt;"));
     }
 
     /* A phone's object, built the way `mobile/Shared/DeviceRecordingObject.swift`
@@ -4703,14 +4668,14 @@ mod tests {
         assert_eq!(&bytes[WAVE_HEADER_BYTES..], audio.as_slice());
 
         let snapshot =
-            tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
+            tauri::async_runtime::block_on(manager.import_recording_with_notes(ImportRecordingRequest {
                 path: staged.path().to_owned(),
                 title: Some("Phone recording".to_owned()),
                 recorded_at_utc_ms: Some(1_788_305_031_276),
                 origin: RecordingOrigin::PairedDevice {
                     device_id: TEST_DEVICE_ID.to_owned(),
                 },
-            }))
+            }, Some("Confirm the launch date.")))
             .expect("the pulled recording imports");
         let review = tauri::async_runtime::block_on(manager.get(snapshot.session_id))
             .expect("the imported meeting is readable");
@@ -4720,6 +4685,8 @@ mod tests {
         assert_eq!(review.session.started_at_utc_ms, Some(1_788_305_031_276));
         assert!(!review.transcript.is_empty());
         assert!(review.tracks[0].durable_record_count > 0);
+        assert_eq!(store.user_notes(snapshot.session_id, crate::meeting::analytics::MeetingNotesTemplate::General.into())
+            .expect("phone notes persist before processing").body, "Confirm the launch date.");
     }
 
     /// A phone may upload a recording with no title. The staged file is named
@@ -4743,6 +4710,7 @@ mod tests {
             title: " \n".to_owned(),
             recorded_at_utc_ms: 1_788_305_031_276,
             device_id: TEST_DEVICE_ID.to_owned(),
+            personal_notes: None,
         };
 
         let snapshot =
@@ -4806,17 +4774,55 @@ mod tests {
             })
             .expect("the install records its head");
 
-        assert!(
-            !queue_session_upload(&store, pulled).expect("the review transition is handled"),
-            "the review transition queued an upload for a phone recording"
-        );
-        assert!(
-            store
-                .cloud_outboxes_for_session(pulled)
-                .expect("outboxes are readable")
-                .is_empty(),
-            "this Mac's bundle was queued as a revision of the phone's object"
-        );
+        assert!(queue_session_upload(&store, pulled).expect("phone notes queue"));
+        let phone_outboxes = store.cloud_outboxes_for_session(pulled).expect("outboxes");
+        assert_eq!(phone_outboxes.len(), 1);
+        assert_eq!(phone_outboxes[0].object_id, cloud_phone_notes_object_id(pulled));
+        assert_ne!(phone_outboxes[0].object_id, TEST_OBJECT_ID);
+        assert_eq!(store.cloud_head_for_session(pulled).expect("primary head").expect("audio head").object_id,
+                   TEST_OBJECT_ID);
+        let revision = store.session_snapshot(pulled).expect("snapshot").revision;
+        let (_, deletion) = store.reserve_deletion(
+            crate::meeting::types::MeetingOperationId::new(), 10, pulled, revision,
+            crate::meeting::types::DeletionCause::User,
+        ).expect("reserve deletion");
+        let revision = store.session_snapshot(pulled).expect("deleting snapshot").revision;
+        store.enqueue_cloud_tombstone_for_session(pulled, revision, "delete-phone".to_owned(), 0)
+            .expect("both phone objects delete");
+        let tombstones: Vec<_> = store.cloud_outboxes_for_session(pulled).expect("tombstones")
+            .into_iter().filter(|row| row.kind == CloudOutboxKind::Tombstone).collect();
+        assert_eq!(tombstones.len(), 2);
+        assert!(tombstones.iter().any(|row| row.object_id == TEST_OBJECT_ID));
+        assert!(tombstones.iter().any(|row| row.object_id == cloud_phone_notes_object_id(pulled)));
+        for row in &tombstones {
+            let deleted_revision = format!("deleted-{}", row.object_id);
+            store.upsert_cloud_head(&CloudHead {
+                object_id: row.object_id.clone(), source_session_id: Some(pulled),
+                remote_revision_id: Some(deleted_revision.clone()), tombstone: true,
+                acknowledged_revision_id: Some(deleted_revision), change_sequence: 20,
+            }).expect("the worker acknowledged deletion");
+        }
+        store.finish_deletion(deletion).expect("move to trash");
+        let restored = store.restore_trashed_meeting(deletion, utc_now_ms()).expect("restore");
+        assert_eq!(restored, pulled);
+        let restored_revision = store.session_snapshot(pulled).expect("restored snapshot").revision;
+        assert!(restored_revision > phone_outboxes[0].source_revision.expect("original revision"));
+        for row in &tombstones {
+            let head = store.cloud_head(&row.object_id).expect("head").expect("retained identifier");
+            assert!(!head.tombstone);
+            assert_eq!(head.remote_revision_id, Some(format!("deleted-{}", row.object_id)));
+            assert!(head.acknowledged_revision_id.is_none());
+        }
+        assert!(store.cloud_outboxes_for_session(pulled).expect("outboxes").iter()
+            .all(|row| row.kind != CloudOutboxKind::Tombstone));
+        assert!(queue_session_upload(&store, pulled).expect("restored notes are uploadable"));
+        let restored_upload = store.cloud_outboxes_for_session(pulled).expect("restored outboxes")
+            .into_iter().find(|row| row.kind == CloudOutboxKind::Object && row.state == CloudOutboxState::Pending)
+            .expect("a fresh upload, not the canceled pre-deletion upload");
+        assert_eq!(restored_upload.object_id, cloud_phone_notes_object_id(pulled));
+        assert_eq!(restored_upload.base_remote_revision_id,
+            Some(format!("deleted-{}", cloud_phone_notes_object_id(pulled))));
+        assert_eq!(restored_upload.source_revision, Some(restored_revision));
 
         let picked = import(RecordingOrigin::LocalFile);
         assert!(queue_session_upload(&store, picked).expect("the review transition is handled"));
@@ -4933,6 +4939,64 @@ mod tests {
                 .is_none(),
             "a failure of this Mac's own must be retried, not recorded"
         );
+    }
+
+    #[test]
+    fn retention_refusal_advances_the_remote_head_but_notes_only_updates_remain_available() {
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let audio = vec![1_u8; 32_000];
+        let object = phone_object(audio.clone(), &sha256_base64url(&audio), TEST_DEVICE_ID);
+        let staged = stage(&object, store.cloud_recording_staging_path(TEST_OBJECT_ID).unwrap()).unwrap();
+        let snapshot = tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
+            path: staged.path().to_owned(), title: Some("Retained notes".to_owned()),
+            recorded_at_utc_ms: Some(1_700_000_000_000), origin: RecordingOrigin::LocalFile,
+        })).unwrap();
+        tauri::async_runtime::block_on(manager.get(snapshot.session_id)).unwrap();
+        let old_bundle = CloudMeetingBundleV1::export_from_store(&store, snapshot.session_id).unwrap();
+        assert!(!old_bundle.transcript_segments.is_empty());
+        store.upsert_cloud_head(&CloudHead {
+            object_id: TEST_OBJECT_ID.to_owned(), source_session_id: Some(snapshot.session_id),
+            remote_revision_id: Some("before-retention".to_owned()), tombstone: false,
+            acknowledged_revision_id: Some("before-retention".to_owned()), change_sequence: 1,
+        }).unwrap();
+        let now = 1_700_000_000_000 + 30 * 86_400_000;
+        store.set_transcript_retention_policy(
+            crate::meeting::types::MeetingOperationId::new(), now - 7 * 86_400_000, 0,
+            &crate::meeting::types::MeetingRetentionPolicy::DeleteAfterDays { days: 1 },
+        ).unwrap();
+        assert!(store.purge_transcript_at(snapshot.session_id, now).unwrap().is_some());
+        let input = |bundle, revision_id, sequence| ConflictCacheInput {
+            object_id: TEST_OBJECT_ID, revision_id, sequence,
+            source_session_id: Some(snapshot.session_id), source_revision: Some(snapshot.revision),
+            bundle,
+        };
+        assert!(!CloudSyncRuntime::cache_conflict(&store, input(&old_bundle, TEST_REVISION_ID, 12)).unwrap());
+        let head = store.cloud_head(TEST_OBJECT_ID).unwrap().unwrap();
+        assert_eq!(head.acknowledged_revision_id.as_deref(), Some(TEST_REVISION_ID));
+        assert_eq!(head.source_session_id, Some(snapshot.session_id));
+        assert_eq!(head.change_sequence, 12);
+        assert!(store.cloud_conflict(TEST_OBJECT_ID).unwrap().is_none());
+        let cache_path = store.root().join(format!(".cloud-conflicts/{TEST_OBJECT_ID}.bundle"));
+        assert!(!cache_path.exists());
+
+        let mut notes_only = CloudMeetingBundleV1::export_from_store(&store, snapshot.session_id).unwrap();
+        notes_only.session.title = "Updated remote notes".to_owned();
+        assert!(CloudSyncRuntime::cache_conflict(&store, input(&notes_only, "notesrevision12345", 13)).unwrap());
+        let cached = CloudMeetingBundleV1::from_json_bytes(&fs::read(&cache_path).unwrap()).unwrap();
+        assert_eq!(cached.session.title, "Updated remote notes");
+        assert!(cached.transcript_segments.is_empty());
+        assert_eq!(cached.transcript_purged_at_utc_ms, Some(now));
+
+        // A genuine local write failure must not acknowledge the remote revision.
+        fs::remove_file(&cache_path).unwrap();
+        fs::create_dir(&cache_path).unwrap();
+        assert!(matches!(
+            CloudSyncRuntime::cache_conflict(&store, input(&notes_only, "retryrevision12345", 14)),
+            Err(CloudRuntimeError::Storage)
+        ));
+        assert_eq!(store.cloud_head(TEST_OBJECT_ID).unwrap().unwrap(), head);
+        assert_eq!(store.require_retained_transcript(snapshot.session_id), Err(StoreError::TranscriptDeleted));
     }
 
     /// The signature the pull path checks after the chunks are on disk. The

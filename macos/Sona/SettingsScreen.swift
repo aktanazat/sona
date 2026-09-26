@@ -122,6 +122,7 @@ struct SettingsScreen: View {
             Page {
                 PageTitle("Meetings", subtitle: "When Sona notices a call, what it keeps, and what it does after.")
                 MeetingSettingsView(store: model.meetingSettings, openPrompts: { model.showSettings(.prompts) })
+                MeetingPrepSettingsView(store: model.prep)
             }
         case .agents:
             Page {
@@ -134,6 +135,8 @@ struct SettingsScreen: View {
                 PageTitle("Sync", subtitle: "Meetings between your devices, end to end encrypted with a key that never leaves them. Pair a phone by pasting the code it shows.")
                 CloudSyncView(store: model.cloudSync, openMeeting: model.openMeeting)
             }
+        case .connections:
+            ConnectionsView(store: model.connections)
         case .privacy:
             PrivacyView(store: model.privacy)
         case .importing:

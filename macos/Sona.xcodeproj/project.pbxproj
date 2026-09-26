@@ -6,14 +6,54 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		BC0000000000000000000001 /* Sona Camera in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = BA0000000000000000000002 /* Sona Camera */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BD0000000000000000000001 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000001 /* Project object */; proxyType = 1; remoteGlobalIDString = E00000000000000000000002; remoteInfo = SonaCamera; };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D40000000000000000000001 /* Embed System Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Library/SystemExtensions";
+			dstSubfolderSpec = 16;
+			files = (BC0000000000000000000001 /* Sona Camera in Embed System Extensions */, );
+			name = "Embed System Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		BA0000000000000000000001 /* Sona.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Sona.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BA0000000000000000000002 /* Sona Camera */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = com.aktanazat.sona.mac.camera.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		BE0000000000000000000001 = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (Info.plist, );
+			target = E00000000000000000000002 /* SonaCamera */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		BB0000000000000000000001 /* Sona */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Sona;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000002 /* SonaCamera */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (BE0000000000000000000001, );
+			path = SonaCamera;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000003 /* CameraShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CameraShared;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -26,6 +66,12 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D00000000000000000000002 /* Camera Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -33,6 +79,8 @@
 			isa = PBXGroup;
 			children = (
 				BB0000000000000000000001 /* Sona */,
+				BB0000000000000000000002 /* SonaCamera */,
+				BB0000000000000000000003 /* CameraShared */,
 				C00000000000000000000002 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +89,7 @@
 			isa = PBXGroup;
 			children = (
 				BA0000000000000000000001 /* Sona.app */,
+				BA0000000000000000000002 /* Sona Camera */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -56,13 +105,16 @@
 				D00000000000000000000001 /* Frameworks */,
 				D20000000000000000000001 /* Resources */,
 				D30000000000000000000001 /* Bundle core */,
+				D40000000000000000000001 /* Embed System Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				E10000000000000000000001 /* Camera target dependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				BB0000000000000000000001 /* Sona */,
+				BB0000000000000000000003 /* CameraShared */,
 			);
 			name = Sona;
 			packageProductDependencies = (
@@ -70,6 +122,26 @@
 			productName = Sona;
 			productReference = BA0000000000000000000001 /* Sona.app */;
 			productType = "com.apple.product-type.application";
+		};
+		E00000000000000000000002 /* SonaCamera */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F20000000000000000000003 /* Camera build configurations */;
+			buildPhases = (
+				D10000000000000000000002 /* Camera Sources */,
+				D00000000000000000000002 /* Camera Frameworks */,
+				D20000000000000000000002 /* Camera Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			fileSystemSynchronizedGroups = (
+				BB0000000000000000000002 /* SonaCamera */,
+				BB0000000000000000000003 /* CameraShared */,
+			);
+			name = SonaCamera;
+			packageProductDependencies = ();
+			productName = com.aktanazat.sona.mac.camera;
+			productReference = BA0000000000000000000002 /* Sona Camera */;
+			productType = "com.apple.product-type.system-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -83,6 +155,10 @@
 				TargetAttributes = {
 					E00000000000000000000001 = {
 						CreatedOnToolsVersion = 26.0;
+					};
+					E00000000000000000000002 = {
+						CreatedOnToolsVersion = 26.0;
+						DevelopmentTeam = AAVB324H37;
 					};
 				};
 			};
@@ -101,6 +177,7 @@
 			projectRoot = "";
 			targets = (
 				E00000000000000000000001 /* Sona */,
+				E00000000000000000000002 /* SonaCamera */,
 			);
 		};
 /* End PBXProject section */
@@ -111,6 +188,12 @@
 			buildActionMask = 2147483647;
 			files = (
 			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D20000000000000000000002 /* Camera Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -134,7 +217,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The Rust core is built by cargo in src-tauri. It ships as its own helper\n# bundle with its own identifier: a bare executable inside Sona.app registers\n# with LaunchServices as a second \"Sona\", and a quit or open event addressed\n# to the app can then land on the core instead of the shell. Without a built\n# core the app still builds and Core.swift reads SONA_CORE from the environment.\n# The core reads its resources (the VAD model, sounds, prompts) from\n# Contents/Resources of the bundle it runs in, so cargo's resources tree is\n# copied there. The old tree is removed first: overwriting the binary in place\n# leaves the kernel's signature cache stale, and the next spawn dies with SIGKILL.\n# ENABLE_USER_SCRIPT_SANDBOXING is off for this target: the sandbox only lets a\n# script write the declared output paths themselves, not the files under a\n# declared directory, and the resources tree is too large to declare file by file.\nset -eu\ntarget=\"$SRCROOT/../src-tauri/target\"\nhelper=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/SonaCore.app\"\nfor profile in release debug; do\n  core=\"$target/$profile/sona\"\n  if [ -x \"$core\" ]; then\n    rm -rf \"$helper\"\n    mkdir -p \"$helper/Contents/MacOS\" \"$helper/Contents/Resources\"\n    cp \"$core\" \"$helper/Contents/MacOS/sona-core\"\n    cp -R \"$target/$profile/resources\" \"$helper/Contents/Resources/resources\"\n    cat > \"$helper/Contents/Info.plist\" <<PLIST\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleExecutable</key>\n\t<string>sona-core</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.aktanazat.sona.core</string>\n\t<key>CFBundleName</key>\n\t<string>Sona Core</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>$MARKETING_VERSION</string>\n\t<key>CFBundleVersion</key>\n\t<string>$CURRENT_PROJECT_VERSION</string>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>$MACOSX_DEPLOYMENT_TARGET</string>\n\t<key>LSUIElement</key>\n\t<true/>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>Sona hears you only while a recording is on.</string>\n</dict>\n</plist>\nPLIST\n    # Signed with the app's own identity before Xcode seals the app over it.\n    # macOS files the helper's permissions under the shell, and a row filed\n    # for a stable identity survives a rebuild; an ad-hoc row is a cdhash and\n    # dies with the next build.\n    codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" \"$helper\"\n    exit 0\n  fi\ndone\necho \"warning: no sona core under $target; the app will need SONA_CORE\"\n";
+			shellScript = "# The Rust core is built by cargo in src-tauri. It ships as its own helper\n# bundle with its own identifier: a bare executable inside Sona.app registers\n# with LaunchServices as a second \"Sona\", and a quit or open event addressed\n# to the app can then land on the core instead of the shell. Without a built\n# core the app still builds and Core.swift reads SONA_CORE from the environment.\n# The core reads its resources (the VAD model, sounds, prompts) from\n# Contents/Resources of the bundle it runs in, so cargo's resources tree is\n# copied there. The old tree is removed first: overwriting the binary in place\n# leaves the kernel's signature cache stale, and the next spawn dies with SIGKILL.\n# ENABLE_USER_SCRIPT_SANDBOXING is off for this target: the sandbox only lets a\n# script write the declared output paths themselves, not the files under a\n# declared directory, and the resources tree is too large to declare file by file.\nset -eu\ntarget=\"$SRCROOT/../src-tauri/target\"\nhelper=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/SonaCore.app\"\nfor profile in release debug; do\n  core=\"$target/$profile/sona\"\n  if [ -x \"$core\" ]; then\n    rm -rf \"$helper\"\n    mkdir -p \"$helper/Contents/MacOS\" \"$helper/Contents/Resources\"\n    cp \"$core\" \"$helper/Contents/MacOS/sona-core\"\n    cp -R \"$target/$profile/resources\" \"$helper/Contents/Resources/resources\"\n    cat > \"$helper/Contents/Info.plist\" <<PLIST\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleExecutable</key>\n\t<string>sona-core</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.aktanazat.sona.core</string>\n\t<key>CFBundleName</key>\n\t<string>Sona Core</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>$MARKETING_VERSION</string>\n\t<key>CFBundleVersion</key>\n\t<string>$CURRENT_PROJECT_VERSION</string>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>$MACOSX_DEPLOYMENT_TARGET</string>\n\t<key>LSUIElement</key>\n\t<true/>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>Sona hears you only while a recording is on.</string>\n\t<key>NSCalendarsFullAccessUsageDescription</key>\n\t<string>Read upcoming events and create calendar events you approve.</string>\n\t<key>NSCalendarsUsageDescription</key>\n\t<string>Read upcoming events and create calendar events you approve.</string>\n\t<key>NSAppleEventsUsageDescription</key>\n\t<string>Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.</string>\n</dict>\n</plist>\nPLIST\n    # Signed with the app's own identity before Xcode seals the app over it.\n    # macOS files the helper's permissions under the shell, and a row filed\n    # for a stable identity survives a rebuild; an ad-hoc row is a cdhash and\n    # dies with the next build.\n    codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --entitlements \"$SRCROOT/../src-tauri/Entitlements.plist\" \"$helper\"\n    exit 0\n  fi\ndone\necho \"warning: no sona core under $target; the app will need SONA_CORE\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -146,7 +229,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D10000000000000000000002 /* Camera Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E10000000000000000000001 /* Camera target dependency */ = {
+			isa = PBXTargetDependency;
+			target = E00000000000000000000002 /* SonaCamera */;
+			targetProxy = BD0000000000000000000001;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		F10000000000000000000001 /* Debug */ = {
@@ -203,6 +300,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
+				REGISTER_APP_GROUPS = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Sona;
@@ -210,6 +308,11 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sona hears you only while a recording is on.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Read upcoming events and create calendar events you approve.";
+				INFOPLIST_KEY_NSCalendarsUsageDescription = "Read upcoming events and create calendar events you approve.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Sona Camera passes your chosen camera to your call app with an optional recording label.";
+				INFOPLIST_KEY_NSSystemExtensionUsageDescription = "Make Sona Camera available in your call app.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -231,6 +334,7 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
+				REGISTER_APP_GROUPS = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Sona;
@@ -238,6 +342,11 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sona hears you only while a recording is on.";
+				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Read upcoming events and create calendar events you approve.";
+				INFOPLIST_KEY_NSCalendarsUsageDescription = "Read upcoming events and create calendar events you approve.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Sona Camera passes your chosen camera to your call app with an optional recording label.";
+				INFOPLIST_KEY_NSSystemExtensionUsageDescription = "Make Sona Camera available in your call app.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -245,6 +354,54 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		F10000000000000000000005 /* Camera Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SonaCamera/SonaCamera.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AAVB324H37;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SonaCamera/Info.plist;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/SystemExtensions";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", );
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mac.camera;
+				PRODUCT_NAME = "$(PRODUCT_BUNDLE_IDENTIFIER)";
+				REGISTER_APP_GROUPS = YES;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		F10000000000000000000006 /* Camera Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SonaCamera/SonaCamera.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AAVB324H37;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SonaCamera/Info.plist;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/SystemExtensions";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", );
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mac.camera;
+				PRODUCT_NAME = "$(PRODUCT_BUNDLE_IDENTIFIER)";
+				REGISTER_APP_GROUPS = YES;
+				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 			};
 			name = Release;
@@ -266,6 +423,15 @@
 			buildConfigurations = (
 				F10000000000000000000003 /* Debug */,
 				F10000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F20000000000000000000003 /* Camera build configurations */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F10000000000000000000005 /* Camera Debug */,
+				F10000000000000000000006 /* Camera Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

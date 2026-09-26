@@ -3173,7 +3173,6 @@
     "seriesBrief_other": "Schůzka {{nth}} s {{person}} · {{count}} otevřených bodů",
     "alwaysRecord": "Tuto schůzku vždy nahrávat",
     "announceInChat": "Oznámit v chatu",
-    "announceLine": "Sona si dělá poznámky pro {{name}}. Pokud to nechcete, dejte vědět.",
     "announceRefused": "Oznámení nebylo odesláno: tato aplikace ho nepřijala.",
     "assurance": "Zvuk zůstává v tomto Macu. Do hovoru se nic nepřipojuje.",
     "record": "Nahrávat",

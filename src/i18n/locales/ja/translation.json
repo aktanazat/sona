@@ -3114,7 +3114,6 @@
     "seriesBrief_other": "{{person}} とのミーティング {{nth}} · 未解決項目 {{count}} 件",
     "alwaysRecord": "このミーティングを常に録音",
     "announceInChat": "チャットで知らせる",
-    "announceLine": "Sonaが{{name}}のためにメモを取っています。ご希望でなければお知らせください。",
     "announceRefused": "通知は投稿されませんでした。このアプリが受け付けませんでした。",
     "assurance": "音声はこのMacの中だけに保存されます。通話に参加するものはありません。",
     "record": "録音",

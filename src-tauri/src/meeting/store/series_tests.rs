@@ -20,7 +20,7 @@ use rusqlite::params;
 /// The calendar facts a finished meeting leaves behind, written through the
 /// call the app itself makes: the only place a series key or a series' name is
 /// ever recorded, so the roster and every preference read hang off it.
-fn calendar_facts(
+pub(super) fn calendar_facts(
     store: &MeetingStore,
     session_id: MeetingSessionId,
     series_key: &str,
@@ -57,6 +57,7 @@ fn set(
                 operation_id: MeetingOperationId::new(),
                 series_key: series_key.to_string(),
                 template,
+                custom_template_id: None,
                 expected_revision,
             },
             1_000,
@@ -212,6 +213,7 @@ fn a_replayed_operation_returns_the_receipt_it_already_wrote() {
         operation_id,
         series_key: "weekly-sync".to_string(),
         template: Some(MeetingNotesTemplate::OneOnOne),
+        custom_template_id: None,
         expected_revision: 0,
     };
 
@@ -279,19 +281,19 @@ fn a_meetings_own_notes_template_outranks_the_one_it_was_handed() {
     let untouched = meeting(&store, "Weekly sync", 1);
     let edited = meeting(&store, "Weekly sync", 2);
     store
-        .save_user_notes(edited, "ship it", MeetingNotesTemplate::Interview, 0)
+        .save_user_notes(edited, "ship it", MeetingNotesTemplate::Interview, None, 0)
         .unwrap();
 
     assert_eq!(
         store
-            .user_notes(untouched, MeetingNotesTemplate::Standup)
+            .user_notes(untouched, MeetingNotesTemplate::Standup.into())
             .unwrap()
             .template,
         MeetingNotesTemplate::Standup
     );
     assert_eq!(
         store
-            .user_notes(edited, MeetingNotesTemplate::Standup)
+            .user_notes(edited, MeetingNotesTemplate::Standup.into())
             .unwrap()
             .template,
         MeetingNotesTemplate::Interview

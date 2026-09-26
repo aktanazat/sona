@@ -3152,7 +3152,6 @@
     "seriesBrief_other": "Reunião {{nth}} com {{person}} · {{count}} pontos em aberto",
     "alwaysRecord": "Gravar sempre esta reunião",
     "announceInChat": "Anunciar no chat",
-    "announceLine": "O Sona está a tirar notas para {{name}}. Diga se preferir que não o faça.",
     "announceRefused": "O aviso não foi publicado: esta app não o aceitou.",
     "assurance": "O áudio fica neste Mac. Nada entra na chamada.",
     "record": "Gravar",

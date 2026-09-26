@@ -25,6 +25,7 @@ struct OverviewView: View {
             OverviewNeedsYou(store: store, openMeeting: openMeeting)
             OverviewUpcomingSection(store: store, series: series)
             ActivityBandView(store: store)
+            UsageStatsView(store: store)
             FeedRecentView(store: store, openMeeting: openMeeting)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -366,12 +367,16 @@ private struct OverviewSeriesControls: View {
                             try await actions.setAlwaysRecord(series.seriesKey, next, revision)
                         }
                     }))
-            ChoiceRow(
+            MeetingTemplateChoiceRow(
                 title: "Notes template",
-                choices: OverviewSeriesControls.templates,
-                label: { $0?.label ?? "App default" },
+                builtIns: OverviewTemplate.allCases,
+                builtInLabel: { $0.label },
+                templates: actions.templates,
+                none: "App default",
                 selection: Binding(
-                    get: { series.template },
+                    get: {
+                        MeetingTemplateChoice(builtIn: series.template, customTemplateId: series.customTemplateId)
+                    },
                     set: { next in
                         store.writeSeries(series.seriesKey) { revision in
                             try await actions.setTemplate(series.seriesKey, next, revision)
@@ -391,10 +396,8 @@ private struct OverviewSeriesControls: View {
         // A write is fenced by one number for the whole pane, so the row
         // being written stops offering more of them until it lands.
         .disabled(store.savingSeries != nil)
+        .task { await actions.templates.loadIfNeeded() }
     }
-
-    /// The app default first, then the core's own list.
-    private static let templates: [OverviewTemplate?] = [nil] + OverviewTemplate.allCases.map { $0 }
 }
 
 // MARK: - Activity
@@ -412,7 +415,7 @@ struct ActivityBandView: View {
     var body: some View {
         if let trend = store.trend {
             OverviewDisclosure("This week", fact: ActivityBandView.fact(trend)) {
-                ActivityBandBody(trend: trend, meetings: store.meetings, stats: store.stats, page: $page)
+                ActivityBandBody(trend: trend, meetings: store.meetings, page: $page)
             }
             .padding(.bottom, 32)
         }
@@ -439,7 +442,6 @@ struct ActivityBandView: View {
 private struct ActivityBandBody: View {
     let trend: ActivityTrend
     let meetings: ActivityMeetingTrend?
-    let stats: HistoryStats?
     @Binding var page: Int
 
     var body: some View {
@@ -471,9 +473,6 @@ private struct ActivityBandBody: View {
                     }
                 }
             }
-            if let stats {
-                Text(ActivityBandBody.allTime(stats)).metaText()
-            }
         }
         .padding(20)
     }
@@ -489,12 +488,6 @@ private struct ActivityBandBody: View {
             byDate[day.localDate] = day.meetings
         }
         return points.map { byDate[$0.localDate] ?? 0 }
-    }
-
-    private static func allTime(_ stats: HistoryStats) -> String {
-        let dictations = stats.entries == 1 ? "1 dictation" : "\(stats.entries) dictations"
-        let spoken = TimeInterval(stats.totalDurationMs) / 1000
-        return "All time: \(dictations) · \(spoken.spoken) spoken · \(stats.totalWords) words"
     }
 }
 
@@ -778,6 +771,123 @@ enum ActivityDates {
     }
 }
 
+// MARK: - Usage
+
+/// All time, as one closed row: how much has been said, how fast, what
+/// typing it would have cost, and which apps it went into.
+///
+/// The fact carries the three numbers worth a glance. Opening the row shows
+/// the rest, the apps, and the switch that decides whether an app is
+/// recorded with a dictation at all; the switch sits beside the list it
+/// exists for rather than on a settings page.
+struct UsageStatsView: View {
+    @Environment(AppModel.self) private var model
+    let store: OverviewStore
+
+    var body: some View {
+        OverviewDisclosure("All time", fact: fact) {
+            switch store.usage {
+            case .loading:
+                CardRow { Text("Loading…").metaText() }
+            case .failed:
+                FeedFailedRow(message: "Couldn't read your usage.", retry: store.reloadUsage)
+            case let .loaded(stats, apps):
+                if stats.dictations == 0 {
+                    CardRow { Text("No dictations yet.").metaText() }
+                } else {
+                    UsageTiles(stats: stats)
+                    UsageAppsList(apps: apps, other: stats.other, counting: model.settings.settings.countWordsPerApp)
+                }
+            }
+            ToggleRow(
+                title: "Count words per app",
+                detail: "Remembers which app each dictation went into. Stays on this Mac.",
+                isOn: Binding(
+                    get: { model.settings.settings.countWordsPerApp },
+                    set: { value in Task { await model.settings.setCountWordsPerApp(value) } }
+                )
+            )
+            .disabled(model.settings.isBusy("count_words_per_app"))
+        }
+        .padding(.bottom, 32)
+    }
+
+    private var fact: String? {
+        guard case let .loaded(stats, _) = store.usage else { return nil }
+        if stats.dictations == 0 { return "Nothing yet" }
+        var parts = ["\(stats.totalWords.formatted()) words"]
+        if stats.wordsPerMinuteDictations > 0 {
+            parts.append("\(stats.wordsPerMinute) wpm")
+        }
+        parts.append("\(stats.timeSaved) saved")
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The four numbers, and the line under them saying what they rest on.
+private struct UsageTiles: View {
+    let stats: UsageStats
+
+    var body: some View {
+        CardRow {
+            HStack(alignment: .top, spacing: 40) {
+                Stat(label: "Words", value: stats.totalWords.formatted())
+                Stat(label: "Words a minute", value: stats.wordsPerMinuteDictations > 0 ? "\(stats.wordsPerMinute)" : "–")
+                Stat(label: "Time saved", value: stats.timeSaved)
+                Stat(label: "Streak", value: UsageStats.days(stats.currentStreakDays))
+            }
+        }
+        CardLine(stats.footing)
+    }
+}
+
+/// Where the words went, most first. Rows the core could not name are one
+/// "Other" line, so the list adds up to the total above it. With counting
+/// off the list says so instead of showing a stale one.
+private struct UsageAppsList: View {
+    let apps: [UsageAppRow]
+    let other: UsageOther
+    let counting: Bool
+
+    var body: some View {
+        if !counting {
+            CardLine("Words aren't counted per app. Turn it on below and the next dictation starts the list.")
+        } else if apps.isEmpty {
+            CardLine("No app recorded yet. The next dictation starts the list.")
+        } else {
+            ForEach(apps) { row in
+                UsageAppRowView(row: row)
+            }
+            if other.dictations > 0 {
+                UsageAppRowView(row: UsageAppRow(
+                    id: "other", name: "Other", icon: nil, dictations: other.dictations, words: other.words))
+            }
+        }
+    }
+}
+
+private struct UsageAppRowView: View {
+    let row: UsageAppRow
+
+    var body: some View {
+        CardRow {
+            HStack(spacing: 10) {
+                if let icon = row.icon {
+                    Image(nsImage: icon).resizable().frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: "app.dashed")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .frame(width: 18, height: 18)
+                }
+                Text(row.name).bodyText(14)
+            }
+        } trailing: {
+            Text(row.counts).metaText()
+        }
+    }
+}
+
 // MARK: - Recent
 
 /// What Sona did without being asked, closed by default.
@@ -843,11 +953,12 @@ private struct FeedReceiptRow: View {
 
 /// A list that could not be read keeps its own row, and the way to ask again.
 private struct FeedFailedRow: View {
+    var message = "Couldn't load this list."
     let retry: () -> Void
 
     var body: some View {
         CardRow {
-            Text("Couldn't load this list.").metaText()
+            Text(message).metaText()
         } trailing: {
             Button("Retry", action: retry).buttonStyle(.quiet)
         }

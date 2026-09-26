@@ -1,9 +1,9 @@
 use crate::input;
 use crate::settings;
-use crate::settings::{OverlayPosition, OverlayStyle};
+use crate::settings::{HudPillEdge, OverlayPosition, OverlayStyle};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::LazyLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
 
 #[cfg(not(target_os = "macos"))]
@@ -76,12 +76,43 @@ fn overlay_dimensions(state: &str) -> (f64, f64) {
 /// to its own screen edge.
 static OVERLAY_SHOWING_IDLE: AtomicBool = AtomicBool::new(false);
 
+/// The screen edge a window is docked to. The recording overlay's setting
+/// names the top and bottom; the idle pill's names all four. Both arrive here
+/// so one placement routine serves the one window they share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Anchor {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl From<OverlayPosition> for Anchor {
+    fn from(position: OverlayPosition) -> Self {
+        match position {
+            OverlayPosition::Top => Anchor::Top,
+            OverlayPosition::Bottom => Anchor::Bottom,
+        }
+    }
+}
+
+impl From<HudPillEdge> for Anchor {
+    fn from(edge: HudPillEdge) -> Self {
+        match edge {
+            HudPillEdge::Top => Anchor::Top,
+            HudPillEdge::Bottom => Anchor::Bottom,
+            HudPillEdge::Left => Anchor::Left,
+            HudPillEdge::Right => Anchor::Right,
+        }
+    }
+}
+
 /// Which screen edge a given overlay state anchors to.
-fn overlay_anchor(settings: &settings::AppSettings, state: &str) -> OverlayPosition {
+fn overlay_anchor(settings: &settings::AppSettings, state: &str) -> Anchor {
     if state == HUD_IDLE_STATE {
-        settings.hud_pill_position
+        settings.hud_pill_position.into()
     } else {
-        settings.overlay_position
+        settings.overlay_position.into()
     }
 }
 
@@ -95,10 +126,23 @@ fn current_overlay_state() -> &'static str {
     }
 }
 
+/// Whether a one-hour hide is still running at `now_ms`: the pill stays off
+/// screen until the stored time, and comes back the instant it is reached.
+fn hud_pill_hidden(hidden_until_ms: Option<i64>, now_ms: i64) -> bool {
+    hidden_until_ms.is_some_and(|until_ms| until_ms > now_ms)
+}
+
 /// Whether the idle pill should be on screen right now. `OverlayStyle::None`
-/// disables overlay rendering wholesale, so it also suppresses the pill.
-fn hud_pill_visible(settings: &settings::AppSettings) -> bool {
-    settings.hud_pill_enabled && settings.overlay_style != OverlayStyle::None
+/// disables overlay rendering wholesale, so it also suppresses the pill, and
+/// so does a running one-hour hide.
+fn hud_pill_visible(settings: &settings::AppSettings, now_ms: i64) -> bool {
+    settings.hud_pill_enabled
+        && settings.overlay_style != OverlayStyle::None
+        && !hud_pill_hidden(settings.hud_pill_hidden_until_ms, now_ms)
+}
+
+fn utc_now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
@@ -151,6 +195,9 @@ const OVERLAY_BOTTOM_OFFSET: f64 = 15.0;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const OVERLAY_BOTTOM_OFFSET: f64 = 40.0;
 
+/// Gap between a side-docked idle pill and the screen edge it stands on.
+const OVERLAY_SIDE_OFFSET: f64 = 12.0;
+
 fn saturating_truncated_i32(value: f64) -> i32 {
     if value.is_nan() {
         return 0;
@@ -181,14 +228,24 @@ fn saturating_truncated_u32(value: f64) -> u32 {
 /// commits anchor and margin changes itself, including while the surface is
 /// mapped, so changing position does not require a manual hide/show cycle.
 #[cfg(target_os = "linux")]
-fn configure_layer_shell_position(gtk_window: &gtk::ApplicationWindow, position: OverlayPosition) {
+fn configure_layer_shell_position(gtk_window: &gtk::ApplicationWindow, position: Anchor) {
     let (edge, opposite_edge, margin) = match position {
-        OverlayPosition::Top => (Edge::Top, Edge::Bottom, OVERLAY_TOP_OFFSET),
-        OverlayPosition::Bottom => (Edge::Bottom, Edge::Top, OVERLAY_BOTTOM_OFFSET),
+        Anchor::Top => (Edge::Top, Edge::Bottom, OVERLAY_TOP_OFFSET),
+        Anchor::Bottom => (Edge::Bottom, Edge::Top, OVERLAY_BOTTOM_OFFSET),
+        Anchor::Left => (Edge::Left, Edge::Right, OVERLAY_SIDE_OFFSET),
+        Anchor::Right => (Edge::Right, Edge::Left, OVERLAY_SIDE_OFFSET),
     };
 
+    // A side edge is centred along the other axis, so both of that axis's
+    // anchors come off; a top or bottom edge likewise releases the sides.
+    let (cross_a, cross_b) = match position {
+        Anchor::Top | Anchor::Bottom => (Edge::Left, Edge::Right),
+        Anchor::Left | Anchor::Right => (Edge::Top, Edge::Bottom),
+    };
     gtk_window.set_anchor(edge, true);
     gtk_window.set_anchor(opposite_edge, false);
+    gtk_window.set_anchor(cross_a, false);
+    gtk_window.set_anchor(cross_b, false);
     gtk_window.set_layer_shell_margin(edge, saturating_truncated_i32(margin.round()));
     gtk_window.set_layer_shell_margin(opposite_edge, 0);
 }
@@ -201,7 +258,7 @@ fn configure_layer_shell_position(gtk_window: &gtk::ApplicationWindow, position:
 #[cfg(target_os = "linux")]
 fn configure_layer_shell_surface(
     gtk_window: &gtk::ApplicationWindow,
-    position: OverlayPosition,
+    position: Anchor,
     width: f64,
     height: f64,
 ) {
@@ -359,6 +416,8 @@ fn is_mouse_within_monitor(
 /// bug that led PR #969 to abandon work_area for full monitor bounds. Top and
 /// the other platforms keep full monitor bounds plus the fixed offsets
 /// (work_area is unreliable on Wayland; Windows' offset clears the taskbar).
+/// A side anchor stands inward from the work area's edge on macOS, so it sits
+/// clear of a Dock on that side, and is centred along the edge.
 ///
 /// We must use LogicalPosition (not PhysicalPosition) because Tauri/tao
 /// converts PhysicalPosition using the scale factor of the monitor the window
@@ -368,7 +427,7 @@ fn calculate_overlay_position(
     app_handle: &AppHandle,
     width: f64,
     height: f64,
-    anchor: OverlayPosition,
+    anchor: Anchor,
 ) -> Option<(f64, f64)> {
     let monitor = get_monitor_with_cursor(app_handle)?;
     let scale = monitor.scale_factor();
@@ -376,22 +435,42 @@ fn calculate_overlay_position(
     let monitor_y = f64::from(monitor.position().y) / scale;
     let monitor_width = f64::from(monitor.size().width) / scale;
 
-    let x = monitor_x + (monitor_width - width) / 2.0;
-    let y = match anchor {
-        OverlayPosition::Top => monitor_y + OVERLAY_TOP_OFFSET,
-        OverlayPosition::Bottom => {
-            // work_area.position shares monitor.position's global coordinate
-            // space, so no monitor offset is added.
-            #[cfg(target_os = "macos")]
-            let bottom = {
-                let wa = monitor.work_area();
-                (f64::from(wa.position.y) + f64::from(wa.size.height)) / scale
-            };
-            #[cfg(not(target_os = "macos"))]
-            let bottom = monitor_y + f64::from(monitor.size().height) / scale;
+    // The area a docked window may use: the work area on macOS (it shares
+    // monitor.position's global coordinate space, so no monitor offset is
+    // added), the whole monitor elsewhere.
+    #[cfg(target_os = "macos")]
+    let (area_x, area_y, area_width, area_height) = {
+        let wa = monitor.work_area();
+        (
+            f64::from(wa.position.x) / scale,
+            f64::from(wa.position.y) / scale,
+            f64::from(wa.size.width) / scale,
+            f64::from(wa.size.height) / scale,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (area_x, area_y, area_width, area_height) = (
+        monitor_x,
+        monitor_y,
+        monitor_width,
+        f64::from(monitor.size().height) / scale,
+    );
 
-            bottom - height - OVERLAY_BOTTOM_OFFSET
-        }
+    let centered_x = monitor_x + (monitor_width - width) / 2.0;
+    let (x, y) = match anchor {
+        Anchor::Top => (centered_x, monitor_y + OVERLAY_TOP_OFFSET),
+        Anchor::Bottom => (
+            centered_x,
+            area_y + area_height - height - OVERLAY_BOTTOM_OFFSET,
+        ),
+        Anchor::Left => (
+            area_x + OVERLAY_SIDE_OFFSET,
+            area_y + (area_height - height) / 2.0,
+        ),
+        Anchor::Right => (
+            area_x + area_width - width - OVERLAY_SIDE_OFFSET,
+            area_y + (area_height - height) / 2.0,
+        ),
     };
 
     Some((x, y))
@@ -421,27 +500,35 @@ fn windows_overlay_bounds(
     scale: f64,
     logical_width: f64,
     logical_height: f64,
-    overlay_position: OverlayPosition,
+    overlay_position: Anchor,
 ) -> (i32, i32, i32, i32) {
     let width = saturating_truncated_i32((logical_width * scale).round()).max(1);
     let height = saturating_truncated_i32((logical_height * scale).round()).max(1);
-    let x = saturating_truncated_i32(
-        (f64::from(monitor_position.x) + (f64::from(monitor_size.width) - f64::from(width)) / 2.0)
-            .round(),
-    );
-    let y = match overlay_position {
-        OverlayPosition::Top => saturating_truncated_i32(
-            (f64::from(monitor_position.y) + OVERLAY_TOP_OFFSET * scale).round(),
+    let monitor_x = f64::from(monitor_position.x);
+    let monitor_y = f64::from(monitor_position.y);
+    let monitor_width = f64::from(monitor_size.width);
+    let monitor_height = f64::from(monitor_size.height);
+    let centered_x = monitor_x + (monitor_width - f64::from(width)) / 2.0;
+    let centered_y = monitor_y + (monitor_height - f64::from(height)) / 2.0;
+    let (x, y) = match overlay_position {
+        Anchor::Top => (centered_x, monitor_y + OVERLAY_TOP_OFFSET * scale),
+        Anchor::Bottom => (
+            centered_x,
+            monitor_y + monitor_height - f64::from(height) - OVERLAY_BOTTOM_OFFSET * scale,
         ),
-        OverlayPosition::Bottom => saturating_truncated_i32(
-            (f64::from(monitor_position.y) + f64::from(monitor_size.height)
-                - f64::from(height)
-                - OVERLAY_BOTTOM_OFFSET * scale)
-                .round(),
+        Anchor::Left => (monitor_x + OVERLAY_SIDE_OFFSET * scale, centered_y),
+        Anchor::Right => (
+            monitor_x + monitor_width - f64::from(width) - OVERLAY_SIDE_OFFSET * scale,
+            centered_y,
         ),
     };
 
-    (x, y, width, height)
+    (
+        saturating_truncated_i32(x.round()),
+        saturating_truncated_i32(y.round()),
+        width,
+        height,
+    )
 }
 
 /// Moves and sizes the overlay in one native SetWindowPos, bypassing tao's
@@ -452,7 +539,7 @@ fn place_windows_overlay(
     overlay_window: &tauri::webview::WebviewWindow,
     logical_width: f64,
     logical_height: f64,
-    anchor: OverlayPosition,
+    anchor: Anchor,
 ) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
 
@@ -506,7 +593,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
             app_handle,
             OVERLAY_WIDTH,
             OVERLAY_HEIGHT,
-            settings::get_settings(app_handle).overlay_position,
+            settings::get_settings(app_handle).overlay_position.into(),
         );
         if position.is_none() {
             debug!("Failed to determine overlay position, not creating overlay window");
@@ -569,7 +656,7 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
         app_handle,
         OVERLAY_WIDTH,
         OVERLAY_HEIGHT,
-        settings::get_settings(app_handle).overlay_position,
+        settings::get_settings(app_handle).overlay_position.into(),
     ) {
         // PanelBuilder creates a Tauri window then converts it to NSPanel.
         // The window remains registered, so get_webview_window() still works.
@@ -839,7 +926,7 @@ static OVERLAY_SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// in the pipeline already calls this one function, which is why the guard
 /// lives here rather than at each of those call sites.
 pub fn hide_recording_overlay(app_handle: &AppHandle) {
-    if hud_pill_visible(&settings::get_settings(app_handle)) {
+    if hud_pill_visible(&settings::get_settings(app_handle), utc_now_ms()) {
         show_overlay_state(app_handle, HUD_IDLE_STATE);
         return;
     }
@@ -874,12 +961,73 @@ fn hide_overlay_window(app_handle: &AppHandle) {
 ///
 /// Called at startup and whenever a setting that governs the pill changes, so
 /// the window state is always derived from settings rather than accumulated
-/// from past transitions.
+/// from past transitions. This is also where a one-hour hide is kept honest:
+/// one still running arms the return below, and one already over is cleared
+/// from the settings, so no shell ever reads a hide the clock has passed.
 pub fn sync_hud_pill(app_handle: &AppHandle) {
-    if hud_pill_visible(&settings::get_settings(app_handle)) {
+    let mut settings = settings::get_settings(app_handle);
+    let now_ms = utc_now_ms();
+    if let Some(until_ms) = settings.hud_pill_hidden_until_ms {
+        if until_ms > now_ms {
+            arm_hud_pill_return(app_handle, until_ms);
+        } else {
+            clear_expired_hud_pill_hide(app_handle, now_ms);
+            settings.hud_pill_hidden_until_ms = None;
+        }
+    }
+    if hud_pill_visible(&settings, now_ms) {
         show_overlay_state(app_handle, HUD_IDLE_STATE);
     } else if OVERLAY_SHOWING_IDLE.load(Ordering::Relaxed) {
         hide_overlay_window(app_handle);
+    }
+}
+
+/// Generation of the armed pill return: a hide set again, or ended early,
+/// arms afresh, and the older sleeper finds its number gone and does nothing.
+static HUD_PILL_RETURN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Longest single sleep of the return timer. The wall clock keeps moving
+/// while the machine sleeps and a monotonic sleep does not, so the timer wakes
+/// at least this often to read the clock again rather than overshooting the
+/// hour by however long the lid was shut.
+const HUD_PILL_RETURN_STEP: Duration = Duration::from_secs(60);
+
+/// Brings the pill back by itself when its one-hour hide ends at `until_ms`.
+fn arm_hud_pill_return(app_handle: &AppHandle, until_ms: i64) {
+    let generation = HUD_PILL_RETURN_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let app_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        loop {
+            let remaining_ms = until_ms.saturating_sub(utc_now_ms());
+            if remaining_ms <= 0 {
+                break;
+            }
+            let step = Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX))
+                .min(HUD_PILL_RETURN_STEP);
+            std::thread::sleep(step);
+            if HUD_PILL_RETURN_GENERATION.load(Ordering::SeqCst) != generation {
+                return;
+            }
+        }
+        if HUD_PILL_RETURN_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        // Clearing writes the settings, which every shell hears; the sync then
+        // reads the cleared record and puts the pill back on screen.
+        sync_hud_pill(&app_handle);
+    });
+}
+
+/// Drops a one-hour hide whose time has passed. Only that one: a hide set
+/// again since the sleeper was armed names a later time and stays.
+fn clear_expired_hud_pill_hide(app_handle: &AppHandle, now_ms: i64) {
+    HUD_PILL_RETURN_GENERATION.fetch_add(1, Ordering::SeqCst);
+    if let Err(error) = settings::update_settings(app_handle, |settings| {
+        if !hud_pill_hidden(settings.hud_pill_hidden_until_ms, now_ms) {
+            settings.hud_pill_hidden_until_ms = None;
+        }
+    }) {
+        log::warn!("The idle pill's ended hide could not be cleared from the settings: {error}");
     }
 }
 
@@ -958,6 +1106,16 @@ mod tests {
         assert!(!is_mouse_within_monitor((-1, 1240), &position, &size));
     }
 
+    #[test]
+    fn a_one_hour_hide_holds_until_its_time_and_not_past_it() {
+        // A stored hide is a wall-clock time. Ahead of it the pill stays off;
+        // at it and after it the pill is back, whatever the settings still say.
+        assert!(hud_pill_hidden(Some(1_000), 999));
+        assert!(!hud_pill_hidden(Some(1_000), 1_000));
+        assert!(!hud_pill_hidden(Some(1_000), 1_001));
+        assert!(!hud_pill_hidden(None, 0));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_cursor_hit_test_does_not_scale_physical_monitor_bounds() {
@@ -998,7 +1156,7 @@ mod tests {
                 1.5,
                 OVERLAY_WIDTH,
                 OVERLAY_HEIGHT,
-                OverlayPosition::Bottom,
+                Anchor::Bottom,
             ),
             (3648, 2031, 384, 69)
         );
@@ -1009,7 +1167,7 @@ mod tests {
                 1.5,
                 OVERLAY_WIDTH,
                 OVERLAY_HEIGHT,
-                OverlayPosition::Top,
+                Anchor::Top,
             ),
             (3648, 6, 384, 69)
         );
@@ -1025,7 +1183,7 @@ mod tests {
                 1.25,
                 OVERLAY_STREAM_WIDTH,
                 OVERLAY_STREAM_HEIGHT,
-                OverlayPosition::Bottom,
+                Anchor::Bottom,
             ),
             (-1530, 1040, 500, 150)
         );

@@ -65,6 +65,12 @@ const NAMED_EVENTS: [&str; 24] = [
 /// How often the core checks that the shell that spawned it is still there.
 const PARENT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The parent that connected as the native Sona app, not merely a launcher
+/// that happened to spawn this core. Playback uses it to discount both Sona
+/// processes without discounting audio from an arbitrary parent application.
+#[cfg(target_os = "macos")]
+static NATIVE_SHELL_PID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
 #[derive(Deserialize)]
 struct Request {
     id: u64,
@@ -187,6 +193,10 @@ pub fn start(app: &AppHandle, path: &Path) -> io::Result<()> {
                     continue;
                 }
             };
+            #[cfg(target_os = "macos")]
+            if let Some(pid) = verified_native_shell_pid(&stream) {
+                let _ = NATIVE_SHELL_PID.set(pid);
+            }
             let connection = Arc::new(Connection {
                 writer: Mutex::new(writer),
             });
@@ -210,6 +220,52 @@ pub fn watch_parent(app: AppHandle) {
             return;
         }
     });
+}
+
+/// The shell that owns this core, while it remains our parent. Reparenting
+/// after the shell exits must not make a reused PID look like Sona playback.
+#[cfg(target_os = "macos")]
+pub(crate) fn native_shell_pid() -> Option<u32> {
+    NATIVE_SHELL_PID
+        .get()
+        .copied()
+        .filter(|pid| *pid == std::os::unix::process::parent_id())
+}
+
+/// Core.swift spawns the helper and connects from the shell itself. Verify
+/// that relationship with the kernel's socket peer PID and LaunchServices'
+/// bundle identity; a parent PID or a client-supplied value alone is not it.
+#[cfg(target_os = "macos")]
+fn verified_native_shell_pid(stream: &UnixStream) -> Option<u32> {
+    use objc2_app_kit::NSRunningApplication;
+    use std::os::fd::AsRawFd;
+
+    let mut pid: libc::pid_t = 0;
+    let expected_size = libc::socklen_t::try_from(std::mem::size_of_val(&pid)).ok()?;
+    let mut size = expected_size;
+    // SAFETY: stream keeps the descriptor open and pid is writable storage
+    // of exactly the size passed to getsockopt for LOCAL_PEERPID.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            std::ptr::from_mut(&mut pid).cast(),
+            &mut size,
+        )
+    };
+    if status != 0 || size != expected_size || pid <= 1 {
+        return None;
+    }
+    let parent = u32::try_from(pid).ok()?;
+    if parent != std::os::unix::process::parent_id() {
+        return None;
+    }
+    objc2::rc::autoreleasepool(|_| {
+        let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+        let bundle_id = application.bundleIdentifier()?;
+        (bundle_id.to_string() == "com.aktanazat.sona.mac").then_some(parent)
+    })
 }
 
 fn broadcast(registry: &Registry, name: &str, payload: &str) {

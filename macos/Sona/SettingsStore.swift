@@ -173,6 +173,14 @@ final class SettingsStore {
 
     var detectsLanguage: Bool { model?.supportsLanguageDetection ?? true }
 
+    var selectsLanguage: Bool { model?.supportsLanguageSelection ?? true }
+
+    /// Legacy fixed-language stores keep their choice until the picker saves.
+    var dictationLanguages: [String] {
+        if settings.selectedLanguage != "auto" { return [settings.selectedLanguage] }
+        return settings.dictationLanguages
+    }
+
     var supportsTranslation: Bool { model?.supportsTranslation ?? false }
 
     /// The language in force: the stored intent resolved against what the
@@ -304,6 +312,13 @@ final class SettingsStore {
         await write(\.pushToTalk, enabled, "change_ptt_setting", ["enabled": .bool(enabled)], key: "push_to_talk")
     }
 
+    func setQuietSpeechEnabled(_ enabled: Bool) async {
+        await write(
+            \.quietSpeechEnabled, enabled, "change_quiet_speech_enabled_setting",
+            ["enabled": .bool(enabled)], key: "quiet_speech_enabled"
+        )
+    }
+
     func setMicrophone(_ name: String) async {
         await write(
             \.selectedMicrophone, name, "set_selected_microphone",
@@ -343,15 +358,13 @@ final class SettingsStore {
         )
     }
 
-    func setLanguage(_ code: String) async {
+    func setDictationLanguages(_ languages: [String]) async {
+        guard !isBusy("dictation_languages") else { return }
+        settings.selectedLanguage = languages.count == 1 ? languages[0] : "auto"
         await write(
-            \.selectedLanguage, code, "change_selected_language_setting",
-            ["language": .string(code)], key: "selected_language"
+            \.dictationLanguages, languages, "change_dictation_languages_setting",
+            ["languages": .array(languages.map(JSONValue.string))], key: "dictation_languages"
         )
-    }
-
-    func resetLanguage() async {
-        await setLanguage(defaults.selectedLanguage)
     }
 
     func setAudioFeedback(_ enabled: Bool) async {
@@ -423,10 +436,26 @@ final class SettingsStore {
         )
     }
 
+    func setCommandAnswersInChat(_ enabled: Bool) async {
+        await write(
+            \.commandAnswersInChat, enabled, "change_command_answers_in_chat_setting",
+            ["enabled": .bool(enabled)], key: "command_answers_in_chat"
+        )
+    }
+
     func setLearnDestinationCorrections(_ enabled: Bool) async {
         await write(
             \.learnDestinationCorrections, enabled, "change_learn_destination_corrections_setting",
             ["enabled": .bool(enabled)], key: "learn_destination_corrections"
+        )
+    }
+
+    /// Whether each saved dictation records the app it went into, for the
+    /// per-app words on the capture page.
+    func setCountWordsPerApp(_ enabled: Bool) async {
+        await write(
+            \.countWordsPerApp, enabled, "change_count_words_per_app_setting",
+            ["enabled": .bool(enabled)], key: "count_words_per_app"
         )
     }
 
@@ -498,10 +527,31 @@ final class SettingsStore {
         )
     }
 
-    func setHudPillPosition(_ position: OverlayPosition) async {
+    func setHudPillPosition(_ edge: HudPillEdge) async {
         await write(
-            \.hudPillPosition, position, "set_hud_pill_position",
-            ["position": .string(position.rawValue)], key: "hud_pill_position"
+            \.hudPillPosition, edge, "set_hud_pill_position",
+            ["position": .string(edge.rawValue)], key: "hud_pill_position"
+        )
+    }
+
+    /// Puts the pill away until an hour from now. The core names the moment
+    /// it comes back; the record carries it to every row that shows it.
+    func hideHudPillForAnHour() async {
+        await send("hide_hud_pill_for_an_hour", key: "hud_pill_hidden_until_ms")
+        await refresh()
+    }
+
+    /// Ends a one-hour hide early.
+    func showHudPillNow() async {
+        settings.hudPillHiddenUntilMs = nil
+        await send("show_hud_pill_now", key: "hud_pill_hidden_until_ms")
+        await refresh()
+    }
+
+    func setMuteWhileRecording(_ enabled: Bool) async {
+        await write(
+            \.muteWhileRecording, enabled, "change_mute_while_recording_setting",
+            ["enabled": .bool(enabled)], key: "mute_while_recording"
         )
     }
 

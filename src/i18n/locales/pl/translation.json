@@ -3173,7 +3173,6 @@
     "seriesBrief_other": "Spotkanie {{nth}} z {{person}} · {{count}} otwartych spraw",
     "alwaysRecord": "Zawsze nagrywaj to spotkanie",
     "announceInChat": "Ogłoś na czacie",
-    "announceLine": "Sona robi notatki dla {{name}}. Daj znać, jeśli wolisz, żeby tego nie robiła.",
     "announceRefused": "Informacja nie została opublikowana: ta aplikacja jej nie przyjęła.",
     "assurance": "Dźwięk pozostaje na tym Macu. Nic nie dołącza do rozmowy.",
     "record": "Nagrywaj",

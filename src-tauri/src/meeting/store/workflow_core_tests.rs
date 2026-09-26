@@ -74,6 +74,40 @@ pub(crate) fn reviewable_meeting(
     id
 }
 
+/// Give an existing rule a fixed grant time for consent boundary fixtures.
+pub(crate) fn seed_connection_grant_time(
+    store: &MeetingStore,
+    rule_id: &str,
+    at_utc_ms: i64,
+) -> Result<(), StoreError> {
+    store.connection()?.execute(
+        "UPDATE integration_rules
+            SET record_json = json_set(record_json, '$.created_at_utc_ms', ?1)
+          WHERE id = ?2",
+        params![at_utc_ms, rule_id],
+    )?;
+    Ok(())
+}
+
+/// Give an existing folder membership a fixed committed filing time.
+pub(crate) fn seed_folder_filing_time(
+    store: &MeetingStore,
+    folder_id: MeetingFolderId,
+    session_id: MeetingSessionId,
+    at_utc_ms: i64,
+) -> Result<(), StoreError> {
+    store.connection()?.execute(
+        "UPDATE meeting_folder_members SET added_at_utc_ms = ?3
+          WHERE folder_id = ?1 AND session_id = ?2",
+        params![
+            folder_id.uuid().to_string(),
+            session_id.uuid().to_string(),
+            at_utc_ms
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn person(
     store: &MeetingStore,
     name: &str,
@@ -604,6 +638,42 @@ fn organization_detail_answers_to_the_label_and_refuses_an_unknown_one() {
         store.organization_detail("beta"),
         Err(StoreError::NotFound)
     ));
+}
+
+/* The companies list is the organization pages counted: everybody carrying a
+ * label, a meeting two of them shared once, what is open there once, and the
+ * company met most recently first. */
+#[test]
+fn companies_list_counts_a_shared_meeting_once_and_puts_the_latest_first() {
+    let (_directory, store) = store();
+    let alice = person(&store, "Alice Doe", &[], &["alice@acme.com"]);
+    let dana = person(&store, "Dana Reyes", &[], &["dana@acme.com"]);
+    let bob = person(&store, "Bob Stone", &[], &["bob@beta.io"]);
+    let shared = calendar_link(&store, alice, "alice@acme.com", 10);
+    link(&store, shared, dana, "calendar", "confirmed");
+    calendar_link(&store, dana, "dana@acme.com", 20);
+    calendar_link(&store, bob, "bob@beta.io", 30);
+    artifact(&store, shared, "Pricing is still open.");
+    let connection = store.connection().unwrap();
+    recompute_organizations_in(&connection).unwrap();
+    drop(connection);
+
+    let companies = store.companies_list().unwrap().companies;
+
+    assert_eq!(
+        companies
+            .iter()
+            .map(|company| (
+                company.name.as_str(),
+                company.people_count,
+                company.meetings_count,
+                company.open_loops_count,
+            ))
+            .collect::<Vec<_>>(),
+        [("Beta", 1, 1, 0), ("Acme", 2, 2, 1)],
+        "latest first; the shared meeting and its open item count once"
+    );
+    assert_eq!(companies[1].slug, "acme", "the key its page answers to");
 }
 
 /* A relationship paragraph is a projection, not identity: it lands on the row

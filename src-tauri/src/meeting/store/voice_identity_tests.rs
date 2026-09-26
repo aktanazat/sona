@@ -1004,3 +1004,53 @@ fn matching_refuses_a_profile_from_another_model_revision() -> Result<(), StoreE
         .is_none());
     Ok(())
 }
+
+/// Automatic matching is what "remember this voice" pays off as: a speaker
+/// still under the label the store wrote takes the matched person's name and
+/// leaves the to-label queue, while a name somebody typed survives the match.
+#[test]
+fn successful_match_names_a_generated_speaker_and_keeps_a_typed_name() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let person_id = person(&store, "Ada Lovelace", &[], &[]);
+    let embedding = unit_embedding()?;
+    insert_compatible_profile(&store, person_id, &embedding)?;
+    for (label, expected) in [
+        ("Speaker 2", "Ada Lovelace"),
+        ("Unknown speaker", "Ada Lovelace"),
+        ("Bob", "Bob"),
+        ("Speaker", "Speaker"),
+        ("Speaker 2b", "Speaker 2b"),
+    ] {
+        let speaker_id = SpeakerId::new();
+        store.connection()?.execute(
+            "INSERT INTO meeting_speakers (
+                speaker_id, session_id, source_kind, display_name, revision, merged_into_speaker_id
+             ) VALUES (?1, ?2, 'microphone', ?3, 0, NULL)",
+            params![id(speaker_id), id(session_id), label],
+        )?;
+        let matched = store
+            .match_local_voice_profile(&embedding, wespeaker_embedding_model_key())?
+            .ok_or(StoreError::VoiceInvariant)?;
+        store.commit_successful_voice_match(session_id, speaker_id, 0, matched, 6)?;
+        let name: String = store.connection()?.query_row(
+            "SELECT display_name FROM meeting_speakers WHERE speaker_id = ?1",
+            params![id(speaker_id)],
+            |row| row.get(0),
+        )?;
+        assert_eq!(name, expected, "{label:?}");
+        assert!(
+            !store
+                .unresolved_active_voice_speaker_ids(session_id)?
+                .contains(&speaker_id),
+            "{label:?} stayed in the to-label queue"
+        );
+    }
+    let links: i64 = store.connection()?.query_row(
+        "SELECT COUNT(*) FROM meeting_person_links WHERE meeting_id = ?1 AND person_id = ?2",
+        params![id(session_id), id(person_id)],
+        |row| row.get(0),
+    )?;
+    assert_eq!(links, 1);
+    Ok(())
+}

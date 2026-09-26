@@ -128,6 +128,7 @@ fn series_for(
         series_key: series_key.to_string(),
         always_record: stored.is_some_and(|record| record.always_record),
         template: stored.and_then(|record| record.template),
+        custom_template_id: stored.and_then(|record| record.custom_template_id),
         digest_included: stored.is_none_or(|record| record.digest_included),
     })
 }
@@ -235,6 +236,7 @@ mod tests {
             MeetingSeriesPreferences {
                 series_key: Some(series_key.to_string()),
                 template,
+                custom_template_id: None,
                 digest_included,
                 always_record,
                 remote_intelligence_opt_out: false,

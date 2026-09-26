@@ -20,9 +20,14 @@ Sona is a local-first desktop app for spoken words: dictation delivered into any
 - Records the microphone and system audio of a meeting after a consent step, with no bot joining the call. Detects meetings from the calendar, from the meeting app you are in, from a call tab in Safari, Chrome, Edge, Firefox, or Arc, and from FaceTime and Phone calls. Presence is not participation: an open but untouched meeting app never prompts, and the status line says why. Calls in apps you grant can record automatically.
 - Transcribes after the meeting, with diarization, notes, a ledger of every thread with its verbatim receipt, people, and series memory; catch-up and questions also work while the meeting is still running. A finished meeting opens on its ledger.
 - Speaker labels: label an unresolved voice as an existing or new person, or correct a wrong one. Remembering a voice for later meetings is a separate opt-in that stays on this Mac, and a person's page can forget it.
+- Call participant names: while recording call audio, open **Names from this call** and choose a Zoom, Teams or Google Meet call. Reading and automatic naming both start off. Readable participant names become review choices; a clear speaking-time match can suggest a name without replacing one you typed or a remembered voice. This needs macOS Accessibility access and a supported English people panel. Missing or ambiguous speech indicators never become a guessed name. Call-name evidence stays on this Mac and is removed when its transcript is deleted.
 - Imports a recording or a Granola, Otter, or Circleback transcript export as a meeting.
-- Saved prompts with optional JSON-schema output, run by hand or after every meeting in a series.
-- Follow-up drafts that open in Mail, Reminders with due dates, an announce-in-chat line, and a thirty-day undo bin for deleted meetings.
+- Saved prompts with optional JSON-schema output, run by hand or after every meeting in a series or folder. Folder defaults allow one notes template and up to five meeting prompts.
+- Folders group meetings without moving or copying them. Add a meeting to several folders, filter the library by folder, or start a fresh chat limited to that folder's meetings. Deleting a folder leaves its meetings intact.
+- Export the whole meeting library as CSV from the Meetings page menu: title, UTC date, recorded duration, participant labels, summary, action items, and transcript. The export ignores list filters and excludes trash.
+- Follow-up drafts that open in Mail, Reminders with due dates, and a thirty-day undo bin for deleted meetings. Delete forever removes a trashed meeting immediately after confirmation.
+- Recording notices are off by default. In Meeting settings, edit the notice and enable posting for new recordings. The detected-meeting prompt can opt out for one meeting. Sona attempts a send once only after identifying a joined English Zoom meeting, its own empty chat composer, Everyone as the recipient, and the Send action. Unclear chats and other apps show “Not posted” with the exact notice to copy. Sona never uses a generic focused field, overwrites an existing draft, or retries an uncertain send. This notice does not replace participants' consent.
+- The optional Sona Camera extension adds “Recording with Sona” to outgoing video only while Sona is recording. Install it from Meeting settings, approve Camera Extensions in macOS, allow camera access, choose a physical camera, then select Sona Camera in the call app. Installing it does not start video. Stopping or pausing the recording removes the label while normal video continues. The extension stops using the physical camera when its last video consumer closes, and never stores video. The signed native app must be in Applications; both the app and extension require the same Apple team and shared app group.
 - Meeting intelligence runs on Apple Intelligence by default. Settings > Advanced also offers a local OpenAI-compatible endpoint, such as Ollama, for summaries, ledgers, recaps, and answers. Supply its loopback URL (including /v1), model ID, and context window if its model catalog does not report one. Remote generation through the paired relay remains a separate opt-in.
 
 ### Screen recording
@@ -41,6 +46,14 @@ Sona is a local-first desktop app for spoken words: dictation delivered into any
 - `mobile/` holds the iPhone and Apple Watch recorders. They pair with your Mac through the same end-to-end encrypted vault the desktop syncs through, record in-person conversations, and hand them to the Mac as meetings. On iPhone, Sona offers to record a note when a call ends; iOS gives no app access to call audio.
 
 Local runs keep captured audio on the device. Cloud transcription sends audio only after you configure a provider key and accept that provider's transfer notice. Sona does not store provider keys in its settings file.
+
+### Native macOS and phone additions
+
+- dictation adds cleanup levels, quiet-speech capture, language choices, usage statistics, a movable bar, and answers in chat. the plain-text scratchpad saves drafts and keeps version history.
+- meetings add live notes and cited help, custom notes templates, preparation briefs, and follow-up tools. email context is opt-in and stays with local generation. public web research needs a brave search key.
+- folders organize meetings and limit chat to their contents. csv export covers the retained library. screen snapshots stay local. recording and transcript retention preserves notes and starts with a seven-day cooldown.
+- notes can be copied as formatted text or markdown. encrypted browser links require the companion service. named-viewer access, comments, and collaborative editing are not built. external destinations require their own setup and consent.
+- the iphone app adds keyboard recording sessions, shortcuts, language choices, saved meeting notes, and playback. sync requires a paired companion service. optional recorded outgoing calls require a configured calling service; ordinary iphone call audio is not accessible.
 
 ## Releases and install
 

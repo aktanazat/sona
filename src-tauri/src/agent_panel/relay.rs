@@ -1269,6 +1269,7 @@ mod tests {
         state.turn = Some(ActiveTurn {
             turn_id,
             workspace,
+            folder_id: None,
             idempotency_key: idempotency_key.to_string(),
             model_alias: SONA_MODEL_ALIAS.to_string(),
             request: turn,

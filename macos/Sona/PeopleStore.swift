@@ -48,6 +48,10 @@ final class PeopleStore {
 
     private(set) var organization: OrganizationDetail?
     private(set) var organizationFailed = false
+    /// Every company the people are at, or nil until the first read answers.
+    private(set) var companies: [CompanySummary]?
+    /// The companies could not be read. Not the same answer as none.
+    private(set) var companiesFailed = false
 
     /// What is still open across everybody, newest first.
     private(set) var inbox: [PersonOpenLoop] = []
@@ -129,9 +133,10 @@ final class PeopleStore {
         switch route {
         case .list:
             async let list: Void = loadList(stamp)
+            async let companies: Void = loadCompanies(stamp)
             async let inbox: Void = loadInbox(stamp)
             async let candidates: Void = loadCandidates(stamp)
-            _ = await (list, inbox, candidates)
+            _ = await (list, companies, inbox, candidates)
         case let .person(personId):
             async let detail: Void = loadDetail(personId, stamp)
             async let briefing: Void = loadBriefing(personId, stamp)
@@ -205,6 +210,18 @@ final class PeopleStore {
         } catch {
             guard stamp == generation else { return }
             organizationFailed = true
+        }
+    }
+
+    private func loadCompanies(_ stamp: UInt64) async {
+        do {
+            let result: CompaniesListResult = try await core.request("companies_list")
+            guard stamp == generation else { return }
+            companies = result.companies
+            companiesFailed = false
+        } catch {
+            guard stamp == generation else { return }
+            companiesFailed = true
         }
     }
 
@@ -558,12 +575,24 @@ final class VoiceIdentityStore {
     private(set) var confirmingUnknown = false
     private(set) var busy = false
     private(set) var error: String?
+    /// Whether the first read for this meeting has answered, either way.
+    private(set) var loaded = false
 
     @ObservationIgnored private let core: Core
+
+    /// The people this meeting already names, from its invite or its links,
+    /// whom the label sheet offers first.
+    private(set) var inMeeting: Set<String> = []
 
     init(core: Core) {
         self.core = core
         core.observe(CoreEvent.peopleArtifactChanged) { [weak self] _ in
+            guard let self, let sessionId else { return }
+            Task { await self.load(sessionId) }
+        }
+        // Diarization and the voice matcher land with the transcript, so the
+        // speakers and their names are re-read when it changes.
+        core.observe(CoreEvent.meetingTranscriptChanged) { [weak self] _ in
             guard let self, let sessionId else { return }
             Task { await self.load(sessionId) }
         }
@@ -575,6 +604,11 @@ final class VoiceIdentityStore {
     /// Reads one meeting's speakers, which of them are unresolved, and who
     /// they could be.
     func load(_ sessionId: String) async {
+        if self.sessionId != sessionId {
+            loaded = false
+            speakers = []
+            unresolved = []
+        }
         self.sessionId = sessionId
         do {
             try await reread(sessionId)
@@ -582,6 +616,7 @@ final class VoiceIdentityStore {
         } catch {
             self.error = PeopleStore.message(error)
         }
+        loaded = true
         await loadPeople()
     }
 
@@ -609,6 +644,25 @@ final class VoiceIdentityStore {
             peopleFailed = false
         } catch {
             peopleFailed = true
+        }
+        await loadRoster()
+    }
+
+    /// Who the meeting's invite and links name. The sheet still lists
+    /// everybody when this cannot be read; it only loses the grouping.
+    private func loadRoster() async {
+        guard let sessionId else {
+            inMeeting = []
+            return
+        }
+        do {
+            let result: PersonMeetingContextResult = try await core.request(
+                "meeting_people_context", ["sessionId": sessionId])
+            guard self.sessionId == sessionId else { return }
+            inMeeting = Set(result.rows.map(\.personId))
+        } catch {
+            guard self.sessionId == sessionId else { return }
+            inMeeting = []
         }
     }
 

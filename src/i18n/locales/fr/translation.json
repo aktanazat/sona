@@ -3152,7 +3152,6 @@
     "seriesBrief_other": "Réunion {{nth}} avec {{person}} · {{count}} points en suspens",
     "alwaysRecord": "Toujours enregistrer cette réunion",
     "announceInChat": "Annoncer dans la discussion",
-    "announceLine": "Sona prend des notes pour {{name}}. Dites-le si vous préférez que ce ne soit pas le cas.",
     "announceRefused": "L'annonce n'a pas été publiée : cette application ne l'a pas acceptée.",
     "assurance": "L'audio reste sur ce Mac. Rien ne rejoint l'appel.",
     "record": "Enregistrer",

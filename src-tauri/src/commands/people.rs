@@ -1,8 +1,9 @@
 use crate::meeting::people_types::{
-    MeetingPeopleContextResult, OpenLoopsInboxResult, OrganizationDetailResult, PeopleListResult,
-    PeopleMutationResult, PersonContextResult, PersonDeleteRequest, PersonDetailResult, PersonId,
-    PersonLinkRequest, PersonMergeRequest, PersonRenameRequest, PersonSplitRequest,
-    PersonSummaryRegenerateResult, VocabularyCandidatesResult,
+    CompaniesListResult, MeetingPeopleContextResult, OpenLoopsInboxResult,
+    OrganizationDetailResult, PeopleListResult, PeopleMutationResult, PersonContextResult,
+    PersonDeleteRequest, PersonDetailResult, PersonId, PersonLinkRequest, PersonMergeRequest,
+    PersonRenameRequest, PersonSplitRequest, PersonSummaryRegenerateResult,
+    VocabularyCandidatesResult,
 };
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
@@ -38,6 +39,16 @@ pub async fn organization_detail(
     slug: String,
 ) -> Result<OrganizationDetailResult, MeetingCommandError> {
     manager.organization_detail(slug).await
+}
+
+/// Every company the people carry, newest meeting first, with the counts its
+/// organization page shows.
+#[tauri::command]
+#[specta::specta]
+pub async fn companies_list(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<CompaniesListResult, MeetingCommandError> {
+    manager.companies_list().await
 }
 
 #[tauri::command]

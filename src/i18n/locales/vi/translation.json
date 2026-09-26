@@ -3114,7 +3114,6 @@
     "seriesBrief_other": "Cuộc họp {{nth}} với {{person}} · {{count}} vấn đề còn mở",
     "alwaysRecord": "Luôn ghi cuộc họp này",
     "announceInChat": "Thông báo trong trò chuyện",
-    "announceLine": "Sona đang ghi chú cho {{name}}. Hãy lên tiếng nếu bạn không muốn vậy.",
     "announceRefused": "Thông báo chưa được đăng: ứng dụng này không chấp nhận.",
     "assurance": "Âm thanh chỉ lưu trên máy Mac này. Không có bot nào tham gia cuộc gọi.",
     "record": "Ghi",

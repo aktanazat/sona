@@ -3152,7 +3152,6 @@
     "seriesBrief_other": "פגישה {{nth}} עם {{person}} · {{count}} נושאים פתוחים",
     "alwaysRecord": "תמיד להקליט את הפגישה הזו",
     "announceInChat": "הודעה בצ'אט",
-    "announceLine": "Sona רושמת הערות עבור {{name}}. אם תעדיפו שלא, אמרו זאת.",
     "announceRefused": "ההודעה על ההקלטה לא פורסמה: היישום הזה לא קיבל אותה.",
     "assurance": "האודיו נשאר על ה‑Mac הזה. שום דבר לא מצטרף לשיחה.",
     "record": "הקלט",

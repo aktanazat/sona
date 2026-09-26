@@ -3,9 +3,9 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// The four places in the sidebar, in the order it shows them.
+/// The places in the sidebar, in the order it shows them.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people
+    case capture, library, meetings, people, scratchpad
 
     var id: Int { rawValue }
 
@@ -15,6 +15,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .library: "Library"
         case .meetings: "Meetings"
         case .people: "People"
+        case .scratchpad: "Scratchpad"
         }
     }
 
@@ -24,6 +25,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .library: "books.vertical"
         case .meetings: "video"
         case .people: "person.2"
+        case .scratchpad: "note.text"
         }
     }
 }
@@ -32,6 +34,7 @@ enum Place: Int, CaseIterable, Identifiable {
 enum SettingsPlace: Int, CaseIterable, Identifiable {
     case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
+    case connections
 
     var id: Int { rawValue }
 
@@ -52,6 +55,7 @@ enum SettingsPlace: Int, CaseIterable, Identifiable {
         case .documents: "Documents"
         case .about: "About"
         case .debug: "Debug"
+        case .connections: "Connections"
         }
     }
 }
@@ -61,6 +65,7 @@ enum Sheet: Identifiable {
     case chat
     case recorder
     case whatsNew
+    case brief
 
     var id: Self { self }
 }
@@ -106,6 +111,12 @@ struct PillMode: Identifiable, Equatable {
     let active: Bool
 }
 
+/// `dictation-duration-warning-event`: the core has counted the dictation
+/// to its last minute, or the count is over. `remainingSeconds` is nil then.
+struct DictationDurationWarningEvent: Decodable {
+    let remainingSeconds: Int?
+}
+
 extension CoreEvent {
     static let recordingError = "recording-error"
     static let pasteError = "paste-error"
@@ -114,6 +125,10 @@ extension CoreEvent {
     /// Sixteen frequency buckets, each 0 to 1, about twenty-four times a
     /// second while the microphone is open and the overlay style shows them.
     static let micLevel = "mic-level"
+    static let dictationDurationWarning = "dictation-duration-warning-event"
+    /// A voice command question was answered into the chat; the sheet is
+    /// what shows it.
+    static let commandAnswered = "command-mode://answered"
 }
 
 /// Everything the windows share. One instance, on the main actor, handed to
@@ -166,6 +181,12 @@ final class AppModel {
     private(set) var pillMode: String?
     /// Every mode, for the pill's right-click menu.
     private(set) var pillModes: [PillMode] = []
+    /// Seconds left before the dictation reaches its limit, once the core
+    /// has said so; nil the rest of the time. The pill shows it, on its own
+    /// if it has to.
+    private(set) var pillWarningSeconds: Int?
+    /// Bumped when the pill's hour away is over, so the pill is placed again.
+    private var pillReturned = 0
 
     let meter = LevelMeter()
 
@@ -177,7 +198,9 @@ final class AppModel {
     let meetings: MeetingsStore
     let live: MeetingLiveStore
     let meetingSettings: MeetingSettingsStore
+    let prep: MeetingPrepStore
     let people: PeopleStore
+    let scratchpad: ScratchpadStore
     let modes: ModesStore
     let providers: ProvidersStore
     let vocabulary: VocabularyStore
@@ -187,6 +210,7 @@ final class AppModel {
     let pairing: AgentPairingStore
     let chat: ChatStore
     let cloudSync: CloudSyncStore
+    let connections: ConnectionsStore
     let privacy: PrivacyStore
     let imports: ImportStore
     let documents: DocumentStore
@@ -200,6 +224,11 @@ final class AppModel {
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel())
     /// What the pill showed when it was last placed.
     @ObservationIgnored private var pillCapture = CaptureState.idle
+    /// The wait for the end of the pill's hour away, and the time it ends.
+    @ObservationIgnored private var pillReturn: Task<Void, Never>?
+    @ObservationIgnored private var pillReturnAt: Int64?
+    /// The ended hide this shell last asked the core to clear.
+    @ObservationIgnored private var pillClearedAt: Int64?
     /// Presents the main window, as the scene's `openWindow` does. Only a
     /// view reaches that action, and the window stays closed at launch, so
     /// the menu bar mark hands it over when it first appears. Observed, so a
@@ -215,7 +244,9 @@ final class AppModel {
         meetings = MeetingsStore(core: core)
         live = MeetingLiveStore(core: core)
         meetingSettings = MeetingSettingsStore(core: core)
+        prep = MeetingPrepStore(core: core)
         people = PeopleStore(core: core)
+        scratchpad = ScratchpadStore(core: core)
         modes = ModesStore(core: core)
         providers = ProvidersStore(core: core)
         vocabulary = VocabularyStore(core: core)
@@ -225,6 +256,7 @@ final class AppModel {
         pairing = AgentPairingStore(core: core)
         chat = ChatStore(core: core)
         cloudSync = CloudSyncStore(core: core)
+        connections = ConnectionsStore(core: core)
         privacy = PrivacyStore(core: core)
         imports = ImportStore(core: core)
         documents = DocumentStore(core: core)
@@ -241,7 +273,8 @@ final class AppModel {
             CoreEvent.extractionStarted, CoreEvent.extractionCompleted, CoreEvent.extractionFailed,
             CoreEvent.modelDeleted, CoreEvent.recordingError, CoreEvent.pasteError, CoreEvent.rewriteSkipped,
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
-            CoreEvent.meetingNavigationRequested,
+            CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
+            CoreEvent.commandAnswered,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -250,11 +283,6 @@ final class AppModel {
             Task { await self?.library.start() }
         }
         core.onClose { [weak self] in self?.coreClosed() }
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
-        ) { [core] _ in
-            core.shutdown()
-        }
         Task { await start() }
     }
 
@@ -338,6 +366,12 @@ final class AppModel {
     func recordScreen() {
         reveal()
         sheet = .recorder
+    }
+
+    func openBrief(_ eventKey: String) {
+        reveal()
+        prep.openBrief(eventKey)
+        sheet = .brief
     }
 
     /// A retained meeting, by id, on its own page.
@@ -520,6 +554,11 @@ final class AppModel {
         if ready { return }
         ready = true
         Task { await showWhatsNew() }
+        pill.onClick = { [weak self] in self?.toggleCapture() }
+        pill.onDock = { [weak self] edge in
+            guard let self else { return }
+            Task { await self.settings.setHudPillPosition(edge) }
+        }
         track { [weak self] in self?.syncPill() }
         track { [weak self] in self?.syncConsent() }
         track { [weak self] in self?.syncNavigation() }
@@ -628,31 +667,86 @@ final class AppModel {
         call { try await self.core.request("set_active_mode", ["modeId": id]) }
     }
 
+    /// The pill's menu asked for an hour without it. The record comes back
+    /// with the time it returns, which places the pill and arms the wait.
+    func hidePillForAnHour() {
+        Task { await settings.hideHudPillForAnHour() }
+    }
+
     // MARK: Floating panels
 
     /// While recording, the sound at the overlay's edge unless the overlay is
-    /// off; idle, the mode pill at its own edge when it is on. One panel,
-    /// moved between the two. No pill while the core is stopped: it would
-    /// offer a recording nothing can make. The pill draws its own state; a
-    /// change of it floats the panel afresh on the screen the pointer is on,
-    /// as each dictation always has, and a settings read leaves it in place.
+    /// off; idle, the mode pill at its own edge when it is on and not put
+    /// away for the hour. One panel, moved between the two. No pill while
+    /// the core is stopped: it would offer a recording nothing can make. The
+    /// last minute of a dictation shows whatever the overlay style, and even
+    /// during the hour away: a dictation about to end is worth one line. The
+    /// pill draws its own state; a change of it floats the panel afresh on
+    /// the screen the pointer is on, as each dictation always has, and a
+    /// settings read leaves it in place. Only the idle pill can be dragged
+    /// to another edge: the recording one stands where the overlay does.
     private func syncPill() {
         let record = settings.settings
         let anew = capture != pillCapture
         pillCapture = capture
+        _ = pillReturned
+        pill.dockable = false
         if coreStopped {
             pill.hide()
         } else if capture != .idle {
-            if record.overlayStyle == .none {
+            if record.overlayStyle == .none, pillWarningSeconds == nil {
                 pill.hide()
             } else {
-                pill.show(at: .edge(record.overlayPosition), anew: anew)
+                pill.show(at: .edge(HudPillEdge(record.overlayPosition)), anew: anew)
             }
-        } else if record.hudPillEnabled {
+        } else if record.hudPillEnabled, !pillAway(record) {
+            pill.dockable = true
             pill.show(at: .edge(record.hudPillPosition), anew: anew)
         } else {
             pill.hide()
         }
+    }
+
+    /// Whether the pill's hour away is still running. A running one arms the
+    /// wait for its end. One that has ended is cleared from the record: the
+    /// core does that itself when it set the hide this run, but a launch
+    /// mid-hour or after it leaves only this shell to notice.
+    private func pillAway(_ record: AppSettings) -> Bool {
+        guard let until = record.hudPillHiddenUntilMs else {
+            endPillReturn()
+            return false
+        }
+        guard Self.now() < until else {
+            endPillReturn()
+            // Once per stale time: a refused clear must not be asked again
+            // on the re-read that follows every write.
+            if pillClearedAt != until {
+                pillClearedAt = until
+                Task { await settings.showHudPillNow() }
+            }
+            return false
+        }
+        if pillReturnAt != until {
+            pillReturn?.cancel()
+            pillReturnAt = until
+            pillReturn = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(max(0, until - Self.now())))
+                guard !Task.isCancelled, let self else { return }
+                pillReturned += 1
+            }
+        }
+        return true
+    }
+
+    private func endPillReturn() {
+        pillReturn?.cancel()
+        pillReturn = nil
+        pillReturnAt = nil
+    }
+
+    /// The wall clock in the record's unit, milliseconds since 1970.
+    private static func now() -> Int64 {
+        Int64(Date.now.timeIntervalSince1970 * 1000)
     }
 
     /// The consent panel: an offer to record, the recording in progress, a
@@ -670,10 +764,7 @@ final class AppModel {
     private func consentPanel() -> some View {
         MeetingConsentPanelView(
             store: live,
-            onOpenBrief: { [weak self] id in
-                self?.reveal()
-                self?.openMeeting(id)
-            },
+            onOpenBrief: { [weak self] eventKey in self?.openBrief(eventKey) },
             onOpenNotes: { [weak self] id in
                 self?.reveal()
                 self?.openMeeting(id)
@@ -786,6 +877,9 @@ final class AppModel {
                 Task { await loadModels() }
             case CoreEvent.settingsChanged, CoreEvent.modesChanged:
                 call { try await self.loadPill() }
+            case CoreEvent.dictationDurationWarning:
+                let event: DictationDurationWarningEvent = try Core.payload(line)
+                pillWarningSeconds = event.remainingSeconds
             case CoreEvent.recordingError:
                 let event: RecordingErrorEvent = try Core.payload(line)
                 notice = CaptureNotice(text: Self.recordingErrorText(event.errorType))
@@ -806,6 +900,9 @@ final class AppModel {
             case CoreEvent.meetingNavigationRequested:
                 reveal()
                 go(.meetings)
+            case CoreEvent.commandAnswered:
+                reveal()
+                sheet = .chat
             default:
                 break
             }

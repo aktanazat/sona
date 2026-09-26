@@ -3152,7 +3152,6 @@
     "seriesBrief_other": "Reunión {{nth}} con {{person}} · {{count}} asuntos pendientes",
     "alwaysRecord": "Grabar siempre esta reunión",
     "announceInChat": "Anunciar en el chat",
-    "announceLine": "Sona está tomando notas para {{name}}. Dilo si prefieres que no lo haga.",
     "announceRefused": "El aviso no se publicó: esta app no lo aceptó.",
     "assurance": "El audio se queda en este Mac. Nada se une a la llamada.",
     "record": "Grabar",

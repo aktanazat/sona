@@ -358,8 +358,8 @@ private struct ChatSuggestionPill: View {
 
 /// Halcyon's wrapping row for pills. A pill wider than the row is offered
 /// the row's width, so a long meeting title truncates instead of running
-/// past the edge.
-private struct ChatFlowRow: Layout {
+/// past the edge. The meetings page wraps its folder chips with it too.
+struct ChatFlowRow: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {

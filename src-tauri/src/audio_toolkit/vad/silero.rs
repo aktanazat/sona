@@ -12,6 +12,7 @@ const SILERO_FRAME_SAMPLES: u32 = constants::WHISPER_SAMPLE_RATE * SILERO_FRAME_
 pub struct SileroVad {
     engine: Vad,
     threshold: f32,
+    quiet_speech: bool,
     frame_samples: usize,
 }
 
@@ -30,6 +31,7 @@ impl SileroVad {
             engine: Vad::new(&model_path, sample_rate)
                 .map_err(|e| anyhow::anyhow!("Failed to create VAD: {e}"))?,
             threshold,
+            quiet_speech: false,
             frame_samples,
         })
     }
@@ -50,11 +52,15 @@ impl VoiceActivityDetector for SileroVad {
             .compute(frame)
             .map_err(|e| anyhow::anyhow!("Silero VAD error: {e}"))?;
 
-        if result.prob > self.threshold {
+        if result.prob > super::quiet_speech::detection_threshold(self.threshold, self.quiet_speech) {
             Ok(VadFrame::Speech(frame))
         } else {
             Ok(VadFrame::Noise)
         }
+    }
+
+    fn set_quiet_speech(&mut self, enabled: bool) {
+        self.quiet_speech = enabled;
     }
 
     fn reset(&mut self) {

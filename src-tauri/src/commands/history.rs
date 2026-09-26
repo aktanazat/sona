@@ -3,7 +3,7 @@ use crate::analytics::DashboardTrendRequest;
 use crate::managers::{
     history::{
         HistoryEntry, HistoryManager, HistorySourceKind, HistoryStats, HistoryStorageStatus,
-        HistoryTrendProjection, NewRunReceipt, PaginatedHistory,
+        HistoryTrendProjection, HistoryUsageStats, NewRunReceipt, PaginatedHistory,
     },
     transcription::TranscriptionManager,
 };
@@ -108,6 +108,21 @@ pub async fn get_history_stats(
         .get_history_stats()
         .await
         .map_err(|error| error!("Failed to read history statistics: {error:#}"))
+}
+
+/// The Overview usage tiles: one content-free aggregate over retained
+/// history. Fails with no payload for the same reason `get_history_stats`
+/// does; the cause goes to the log.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_history_usage_stats(
+    _app: AppHandle,
+    history_manager: State<'_, Arc<HistoryManager>>,
+) -> Result<HistoryUsageStats, ()> {
+    history_manager
+        .get_history_usage_stats()
+        .await
+        .map_err(|error| error!("Failed to read history usage statistics: {error:#}"))
 }
 
 /// Whether dictation history is encrypted at rest. Reads in-memory state, so it
@@ -255,6 +270,7 @@ async fn replay_stored_recording(
                 source_kind: HistorySourceKind::Microphone,
                 has_audio: true,
                 capture_status: None,
+                application_identifier: None,
             },
         )
         .map_err(|error| error.to_string())?

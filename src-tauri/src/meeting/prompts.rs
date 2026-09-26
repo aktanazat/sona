@@ -174,6 +174,29 @@ pub(crate) fn run_prompt_for_meeting(
     Some(run)
 }
 
+/// Folder defaults share the after-meeting worker with series automations.
+/// Running them afterwards lets an existing series prompt satisfy the folder
+/// too. A failed run is still an attempt, never an invitation to retry.
+pub(crate) fn run_folder_prompts(
+    store: &MeetingStore,
+    processing: &MeetingProcessingService,
+    session_id: MeetingSessionId,
+    produced_at_utc_ms: i64,
+) -> Result<(), super::store::StoreError> {
+    let Some(artifact_id) = store.current_artifact_id(session_id)? else {
+        return Ok(());
+    };
+    for prompt_id in store.folder_prompt_ids_for_session(session_id)? {
+        if store.has_prompt_run_for_artifact(prompt_id, session_id, artifact_id)? {
+            continue;
+        }
+        if run_prompt_for_meeting(store, processing, prompt_id, session_id, produced_at_utc_ms).is_none() {
+            log::warn!("Folder prompt {prompt_id:?} for {session_id:?} could not be recorded");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +626,71 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// Two folders and a series may choose the same prompt. It is one answer
+    /// for the current notes, including when finalization is delivered twice;
+    /// a new notes revision gets its own answers.
+    #[test]
+    fn folder_prompts_share_runs_with_the_series_and_follow_new_notes() {
+        use crate::meeting::folder_types::{
+            MeetingFolderCreateRequest, MeetingFolderDefaultsSetRequest, MeetingFolderMembershipRequest,
+        };
+        let (_directory, store) = store();
+        let session_id = finished_series_meeting(&store);
+        let folder_prompt = save(&store, "Folder decisions", PromptOutput::Text);
+        let shared_prompt = save(&store, "Shared decisions", PromptOutput::Text);
+        enable_run_prompt(&store, shared_prompt);
+        // PANIC: the fixtures create valid, current folders and a reviewable meeting.
+        let mut revision = store.meeting_folder_list().expect("folder list").revision;
+        for name in ["Clients", "This quarter"] {
+            let created = store.create_meeting_folder(&MeetingFolderCreateRequest {
+                operation_id: MeetingOperationId::new(), name: name.to_string(), expected_revision: revision,
+            }, NOW).expect("create folder");
+            let folder_id = created.folders.folders.iter()
+                .find(|folder| folder.name == name).expect("created folder").folder_id;
+            let defaults = store.set_meeting_folder_defaults(&MeetingFolderDefaultsSetRequest {
+                operation_id: MeetingOperationId::new(), folder_id, template: None,
+                prompt_ids: vec![folder_prompt, shared_prompt], expected_revision: created.folders.revision,
+            }, NOW).expect("folder defaults");
+            let filed = store.add_meeting_to_folder(&MeetingFolderMembershipRequest {
+                operation_id: MeetingOperationId::new(), folder_id, session_id,
+                expected_revision: defaults.folders.revision,
+            }, NOW).expect("file meeting");
+            revision = filed.folders.revision;
+        }
+        let service = service(Ok("- Ship on Friday"));
+        let first_artifact = store.current_artifact_id(session_id).expect("artifact read").expect("notes");
+        crate::meeting::automations::run_for_meeting(&store, session_id, &NoEffects, &service, NOW);
+        let target = PromptTargetRef::Meeting { session_id };
+        let first = store.prompt_runs(&target).expect("first runs");
+        assert_eq!(first.len(), 2, "one run per distinct prompt, not per folder or series");
+        for prompt_id in [folder_prompt, shared_prompt] {
+            let run = first.iter().find(|run| run.prompt_id == prompt_id).expect("chosen prompt ran");
+            assert_eq!(run.artifact_id, Some(first_artifact));
+            assert_eq!(run.result, PromptRunResult::Text { text: "- Ship on Friday".to_string() });
+        }
+        crate::meeting::automations::run_for_meeting(&store, session_id, &NoEffects, &service, NOW + 1);
+        assert_eq!(store.prompt_runs(&target).expect("repeat runs"), first);
+
+        let review = store.review_snapshot(session_id).expect("review");
+        let prior = review.artifacts.iter().find(|artifact| artifact.artifact_id == first_artifact)
+            .expect("current notes");
+        store.store_artifact_revision(ArtifactRevisionInput {
+            session_id, transcript_revision_id: prior.transcript_revision_id,
+            input_revision: review.session.revision, template_id: "test", template_version: 1,
+            generation_key: "new-folder-notes", state: MeetingArtifactState::Current,
+            content: prior.content.as_ref(), generated_at_utc_ms: NOW + 2,
+        }).expect("new notes");
+        let next_artifact = store.current_artifact_id(session_id).expect("artifact read").expect("new notes");
+        assert_ne!(next_artifact, first_artifact);
+        crate::meeting::automations::run_for_meeting(&store, session_id, &NoEffects, &service, NOW + 3);
+        let next = store.prompt_runs(&target).expect("new notes runs");
+        assert_eq!(next.len(), 4);
+        for prompt_id in [folder_prompt, shared_prompt] {
+            assert_eq!(next.iter().filter(|run| run.prompt_id == prompt_id
+                && run.artifact_id == Some(next_artifact)).count(), 1);
+        }
     }
 
     #[test]

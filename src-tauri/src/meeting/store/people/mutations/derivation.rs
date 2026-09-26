@@ -183,6 +183,13 @@ fn organization_from_email(email: &str) -> Option<String> {
     )
 }
 
+impl crate::meeting::store::MeetingStore {
+    /// Reuse the calendar identity rule without exposing addresses to research.
+    pub(crate) fn organization_from_email(email: &str) -> Option<String> {
+        organization_from_email(email)
+    }
+}
+
 /// Derive a person from a named speaker in one meeting.
 ///
 /// Two bars, on two different axes, and both are load-bearing.

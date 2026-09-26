@@ -20,6 +20,7 @@ struct DeviceRecordingManifest: Codable, Equatable {
     var duration_ms: Int64
     var title: String
     var audio: Audio
+    var personal_notes: String?
 }
 
 /// Recording capture format. The phone resamples to this before anything is written,
@@ -53,7 +54,8 @@ enum DeviceRecordingObject {
         durationMs: Int64,
         title: String,
         audioByteLength: Int,
-        audioSha256: String
+        audioSha256: String,
+        notes: String? = nil
     ) -> DeviceRecordingManifest {
         DeviceRecordingManifest(
             format_version: 1,
@@ -68,7 +70,8 @@ enum DeviceRecordingObject {
                 channels: RecordingAudioFormat.channels,
                 byte_length: audioByteLength,
                 sha256: audioSha256
-            )
+            ),
+            personal_notes: notes?.isEmpty == false ? notes : nil
         )
     }
 

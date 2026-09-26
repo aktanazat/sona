@@ -14,6 +14,8 @@
 			<array><string>sona</string></array>
 		</dict>
 	</array>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Show your upcoming meetings so you can tap one to record it. Calendar access stays off until you turn it on.</string>
 	<!-- Meeting capture continues when the app leaves the foreground. -->
 	<key>UIBackgroundModes</key>
 	<array>

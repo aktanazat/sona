@@ -7,29 +7,83 @@ struct RecordingScreen: View {
     /* Observed separately: `AppModel` holds the recorder but does not republish its
      * changes, so a view that watched only the model would never see the clock run. */
     @ObservedObject var recorder: PhoneRecorder
+    @ObservedObject var calendar: PhoneCalendar
+    @AppStorage(PhoneCalendar.enabledKey) private var calendarEnabled = false
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 60
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 96
     @State private var showsPairing = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            elapsed
-                .padding(.top, 72)
-            Spacer()
-            control
-            status
-                .padding(.top, 20)
-            Spacer()
-            pairingLine
-                .padding(.bottom, 8)
+        ScrollView {
+            VStack(spacing: 24) {
+                elapsed.padding(.top, 24)
+                control
+                status
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField("meeting.title", text: $model.meetingTitle).font(.headline)
+                        .accessibilityIdentifier("meeting-title")
+                    Text("meeting.ownNotes").font(.headline)
+                    TextEditor(text: $model.meetingNotes)
+                        .frame(minHeight: 140).scrollContentBackground(.hidden)
+                        .padding(8).background(Theme.inset)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
+                        .accessibilityLabel(Text("meeting.ownNotes"))
+                        .accessibilityIdentifier("meeting-own-notes")
+                    Text("meeting.notesHelp").font(.footnote).foregroundStyle(Theme.textSecondary)
+                    Divider()
+                    upcoming
+                }
+                pairingLine.padding(.bottom, 8)
+            }.padding(.horizontal, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
         .sheet(isPresented: $showsPairing) {
             PairingScreen(model: model)
         }
-        .task { await model.refresh() }
+        .task { await model.refresh(); await calendar.refresh() }
+        .refreshable { await model.refresh(); await calendar.refresh() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await calendar.refresh() } }
+        }
+    }
+
+    private var upcoming: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("calendar.enable", isOn: $calendarEnabled)
+                .onChange(of: calendarEnabled) { _, enabled in
+                    Task { await calendar.refresh(requestAccess: enabled) }
+                }
+            Text("calendar.privacy").font(.footnote).foregroundStyle(Theme.textSecondary)
+            if calendarEnabled {
+                Text("calendar.upcoming").font(.headline)
+                if calendar.loading { ProgressView() }
+                else if let error = calendar.error {
+                    Text(error).font(.footnote).foregroundStyle(Theme.recording)
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        Link("calendar.settings", destination: url)
+                    }
+                } else if calendar.events.isEmpty {
+                    Text("calendar.empty").font(.footnote).foregroundStyle(Theme.textSecondary)
+                } else {
+                    ForEach(calendar.events.indices, id: \.self) { index in
+                        let event = calendar.events[index]
+                        Button {
+                            model.meetingTitle = event.title ?? NSLocalizedString("meeting.untitled", comment: "")
+                            model.startRecording()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(event.title ?? NSLocalizedString("meeting.untitled", comment: ""))
+                                Text(event.startDate.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.footnote).foregroundStyle(Theme.textSecondary)
+                            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }.disabled(recorder.isRecording || model.startingRecording)
+                    }
+                }
+            }
+        }
     }
 
     private var elapsed: some View {

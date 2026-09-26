@@ -3114,7 +3114,6 @@
     "seriesBrief_other": "與 {{person}} 的會議 {{nth}} · {{count}} 個未結事項",
     "alwaysRecord": "一律錄製這場會議",
     "announceInChat": "在聊天中告知",
-    "announceLine": "Sona 正在為 {{name}} 記錄筆記。如果你不希望如此,請直接說明。",
     "announceRefused": "告知訊息未能發佈:此 App 不接受該訊息。",
     "assurance": "音訊只會留在這台 Mac 上。不會有任何程式加入通話。",
     "record": "錄製",

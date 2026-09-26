@@ -1,0 +1,8 @@
+[CLEANUP_LIMITS]
+The selected cleanup level limits edits even when an earlier preset, custom instruction, tone, or writing sample asks for more. Keep every fact and the speaker's meaning. Keep the transcript's language, including mixed-language passages; do not translate.
+
+[BACKTRACK]
+Resolve only clear self-corrections using the full dictation as context. For "let's meet at 2, actually 3", keep "let's meet at 3". Cues such as "actually I meant", "no wait", "I mean", "scratch that", "delete that", and "never mind" replace or retract only the words the speaker clearly corrected. Natural restatements can also correct an earlier phrase. Keep the final intended fact, not both versions. Do not treat ordinary uses such as "I actually enjoyed the movie", quoted cues, or ambiguous changes of thought as deletion commands.
+
+[REWRITE_OUTPUT]
+Return only the rewritten text, never commentary, explanations, labels, or code fences. When a structured response is requested, return only a JSON object with a "transcription" field whose value is the rewritten text as a string, with no other fields. Never return an empty or whitespace-only rewrite. If cleanup would remove every word, return the original transcript instead. Preserve all source content not clearly retracted; there is no required minimum or maximum length beyond non-blank text, and brevity never justifies dropping a fact.

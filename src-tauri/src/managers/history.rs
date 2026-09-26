@@ -3,7 +3,7 @@ use crate::context::ContextReceipt;
 use crate::delivery::{DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
 use crate::modes::ModeReceipt;
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use log::{debug, error, info, warn};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use rusqlite_migration::{Migrations, M};
@@ -37,7 +37,7 @@ pub const HISTORY_STORAGE_EVENT: &str = "history-storage-changed";
 /// Note: For users upgrading from tauri-plugin-sql, migrate_from_tauri_plugin_sql()
 /// converts the old _sqlx_migrations table tracking to the user_version pragma,
 /// ensuring migrations don't re-run on existing databases.
-static MIGRATIONS: &[M] = &[
+pub(crate) static MIGRATIONS: &[M] = &[
     M::up(
         "CREATE TABLE IF NOT EXISTS transcription_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +220,41 @@ static MIGRATIONS: &[M] = &[
         "ALTER TABLE transcription_history ADD COLUMN semantic_embedding BLOB;
          ALTER TABLE transcription_history ADD COLUMN semantic_model_revision TEXT;",
     ),
+    // Which application a dictation was delivered into, as the bundle
+    // identifier the frontmost application reported at save time. It feeds
+    // the per-app usage tiles and nothing else: it is not in the receipt JSON
+    // (which stays content-free), and rows written before this column,
+    // imported, replayed, or saved with "Count words per app" off stay NULL.
+    M::up("ALTER TABLE transcription_history ADD COLUMN application_identifier TEXT;"),
+    // The scratchpad: notes a person keeps and edits, with the saved states
+    // behind each. They share this database for its encryption and unlock
+    // rather than for any link to a dictation; `scratchpad.rs` owns every
+    // read and write. A note's versions leave with it, the way runs leave
+    // with a dictation.
+    M::up(
+        "CREATE TABLE scratch_notes (
+            id TEXT PRIMARY KEY NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX scratch_notes_order ON scratch_notes(pinned DESC, updated_at_ms DESC);
+        CREATE TABLE scratch_note_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            body TEXT NOT NULL,
+            saved_at_ms INTEGER NOT NULL,
+            FOREIGN KEY(note_id) REFERENCES scratch_notes(id)
+        );
+        CREATE INDEX scratch_note_versions_note_id ON scratch_note_versions(note_id, id DESC);
+        CREATE TRIGGER scratch_note_versions_note_delete
+        AFTER DELETE ON scratch_notes BEGIN
+            DELETE FROM scratch_note_versions WHERE note_id = old.id;
+        END;",
+    ),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -397,6 +432,66 @@ pub struct HistoryTrendProjection {
     pub points: Vec<HistoryTrendPoint>,
 }
 
+/// One application in the usage breakdown, by the bundle identifier the
+/// frontmost application reported when the row was saved. The shell turns it
+/// into a name and an icon at render time, so history never stores a
+/// localized string.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct HistoryUsageApp {
+    pub application_identifier: String,
+    pub dictations: u64,
+    pub words: u64,
+}
+
+/// The rows the per-app list does not name: saved before the column existed,
+/// imported, replayed, saved while "Count words per app" was off, or in an
+/// application outside the top `USAGE_TOP_APPS`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct HistoryUsageOther {
+    pub dictations: u64,
+    pub words: u64,
+}
+
+/// Content-free usage figures over every retained history row, for the
+/// Overview usage tiles. Each number is defined here so the screen can be
+/// checked against the database:
+///
+/// - `words_per_minute`: words over spoken minutes across the
+///   `USAGE_WPM_WINDOW` most recent rows that have words and a measured
+///   duration under `USAGE_WPM_MAX_DURATION_MS`, rounded to a whole number;
+///   zero when no row qualifies. `words_per_minute_dictations` is how many
+///   rows that was.
+/// - `time_saved_ms`: typing every timed word at
+///   `USAGE_TYPING_WORDS_PER_MINUTE` minus the time spent speaking those
+///   words, never below zero.
+/// - `current_streak_days`: consecutive local calendar days with a dictation
+///   ending today or yesterday, since today is still open; zero otherwise.
+/// - `longest_streak_days`: the longest such run anywhere in history.
+/// - `apps`: the top `USAGE_TOP_APPS` applications by words, most first;
+///   `other` folds every remaining row.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct HistoryUsageStats {
+    pub dictations: u64,
+    pub total_words: u64,
+    pub total_duration_ms: u64,
+    pub words_per_minute: u32,
+    pub words_per_minute_dictations: u32,
+    pub time_saved_ms: u64,
+    pub current_streak_days: u32,
+    pub longest_streak_days: u32,
+    pub apps: Vec<HistoryUsageApp>,
+    pub other: HistoryUsageOther,
+}
+
+/// How many recent rows the speed reads, and the longest recording one may
+/// be: a dictation left running for minutes says nothing about speaking
+/// speed.
+const USAGE_WPM_WINDOW: u32 = 100;
+const USAGE_WPM_MAX_DURATION_MS: i64 = 400_000;
+/// The typing speed the time-saved figure is measured against.
+const USAGE_TYPING_WORDS_PER_MINUTE: u64 = 40;
+const USAGE_TOP_APPS: usize = 6;
+
 #[derive(Clone, Copy, Default)]
 struct HistoryTrendValues {
     recordings: u64,
@@ -467,6 +562,32 @@ fn history_trend_value(value: i64, name: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| anyhow!("history trend {name} is negative"))
 }
 
+/// Current and longest streaks over the distinct active local dates, given in
+/// ascending `%F` order. The current streak survives an empty today, since
+/// the day is not over, and ends the moment a whole day was missed.
+fn history_usage_streaks(active_dates: &[String], today: NaiveDate) -> Result<(u32, u32)> {
+    let mut longest = 0_u32;
+    let mut run = 0_u32;
+    let mut previous: Option<NaiveDate> = None;
+    for local_date in active_dates {
+        let date = NaiveDate::parse_from_str(local_date, "%F")
+            .map_err(|_| anyhow!("history usage query returned an unparseable local date"))?;
+        run = match previous {
+            Some(previous) if previous.succ_opt() == Some(date) => run
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("history usage streak overflowed"))?,
+            _ => 1,
+        };
+        longest = longest.max(run);
+        previous = Some(date);
+    }
+    let current = match previous {
+        Some(last) if last == today || last.succ_opt() == Some(today) => run,
+        _ => 0,
+    };
+    Ok((current, longest))
+}
+
 /// One immutable run receipt linked to a recording. Text remains only in the
 /// history entry and FTS table; this table holds content-free provenance.
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -529,6 +650,10 @@ pub struct NewRunReceipt {
     pub source_kind: HistorySourceKind,
     pub has_audio: bool,
     pub capture_status: Option<CaptureStatus>,
+    /// The bundle identifier of the application the words were delivered
+    /// into, read at save time. `None` for a replay, an import, or a run
+    /// saved while "Count words per app" is off.
+    pub application_identifier: Option<String>,
 }
 /// A validated row from the upstream SQLite database. It is deliberately
 /// internal: transcript text never crosses the importer IPC boundary.
@@ -786,6 +911,17 @@ impl HistoryManager {
     /// read that broke.
     pub(crate) fn storage_is_ready(&self) -> bool {
         self.storage.is_ready()
+    }
+
+    /// One locked read or write against the dictation store, for the
+    /// scratchpad, which keeps its notes in this database for the encryption
+    /// and the unlock. The closure runs with the store's lock held: it must
+    /// not call back into this manager, emit, or wait.
+    pub(crate) fn with_connection<T>(
+        &self,
+        action: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.storage.with_connection(action)
     }
 
     fn init_database(&self) -> Result<()> {
@@ -1178,13 +1314,23 @@ impl HistoryManager {
         // refusal, since a recording without a row is one nobody can reach; a
         // derived row reuses its parent's file, which is not this call's to
         // remove.
-        if crate::settings::get_settings(&self.app_handle).history_limit == 0 {
+        let settings = crate::settings::get_settings(&self.app_handle);
+        if settings.history_limit == 0 {
             if derived_from_history_id.is_none() {
                 Self::remove_recording_file(&self.recordings_dir, &file_name)?;
             }
             debug!("Saved history is off; the dictation was not kept");
             return Ok(None);
         }
+        // "Count words per app" off: the row is saved without its application,
+        // so the setting governs what history keeps, not only what the usage
+        // tiles show.
+        let receipt = receipt.map(|mut receipt| {
+            if !settings.count_words_per_app {
+                receipt.application_identifier = None;
+            }
+            receipt
+        });
         let timestamp = Utc::now().timestamp();
         let title = self.format_timestamp_title(timestamp);
         // The insert owns the connection only until it commits. `cleanup_old_entries`
@@ -1259,15 +1405,17 @@ impl HistoryManager {
             .map(|history_id| Self::latest_run_id(&transaction, history_id))
             .transpose()?
             .flatten();
-        let (duration_ms, word_count, source_kind, has_audio) = match receipt {
-            Some(receipt) => (
-                receipt.duration_ms.map(as_sql_i64).transpose()?,
-                receipt.word_count.map(as_sql_i64).transpose()?,
-                Some(receipt.source_kind.as_str()),
-                receipt.has_audio,
-            ),
-            None => (None, None, None, true),
-        };
+        let (duration_ms, word_count, source_kind, has_audio, application_identifier) =
+            match receipt {
+                Some(receipt) => (
+                    receipt.duration_ms.map(as_sql_i64).transpose()?,
+                    receipt.word_count.map(as_sql_i64).transpose()?,
+                    Some(receipt.source_kind.as_str()),
+                    receipt.has_audio,
+                    receipt.application_identifier.as_deref(),
+                ),
+                None => (None, None, None, true, None),
+            };
         transaction.execute(
             "INSERT INTO transcription_history (
                 file_name,
@@ -1281,8 +1429,9 @@ impl HistoryManager {
                 word_count,
                 source_kind,
                 has_audio,
-                parent_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                parent_id,
+                application_identifier
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 file_name,
                 timestamp,
@@ -1296,6 +1445,7 @@ impl HistoryManager {
                 source_kind,
                 has_audio,
                 derived_from_history_id,
+                application_identifier,
             ],
         )?;
         let history_id = transaction.last_insert_rowid();
@@ -1765,6 +1915,150 @@ impl HistoryManager {
             });
         }
         Ok(stats)
+    }
+
+    /// The usage tiles' figures. Four bounded aggregates on one read
+    /// snapshot; the streaks are derived from the distinct active dates after
+    /// the transaction has closed.
+    pub async fn get_history_usage_stats(&self) -> Result<HistoryUsageStats> {
+        self.storage.with_connection(|conn| {
+            Self::get_history_usage_stats_with_connection_at(conn, Local::now().date_naive())
+        })
+    }
+
+    fn get_history_usage_stats_with_connection_at(
+        connection: &mut Connection,
+        today: NaiveDate,
+    ) -> Result<HistoryUsageStats> {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let (dictations, total_words, total_duration_ms) = transaction.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0)
+             FROM transcription_history",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let (speed_words, speed_duration_ms, speed_dictations) = transaction.query_row(
+            "SELECT COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0), COUNT(*)
+             FROM (
+                SELECT word_count, duration_ms
+                FROM transcription_history
+                WHERE word_count > 0 AND duration_ms > 0 AND duration_ms < ?1
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?2
+             )",
+            params![USAGE_WPM_MAX_DURATION_MS, USAGE_WPM_WINDOW],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let (timed_words, timed_duration_ms) = transaction.query_row(
+            "SELECT COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0)
+             FROM transcription_history
+             WHERE word_count > 0 AND duration_ms IS NOT NULL",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let active_dates = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT date(timestamp, 'unixepoch', 'localtime') AS local_date
+                 FROM transcription_history
+                 ORDER BY local_date",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let app_rows = {
+            let mut statement = transaction.prepare(
+                "SELECT
+                    NULLIF(application_identifier, '') AS application_identifier,
+                    COUNT(*) AS dictations,
+                    COALESCE(SUM(word_count), 0) AS words
+                 FROM transcription_history
+                 GROUP BY NULLIF(application_identifier, '')
+                 ORDER BY words DESC, dictations DESC, application_identifier",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>("application_identifier")?,
+                    row.get::<_, i64>("dictations")?,
+                    row.get::<_, i64>("words")?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        transaction.commit()?;
+
+        let speed_words = history_trend_value(speed_words, "word count")?;
+        let speed_duration_ms = history_trend_value(speed_duration_ms, "duration")?;
+        let words_per_minute = if speed_duration_ms == 0 {
+            0
+        } else {
+            // Rounded to the nearest whole number, the way a tile reads it.
+            let scaled = speed_words
+                .checked_mul(60_000)
+                .and_then(|words| words.checked_add(speed_duration_ms / 2))
+                .ok_or_else(|| anyhow!("history usage speed overflowed"))?;
+            u32::try_from(scaled / speed_duration_ms)
+                .map_err(|_| anyhow!("history usage speed exceeds the supported range"))?
+        };
+        let timed_words = history_trend_value(timed_words, "word count")?;
+        let timed_duration_ms = history_trend_value(timed_duration_ms, "duration")?;
+        let typing_ms = timed_words
+            .checked_mul(60_000 / USAGE_TYPING_WORDS_PER_MINUTE)
+            .ok_or_else(|| anyhow!("history usage typing time overflowed"))?;
+        let (current_streak_days, longest_streak_days) =
+            history_usage_streaks(&active_dates, today)?;
+
+        let mut apps = Vec::with_capacity(USAGE_TOP_APPS);
+        let mut other = HistoryUsageOther::default();
+        for (application_identifier, dictations, words) in app_rows {
+            let dictations = history_trend_value(dictations, "dictation count")?;
+            let words = history_trend_value(words, "word count")?;
+            match application_identifier {
+                Some(application_identifier) if apps.len() < USAGE_TOP_APPS => {
+                    apps.push(HistoryUsageApp {
+                        application_identifier,
+                        dictations,
+                        words,
+                    });
+                }
+                _ => {
+                    other.dictations = other
+                        .dictations
+                        .checked_add(dictations)
+                        .ok_or_else(|| anyhow!("history usage dictation count overflowed"))?;
+                    other.words = other
+                        .words
+                        .checked_add(words)
+                        .ok_or_else(|| anyhow!("history usage word count overflowed"))?;
+                }
+            }
+        }
+
+        Ok(HistoryUsageStats {
+            dictations: history_trend_value(dictations, "dictation count")?,
+            total_words: history_trend_value(total_words, "word count")?,
+            total_duration_ms: history_trend_value(total_duration_ms, "duration")?,
+            words_per_minute,
+            words_per_minute_dictations: u32::try_from(speed_dictations).map_err(|_| {
+                anyhow!("history usage speed window exceeds the supported range")
+            })?,
+            time_saved_ms: typing_ms.saturating_sub(timed_duration_ms),
+            current_streak_days,
+            longest_streak_days,
+            apps,
+            other,
+        })
     }
 
     /// Return a dense, bounded local-calendar trend plus an independent
@@ -2839,6 +3133,7 @@ mod tests {
             source_kind: HistorySourceKind::Microphone,
             has_audio: true,
             capture_status: Some(CaptureStatus::Complete),
+            application_identifier: Some("com.apple.mail".to_string()),
         }
     }
 
@@ -2905,6 +3200,176 @@ mod tests {
         assert_eq!(after.entries, before.entries);
         assert_eq!(after.total_duration_ms, before.total_duration_ms);
         assert_eq!(after.total_words, before.total_words);
+    }
+
+    fn insert_usage_entry(
+        conn: &Connection,
+        timestamp: i64,
+        duration_ms: i64,
+        words: i64,
+        application_identifier: Option<&str>,
+    ) -> i64 {
+        let id = insert_trend_entry(
+            conn,
+            timestamp,
+            "usage words",
+            Some("microphone"),
+            duration_ms,
+            words,
+        );
+        conn.execute(
+            "UPDATE transcription_history SET application_identifier = ?1 WHERE id = ?2",
+            params![application_identifier, id],
+        )
+        .expect("seed usage application");
+        id
+    }
+
+    fn usage_at(conn: &mut Connection, today: NaiveDate) -> HistoryUsageStats {
+        HistoryManager::get_history_usage_stats_with_connection_at(conn, today)
+            .expect("usage stats")
+    }
+
+    #[test]
+    fn usage_over_an_empty_history_is_all_zero() {
+        let mut conn = setup_conn();
+        assert_eq!(
+            usage_at(&mut conn, Local::now().date_naive()),
+            HistoryUsageStats {
+                dictations: 0,
+                total_words: 0,
+                total_duration_ms: 0,
+                words_per_minute: 0,
+                words_per_minute_dictations: 0,
+                time_saved_ms: 0,
+                current_streak_days: 0,
+                longest_streak_days: 0,
+                apps: Vec::new(),
+                other: HistoryUsageOther::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_speed_reads_the_hundred_most_recent_short_dictations_that_have_words() {
+        let mut conn = setup_conn();
+        // The oldest row is fast, and the one row the window must leave out.
+        insert_usage_entry(&conn, 1_000, 10_000, 100, None);
+        for offset in 0..100 {
+            insert_usage_entry(&conn, 2_000 + offset, 10_000, 10, None);
+        }
+        // Newer still: one too long to say anything about speed, and one
+        // with no words at all.
+        insert_usage_entry(&conn, 10_000, USAGE_WPM_MAX_DURATION_MS, 4_000, None);
+        insert_usage_entry(&conn, 10_001, 100_000, 0, None);
+
+        let usage = usage_at(&mut conn, Local::now().date_naive());
+        assert_eq!(usage.words_per_minute, 60);
+        assert_eq!(usage.words_per_minute_dictations, 100);
+    }
+
+    #[test]
+    fn usage_time_saved_is_typing_time_at_forty_words_a_minute_minus_speaking_time() {
+        let mut conn = setup_conn();
+        // 400 words typed at 40 a minute is ten minutes; they took one to say.
+        insert_usage_entry(&conn, 1_000, 60_000, 400, None);
+        let usage = usage_at(&mut conn, Local::now().date_naive());
+        assert_eq!(usage.time_saved_ms, 540_000);
+    }
+
+    #[test]
+    fn usage_time_saved_never_goes_below_zero() {
+        let mut conn = setup_conn();
+        // Ten words over a minute would have been typed in fifteen seconds.
+        insert_usage_entry(&conn, 1_000, 60_000, 10, None);
+        let usage = usage_at(&mut conn, Local::now().date_naive());
+        assert_eq!(usage.time_saved_ms, 0);
+    }
+
+    #[test]
+    fn usage_longest_streak_is_the_longest_run_of_consecutive_days_across_a_gap() {
+        let mut conn = setup_conn();
+        let today = NaiveDate::from_ymd_opt(2026, 9, 26).expect("date");
+        for days_ago in [10, 9, 8, 7, 2, 1] {
+            let date = today - chrono::Days::new(days_ago);
+            insert_usage_entry(&conn, local_noon_timestamp(date), 1_000, 5, None);
+        }
+        let usage = usage_at(&mut conn, today);
+        assert_eq!(usage.longest_streak_days, 4);
+        assert_eq!(usage.current_streak_days, 2);
+    }
+
+    #[test]
+    fn usage_current_streak_survives_an_empty_today_but_not_a_missed_day() {
+        let mut conn = setup_conn();
+        let today = NaiveDate::from_ymd_opt(2026, 9, 26).expect("date");
+        for days_ago in [3, 2, 1] {
+            let date = today - chrono::Days::new(days_ago);
+            insert_usage_entry(&conn, local_noon_timestamp(date), 1_000, 5, None);
+        }
+        assert_eq!(usage_at(&mut conn, today).current_streak_days, 3);
+        let day_after = today + chrono::Days::new(1);
+        assert_eq!(usage_at(&mut conn, day_after).current_streak_days, 0);
+        assert_eq!(usage_at(&mut conn, day_after).longest_streak_days, 3);
+    }
+
+    #[test]
+    fn usage_apps_rank_by_words_and_fold_rows_without_an_application_into_other() {
+        let mut conn = setup_conn();
+        insert_usage_entry(&conn, 1_000, 1_000, 30, Some("com.apple.mail"));
+        insert_usage_entry(&conn, 1_001, 1_000, 20, Some("com.apple.mail"));
+        insert_usage_entry(&conn, 1_002, 1_000, 100, Some("com.tinyspeck.slackmacgap"));
+        insert_usage_entry(&conn, 1_003, 1_000, 5, None);
+        insert_usage_entry(&conn, 1_004, 1_000, 7, Some(""));
+
+        let usage = usage_at(&mut conn, Local::now().date_naive());
+        assert_eq!(
+            usage.apps,
+            vec![
+                HistoryUsageApp {
+                    application_identifier: "com.tinyspeck.slackmacgap".to_string(),
+                    dictations: 1,
+                    words: 100,
+                },
+                HistoryUsageApp {
+                    application_identifier: "com.apple.mail".to_string(),
+                    dictations: 2,
+                    words: 50,
+                },
+            ]
+        );
+        assert_eq!(
+            usage.other,
+            HistoryUsageOther {
+                dictations: 2,
+                words: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn usage_apps_keep_the_top_six_by_words_and_fold_the_rest_into_other() {
+        let mut conn = setup_conn();
+        for rank in 0..7_i64 {
+            let application = format!("app.{rank}");
+            insert_usage_entry(
+                &conn,
+                1_000 + rank,
+                1_000,
+                70 - rank * 10,
+                Some(application.as_str()),
+            );
+        }
+        let usage = usage_at(&mut conn, Local::now().date_naive());
+        assert_eq!(usage.apps.len(), 6);
+        assert_eq!(usage.apps[5].application_identifier, "app.5");
+        assert_eq!(
+            usage.other,
+            HistoryUsageOther {
+                dictations: 1,
+                words: 10,
+            }
+        );
     }
 
     #[test]
@@ -3533,6 +3998,7 @@ mod tests {
             source_kind: HistorySourceKind::Microphone,
             has_audio: true,
             capture_status: None,
+            application_identifier: None,
         };
         let retried = HistoryManager::save_entry_with_receipt_with_connection(
             &mut conn,
@@ -3565,6 +4031,7 @@ mod tests {
             source_kind: HistorySourceKind::Microphone,
             has_audio: true,
             capture_status: None,
+            application_identifier: None,
         };
         let reprocessed = HistoryManager::save_entry_with_receipt_with_connection(
             &mut conn,

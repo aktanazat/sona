@@ -47,6 +47,7 @@ enum PeopleCommandError: String, Decodable {
     case remoteUnavailable = "remote_unavailable"
     case engineFailure = "engine_failure"
     case importUnreadable = "import_unreadable"
+    case transcriptDeleted = "transcript_deleted"
 
     /// What a reader can act on. The three refusals that mean "this Mac kept
     /// no usable sample of that voice" share one sentence, because they share
@@ -75,6 +76,7 @@ enum PeopleCommandError: String, Decodable {
         case .exportFailed: "The export failed."
         case .remoteUnavailable: "The selected remote destination is unavailable."
         case .importUnreadable: "Sona could not read that file."
+        case .transcriptDeleted: "Transcript deleted based on your retention settings."
         }
     }
 }
@@ -302,6 +304,27 @@ struct OrganizationDetailResult: Decodable {
     let schemaVersion: UInt32
     let revision: UInt64
     let detail: OrganizationDetail
+}
+
+/// One company on the companies list: what its page holds, counted.
+struct CompanySummary: Decodable, Identifiable {
+    /// The label as its people carry it.
+    let name: String
+    /// What `organization_detail` answers to.
+    let slug: String
+    let peopleCount: UInt64
+    let meetingsCount: UInt64
+    let lastMeetingAtUtcMs: Int64?
+    let openLoopsCount: UInt64
+
+    var id: String { slug }
+}
+
+struct CompaniesListResult: Decodable {
+    let schemaVersion: UInt32
+    let revision: UInt64
+    /// Most recent meeting first; companies with no meeting yet last.
+    let companies: [CompanySummary]
 }
 
 /// Everything still open across the whole corpus, newest first.
@@ -750,18 +773,9 @@ enum PeopleModel {
         confirmed(links).map(\.meeting.at).max()
     }
 
-    /// The organizations the loaded rows already carry, with how many carry
-    /// each. Derived from the list on screen rather than asked for again;
-    /// sorted by name so the strip does not reorder when a meeting lands.
-    static func organizations(_ entries: [PersonListEntry]) -> [(name: String, count: Int)] {
-        var counts: [String: Int] = [:]
-        for entry in entries {
-            guard let organization = entry.person.organization else { continue }
-            counts[organization, default: 0] += 1
-        }
-        return counts
-            .map { (name: $0.key, count: $0.value) }
-            .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+    /// "1 open item", "3 open items".
+    static func openItems(_ count: UInt64) -> String {
+        count == 1 ? "1 open item" : "\(count) open items"
     }
 
     /// "1 meeting", "4 meetings".

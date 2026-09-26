@@ -34,11 +34,14 @@ struct MeetingReviewView: View {
         .overlay(alignment: .bottom) { toast }
         .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
         .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
+        .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
+            MeetingFilingSheet(store: store)
+        }
         .alert("Delete this meeting?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
             Button("Keep it", role: .cancel) {}
         } message: {
-            Text("It goes to the trash for a week, then Sona removes it for good.")
+            Text("It goes to the trash for 30 days, then Sona removes it for good.")
         }
     }
 
@@ -151,6 +154,9 @@ struct MeetingReviewHeader: View {
     var askAgent: ((String) -> Void)?
     @State private var editing = false
     @State private var draft = ""
+    /// The line that confirms a copy, cleared after a moment.
+    @State private var copied: String?
+    @State private var copyGeneration = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -192,11 +198,26 @@ struct MeetingReviewHeader: View {
             if let doing = store.pending ?? (store.catchingUp ? "Catching up" : nil) {
                 Text("\(doing)…").metaText(Theme.accent)
             }
+            if let copied {
+                Text(copied).metaText(Theme.inkSecondary)
+                    .task(id: copyGeneration) {
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled else { return }
+                        self.copied = nil
+                    }
+            }
             if store.hasLedger {
                 Button("Follow up") { store.openFollowUp() }
                     .buttonStyle(SecondaryButton(compact: true))
             }
+            if store.canExport {
+                MeetingSendToMenu(sessionId: snapshot.session.sessionId)
+            }
             Menu {
+                Button("Add to folder…") {
+                    store.openFiling(snapshot.session.sessionId, title: snapshot.session.title)
+                }
+                Divider()
                 if let askAgent {
                     Button("Ask about this meeting") { askAgent(question) }
                     Divider()
@@ -204,11 +225,18 @@ struct MeetingReviewHeader: View {
                 if store.editable {
                     Button("Rename", action: start)
                 }
-                if store.canRegenerate {
+                if store.canRegenerate || store.transcriptDeleted {
                     Button("Write the notes again") { store.regenerate() }
+                        .disabled(store.transcriptDeleted)
+                        .help(store.transcriptDeleted ? MeetingCommandError.transcriptDeleted.label : "Write new notes")
                 }
                 Button("Catch me up") { store.runCatchUp() }
                     .disabled(store.catchingUp)
+                Divider()
+                Button("Copy notes") { copyNotes(asMarkdown: false) }
+                    .disabled(!MeetingNotesCopy.hasNotes(snapshot, userNotes: store.notesBody))
+                Button("Copy notes as Markdown") { copyNotes(asMarkdown: true) }
+                    .disabled(!MeetingNotesCopy.hasNotes(snapshot, userNotes: store.notesBody))
                 if store.canExport || store.hasLedger {
                     Divider()
                 }
@@ -241,6 +269,14 @@ struct MeetingReviewHeader: View {
         }
     }
 
+    private func copyNotes(asMarkdown: Bool) {
+        guard MeetingNotesCopy.copy(snapshot, userNotes: store.notesBody, asMarkdown: asMarkdown) else {
+            return
+        }
+        copied = asMarkdown ? "Markdown copied" : "Notes copied"
+        copyGeneration += 1
+    }
+
     /// The start of a question for the agent: this meeting by name and by
     /// link, left open for the person to finish.
     private var question: String {
@@ -256,6 +292,10 @@ struct MeetingReviewHeader: View {
             statusLine(AttributedString(error), color: Theme.live) {
                 Button("Dismiss") { store.dismissError() }
                     .buttonStyle(QuietButton(compact: true))
+            }
+        } else if store.transcriptDeleted {
+            statusLine(AttributedString(MeetingCommandError.transcriptDeleted.label + " Your notes are kept.")) {
+                EmptyView()
             }
         } else if snapshot.remoteCancellationPending {
             statusLine(AttributedString("Sona asked the remote engine to stop, and it has not answered yet.")) {
@@ -334,6 +374,7 @@ struct MeetingReviewHeader: View {
         case .remoteUnavailable: "your server was not reachable"
         case .cancelled: "the run was cancelled"
         case .interrupted: "Sona closed before they were written"
+        case .transcriptDeleted: "the transcript was deleted by your retention settings"
         }
     }
 
@@ -412,7 +453,7 @@ struct MeetingReviewTabs: View {
                 .buttonStyle(.plain)
             }
             Spacer(minLength: 0)
-            if store.tab == .transcript {
+            if store.tab == .transcript && !store.transcriptDeleted {
                 TranscriptSearchField(store: store)
             }
         }
@@ -492,11 +533,11 @@ struct TranscriptPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
-            if !store.elsewhereHits.isEmpty {
+            if !store.transcriptDeleted && !store.elsewhereHits.isEmpty {
                 elsewhere
             }
             turns
-            if !store.gapRuns.isEmpty {
+            if !store.transcriptDeleted && !store.gapRuns.isEmpty {
                 gaps
             }
         }
@@ -551,7 +592,7 @@ struct TranscriptPane: View {
                 }
             }
             .onChange(of: store.jump) { _, jump in
-                guard let jump else { return }
+                guard let jump, store.canJumpTo(jump.segmentId) else { return }
                 withAnimation(reduceMotion ? nil : .default) {
                     proxy.scrollTo(jump.segmentId, anchor: .center)
                 }
@@ -576,7 +617,10 @@ struct TranscriptPane: View {
     }
 
     private var emptyLine: String {
-        store.transcriptQuery.isEmpty
+        if store.transcriptDeleted {
+            return MeetingCommandError.transcriptDeleted.label + " Audio playback and rewriting are unavailable."
+        }
+        return store.transcriptQuery.isEmpty
             ? "Nothing was transcribed for this meeting."
             : "Nothing said matches “\(store.transcriptQuery)”."
     }
@@ -748,11 +792,14 @@ struct MeetingInsightsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
             MeetingPeopleBand(store: store, openPerson: openPerson)
+            MeetingVoiceIdentitySection(sessionId: snapshot.session.sessionId)
+            CallNamesReviewSection(store: store, snapshot: snapshot)
             MeetingAnalyticsStrip(store: store)
-            ArtifactPane(store: store, snapshot: snapshot)
+            ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
             MeetingQuestionsCard(store: store, snapshot: snapshot)
             MeetingNotesCard(store: store, snapshot: snapshot)
-            MeetingUserNotesCard(store: store)
+            MeetingSnapshotsSection(sessionId: snapshot.session.sessionId)
+            MeetingUserNotesCard(store: store, templates: settings.templates)
             MeetingSeriesSection(
                 store: settings, sessionId: snapshot.session.sessionId,
                 openMeetingSettings: openMeetingSettings)
@@ -844,6 +891,7 @@ struct MeetingAnalyticsStrip: View {
                         if let first = tracker.segmentIds.first {
                             Button("Show first") { store.jumpTo(first) }
                                 .buttonStyle(QuietButton(color: Theme.accent))
+                                .disabled(!store.canJumpTo(first))
                         }
                     }
                 }
@@ -897,6 +945,8 @@ struct MeetingAnalyticsStrip: View {
 struct ArtifactPane: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
+    /// For naming the person's own template a generation was written with.
+    let templates: MeetingTemplatesStore
 
     var body: some View {
         if let artifact = snapshot.readableArtifact, let content = artifact.content {
@@ -912,6 +962,7 @@ struct ArtifactPane: View {
                 if !content.risks.isEmpty { cited("Risks", content.risks) }
                 followUp(content)
             }
+            .task { await templates.loadIfNeeded() }
         }
     }
 
@@ -920,7 +971,7 @@ struct ArtifactPane: View {
             Card {
                 if let lines = content.summary.tracedLines(content.summaryTrace) {
                     ForEach(lines) { line in
-                        CardRow(action: line.segmentId.map { id in { store.jumpTo(id) } }) {
+                        CardRow(action: line.segmentId.flatMap(store.citationAction)) {
                             HStack(alignment: .firstTextBaseline, spacing: 12) {
                                 if let offset = line.startOffsetNs {
                                     Text(offset.meetingOffsetClock)
@@ -938,7 +989,7 @@ struct ArtifactPane: View {
                     }
                 }
                 CardRow {
-                    Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(artifact.templateId) v\(artifact.templateVersion)")
+                    Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(templateWords(artifact)) v\(artifact.templateVersion)")
                         .metaText()
                 } trailing: {
                     if store.canRegenerate {
@@ -949,6 +1000,13 @@ struct ArtifactPane: View {
                 }
             }
         }
+    }
+
+    /// What the generation was written with: a built-in's own id, or the
+    /// name of the person's template, which is never shown as its raw id.
+    private func templateWords(_ artifact: MeetingArtifactRevision) -> String {
+        guard let templateId = artifact.customTemplateId else { return artifact.templateId }
+        return templates.name(templateId) ?? "Custom template"
     }
 
     private func outline(_ content: MeetingGeneratedArtifacts) -> some View {
@@ -1009,6 +1067,7 @@ struct ArtifactPane: View {
                                 store.jumpTo(citation.segmentId)
                             }
                             .buttonStyle(QuietButton())
+                            .disabled(!store.canJumpTo(citation.segmentId))
                         }
                     }
                 }
@@ -1043,10 +1102,8 @@ struct ArtifactPane: View {
                         : content.followUpDraft.text)
                         .bodyText()
                 } trailing: {
-                    if store.hasLedger {
-                        Button("Draft it") { store.openFollowUp() }
-                            .buttonStyle(SecondaryButton(compact: true))
-                    }
+                    Button("Draft follow-up") { store.openFollowUp() }
+                        .buttonStyle(SecondaryButton(compact: true))
                 }
             }
         }
@@ -1058,8 +1115,7 @@ struct ArtifactPane: View {
     }
 
     private func jump(_ line: ArtifactCitedText) -> (() -> Void)? {
-        guard let citation = line.citations.first else { return nil }
-        return { store.jumpTo(citation.segmentId) }
+        line.citations.first.flatMap { store.citationAction($0.segmentId) }
     }
 }
 
@@ -1209,6 +1265,9 @@ struct MeetingNotesCard: View {
 /// what is typed.
 struct MeetingUserNotesCard: View {
     let store: MeetingsStore
+    /// The person's own templates, for the picker to name beside the
+    /// built-ins. A list that could not be read costs only the custom names.
+    let templates: MeetingTemplatesStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1225,6 +1284,7 @@ struct MeetingUserNotesCard: View {
             }
         }
         .padding(.bottom, 32)
+        .task { await templates.loadIfNeeded() }
     }
 
     private var header: some View {
@@ -1234,21 +1294,19 @@ struct MeetingUserNotesCard: View {
                 Text(saved).metaText()
             }
             Spacer(minLength: 12)
-            Menu {
-                Picker("Template", selection: template) {
-                    ForEach(MeetingNotesTemplate.allCases, id: \.self) { choice in
-                        Text(choice.label).tag(choice)
-                    }
-                }
-                .pickerStyle(.inline)
-            } label: {
-                Text("\(template.wrappedValue.label) template")
+            MeetingTemplateMenu(
+                builtIns: MeetingNotesTemplate.allCases,
+                builtInLabel: { $0.label },
+                templates: templates,
+                selection: template
+            ) {
+                Text(templateLabel)
                     .font(TypeScale.label(13))
                     .foregroundStyle(Theme.inkSecondary)
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .disabled(store.userNotes == nil)
+            .disabled(store.userNotes == nil || store.enhancing || store.busy)
             if store.canRegenerate, !store.notesBody.isEmpty {
                 Button("Rewrite with my notes") { store.reenhance() }
                     .buttonStyle(QuietButton(color: Theme.accent, compact: true))
@@ -1261,8 +1319,27 @@ struct MeetingUserNotesCard: View {
         Binding(get: { store.notesBody }, set: { store.typeNotes($0) })
     }
 
-    private var template: Binding<MeetingNotesTemplate> {
-        Binding(get: { store.userNotes?.template ?? .general }, set: { store.choose(template: $0) })
+    /// The meeting's choice: its custom template when it has one, else the
+    /// built-in. Never nil on the way out: the menu offers no "app default".
+    private var template: Binding<MeetingTemplateChoice<MeetingNotesTemplate>?> {
+        Binding(
+            get: {
+                MeetingTemplateChoice(
+                    builtIn: store.userNotes?.template ?? .general,
+                    customTemplateId: store.userNotes?.customTemplateId)
+            },
+            set: { choice in
+                if let choice { store.choose(template: choice) }
+            })
+    }
+
+    /// "General meeting template", or the name of the person's own template
+    /// the meeting chose; never its raw id.
+    private var templateLabel: String {
+        switch template.wrappedValue {
+        case let .custom(templateId)?: templates.name(templateId) ?? "Custom template"
+        default: "\((store.userNotes?.template ?? .general).label) template"
+        }
     }
 }
 
@@ -1380,7 +1457,7 @@ struct LedgerPane: View {
         PageSection("Where people stood") {
             Card {
                 ForEach(Array(ledger.stances.enumerated()), id: \.offset) { _, stance in
-                    CardRow(action: stance.citations.first.map { c in { store.jumpTo(c.segmentId) } }) {
+                    CardRow(action: stance.citations.first.flatMap { store.citationAction($0.segmentId) }) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 8) {
                                 Text(stance.from).bodyText(14)
@@ -1453,8 +1530,7 @@ struct LedgerThreadRow: View {
     }
 
     private var jump: (() -> Void)? {
-        guard let citation = thread.receipt.citations.first else { return nil }
-        return { store.jumpTo(citation.segmentId) }
+        thread.receipt.citations.first.flatMap { store.citationAction($0.segmentId) }
     }
 }
 
@@ -1536,6 +1612,7 @@ struct LoopRowView: View {
                 if let citation = row.citations.first {
                     Button(citation.startOffsetNs.meetingOffsetClock) { store.jumpTo(citation.segmentId) }
                         .buttonStyle(QuietButton(color: Theme.accent))
+                        .disabled(!store.canJumpTo(citation.segmentId))
                 }
             }
         }
@@ -1606,6 +1683,7 @@ struct FollowUpSheet: View {
                     Text("Follow up").font(TypeScale.headline).foregroundStyle(Theme.ink)
                     if let draft = store.followUp {
                         Text(draft.source.label).metaText(Theme.inkSecondary)
+                        Text(draft.mailContextStatus).metaText(Theme.inkSecondary)
                     }
                 }
                 Spacer(minLength: 20)
@@ -1613,22 +1691,28 @@ struct FollowUpSheet: View {
             }
             .padding(24)
             Hairline()
+            ErrorNote(store.error).padding(.horizontal, 24)
             ScrollView {
-                Text(store.followUp?.body ?? (store.drafting ? "Writing the draft…" : "No draft."))
-                    .bodyText()
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(24)
+                VStack(alignment: .leading, spacing: 12) {
+                    if store.drafting { ProgressView("Writing the draft…") }
+                    Text(store.followUp.map { $0.body.isEmpty ? "No follow-up is needed for this meeting." : $0.body }
+                        ?? (store.drafting ? "" : "No draft."))
+                        .bodyText()
+                        .textSelection(.enabled)
+                    Text("Sona opens a draft. Only you can send it.").metaText(Theme.inkSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
             }
             Hairline()
             HStack(spacing: 12) {
                 Spacer(minLength: 0)
                 Button("Copy") { store.copyFollowUp() }
                     .buttonStyle(.secondary)
-                    .disabled(store.followUp == nil)
-                Button("Open in Mail") { store.mailFollowUp() }
+                    .disabled(store.followUp?.body.isEmpty != false || store.pending != nil)
+                Button(store.pending == "Opening Mail" ? "Opening…" : "Open in Mail") { store.mailFollowUp() }
                     .buttonStyle(.primary)
-                    .disabled(store.followUp == nil)
+                    .disabled(store.followUp?.body.isEmpty != false || store.pending != nil)
             }
             .padding(24)
         }

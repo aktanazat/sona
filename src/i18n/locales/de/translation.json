@@ -3131,7 +3131,6 @@
     "seriesBrief_other": "Besprechung {{nth}} mit {{person}} · {{count}} offene Punkte",
     "alwaysRecord": "Diese Besprechung immer aufnehmen",
     "announceInChat": "Im Chat ankündigen",
-    "announceLine": "Sona macht Notizen für {{name}}. Sag Bescheid, wenn dir das lieber nicht ist.",
     "announceRefused": "Der Hinweis wurde nicht gepostet: Diese App hat ihn nicht angenommen.",
     "assurance": "Der Ton bleibt auf diesem Mac. Es tritt nichts dem Anruf bei.",
     "record": "Aufnehmen",

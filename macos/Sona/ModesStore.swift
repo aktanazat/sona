@@ -379,6 +379,15 @@ extension CoreEvent {
         draft = next
     }
 
+    func chooseCleanupLevel(_ level: ModeCleanupLevel?) {
+        guard let level else { return }
+        edit { $0.llm.chooseCleanupLevel(level) }
+    }
+
+    func setCleanupEnabled(_ enabled: Bool) {
+        edit { $0.llm.setCleanupEnabled(enabled) }
+    }
+
     private func resetRowIds() {
         vocabularyRowIds = (editing?.asr.customWords ?? []).map { _ in UUID() }
     }

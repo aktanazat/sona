@@ -7,10 +7,8 @@
 //! (`meeting-one-on-one`, and so on), so a preference and an artifact never
 //! disagree about what a template is called.
 //!
-//! Resolution order for a meeting's template, highest first: the template saved
-//! on that meeting's own notes, this series' preference, the app default. This
-//! module owns only the middle one — the notes row is `user_notes_row`'s, and
-//! the default is `AppSettings`' — which is why nothing here reads settings.
+//! Resolution order: the meeting's own notes, its series, its folder, then the
+//! app default. This module owns only the series rung.
 //!
 //! Always-record is deliberately *not* a column here. Permission to record is
 //! consent: it lives in `meeting_series_consents`, where the grant carries its
@@ -26,10 +24,11 @@
 
 use super::fence::{write_fenced, Fence, FencedWrite};
 use super::{
-    grant_series_consent_in, id, live_series_consent_in, revoke_series_consent_in, MeetingStore,
-    StoreError,
+    grant_series_consent_in, id, live_series_consent_in, parse_uuid, revoke_series_consent_in,
+    MeetingStore, StoreError,
 };
 use crate::meeting::analytics::MeetingNotesTemplate;
+use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::series_types::{
     MeetingSeriesAlwaysRecordSetRequest, MeetingSeriesDigestSetRequest,
     MeetingSeriesMutationResult, MeetingSeriesPreferences, MeetingSeriesRemoteOptOutSetRequest,
@@ -199,31 +198,27 @@ impl MeetingStore {
             requested_at_utc_ms,
             MeetingCommandKind::SeriesTemplateSet,
             |connection, series_key, now| {
-                match request.template {
-                    Some(template) => {
-                        connection.execute(
-                            "INSERT INTO meeting_series_preferences (
-                                series_key, template_id, digest_included, updated_at_utc_ms
-                             ) VALUES (?1, ?2, 1, ?3)
-                             ON CONFLICT(series_key) DO UPDATE SET
-                                template_id = excluded.template_id,
-                                updated_at_utc_ms = excluded.updated_at_utc_ms",
-                            params![series_key, encode_series_template(template), now],
-                        )?;
-                    }
-                    // Clearing the template does not delete the row: it may
-                    // still carry a digest choice. The row goes only when it
-                    // holds nothing.
-                    None => {
-                        connection.execute(
-                            "UPDATE meeting_series_preferences
-                                SET template_id = NULL, updated_at_utc_ms = ?2
-                              WHERE series_key = ?1",
-                            params![series_key, now],
-                        )?;
-                        delete_default_row_in(connection, series_key)?;
+                if let Some(template_id) = request.custom_template_id {
+                    if !super::custom_templates::custom_template_exists_in(connection, template_id)? {
+                        return Err(StoreError::NotFound);
                     }
                 }
+                let template = if request.custom_template_id.is_some() {
+                    None
+                } else {
+                    request.template.map(encode_series_template)
+                };
+                connection.execute(
+                    "INSERT INTO meeting_series_preferences (
+                        series_key, template_id, custom_template_id, digest_included, updated_at_utc_ms
+                     ) VALUES (?1, ?2, ?3, 1, ?4)
+                     ON CONFLICT(series_key) DO UPDATE SET
+                        template_id = excluded.template_id,
+                        custom_template_id = excluded.custom_template_id,
+                        updated_at_utc_ms = excluded.updated_at_utc_ms",
+                    params![series_key, template, request.custom_template_id.map(id), now],
+                )?;
+                delete_default_row_in(connection, series_key)?;
                 Ok(())
             },
         )
@@ -536,16 +531,47 @@ pub(super) fn series_digest_included_in(
 fn series_template_in(
     connection: &Connection,
     series_key: &str,
-) -> Result<Option<MeetingNotesTemplate>, StoreError> {
-    let stored: Option<String> = connection
+) -> Result<(Option<MeetingNotesTemplate>, Option<MeetingTemplateId>), StoreError> {
+    let stored: Option<(Option<String>, Option<String>)> = connection
         .query_row(
-            "SELECT template_id FROM meeting_series_preferences WHERE series_key = ?1",
+            "SELECT template_id, custom_template_id FROM meeting_series_preferences WHERE series_key = ?1",
             params![series_key],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-        .flatten();
-    stored.as_deref().map(decode_series_template).transpose()
+        .optional()?;
+    let Some((template, custom)) = stored else { return Ok((None, None)); };
+    if let Some(custom) = custom {
+        let template_id = MeetingTemplateId::from_uuid(parse_uuid(&custom)?);
+        let exists = super::custom_templates::custom_template_exists_in(connection, template_id)?;
+        return Ok((None, exists.then_some(template_id)));
+    }
+    Ok((template.as_deref().map(decode_series_template).transpose()?, None))
+}
+
+/// Clearing a deleted template must preserve the series' other choices.
+pub(super) fn forget_custom_template_in(
+    connection: &Connection,
+    template_id: MeetingTemplateId,
+) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT series_key FROM meeting_series_preferences WHERE custom_template_id = ?1",
+    )?;
+    let keys = statement.query_map(params![id(template_id)], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if keys.is_empty() {
+        return Ok(());
+    }
+    connection.execute(
+        "UPDATE meeting_series_preferences SET template_id = NULL, custom_template_id = NULL
+         WHERE custom_template_id = ?1",
+        params![id(template_id)],
+    )?;
+    for key in keys {
+        delete_default_row_in(connection, &key)?;
+    }
+    bump_series_revision_in(connection)?;
+    Ok(())
 }
 
 /// D14. False unless this series has been kept off the operator's server. A
@@ -592,6 +618,7 @@ fn series_preferences_in(
         return Ok(MeetingSeriesPreferences {
             series_key: None,
             template: None,
+            custom_template_id: None,
             digest_included: true,
             always_record: false,
             remote_intelligence_opt_out: false,
@@ -609,9 +636,11 @@ fn stored_series_preferences_in(
     series_key: &str,
     revision: u64,
 ) -> Result<MeetingSeriesPreferences, StoreError> {
+    let (template, custom_template_id) = series_template_in(connection, series_key)?;
     Ok(MeetingSeriesPreferences {
         series_key: Some(series_key.to_string()),
-        template: series_template_in(connection, series_key)?,
+        template,
+        custom_template_id,
         digest_included: series_digest_included_in(connection, series_key)?,
         always_record: live_series_consent_in(connection, series_key)?.is_some(),
         remote_intelligence_opt_out: series_remote_opt_out_in(connection, series_key)?,
@@ -629,7 +658,7 @@ fn stored_series_preferences_in(
 fn delete_default_row_in(connection: &Connection, series_key: &str) -> Result<(), StoreError> {
     connection.execute(
         "DELETE FROM meeting_series_preferences
-          WHERE series_key = ?1 AND template_id IS NULL AND digest_included = 1
+          WHERE series_key = ?1 AND template_id IS NULL AND custom_template_id IS NULL AND digest_included = 1
             AND remote_intelligence_opt_out = 0 AND announce_in_chat = 0",
         params![series_key],
     )?;

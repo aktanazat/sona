@@ -8,6 +8,14 @@ const inlineToken = /\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/gu;
 const MAX_VIEWER_SHARE_CIPHERTEXT = 256 * 1024 * 1024;
 const ENCRYPTED_PAYLOAD_OVERHEAD = 12 + 16;
 const MAX_CONCURRENT_CHUNK_REQUESTS = 8;
+const MAX_TITLE_CHARS = 240;
+const MAX_DOCUMENT_SECTIONS = 32;
+// `share_document.rs` in the Mac core writes this document; every bound
+// below has its twin there.
+const DOCUMENT_KIND = "notes_document";
+const DOCUMENT_FORMAT = "sona-share-document-v1";
+const DOCUMENT_INCLUDES = new Set(["notes", "notes_and_transcript", "everything"]);
+const clockTime = /^\d{1,4}:\d{2}(?::\d{2})?$/u;
 
 function utf8(value) {
   return encoder.encode(value);
@@ -338,6 +346,136 @@ export function renderMarkdown(container, source) {
   flushList();
 }
 
+function boundedText(value, max) {
+  return isJsonString(value) && value.length > 0 && value.length <= max;
+}
+
+function parseBlock(block) {
+  requireValue(isJsonObject(block));
+  if (block.type === "paragraph") {
+    requireValue(
+      exactKeys(block, ["type", "text"]) &&
+        boundedText(block.text, MAX_RENDER_LINE_CHARS),
+    );
+    return { type: "paragraph", text: block.text };
+  }
+  requireValue(
+    block.type === "item" &&
+      exactKeys(block, ["type", "text", "meta", "time"]) &&
+      boundedText(block.text, MAX_RENDER_LINE_CHARS) &&
+      (block.meta === null || boundedText(block.meta, MAX_RENDER_LINE_CHARS)) &&
+      (block.time === null ||
+        (isJsonString(block.time) && clockTime.test(block.time))),
+  );
+  return { type: "item", text: block.text, meta: block.meta, time: block.time };
+}
+
+export function parseShareDocument(source) {
+  const value = JSON.parse(source);
+  requireValue(isJsonObject(value));
+  requireValue(
+    exactKeys(value, [
+      "version",
+      "title",
+      "include",
+      "notes_out_of_date",
+      "sections",
+    ]),
+  );
+  requireValue(
+    value.version === 1 &&
+      boundedText(value.title, MAX_TITLE_CHARS) &&
+      DOCUMENT_INCLUDES.has(value.include) &&
+      typeof value.notes_out_of_date === "boolean" &&
+      Array.isArray(value.sections) &&
+      value.sections.length <= MAX_DOCUMENT_SECTIONS,
+  );
+  let blocks = 0;
+  const sections = value.sections.map((section) => {
+    requireValue(
+      isJsonObject(section) && exactKeys(section, ["heading", "blocks"]),
+    );
+    requireValue(
+      boundedText(section.heading, MAX_TITLE_CHARS) &&
+        Array.isArray(section.blocks) &&
+        section.blocks.length > 0,
+    );
+    blocks += section.blocks.length;
+    requireValue(blocks <= MAX_RENDER_BLOCKS);
+    return { heading: section.heading, blocks: section.blocks.map(parseBlock) };
+  });
+  return {
+    title: value.title,
+    include: value.include,
+    notesOutOfDate: value.notes_out_of_date,
+    sections,
+  };
+}
+
+function shareNote(text) {
+  const note = document.createElement("p");
+  note.className = "share-note";
+  note.textContent = text;
+  return note;
+}
+
+function shareItem(block) {
+  const item = document.createElement("li");
+  const text = document.createElement("span");
+  text.className = "share-text";
+  text.textContent = block.text;
+  const meta = document.createElement("span");
+  meta.className = "share-meta";
+  if (block.time !== null) {
+    // A moment in the meeting: when, and who, above what was said.
+    meta.textContent =
+      block.meta === null ? block.time : `${block.time} · ${block.meta}`;
+    item.append(meta, text);
+  } else if (block.meta !== null) {
+    meta.textContent = block.meta;
+    item.append(text, meta);
+  } else {
+    item.append(text);
+  }
+  return item;
+}
+
+export function renderShareDocument(container, shared) {
+  container.replaceChildren();
+  if (shared.notesOutOfDate)
+    container.append(
+      shareNote("These notes were written before the transcript last changed."),
+    );
+  if (shared.sections.length === 0) {
+    container.append(shareNote("Nothing was shared in this link."));
+    return;
+  }
+  for (const section of shared.sections) {
+    const element = document.createElement("section");
+    const heading = document.createElement("h2");
+    heading.textContent = section.heading;
+    element.append(heading);
+    let list = null;
+    for (const block of section.blocks) {
+      if (block.type === "paragraph") {
+        list = null;
+        const paragraph = document.createElement("p");
+        paragraph.className = "share-paragraph";
+        paragraph.textContent = block.text;
+        element.append(paragraph);
+        continue;
+      }
+      if (list === null) {
+        list = document.createElement("ul");
+        list.className = "share-items";
+        element.append(list);
+      }
+      list.append(shareItem(block));
+    }
+    container.append(element);
+  }
+}
+
 function parseManifestResponse(value) {
   requireValue(isJsonObject(value));
   const response = value;
@@ -410,10 +548,13 @@ function parseViewerManifest(bytes, chunkCount) {
   );
   requireValue(
     value.version === 1 &&
-      value.kind === "markdown" &&
-      value.source_format === "markdown-utf8",
+      ((value.kind === "markdown" && value.source_format === "markdown-utf8") ||
+        (value.kind === DOCUMENT_KIND &&
+          value.source_format === DOCUMENT_FORMAT)),
   );
-  requireValue(isJsonString(value.title) && value.title.length <= 240);
+  requireValue(
+    isJsonString(value.title) && value.title.length <= MAX_TITLE_CHARS,
+  );
   requireValue(
     value.chunk_count === chunkCount &&
       Number.isSafeInteger(value.plaintext_bytes) &&
@@ -563,14 +704,20 @@ async function boot() {
       requireValue(plaintextLength <= MAX_VIEWER_PLAINTEXT);
       requireValue(plaintextLength === viewerManifest.plaintext_bytes);
       const plaintext = concat(plaintextChunks);
-      let markdown;
+      let text;
       try {
-        markdown = decoder.decode(plaintext);
+        text = decoder.decode(plaintext);
       } finally {
         plaintext.fill(0);
       }
-      title.textContent = viewerManifest.title || "Sona shared note";
-      renderMarkdown(content, markdown);
+      if (viewerManifest.kind === DOCUMENT_KIND) {
+        const shared = parseShareDocument(text);
+        title.textContent = shared.title;
+        renderShareDocument(content, shared);
+      } else {
+        title.textContent = viewerManifest.title || "Sona shared note";
+        renderMarkdown(content, text);
+      }
       content.hidden = false;
       status.textContent = "Decrypted in this browser.";
     } finally {

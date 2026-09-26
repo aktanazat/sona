@@ -64,6 +64,16 @@ impl SecretAccount {
         }
     }
 
+    pub(crate) fn meeting_brave_search() -> Self {
+        Self { account: "meeting_prep/brave-search".to_string() }
+    }
+
+    pub(crate) fn connection(id: &str) -> Result<Self, SecretStoreError> {
+        let id = uuid::Uuid::parse_str(id)
+            .map_err(|_| SecretStoreError::new(SecretErrorKind::Invalid))?;
+        Ok(Self { account: format!("connections/{id}") })
+    }
+
     pub(crate) fn history_storage() -> Self {
         Self {
             account: "history_storage/database-key-v1".to_string(),

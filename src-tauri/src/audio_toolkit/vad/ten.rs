@@ -46,6 +46,7 @@ use crate::audio_toolkit::ort_session::{
 pub struct TenVad {
     session: InitializedSession,
     threshold: f32,
+    quiet_speech: bool,
     frame_samples: usize,
     front_end: FrontEnd,
     /// `input_1`: the 3-frame, 41-dimensional feature context.
@@ -220,6 +221,7 @@ impl TenVad {
         Ok(Self {
             session,
             threshold,
+            quiet_speech: false,
             frame_samples,
             front_end: FrontEnd::new(),
             context: Array3::zeros((1, CONTEXT, FEATURES)),
@@ -315,11 +317,15 @@ impl VoiceActivityDetector for TenVad {
             probability = probability.max(self.run_hop()?);
         }
 
-        if probability > self.threshold {
+        if probability > super::quiet_speech::detection_threshold(self.threshold, self.quiet_speech) {
             Ok(VadFrame::Speech(frame))
         } else {
             Ok(VadFrame::Noise)
         }
+    }
+
+    fn set_quiet_speech(&mut self, enabled: bool) {
+        self.quiet_speech = enabled;
     }
 
     fn reset(&mut self) {

@@ -29,6 +29,10 @@ struct MeetingSettingsView: View {
             }
 
             MeetingDetectionStateSection(store: store)
+            MeetingDisclosureSettingsView(store: store)
+            CameraWatermarkSettingsView()
+            MeetingLanguageSection(store: store)
+            MeetingTemplatesSection(store: store)
             MeetingAutomationSection(store: store, openPrompts: openPrompts)
             MeetingRemoteSection(store: store)
 
@@ -37,6 +41,8 @@ struct MeetingSettingsView: View {
                     MeetingDigestRows(store: store)
                 }
             }
+
+            MeetingSnapshotSettingsSection()
 
             PageSection("Retention") {
                 Card {
@@ -65,6 +71,44 @@ struct MeetingDetectionEssentials: View {
             // detection is read here as well as by the full settings view.
             .task { await store.loadDetection() }
         MeetingAppsPicker(store: store)
+    }
+}
+
+struct MeetingLanguageSection: View {
+    let store: MeetingSettingsStore
+
+    var body: some View {
+        PageSection("Language") {
+            Card {
+                if store.settingsRead {
+                    ChoiceRow(
+                        title: "Transcription language",
+                        detail: "For new meetings. This does not change your dictation languages.",
+                        choices: LanguageCatalog.all.filter { LanguageCatalog.base($0.code) == $0.code },
+                        label: { $0.name },
+                        selection: Binding(
+                            get: {
+                                LanguageCatalog.all.first { $0.code == store.settings.transcriptionLanguage }
+                                    ?? LanguageOption(
+                                        code: store.settings.transcriptionLanguage,
+                                        name: LanguageCatalog.name(store.settings.transcriptionLanguage))
+                            },
+                            set: { choice in Task { await store.setTranscriptionLanguage(choice.code) } }))
+                    .disabled(store.transcriptionLanguageSaving)
+                    ChoiceRow(
+                        title: "Notes language",
+                        detail: "The language the notes are written in. Same as the meeting follows whatever was spoken most.",
+                        choices: MeetingNotesLanguage.allCases,
+                        label: { $0.label },
+                        selection: Binding(
+                            get: { store.settings.notesLanguage },
+                            set: { choice in Task { await store.setNotesLanguage(choice) } }))
+                    .disabled(store.notesLanguageSaving)
+                } else {
+                    MeetingSettingsNote("Reading language settings…")
+                }
+            }
+        }
     }
 }
 
@@ -101,7 +145,7 @@ private struct MeetingDetectionAdvancedRows: View {
                 // The one thing about this switch nobody can infer from it:
                 // macOS has no read-only calendar grant, so turning it on asks
                 // for the whole calendar.
-                detail: "Shows a countdown a minute before events with two or more attendees. "
+                detail: "Prepares meeting briefs and reminds you before events with two or more attendees. Choose the reminder time below. "
                     + "macOS asks for full calendar access the first time, because Apple offers no read-only grant.",
                 isOn: Binding(
                     get: { settings.calendarEnabled },
@@ -757,9 +801,8 @@ private struct MeetingRetentionRows: View {
     var body: some View {
         if let snapshot = store.retention {
             ChoiceRow(
-                title: "Retention",
-                // The one thing the control cannot state: what "delete" means.
-                detail: "Sona deletes meetings on this Mac the same verified way every time.",
+                title: "Whole meetings",
+                detail: "Deletes the whole meeting, including notes. The recording setting below does not change this.",
                 choices: choices,
                 label: { $0.label },
                 selection: Binding(
@@ -776,6 +819,64 @@ private struct MeetingRetentionRows: View {
                 button: "Try again",
                 busy: store.retentionSaving,
                 action: { Task { await store.loadRetention() } })
+        }
+        MeetingTranscriptRetentionRows(store: store)
+    }
+}
+
+private struct MeetingTranscriptRetentionRows: View {
+    let store: MeetingSettingsStore
+    @State private var pending: MeetingRetentionPolicy?
+
+    var body: some View {
+        Group {
+            if let snapshot = store.transcriptRetention {
+                ChoiceRow(
+                    title: "Recordings and transcripts",
+                    detail: store.transcriptRetentionSaving ? "Saving…" : snapshot.detail,
+                    choices: MeetingTranscriptRetentionSnapshot.choices,
+                    label: MeetingTranscriptRetentionSnapshot.label,
+                    selection: Binding(
+                        get: { snapshot.policy },
+                        set: { policy in
+                            if shortens(policy, from: snapshot.policy) {
+                                pending = policy
+                            } else {
+                                Task { await store.setTranscriptRetention(policy) }
+                            }
+                        }))
+                .disabled(store.transcriptRetentionSaving || store.transcriptRetentionLoading)
+            } else if store.transcriptRetentionLoading || store.transcriptRetentionNote == nil {
+                MeetingSettingsNote("Reading the recording retention setting…")
+            }
+            if let note = store.transcriptRetentionNote {
+                ActionRow(
+                    title: note,
+                    button: "Try again",
+                    busy: store.transcriptRetentionLoading || store.transcriptRetentionSaving,
+                    action: { Task { await store.loadTranscriptRetention() } })
+            }
+        }
+        .confirmationDialog("Delete older recordings and transcripts?", isPresented: Binding(
+            get: { pending != nil },
+            set: { if !$0 { pending = nil } })) {
+                if let policy = pending {
+                    Button("Apply retention setting", role: .destructive) {
+                        pending = nil
+                        Task { await store.setTranscriptRetention(policy) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { pending = nil }
+            } message: {
+                Text("Deletion starts in 7 days and includes past meetings on this Mac. Your notes, summaries, and action items stay. Links you already shared keep what they showed.")
+            }
+    }
+
+    private func shortens(_ policy: MeetingRetentionPolicy, from current: MeetingRetentionPolicy) -> Bool {
+        switch (current, policy) {
+        case (.forever, .deleteAfter): true
+        case let (.deleteAfter(old), .deleteAfter(new)): new < old
+        default: false
         }
     }
 }
@@ -987,18 +1088,25 @@ struct MeetingSeriesSection: View {
             if let preferences, preferences.seriesKey != nil {
                 PageSection("This series") {
                     Card {
-                        ChoiceRow(
+                        MeetingTemplateChoiceRow(
                             title: "Notes template",
                             detail: "Every meeting in this series is written this way.",
-                            choices: [nil] + MeetingSeriesTemplate.allCases.map { Optional($0) },
-                            label: { $0?.label ?? "App default" },
+                            builtIns: MeetingSeriesTemplate.allCases,
+                            builtInLabel: { $0.label },
+                            templates: store.templates,
+                            none: "App default",
                             selection: Binding(
-                                get: { preferences.template },
-                                set: { template in
+                                get: {
+                                    MeetingTemplateChoice(
+                                        builtIn: preferences.template,
+                                        customTemplateId: preferences.customTemplateId)
+                                },
+                                set: { choice in
                                     write { revision in
                                         try await store.setTemplate(
                                             seriesKey: preferences.seriesKey ?? "",
-                                            template: template,
+                                            template: choice?.builtIn,
+                                            customTemplateId: choice?.customTemplateId,
                                             revision: revision)
                                     }
                                 }))
@@ -1068,6 +1176,7 @@ struct MeetingSeriesSection: View {
             }
         }
         .task(id: sessionId) { await load() }
+        .task { await store.templates.loadIfNeeded() }
     }
 
     /// Three independent reads, one wait. Each costs only its own rows.

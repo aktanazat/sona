@@ -99,6 +99,10 @@ impl VoiceActivityDetector for SmoothedVad {
         self.hangover_frames = frames;
     }
 
+    fn set_quiet_speech(&mut self, enabled: bool) {
+        self.inner_vad.set_quiet_speech(enabled);
+    }
+
     fn reset(&mut self) {
         self.inner_vad.reset();
         self.frame_buffer.clear();

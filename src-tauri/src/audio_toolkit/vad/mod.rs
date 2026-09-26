@@ -32,9 +32,14 @@ pub trait VoiceActivityDetector: Send + Sync {
     /// subsequent frames. Detectors without a smoothing tail can ignore this.
     fn set_hangover_frames(&mut self, _frames: usize) {}
 
+    /// Relax this engine's own threshold for soft dictation. Meeting capture
+    /// does not pass through the dictation detector.
+    fn set_quiet_speech(&mut self, _enabled: bool) {}
+
     fn reset(&mut self) {}
 }
 
+pub(crate) mod quiet_speech;
 mod silero;
 mod smoothed;
 mod ten;

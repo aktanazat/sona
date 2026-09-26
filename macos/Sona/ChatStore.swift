@@ -23,6 +23,7 @@ final class ChatStore {
     /// What the reader is typing. Held here so that opening another
     /// conversation can drop it.
     var draft = ""
+    private(set) var folderScope: MeetingFolder?
     /// Which brain the next turn goes to.
     var workspace: AgentPanelWorkspace = .sonaChat {
         didSet {
@@ -135,7 +136,7 @@ final class ChatStore {
     var offersSuggestions: Bool {
         workspace == .sonaChat && phase == .ready && !consentNeeded && conversation.isEmpty
             && turn == nil && proposal == nil && draft.isEmpty && screenshot == nil && !voiceActive
-            && !composerDisabled && !sending
+            && !composerDisabled && !sending && folderScope == nil
     }
 
     /// Where the turn's activity belongs in the scrollback: above the answer
@@ -354,6 +355,7 @@ final class ChatStore {
          * quoted with `sona://` links; Configure turns get none, because a
          * settings change is not a question about a meeting. */
         let allowed = packs
+        let folderId = workspace == .sonaChat ? folderScope?.folderId : nil
         searchedCorpus = false
         sending = true
         defer {
@@ -366,7 +368,7 @@ final class ChatStore {
          * the pack is being built ends the act here, and the field keeps
          * the question. */
         let sent = await run {
-            let pack = allowed ? await self.buildPack(message) : nil
+            let pack = allowed ? await self.buildPack(message, folderId: folderId) : nil
             try Task.checkCancellation()
             return try await self.core.request(
                 "agent_panel_send_turn",
@@ -378,6 +380,7 @@ final class ChatStore {
                         workspace: self.workspace.rawValue,
                         contextPack: pack,
                         toolsAllowed: allowed,
+                        folderId: folderId,
                         screenshot: screenshot?.png)))
         }
         if sent {
@@ -388,10 +391,13 @@ final class ChatStore {
     }
 
     /// The evidence this question carries, and whether it quoted anything.
-    private func buildPack(_ message: String) async -> String? {
+    private func buildPack(_ message: String, folderId: MeetingFolderId?) async -> String? {
         do {
             let built: ChatContextPack = try await core.request(
-                "sona_query_pack", ["question": message])
+                "sona_query_pack", [
+                    "question": JSONValue.string(message),
+                    "folderId": folderId.map { JSONValue.string($0) } ?? .null,
+                ])
             searchedCorpus = !built.sources.isEmpty
             return built.pack
         } catch {
@@ -658,7 +664,50 @@ final class ChatStore {
         }
     }
 
+    func approveReviewedAction(_ index: UInt32, action: JSONValue) async -> Bool {
+        guard let turnId = turn?.turnId, !busy else { return false }
+        inFlight += 1
+        defer { inFlight -= 1 }
+        error = nil
+        do {
+            let request: JSONValue = ["turn_id": .string(turnId), "action_index": .number(Double(index))]
+            let edited: AgentPanelTurnStatus = try await core.request(
+                "connections_edit_chat_action", ["request": request, "action": action])
+            status?.turn = edited
+            let next: AgentPanelTurnStatus = try await core.request(
+                "agent_panel_apply_action", ["request": request])
+            status?.turn = next
+            return true
+        } catch { report(error); return false }
+    }
+
     // MARK: - Conversations
+
+    /// Start fresh so an earlier, unrestricted conversation cannot supply
+    /// evidence from outside this folder.
+    func scope(to folder: MeetingFolder) {
+        guard !busy, !running else {
+            error = "Finish or stop the current answer before asking about a folder."
+            return
+        }
+        stopVoice()
+        cancelScreenshotSelection()
+        Task {
+            if await run({ try await self.core.request("agent_chat_new") }) {
+                workspace = .sonaChat
+                folderScope = folder
+                draft = ""
+                screenshot = nil
+                submittedScreenshot = nil
+                searchedCorpus = false
+            }
+        }
+    }
+
+    func clearFolderScope() {
+        guard !busy, !running else { return }
+        folderScope = nil
+    }
 
     func newChat() {
         guard !busy, !running else { return }
@@ -688,6 +737,7 @@ final class ChatStore {
                 // The work line belongs to the turn that was on screen, not
                 // to whatever this conversation last did.
                 searchedCorpus = false
+                folderScope = nil
             }
         }
     }
@@ -824,6 +874,7 @@ final class ChatStore {
         let workspace: String
         let contextPack: String?
         let toolsAllowed: Bool
+        let folderId: MeetingFolderId?
         let screenshot: Data?
 
         enum CodingKeys: String, CodingKey {
@@ -833,6 +884,7 @@ final class ChatStore {
             case workspace
             case contextPack = "context_pack"
             case toolsAllowed = "tools_allowed"
+            case folderId = "folder_id"
             case screenshot
         }
     }

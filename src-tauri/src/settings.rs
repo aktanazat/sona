@@ -1,5 +1,6 @@
 use crate::context::ContextPolicy;
 use crate::meeting::analytics::{KeywordTracker, MeetingNotesTemplate};
+use crate::meeting::template_types::{MeetingNotesLanguage, MeetingTemplateId};
 use crate::modes::{
     default_modes, ensure_mode_settings, switch_binding_id, transcribe_binding_id,
     CloudSttProvider, ModeActivationRule, ModeDefinition, ModeWebsiteActivationRule,
@@ -721,6 +722,24 @@ pub enum OverlayPosition {
     Bottom,
 }
 
+/// Which screen edge the idle pill docks to. Its own type rather than
+/// [`OverlayPosition`]: the recording overlay lays out for the top and bottom
+/// edges only, while the pill also stands on a side edge, and widening the
+/// overlay's type would let a stored side edge reach a layout that has no
+/// place for it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum HudPillEdge {
+    Top,
+    // The pill shared `OverlayPosition` before it had edges of its own, so a
+    // store may still carry that type's retired `none`; it folds onto the
+    // default edge the same way, and `hud_pill_enabled` owns visibility.
+    #[serde(alias = "none")]
+    Bottom,
+    Left,
+    Right,
+}
+
 /// Which recording overlay to display. `Minimal` and `Live` share one base
 /// (the pill); `Live` grows into the panel that shows live transcription text.
 /// `None` hides the overlay entirely. Decoupled from whether the model runs in
@@ -1192,6 +1211,9 @@ pub struct AppSettings {
     pub context_policy_ceiling: ContextPolicy,
     #[serde(default = "default_push_to_talk")]
     pub push_to_talk: bool,
+    /// Software gain and relaxed speech detection for dictation only.
+    #[serde(default)]
+    pub quiet_speech_enabled: bool,
     #[serde(default)]
     pub audio_feedback: bool,
     #[serde(default = "default_audio_feedback_volume")]
@@ -1230,6 +1252,10 @@ pub struct AppSettings {
     pub translate_to_english: bool,
     #[serde(default = "default_selected_language")]
     pub selected_language: String,
+    /// Ordered choices for automatic dictation detection. Empty means all
+    /// languages; the first choice is primary when a short clip is ambiguous.
+    #[serde(default)]
+    pub dictation_languages: Vec<String>,
     /// An explicit, global choice for final English spelling. This belongs to
     /// the user's writing preference rather than a mode or ASR engine.
     #[serde(default)]
@@ -1366,6 +1392,12 @@ pub struct AppSettings {
     /// it. See crate::command_mode.
     #[serde(default = "default_command_mode_enabled")]
     pub command_mode_enabled: bool,
+    /// Where a spoken question in command mode is answered: in the chat sheet
+    /// (on) or as one more edit of the selection (off). Only questions move;
+    /// an edit instruction rewrites the selection either way. See
+    /// crate::command_mode.
+    #[serde(default = "default_command_answers_in_chat")]
+    pub command_answers_in_chat: bool,
     /// Default-off local coding-agent bridge policy. It intentionally contains
     /// no user text or provider payloads; those are in-memory only.
     #[serde(default)]
@@ -1405,6 +1437,10 @@ pub struct AppSettings {
     /// of its own.
     #[serde(default)]
     pub meeting_notes_template: MeetingNotesTemplate,
+    #[serde(default)]
+    pub meeting_notes_custom_template_id: Option<MeetingTemplateId>,
+    #[serde(default)]
+    pub meeting_notes_language: MeetingNotesLanguage,
     /// Whether the deterministic replacement stage runs at all. The starter
     /// library ships enabled, so this is the single switch that turns symbol
     /// dictation off without discarding the user's rules.
@@ -1430,11 +1466,17 @@ pub struct AppSettings {
     /// screen is opt-in.
     #[serde(default)]
     pub hud_pill_enabled: bool,
-    /// Which screen edge the idle pill sits on. Shares `OverlayPosition` with
-    /// the recording overlay because it is the same window and the same anchor
-    /// arithmetic.
+    /// Which screen edge the idle pill docks to. Dragging the pill to another
+    /// edge writes this, so it survives a restart.
     #[serde(default = "default_hud_pill_position")]
-    pub hud_pill_position: OverlayPosition,
+    pub hud_pill_position: HudPillEdge,
+    /// "Hide for an hour" from the pill's menu: while this wall-clock time
+    /// (milliseconds since the Unix epoch) is ahead, the idle pill stays off
+    /// screen; a recording still shows the bar. The core clears it once the
+    /// time passes and whenever the pill is turned off or on, so a stale value
+    /// never outlives the hour it named.
+    #[serde(default)]
+    pub hud_pill_hidden_until_ms: Option<i64>,
     /// Whether automatic meeting detection runs at all. On by default, because
     /// on its own it only ever raises a prompt: no path below it starts a
     /// capture without an explicit click through the consent screen.
@@ -1468,17 +1510,30 @@ pub struct AppSettings {
     /// `detection_meeting_apps` grants nothing, because nothing detects it.
     #[serde(default)]
     pub detection_auto_record_apps: Vec<String>,
+    #[serde(default)]
+    pub meeting_prep: crate::meeting::prep::PrepPreferences,
+    /// Posting is opt-in, independently of the consent to record.
+    #[serde(default)]
+    pub meeting_disclosure_enabled: bool,
+    #[serde(default = "default_meeting_disclosure_message")]
+    pub meeting_disclosure_message: String,
     /// Whether the evening digest raises one native notification on days with
     /// activity. Off on install: an unasked-for notification is the one thing a
     /// quiet app must never do.
     #[serde(default)]
     pub meeting_digest_enabled: bool,
+    /// Save stills of the meeting window as it changes. Off until opted in.
+    #[serde(default)]
+    pub meeting_screen_snapshots_enabled: bool,
     /// Minutes past local midnight the digest is due. 1080 is 18:00, which is
     /// evening for the working day this summarizes. Stored as a number rather
     /// than "18:00" so there is no clock format to parse, and no invalid state
     /// a settings file can express.
     #[serde(default = "default_meeting_digest_minute_of_day")]
     pub meeting_digest_minute_of_day: u32,
+    /// Frozen into each meeting's run plan, independently of dictation.
+    #[serde(default = "default_selected_language")]
+    pub meeting_transcription_language: String,
     /// D14. Where meeting text is generated when the remote relay is not chosen.
     /// The endpoint variant is validated as loopback and takes effect on the next
     /// artifact because the processing service resolves it at the artifact seam.
@@ -1514,6 +1569,18 @@ pub struct AppSettings {
     /// needs the row above.
     #[serde(default)]
     pub external_mutations_enabled: bool,
+    /// Whether a saved dictation records which application it was delivered
+    /// into, as the frontmost application's bundle identifier, for the
+    /// per-app words on the Overview page. On by default: it is the same
+    /// read mode activation already makes, and nothing leaves this Mac. Off,
+    /// the row is saved without an application and the breakdown shows its
+    /// off state.
+    #[serde(default = "default_count_words_per_app")]
+    pub count_words_per_app: bool,
+}
+
+fn default_count_words_per_app() -> bool {
+    true
 }
 
 fn default_meeting_local_engine() -> MeetingLocalEngine {
@@ -1542,8 +1609,8 @@ fn default_replacements_enabled() -> bool {
     true
 }
 
-fn default_hud_pill_position() -> OverlayPosition {
-    OverlayPosition::Bottom
+fn default_hud_pill_position() -> HudPillEdge {
+    HudPillEdge::Bottom
 }
 
 fn default_detection_enabled() -> bool {
@@ -1655,6 +1722,12 @@ fn default_context_capture_clipboard_preroll_ms() -> u64 {
 }
 
 fn default_command_mode_enabled() -> bool {
+    true
+}
+
+/// On by default: an answer typed over the selection destroys the text it
+/// was about, and the chat keeps it readable. Edits are unaffected.
+fn default_command_answers_in_chat() -> bool {
     true
 }
 
@@ -2018,6 +2091,7 @@ pub fn get_default_settings() -> AppSettings {
         mode_website_activation_rules: Vec::new(),
         context_policy_ceiling: ContextPolicy::None,
         push_to_talk: default_push_to_talk(),
+        quiet_speech_enabled: false,
         audio_feedback: false,
         audio_feedback_volume: default_audio_feedback_volume(),
         sound_theme: default_sound_theme(),
@@ -2034,6 +2108,7 @@ pub fn get_default_settings() -> AppSettings {
         selected_output_device: None,
         translate_to_english: false,
         selected_language: "auto".to_string(),
+        dictation_languages: Vec::new(),
         english_spelling: EnglishSpelling::AsSpoken,
         overlay_position: default_overlay_position(),
         debug_mode: false,
@@ -2089,6 +2164,7 @@ pub fn get_default_settings() -> AppSettings {
         context_url_capture_enabled: false,
         context_capture_clipboard_preroll_ms: default_context_capture_clipboard_preroll_ms(),
         command_mode_enabled: default_command_mode_enabled(),
+        command_answers_in_chat: default_command_answers_in_chat(),
         agent_bridge: AgentBridgeSettings::default(),
         snippets: Vec::new(),
         snippets_enabled: default_snippets_enabled(),
@@ -2103,24 +2179,33 @@ pub fn get_default_settings() -> AppSettings {
         agent_panel_model_selection: None,
         trackers_list: Vec::new(),
         meeting_notes_template: MeetingNotesTemplate::General,
+        meeting_notes_custom_template_id: None,
+        meeting_notes_language: MeetingNotesLanguage::Auto,
         replacements_enabled: default_replacements_enabled(),
         replacements_rules: default_replacement_rules(),
         spoken_edits_enabled: false,
         persona_samples: Vec::new(),
         hud_pill_enabled: false,
         hud_pill_position: default_hud_pill_position(),
+        hud_pill_hidden_until_ms: None,
         detection_enabled: default_detection_enabled(),
         detection_calendar_enabled: false,
         detection_any_mic_activity: false,
         detection_auto_start_on_open_pane: false,
         detection_meeting_apps: crate::meeting::detection::apps::default_meeting_app_bundle_ids(),
         detection_auto_record_apps: Vec::new(),
+        meeting_prep: crate::meeting::prep::PrepPreferences::default(),
+        meeting_disclosure_enabled: false,
+        meeting_disclosure_message: default_meeting_disclosure_message(),
         meeting_digest_enabled: false,
+        meeting_screen_snapshots_enabled: false,
         meeting_digest_minute_of_day: default_meeting_digest_minute_of_day(),
+        meeting_transcription_language: default_selected_language(),
         meeting_local_engine: default_meeting_local_engine(),
         meeting_remote_intelligence_enabled: false,
         external_query_enabled: false,
         external_mutations_enabled: false,
+        count_words_per_app: default_count_words_per_app(),
     };
     settings.modes = default_modes(&settings);
     ensure_mode_settings(&mut settings);
@@ -2856,6 +2941,7 @@ pub(crate) fn merge_upstream_import_settings(
     merged.show_whats_new_on_update = imported.show_whats_new_on_update;
     merged.translate_to_english = imported.translate_to_english;
     merged.selected_language = imported.selected_language;
+    merged.dictation_languages = imported.dictation_languages;
     merged.overlay_position = imported.overlay_position;
     merged.english_spelling = imported.english_spelling;
     merged.overlay_style = imported.overlay_style;
@@ -2894,6 +2980,21 @@ pub(crate) fn merge_upstream_import_settings(
 
     ensure_mode_settings(&mut merged);
     merged
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_quiet_speech_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let persisted = update_settings(&app, |settings| {
+        settings.quiet_speech_enabled = enabled;
+    });
+    // The in-memory preference changes even if persistence fails. Keep the
+    // recorder in agreement, then report any disk refusal to the settings row.
+    if let Some(manager) = app.try_state::<Arc<crate::managers::audio::AudioRecordingManager>>() {
+        manager.set_quiet_speech_enabled(enabled);
+    }
+    persisted?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2997,11 +3098,137 @@ pub fn change_meeting_local_engine_setting(
     })?;
     Ok(())
 }
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_dictation_languages_setting(
+    app: AppHandle,
+    languages: Vec<String>,
+) -> Result<(), String> {
+    let languages = normalize_dictation_languages(languages);
+    update_settings(&app, |settings| {
+        settings.selected_language = match languages.as_slice() {
+            [language] => language.clone(),
+            _ => default_selected_language(),
+        };
+        settings.dictation_languages = languages;
+    })?;
+    Ok(())
+}
+
+fn normalize_dictation_languages(languages: Vec<String>) -> Vec<String> {
+    let mut selected: Vec<String> = Vec::with_capacity(languages.len());
+    for language in languages {
+        let language = language.trim();
+        if language.is_empty() || language == "auto" {
+            continue;
+        }
+        // Variants share one recognizer language, so the newest variant wins
+        // without changing that language's place in the primary-first order.
+        let base = language.split(['-', '_']).next().unwrap_or(language);
+        if let Some(existing) = selected.iter_mut().find(|code| {
+            code.split(['-', '_'])
+                .next()
+                .is_some_and(|code| code.eq_ignore_ascii_case(base))
+        }) {
+            *existing = language.to_string();
+        } else {
+            selected.push(language.to_string());
+        }
+    }
+    selected
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_transcription_language_setting(
+    app: AppHandle,
+    language: String,
+) -> Result<(), String> {
+    let language = language.trim();
+    if language.is_empty() {
+        return Err("Choose a meeting language or Auto detect.".to_string());
+    }
+    update_settings(&app, |settings| {
+        settings.meeting_transcription_language = language.to_string();
+    })?;
+    Ok(())
+}
+
+pub fn default_meeting_disclosure_message() -> String {
+    "I'm recording this meeting with Sona to take notes. Please tell me if you'd prefer I stop.".to_string()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_disclosure_setting(
+    app: AppHandle,
+    enabled: bool,
+    message: String,
+) -> Result<(), String> {
+    let message = message.trim();
+    if message.is_empty() || message.chars().count() > 1_000 || message.contains('\0') {
+        return Err("Write a recording notice between 1 and 1,000 characters.".to_string());
+    }
+    update_settings(&app, |settings| {
+        settings.meeting_disclosure_enabled = enabled;
+        settings.meeting_disclosure_message = message.to_string();
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_notes_template_setting(
+    app: AppHandle,
+    template: MeetingNotesTemplate,
+    custom_template_id: Option<MeetingTemplateId>,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.meeting_notes_template = template;
+        settings.meeting_notes_custom_template_id = custom_template_id;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_notes_language_setting(
+    app: AppHandle,
+    language: MeetingNotesLanguage,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.meeting_notes_language = language;
+    })?;
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn change_meeting_digest_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     update_settings(&app, |settings| {
         settings.meeting_digest_enabled = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_meeting_screen_snapshots_enabled_setting(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.meeting_screen_snapshots_enabled = enabled;
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_count_words_per_app_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    update_settings(&app, |settings| {
+        settings.count_words_per_app = enabled;
     })?;
     Ok(())
 }
@@ -3427,6 +3654,128 @@ mod tests {
         // Bindings default to empty; the load path merges the real defaults in.
         assert!(settings.bindings.is_empty());
     }
+
+    #[test]
+    fn old_settings_leave_quiet_speech_off() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "push_to_talk": false
+        }))
+        .expect("older settings decode");
+        assert!(!settings.quiet_speech_enabled);
+        assert!(!settings.push_to_talk);
+    }
+
+    #[test]
+    fn quiet_speech_preference_survives_settings_round_trip() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "quiet_speech_enabled": true
+        }))
+        .expect("quiet speech preference decodes");
+        let stored = serde_json::to_value(&settings).expect("settings serialize");
+        let restored: AppSettings = serde_json::from_value(stored).expect("settings reload");
+        assert!(restored.quiet_speech_enabled);
+    }
+
+    #[test]
+    fn invalid_quiet_speech_value_salvages_without_resetting_other_preferences() {
+        let settings = salvage_settings(&serde_json::json!({
+            "quiet_speech_enabled": "yes",
+            "push_to_talk": false
+        }));
+        assert!(!settings.quiet_speech_enabled);
+        assert!(!settings.push_to_talk);
+    }
+
+    #[test]
+    fn custom_notes_settings_load_legacy_and_salvage_wrong_types() {
+        let legacy: AppSettings = serde_json::from_value(serde_json::json!({
+            "meeting_notes_template": "standup"
+        })).unwrap();
+        assert_eq!(legacy.meeting_notes_custom_template_id, None);
+        assert_eq!(legacy.meeting_notes_language, MeetingNotesLanguage::Auto);
+        assert_eq!(legacy.meeting_notes_template, MeetingNotesTemplate::Standup);
+        let salvaged = salvage_settings(&serde_json::json!({
+            "meeting_notes_custom_template_id": 42,
+            "meeting_notes_language": ["english"],
+            "push_to_talk": false
+        }));
+        assert_eq!(salvaged.meeting_notes_custom_template_id, None);
+        assert_eq!(salvaged.meeting_notes_language, MeetingNotesLanguage::Auto);
+        assert!(!salvaged.push_to_talk);
+    }
+
+    #[test]
+    fn custom_notes_settings_preserve_custom_choice_and_language() {
+        let template_id = MeetingTemplateId::new();
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "meeting_notes_custom_template_id": template_id,
+            "meeting_notes_language": "english"
+        })).unwrap();
+        let restored: AppSettings = serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert_eq!(restored.meeting_notes_custom_template_id, Some(template_id));
+        assert_eq!(restored.meeting_notes_language, MeetingNotesLanguage::English);
+    }
+
+    #[test]
+    fn language_settings_load_legacy_fixed_dictation_without_changing_meetings() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "selected_language": "fr"
+        }))
+        .unwrap();
+        assert_eq!(settings.selected_language, "fr");
+        assert_eq!(settings.dictation_languages, Vec::<String>::new());
+        assert_eq!(settings.meeting_transcription_language, "auto");
+    }
+
+    #[test]
+    fn language_settings_preserve_order_and_meeting_choice_after_round_trip() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "selected_language": "auto",
+            "dictation_languages": ["fr", "en", "zh-Hant"],
+            "meeting_transcription_language": "ja"
+        }))
+        .unwrap();
+        let loaded: AppSettings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert_eq!(loaded.dictation_languages, vec!["fr", "en", "zh-Hant"]);
+        assert_eq!(loaded.meeting_transcription_language, "ja");
+    }
+
+    #[test]
+    fn language_settings_salvage_wrong_types_without_losing_fixed_language() {
+        let settings = salvage_settings(&serde_json::json!({
+            "selected_language": "pt",
+            "dictation_languages": "fr",
+            "meeting_transcription_language": ["ja"]
+        }));
+        assert_eq!(settings.selected_language, "pt");
+        assert_eq!(settings.dictation_languages, Vec::<String>::new());
+        assert_eq!(settings.meeting_transcription_language, "auto");
+    }
+
+    #[test]
+    fn count_words_per_app_defaults_on_for_a_settings_file_written_before_it() {
+        let missing = salvage_settings(&serde_json::json!({ "push_to_talk": false }));
+        assert!(missing.count_words_per_app);
+        let wrong_type = salvage_settings(&serde_json::json!({ "count_words_per_app": "no" }));
+        assert!(wrong_type.count_words_per_app);
+        let off = salvage_settings(&serde_json::json!({ "count_words_per_app": false }));
+        assert!(!off.count_words_per_app);
+    }
+
+    #[test]
+    fn language_selection_replaces_conflicting_variants_without_reordering_primary() {
+        assert_eq!(
+            normalize_dictation_languages(
+                ["fr", "zh-Hans", "en", "zh-Hant", "fr", "auto", " "]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            ),
+            vec!["fr", "zh-Hant", "en"]
+        );
+    }
+
     #[test]
     fn default_post_process_provider_matches_platform() {
         let provider_id = default_post_process_provider_id();
@@ -4503,6 +4852,34 @@ mod tests {
         );
     }
 
+    /// A store written before the chat route existed loads with the route on,
+    /// and a wrong-typed value falls back to it without touching its
+    /// neighbours.
+    #[test]
+    fn command_answers_in_chat_defaults_on_and_salvages_a_wrong_type() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "command_mode_enabled": false
+        }))
+        .expect("a store without the key loads");
+        assert!(settings.command_answers_in_chat);
+        assert!(!settings.command_mode_enabled);
+
+        let salvaged = salvage_settings(&serde_json::json!({
+            "command_answers_in_chat": "no",
+            "command_mode_enabled": false
+        }));
+        assert!(salvaged.command_answers_in_chat);
+        assert!(!salvaged.command_mode_enabled);
+
+        let stored: AppSettings = serde_json::from_value(serde_json::json!({
+            "command_answers_in_chat": false
+        }))
+        .unwrap();
+        let reloaded: AppSettings =
+            serde_json::from_value(serde_json::to_value(&stored).unwrap()).unwrap();
+        assert!(!reloaded.command_answers_in_chat);
+    }
+
     #[test]
     fn salvage_of_poisoned_bindings_keeps_other_fields() {
         let mut stored = serde_json::Value::Object(default_settings_document().0);
@@ -4599,6 +4976,54 @@ mod tests {
             serde_json::from_value(raw.get("overlay_position").unwrap().clone())
                 .expect("legacy \"none\" should deserialize, not error");
         assert_eq!(position, OverlayPosition::Bottom);
+    }
+
+    #[test]
+    fn hud_pill_position_loads_every_stored_edge_including_the_retired_none() {
+        // The pill's edge was stored as `OverlayPosition` before it had a type
+        // of its own, so "top", "bottom" and the retired "none" must load as
+        // they always did, beside the two side edges the pill now has.
+        for (stored, expected) in [
+            ("top", HudPillEdge::Top),
+            ("bottom", HudPillEdge::Bottom),
+            ("none", HudPillEdge::Bottom),
+            ("left", HudPillEdge::Left),
+            ("right", HudPillEdge::Right),
+        ] {
+            let settings: AppSettings =
+                serde_json::from_value(serde_json::json!({ "hud_pill_position": stored }))
+                    .unwrap_or_else(|error| panic!("{stored:?} must load: {error}"));
+            assert_eq!(settings.hud_pill_position, expected, "stored {stored:?}");
+        }
+    }
+
+    #[test]
+    fn hud_pill_hidden_until_is_absent_by_default_and_kept_when_stored() {
+        let without: AppSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(without.hud_pill_hidden_until_ms, None);
+        assert_eq!(get_default_settings().hud_pill_hidden_until_ms, None);
+
+        let stored: AppSettings = serde_json::from_value(
+            serde_json::json!({ "hud_pill_hidden_until_ms": 1_800_000_000_000_i64 }),
+        )
+        .unwrap();
+        assert_eq!(stored.hud_pill_hidden_until_ms, Some(1_800_000_000_000));
+    }
+
+    #[test]
+    fn salvage_resets_wrong_typed_pill_fields_and_keeps_the_rest() {
+        let mut stored = serde_json::Value::Object(default_settings_document().0);
+        let map = stored.as_object_mut().unwrap();
+        map.insert("hud_pill_hidden_until_ms".into(), serde_json::json!("later"));
+        map.insert("hud_pill_position".into(), serde_json::json!(7));
+        map.insert("hud_pill_enabled".into(), serde_json::json!(true));
+
+        assert!(serde_json::from_value::<AppSettings>(stored.clone()).is_err());
+
+        let salvaged = salvage_settings(&stored);
+        assert_eq!(salvaged.hud_pill_hidden_until_ms, None);
+        assert_eq!(salvaged.hud_pill_position, HudPillEdge::Bottom);
+        assert!(salvaged.hud_pill_enabled);
     }
 
     #[test]

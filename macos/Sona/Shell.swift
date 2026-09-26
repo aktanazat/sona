@@ -5,6 +5,7 @@ import SwiftUI
 /// the pages.
 struct Shell: View {
     @Environment(AppModel.self) private var model
+    @State private var sharedNote: ScratchNote?
 
     var body: some View {
         ZStack {
@@ -47,6 +48,18 @@ struct Shell: View {
                     })
             case .recorder:
                 RecorderSheet(store: model.recorder) { model.sheet = nil }
+            case .brief:
+                MeetingBriefView(
+                    store: model.prep,
+                    onClose: { model.sheet = nil },
+                    onOpenMeeting: { id in
+                        model.sheet = nil
+                        model.openMeeting(id)
+                    },
+                    onSettings: {
+                        model.sheet = nil
+                        model.showSettings(.meetings)
+                    })
             case .whatsNew:
                 WhatsNewView(store: model.debug.whatsNew) {
                     model.debug.whatsNew.dismiss()
@@ -98,6 +111,19 @@ struct Shell: View {
                     ingestDocument: { model.showSettings(.importing) },
                     deleteDocument: { id in Task { await model.documents.delete(id: id) } },
                     openVocabulary: { model.showSettings(.vocabulary) })
+            case .scratchpad:
+                ScratchpadView(store: model.scratchpad, share: { note in
+                    Task {
+                        await model.scratchpad.flush()
+                        guard let saved = model.scratchpad.saved,
+                              saved.id == note.id,
+                              saved.body == model.scratchpad.body else { return }
+                        sharedNote = saved
+                    }
+                })
+                    .sheet(item: $sharedNote) { note in
+                        CloudNoteShareView(note: note)
+                    }
             }
         }
     }
@@ -174,6 +200,17 @@ struct MeetingsPlace: View {
         return Page {
             PageTitle("Meetings", subtitle: subtitle) {
                 HStack(spacing: 8) {
+                    Menu {
+                        Button("Export all as CSV…") { meetings.exportAllCsv() }
+                            .disabled(meetings.busy)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .frame(width: 30, height: 30)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .accessibilityLabel("Meeting library options")
                     Button("Deleted") { meetings.openTrash() }
                         .buttonStyle(.secondary)
                     Button("Import recording") { live.importMeeting() }
@@ -233,6 +270,10 @@ struct MeetingsPlace: View {
                 MeetingsRetryNote(message: message) { meetings.retry() }
             }
             MeetingsTrendCard(store: meetings)
+            MeetingsFolderBar(store: meetings) { folder in
+                model.chat.scope(to: folder)
+                model.sheet = .chat
+            }
             MeetingsFilterCard(store: meetings)
             MeetingsFeed(store: meetings)
             MeetingsPager(store: meetings)

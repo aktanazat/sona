@@ -262,6 +262,19 @@ struct ChatView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
         }
+        if store.workspace == .sonaChat, let folder = store.folderScope {
+            HStack(spacing: 12) {
+                Text("Only meetings in “\(folder.name)”").metaText(Theme.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Remove") { store.clearFolderScope() }
+                    .buttonStyle(.quiet)
+                    .disabled(store.busy || store.running)
+                    .accessibilityLabel("Ask across all meetings")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
         ChatComposer(store: store, onClose: onClose)
     }
 
@@ -487,6 +500,7 @@ private struct ChatProposalCard: View {
 private struct ChatActionCard: View {
     let store: ChatStore
     let action: AgentPanelAction
+    @State private var reviewing = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -497,6 +511,9 @@ private struct ChatActionCard: View {
                 Text(action.action.reason)
                     .metaText()
                     .fixedSize(horizontal: false, vertical: true)
+                if let detail = action.detail {
+                    Text(detail).bodyText(13, Theme.inkSecondary).textSelection(.enabled)
+                }
             }
 
             Spacer(minLength: 8)
@@ -504,7 +521,10 @@ private struct ChatActionCard: View {
             switch action.state {
             case .pending:
                 HStack(spacing: 8) {
-                    Button("Apply") { store.applyAction(action.actionIndex) }
+                    Button(action.action.needsReview ? "Review" : "Apply") {
+                        if action.action.needsReview { reviewing = true }
+                        else { store.applyAction(action.actionIndex) }
+                    }
                         .buttonStyle(.compact)
                         .disabled(store.busy)
                     Button("Dismiss") { store.dismissAction(action.actionIndex) }
@@ -513,13 +533,17 @@ private struct ChatActionCard: View {
                 }
             case .applied:
                 HStack(spacing: 8) {
-                    Text("Applied").metaText(Theme.inkSecondary)
-                    Button("Undo") { store.dismissAction(action.actionIndex) }
-                        .buttonStyle(.quiet)
-                        .disabled(store.busy)
+                    Text(action.action.appliedLabel).metaText(Theme.inkSecondary)
+                    if action.canUndo {
+                        Button("Undo") { store.dismissAction(action.actionIndex) }
+                            .buttonStyle(.quiet)
+                            .disabled(store.busy)
+                    }
                 }
             case .dismissed:
                 Text("Dismissed").metaText(Theme.inkSecondary)
+            case .failed:
+                Text("Not confirmed").metaText(Theme.inkSecondary)
             }
         }
         .padding(12)
@@ -528,6 +552,7 @@ private struct ChatActionCard: View {
         .overlay(
             RoundedRectangle(cornerRadius: Theme.radiusPanel)
                 .strokeBorder(Theme.border, lineWidth: 1))
+        .sheet(isPresented: $reviewing) { ChatActionReview(store: store, card: action) }
     }
 }
 
