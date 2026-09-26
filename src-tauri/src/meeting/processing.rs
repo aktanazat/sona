@@ -1554,7 +1554,20 @@ impl MeetingProcessingService {
         tracks: &[MeetingTrackSnapshot],
         cancelled: &AtomicBool,
     ) {
-        let Some(track) = Self::diarization_track(origin, tracks) else {
+        // A lane spoke when this revision gave it a line. Records alone do
+        // not say so: a call's system audio records silence the whole way
+        // through when the far end reaches Sona only through the microphone.
+        let spoken = |track: &MeetingTrackSnapshot| {
+            store
+                .transcript_segments_overlapping(
+                    transcript_revision_id,
+                    track.track_id,
+                    0,
+                    i64::MAX.unsigned_abs(),
+                )
+                .is_ok_and(|segments| !segments.is_empty())
+        };
+        let Some(track) = Self::diarization_track(origin, tracks, spoken) else {
             return;
         };
         let manifest = model_manifest();
@@ -1841,6 +1854,7 @@ impl MeetingProcessingService {
     fn diarization_track(
         origin: MeetingOrigin,
         tracks: &[MeetingTrackSnapshot],
+        spoken: impl Fn(&MeetingTrackSnapshot) -> bool,
     ) -> Option<&MeetingTrackSnapshot> {
         let source_kind = match origin {
             MeetingOrigin::Import => SourceKind::Microphone,
@@ -1848,8 +1862,8 @@ impl MeetingProcessingService {
         };
         let expected = tracks.iter().find(|track| track.source_kind == source_kind);
         expected
-            .filter(|track| track.durable_record_count > 0)
-            .or_else(|| tracks.iter().find(|track| track.durable_record_count > 0))
+            .filter(|track| spoken(track))
+            .or_else(|| tracks.iter().find(|track| spoken(track)))
             .or(expected)
     }
 
@@ -4751,6 +4765,12 @@ mod tests {
         }
     }
 
+    /// The tracks this revision gave a line to.
+    fn spoken_on(tracks: &[&MeetingTrackSnapshot]) -> impl Fn(&MeetingTrackSnapshot) -> bool {
+        let ids: Vec<SourceTrackId> = tracks.iter().map(|track| track.track_id).collect();
+        move |track| ids.contains(&track.track_id)
+    }
+
     #[test]
     fn imported_recordings_select_their_microphone_track_for_diarization() {
         let microphone = track(SourceKind::Microphone);
@@ -4759,6 +4779,7 @@ mod tests {
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Import,
                 std::slice::from_ref(&microphone),
+                spoken_on(&[]),
             ),
             Some(&microphone),
         );
@@ -4773,6 +4794,7 @@ mod tests {
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
                 std::slice::from_ref(&microphone),
+                spoken_on(&[]),
             ),
             None,
         );
@@ -4780,46 +4802,47 @@ mod tests {
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
                 &[microphone, system_audio.clone()],
+                spoken_on(&[]),
             ),
             Some(&system_audio),
         );
     }
 
-    fn track_with_audio(source_kind: SourceKind) -> MeetingTrackSnapshot {
-        MeetingTrackSnapshot {
-            durable_record_count: 12,
-            ..track(source_kind)
-        }
-    }
-
-    /// Every system-audio track in the owner's store holds zero records, and
-    /// walking one published a completed generation with no assignments over a
-    /// transcript the microphone had earned. The origin names the lane a
-    /// meeting's speakers are expected from; audio decides which lane can
-    /// answer at all.
+    /// A FaceTime call recorded its system audio start to finish, all of it
+    /// silence, while the microphone carried both voices. Diarizing the
+    /// silent lane assigned nobody, and the meeting read "Separating
+    /// speakers failed" over a transcript the microphone had earned.
     #[test]
-    fn diarization_falls_back_to_the_lane_that_holds_audio() {
-        let microphone = track_with_audio(SourceKind::Microphone);
-        let system_audio = track(SourceKind::SystemAudio);
+    fn diarization_falls_back_to_the_lane_that_holds_speech() {
+        let microphone = MeetingTrackSnapshot {
+            durable_record_count: 12,
+            ..track(SourceKind::Microphone)
+        };
+        let system_audio = MeetingTrackSnapshot {
+            durable_record_count: 12,
+            ..track(SourceKind::SystemAudio)
+        };
 
         assert_eq!(
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
                 &[microphone.clone(), system_audio],
+                spoken_on(&[&microphone]),
             ),
             Some(&microphone),
         );
     }
 
     #[test]
-    fn diarization_keeps_the_expected_lane_when_it_holds_audio() {
-        let microphone = track_with_audio(SourceKind::Microphone);
-        let system_audio = track_with_audio(SourceKind::SystemAudio);
+    fn diarization_keeps_the_expected_lane_when_it_holds_speech() {
+        let microphone = track(SourceKind::Microphone);
+        let system_audio = track(SourceKind::SystemAudio);
 
         assert_eq!(
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
-                &[microphone, system_audio.clone()],
+                &[microphone.clone(), system_audio.clone()],
+                spoken_on(&[&microphone, &system_audio]),
             ),
             Some(&system_audio),
         );
