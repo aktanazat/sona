@@ -119,40 +119,21 @@ enum PanelPlacement: Equatable {
 
 /// A window that floats above other windows and on every space, without
 /// taking the keyboard away from the app the words are going into, which a
-/// SwiftUI `Window` scene would. Shown with a fresh view each time; the
-/// hosting view keeps it, so a `show` with the same content redraws in
-/// place.
+/// SwiftUI `Window` scene would. It hosts one view for its whole life, a
+/// view that reads its own state, so a change redraws in place: nothing
+/// here swaps the view, and the panel moves only when it is shown after
+/// being hidden, when its placement changes, or when the view's size does.
 @MainActor
 final class FloatingPanel {
-    private var panel: NSPanel?
-    private var host: NSHostingView<AnyView>?
+    private let panel: NSPanel
+    private let host: NSHostingView<AnyView>
+    private var placement: PanelPlacement?
+    /// The point the placement pins, fixed when the panel is placed: its
+    /// top right corner, or the middle of its top or bottom edge. A resize
+    /// grows the panel away from it, so the panel stays on its screen.
+    private var anchor = NSPoint.zero
 
-    func show(_ content: some View, at placement: PanelPlacement) {
-        let panel = panel ?? make()
-        self.panel = panel
-        host?.rootView = AnyView(content)
-        panel.setContentSize(host?.fittingSize ?? .zero)
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
-            let visible = screen.visibleFrame
-            let size = panel.frame.size
-            let origin = switch placement {
-            case .edge(.bottom):
-                NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 24)
-            case .edge(.top):
-                NSPoint(x: visible.midX - size.width / 2, y: visible.maxY - size.height - 24)
-            case .topTrailing:
-                NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16)
-            }
-            panel.setFrameOrigin(origin)
-        }
-        panel.orderFrontRegardless()
-    }
-
-    func hide() {
-        panel?.orderOut(nil)
-    }
-
-    private func make() -> NSPanel {
+    init(_ content: some View) {
         let panel = NSPanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -168,8 +149,54 @@ final class FloatingPanel {
         let host = NSHostingView(rootView: AnyView(EmptyView()))
         host.sizingOptions = .intrinsicContentSize
         panel.contentView = host
+        self.panel = panel
         self.host = host
-        return panel
+        host.rootView = AnyView(
+            content
+                .fixedSize()
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak self] size in
+                    self?.fit(size)
+                })
+    }
+
+    /// Floats the panel at `placement` on the screen the pointer is on. A
+    /// panel already up at the same placement stays exactly where it is,
+    /// unless `anew` asks for it to be floated again all the same.
+    func show(at placement: PanelPlacement, anew: Bool = false) {
+        guard anew || !panel.isVisible || placement != self.placement else { return }
+        self.placement = placement
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            anchor = switch placement {
+            case .edge(.bottom): NSPoint(x: visible.midX, y: visible.minY + 24)
+            case .edge(.top): NSPoint(x: visible.midX, y: visible.maxY - 24)
+            case .topTrailing: NSPoint(x: visible.maxX - 16, y: visible.maxY - 16)
+            }
+        }
+        panel.setFrame(frame(host.fittingSize, at: placement), display: false)
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        panel.orderOut(nil)
+    }
+
+    /// The view's size changed, which is the only time this is called. The
+    /// panel takes the new size around the same anchor, in one move, even
+    /// when AppKit already grew it from the hosting view's intrinsic size.
+    private func fit(_ size: CGSize) {
+        guard let placement, panel.isVisible else { return }
+        let target = frame(size, at: placement)
+        if target != panel.frame { panel.setFrame(target, display: true) }
+    }
+
+    private func frame(_ size: CGSize, at placement: PanelPlacement) -> NSRect {
+        let origin = switch placement {
+        case .edge(.bottom): NSPoint(x: anchor.x - size.width / 2, y: anchor.y)
+        case .edge(.top): NSPoint(x: anchor.x - size.width / 2, y: anchor.y - size.height)
+        case .topTrailing: NSPoint(x: anchor.x - size.width, y: anchor.y - size.height)
+        }
+        return NSRect(origin: origin, size: size)
     }
 }
 

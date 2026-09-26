@@ -905,14 +905,3 @@ struct UpcomingDay: Identifiable {
         return days
     }
 }
-
-// MARK: - Reading a clock
-
-extension Int64 {
-    /// `elapsedLabel`: how long a capture has been running. A start that is
-    /// missing, zero or in the future is not a start to count from.
-    func meetingElapsed(since now: Date) -> String {
-        guard self > 0 else { return TimeInterval(0).clock }
-        return Swift.max(0, now.timeIntervalSince(meetingDate)).clock
-    }
-}

@@ -196,8 +196,10 @@ final class AppModel {
     let debug: DebugStore
 
     @ObservationIgnored let core = Core()
-    @ObservationIgnored private let pill = FloatingPanel()
-    @ObservationIgnored private let consent = FloatingPanel()
+    @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
+    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel())
+    /// What the pill showed when it was last placed.
+    @ObservationIgnored private var pillCapture = CaptureState.idle
     /// Presents the main window, as the scene's `openWindow` does. Only a
     /// view reaches that action, and the window stays closed at launch, so
     /// the menu bar mark hands it over when it first appears. Observed, so a
@@ -631,34 +633,42 @@ final class AppModel {
     /// While recording, the sound at the overlay's edge unless the overlay is
     /// off; idle, the mode pill at its own edge when it is on. One panel,
     /// moved between the two. No pill while the core is stopped: it would
-    /// offer a recording nothing can make.
+    /// offer a recording nothing can make. The pill draws its own state; a
+    /// change of it floats the panel afresh on the screen the pointer is on,
+    /// as each dictation always has, and a settings read leaves it in place.
     private func syncPill() {
         let record = settings.settings
+        let anew = capture != pillCapture
+        pillCapture = capture
         if coreStopped {
             pill.hide()
         } else if capture != .idle {
             if record.overlayStyle == .none {
                 pill.hide()
             } else {
-                pill.show(HUDPill().environment(self), at: .edge(record.overlayPosition))
+                pill.show(at: .edge(record.overlayPosition), anew: anew)
             }
         } else if record.hudPillEnabled {
-            pill.show(HUDPill().environment(self), at: .edge(record.hudPillPosition))
+            pill.show(at: .edge(record.hudPillPosition), anew: anew)
         } else {
             pill.hide()
         }
     }
 
     /// The consent panel: an offer to record, the recording in progress, a
-    /// prep or wrap card. The view draws its own surface; this only floats
-    /// it at the top right of the screen the pointer is on, as the Tauri
-    /// window did.
+    /// prep or wrap card. The view reads the store and draws its own surface;
+    /// this only floats it at the top right of the screen the pointer is on
+    /// when a card appears, as the Tauri window did, and leaves it there.
     private func syncConsent() {
-        guard live.card != nil else {
+        if live.card == nil {
             consent.hide()
-            return
+        } else {
+            consent.show(at: .topTrailing)
         }
-        let view = MeetingConsentPanelView(
+    }
+
+    private func consentPanel() -> some View {
+        MeetingConsentPanelView(
             store: live,
             onOpenBrief: { [weak self] id in
                 self?.reveal()
@@ -676,7 +686,6 @@ final class AppModel {
         )
         .padding(8)
         .environment(self)
-        consent.show(view, at: .topTrailing)
     }
 
     /// The cues the stores leave for the shell: a stopped or imported

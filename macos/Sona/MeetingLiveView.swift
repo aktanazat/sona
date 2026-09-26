@@ -66,19 +66,15 @@ struct MeetingLiveView: View {
             if session.phase != .capturingRecording {
                 Text(session.phase.label).metaText(Theme.inkSecondary)
             }
-            // The core reports the offset once per read; the screen counts on
-            // from it every second while the capture runs, and stands still
-            // while it is paused.
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                HStack(spacing: 6) {
-                    LiveDot(state: dot(session))
-                    Text(store.elapsed(at: context.date))
-                        .font(TypeScale.mono(13))
-                        .foregroundStyle(Theme.ink)
-                        .monospacedDigit()
+            // The store keeps the capture's clock; this counts on from it
+            // every second while the capture runs, and stands still while
+            // it is paused.
+            HStack(spacing: 6) {
+                LiveDot(state: dot(session))
+                if let clock = store.clocks[session.sessionId] {
+                    MeetingClockText(clock: clock, size: 13, color: Theme.ink)
                 }
             }
-            .accessibilityLabel("Elapsed")
             Button("Stop") { store.stop() }
                 .buttonStyle(.primary)
                 .disabled(!session.allows(.stop) || store.pending != nil)
@@ -91,7 +87,7 @@ struct MeetingLiveView: View {
     /// stopping or processing.
     private func dot(_ session: MeetingSessionSnapshot) -> CaptureState {
         switch session.phase {
-        case .capturingRecording: .recording(since: Date())
+        case .capturingRecording: .recording(since: session.captureStart)
         case .capturingPaused: .idle
         default: .working(session.phase.label)
         }
@@ -213,6 +209,49 @@ struct MeetingLiveView: View {
     }
 }
 
+// MARK: - The clock
+
+/// A capture's clock, drawn. Running, it counts on once a second on a
+/// schedule that starts at the clock's own start instant, so each tick lands
+/// on a whole second of the meeting, and a redraw that hands it the same
+/// clock keeps the same schedule. Standing, it is a still number.
+struct MeetingClockText: View {
+    let clock: MeetingCaptureClock
+    var size: CGFloat = 12
+    var color: Color = Theme.inkSecondary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if let since = clock.runningSince {
+            TimelineView(.periodic(from: since, by: 1)) { context in
+                face(clock.elapsedNs(at: context.date))
+            }
+        } else {
+            face(clock.standingNs)
+        }
+    }
+
+    /// The digits roll from one second to the next; with motion reduced,
+    /// they change in place.
+    private func face(_ elapsedNs: Int64) -> some View {
+        let reading = elapsedNs.meetingOffsetClock
+        return Text(reading)
+            .font(TypeScale.mono(size))
+            .foregroundStyle(color)
+            .monospacedDigit()
+            .contentTransition(reduceMotion ? .identity : .numericText())
+            .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: reading)
+            .accessibilityLabel("Elapsed")
+            .accessibilityValue(reading)
+    }
+}
+
+private extension MeetingSessionSnapshot {
+    /// When the capture started, as the live dot carries it: the same date
+    /// on every redraw, so a redraw hands the dot the state it already has.
+    var captureStart: Date { (startedAtUtcMs ?? 0).meetingDate }
+}
+
 // MARK: - The consent panel
 
 /// The floating panel, which is the card: one surface at the panel radius,
@@ -266,7 +305,7 @@ struct DetectionPromptView: View {
     let prompt: DetectionPromptEvent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(prompt.prompt.consentTitle).headlineText()
             Text(
                 prompt.showIntroduction
@@ -277,7 +316,7 @@ struct DetectionPromptView: View {
             if let brief = store.seriesBrief {
                 Text(brief).bodyText(13, Theme.inkSecondary)
             }
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 if prompt.prompt.isCalendar {
                     Toggle(
                         "Always record this meeting",
@@ -311,43 +350,43 @@ struct DetectionPromptView: View {
     }
 }
 
-/// The session the panel is watching: the clock, and the two things a person
-/// does from here — stop it, or stop it recording this series by itself. The
-/// dot carries the colour; the word beside it is plain ink.
+/// The session the panel is watching, in one row: the dot, the word, the
+/// clock, and Stop. The dot carries the colour; the word beside it is plain
+/// ink. The title sits under the row, and so does the chat notice's outcome
+/// when the person asked for one, because it asks them to send it. Telling
+/// this series to stop recording itself waits behind the `…`.
 struct MeetingConsentActiveCard: View {
     let store: MeetingLiveStore
     let state: MeetingConsentPanelSessionState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let paused = state.snapshot.phase == .capturingPaused
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                let paused = state.snapshot.phase == .capturingPaused
-                LiveDot(state: paused ? .idle : .recording(since: Date()))
+                LiveDot(state: paused ? .idle : .recording(since: state.snapshot.captureStart))
                 Text(paused ? "Paused" : "Recording")
                     .font(TypeScale.label(13))
                     .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
-                Spacer()
-                Text((state.snapshot.elapsedOffsetNs ?? 0).meetingOffsetClock)
-                    .font(TypeScale.mono(12))
-                    .foregroundStyle(Theme.inkSecondary)
-            }
-            Text(state.snapshot.title)
-                .font(TypeScale.label(14))
-                .foregroundStyle(Theme.ink)
-                .lineLimit(1)
-            if let line = state.disclosure.outcomeLine {
-                Text(line).bodyText(12, Theme.inkSecondary)
-            }
-            HStack(spacing: 8) {
-                Spacer()
-                if state.standingSeriesKey != nil {
-                    Button("Forget this series") { store.forgetSeries() }
-                        .buttonStyle(QuietButton(compact: true))
-                        .disabled(store.pending != nil)
+                if let clock = store.clocks[state.snapshot.sessionId] {
+                    MeetingClockText(clock: clock)
                 }
+                Spacer(minLength: 8)
                 Button("Stop") { store.stopFromPanel() }
                     .buttonStyle(.compact)
                     .disabled(store.pending != nil)
+                if state.standingSeriesKey != nil {
+                    PanelMore {
+                        Button("Forget this series") { store.forgetSeries() }
+                            .disabled(store.pending != nil)
+                    }
+                }
+            }
+            Text(state.snapshot.title)
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+            if let line = state.disclosure.outcomeLine {
+                Text(line).bodyText(12, Theme.inkSecondary)
             }
         }
     }
@@ -355,45 +394,65 @@ struct MeetingConsentActiveCard: View {
 
 // MARK: - The rituals
 
-/// A running recording Sona started by itself, and the one answer that keeps
-/// it from doing that again for this app.
+/// A running recording Sona started by itself, in the same row as the
+/// panel's own, with the app it is recording under it. The one answer that
+/// keeps it from doing that again for this app waits behind the `…`.
 struct RitualRecordingView: View {
     let store: MeetingLiveStore
     let event: RitualEvent
     let card: RitualRecordingCard
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // The card is an event; the phase is the session's. Paused is the
+        // one state the card would otherwise misreport.
+        let paused = store.active?.snapshot.sessionId == card.sessionId
+            && store.active?.snapshot.phase == .capturingPaused
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                // The card is an event; the phase is the session's. Paused
-                // is the one state the card would otherwise misreport.
-                let paused = store.active?.snapshot.sessionId == card.sessionId
-                    && store.active?.snapshot.phase == .capturingPaused
-                LiveDot(state: paused ? .idle : .recording(since: Date()))
+                LiveDot(state: paused ? .idle : .recording(since: card.startedAtUtcMs.meetingDate))
                 Text(paused ? "Paused" : "Recording started")
                     .font(TypeScale.label(13))
                     .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
-                Spacer()
-                Text(card.startedAtUtcMs.meetingElapsed(since: Date()))
-                    .font(TypeScale.mono(12))
-                    .foregroundStyle(Theme.inkSecondary)
-            }
-            Text(card.appName)
-                .font(TypeScale.label(14))
-                .foregroundStyle(Theme.ink)
-                .lineLimit(1)
-            HStack(spacing: 8) {
-                Spacer()
-                Button("Don't record this app automatically") {
-                    store.respond(event, action: .recordingForgetApp)
+                if let clock = store.clocks[card.sessionId] {
+                    MeetingClockText(clock: clock)
                 }
-                .buttonStyle(QuietButton(compact: true))
-                .disabled(store.pending != nil)
+                Spacer(minLength: 8)
                 Button("Stop") { store.respond(event, action: .recordingStop) }
                     .buttonStyle(.compact)
                     .disabled(store.pending != nil)
+                PanelMore {
+                    Button("Don't record this app automatically") {
+                        store.respond(event, action: .recordingForgetApp)
+                    }
+                    .disabled(store.pending != nil)
+                }
             }
+            Text(card.appName)
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
         }
+    }
+}
+
+/// The `…` on a recording card: the answer the card keeps but rarely needs,
+/// out of the row, so the row is the recording and its Stop.
+private struct PanelMore<Items: View>: View {
+    @ViewBuilder let items: Items
+
+    var body: some View {
+        Menu {
+            items
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 26, height: 30)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("More")
     }
 }
 
