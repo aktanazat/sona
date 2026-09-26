@@ -133,6 +133,50 @@ enum AgentPanelWorkspace: String, Codable, CaseIterable, Identifiable {
         case .sonaConfig: "Change a setting"
         }
     }
+
+    /// What an empty chat asks, as Halcyon's opens on its one question.
+    var greeting: String {
+        switch self {
+        case .sonaChat: "What would you like to know?"
+        case .sonaConfig: "What would you like to change?"
+        }
+    }
+
+    /// The line under the greeting: what this brain can be asked.
+    var reach: String {
+        switch self {
+        case .sonaChat: "Ask what was said, what you owe, or who someone is."
+        case .sonaConfig: "Describe the setting you want changed."
+        }
+    }
+}
+
+/// Three questions to press while a chat is empty, from what Sona already
+/// holds: the next meeting on the calendar, the newest one recorded, and the
+/// newest meeting with a promise still open. A slot with nothing to go on
+/// asks its plain version, so there are always three, and no two name the
+/// same meeting.
+enum ChatSuggestions {
+    static func pick(next: String?, latest: String?, open: String?) -> [String] {
+        var named: Set<String> = []
+        func fresh(_ title: String?) -> String? {
+            guard let title = quoted(title), named.insert(title).inserted else { return nil }
+            return title
+        }
+        return [
+            fresh(next).map { "What should I know before \($0)?" } ?? "Who did I meet with this week?",
+            fresh(latest).map { "What was decided in \($0)?" } ?? "What was said in my last meeting?",
+            fresh(open).map { "What's still open from \($0)?" } ?? "What do I still owe people?",
+        ]
+    }
+
+    /// A meeting's title as a question names it, or nil when it has none.
+    private static func quoted(_ title: String?) -> String? {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+            return nil
+        }
+        return "“\(title)”"
+    }
 }
 
 enum AgentPanelRelayStatus: String, Decodable {
@@ -399,29 +443,53 @@ struct AgentPanelTurnStatus: Decodable {
 
     var isRunning: Bool { !state.isTerminal }
 
+    /// When the core accepted the turn: the one instant every elapsed number
+    /// on the working row counts from.
+    var startedAt: Date { Date(timeIntervalSince1970: Double(startedAtUtcMs) / 1000) }
+
     /// How long the turn took, in milliseconds.
-    func workedMs(_ now: Int64) -> Int64 {
-        max(0, (completedAtUtcMs ?? now) - startedAtUtcMs)
+    func workedMs(_ now: Date) -> Int64 {
+        max(0, (completedAtUtcMs ?? Self.milliseconds(now)) - startedAtUtcMs)
     }
 
     /// How long one step took, on the same axis.
-    func workedMs(_ step: AgentPanelStep, _ now: Int64) -> Int64 {
+    func workedMs(_ step: AgentPanelStep, _ now: Date) -> Int64 {
         max(0, (step.endedAfterMs ?? workedMs(now)) - step.startedAfterMs)
     }
 
-    /// A live turn always gets a timing line; a finished one gets one when
-    /// the core recorded its finish.
-    var showsTiming: Bool { isRunning || completedAtUtcMs != nil }
+    /// "Working for 12s" while it runs and "Worked for 1m 4s" once it is
+    /// over: Aside's two tenses for the one line. Nil for a finished turn the
+    /// core never timed, which has no honest number to show.
+    func elapsed(_ now: Date) -> String? {
+        tense.map { "\($0) \(Self.duration(workedMs(now)))" }
+    }
 
-    /// "Thinking · 5s" while it runs, "Worked for 5s" once it is over.
-    func timing(_ now: Int64) -> String {
-        isRunning
-            ? "\(state.label) · \(Self.seconds(workedMs(now)))s"
-            : "Worked for \(Self.seconds(workedMs(now)))s"
+    /// The same line said in full for VoiceOver: "Worked for 1 minute, 4 seconds".
+    func spokenElapsed(_ now: Date) -> String? {
+        tense.map { "\($0) \(Self.spoken(workedMs(now)))" }
+    }
+
+    private var tense: String? {
+        if isRunning { return "Working for" }
+        return completedAtUtcMs == nil ? nil : "Worked for"
+    }
+
+    /// What the working row says the turn is on. A step that bolds a phrase
+    /// is naming what it is doing, the way a model's reasoning does in Aside,
+    /// so the newest bold phrase is the title. Without one it is the plain
+    /// word for where the turn has got to: "Thinking", "Queued", "Waiting for
+    /// you".
+    var headline: String {
+        for step in steps.reversed() {
+            guard let bold = step.label.matches(of: #/\*\*([^\n*]+)\*\*/#).last else { continue }
+            let phrase = bold.output.1.trimmingCharacters(in: .whitespaces)
+            return phrase.isEmpty ? state.label : phrase
+        }
+        return state.label
     }
 
     /// The wait message is a promise of the shell, never a relay timeout.
-    func isStillWaiting(_ now: Int64) -> Bool {
+    func isStillWaiting(_ now: Date) -> Bool {
         steps.isEmpty
             && (state == .queued || state == .running)
             && workedMs(now) >= Self.stillWaitingAfterMs
@@ -429,8 +497,29 @@ struct AgentPanelTurnStatus: Decodable {
 
     static let stillWaitingAfterMs: Int64 = 30_000
 
-    static func seconds(_ milliseconds: Int64) -> Int {
-        Int((Double(milliseconds) / 1000).rounded())
+    /// "12s", "1m 4s", "1h 2m". Whole seconds, floored: read on a clock that
+    /// ticks on the turn's own second boundaries, a floored count moves by
+    /// exactly one each tick, where a rounded one read at arbitrary moments
+    /// shows a second twice and then skips the next.
+    static func duration(_ milliseconds: Int64) -> String {
+        let seconds = milliseconds / 1000
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds / 3600)h \(seconds % 3600 / 60)m"
+    }
+
+    /// The count `duration` shows, in words: "12 seconds", "1 minute, 4 seconds".
+    static func spoken(_ milliseconds: Int64) -> String {
+        Duration.seconds(milliseconds / 1000)
+            .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .wide))
+    }
+
+    /// An instant on the core's axis, in whole milliseconds since the epoch.
+    /// Rounded, not truncated: a timeline entry is the start plus whole
+    /// seconds, and the float it comes back as can land a hair short of the
+    /// millisecond it is.
+    private static func milliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1000).rounded())
     }
 }
 
@@ -714,6 +803,31 @@ struct ChatRow: Identifiable {
             occurrences[identity] = occurrence + 1
             return ChatRow(id: "\(identity)\u{1F}\(occurrence)", turn: turn)
         }
+    }
+}
+
+/// An answer that arrived while the chat was on screen: which row, and the
+/// moment it landed. Only this row types itself out. Everything read back,
+/// a conversation opened or the panel's first read, is history and is
+/// simply there.
+struct ChatLanding: Equatable {
+    let rowId: String
+    let at: Date
+
+    /// The answer `next` adds to the chat `previous` was showing, when it is
+    /// one: the conversation grew and ends on the assistant, and it is the
+    /// same conversation or the turn that was running in it. A conversation
+    /// that only gets its id with its first answer is still that turn's.
+    static func between(_ previous: AgentPanelStatus?, _ next: AgentPanelStatus, at now: Date) -> ChatLanding? {
+        guard let previous,
+              next.conversation.count > previous.conversation.count,
+              let last = ChatRow.rows(next.conversation).last,
+              last.turn.role == .assistant
+        else { return nil }
+        let sameChat = next.conversationId != nil && next.conversationId == previous.conversationId
+        let ownTurn = previous.turn?.isRunning == true && previous.turn?.turnId == next.turn?.turnId
+        guard sameChat || ownTurn else { return nil }
+        return ChatLanding(rowId: last.id, at: now)
     }
 }
 

@@ -18,6 +18,11 @@ struct ChatView: View {
     /// itself; the chat is where the reader notices it.
     var pendingRequests = 0
     var openRequests: () -> Void = {}
+    /// Whether the reader is on the newest line, which is the only time a new
+    /// one may move the scrollback.
+    @State private var following = true
+    /// Which ends of the thread have more beyond them, so only those fade.
+    @State private var edges = ChatEdges()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,9 +56,6 @@ struct ChatView: View {
 
             Spacer(minLength: 8)
 
-            if store.running {
-                ProgressView().controlSize(.small)
-            }
             menu
         }
         .padding(.horizontal, 16)
@@ -116,7 +118,28 @@ struct ChatView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.never)
-        .defaultScrollAnchor(.bottom)
+        /* A chat opens on its newest line, and a short one sits down on the
+         * composer. A line that arrives later keeps the view on the bottom
+         * only when the reader was already there: scrolled up to an earlier
+         * answer, the page holds still under them instead of being pushed. */
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
+        .defaultScrollAnchor(.bottom, for: .alignment)
+        .defaultScrollAnchor(following ? UnitPoint.bottom : .top, for: .sizeChanges)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 24
+        } action: { _, atBottom in
+            following = atBottom
+        }
+        .onScrollGeometryChange(for: ChatEdges.self) { geometry in
+            ChatEdges(geometry)
+        } action: { _, next in
+            edges = next
+        }
+        .mask { ChatFades(edges: edges) }
+        /* Another conversation is another page: it opens on its newest line
+         * with its rows already in place, not arriving one by one. */
+        .id(store.conversationId)
+        .onChange(of: store.conversationId) { following = true }
         .frame(maxHeight: .infinity)
     }
 
@@ -128,12 +151,9 @@ struct ChatView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 48)
         } else if store.conversation.isEmpty, store.turn == nil, store.proposal == nil {
-            Text("Ask what was said, what you owe, or who someone is.")
-                .bodyText(14, Theme.inkSecondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 300)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 48)
+            ChatEmptyState(workspace: store.workspace)
+                .padding(.top, 48)
+                .padding(.bottom, 8)
         } else {
             ChatScrollback(store: store)
         }
@@ -232,16 +252,16 @@ struct ChatView: View {
             .padding(.vertical, 12)
         }
 
-        if store.workspace == .sonaChat {
-            Text(store.voice?.phase.label ?? (store.stoppingVoice
-                ? "Stopping microphone…"
-                : "Voice: audio stays on this Mac. Questions go to your server."))
+        /* The microphone gets a line while it is in use. Where the audio goes
+         * is said on the mic button, where it is read before pressing. */
+        if store.workspace == .sonaChat,
+           let line = store.voice?.phase.label ?? (store.stoppingVoice ? "Stopping microphone…" : nil) {
+            Text(line)
                 .metaText(Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
         }
-        Hairline()
         ChatComposer(store: store, onClose: onClose)
     }
 
@@ -263,38 +283,13 @@ private struct ChatScrollback: View {
 
     var body: some View {
         let rows = store.rows
-        let workIndex = store.workRowIndex
         let cardIndex = store.proposalRowIndex
         let retry = store.retryMessage
 
         LazyVStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                if index == workIndex {
-                    work(retry)
-                }
-                if row.turn.role == .user {
-                    ChatQuestion(message: row.turn.message)
-                } else if index == cardIndex, let proposal = store.proposal {
-                    ChatProposalCard(store: store, proposal: proposal)
-                } else {
-                    ChatAnswer(message: row.turn.message, store: store)
-                }
-                /* A failure the live turn is already reporting is the same
-                 * failure: the row it belongs to is the question above, and
-                 * one line about it is enough. */
-                if let outcome = row.turn.outcome, !(index == rows.count - 1 && retry != nil) {
-                    ChatOutcomeNote(
-                        store: store,
-                        outcome: outcome,
-                        message: row.turn.role == .user ? row.turn.message : nil)
-                }
-            }
-
-            /* A turn still working has no answer to sit above, so its work
-             * goes last — and a proposal with no row of its own is drawn
-             * rather than dropped. */
-            if workIndex == rows.count {
-                work(retry)
+            ForEach(ChatEntry.list(rows, work: store.workRowIndex, turn: store.turn, retry: retry)) { entry in
+                view(for: entry, cardIndex: cardIndex, retry: retry)
+                    .modifier(ChatEntrance())
             }
 
             /* The offer sits under the answer that made it, because the
@@ -302,204 +297,95 @@ private struct ChatScrollback: View {
              * of three reads as three choices rather than one block. */
             ForEach(store.turn?.actions ?? []) { action in
                 ChatActionCard(store: store, action: action)
+                    .modifier(ChatEntrance())
             }
 
+            // A proposal with no row of its own is drawn rather than dropped.
             if cardIndex == -1, let proposal = store.proposal {
                 ChatProposalCard(store: store, proposal: proposal)
+                    .modifier(ChatEntrance())
             }
             if let proposal = store.proposal, !proposal.rationale.isEmpty {
-                ChatAnswer(message: proposal.rationale, store: store)
+                ChatAnswer(message: proposal.rationale, landed: nil, store: store)
+                    .equatable()
+                    .modifier(ChatEntrance())
             }
             if let question = store.proposal?.followUpQuestion {
-                ChatAnswer(message: question, store: store)
+                ChatAnswer(message: question, landed: nil, store: store)
+                    .equatable()
+                    .modifier(ChatEntrance())
             }
         }
     }
 
     @ViewBuilder
-    private func work(_ retry: String?) -> some View {
-        if let turn = store.turn {
+    private func view(for entry: ChatEntry, cardIndex: Int, retry: String?) -> some View {
+        switch entry {
+        case let .work(turn):
             ChatWorkRow(store: store, turn: turn, retryMessage: retry)
+        case let .row(index, row):
+            if row.turn.role == .user {
+                ChatQuestion(message: row.turn.message)
+            } else if index == cardIndex, let proposal = store.proposal {
+                ChatProposalCard(store: store, proposal: proposal)
+            } else {
+                ChatAnswer(message: row.turn.message, landed: landed(row), store: store).equatable()
+            }
+        case let .outcome(row, outcome):
+            ChatOutcomeNote(
+                store: store,
+                outcome: outcome,
+                message: row.turn.role == .user ? row.turn.message : nil)
         }
+    }
+
+    /// When `row` landed, for the one answer that arrived while the chat was
+    /// on screen.
+    private func landed(_ row: ChatRow) -> Date? {
+        store.landing.flatMap { $0.rowId == row.id ? $0.at : nil }
     }
 }
 
-/// A question of your own, as an object on the surface rather than a wash
-/// over it.
-private struct ChatQuestion: View {
-    let message: String
+/// One entry of the scrollback, in reading order. The live turn's work is an
+/// entry of its own, keyed by the turn, so the answer landing under it leaves
+/// it where it was, with its fold as the reader left it.
+private enum ChatEntry: Identifiable {
+    case row(Int, ChatRow)
+    /// The terminal result remembered with an earlier question.
+    case outcome(ChatRow, AgentChatOutcome)
+    case work(AgentPanelTurnStatus)
 
-    var body: some View {
-        Text(message)
-            .bodyText(14)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.radiusCard)
-                    .strokeBorder(Theme.border, lineWidth: 1))
-            .frame(maxWidth: 380, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-    }
-}
-
-/// An answer is prose on the surface, not a card and not a bubble: it is the
-/// thing the sheet exists to show, and putting a container around it would
-/// make it look like an aside to something else. Only the addresses inside it
-/// are chrome, because only they are pressable.
-private struct ChatAnswer: View {
-    let message: String
-    let store: ChatStore
-
-    var body: some View {
-        Text(prose)
-            .font(TypeScale.body(14))
-            .foregroundStyle(Theme.ink)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .environment(
-                \.openURL,
-                OpenURLAction { url in
-                    store.openLink(url.absoluteString)
-                    return .handled
-                })
-    }
-
-    /// The addresses are links in the run of text rather than buttons beside
-    /// it, so the sentence still reads as a sentence. The prose between them
-    /// is read as inline Markdown, because that is how an assistant writes
-    /// emphasis and code, and a reader should see the word, not the stars
-    /// around it. Lines and paragraphs are kept as the answer laid them out.
-    private var prose: AttributedString {
-        var result = AttributedString()
-        for segment in ChatSegment.scan(message) {
-            switch segment {
-            case let .text(text):
-                result += Self.inline(text)
-            case let .link(link):
-                var run = AttributedString(link)
-                run.underlineStyle = .single
-                if let url = URL(string: link) {
-                    run.link = url
-                }
-                result += run
-            }
-        }
-        return result
-    }
-
-    /// Text that does not parse as Markdown is still an answer; it is shown
-    /// as written rather than lost to a parser's opinion of it.
-    private static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(text)
-    }
-}
-
-/// The activity that belongs below a turn's question.
-///
-/// A live turn always gets a timing line. A finished turn gets one when the
-/// core recorded its finish. Failure and the corpus marker share this row
-/// because neither has an assistant answer of its own to introduce them.
-private struct ChatWorkRow: View {
-    let store: ChatStore
-    let turn: AgentPanelTurnStatus
-    /// The question a retry would ask again, when the failure belongs to the
-    /// row above this one.
-    let retryMessage: String?
-    @State private var stepsOpen = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if turn.showsTiming {
-                timing
-            }
-            if store.searchedCorpus {
-                Text("Looked through your meetings and notes").metaText()
-            }
-            if turn.isStillWaiting(store.now) {
-                HStack(spacing: 8) {
-                    Text("Still waiting…").metaText(Theme.inkSecondary)
-                    Button("Cancel") { store.stop() }
-                        .buttonStyle(.quiet)
-                        .disabled(store.stopping)
-                }
-            }
-            if let failure = turn.failure {
-                HStack(spacing: 8) {
-                    Text(failure.message).metaText(Theme.live)
-                    if let retryMessage {
-                        Button("Retry") { store.retry(retryMessage) }
-                            .buttonStyle(QuietButton(color: Theme.live))
-                            .disabled(store.busy)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var timing: some View {
-        if turn.steps.isEmpty {
-            Text(turn.timing(store.now)).metaText(Theme.inkSecondary)
-        } else {
-            Button { stepsOpen.toggle() } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .rotationEffect(.degrees(stepsOpen ? 90 : 0))
-                    Text(turn.timing(store.now))
-                }
-            }
-            .buttonStyle(.quiet)
-            if stepsOpen {
-                steps
-            }
+    var id: String {
+        switch self {
+        case let .row(_, row): row.id
+        case let .outcome(row, _): row.id + "\u{1F}outcome"
+        case let .work(turn): "work\u{1F}" + turn.turnId
         }
     }
 
-    private var steps: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(turn.steps) { step in
-                HStack(spacing: 8) {
-                    if step.isTool {
-                        /* A tool's name is a machine's name, so it reads as
-                         * one: a mono word in a hairline pill with no fill.
-                         * A step with no tool stays prose, because it is
-                         * prose. */
-                        Text(step.title)
-                            .font(TypeScale.mono(12))
-                            .foregroundStyle(step.state == .failed ? Theme.live : Theme.inkSecondary)
-                            .lineLimit(1)
-                            .padding(.horizontal, 6)
-                            .frame(height: 19)
-                            .overlay(
-                                Capsule().strokeBorder(
-                                    step.state == .failed ? Theme.live : Theme.border,
-                                    lineWidth: 1))
-                    } else {
-                        Text(step.title)
-                            .metaText(step.state == .failed ? Theme.live : Theme.inkSecondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    Text("\(AgentPanelTurnStatus.seconds(turn.workedMs(step, store.now)))s")
-                        .metaText()
-                        .monospacedDigit()
-                }
+    /// The work sits above the answer it produced, or last while there is
+    /// none; `work` is the row it sits above, `-1` when the turn has nothing
+    /// to say.
+    static func list(
+        _ rows: [ChatRow], work: Int, turn: AgentPanelTurnStatus?, retry: String?
+    ) -> [ChatEntry] {
+        var entries: [ChatEntry] = []
+        for (index, row) in rows.enumerated() {
+            if index == work, let turn {
+                entries.append(.work(turn))
+            }
+            entries.append(.row(index, row))
+            /* A failure the live turn is already reporting is the same
+             * failure: the row it belongs to is the question above, and
+             * one line about it is enough. */
+            if let outcome = row.turn.outcome, !(index == rows.count - 1 && retry != nil) {
+                entries.append(.outcome(row, outcome))
             }
         }
-        .padding(.leading, 12)
-        .padding(.vertical, 2)
-        .overlay(alignment: .leading) {
-            Rectangle().fill(Theme.border).frame(width: 1)
+        if work == rows.count, let turn {
+            entries.append(.work(turn))
         }
+        return entries
     }
 }
 
@@ -645,14 +531,67 @@ private struct ChatActionCard: View {
     }
 }
 
-/// The field and the one button beside it, which is Send until a question is
-/// on its way and Stop from then until the turn is over.
+/// The composer, pinned under the thread as Halcyon's is: the questions an
+/// empty chat offers, then the field in its well with the attach and voice
+/// controls tucked inside it, and the one round button beside it, which is
+/// Send until a question is on its way and Stop from then until the turn is
+/// over.
 private struct ChatComposer: View {
     let store: ChatStore
     let onClose: () -> Void
+    /// Where the suggestions come from: the calendar, the meetings and the
+    /// open promises the other pages already read.
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
+        let offered = suggestions
+        VStack(alignment: .leading, spacing: 10) {
+            if !offered.isEmpty {
+                ChatSuggestionPills(suggestions: offered) { store.ask($0) }
+                    .transition(.opacity)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                well
+                if store.running || store.sending {
+                    ChatRoundButton(
+                        symbol: "stop.fill", help: "Stop", isEnabled: !store.stopping,
+                        action: { store.stop() })
+                } else {
+                    ChatRoundButton(
+                        symbol: "arrow.up", help: "Send", isEnabled: store.canSend,
+                        action: { store.send() })
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
+        .animation(ChatMotion.arrival(reduceMotion), value: offered)
+    }
+
+    /// Three questions for an empty chat, drawn from what the other pages
+    /// already read: the next event on the calendar, the newest meeting, and
+    /// the newest meeting with a promise still open. Nothing is asked of the
+    /// core for them.
+    private var suggestions: [String] {
+        guard store.offersSuggestions else { return [] }
+        let now = Int64(Date.now.timeIntervalSince1970 * 1000)
+        let next = model.overview.upcoming?.rows
+            .filter { $0.startUtcMs > now }
+            .min { $0.startUtcMs < $1.startUtcMs }
+        let latest = model.meetings.entries.max { $0.createdAtUtcMs < $1.createdAtUtcMs }
+        var open: FeedOpenLoop?
+        if case let .loaded(loops) = model.overview.openLoops {
+            open = loops.max { $0.atUtcMs < $1.atUtcMs }
+        }
+        return ChatSuggestions.pick(next: next?.title, latest: latest?.title, open: open?.title)
+    }
+
+    /// The field, and in Ask the image and voice controls at its trailing
+    /// edge, quiet until they are pressed.
+    private var well: some View {
+        HStack(alignment: .bottom, spacing: 4) {
             ZStack(alignment: .topLeading) {
                 if store.draft.isEmpty {
                     Text(store.workspace.prompt)
@@ -668,50 +607,43 @@ private struct ChatComposer: View {
                     send: { store.send() },
                     escape: onClose)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.radiusControl)
-                    .strokeBorder(Theme.border, lineWidth: 1))
-
             if store.workspace == .sonaChat {
                 Menu {
                     Button("Use a window…") { store.chooseScreenshot(window: true) }
                     Button("Choose screenshot…") { store.chooseScreenshot(window: false) }
                 } label: {
                     Image(systemName: "photo.badge.plus")
-                        .font(.system(size: 14))
-                        .frame(width: 30, height: 30)
+                        .font(.system(size: 13))
+                        .frame(width: 24, height: 24)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
+                .foregroundStyle(Theme.inkSecondary)
                 .disabled(!store.canAttachScreenshot)
                 .help("Attach a screenshot")
                 .accessibilityLabel("Attach a screenshot")
-                ChatRoundButton(
+                ChatWellButton(
                     symbol: store.voiceActive ? "waveform" : "mic",
                     help: store.voiceActive ? "End voice conversation" : "Start voice conversation",
+                    note: "Audio stays on this Mac. Questions go to your server.",
+                    isOn: store.voiceActive,
                     isEnabled: store.voiceActive || store.canStartVoice,
                     action: { if store.voiceActive { store.stopVoice() } else { store.startVoice() } })
             }
-            if store.running || store.sending {
-                ChatRoundButton(
-                    symbol: "stop.fill", help: "Stop", isEnabled: !store.stopping,
-                    action: { store.stop() })
-            } else {
-                ChatRoundButton(
-                    symbol: "arrow.up", help: "Send", isEnabled: store.canSend,
-                    action: { store.send() })
-            }
         }
-        .padding(12)
-        .background(Theme.surface)
+        .padding(.leading, 14)
+        .padding(.trailing, store.workspace == .sonaChat ? 8 : 14)
+        .padding(.vertical, 7)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.radiusCard)
+                .strokeBorder(Theme.border, lineWidth: 1))
     }
 }
 
-/// Send and Stop: one 30-point circle, filled while it can be pressed.
+/// Send and Stop: one 32-point circle beside the well, filled with ink while
+/// it can be pressed, as Halcyon's send is.
 private struct ChatRoundButton: View {
     let symbol: String
     let help: String
@@ -723,13 +655,41 @@ private struct ChatRoundButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(isEnabled ? Theme.onInvert : Theme.inkDisabled)
-                .frame(width: 30, height: 30)
+                .frame(width: 32, height: 32)
                 .background(isEnabled ? Theme.invert : Theme.selection, in: Circle())
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+/// A control inside the well: a glyph in quiet ink with no fill of its own,
+/// full ink while what it starts is running.
+private struct ChatWellButton: View {
+    let symbol: String
+    let help: String
+    /// What to know before pressing, added to the tooltip and read as the
+    /// hint by assistive technology.
+    let note: String
+    let isOn: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: isOn ? .semibold : .regular))
+                .foregroundStyle(isEnabled ? (isOn ? Theme.ink : Theme.inkSecondary) : Theme.inkDisabled)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(help + ". " + note)
+        .accessibilityLabel(help)
+        .accessibilityHint(note)
     }
 }
 
