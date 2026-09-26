@@ -158,7 +158,11 @@ struct MeetingsPlace: View {
         } else if meetings.openSessionId != nil {
             MeetingReviewView(
                 store: meetings, settings: model.meetingSettings, openPerson: model.openPerson,
-                openMeetingSettings: { model.showSettings(.meetings) })
+                openMeetingSettings: { model.showSettings(.meetings) },
+                askAgent: { question in
+                    model.chat.editDraft(question)
+                    model.sheet = .chat
+                })
         } else {
             home
         }

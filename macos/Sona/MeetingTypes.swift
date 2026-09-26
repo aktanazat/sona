@@ -206,7 +206,7 @@ enum MeetingEngineFailureCause: String, Decodable {
         case .transcription: "the speech engine refused some of the audio"
         case .voiceDetection: "speech detection refused part of a track"
         case .evidencePack: "the transcript would not fit the model's prompt"
-        case .modelRefused: "the model returned nothing usable"
+        case .modelRefused: "the model did not answer"
         case .replyNotStructured: "the model's reply was not the shape asked for"
         case .replyRejected: "the model cited a moment that is not in the transcript"
         case .panicked: "the notes pipeline crashed"
