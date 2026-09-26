@@ -241,6 +241,22 @@ pub fn is_call_app_bundle_id(bundle_id: &str) -> bool {
         .any(|candidate| bundle_id.eq_ignore_ascii_case(candidate))
 }
 
+/// The applications a detection capture narrows its system-audio lane to.
+///
+/// A meeting app renders its own far end, so recording only that app keeps a
+/// video in another window out of the meeting. A call app does not: FaceTime
+/// and Phone hand the call to `avconferenced`, a daemon ScreenCaptureKit never
+/// lists, so narrowing to the app recorded a whole FaceTime call as silence
+/// while the other side's voice reached Sona only through the microphone.
+/// A call records the whole mix instead.
+pub fn system_audio_route(trigger_bundle_id: Option<&str>) -> Vec<String> {
+    trigger_bundle_id
+        .filter(|bundle_id| !is_call_app_bundle_id(bundle_id))
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
+
 /// Normalizes an operator-edited auto-record list, and drops every entry the
 /// decision table can never read.
 ///
@@ -845,6 +861,14 @@ mod tests {
                 "the registry stores what WorkspaceApps reports, which is lowercased"
             );
         }
+    }
+
+    #[test]
+    fn a_call_records_the_whole_mix_and_a_meeting_app_only_itself() {
+        assert_eq!(system_audio_route(Some("com.apple.facetime")), Vec::<String>::new());
+        assert_eq!(system_audio_route(Some("com.apple.mobilephone")), Vec::<String>::new());
+        assert_eq!(system_audio_route(Some("us.zoom.xos")), vec!["us.zoom.xos".to_string()]);
+        assert_eq!(system_audio_route(None), Vec::<String>::new());
     }
 
     #[test]

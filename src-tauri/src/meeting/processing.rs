@@ -1379,7 +1379,12 @@ impl MeetingProcessingService {
             .map_err(RunFailure::from)?;
         let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
         let tracks = review.tracks;
-        for source_kind in [SourceKind::Microphone, SourceKind::SystemAudio] {
+        /* The far end first, so the microphone pass can recognise it: on
+         * speakers the other side of a call reaches the microphone too, and
+         * without this every line they said would appear twice, once as the
+         * operator. */
+        let mut far_end = FarEnd::default();
+        for source_kind in [SourceKind::SystemAudio, SourceKind::Microphone] {
             for track in tracks
                 .iter()
                 .filter(|track| track.source_kind == source_kind)
@@ -1392,6 +1397,7 @@ impl MeetingProcessingService {
                     source_kind,
                     engine.as_ref(),
                     &asr_plan,
+                    &mut far_end,
                     cancelled,
                 )?;
             }
@@ -1422,6 +1428,7 @@ impl MeetingProcessingService {
         source_kind: SourceKind,
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
+        far_end: &mut FarEnd,
         cancelled: &AtomicBool,
     ) -> Result<(), RunFailure> {
         let detector = self
@@ -1449,6 +1456,7 @@ impl MeetingProcessingService {
                             source_kind,
                             engine,
                             asr_plan,
+                            far_end,
                             chunk,
                         )?;
                     }
@@ -1462,6 +1470,7 @@ impl MeetingProcessingService {
                         source_kind,
                         engine,
                         asr_plan,
+                        far_end,
                         chunk,
                     )
                 })
@@ -1482,6 +1491,7 @@ impl MeetingProcessingService {
                 source_kind,
                 engine,
                 asr_plan,
+                far_end,
                 chunk,
             )?;
         }
@@ -1498,6 +1508,7 @@ impl MeetingProcessingService {
         source_kind: SourceKind,
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
+        far_end: &mut FarEnd,
         chunk: AudioChunk,
     ) -> Result<(), RunFailure> {
         let text = engine
@@ -1505,6 +1516,17 @@ impl MeetingProcessingService {
             .map_err(|error| RunFailure::from_boundary(error, EngineFailureCause::Transcription))?;
         if text.trim().is_empty() {
             return Ok(());
+        }
+        match source_kind {
+            SourceKind::SystemAudio => {
+                far_end.heard(chunk.start_offset_ns, chunk.end_offset_ns, &text);
+            }
+            SourceKind::Microphone
+                if far_end.echoes(chunk.start_offset_ns, chunk.end_offset_ns, &text) =>
+            {
+                return Ok(());
+            }
+            _ => {}
         }
         store
             .append_transcript_segments(
@@ -3195,6 +3217,58 @@ fn prime_diarizer(
     diarizer.prime()
 }
 
+/// What the system-audio track said, held while the microphone track is
+/// transcribed after it.
+///
+/// On a call played through speakers the microphone hears the other side a
+/// few milliseconds after the system mix carries it, so the same words land
+/// on both tracks. A microphone line whose words the far end was saying at
+/// that moment is that echo, not the operator.
+#[derive(Default)]
+struct FarEnd {
+    spans: Vec<(u64, u64, Vec<String>)>,
+}
+
+impl FarEnd {
+    /// How far apart two tracks' chunk boundaries can fall around one
+    /// utterance: each track's voice detector cuts at its own pauses.
+    const SLACK_NS: u64 = 500_000_000;
+
+    fn heard(&mut self, start_ns: u64, end_ns: u64, text: &str) {
+        self.spans.push((start_ns, end_ns, spoken_words(text)));
+    }
+
+    /// True when at least 70% of the line's words were in what the far end
+    /// said over the same stretch. A chunk where the operator talked over the
+    /// far end keeps his words and so falls below the bar.
+    fn echoes(&self, start_ns: u64, end_ns: u64, text: &str) -> bool {
+        let words = spoken_words(text);
+        if words.is_empty() {
+            return false;
+        }
+        let from = start_ns.saturating_sub(Self::SLACK_NS);
+        let to = end_ns.saturating_add(Self::SLACK_NS);
+        let nearby: std::collections::HashSet<&str> = self
+            .spans
+            .iter()
+            .filter(|(start, end, _)| *start < to && *end > from)
+            .flat_map(|(_, _, words)| words.iter().map(String::as_str))
+            .collect();
+        let matched = words
+            .iter()
+            .filter(|word| nearby.contains(word.as_str()))
+            .count();
+        matched * 10 >= words.len() * 7
+    }
+}
+
+fn spoken_words(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 fn process_record_frames<C, F>(
     record: &DurableTrackRecord,
     frames: &mut RecordFrameBuffer,
@@ -4609,6 +4683,34 @@ mod tests {
         mpsc, Arc,
     };
     use std::thread;
+
+    const SECOND_NS: u64 = 1_000_000_000;
+
+    #[test]
+    fn the_microphone_hearing_the_far_end_is_not_the_operator_talking() {
+        let mut far_end = FarEnd::default();
+        far_end.heard(10 * SECOND_NS, 14 * SECOND_NS, "Is your dumpling still smell like petroleum?");
+
+        // Her line through the speakers, cut at slightly different pauses.
+        assert!(far_end.echoes(
+            10 * SECOND_NS + 200_000_000,
+            13 * SECOND_NS,
+            "is your dumpling still smell like petroleum"
+        ));
+        // His answer at the same moment, and the same words said later.
+        assert!(!far_end.echoes(11 * SECOND_NS, 13 * SECOND_NS, "I don't think so, no."));
+        assert!(!far_end.echoes(
+            40 * SECOND_NS,
+            43 * SECOND_NS,
+            "is your dumpling still smell like petroleum"
+        ));
+        // Talking over her keeps the line: most of the words are his.
+        assert!(!far_end.echoes(
+            12 * SECOND_NS,
+            16 * SECOND_NS,
+            "petroleum? no way, I washed it twice this morning honestly"
+        ));
+    }
 
     struct EnergyVad;
 

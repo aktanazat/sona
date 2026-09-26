@@ -1431,11 +1431,10 @@ impl MeetingSessionManager {
                     destination: consent.destination.clone(),
                     remote_acknowledgement: consent.remote_acknowledgement.clone(),
                     microphone_device_uid: None,
-                    frozen_system_audio_application_bundle_ids: context
-                        .trigger_bundle_id
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    frozen_system_audio_application_bundle_ids:
+                        super::detection::apps::system_audio_route(
+                            context.trigger_bundle_id.as_deref(),
+                        ),
                 },
                 context.calendar_event.clone(),
             )
