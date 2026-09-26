@@ -493,7 +493,7 @@ final class MeetingLiveStore {
     /// `meeting_get` on whichever session a surface is standing on.
     private func refreshSession() async {
         if let sessionId = live?.session.sessionId {
-            await adoptLive(sessionId)
+            await adoptLive(sessionId, whileShown: true)
             return
         }
         guard let sessionId = gate?.sessionId, let snapshot = await read(sessionId) else { return }
@@ -504,8 +504,11 @@ final class MeetingLiveStore {
     /// capture has recognized. A read that fails leaves the last snapshot
     /// standing — the recording is still running, and a screen with no Stop
     /// on it would be the worse answer — and says so in the error line.
-    private func adoptLive(_ sessionId: MeetingSessionId) async {
+    /// A refresh reads `whileShown`: a stop or a discard that closed the
+    /// screen while the read was out must not have it reopened by the read.
+    private func adoptLive(_ sessionId: MeetingSessionId, whileShown: Bool = false) async {
         guard let snapshot = await read(sessionId) else { return }
+        if whileShown, live?.session.sessionId != sessionId { return }
         live = snapshot
         provisional = snapshot.session.phase.isActive ? await readProvisional(sessionId) : []
     }
