@@ -26,9 +26,9 @@ use super::store::voice_identity::{
     VoiceEnrollmentRecord,
 };
 use super::store::{
-    ArtifactEvidence, ArtifactRevisionInput, DiarizationAssignmentInput, DurableTrackRecord,
-    MeetingEvidence, MeetingStore, StoreError, StoreTransition, TranscriptRevisionInput,
-    TranscriptSegmentInput,
+    timestamp_drift_tolerance_ns, ArtifactEvidence, ArtifactRevisionInput,
+    DiarizationAssignmentInput, DurableTrackRecord, MeetingEvidence, MeetingStore, StoreError,
+    StoreTransition, TranscriptRevisionInput, TranscriptSegmentInput,
 };
 use super::types::*;
 use super::voice_identity::{
@@ -58,7 +58,6 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const VAD_FRAME_SAMPLES: usize = 480;
 const VAD_FRAME_NS: u64 = 30_000_000;
-const TIMESTAMP_ROUNDING_TOLERANCE_NS: u64 = 1;
 const ASR_MAX_SAMPLES: usize = 15 * 16_000;
 const ASR_OVERLAP_SAMPLES: usize = 8_000;
 const ASR_SILENCE_FRAMES: u32 = 10;
@@ -3020,13 +3019,15 @@ fn record_starts_new_span(
 ) -> bool {
     previous_sequence.is_some_and(|sequence| sequence.checked_add(1) != Some(record.sequence))
         || previous_epoch.is_some_and(|epoch| epoch != record.source_epoch)
-        // Forward only. A record that starts before the previous record's
-        // computed end is the capture device's clock-rate error against a
-        // truncated `duration_ns`, which the writer already treats as ordinary
-        // drift; reading it as a gap restarts the frame buffer on every record
-        // and no VAD frame ever forms. A real gap moves the start forward.
+        // Forward only, and only past the writer's own drift bound. A start
+        // a few ticks either side of the previous record's computed end is
+        // host-clock jitter against a truncated `duration_ns`; reading it as
+        // a gap restarted the frame buffer every few records, so no sentence
+        // and no speaker window ever formed. A real gap moves the start past
+        // the bound, where the writer logged it.
         || previous_end_offset_ns.is_some_and(|end| {
-            record.start_offset_ns.saturating_sub(end) > TIMESTAMP_ROUNDING_TOLERANCE_NS
+            record.start_offset_ns.saturating_sub(end)
+                > timestamp_drift_tolerance_ns(record.duration_ns, record.format.sample_rate_hz)
         })
 }
 
@@ -4703,7 +4704,11 @@ mod tests {
     #[test]
     fn the_microphone_hearing_the_far_end_is_not_the_operator_talking() {
         let mut far_end = FarEnd::default();
-        far_end.heard(10 * SECOND_NS, 14 * SECOND_NS, "Is your dumpling still smell like petroleum?");
+        far_end.heard(
+            10 * SECOND_NS,
+            14 * SECOND_NS,
+            "Is your dumpling still smell like petroleum?",
+        );
 
         // Her line through the speakers, cut at slightly different pauses.
         assert!(far_end.echoes(
@@ -4957,6 +4962,69 @@ mod tests {
 
         assert_eq!(boundaries, 0);
         assert_eq!(consumer.count, 8);
+    }
+
+    /// System-audio and microphone records carry host-clock starts, so a
+    /// record also lands a few ticks after the previous record's computed
+    /// end. Reading that as a gap restarted the frame buffer every few
+    /// records: a spoken sentence reached the recogniser as 30 ms scraps it
+    /// heard as "Yeah" and "M", and the speaker pass never filled a window,
+    /// so the review read "Separating speakers failed".
+    #[test]
+    fn forward_timestamp_jitter_stays_inside_one_span() {
+        let track_id = SourceTrackId::new();
+        let mut consumer = CountingFrames { count: 0 };
+        let mut frames = RecordFrameBuffer::new();
+        let mut boundaries = 0;
+        for sequence in 0..12 {
+            let record = DurableTrackRecord {
+                track_id,
+                sequence,
+                source_epoch: SourceEpoch::new(0),
+                start_offset_ns: sequence * 20_000_042,
+                duration_ns: 20_000_000,
+                format: AudioFormat {
+                    sample_rate_hz: 16_000,
+                    channels: 1,
+                },
+                samples: vec![0.25; 320],
+            };
+            if frames.starts_new_span(&record) {
+                boundaries += 1;
+            }
+            process_record_frames(&record, &mut frames, &mut consumer, |_| Ok(()))
+                .expect("jittered record is valid");
+        }
+
+        assert_eq!(boundaries, 0);
+        assert_eq!(consumer.count, 8);
+    }
+
+    /// A stall in capture moves the next record's start well past the
+    /// previous end. The writer logs that as a gap, and the reader restarts
+    /// there too, or speech on either side of the stall is spliced into one
+    /// line at the wrong time.
+    #[test]
+    fn a_stall_in_capture_starts_a_new_span() {
+        let track_id = SourceTrackId::new();
+        let record = |sequence: u64, start_offset_ns: u64| DurableTrackRecord {
+            track_id,
+            sequence,
+            source_epoch: SourceEpoch::new(0),
+            start_offset_ns,
+            duration_ns: 20_000_000,
+            format: AudioFormat {
+                sample_rate_hz: 16_000,
+                channels: 1,
+            },
+            samples: vec![0.25; 320],
+        };
+        let mut consumer = CountingFrames { count: 0 };
+        let mut frames = RecordFrameBuffer::new();
+        process_record_frames(&record(0, 0), &mut frames, &mut consumer, |_| Ok(()))
+            .expect("first record is valid");
+
+        assert!(frames.starts_new_span(&record(1, 220_000_000)));
     }
 
     #[test]
