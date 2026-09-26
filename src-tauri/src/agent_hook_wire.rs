@@ -741,7 +741,10 @@ fn write_temporary(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(&temporary)?;
-    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(bytes)
+        .and_then(|()| order_before_publish(&file))
+    {
         drop(file);
         let _ = fs::remove_file(&temporary);
         return Err(error);
@@ -749,6 +752,27 @@ fn write_temporary(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     drop(file);
     verify_private_file(&temporary)?;
     Ok(temporary)
+}
+
+/// Puts the record's bytes on disk ahead of the rename or link that publishes
+/// it, so a crash can lose a record but never publish a torn one. Every record
+/// here lives for seconds and is rewritten on each hook call and heartbeat, so
+/// it needs that order and not durability. On macOS `sync_all` also flushes
+/// the drive's whole write cache: about 4 ms a record, against 0.6 ms for a
+/// barrier, on every hook call and three times a heartbeat.
+fn order_before_publish(file: &fs::File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `file` stays open for the whole call, and F_BARRIERFSYNC
+        // takes no argument.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } != -1 {
+            return Ok(());
+        }
+        // A runtime directory on a file system without barriers, which
+        // `XDG_RUNTIME_DIR` can name, still gets the order from a full sync.
+    }
+    file.sync_all()
 }
 
 fn json_path(directory: &Path, id: &str) -> io::Result<PathBuf> {

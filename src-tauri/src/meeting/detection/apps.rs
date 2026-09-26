@@ -241,6 +241,22 @@ pub fn is_call_app_bundle_id(bundle_id: &str) -> bool {
         .any(|candidate| bundle_id.eq_ignore_ascii_case(candidate))
 }
 
+/// The applications a detection capture narrows its system-audio lane to.
+///
+/// A meeting app renders its own far end, so recording only that app keeps a
+/// video in another window out of the meeting. A call app does not: FaceTime
+/// and Phone hand the call to `avconferenced`, a daemon ScreenCaptureKit never
+/// lists, so narrowing to the app recorded a whole FaceTime call as silence
+/// while the other side's voice reached Sona only through the microphone.
+/// A call records the whole mix instead.
+pub fn system_audio_route(trigger_bundle_id: Option<&str>) -> Vec<String> {
+    trigger_bundle_id
+        .filter(|bundle_id| !is_call_app_bundle_id(bundle_id))
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
+
 /// Normalizes an operator-edited auto-record list, and drops every entry the
 /// decision table can never read.
 ///
@@ -351,16 +367,75 @@ pub fn browser_title_evidence(
     BrowserTitleEvidence::NoMatch
 }
 
+/// What a running process said about itself the first time a read saw it.
+#[cfg(target_os = "macos")]
+struct AppIdentity {
+    bundle_id: String,
+    display_name: String,
+}
+
+/// Each process's identity, remembered by pid for as long as it runs.
+///
+/// Listing the running applications is cheap. Asking one of them for its
+/// bundle ID or its name is a round trip to launchservicesd, and a tick used
+/// to ask every one of them for both, every fifteen seconds. Neither answer
+/// changes while a process runs, so each process is asked once; a pid missing
+/// from a read is forgotten, so a reused pid is asked again.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct KnownProcesses(std::collections::HashMap<i32, Option<AppIdentity>>);
+
+#[cfg(target_os = "macos")]
+impl KnownProcesses {
+    /// The running apps among `processes`, `(pid, process)` pairs, calling
+    /// `identify` only for a pid the previous read did not see.
+    fn running_apps<P>(
+        &mut self,
+        processes: impl IntoIterator<Item = (i32, P)>,
+        frontmost_pid: Option<i32>,
+        mut identify: impl FnMut(&P) -> Option<AppIdentity>,
+    ) -> Vec<RunningApp> {
+        let capacity = self.0.len();
+        let mut previous = std::mem::replace(
+            &mut self.0,
+            std::collections::HashMap::with_capacity(capacity),
+        );
+        let mut running = Vec::with_capacity(capacity);
+        for (pid, process) in processes {
+            let identity = previous.remove(&pid).unwrap_or_else(|| identify(&process));
+            if let Some(identity) = &identity {
+                running.push(RunningApp {
+                    bundle_id: identity.bundle_id.clone(),
+                    display_name: identity.display_name.clone(),
+                    frontmost: frontmost_pid == Some(pid),
+                });
+            }
+            // Without a pid of its own, one process cannot be told from the next.
+            if pid > 0 {
+                self.0.insert(pid, identity);
+            }
+        }
+        running
+    }
+}
+
 /// `NSWorkspace`-backed implementation. `runningApplications` needs no
 /// entitlement and no TCC grant; it is always-available data.
 #[cfg(target_os = "macos")]
-pub struct WorkspaceApps;
+#[derive(Default)]
+pub struct WorkspaceApps {
+    known: std::sync::Mutex<KnownProcesses>,
+}
 
 #[cfg(target_os = "macos")]
 impl RunningAppsSource for WorkspaceApps {
     fn running_apps(&self) -> Vec<RunningApp> {
         use objc2_app_kit::NSWorkspace;
 
+        let mut known = self
+            .known
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // An autorelease pool per call: without one, every NSString and
         // NSRunningApplication read here would be held for the polling thread's
         // whole life.
@@ -369,10 +444,13 @@ impl RunningAppsSource for WorkspaceApps {
             let frontmost_pid = workspace
                 .frontmostApplication()
                 .map(|application| application.processIdentifier());
-            workspace
-                .runningApplications()
-                .iter()
-                .filter_map(|application| {
+            let applications = workspace.runningApplications();
+            known.running_apps(
+                applications
+                    .iter()
+                    .map(|application| (application.processIdentifier(), application)),
+                frontmost_pid,
+                |application| {
                     let bundle_id = application.bundleIdentifier()?.to_string().to_lowercase();
                     if bundle_id.is_empty() {
                         return None;
@@ -381,14 +459,12 @@ impl RunningAppsSource for WorkspaceApps {
                         .localizedName()
                         .map(|name| name.to_string())
                         .unwrap_or_else(|| bundle_id.clone());
-                    Some(RunningApp {
-                        frontmost: frontmost_pid
-                            .is_some_and(|pid| pid == application.processIdentifier()),
+                    Some(AppIdentity {
                         bundle_id,
                         display_name,
                     })
-                })
-                .collect()
+                },
+            )
         })
     }
 }
@@ -788,6 +864,14 @@ mod tests {
     }
 
     #[test]
+    fn a_call_records_the_whole_mix_and_a_meeting_app_only_itself() {
+        assert_eq!(system_audio_route(Some("com.apple.facetime")), Vec::<String>::new());
+        assert_eq!(system_audio_route(Some("com.apple.mobilephone")), Vec::<String>::new());
+        assert_eq!(system_audio_route(Some("us.zoom.xos")), vec!["us.zoom.xos".to_string()]);
+        assert_eq!(system_audio_route(None), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_call_app_reports_on_the_call_dimension_and_not_the_app_one() {
         let running = [app("com.apple.facetime", "FaceTime", true)];
         let allowlist = default_meeting_app_bundle_ids();
@@ -897,5 +981,72 @@ mod tests {
             );
         }
         assert_eq!(stored, ["com.apple.facetime", "com.apple.mobilephone"]);
+    }
+
+    /* Every tick used to ask launchservicesd for every running application's
+     * bundle ID and name: two round trips per application, about 160 every
+     * fifteen seconds. A process's identity does not change while it runs, so
+     * a read asks only about a pid the previous read did not see, and asks
+     * again about a pid that went away and came back. */
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_running_process_is_asked_who_it_is_once() {
+        fn identify(pid: i32) -> Option<AppIdentity> {
+            let (bundle_id, display_name) = match pid {
+                10 => ("us.zoom.xos", "Zoom"),
+                11 => ("com.apple.safari", "Safari"),
+                // A process without a bundle ID.
+                _ => return None,
+            };
+            Some(AppIdentity {
+                bundle_id: bundle_id.to_string(),
+                display_name: display_name.to_string(),
+            })
+        }
+        let everything = [(10, 10), (11, 11), (12, 12)];
+        let mut known = KnownProcesses::default();
+        let mut asked = Vec::new();
+
+        let first = known.running_apps(everything, Some(11), |&pid| {
+            asked.push(pid);
+            identify(pid)
+        });
+        assert_eq!(
+            asked,
+            [10, 11, 12],
+            "the first read asks about every process"
+        );
+        assert_eq!(
+            first,
+            [
+                app("us.zoom.xos", "Zoom", false),
+                app("com.apple.safari", "Safari", true)
+            ]
+        );
+
+        asked.clear();
+        let second = known.running_apps(everything, Some(10), |&pid| {
+            asked.push(pid);
+            identify(pid)
+        });
+        assert!(asked.is_empty(), "nothing started, so nothing is asked");
+        assert_eq!(
+            second,
+            [
+                app("us.zoom.xos", "Zoom", true),
+                app("com.apple.safari", "Safari", false)
+            ],
+            "which process is in front is read fresh every time"
+        );
+
+        known.running_apps([(10, 10), (12, 12)], None, |&pid| {
+            asked.push(pid);
+            identify(pid)
+        });
+        known.running_apps(everything, None, |&pid| {
+            asked.push(pid);
+            identify(pid)
+        });
+        assert_eq!(asked, [11], "a pid that went away is asked about again");
     }
 }

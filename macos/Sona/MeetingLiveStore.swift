@@ -73,6 +73,69 @@ struct MeetingLiveWarning {
     let urgent: Bool
 }
 
+/// A capture's clock, as every surface counts it. The core reports how far
+/// the capture has durably written, which trails the recording by however
+/// full the current chunk is, so each read implies a start a little late,
+/// and late by a different amount each time. The clock keeps one start
+/// instead, and a read that trails leaves it alone: while the capture
+/// records, the count only moves forward, and only for a read more than a
+/// second ahead of it. A start, a pause, a resume or a stop is where the
+/// count may meet the core's number again.
+struct MeetingCaptureClock: Equatable {
+    /// How far a read must be from the count before it moves the count.
+    /// Under a second, the ticks stay on the seconds they were on.
+    private static let drift: Int64 = 1_000_000_000
+
+    /// While the capture records: the instant its offset read zero, as if
+    /// it had run straight through. Nil while it stands still.
+    let runningSince: Date?
+    /// While it stands still: the offset it stands at.
+    let standingNs: Int64
+
+    /// The clock after `session` was read at `now`; `prior` is the same
+    /// session's clock before the read.
+    init(_ session: MeetingSessionSnapshot, readAt now: Date, after prior: MeetingCaptureClock?) {
+        let reported = session.elapsedOffsetNs ?? 0
+        let recording = session.phase == .capturingRecording
+        if recording, let anchor = prior?.runningSince {
+            let shown = anchor.distance(to: now).nanoseconds
+            runningSince = reported - shown > Self.drift ? now.addingTimeInterval(-reported.seconds) : anchor
+            standingNs = 0
+            return
+        }
+        // A start, a pause, a resume, a stop, or another read while it
+        // stands: the count carries on from what is showing, unless the
+        // core's number is more than a second away from it.
+        let shown = prior?.elapsedNs(at: now) ?? reported
+        let count = abs(reported - shown) > Self.drift ? reported : shown
+        runningSince = recording ? now.addingTimeInterval(-count.seconds) : nil
+        standingNs = recording ? 0 : count
+    }
+
+    /// A recording a ritual card announced before any read of its session:
+    /// counted from the wall-clock instant it started. A start that is
+    /// missing or zero is not one to count from.
+    init(startedAtUtcMs: Int64) {
+        runningSince = startedAtUtcMs > 0 ? startedAtUtcMs.meetingDate : nil
+        standingNs = 0
+    }
+
+    /// The count at `now`, in whole milliseconds, so a tick scheduled on
+    /// `runningSince` plus n seconds reads n seconds and not a hair under.
+    func elapsedNs(at now: Date) -> Int64 {
+        guard let runningSince else { return standingNs }
+        return max(0, Int64((runningSince.distance(to: now) * 1000).rounded())) * 1_000_000
+    }
+}
+
+private extension TimeInterval {
+    var nanoseconds: Int64 { Int64((self * 1_000_000_000).rounded()) }
+}
+
+private extension Int64 {
+    var seconds: TimeInterval { TimeInterval(self) / 1_000_000_000 }
+}
+
 /// The fields of the app settings this slice reads. `settings-changed`
 /// carries no useful payload, so the store re-reads `get_app_settings` and
 /// decodes only these.
@@ -113,7 +176,9 @@ final class MeetingLiveStore {
     private(set) var detection: DetectionStatus?
     /// Offers still waiting for an answer, oldest first, one per subject.
     private(set) var prompts: [DetectionPromptEvent] = []
-    private(set) var ritual: RitualEvent?
+    private(set) var ritual: RitualEvent? {
+        didSet { anchorClocks() }
+    }
     /// The wrap card's Copy follow-up, once it has been pressed.
     private(set) var followUpCopied = false
     /// The follow-up is being drafted; the card's button says so and refuses
@@ -122,7 +187,9 @@ final class MeetingLiveStore {
 
     // MARK: The panel's own recording
 
-    private(set) var active: MeetingConsentPanelSessionState?
+    private(set) var active: MeetingConsentPanelSessionState? {
+        didSet { anchorClocks(read: active?.snapshot) }
+    }
     /// The two boxes an offer carries, kept for the one prompt they were
     /// ticked on. Part of the consent that prompt's Record expresses, so a
     /// choice made on one offer never answers for another.
@@ -159,14 +226,18 @@ final class MeetingLiveStore {
 
     // MARK: Capture, while it runs
 
-    private(set) var live: MeetingReviewSnapshot?
+    private(set) var live: MeetingReviewSnapshot? {
+        didSet { anchorClocks(read: live?.session) }
+    }
     /// The words recognized so far by the pass that runs during capture.
     /// Separate from `live.transcript`, which is the stored reading and is
     /// empty until the meeting stops.
     private(set) var provisional: [MeetingProvisionalSegment] = []
-    /// When `live` was read. The clock the core reports is as of that read,
-    /// and the screen counts on from it while the capture runs.
-    private(set) var liveReadAt: Date?
+    /// The clock of each capture a surface shows, by session: the live
+    /// screen's, the panel's, and a ritual card's, which are one session
+    /// unless two captures overlap. Only `anchorClocks` writes it, on every
+    /// read of `live` or `active`, so each surface counts the same seconds.
+    private(set) var clocks: [MeetingSessionId: MeetingCaptureClock] = [:]
     /// The word for what is in flight, which disables the controls that would
     /// contradict it.
     private(set) var pending: String?
@@ -422,7 +493,7 @@ final class MeetingLiveStore {
     /// `meeting_get` on whichever session a surface is standing on.
     private func refreshSession() async {
         if let sessionId = live?.session.sessionId {
-            await adoptLive(sessionId)
+            await adoptLive(sessionId, whileShown: true)
             return
         }
         guard let sessionId = gate?.sessionId, let snapshot = await read(sessionId) else { return }
@@ -433,10 +504,12 @@ final class MeetingLiveStore {
     /// capture has recognized. A read that fails leaves the last snapshot
     /// standing — the recording is still running, and a screen with no Stop
     /// on it would be the worse answer — and says so in the error line.
-    private func adoptLive(_ sessionId: MeetingSessionId) async {
+    /// A refresh reads `whileShown`: a stop or a discard that closed the
+    /// screen while the read was out must not have it reopened by the read.
+    private func adoptLive(_ sessionId: MeetingSessionId, whileShown: Bool = false) async {
         guard let snapshot = await read(sessionId) else { return }
+        if whileShown, live?.session.sessionId != sessionId { return }
         live = snapshot
-        liveReadAt = Date()
         provisional = snapshot.session.phase.isActive ? await readProvisional(sessionId) : []
     }
 
@@ -757,7 +830,6 @@ final class MeetingLiveStore {
                 // The capture is running either way. The screen stands on the
                 // session the start returned until the next read lands.
                 live = MeetingReviewSnapshot(session: result.snapshot)
-                liveReadAt = Date()
             }
         } catch {
             self.error = reason(error)
@@ -868,7 +940,6 @@ final class MeetingLiveStore {
 
     func open(_ snapshot: MeetingReviewSnapshot) {
         live = snapshot
-        liveReadAt = Date()
         provisional = []
         Task { await adoptLive(snapshot.session.sessionId) }
     }
@@ -880,7 +951,6 @@ final class MeetingLiveStore {
 
     func closeLive() {
         live = nil
-        liveReadAt = nil
         provisional = []
         noteBody = ""
     }
@@ -936,16 +1006,16 @@ final class MeetingLiveStore {
         noteBody = text
     }
 
-    /// A note against this moment of the meeting. The moment is where the
-    /// capture is now, counted on from the last read; a note written two
-    /// minutes after the screen last refreshed is a note about now, not then.
+    /// A note against this moment of the meeting. The moment is the count
+    /// the capture's clock shows now, not the core's last number; a note
+    /// written two minutes after the last read is a note about now, not then.
     /// The draft stays in the sheet until the core has kept it, so a refusal
     /// hands the words back rather than losing them.
     func createNote() {
         guard let session = live?.session else { return }
         let body = noteBody.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
-        let moment = elapsedNs(at: Date())
+        let moment = clocks[session.sessionId]?.elapsedNs(at: Date()) ?? 0
         Task {
             await act("Saving the note") {
                 let result: MeetingMutationResult = try await self.core.request(
@@ -1136,20 +1206,26 @@ final class MeetingLiveStore {
         lines.isEmpty && !provisional.isEmpty
     }
 
-    /// Where the capture is at `now`: the offset the core reported, plus the
-    /// time since it reported it, while the capture is running. Paused, the
-    /// clock stands where the core left it.
-    func elapsedNs(at now: Date) -> Int64 {
-        guard let session = live?.session else { return 0 }
-        let reported = session.elapsedOffsetNs ?? 0
-        guard session.phase == .capturingRecording, let liveReadAt else { return reported }
-        let since = now.timeIntervalSince(liveReadAt)
-        guard since > 0 else { return reported }
-        return reported + Int64(since * 1_000_000_000)
-    }
-
-    func elapsed(at now: Date) -> String {
-        elapsedNs(at: now).meetingOffsetClock
+    /// A read of `session` landed, or a surface let a session go: carry the
+    /// read session's clock on, start one for a recording a ritual card
+    /// announced before any read of it, and drop the clocks nothing shows.
+    /// Written only when a clock moved, so a read that leaves every count
+    /// where it was redraws nothing.
+    private func anchorClocks(read session: MeetingSessionSnapshot? = nil) {
+        var next = clocks
+        if let session {
+            next[session.sessionId] = MeetingCaptureClock(
+                session, readAt: Date(), after: clocks[session.sessionId])
+        }
+        var shown = [live?.session.sessionId, active?.snapshot.sessionId]
+        if let ritual, case let .recording(card) = ritual.ritual {
+            shown.append(card.sessionId)
+            if next[card.sessionId] == nil {
+                next[card.sessionId] = MeetingCaptureClock(startedAtUtcMs: card.startedAtUtcMs)
+            }
+        }
+        next = next.filter { shown.contains($0.key) }
+        if next != clocks { clocks = next }
     }
 
     /// The two lines the live screen has to say, in the order it says them:

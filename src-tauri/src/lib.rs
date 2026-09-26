@@ -404,7 +404,7 @@ fn start_meeting_detection(
                 }
             };
         (
-            Arc::new(apps::WorkspaceApps) as Arc<dyn apps::RunningAppsSource>,
+            Arc::new(apps::WorkspaceApps::default()) as Arc<dyn apps::RunningAppsSource>,
             calendar::platform_calendar(),
             prompts,
             browser_titles,
@@ -2262,6 +2262,7 @@ pub fn run(cli_args: CliArgs) {
                 app_handle.manage(model_manager);
                 app_handle.manage(transcription_manager);
                 managers::transcription::init_transcribe_backend();
+                managers::transcription::report_compute_devices();
                 managers::transcription::apply_accelerator_settings(&app_handle);
 
                 let handle = app_handle.clone();
@@ -2449,6 +2450,7 @@ pub fn run(cli_args: CliArgs) {
                 );
 
                 std::thread::spawn(|| {
+                    crate::managers::transcription::report_compute_devices();
                     let _ = crate::managers::transcription::get_available_accelerators();
                 });
                 let prewarm_audio = startup_app.clone();

@@ -452,6 +452,18 @@ struct StreamBuildOptions {
     sample_rate: u32,
 }
 
+/// What the consumer waits for before it tells the caller the microphone is
+/// live: the cue that tells the user to start speaking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyOn {
+    /// The first buffer, silent or not. A room is never exactly silent, so
+    /// any delivered buffer means the microphone is hearing it.
+    FirstBuffer,
+    /// The first buffer holding a nonzero sample. A Bluetooth headset that
+    /// is not yet routed to this Mac delivers buffers of exact zeros.
+    FirstSound,
+}
+
 struct ConsumerInputs {
     in_sample_rate: u32,
     vad: Option<VadConfig>,
@@ -461,6 +473,7 @@ struct ConsumerInputs {
     audio_cb: Option<AudioFrameCallback>,
     stream_running_at: Instant,
     meeting_control: Arc<MeetingCallbackControl>,
+    ready_on: ReadyOn,
 }
 
 pub struct AudioRecorder {
@@ -577,6 +590,7 @@ impl AudioRecorder {
         let stream_error = Arc::clone(&self.stream_error);
 
         let worker = std::thread::spawn(move || {
+            let device_name = thread_device.name().unwrap_or_default();
             let init_result = (|| -> Result<
                 (
                     cpal::Stream,
@@ -587,7 +601,6 @@ impl AudioRecorder {
                 String,
             > {
                 let config_started = Instant::now();
-                let device_name = thread_device.name().unwrap_or_default();
                 let cached_config = cached_config_for(&config_cache, &device_name);
                 let config_was_cached = cached_config.is_some();
                 let config = match cached_config {
@@ -683,7 +696,7 @@ impl AudioRecorder {
                 // The device accepted this config; remember it so the next
                 // open skips the HAL property queries entirely.
                 if !config_was_cached {
-                    store_config(&config_cache, device_name, config);
+                    store_config(&config_cache, device_name.clone(), config);
                 }
 
                 Ok((stream, sample_rate, consumer, meeting_control))
@@ -692,6 +705,15 @@ impl AudioRecorder {
             match init_result {
                 Ok((stream, sample_rate, consumer, meeting_control)) => {
                     let _ = init_tx.send(Ok(()));
+                    // After the handshake, so `open()` never waits on the
+                    // device scan or the second stream. Samples wait in the
+                    // lane meanwhile.
+                    let headset = is_bluetooth_input(&device_name);
+                    let route = if headset {
+                        hold_headset_route(&device_name)
+                    } else {
+                        None
+                    };
                     // Timestamp for the play()-returned -> first-samples gap the
                     // init handshake can't see (hardware dependent).
                     let stream_running_at = Instant::now();
@@ -705,8 +727,14 @@ impl AudioRecorder {
                         audio_cb,
                         stream_running_at,
                         meeting_control,
+                        ready_on: if headset {
+                            ReadyOn::FirstSound
+                        } else {
+                            ReadyOn::FirstBuffer
+                        },
                     });
                     drop(stream);
+                    drop(route);
                 }
                 Err(error_message) => {
                     // A failed open may mean the cached config went stale
@@ -791,7 +819,9 @@ impl AudioRecorder {
     /// Queue a recording start and return a one-shot receiver that resolves only
     /// after the first real microphone sample chunk has entered the capture path.
     /// `Stream::play()` returning is not sufficient: some Bluetooth and USB
-    /// devices take much longer to begin delivering callbacks.
+    /// devices take much longer to begin delivering callbacks. A Bluetooth
+    /// headset resolves at its first nonzero sample instead, since its buffers
+    /// are exact zeros until it is routed to this Mac.
     pub fn start(
         &self,
         vad_policy: VadPolicy,
@@ -1141,6 +1171,66 @@ fn cpal_host_monotonic_anchor_ns(_native_timestamp_value: Option<i64>) -> Option
     None
 }
 
+/// Whether the input is a Bluetooth headset: its route is held while the
+/// microphone is open, and readiness waits for it to sound.
+#[cfg(target_os = "macos")]
+fn is_bluetooth_input(device_name: &str) -> bool {
+    super::core_audio::is_bluetooth_device_named(device_name)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_bluetooth_input(_device_name: &str) -> bool {
+    false
+}
+
+/// Plays silence to a Bluetooth headset for as long as its microphone is open.
+///
+/// While another Apple device plays through AirPods, CoreAudio hands this Mac
+/// a running input stream of exact zeros. Opening the microphone does not
+/// route the headset here; playing to it does. The headset lists its output
+/// under its microphone's name.
+#[cfg(target_os = "macos")]
+fn hold_headset_route(device_name: &str) -> Option<cpal::Stream> {
+    let opened = (|| -> Result<cpal::Stream, String> {
+        let device = crate::audio_toolkit::get_cpal_host()
+            .output_devices()
+            .map_err(|error| error.to_string())?
+            .find(|device| device.name().is_ok_and(|name| name == device_name))
+            .ok_or("it lists no output under its name")?;
+        let config = device
+            .default_output_config()
+            .map_err(|error| error.to_string())?;
+        if config.sample_format() != cpal::SampleFormat::F32 {
+            return Err(format!("its output format is {:?}", config.sample_format()));
+        }
+        let stream = device
+            .build_output_stream(
+                &config.config(),
+                |out: &mut [f32], _: &cpal::OutputCallbackInfo| out.fill(0.0),
+                |error| log::warn!("Headset route output failed: {error}"),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        stream.play().map_err(|error| error.to_string())?;
+        Ok(stream)
+    })();
+    match opened {
+        Ok(stream) => {
+            log::info!("Holding {device_name:?} routed here with a silent output");
+            Some(stream)
+        }
+        Err(error) => {
+            log::warn!("Could not hold {device_name:?} routed here: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hold_headset_route(_device_name: &str) -> Option<cpal::Stream> {
+    None
+}
+
 struct TimedCaptureState<'a> {
     channels: usize,
     use_channel: Option<usize>,
@@ -1470,6 +1560,7 @@ fn run_consumer(inputs: ConsumerInputs) {
         audio_cb,
         stream_running_at,
         meeting_control,
+        ready_on,
     } = inputs;
     let mut frame_resampler = FrameResampler::new(
         sample_rate_to_usize(in_sample_rate),
@@ -1491,7 +1582,11 @@ fn run_consumer(inputs: ConsumerInputs) {
     // Cmd::Start lands.
     let mut first_samples_logged = false;
     let mut awaiting_first_captured_chunk: Option<Instant> = None;
-    let mut capture_ready_tx: Option<mpsc::Sender<()>> = None;
+    // The ready sender, with when its Cmd::Start landed.
+    let mut capture_ready_tx: Option<(mpsc::Sender<()>, Instant)> = None;
+    // Whether a buffer since Cmd::Start held a nonzero sample; read only
+    // under `ReadyOn::FirstSound`.
+    let mut heard_sound = false;
 
     // This buffer is reserved only while a meeting source is active. It bridges
     // a rare wrap in the existing SPSC ring because PacketSink accepts one
@@ -1622,8 +1717,10 @@ fn run_consumer(inputs: ConsumerInputs) {
                         sent_at.elapsed(),
                         lane.len()
                     );
-                    awaiting_first_captured_chunk = Some(Instant::now());
-                    capture_ready_tx = Some(ready_tx);
+                    let start_landed_at = Instant::now();
+                    awaiting_first_captured_chunk = Some(start_landed_at);
+                    capture_ready_tx = Some((ready_tx, start_landed_at));
+                    heard_sound = false;
                     vad_policy = policy;
                     processed_samples.clear();
                     silence_until_speech = (policy != VadPolicy::Disabled).then(Vec::new);
@@ -1904,7 +2001,9 @@ fn run_consumer(inputs: ConsumerInputs) {
             }
             drained
         } else if recording {
+            let listen_for_sound = ready_on == ReadyOn::FirstSound && capture_ready_tx.is_some();
             lane.drain(|chunk| {
+                heard_sound |= listen_for_sound && chunk.iter().any(|&sample| sample != 0.0);
                 if let Some(buckets) = visualizer.feed(chunk) {
                     if let Some(cb) = &level_cb {
                         cb(buckets);
@@ -1948,12 +2047,24 @@ fn run_consumer(inputs: ConsumerInputs) {
                     started.elapsed()
                 );
             }
-            if let Some(ready_tx) = capture_ready_tx.take() {
-                // Signal only after these samples have passed through the
-                // visualizer and resampler. Silence still counts: readiness
-                // means the host is delivering samples, not that VAD has
-                // detected speech.
-                let _ = ready_tx.send(());
+            let ready = match ready_on {
+                ReadyOn::FirstBuffer => true,
+                ReadyOn::FirstSound => heard_sound,
+            };
+            if ready {
+                if let Some((ready_tx, start_landed_at)) = capture_ready_tx.take() {
+                    if ready_on == ReadyOn::FirstSound {
+                        log::debug!(
+                            "headset first sounded {:?} after Cmd::Start",
+                            start_landed_at.elapsed()
+                        );
+                    }
+                    // Signal only after these samples have passed through the
+                    // visualizer and resampler. Quiet still counts: readiness
+                    // means the microphone is hearing the room, not that VAD
+                    // has detected speech.
+                    let _ = ready_tx.send(());
+                }
             }
         }
     }
@@ -1966,7 +2077,8 @@ mod tests {
         is_microphone_access_denied, is_no_input_device_error, observe_meeting_packet,
         retain_no_speech_samples, run_consumer, store_config, ActiveMeetingCapture, AudioRecorder,
         CaptureError, CaptureProducer, Cmd, ConsumerInputs, MeetingCallbackControl, PacketSink,
-        RecordedAudio, TimedCaptureState, VadConfig, VadPolicy, MAX_NO_SPEECH_HISTORY_SAMPLES,
+        ReadyOn, RecordedAudio, TimedCaptureState, VadConfig, VadPolicy,
+        MAX_NO_SPEECH_HISTORY_SAMPLES,
     };
     use crate::audio_toolkit::vad::{VadFrame, VoiceActivityDetector};
     use crate::meeting::capture::PacketLaneReader;
@@ -2563,6 +2675,7 @@ mod tests {
                 audio_cb: None,
                 stream_running_at: Instant::now(),
                 meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
             });
             let _ = done_tx.send(());
         });
@@ -2589,6 +2702,7 @@ mod tests {
                 audio_cb: None,
                 stream_running_at: Instant::now(),
                 meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
             });
         });
 
@@ -2658,6 +2772,7 @@ mod tests {
                 audio_cb: None,
                 stream_running_at: Instant::now(),
                 meeting_control,
+                ready_on: ReadyOn::FirstBuffer,
             });
         });
 
@@ -2792,6 +2907,7 @@ mod tests {
                 audio_cb: None,
                 stream_running_at: Instant::now(),
                 meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
             });
         });
 
@@ -2813,6 +2929,50 @@ mod tests {
         cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
         worker.join().expect("join consumer");
     }
+
+    /// AirPods that another device holds deliver buffers of exact zeros until
+    /// they are routed here. A cue at the first buffer would tell the user to
+    /// speak while every word still records as silence.
+    #[test]
+    fn a_headset_is_not_ready_until_it_delivers_sound() {
+        let (mut producer, consumer) =
+            capture_lane::lane(native_rate_samples() * super::LANE_SECONDS);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_consumer(ConsumerInputs {
+                in_sample_rate: NATIVE_RATE,
+                vad: None,
+                lane: consumer,
+                cmd_rx,
+                level_cb: None,
+                audio_cb: None,
+                stream_running_at: Instant::now(),
+                meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstSound,
+            });
+        });
+
+        let ready = start(&cmd_tx);
+        let unrouted = vec![0.0; 480];
+        for _ in 0..20 {
+            capture_into_lane(&unrouted, 1, None, &mut producer);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            ready.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "readiness was asserted while the headset delivered only zeros"
+        );
+
+        capture_into_lane(&interleaved(480, 1, 0), 1, None, &mut producer);
+        assert!(
+            ready.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "readiness was not asserted once the headset delivered sound"
+        );
+
+        cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
+        worker.join().expect("join consumer");
+    }
     #[test]
     fn vad_silence_buffer_does_not_drop_the_detected_speech_onset() {
         let (mut producer, consumer) = capture_lane::lane(16_000 * super::LANE_SECONDS);
@@ -2827,6 +2987,7 @@ mod tests {
                 audio_cb: None,
                 stream_running_at: Instant::now(),
                 meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
             });
         });
 
@@ -2874,6 +3035,7 @@ mod tests {
                 })),
                 stream_running_at: Instant::now(),
                 meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
             });
         });
 
@@ -2910,6 +3072,7 @@ mod tests {
                 audio_cb: None,
                 stream_running_at: Instant::now(),
                 meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
             });
         });
 

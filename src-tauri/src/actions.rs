@@ -225,15 +225,28 @@ fn check_cloud_preconditions(
     }
 }
 
-/// Whether this run would open the microphone for a decode that cannot happen:
-/// a local run with no model selected. Cloud runs answer for their own frozen
-/// fallback in the cloud preflight, and a cloud run without a fallback still
-/// has a provider to transcribe with.
-fn local_model_is_missing(run: &RunPlan) -> bool {
-    run.cloud().is_none()
-        && run
-            .local_asr()
-            .is_none_or(|local| local.model_id.trim().is_empty())
+/// Why this run must not open the microphone, when its local decode cannot
+/// happen: `no_model_selected` when no model is selected or the selected one
+/// is unknown, `model_not_downloaded` when its file is not on disk.
+/// `is_downloaded` answers `None` for a model id Sona does not know. Cloud
+/// runs answer for their own frozen fallback in the cloud preflight, and a
+/// cloud run without a fallback still has a provider to transcribe with.
+fn local_model_refusal(
+    run: &RunPlan,
+    is_downloaded: impl FnOnce(&str) -> Option<bool>,
+) -> Option<&'static str> {
+    if run.cloud().is_some() {
+        return None;
+    }
+    let model_id = run.local_asr().map_or("", |local| local.model_id.as_str());
+    if model_id.trim().is_empty() {
+        return Some("no_model_selected");
+    }
+    match is_downloaded(model_id) {
+        None => Some("no_model_selected"),
+        Some(false) => Some("model_not_downloaded"),
+        Some(true) => None,
+    }
 }
 
 /// Code on the coordinator thread must not perform keychain, network, or other
@@ -586,6 +599,59 @@ fn provider_allows_unauthenticated_request(
     provider.id == "custom" && !endpoint.is_remote()
 }
 
+/// Ask these providers to skip reasoning/thinking — post-processing rarely
+/// benefits from it and it adds seconds of latency. llm_client picks the
+/// field the endpoint understands and retries without it if rejected.
+fn disables_reasoning(provider: &crate::settings::PostProcessProvider) -> bool {
+    matches!(provider.id.as_str(), "custom" | "openrouter")
+}
+
+/// The one message a prose rewrite sends: the instructions, then the
+/// envelope. A warm-up sends the instructions with no envelope, so both go
+/// through here and cannot disagree on how the two are joined.
+fn prose_rewrite_prompt(system_message: &str, user_message: &str) -> String {
+    format!("{system_message}\n\n{user_message}")
+}
+
+/// The first rewrite after a local model unloads measured 7.3 s on
+/// `gemma4:12b-mlx`: 4.0 s loading the model and 2.3 s reading the
+/// instructions before 1.0 s of writing. Neither needs the words, so both can
+/// happen while the user is still speaking. This asks the rewrite's own
+/// endpoint for one token over the instructions the rewrite will open with;
+/// the endpoint loads the model and keeps what it read, and that first
+/// rewrite then measured 1.4 s. A recording that is cancelled or silent still
+/// loads the model, which the server unloads again on its own idle timer.
+///
+/// Only a keyless endpoint on this Mac is warmed. Any other would be sent a
+/// request, and possibly a credential, before there is anything to rewrite.
+fn rewrite_warm_up(run: &RunPlan) -> Option<impl Future<Output = ()> + Send + 'static> {
+    let llm = run.prompt().llm.as_ref()?;
+    if !provider_allows_unauthenticated_request(&llm.provider, &llm.endpoint)
+        || llm.model_id.trim().is_empty()
+    {
+        return None;
+    }
+    let provider = llm.provider.clone();
+    let endpoint = llm.endpoint.clone();
+    let model = llm.model_id.clone();
+    let prompt = prose_rewrite_prompt(&crate::prompt_renderer::system_message(run), "");
+    Some(async move {
+        let started = Instant::now();
+        match crate::llm_client::warm_up_chat_completion(
+            &provider,
+            &endpoint,
+            &model,
+            prompt,
+            disables_reasoning(&provider),
+        )
+        .await
+        {
+            Ok(()) => debug!("Rewrite model warmed in {:?}", started.elapsed()),
+            Err(failure) => debug!("Rewrite warm-up got no usable reply ({failure})"),
+        }
+    })
+}
+
 /// Runs the frozen rewrite provider over an already-rendered prompt. Voice
 /// command mode renders a different prompt but must not fork the provider,
 /// credential, structured-output, and fallback handling below.
@@ -624,10 +690,7 @@ pub(crate) async fn post_process_transcription(
 
     debug!("Starting LLM post-processing");
 
-    // Ask these providers to skip reasoning/thinking — post-processing rarely
-    // benefits from it and it adds seconds of latency. llm_client picks the
-    // field the endpoint understands and retries without it if rejected.
-    let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+    let disable_reasoning = disables_reasoning(&provider);
 
     if provider.supports_structured_output && provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -690,6 +753,45 @@ pub(crate) async fn post_process_transcription(
         }
     };
 
+    let attempt = request_rewrite(
+        &provider,
+        &endpoint,
+        secret.as_ref(),
+        &model,
+        rendered,
+        disable_reasoning,
+    )
+    .await;
+    if attempt.credential_proved {
+        crate::settings::mark_post_process_secret_verified(app, &provider.id);
+    }
+    attempt.text
+}
+
+/// What the rewrite requests produced, held apart from the app-state write a
+/// success implies. Splitting them leaves the request sequence drivable
+/// without a running app, which is where the decision below is worth pinning.
+struct RewriteAttempt {
+    text: Result<String, RewriteOutcome>,
+    /// A reply came back over the configured credential, which is what marks
+    /// that credential verified. An answer the rewrite could not use still
+    /// proves the credential.
+    credential_proved: bool,
+}
+
+/// Ask the frozen endpoint for the rewrite: structured output first where the
+/// provider supports it, prose otherwise or as the one retry.
+async fn request_rewrite(
+    provider: &crate::settings::PostProcessProvider,
+    endpoint: &crate::settings::PostProcessEndpoint,
+    secret: Option<&crate::secrets::SecretValue>,
+    model: &str,
+    rendered: &RenderedPrompt,
+    disable_reasoning: bool,
+) -> RewriteAttempt {
+    use crate::llm_client::ChatCompletionFailure;
+
+    let mut credential_proved = false;
     if provider.supports_structured_output {
         let json_schema = serde_json::json!({
             "type": "object",
@@ -705,10 +807,10 @@ pub(crate) async fn post_process_transcription(
 
         match crate::llm_client::send_chat_completion_with_schema(
             crate::llm_client::ChatCompletionInput {
-                provider: &provider,
-                endpoint: &endpoint,
-                secret: secret.as_ref(),
-                model: &model,
+                provider,
+                endpoint,
+                secret,
+                model,
                 user_content: rendered.user_message.clone(),
                 system_prompt: Some(rendered.system_message.clone()),
                 json_schema: Some(crate::llm_client::StructuredOutputSchema(json_schema)),
@@ -718,11 +820,14 @@ pub(crate) async fn post_process_transcription(
         .await
         {
             Ok(Some(content)) => {
-                if secret.is_some() {
-                    crate::settings::mark_post_process_secret_verified(app, &provider.id);
-                }
+                credential_proved = secret.is_some();
                 match structured_rewrite(&content) {
-                    Ok(text) => return accept_rewrite(&text),
+                    Ok(text) => {
+                        return RewriteAttempt {
+                            text: accept_rewrite(&text),
+                            credential_proved,
+                        }
+                    }
                     // The endpoint honoured the request and answered the
                     // wrong thing; asking again in prose is the one retry
                     // that can still produce the rewrite.
@@ -735,38 +840,60 @@ pub(crate) async fn post_process_transcription(
                 warn!(
                     "Structured post-processing returned no content; delivering the raw transcript"
                 );
-                return Err(RewriteOutcome::Failed);
+                return RewriteAttempt {
+                    text: Err(RewriteOutcome::Failed),
+                    credential_proved,
+                };
             }
-            Err(error) => {
-                warn!("Structured post-processing failed ({error}); retrying without a schema");
+            // An endpoint that answered is there to answer again, and the
+            // prose request asks it something simpler.
+            Err(ChatCompletionFailure::Answered(message)) => {
+                warn!("Structured post-processing failed ({message}); retrying without a schema");
+            }
+            // Nothing came back, so a second request buys the same silence at
+            // the same price: another `REQUEST_TIMEOUT` before words that were
+            // transcribed long ago reach the user. Deliver them now and let
+            // the skipped-rewrite notice say the rewrite failed.
+            Err(ChatCompletionFailure::Unanswered(message)) => {
+                warn!(
+                    "Structured post-processing got no reply ({message}); delivering the raw transcript"
+                );
+                return RewriteAttempt {
+                    text: Err(RewriteOutcome::Failed),
+                    credential_proved,
+                };
             }
         }
     }
 
-    let processed_prompt = format!("{}\n\n{}", rendered.system_message, rendered.user_message);
+    let processed_prompt = prose_rewrite_prompt(&rendered.system_message, &rendered.user_message);
     match crate::llm_client::send_chat_completion(
-        &provider,
-        &endpoint,
-        secret.as_ref(),
-        &model,
+        provider,
+        endpoint,
+        secret,
+        model,
         processed_prompt,
         disable_reasoning,
     )
     .await
     {
-        Ok(Some(content)) => {
-            if secret.is_some() {
-                crate::settings::mark_post_process_secret_verified(app, &provider.id);
-            }
-            accept_rewrite(&content)
-        }
+        Ok(Some(content)) => RewriteAttempt {
+            text: accept_rewrite(&content),
+            credential_proved: secret.is_some(),
+        },
         Ok(None) => {
             warn!("Post-processing returned no content; delivering the raw transcript");
-            Err(RewriteOutcome::Failed)
+            RewriteAttempt {
+                text: Err(RewriteOutcome::Failed),
+                credential_proved,
+            }
         }
-        Err(error) => {
-            warn!("Post-processing failed ({error}); delivering the raw transcript");
-            Err(RewriteOutcome::Failed)
+        Err(failure) => {
+            warn!("Post-processing failed ({failure}); delivering the raw transcript");
+            RewriteAttempt {
+                text: Err(RewriteOutcome::Failed),
+                credential_proved,
+            }
         }
     }
 }
@@ -1401,12 +1528,12 @@ impl TranscribeAction {
             emit_cloud_run_error(app, error);
             return;
         }
-        if local_model_is_missing(&self.run) {
-            warn!("Refusing to record: no local transcription model is selected");
-            let _ = app.emit(
-                "recording-error",
-                RecordingErrorEvent::typed("no_model_selected"),
-            );
+        if let Some(error_type) = local_model_refusal(&self.run, |model_id| {
+            app.state::<Arc<ModelManager>>()
+                .recheck_downloaded(model_id)
+        }) {
+            warn!("Refusing to record: the local transcription model cannot load ({error_type})");
+            let _ = app.emit("recording-error", RecordingErrorEvent::typed(error_type));
             return;
         }
         let cloud_requested = self.run.cloud().is_some();
@@ -1503,6 +1630,9 @@ impl TranscribeAction {
                 // is already Recording, so the tray's Stop action is correct
                 // from here on.
                 set_tray_state(app, TrayIconState::Recording);
+                if let Some(warm_up) = rewrite_warm_up(&self.run) {
+                    tauri::async_runtime::spawn(warm_up);
+                }
                 let generation = readiness.generation();
                 let app_clone = app.clone();
                 let rm_clone = Arc::clone(&rm);
@@ -2076,7 +2206,7 @@ mod tests {
     use super::{ensure_cloud_fallback_is_installed, resolve_cloud_finalization, FrozenTranscript};
     use crate::settings::OverlayStyle;
     use std::future;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -2400,35 +2530,42 @@ mod tests {
         .expect("valid cloud run")
     }
 
-    /// A local run with no model selected can only fail after the microphone
+    /// A local run whose model cannot load can only fail after the microphone
     /// has opened and the user has already spoken, so it is refused before
-    /// capture instead.
+    /// capture, and the refusal says whether a model must be chosen or
+    /// downloaded.
     #[test]
-    fn a_local_run_without_a_selected_model_is_refused() {
-        use super::local_model_is_missing;
+    fn a_local_run_whose_model_cannot_load_is_refused_before_capture() {
+        use super::local_model_refusal;
         use crate::modes::{RunPlan, TranscriptionIntent};
 
-        let mut settings = crate::settings::get_default_settings();
-        settings
-            .modes
-            .first_mut()
-            .expect("default mode")
-            .asr
-            .model_id
-            .clear();
-        let without_model = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
-            .expect("local run without a model");
-        assert!(local_model_is_missing(&without_model));
+        let refusal = |model_id: &str, is_downloaded: Option<bool>| {
+            let mut settings = crate::settings::get_default_settings();
+            settings
+                .modes
+                .first_mut()
+                .expect("default mode")
+                .asr
+                .model_id = model_id.to_string();
+            let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+                .expect("local run");
+            local_model_refusal(&run, |_| is_downloaded)
+        };
 
-        settings
-            .modes
-            .first_mut()
-            .expect("default mode")
-            .asr
-            .model_id = "parakeet-tdt-0.6b-v3".to_string();
-        let with_model = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
-            .expect("local run with a model");
-        assert!(!local_model_is_missing(&with_model));
+        assert_eq!(
+            [
+                refusal("", Some(true)),
+                refusal("retired-model", None),
+                refusal("parakeet-tdt-0.6b-v3", Some(false)),
+                refusal("parakeet-tdt-0.6b-v3", Some(true)),
+            ],
+            [
+                Some("no_model_selected"),
+                Some("no_model_selected"),
+                Some("model_not_downloaded"),
+                None,
+            ]
+        );
     }
 
     /// The user's text passes are settings, not engine features: a
@@ -2752,5 +2889,321 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// What a counting endpoint does with each connection it accepts.
+    enum FixtureReply {
+        /// Plaintext only. Reached over `https://` the handshake fails, which
+        /// reqwest reports as a connect failure: nothing answered. A refused
+        /// connect is the same class, and an elapsed request timeout is too —
+        /// but a refused port cannot count the attempts made against it, and
+        /// the timeout costs twenty seconds a side.
+        Plaintext,
+        /// One complete HTTP response per connection, the last repeating.
+        Http(Vec<String>),
+    }
+
+    /// Whether these bytes hold a whole HTTP request: the headers, then as
+    /// much body as `Content-Length` promised.
+    fn request_is_complete(request: &[u8]) -> bool {
+        let Some(head) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let length: usize = String::from_utf8_lossy(&request[..head])
+            .to_lowercase()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .map(str::trim)
+                    .and_then(|value| value.parse().ok())
+            })
+            .unwrap_or(0);
+        request.len() >= head + 4 + length
+    }
+
+    /// The HTTP requests a counting endpoint read, in arrival order.
+    type ReadRequests = Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+    /// A loopback server that counts every connection it accepts. Each send
+    /// builds its own client, so the count is the number of rewrite requests
+    /// that reached the network.
+    async fn counting_endpoint(
+        reply: FixtureReply,
+    ) -> (std::net::SocketAddr, Arc<AtomicUsize>, ReadRequests) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting endpoint");
+        let address = listener.local_addr().expect("counting endpoint address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&connections);
+        let requests = ReadRequests::default();
+        let recorded = Arc::clone(&requests);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let index = served.fetch_add(1, Ordering::SeqCst);
+                match &reply {
+                    FixtureReply::Plaintext => {
+                        let mut hello = [0_u8; 512];
+                        let _ = stream.read(&mut hello).await;
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+                    }
+                    FixtureReply::Http(responses) => {
+                        let Some(response) = responses.get(index).or_else(|| responses.last())
+                        else {
+                            continue;
+                        };
+                        // Drain the request first: closing a socket that still
+                        // holds unread bytes can cost the client the reply.
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 1024];
+                        while !request_is_complete(&request) {
+                            match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(read) => request.extend_from_slice(&chunk[..read]),
+                            }
+                        }
+                        recorded.lock().expect("read requests").push(request);
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                }
+            }
+        });
+        (address, connections, requests)
+    }
+
+    fn structured_provider(base_url: &str) -> crate::settings::PostProcessProvider {
+        crate::settings::PostProcessProvider {
+            id: "custom".to_string(),
+            label: "Custom".to_string(),
+            base_url: base_url.to_string(),
+            allow_base_url_edit: true,
+            supports_structured_output: true,
+        }
+    }
+
+    fn http_response(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// The rewrite asks a second time only when a second question can be
+    /// answered. An endpoint that answered badly gets the prose retry, and
+    /// that retry is how a provider which rejects the schema still rewrites.
+    /// An endpoint that never answered gets nothing further: the same silence
+    /// costs the same wait again, and a finished dictation is sitting behind
+    /// it.
+    ///
+    /// Counting connections is the only way to see the difference. Both
+    /// endpoints here refuse the structured request, and the delivered text
+    /// cannot tell one request from two.
+    #[tokio::test]
+    async fn only_an_endpoint_that_answered_gets_a_second_rewrite_request() {
+        use super::request_rewrite;
+        use crate::modes::RewriteOutcome;
+
+        let rendered = crate::prompt_renderer::render_instruction(
+            crate::prompt_renderer::InstructionRenderInput {
+                instruction: "make that a question",
+                input: "The plan is ready by Friday.",
+                language: "en",
+                target: &crate::context::TargetMetadata::default(),
+            },
+        );
+
+        let (silent, silent_requests, _) = counting_endpoint(FixtureReply::Plaintext).await;
+        let provider = structured_provider(&format!("https://{silent}/v1"));
+        let endpoint = provider.endpoint().expect("silent endpoint");
+        let attempt = request_rewrite(&provider, &endpoint, None, "any", &rendered, false).await;
+
+        assert_eq!(attempt.text, Err(RewriteOutcome::Failed));
+        assert_eq!(
+            silent_requests.load(Ordering::SeqCst),
+            1,
+            "an endpoint that never answered is asked once"
+        );
+
+        let rewritten = "Is the plan ready by Friday?";
+        let completion =
+            serde_json::json!({ "choices": [{ "message": { "content": rewritten } }] }).to_string();
+        let (answering, answering_requests, _) = counting_endpoint(FixtureReply::Http(vec![
+            http_response("500 Internal Server Error", "the schema is not supported"),
+            http_response("200 OK", &completion),
+        ]))
+        .await;
+        let provider = structured_provider(&format!("http://{answering}/v1"));
+        let endpoint = provider.endpoint().expect("answering endpoint");
+        let attempt = request_rewrite(&provider, &endpoint, None, "any", &rendered, false).await;
+
+        assert_eq!(attempt.text, Ok(rewritten.to_string()));
+        assert_eq!(
+            answering_requests.load(Ordering::SeqCst),
+            2,
+            "an endpoint that answered is asked the simpler question"
+        );
+    }
+
+    /// Settings whose active mode rewrites through the keyless custom
+    /// provider at `base_url`, the way Aktan's local model is set up.
+    fn custom_rewrite_settings(base_url: &str) -> crate::settings::AppSettings {
+        let mut settings = crate::settings::get_default_settings();
+        crate::modes::ensure_mode_settings(&mut settings);
+        settings.post_process_provider_id = "custom".to_string();
+        settings
+            .post_process_models
+            .insert("custom".to_string(), "gemma4:12b-mlx".to_string());
+        settings
+            .post_process_providers
+            .iter_mut()
+            .find(|provider| provider.id == "custom")
+            .expect("the custom provider is always configured")
+            .base_url = base_url.to_string();
+        settings.modes[0].llm.enabled = true;
+        settings.modes[0].llm.provider_id = None;
+        settings
+    }
+
+    fn active_run(settings: &crate::settings::AppSettings) -> crate::modes::RunPlan {
+        crate::modes::RunPlan::for_intent(settings, &crate::modes::TranscriptionIntent::ActiveMode)
+            .expect("active mode resolves")
+    }
+
+    /// The body of a chat request a counting endpoint read. The prompt and the
+    /// reply budget get fields of their own; everything else the request says
+    /// lands in `rest`, so two bodies still compare in full.
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct ChatRequestBody {
+        messages: Vec<ChatRequestMessage>,
+        max_tokens: Option<u64>,
+        #[serde(flatten)]
+        rest: serde_json::Map<String, serde_json::Value>,
+    }
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct ChatRequestMessage {
+        content: String,
+        #[serde(flatten)]
+        rest: serde_json::Map<String, serde_json::Value>,
+    }
+
+    fn request_body(request: &[u8]) -> ChatRequestBody {
+        let head = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("a complete HTTP request");
+        serde_json::from_slice(&request[head + 4..]).expect("a chat request body")
+    }
+
+    /// Lifts the prompt out of a chat request, the last message's text, and
+    /// drops the reply budget, the one field a warm-up means to ask
+    /// differently. What is left is how the request asks.
+    fn take_prompt(body: &mut ChatRequestBody) -> String {
+        body.max_tokens = None;
+        let last = body.messages.last_mut().expect("a last message");
+        std::mem::take(&mut last.content)
+    }
+
+    /// A warm-up is only worth its request if the rewrite that follows finds
+    /// its prompt already read. A local server keeps what it last read and
+    /// reuses it only as far as the next request agrees token for token, so
+    /// the warm-up must ask the same way, over everything the rewrite sends
+    /// ahead of the words. One changed field or separator and the rewrite
+    /// reads its instructions again: 2.1 s of the 3 s the warm-up exists to
+    /// save on a 12B model.
+    #[tokio::test]
+    async fn a_warm_up_reads_everything_the_rewrite_sends_before_the_words() {
+        use super::{disables_reasoning, request_rewrite, rewrite_warm_up};
+
+        let completion =
+            serde_json::json!({ "choices": [{ "message": { "content": "Done." } }] }).to_string();
+        let (local, _, requests) = counting_endpoint(FixtureReply::Http(vec![http_response(
+            "200 OK",
+            &completion,
+        )]))
+        .await;
+        let run = active_run(&custom_rewrite_settings(&format!("http://{local}/v1")));
+
+        rewrite_warm_up(&run)
+            .expect("a local rewrite is warmed")
+            .await;
+        let rendered = crate::prompt_renderer::render(crate::prompt_renderer::PromptRenderInput {
+            run: &run,
+            transcript: "Draft the update for Morgan.",
+            language: "en",
+            target: &crate::context::TargetMetadata::default(),
+            context: &crate::context::ContextPacket::default(),
+        });
+        let llm = run.prompt().llm.as_ref().expect("the run rewrites");
+        request_rewrite(
+            &llm.provider,
+            &llm.endpoint,
+            None,
+            &llm.model_id,
+            &rendered,
+            disables_reasoning(&llm.provider),
+        )
+        .await;
+
+        let bodies: Vec<_> = requests
+            .lock()
+            .expect("read requests")
+            .iter()
+            .map(|request| request_body(request))
+            .collect();
+        let [mut warm_up, mut rewrite]: [ChatRequestBody; 2] =
+            bodies.try_into().expect("one warm-up, then one rewrite");
+        let warm_up_prompt = take_prompt(&mut warm_up);
+        assert_eq!(
+            take_prompt(&mut rewrite),
+            format!("{warm_up_prompt}{}", rendered.user_message),
+            "the rewrite's prompt is the warm-up's followed by the words"
+        );
+        assert_eq!(
+            warm_up, rewrite,
+            "the warm-up asks the way the rewrite does"
+        );
+    }
+
+    /// Recording start runs before there is anything to rewrite, so a request
+    /// then may go only where the rewrite itself will go, and only to an
+    /// endpoint on this Mac that needs no key. Anything else would announce
+    /// the dictation to a remote server, or spend a credential, for words
+    /// that may never be spoken.
+    #[test]
+    fn only_a_rewrite_on_this_mac_is_warmed() {
+        use super::rewrite_warm_up;
+
+        let local = custom_rewrite_settings("http://127.0.0.1:11434/v1");
+        assert!(rewrite_warm_up(&active_run(&local)).is_some());
+
+        let mut cleanup_off = local.clone();
+        cleanup_off.modes[0].llm.enabled = false;
+        assert!(
+            rewrite_warm_up(&active_run(&cleanup_off)).is_none(),
+            "a mode that does not rewrite is not warmed"
+        );
+
+        let mut remote = custom_rewrite_settings("https://llm.example.test/v1");
+        let custom = remote
+            .post_process_provider("custom")
+            .expect("the custom provider is always configured");
+        let consent = crate::settings::PostProcessProviderConsent::for_endpoint(
+            &custom.endpoint().expect("a remote endpoint"),
+        );
+        remote
+            .post_process_provider_consents
+            .insert("custom".to_string(), consent);
+        let run = active_run(&remote);
+        assert!(
+            run.prompt().llm.is_some(),
+            "the remote rewrite itself runs, so only the warm-up declines"
+        );
+        assert!(
+            rewrite_warm_up(&run).is_none(),
+            "a remote endpoint hears nothing before the words exist"
+        );
     }
 }

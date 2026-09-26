@@ -26,9 +26,9 @@ use super::store::voice_identity::{
     VoiceEnrollmentRecord,
 };
 use super::store::{
-    ArtifactEvidence, ArtifactRevisionInput, DiarizationAssignmentInput, DurableTrackRecord,
-    MeetingEvidence, MeetingStore, StoreError, StoreTransition, TranscriptRevisionInput,
-    TranscriptSegmentInput,
+    timestamp_drift_tolerance_ns, ArtifactEvidence, ArtifactRevisionInput,
+    DiarizationAssignmentInput, DurableTrackRecord, MeetingEvidence, MeetingStore, StoreError,
+    StoreTransition, TranscriptRevisionInput, TranscriptSegmentInput,
 };
 use super::types::*;
 use super::voice_identity::{
@@ -58,7 +58,6 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const VAD_FRAME_SAMPLES: usize = 480;
 const VAD_FRAME_NS: u64 = 30_000_000;
-const TIMESTAMP_ROUNDING_TOLERANCE_NS: u64 = 1;
 const ASR_MAX_SAMPLES: usize = 15 * 16_000;
 const ASR_OVERLAP_SAMPLES: usize = 8_000;
 const ASR_SILENCE_FRAMES: u32 = 10;
@@ -1379,7 +1378,12 @@ impl MeetingProcessingService {
             .map_err(RunFailure::from)?;
         let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
         let tracks = review.tracks;
-        for source_kind in [SourceKind::Microphone, SourceKind::SystemAudio] {
+        /* The far end first, so the microphone pass can recognise it: on
+         * speakers the other side of a call reaches the microphone too, and
+         * without this every line they said would appear twice, once as the
+         * operator. */
+        let mut far_end = FarEnd::default();
+        for source_kind in [SourceKind::SystemAudio, SourceKind::Microphone] {
             for track in tracks
                 .iter()
                 .filter(|track| track.source_kind == source_kind)
@@ -1392,6 +1396,7 @@ impl MeetingProcessingService {
                     source_kind,
                     engine.as_ref(),
                     &asr_plan,
+                    &mut far_end,
                     cancelled,
                 )?;
             }
@@ -1422,6 +1427,7 @@ impl MeetingProcessingService {
         source_kind: SourceKind,
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
+        far_end: &mut FarEnd,
         cancelled: &AtomicBool,
     ) -> Result<(), RunFailure> {
         let detector = self
@@ -1449,6 +1455,7 @@ impl MeetingProcessingService {
                             source_kind,
                             engine,
                             asr_plan,
+                            far_end,
                             chunk,
                         )?;
                     }
@@ -1462,6 +1469,7 @@ impl MeetingProcessingService {
                         source_kind,
                         engine,
                         asr_plan,
+                        far_end,
                         chunk,
                     )
                 })
@@ -1482,6 +1490,7 @@ impl MeetingProcessingService {
                 source_kind,
                 engine,
                 asr_plan,
+                far_end,
                 chunk,
             )?;
         }
@@ -1498,6 +1507,7 @@ impl MeetingProcessingService {
         source_kind: SourceKind,
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
+        far_end: &mut FarEnd,
         chunk: AudioChunk,
     ) -> Result<(), RunFailure> {
         let text = engine
@@ -1505,6 +1515,17 @@ impl MeetingProcessingService {
             .map_err(|error| RunFailure::from_boundary(error, EngineFailureCause::Transcription))?;
         if text.trim().is_empty() {
             return Ok(());
+        }
+        match source_kind {
+            SourceKind::SystemAudio => {
+                far_end.heard(chunk.start_offset_ns, chunk.end_offset_ns, &text);
+            }
+            SourceKind::Microphone
+                if far_end.echoes(chunk.start_offset_ns, chunk.end_offset_ns, &text) =>
+            {
+                return Ok(());
+            }
+            _ => {}
         }
         store
             .append_transcript_segments(
@@ -1532,7 +1553,20 @@ impl MeetingProcessingService {
         tracks: &[MeetingTrackSnapshot],
         cancelled: &AtomicBool,
     ) {
-        let Some(track) = Self::diarization_track(origin, tracks) else {
+        // A lane spoke when this revision gave it a line. Records alone do
+        // not say so: a call's system audio records silence the whole way
+        // through when the far end reaches Sona only through the microphone.
+        let spoken = |track: &MeetingTrackSnapshot| {
+            store
+                .transcript_segments_overlapping(
+                    transcript_revision_id,
+                    track.track_id,
+                    0,
+                    i64::MAX.unsigned_abs(),
+                )
+                .is_ok_and(|segments| !segments.is_empty())
+        };
+        let Some(track) = Self::diarization_track(origin, tracks, spoken) else {
             return;
         };
         let manifest = model_manifest();
@@ -1819,6 +1853,7 @@ impl MeetingProcessingService {
     fn diarization_track(
         origin: MeetingOrigin,
         tracks: &[MeetingTrackSnapshot],
+        spoken: impl Fn(&MeetingTrackSnapshot) -> bool,
     ) -> Option<&MeetingTrackSnapshot> {
         let source_kind = match origin {
             MeetingOrigin::Import => SourceKind::Microphone,
@@ -1826,8 +1861,8 @@ impl MeetingProcessingService {
         };
         let expected = tracks.iter().find(|track| track.source_kind == source_kind);
         expected
-            .filter(|track| track.durable_record_count > 0)
-            .or_else(|| tracks.iter().find(|track| track.durable_record_count > 0))
+            .filter(|track| spoken(track))
+            .or_else(|| tracks.iter().find(|track| spoken(track)))
             .or(expected)
     }
 
@@ -2984,13 +3019,15 @@ fn record_starts_new_span(
 ) -> bool {
     previous_sequence.is_some_and(|sequence| sequence.checked_add(1) != Some(record.sequence))
         || previous_epoch.is_some_and(|epoch| epoch != record.source_epoch)
-        // Forward only. A record that starts before the previous record's
-        // computed end is the capture device's clock-rate error against a
-        // truncated `duration_ns`, which the writer already treats as ordinary
-        // drift; reading it as a gap restarts the frame buffer on every record
-        // and no VAD frame ever forms. A real gap moves the start forward.
+        // Forward only, and only past the writer's own drift bound. A start
+        // a few ticks either side of the previous record's computed end is
+        // host-clock jitter against a truncated `duration_ns`; reading it as
+        // a gap restarted the frame buffer every few records, so no sentence
+        // and no speaker window ever formed. A real gap moves the start past
+        // the bound, where the writer logged it.
         || previous_end_offset_ns.is_some_and(|end| {
-            record.start_offset_ns.saturating_sub(end) > TIMESTAMP_ROUNDING_TOLERANCE_NS
+            record.start_offset_ns.saturating_sub(end)
+                > timestamp_drift_tolerance_ns(record.duration_ns, record.format.sample_rate_hz)
         })
 }
 
@@ -3193,6 +3230,58 @@ fn prime_diarizer(
         return Err(DiarizationError::InferenceFailed);
     }
     diarizer.prime()
+}
+
+/// What the system-audio track said, held while the microphone track is
+/// transcribed after it.
+///
+/// On a call played through speakers the microphone hears the other side a
+/// few milliseconds after the system mix carries it, so the same words land
+/// on both tracks. A microphone line whose words the far end was saying at
+/// that moment is that echo, not the operator.
+#[derive(Default)]
+struct FarEnd {
+    spans: Vec<(u64, u64, Vec<String>)>,
+}
+
+impl FarEnd {
+    /// How far apart two tracks' chunk boundaries can fall around one
+    /// utterance: each track's voice detector cuts at its own pauses.
+    const SLACK_NS: u64 = 500_000_000;
+
+    fn heard(&mut self, start_ns: u64, end_ns: u64, text: &str) {
+        self.spans.push((start_ns, end_ns, spoken_words(text)));
+    }
+
+    /// True when at least 70% of the line's words were in what the far end
+    /// said over the same stretch. A chunk where the operator talked over the
+    /// far end keeps his words and so falls below the bar.
+    fn echoes(&self, start_ns: u64, end_ns: u64, text: &str) -> bool {
+        let words = spoken_words(text);
+        if words.is_empty() {
+            return false;
+        }
+        let from = start_ns.saturating_sub(Self::SLACK_NS);
+        let to = end_ns.saturating_add(Self::SLACK_NS);
+        let nearby: std::collections::HashSet<&str> = self
+            .spans
+            .iter()
+            .filter(|(start, end, _)| *start < to && *end > from)
+            .flat_map(|(_, _, words)| words.iter().map(String::as_str))
+            .collect();
+        let matched = words
+            .iter()
+            .filter(|word| nearby.contains(word.as_str()))
+            .count();
+        matched * 10 >= words.len() * 7
+    }
+}
+
+fn spoken_words(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 fn process_record_frames<C, F>(
@@ -4610,6 +4699,38 @@ mod tests {
     };
     use std::thread;
 
+    const SECOND_NS: u64 = 1_000_000_000;
+
+    #[test]
+    fn the_microphone_hearing_the_far_end_is_not_the_operator_talking() {
+        let mut far_end = FarEnd::default();
+        far_end.heard(
+            10 * SECOND_NS,
+            14 * SECOND_NS,
+            "Is your dumpling still smell like petroleum?",
+        );
+
+        // Her line through the speakers, cut at slightly different pauses.
+        assert!(far_end.echoes(
+            10 * SECOND_NS + 200_000_000,
+            13 * SECOND_NS,
+            "is your dumpling still smell like petroleum"
+        ));
+        // His answer at the same moment, and the same words said later.
+        assert!(!far_end.echoes(11 * SECOND_NS, 13 * SECOND_NS, "I don't think so, no."));
+        assert!(!far_end.echoes(
+            40 * SECOND_NS,
+            43 * SECOND_NS,
+            "is your dumpling still smell like petroleum"
+        ));
+        // Talking over her keeps the line: most of the words are his.
+        assert!(!far_end.echoes(
+            12 * SECOND_NS,
+            16 * SECOND_NS,
+            "petroleum? no way, I washed it twice this morning honestly"
+        ));
+    }
+
     struct EnergyVad;
 
     impl MeetingVad for EnergyVad {
@@ -4649,6 +4770,12 @@ mod tests {
         }
     }
 
+    /// The tracks this revision gave a line to.
+    fn spoken_on(tracks: &[&MeetingTrackSnapshot]) -> impl Fn(&MeetingTrackSnapshot) -> bool {
+        let ids: Vec<SourceTrackId> = tracks.iter().map(|track| track.track_id).collect();
+        move |track| ids.contains(&track.track_id)
+    }
+
     #[test]
     fn imported_recordings_select_their_microphone_track_for_diarization() {
         let microphone = track(SourceKind::Microphone);
@@ -4657,6 +4784,7 @@ mod tests {
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Import,
                 std::slice::from_ref(&microphone),
+                spoken_on(&[]),
             ),
             Some(&microphone),
         );
@@ -4671,6 +4799,7 @@ mod tests {
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
                 std::slice::from_ref(&microphone),
+                spoken_on(&[]),
             ),
             None,
         );
@@ -4678,46 +4807,47 @@ mod tests {
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
                 &[microphone, system_audio.clone()],
+                spoken_on(&[]),
             ),
             Some(&system_audio),
         );
     }
 
-    fn track_with_audio(source_kind: SourceKind) -> MeetingTrackSnapshot {
-        MeetingTrackSnapshot {
-            durable_record_count: 12,
-            ..track(source_kind)
-        }
-    }
-
-    /// Every system-audio track in the owner's store holds zero records, and
-    /// walking one published a completed generation with no assignments over a
-    /// transcript the microphone had earned. The origin names the lane a
-    /// meeting's speakers are expected from; audio decides which lane can
-    /// answer at all.
+    /// A FaceTime call recorded its system audio start to finish, all of it
+    /// silence, while the microphone carried both voices. Diarizing the
+    /// silent lane assigned nobody, and the meeting read "Separating
+    /// speakers failed" over a transcript the microphone had earned.
     #[test]
-    fn diarization_falls_back_to_the_lane_that_holds_audio() {
-        let microphone = track_with_audio(SourceKind::Microphone);
-        let system_audio = track(SourceKind::SystemAudio);
+    fn diarization_falls_back_to_the_lane_that_holds_speech() {
+        let microphone = MeetingTrackSnapshot {
+            durable_record_count: 12,
+            ..track(SourceKind::Microphone)
+        };
+        let system_audio = MeetingTrackSnapshot {
+            durable_record_count: 12,
+            ..track(SourceKind::SystemAudio)
+        };
 
         assert_eq!(
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
                 &[microphone.clone(), system_audio],
+                spoken_on(&[&microphone]),
             ),
             Some(&microphone),
         );
     }
 
     #[test]
-    fn diarization_keeps_the_expected_lane_when_it_holds_audio() {
-        let microphone = track_with_audio(SourceKind::Microphone);
-        let system_audio = track_with_audio(SourceKind::SystemAudio);
+    fn diarization_keeps_the_expected_lane_when_it_holds_speech() {
+        let microphone = track(SourceKind::Microphone);
+        let system_audio = track(SourceKind::SystemAudio);
 
         assert_eq!(
             MeetingProcessingService::diarization_track(
                 MeetingOrigin::Manual,
-                &[microphone, system_audio.clone()],
+                &[microphone.clone(), system_audio.clone()],
+                spoken_on(&[&microphone, &system_audio]),
             ),
             Some(&system_audio),
         );
@@ -4832,6 +4962,69 @@ mod tests {
 
         assert_eq!(boundaries, 0);
         assert_eq!(consumer.count, 8);
+    }
+
+    /// System-audio and microphone records carry host-clock starts, so a
+    /// record also lands a few ticks after the previous record's computed
+    /// end. Reading that as a gap restarted the frame buffer every few
+    /// records: a spoken sentence reached the recogniser as 30 ms scraps it
+    /// heard as "Yeah" and "M", and the speaker pass never filled a window,
+    /// so the review read "Separating speakers failed".
+    #[test]
+    fn forward_timestamp_jitter_stays_inside_one_span() {
+        let track_id = SourceTrackId::new();
+        let mut consumer = CountingFrames { count: 0 };
+        let mut frames = RecordFrameBuffer::new();
+        let mut boundaries = 0;
+        for sequence in 0..12 {
+            let record = DurableTrackRecord {
+                track_id,
+                sequence,
+                source_epoch: SourceEpoch::new(0),
+                start_offset_ns: sequence * 20_000_042,
+                duration_ns: 20_000_000,
+                format: AudioFormat {
+                    sample_rate_hz: 16_000,
+                    channels: 1,
+                },
+                samples: vec![0.25; 320],
+            };
+            if frames.starts_new_span(&record) {
+                boundaries += 1;
+            }
+            process_record_frames(&record, &mut frames, &mut consumer, |_| Ok(()))
+                .expect("jittered record is valid");
+        }
+
+        assert_eq!(boundaries, 0);
+        assert_eq!(consumer.count, 8);
+    }
+
+    /// A stall in capture moves the next record's start well past the
+    /// previous end. The writer logs that as a gap, and the reader restarts
+    /// there too, or speech on either side of the stall is spliced into one
+    /// line at the wrong time.
+    #[test]
+    fn a_stall_in_capture_starts_a_new_span() {
+        let track_id = SourceTrackId::new();
+        let record = |sequence: u64, start_offset_ns: u64| DurableTrackRecord {
+            track_id,
+            sequence,
+            source_epoch: SourceEpoch::new(0),
+            start_offset_ns,
+            duration_ns: 20_000_000,
+            format: AudioFormat {
+                sample_rate_hz: 16_000,
+                channels: 1,
+            },
+            samples: vec![0.25; 320],
+        };
+        let mut consumer = CountingFrames { count: 0 };
+        let mut frames = RecordFrameBuffer::new();
+        process_record_frames(&record(0, 0), &mut frames, &mut consumer, |_| Ok(()))
+            .expect("first record is valid");
+
+        assert!(frames.starts_new_span(&record(1, 220_000_000)));
     }
 
     #[test]

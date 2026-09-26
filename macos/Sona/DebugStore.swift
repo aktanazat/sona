@@ -166,7 +166,6 @@ final class DebugStore {
 
     /// Lines that arrived while the stream was paused, shown on resume.
     @ObservationIgnored private var pending: [LogLine] = []
-    @ObservationIgnored private var tail: LogTailReader?
     @ObservationIgnored private var copyReset: Task<Void, Never>?
     @ObservationIgnored private let core: Core
 
@@ -178,13 +177,12 @@ final class DebugStore {
         core.observe(CoreEvent.modelStateChanged) { [weak self] _ in self?.reloadModel() }
     }
 
-    /// The first load: settings, the core's defaults, the selected model, and
-    /// the log file the viewer tails.
+    /// The first load: settings, the core's defaults, and the selected model.
+    /// The log is not tailed here; `followLogs` reads it while the page is up.
     func start() async {
         await loadSettings()
         await loadDefaults()
         await loadModel()
-        await startTail()
     }
 
     // MARK: - Settings
@@ -334,22 +332,29 @@ final class DebugStore {
         }
     }
 
-    private func startTail() async {
+    /// Tails the log for as long as the calling task runs. The Debug page's
+    /// `.task` owns the call, so leaving the page cancels it and the reader
+    /// stops: with the page closed the shell never touches the file. A
+    /// polling timer that ran from launch cost four wakeups a second for a
+    /// view that is almost never open.
+    func followLogs() async {
+        let directory: String
         do {
-            let directory: String = try await core.request("get_log_dir_path")
+            directory = try await core.request("get_log_dir_path")
             logDirectory = directory
-            // A second start, after the core was restarted, replaces the tail
-            // rather than doubling the polling.
-            tail?.stop()
-            let tail = LogTailReader(directory: directory) { [weak self] lines in
-                self?.append(lines)
-            }
-            self.tail = tail
-            tail.start()
             error = nil
         } catch {
             self.error = error.localizedDescription
+            return
         }
+        let tail = LogTailReader(directory: directory) { [weak self] lines in
+            self?.append(lines)
+        }
+        tail.start()
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(3600))
+        }
+        tail.stop()
     }
 
     private func append(_ incoming: [LogLine]) {

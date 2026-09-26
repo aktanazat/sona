@@ -7,11 +7,18 @@ struct SonaApp: App {
     var body: some Scene {
         Window("Sona", id: "main") {
             Shell().environment(model)
+                // In the Dock and the app switcher only while this window is
+                // open; the rest of the time Sona is its menu bar mark.
+                .onAppear { NSApp.setActivationPolicy(.regular) }
+                .onDisappear { NSApp.setActivationPolicy(.accessory) }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1240, height: 820)
-        .defaultLaunchBehavior(.presented)
+        // Sona lives in the menu bar: the window opens when something asks for
+        // it, never at launch, and never because it was open at the last quit.
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appSettings) {
@@ -31,7 +38,7 @@ struct SonaApp: App {
         MenuBarExtra {
             MenuBarMenu().environment(model)
         } label: {
-            Image(model.capture.mark)
+            MenuBarMark(model: model)
         }
     }
 }
@@ -44,6 +51,18 @@ extension CaptureState {
         case .recording: "MarkRecording"
         case .working: "MarkWorking"
         }
+    }
+}
+
+/// The menu bar mark. It is on screen from launch while the window is not,
+/// so it is the view that hands the window's opener to the model.
+struct MenuBarMark: View {
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(model.capture.mark)
+            .onAppear { model.presentMainWindow = { openWindow(id: "main") } }
     }
 }
 

@@ -196,12 +196,15 @@ final class AppModel {
     let debug: DebugStore
 
     @ObservationIgnored let core = Core()
-    @ObservationIgnored private let pill = FloatingPanel()
-    @ObservationIgnored private let consent = FloatingPanel()
+    @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
+    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel())
+    /// What the pill showed when it was last placed.
+    @ObservationIgnored private var pillCapture = CaptureState.idle
     /// Presents the main window, as the scene's `openWindow` does. Only a
-    /// view reaches that action, so the shell hands it over when it first
-    /// appears, which is at launch: the scene presents the window then.
-    @ObservationIgnored var presentMainWindow: () -> Void = {}
+    /// view reaches that action, and the window stays closed at launch, so
+    /// the menu bar mark hands it over when it first appears. Observed, so a
+    /// reveal the core asked for before then runs again once it can.
+    var presentMainWindow: () -> Void = {}
 
     init() {
         settings = SettingsStore(core: core)
@@ -305,9 +308,11 @@ final class AppModel {
     /// The main window, in front and key. A floating card, the menu bar, a
     /// link, or the core sends a person somewhere in the window: this comes
     /// first, so the place is not set on a window that is closed or behind.
+    /// Sona is a menu bar app, so another app is in front when this runs, and
+    /// macOS turns down a plain `activate()` then: the window opened behind.
     func reveal() {
         presentMainWindow()
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// The settings, on the tab last shown, from the app menu or the menu bar.
@@ -628,34 +633,42 @@ final class AppModel {
     /// While recording, the sound at the overlay's edge unless the overlay is
     /// off; idle, the mode pill at its own edge when it is on. One panel,
     /// moved between the two. No pill while the core is stopped: it would
-    /// offer a recording nothing can make.
+    /// offer a recording nothing can make. The pill draws its own state; a
+    /// change of it floats the panel afresh on the screen the pointer is on,
+    /// as each dictation always has, and a settings read leaves it in place.
     private func syncPill() {
         let record = settings.settings
+        let anew = capture != pillCapture
+        pillCapture = capture
         if coreStopped {
             pill.hide()
         } else if capture != .idle {
             if record.overlayStyle == .none {
                 pill.hide()
             } else {
-                pill.show(HUDPill().environment(self), at: .edge(record.overlayPosition))
+                pill.show(at: .edge(record.overlayPosition), anew: anew)
             }
         } else if record.hudPillEnabled {
-            pill.show(HUDPill().environment(self), at: .edge(record.hudPillPosition))
+            pill.show(at: .edge(record.hudPillPosition), anew: anew)
         } else {
             pill.hide()
         }
     }
 
     /// The consent panel: an offer to record, the recording in progress, a
-    /// prep or wrap card. The view draws its own surface; this only floats
-    /// it at the top right of the screen the pointer is on, as the Tauri
-    /// window did.
+    /// prep or wrap card. The view reads the store and draws its own surface;
+    /// this only floats it at the top right of the screen the pointer is on
+    /// when a card appears, as the Tauri window did, and leaves it there.
     private func syncConsent() {
-        guard live.card != nil else {
+        if live.card == nil {
             consent.hide()
-            return
+        } else {
+            consent.show(at: .topTrailing)
         }
-        let view = MeetingConsentPanelView(
+    }
+
+    private func consentPanel() -> some View {
+        MeetingConsentPanelView(
             store: live,
             onOpenBrief: { [weak self] id in
                 self?.reveal()
@@ -673,11 +686,11 @@ final class AppModel {
         )
         .padding(8)
         .environment(self)
-        consent.show(view, at: .topTrailing)
     }
 
-    /// The cues the meeting store leaves for the shell: a stopped or imported
-    /// meeting to read, the digest asking for Capture.
+    /// The cues the stores leave for the shell: a stopped or imported
+    /// meeting to read, the digest asking for Capture, and a first run or a
+    /// lost permission, which only the window can walk through.
     private func syncNavigation() {
         if let opened = live.opened {
             reveal()
@@ -688,6 +701,12 @@ final class AppModel {
             reveal()
             go(.capture)
             live.clearCaptureRequest()
+        }
+        switch onboarding.step {
+        case .permissions, .model:
+            reveal()
+        case .probing, .done:
+            break
         }
     }
 
@@ -814,6 +833,8 @@ final class AppModel {
             "No speech was detected. A sample of the recording was saved to History."
         case "no_model_selected":
             "No speech model is selected. Choose one in Settings > Models."
+        case "model_not_downloaded":
+            "The selected speech model isn't downloaded. Download it in Settings > Models."
         case "command_no_selection":
             "Select the text you want to change, then hold the command shortcut and say the change."
         case "command_rewrite_unavailable":

@@ -6857,6 +6857,18 @@ impl MeetingStore {
     }
 }
 
+/// How far a record's host-clock start may sit from the previous record's
+/// computed end and still continue it: half the record, never under one
+/// sample. Starts are host ticks against a truncated duration, so every
+/// record lands a few ticks either side. Past this bound the writer logs a
+/// gap, and a reader restarts its audio at the same place.
+pub(crate) fn timestamp_drift_tolerance_ns(duration_ns: u64, sample_rate_hz: u32) -> u64 {
+    let sample_ns = 1_000_000_000_u64
+        .checked_div(u64::from(sample_rate_hz))
+        .unwrap_or(0);
+    (duration_ns / 2).max(sample_ns)
+}
+
 pub struct MeetingTrackWriter {
     store: Arc<MeetingStore>,
     track_id: SourceTrackId,
@@ -6967,8 +6979,7 @@ impl MeetingTrackWriter {
             || packet.discontinuity_flags.route_changed;
         if !skipped_source_packet && !has_source_boundary {
             if let Some(previous_end_offset_ns) = previous_end_offset_ns {
-                let tolerance_ns =
-                    (duration_ns / 2).max(1_000_000_000 / u64::from(packet.sample_rate_hz));
+                let tolerance_ns = timestamp_drift_tolerance_ns(duration_ns, packet.sample_rate_hz);
                 let drift_ns = start_offset_ns.abs_diff(previous_end_offset_ns);
                 if drift_ns > tolerance_ns {
                     let dropped_frames = (start_offset_ns > previous_end_offset_ns).then(|| {

@@ -5,7 +5,6 @@ import SwiftUI
 /// the pages.
 struct Shell: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack {
@@ -54,9 +53,6 @@ struct Shell: View {
                     model.sheet = nil
                 }
             }
-        }
-        .onAppear {
-            model.presentMainWindow = { openWindow(id: "main") }
         }
     }
 
@@ -162,7 +158,11 @@ struct MeetingsPlace: View {
         } else if meetings.openSessionId != nil {
             MeetingReviewView(
                 store: meetings, settings: model.meetingSettings, openPerson: model.openPerson,
-                openMeetingSettings: { model.showSettings(.meetings) })
+                openMeetingSettings: { model.showSettings(.meetings) },
+                askAgent: { question in
+                    model.chat.editDraft(question)
+                    model.sheet = .chat
+                })
         } else {
             home
         }

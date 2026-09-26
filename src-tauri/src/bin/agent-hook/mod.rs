@@ -36,9 +36,9 @@ const USAGE_EXIT_CODE: i32 = 64;
 /// The app answers a `Stop` only from a reply the user confirmed before the
 /// event arrived: `respond_to_stop` returns without writing when no confirmed
 /// reply is held, and nothing answers that request afterwards. So the wait is
-/// worth only the bridge worker's own scan, which runs every 100 ms, plus room
-/// for the write. Waiting the full request lifetime instead would stall every
-/// turn end for 30 seconds and never produce an answer.
+/// worth only the bridge worker's own scan, which this hook's wake starts at
+/// once, plus room for the write. Waiting the full request lifetime instead
+/// would stall every turn end for 30 seconds and never produce an answer.
 const STOP_POLL_TIMEOUT: Duration = Duration::from_millis(2_000);
 
 /// Fixed, content-free stderr lines. Event and response payloads are private and

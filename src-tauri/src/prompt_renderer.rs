@@ -219,6 +219,18 @@ fn serialized_context_len(context: &ContextPacket) -> usize {
 const LEGACY_OUTPUT_PLACEHOLDER: &str = "${output}";
 const OUTPUT_PLACEHOLDER_REFERENCE: &str = "the transcript in the envelope";
 
+/// The system message a rewrite of `run` sends, as far as it is known before
+/// a word is spoken: the voice command's for a command run, the mode's own
+/// for a dictation. A dictation that ends in a spoken instruction switches to
+/// the command's only once its words are in.
+pub fn system_message(run: &RunPlan) -> String {
+    if run.command().is_some() {
+        COMMAND.to_string()
+    } else {
+        render_system(run)
+    }
+}
+
 fn render_system(run: &RunPlan) -> String {
     let prompt_plan = run.prompt();
     let custom_prompt = prompt_plan.custom_prompt.as_deref();

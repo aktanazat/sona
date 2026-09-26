@@ -157,37 +157,6 @@ extension MeetingProcessingStatus {
         default: false
         }
     }
-
-    /// The one line under a failure that a setting can fix: what to check,
-    /// where. The engine row under Settings says which condition it is in —
-    /// Apple Intelligence off or still preparing, an endpoint without its
-    /// context window, a model the endpoint does not serve — so the page
-    /// sends the reader there instead of guessing which one it was.
-    var settingsAdvice: String? {
-        switch failure {
-        case .localModelUnavailable:
-            "The engine row under Settings › Meetings says what it is waiting on."
-        case .remoteUnavailable:
-            "Check the server under Settings › Meetings, or turn off writing on your server to use this Mac."
-        default:
-            nil
-        }
-    }
-
-    /// The sentence under the reason: why nothing was written.
-    var explanation: String {
-        switch self {
-        case .pending, .running:
-            "Sona is writing the notes for this meeting. This page fills in when it lands."
-        case .succeeded:
-            "Nothing was generated for this meeting."
-        case .cancelled:
-            "Processing was cancelled, so nothing was written."
-        case let .failed(_, cause):
-            cause.map { "Nothing was written because \($0.label)." }
-                ?? "Sona could not write the notes for this meeting."
-        }
-    }
 }
 
 extension MeetingHistorySummary {
@@ -1161,21 +1130,27 @@ final class MeetingsStore {
 
     var trackers: [MeetingTrackerResult] { analytics?.analytics.trackers ?? [] }
 
-    /// "Ada 62% · Bo 31%": the two loudest, the way the strip's own band
-    /// summarises itself.
-    var talkLeaders: String {
-        guard let talk else { return "" }
-        return talk.speakers
+    /// The voices that said something, loudest first: a thin bar each.
+    var talkShares: [SpeakerTalkShare] {
+        (talk?.speakers ?? [])
+            .filter { $0.turnCount > 0 }
             .sorted { $0.sharePermille > $1.sharePermille }
-            .prefix(2)
-            .map { "\(speakerName($0.speakerId)) \($0.sharePermille.meetingTalkShare)" }
-            .joined(separator: " · ")
     }
 
     /// `formatPatience`: milliseconds under a second, one decimal above it.
-    var patience: String {
-        guard let gap = talk?.medianSwitchGapMs else { return "—" }
+    /// A room of one has no switch to wait through, so it reads nothing.
+    var patience: String? {
+        guard talkShares.count > 1, let gap = talk?.medianSwitchGapMs else { return nil }
         return gap < 1_000 ? "\(gap)ms" : String(format: "%.1fs", Double(gap) / 1_000)
+    }
+
+    /// How often the room changed hands, while two voices each hold at least
+    /// one turn in twenty. Below that one side is listening, and a count of
+    /// handovers to a listener says nothing.
+    var handovers: Int? {
+        guard let talk, talk.interactionCount > 0 else { return nil }
+        let talkers = talk.speakers.filter { $0.turnCount > 0 && $0.turnCount * 20 >= talk.turnCount }
+        return talkers.count > 1 ? talk.interactionCount : nil
     }
 
     // MARK: - Loops and commitments
