@@ -1451,8 +1451,11 @@ mod tests {
         assert_eq!(MAX_CHAT_SUBMISSION_BYTES, 2_984_620);
         assert_eq!(
             MAX_CHAT_SUBMISSION_BYTES,
-            MAX_CONTEXT_PACK_BYTES + MAX_USER_MESSAGE_BYTES + MAX_RECENT_TURN_BYTES
-                + 16 * 1024 + MAX_SCREENSHOT_BASE64_BYTES,
+            MAX_CONTEXT_PACK_BYTES
+                + MAX_USER_MESSAGE_BYTES
+                + MAX_RECENT_TURN_BYTES
+                + 16 * 1024
+                + MAX_SCREENSHOT_BASE64_BYTES,
             "the submission includes the base64-encoded screenshot budget"
         );
     }

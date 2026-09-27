@@ -4,7 +4,11 @@ import { describe, expect, test } from "bun:test";
 import type { Cluster } from "../src/objects";
 import { parseClassification, resolveCluster } from "../src/sort";
 
-const SIDE_PROJECTS: Cluster = { hue: 212, key: "side-projects", name: "Side Projects" };
+const SIDE_PROJECTS: Cluster = {
+  hue: 212,
+  key: "side-projects",
+  name: "Side Projects",
+};
 
 describe("resolveCluster against a board with Side Projects", () => {
   test.each([
@@ -13,7 +17,9 @@ describe("resolveCluster against a board with Side Projects", () => {
     ["  SIDE PROJECTS  "],
     ["Sidé Projects"],
   ])("maps %j onto the existing cluster", (spelling) => {
-    expect(resolveCluster(spelling, [SIDE_PROJECTS])).toStrictEqual(SIDE_PROJECTS);
+    expect(resolveCluster(spelling, [SIDE_PROJECTS])).toStrictEqual(
+      SIDE_PROJECTS,
+    );
   });
 
   test("opens a new cluster for a name the board lacks, keyed by its slug", () => {
@@ -42,7 +48,9 @@ describe("parseClassification", () => {
 
   test("reads a bare object unchanged", () => {
     expect(
-      parseClassification('{"title":"A","summary":"","tags":[],"cluster":"Ideas"}'),
+      parseClassification(
+        '{"title":"A","summary":"","tags":[],"cluster":"Ideas"}',
+      ),
     ).toStrictEqual({ cluster: "Ideas", summary: "", tags: [], title: "A" });
   });
 

@@ -73,12 +73,14 @@ mod tests {
     #[test]
     fn truncated_pixels_are_refused_even_with_a_valid_png_header() {
         let mut bytes = png(8, 8);
-        let pixels = bytes.windows(4).position(|part| part == b"IDAT")
+        let pixels = bytes
+            .windows(4)
+            .position(|part| part == b"IDAT")
             .expect("PNG fixture has image data");
         bytes.truncate(pixels + 8);
-        let result = serde_json::from_value::<ChatScreenshot>(
-            serde_json::Value::String(STANDARD.encode(bytes)),
-        );
+        let result = serde_json::from_value::<ChatScreenshot>(serde_json::Value::String(
+            STANDARD.encode(bytes),
+        ));
         assert!(result.is_err());
     }
 }

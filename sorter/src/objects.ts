@@ -12,7 +12,11 @@ import {
   sha256Base64Url,
   utf8,
 } from "../../cloudflare/sona-companion/src/encoding";
-import type { DeviceIdentity, ObjectUploadPlan, RevisionManifest } from "./client";
+import type {
+  DeviceIdentity,
+  ObjectUploadPlan,
+  RevisionManifest,
+} from "./client";
 import { signEd25519 } from "./keys";
 
 /* Source formats are bound into every payload's HKDF info and AES-GCM AAD, so a
@@ -106,7 +110,9 @@ export function canonicalJson(value: Json): Uint8Array {
     if (Array.isArray(node)) return node.map(sorted);
     if (node !== null && typeof node === "object") {
       const out: { [key: string]: Json } = {};
-      for (const [key, child] of Object.entries(node).sort(([a], [b]) => (a < b ? -1 : 1)))
+      for (const [key, child] of Object.entries(node).sort(([a], [b]) =>
+        a < b ? -1 : 1,
+      ))
         out[key] = sorted(child);
       return out;
     }
@@ -140,7 +146,9 @@ export async function openManifest(
     envelope.crypto_version !== 1 ||
     (await sha256Base64Url(ciphertext)) !== envelope.manifest_sha256
   ) {
-    throw new Error(`manifest ${envelope.object_id}/${envelope.revision_id} failed integrity`);
+    throw new Error(
+      `manifest ${envelope.object_id}/${envelope.revision_id} failed integrity`,
+    );
   }
   const open = (sourceFormat: string): Promise<Uint8Array | null> =>
     decryptObjectRevisionPayload({
@@ -156,11 +164,17 @@ export async function openManifest(
     }).catch(() => null);
   const thought = await open(THOUGHT_SOURCE_FORMAT);
   if (thought !== null) {
-    return { kind: "thought", manifest: ThoughtManifest.parse(JSON.parse(decodeUtf8(thought))) };
+    return {
+      kind: "thought",
+      manifest: ThoughtManifest.parse(JSON.parse(decodeUtf8(thought))),
+    };
   }
   const card = await open(CARD_SOURCE_FORMAT);
   if (card !== null) {
-    return { kind: "card", manifest: CardManifest.parse(JSON.parse(decodeUtf8(card))) };
+    return {
+      kind: "card",
+      manifest: CardManifest.parse(JSON.parse(decodeUtf8(card))),
+    };
   }
   return { kind: "other" };
 }
@@ -243,7 +257,9 @@ export async function sealCard(
 }
 
 /** Stable idempotency key: base64url(sha256(part || 0x00 …)), as `runtime.rs` derives it. */
-export async function idempotencyKey(parts: readonly string[]): Promise<string> {
+export async function idempotencyKey(
+  parts: readonly string[],
+): Promise<string> {
   const bytes: number[] = [];
   for (const part of parts) bytes.push(...utf8(part), 0);
   return sha256Base64Url(new Uint8Array(bytes));

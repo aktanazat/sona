@@ -10,16 +10,16 @@ rule:
       - kind: user_type
         has:
           kind: type_identifier
-          regex: '^(Any|AnyObject)$'
+          regex: "^(Any|AnyObject)$"
       - kind: array_type
         has:
           kind: user_type
           has:
             kind: type_identifier
-            regex: '^Any$'
+            regex: "^Any$"
       - kind: optional_type
         has:
           kind: user_type
           has:
             kind: type_identifier
-            regex: '^Any$'
+            regex: "^Any$"

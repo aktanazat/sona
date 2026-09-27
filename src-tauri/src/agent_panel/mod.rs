@@ -703,7 +703,8 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         R: NativeAgentPanelRuntime,
     {
         if !is_opaque_id(&request.turn_id)
-            || (request.workspace != AgentPanelWorkspaceV1::SonaChat && request.screenshot.is_some())
+            || (request.workspace != AgentPanelWorkspaceV1::SonaChat
+                && request.screenshot.is_some())
         {
             return Err(AgentPanelCommandErrorV1::InvalidRequest);
         }

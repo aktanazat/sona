@@ -1,4 +1,7 @@
-import { deriveAesGcmKey, record } from "../../cloudflare/sona-companion/src/crypto";
+import {
+  deriveAesGcmKey,
+  record,
+} from "../../cloudflare/sona-companion/src/crypto";
 import {
   base64UrlDecode,
   concatBytes,
@@ -30,7 +33,8 @@ async function importPrivateKey(
   algorithm: "Ed25519" | "X25519",
   usages: KeyUsage[],
 ): Promise<CryptoKey> {
-  if (raw.length !== KEY_BYTES) throw new Error(`invalid ${algorithm} private key`);
+  if (raw.length !== KEY_BYTES)
+    throw new Error(`invalid ${algorithm} private key`);
   return crypto.subtle.importKey(
     "pkcs8",
     concatBytes([prefix, raw]),
@@ -45,25 +49,32 @@ async function importPrivateKey(
 async function publicKeyOf(privateKey: CryptoKey): Promise<Uint8Array> {
   const jwk = await crypto.subtle.exportKey("jwk", privateKey);
   const raw = jwk.x === undefined ? null : base64UrlDecode(jwk.x);
-  if (raw === null || raw.length !== KEY_BYTES) throw new Error("invalid public key");
+  if (raw === null || raw.length !== KEY_BYTES)
+    throw new Error("invalid public key");
   return raw;
 }
 
 export async function ed25519PublicKey(seed: Uint8Array): Promise<Uint8Array> {
-  return publicKeyOf(await importPrivateKey(ED25519_PKCS8_PREFIX, seed, "Ed25519", ["sign"]));
+  return publicKeyOf(
+    await importPrivateKey(ED25519_PKCS8_PREFIX, seed, "Ed25519", ["sign"]),
+  );
 }
 
 export async function signEd25519(
   seed: Uint8Array,
   message: Uint8Array,
 ): Promise<Uint8Array> {
-  const key = await importPrivateKey(ED25519_PKCS8_PREFIX, seed, "Ed25519", ["sign"]);
+  const key = await importPrivateKey(ED25519_PKCS8_PREFIX, seed, "Ed25519", [
+    "sign",
+  ]);
   return new Uint8Array(await crypto.subtle.sign("Ed25519", key, message));
 }
 
 export async function x25519PublicKey(secret: Uint8Array): Promise<Uint8Array> {
   return publicKeyOf(
-    await importPrivateKey(X25519_PKCS8_PREFIX, secret, "X25519", ["deriveBits"]),
+    await importPrivateKey(X25519_PKCS8_PREFIX, secret, "X25519", [
+      "deriveBits",
+    ]),
   );
 }
 
@@ -73,11 +84,21 @@ export async function x25519SharedSecret(
   secret: Uint8Array,
   peerPublicKey: Uint8Array,
 ): Promise<Uint8Array> {
-  if (peerPublicKey.length !== KEY_BYTES) throw new Error("invalid X25519 public key");
-  const privateKey = await importPrivateKey(X25519_PKCS8_PREFIX, secret, "X25519", [
-    "deriveBits",
-  ]);
-  const publicKey = await crypto.subtle.importKey("raw", peerPublicKey, { name: "X25519" }, false, []);
+  if (peerPublicKey.length !== KEY_BYTES)
+    throw new Error("invalid X25519 public key");
+  const privateKey = await importPrivateKey(
+    X25519_PKCS8_PREFIX,
+    secret,
+    "X25519",
+    ["deriveBits"],
+  );
+  const publicKey = await crypto.subtle.importKey(
+    "raw",
+    peerPublicKey,
+    { name: "X25519" },
+    false,
+    [],
+  );
   const bits = await crypto.subtle.deriveBits(
     { name: "X25519", public: publicKey },
     privateKey,
@@ -120,7 +141,9 @@ export async function openPairingEnvelope(
   ) {
     throw new Error("invalid pairing envelope");
   }
-  if (!equalBytes(fields[1] ?? new Uint8Array(), utf8(PAIRING_ENVELOPE_VERSION))) {
+  if (
+    !equalBytes(fields[1] ?? new Uint8Array(), utf8(PAIRING_ENVELOPE_VERSION))
+  ) {
     throw new Error("unsupported pairing envelope version");
   }
   const ephemeralPublicKey = fields[2] ?? new Uint8Array();
@@ -138,7 +161,11 @@ export async function openPairingEnvelope(
   const key = await deriveAesGcmKey(
     shared,
     utf8("sona-pairing-envelope-v1"),
-    record("sona-pairing-envelope-key-v1", recipientPublicKey, ephemeralPublicKey),
+    record(
+      "sona-pairing-envelope-key-v1",
+      recipientPublicKey,
+      ephemeralPublicKey,
+    ),
   );
   const aad = record(
     "sona-pairing-envelope-aad-v1",
@@ -154,6 +181,7 @@ export async function openPairingEnvelope(
       ciphertext,
     ),
   );
-  if (vaultRoot.length !== KEY_BYTES) throw new Error("invalid pairing envelope");
+  if (vaultRoot.length !== KEY_BYTES)
+    throw new Error("invalid pairing envelope");
   return vaultRoot;
 }

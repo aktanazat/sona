@@ -11,23 +11,23 @@ rule:
             kind: user_type
             has:
               kind: type_identifier
-              regex: '^String$'
+              regex: "^String$"
         - has:
             kind: user_type
             has:
               kind: type_identifier
-              regex: '^(Any|AnyObject)$'
+              regex: "^(Any|AnyObject)$"
     - kind: type_identifier
-      regex: '^NSDictionary$'
+      regex: "^NSDictionary$"
     - all:
         - kind: user_type
         - has:
             kind: type_identifier
-            regex: '^Dictionary$'
+            regex: "^Dictionary$"
         - has:
             kind: type_arguments
             has:
               kind: user_type
               has:
                 kind: type_identifier
-                regex: '^(Any|AnyObject)$'
+                regex: "^(Any|AnyObject)$"

@@ -5,7 +5,12 @@ import {
   sha256Base64Url,
 } from "../../cloudflare/sona-companion/src/encoding";
 import { ApiError, CompanionClient, type SelfDevice } from "./client";
-import { ed25519PublicKey, openPairingEnvelope, signEd25519, x25519PublicKey } from "./keys";
+import {
+  ed25519PublicKey,
+  openPairingEnvelope,
+  signEd25519,
+  x25519PublicKey,
+} from "./keys";
 import type { SorterModel } from "./sort";
 import {
   type Credentials,
@@ -41,7 +46,8 @@ function log(line: string): void {
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
-  if (value === undefined || value === "") throw new Error(`${name} is not set`);
+  if (value === undefined || value === "")
+    throw new Error(`${name} is not set`);
   return value;
 }
 
@@ -73,7 +79,9 @@ async function mintOffer(
     vaultId,
   });
   return {
-    candidate_proof: base64UrlEncode(await signEd25519(identity.signingSeed, record)),
+    candidate_proof: base64UrlEncode(
+      await signEd25519(identity.signingSeed, record),
+    ),
     device_id: identity.deviceId,
     expires_at_utc_ms: expiresAt,
     fingerprint: (await sha256Base64Url(record)).slice(0, 12),
@@ -102,11 +110,14 @@ async function acceptApproval(
     device.pairing_public_key !== offer.pairing_public_key ||
     device.protocol_version !== PROTOCOL_VERSION
   ) {
-    throw new Error("the Worker's record of this device does not match the offer");
+    throw new Error(
+      "the Worker's record of this device does not match the offer",
+    );
   }
   if (device.envelope === null) return null;
   const envelope = base64UrlDecode(device.envelope);
-  if (envelope === null) throw new Error("the approval envelope is not base64url");
+  if (envelope === null)
+    throw new Error("the approval envelope is not base64url");
   const vaultRoot = await openPairingEnvelope(identity.pairingSecret, envelope);
   return {
     endpoint: pending.endpoint,
@@ -117,7 +128,9 @@ async function acceptApproval(
 
 /* The Worker learns a candidate only when the desktop approves it, so until then
  * every signed request answers 401 unauthorized: that is "not yet", not a fault. */
-async function selfDeviceIfKnown(client: CompanionClient): Promise<SelfDevice | null> {
+async function selfDeviceIfKnown(
+  client: CompanionClient,
+): Promise<SelfDevice | null> {
   try {
     return await client.selfDevice();
   } catch (error) {
@@ -126,7 +139,11 @@ async function selfDeviceIfKnown(client: CompanionClient): Promise<SelfDevice | 
   }
 }
 
-async function pair(state: StateDir, endpoint: string, vaultId: string): Promise<void> {
+async function pair(
+  state: StateDir,
+  endpoint: string,
+  vaultId: string,
+): Promise<void> {
   const identity = await state.identity();
   const client = new CompanionClient(endpoint, identity, vaultId);
   await client.syncClock();
@@ -134,13 +151,18 @@ async function pair(state: StateDir, endpoint: string, vaultId: string): Promise
   const pending: Pending = { endpoint, offer, vault_id: vaultId };
   await state.savePending(pending);
   console.log(JSON.stringify(offer));
-  log(`offer fingerprint ${offer.fingerprint}; paste the line above into Sona's Cloud Sync panel`);
+  log(
+    `offer fingerprint ${offer.fingerprint}; paste the line above into Sona's Cloud Sync panel`,
+  );
   for (;;) {
     if (client.nowUtcMs() >= offer.expires_at_utc_ms) {
-      throw new Error("the offer expired before the desktop approved it; run pair again");
+      throw new Error(
+        "the offer expired before the desktop approved it; run pair again",
+      );
     }
     const device = await selfDeviceIfKnown(client);
-    const credentials = device === null ? null : await acceptApproval(identity, pending, device);
+    const credentials =
+      device === null ? null : await acceptApproval(identity, pending, device);
     if (credentials !== null) {
       await state.saveCredentials(credentials);
       await state.clearPending();
@@ -153,12 +175,18 @@ async function pair(state: StateDir, endpoint: string, vaultId: string): Promise
 
 async function sorter(state: StateDir): Promise<Sorter> {
   const credentials = await state.credentials();
-  if (credentials === null) throw new Error("not paired; run `pair <endpoint> <vault_id>` first");
+  if (credentials === null)
+    throw new Error("not paired; run `pair <endpoint> <vault_id>` first");
   const identity = await state.identity();
-  const client = new CompanionClient(credentials.endpoint, identity, credentials.vault_id);
+  const client = new CompanionClient(
+    credentials.endpoint,
+    identity,
+    credentials.vault_id,
+  );
   await client.syncClock();
   const vaultRoot = base64UrlDecode(credentials.vault_root);
-  if (vaultRoot === null) throw new Error("credentials.json holds no vault root");
+  if (vaultRoot === null)
+    throw new Error("credentials.json holds no vault root");
   return new Sorter({
     client,
     identity,
@@ -177,7 +205,9 @@ async function once(state: StateDir): Promise<void> {
 /* A revoked device cannot recover by retrying; anything else is logged and tried
  * again next interval, so a Worker or model outage never stops the loop. */
 async function run(state: StateDir): Promise<void> {
-  const intervalMs = Number(process.env.SONA_SORTER_INTERVAL_MS || DEFAULT_INTERVAL_MS);
+  const intervalMs = Number(
+    process.env.SONA_SORTER_INTERVAL_MS || DEFAULT_INTERVAL_MS,
+  );
   if (!Number.isInteger(intervalMs) || intervalMs <= 0) {
     throw new Error("SONA_SORTER_INTERVAL_MS must be a positive integer");
   }
@@ -189,7 +219,8 @@ async function run(state: StateDir): Promise<void> {
         log(`synced ${result.synced} changes, filed ${result.sorted} thoughts`);
       }
     } catch (error) {
-      if (error instanceof ApiError && error.code === "revoked_device") throw error;
+      if (error instanceof ApiError && error.code === "revoked_device")
+        throw error;
       log(`pass failed: ${String(error)}`);
     }
     await Bun.sleep(intervalMs);

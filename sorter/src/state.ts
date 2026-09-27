@@ -1,13 +1,19 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { base64UrlDecode, base64UrlEncode, randomId } from "../../cloudflare/sona-companion/src/encoding";
+import {
+  base64UrlDecode,
+  base64UrlEncode,
+  randomId,
+} from "../../cloudflare/sona-companion/src/encoding";
 import type { DeviceIdentity } from "./client";
 import { KEY_BYTES } from "./keys";
 
-const key32 = z.string().refine((value) => base64UrlDecode(value)?.length === KEY_BYTES, {
-  message: "expected 32 base64url bytes",
-});
+const key32 = z
+  .string()
+  .refine((value) => base64UrlDecode(value)?.length === KEY_BYTES, {
+    message: "expected 32 base64url bytes",
+  });
 
 const Identity = z.object({
   device_id: z.string(),
@@ -57,7 +63,9 @@ export type FeedObject = z.infer<typeof FeedObject>;
 
 /** A derived cache of the vault's heads; delete the file and the next pass rebuilds it. */
 const Feed = z.object({
-  attempts: z.record(z.object({ count: z.number().int(), next_at_utc_ms: z.number().int() })),
+  attempts: z.record(
+    z.object({ count: z.number().int(), next_at_utc_ms: z.number().int() }),
+  ),
   cursor: z.string().nullable(),
   objects: z.record(FeedObject),
 });
@@ -72,7 +80,10 @@ export interface FullIdentity extends DeviceIdentity {
 /** What `readFile` throws for a missing file; anything else propagates. */
 const MissingFile = z.object({ code: z.literal("ENOENT") });
 
-async function readJson<Value>(path: string, schema: z.ZodType<Value>): Promise<Value | null> {
+async function readJson<Value>(
+  path: string,
+  schema: z.ZodType<Value>,
+): Promise<Value | null> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -95,7 +106,8 @@ async function writeJson(
 
 function decodeKey(text: string): Uint8Array {
   const bytes = base64UrlDecode(text);
-  if (bytes === null || bytes.length !== KEY_BYTES) throw new Error("invalid key material");
+  if (bytes === null || bytes.length !== KEY_BYTES)
+    throw new Error("invalid key material");
   return bytes;
 }
 
@@ -123,8 +135,12 @@ export class StateDir {
     }
     const fresh = {
       device_id: randomId(),
-      pairing_secret: base64UrlEncode(crypto.getRandomValues(new Uint8Array(KEY_BYTES))),
-      signing_seed: base64UrlEncode(crypto.getRandomValues(new Uint8Array(KEY_BYTES))),
+      pairing_secret: base64UrlEncode(
+        crypto.getRandomValues(new Uint8Array(KEY_BYTES)),
+      ),
+      signing_seed: base64UrlEncode(
+        crypto.getRandomValues(new Uint8Array(KEY_BYTES)),
+      ),
     };
     await writeJson(this.path("identity.json"), fresh, 0o600);
     return {
