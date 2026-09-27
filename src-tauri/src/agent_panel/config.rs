@@ -923,6 +923,7 @@ mod tests {
     fn safe_appearance_defaults_off_and_undo_restores_prior_values() {
         let mut settings = get_default_settings();
         assert!(!settings.agent_panel_safe_appearance_auto_apply);
+        let (prior_theme, prior_overlay) = (settings.theme, settings.overlay_style);
         let expected = settings.settings_revision;
         let undo = mutate_settings(
             &mut settings,
@@ -937,8 +938,9 @@ mod tests {
         for change in undo.iter().rev() {
             restore_setting(&mut settings, change).expect("undo applies");
         }
-        assert_eq!(settings.theme, Theme::System);
-        assert_eq!(settings.overlay_style, OverlayStyle::Live);
+        // Prior values, not literals: the overlay default differs on Linux.
+        assert_eq!(settings.theme, prior_theme);
+        assert_eq!(settings.overlay_style, prior_overlay);
     }
 
     #[test]
