@@ -118,11 +118,15 @@ test.describe("App shell", () => {
       .click();
     await expect(page.getByTestId("settings-hub")).toBeVisible();
 
-    /* Two tabs, and Debug is absent until the chord unlocks it. Five of the
-     * seven tabs this hub used to carry are gone: General, Privacy, Agents,
-     * Workflows and About are all Advanced now. */
+    /* Three tabs, and Debug is absent until the chord unlocks it. General,
+     * Privacy, Agents, Workflows and About are all Advanced now; Prompts has
+     * its own tab. */
     const tabs = page.getByRole("tablist", { name: "Settings" });
-    await expect(tabs.getByRole("tab")).toHaveText(["Essentials", "Advanced"]);
+    await expect(tabs.getByRole("tab")).toHaveText([
+      "Essentials",
+      "Advanced",
+      "Prompts",
+    ]);
     await expect(
       tabs.getByRole("tab", { name: "Essentials", exact: true }),
     ).toHaveAttribute("aria-selected", "true");

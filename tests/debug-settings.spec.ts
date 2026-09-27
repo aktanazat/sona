@@ -92,6 +92,7 @@ test.describe("Debug settings", () => {
     await expect(settingsTabs(page).getByRole("tab")).toHaveText([
       "Essentials",
       "Advanced",
+      "Prompts",
     ]);
     await expect(
       page.getByRole("heading", { name: "Debug", exact: true }),
@@ -104,6 +105,7 @@ test.describe("Debug settings", () => {
     await expect(settingsTabs(page).getByRole("tab")).toHaveText([
       "Essentials",
       "Advanced",
+      "Prompts",
       "Debug",
     ]);
     await expect(
