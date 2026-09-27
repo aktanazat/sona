@@ -2720,9 +2720,19 @@ mod tests {
             packets
         };
 
+        // The consumer takes the start command on its own thread, and only a
+        // buffer that arrives after that belongs to the meeting. On a loaded
+        // machine eight buffers can all land first, so keep the room talking
+        // until the start is acknowledged or the deadline passes.
         pump(&mut producer, &speech, 8);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut acknowledged = start_result.try_recv().is_ok();
+        while !acknowledged && Instant::now() < deadline {
+            pump(&mut producer, &speech, 1);
+            acknowledged = start_result.recv_timeout(Duration::from_millis(10)).is_ok();
+        }
         assert!(
-            start_result.recv_timeout(Duration::from_secs(2)).is_ok(),
+            acknowledged,
             "the meeting source never acknowledged its start"
         );
         assert!(drain(&mut reader) > 0, "no audio reached the meeting lane");
