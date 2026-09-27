@@ -584,7 +584,7 @@ fn loop_two_learns_the_word_a_dictation_correction_changed() {
         correction(
             &store,
             &inputs,
-            "please open the handy project",
+            "please open the sonar project",
             "please open the Sona project",
             day,
             index,
@@ -593,7 +593,7 @@ fn loop_two_learns_the_word_a_dictation_correction_changed() {
     assert_eq!(
         suggestions(&store, &inputs),
         vec![LearningSuggestion::VocabularyCorrection {
-            spoken: "handy".to_string(),
+            spoken: "sonar".to_string(),
             written: "Sona".to_string(),
         }]
     );

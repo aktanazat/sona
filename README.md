@@ -150,4 +150,4 @@ Use the settings screens to inspect the live permission state and application-da
 
 ## Licenses
 
-The bundled **Open-source licenses** action opens the packaged `LICENSE` and `NOTICE` files. Handy's MIT notice is kept in `LICENSE`.
+The bundled **Open-source licenses** action opens the packaged `LICENSE` and `NOTICE` files.
