@@ -112,6 +112,14 @@
                 package.json > $TMPDIR/package.json
               cp $TMPDIR/package.json package.json
 
+              # Run `next build` on real Node. The bun2nix hook puts Bun first on
+              # the path as `node`, and Bun cannot load Next's compiled page
+              # runtime while collecting page data.
+              ${pkgs.jq}/bin/jq --arg next "${pkgs.nodejs}/bin/node node_modules/next/dist/bin/next build" \
+                '.build.beforeBuildCommand = "bun run prepare:agent-hook && " + $next' \
+                src-tauri/tauri.conf.json > $TMPDIR/tauri.conf.json
+              cp $TMPDIR/tauri.conf.json src-tauri/tauri.conf.json
+
               # Point libappindicator-sys to the Nix store path
               substituteInPlace \
                 $cargoDepsCopy/libappindicator-sys-*/src/lib.rs \
@@ -140,9 +148,6 @@
               pkg-config
               wrapGAppsHook4
               bun
-              # `next build` runs through its `node` shebang. Without Node on the
-              # path Bun stands in, and it cannot load Next's compiled runtime.
-              nodejs
               # pkgs.bun2nix (from overlay), not the flake input — `with pkgs;`
               # doesn't shadow function arguments in Nix.
               pkgs.bun2nix.hook # Sets up node_modules from pre-fetched bun cache
