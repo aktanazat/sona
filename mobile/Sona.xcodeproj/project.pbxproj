@@ -82,6 +82,8 @@
 		CA000000000000000000003F /* SonaIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003F /* SonaIntents.swift */; };
 		CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000040 /* PhoneCallsScreen.swift */; };
 		CC0000000000000000000041 /* PhoneParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000041 /* PhoneParityTests.swift */; };
+		CA0000000000000000000042 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000042 /* Assets.xcassets */; };
+		CB0000000000000000000043 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000043 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -181,6 +183,8 @@
 		BB000000000000000000003F /* SonaIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonaIntents.swift; sourceTree = "<group>"; };
 		BB0000000000000000000040 /* PhoneCallsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCallsScreen.swift; sourceTree = "<group>"; };
 		BB0000000000000000000041 /* PhoneParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneParityTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000042 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		BB0000000000000000000043 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -303,6 +307,7 @@
 				BB000000000000000000003E /* PhoneCalendar.swift */,
 				BB000000000000000000003F /* SonaIntents.swift */,
 				BB0000000000000000000040 /* PhoneCallsScreen.swift */,
+				BB0000000000000000000042 /* Assets.xcassets */,
 			);
 			path = Sona;
 			sourceTree = "<group>";
@@ -313,6 +318,7 @@
 				BB000000000000000000000E /* SonaWatchApp.swift */,
 				BB000000000000000000000F /* WatchRecorder.swift */,
 				BB0000000000000000000018 /* Localizable.strings */,
+				BB0000000000000000000043 /* Assets.xcassets */,
 			);
 			path = SonaWatch;
 			sourceTree = "<group>";
@@ -477,6 +483,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CA0000000000000000000017 /* Localizable.strings in Resources */,
+				CA0000000000000000000042 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -485,6 +492,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CB0000000000000000000018 /* Localizable.strings in Resources */,
+				CB0000000000000000000043 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -661,6 +669,7 @@
 		F10000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
@@ -686,6 +695,7 @@
 		F10000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
@@ -711,6 +721,7 @@
 		F10000000000000000000005 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
@@ -733,6 +744,7 @@
 		F10000000000000000000006 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
