@@ -381,9 +381,10 @@ final class AppModel: NSObject, ObservableObject {
         pairingMessage = nil
         do {
             let client = try CompanionClient(endpoint: endpoint)
-            /* The Mac rejects an offer whose expiry is outside its own fifteen-minute
-             * window, so the phone's clock is corrected before the record is signed. */
-            try? await client.syncClock()
+            /* Reaching the vault proves the address before a code is shown for it, and
+             * corrects the phone's clock: the Mac rejects an offer whose expiry is
+             * outside its own fifteen-minute window. */
+            try await client.syncClock()
             let offer = try Pairing.candidateOffer(
                 identity: vault.identity,
                 vaultId: vaultId,
@@ -394,26 +395,29 @@ final class AppModel: NSObject, ObservableObject {
             VaultKeychain.save(state)
             vault = state
             pairingOffer = offer
-        } catch {
+        } catch CompanionError.invalidEndpoint {
             pairingMessage = "pair.badEndpoint"
+        } catch is CompanionError {
+            pairingMessage = "pair.unreachable"
+        } catch {
+            pairingMessage = "pair.failed"
         }
     }
 
     /// Read the approval the desktop wrote and store the vault root it carries.
     func finishPairing() async {
-        guard let pending = vault.pending else {
+        let endpoint = endpointDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var pending = vault.pending, !endpoint.isEmpty else {
             pairingMessage = "pair.needFields"
             return
         }
+        /* The offer names this phone and the vault, not the address, so the approval is
+         * read from the address in the field: a mistyped one is corrected there, because
+         * the vault refuses a second approval for a device it already knows. */
+        pending.endpoint = endpoint
         pairingMessage = nil
         do {
-            let client = try CompanionClient(endpoint: pending.endpoint)
-            let device = try await client.selfDevice(
-                identity: vault.identity, vaultId: pending.vaultId
-            )
-            let credentials = try Pairing.acceptApproval(
-                identity: vault.identity, pending: pending, selfDevice: device
-            )
+            let credentials = try await Pairing.finish(identity: vault.identity, pending: pending)
             var state = vault
             state.credentials = credentials
             state.pending = nil
@@ -426,6 +430,12 @@ final class AppModel: NSObject, ObservableObject {
             await drain()
         } catch PairingError.notApprovedYet {
             pairingMessage = "pair.notApproved"
+        } catch PairingError.offerExpired {
+            pairingMessage = "pair.expired"
+        } catch CompanionError.invalidEndpoint {
+            pairingMessage = "pair.badEndpoint"
+        } catch CompanionError.transport, CompanionError.invalidResponse {
+            pairingMessage = "pair.unreachable"
         } catch {
             pairingMessage = "pair.failed"
         }

@@ -31,7 +31,9 @@
 "pair.close" = "Close";
 "pair.needFields" = "Enter the vault address and id first.";
 "pair.badEndpoint" = "Not a vault address.";
+"pair.unreachable" = "Could not reach this vault. Check the address and your connection.";
 "pair.notApproved" = "Not approved yet. Approve this phone on your Mac.";
+"pair.expired" = "This code expired. Create a new pairing code.";
 "pair.done" = "Paired.";
 "pair.failed" = "Pairing failed.";
 
