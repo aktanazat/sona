@@ -112,10 +112,10 @@
                 package.json > $TMPDIR/package.json
               cp $TMPDIR/package.json package.json
 
-              # Run `next build` on real Node. The bun2nix hook puts Bun first on
-              # the path as `node`, and Bun cannot load Next's compiled page
-              # runtime while collecting page data.
-              ${pkgs.jq}/bin/jq --arg next "${pkgs.nodejs}/bin/node node_modules/next/dist/bin/next build" \
+              # Run `next build` on real Node, first on the path. The bun2nix hook
+              # puts Bun on the path as `node`: Bun cannot load Next's compiled
+              # page runtime, and Turbopack spawns its PostCSS workers as `node`.
+              ${pkgs.jq}/bin/jq --arg next "PATH=${pkgs.nodejs}/bin:\$PATH node node_modules/next/dist/bin/next build" \
                 '.build.beforeBuildCommand = "bun run prepare:agent-hook && " + $next' \
                 src-tauri/tauri.conf.json > $TMPDIR/tauri.conf.json
               cp $TMPDIR/tauri.conf.json src-tauri/tauri.conf.json
