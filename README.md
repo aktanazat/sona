@@ -55,6 +55,8 @@ Local runs keep captured audio on the device. Cloud transcription sends audio on
 - notes can be copied as formatted text or markdown. encrypted browser links require the companion service. named-viewer access, comments, and collaborative editing are not built. external destinations require their own setup and consent.
 - the iphone app adds keyboard recording sessions, shortcuts, language choices, saved meeting notes, and playback. sync requires a paired companion service. optional recorded outgoing calls require a configured calling service; ordinary iphone call audio is not accessible.
 
+meeting sync saves an encrypted copy before uploading. if an upload is interrupted, sona uses that saved copy to try again.
+
 ## Releases and install
 
 Tagged builds are published on the [releases page](https://github.com/aktanazat/sona/releases). Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds macOS (Apple silicon), Windows, and Linux bundles and attaches them to a draft release for review before publishing.

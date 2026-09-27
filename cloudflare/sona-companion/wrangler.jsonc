@@ -6,13 +6,13 @@
   "workers_dev": true,
   "vars": {
     "AUDIENCE": "sona-companion",
-    "WORKER_VERSION": "local",
+    "WORKER_VERSION": "40e9316e",
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "sona-companion",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ad090602-83e3-4f27-a907-6564f45d5812",
       "migrations_dir": "migrations",
     },
   ],

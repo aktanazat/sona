@@ -252,6 +252,11 @@ struct CloudAccess {
     keys: CloudSyncKeys,
 }
 
+struct PreparedOutboxClaim {
+    record: CloudOutboxRecord,
+    preparation: Result<(), CloudRuntimeError>,
+}
+
 struct StagedChunk {
     index: u32,
     size: u64,
@@ -1706,10 +1711,10 @@ impl CloudSyncRuntime {
                 return Ok(());
             }
             let claim_token = random_opaque_id()?;
-            let Some(record) = access
-                .store
-                .claim_cloud_outbox(&due_record.outbox_id, &claim_token, utc_now_ms())
-                .map_err(map_store_error)?
+            let Some(PreparedOutboxClaim {
+                record,
+                preparation,
+            }) = Self::prepare_outbox_claim(access, &due_record, &claim_token, utc_now_ms())?
             else {
                 continue;
             };
@@ -1721,12 +1726,19 @@ impl CloudSyncRuntime {
                 );
                 return Ok(());
             }
-            let result = match record.kind {
-                CloudOutboxKind::Object => self.process_object(access, &record, &claim_token).await,
-                CloudOutboxKind::Tombstone => {
-                    self.process_tombstone(access, &record, &claim_token).await
-                }
-                CloudOutboxKind::Share => self.process_share(access, &record, &claim_token).await,
+            let result = match preparation {
+                Err(error) => Err(error),
+                Ok(()) => match record.kind {
+                    CloudOutboxKind::Object => {
+                        self.process_object(access, &record, &claim_token).await
+                    }
+                    CloudOutboxKind::Tombstone => {
+                        self.process_tombstone(access, &record, &claim_token).await
+                    }
+                    CloudOutboxKind::Share => {
+                        self.process_share(access, &record, &claim_token).await
+                    }
+                },
             };
             if let Err(error) = result {
                 self.handle_outbox_failure(access, &record, &claim_token, error)
@@ -1734,6 +1746,31 @@ impl CloudSyncRuntime {
             }
         }
         Ok(())
+    }
+
+    /// Stage immutable ciphertext while the intent is still pending. Claim even
+    /// a failed preparation so its error follows the existing claim-protected
+    /// failure path. If retention cancelled the intent, no claim is returned.
+    fn prepare_outbox_claim(
+        access: &CloudAccess,
+        due_record: &CloudOutboxRecord,
+        claim_token: &str,
+        now_utc_ms: i64,
+    ) -> Result<Option<PreparedOutboxClaim>, CloudRuntimeError> {
+        let preparation = match due_record.kind {
+            CloudOutboxKind::Object => {
+                Self::stage_object(&access.store, &access.state, &access.keys, due_record)
+            }
+            CloudOutboxKind::Tombstone | CloudOutboxKind::Share => Ok(()),
+        };
+        let record = access
+            .store
+            .claim_cloud_outbox(&due_record.outbox_id, claim_token, now_utc_ms)
+            .map_err(map_store_error)?;
+        Ok(record.map(|record| PreparedOutboxClaim {
+            record,
+            preparation,
+        }))
     }
 
     async fn process_object(
@@ -1747,7 +1784,6 @@ impl CloudSyncRuntime {
             .remote_revision_id
             .clone()
             .ok_or(CloudRuntimeError::IntegrityFailure)?;
-        self.stage_object(&access.store, &access.state, &access.keys, &record)?;
         if !self.request_permitted(&access.state).await {
             return Err(CloudRuntimeError::Deferred);
         }
@@ -2282,7 +2318,6 @@ impl CloudSyncRuntime {
     }
 
     fn stage_object(
-        &self,
         store: &MeetingStore,
         state: &crate::meeting::store::CloudState,
         keys: &CloudSyncKeys,
@@ -4515,6 +4550,182 @@ mod tests {
     const TEST_OBJECT_ID: &str = "objectid12345678";
     const TEST_REVISION_ID: &str = "revisionid123456";
     const TEST_DEVICE_ID: &str = "phonedeviceid123";
+
+    /// Import the same supported Otter text as the live failure, then exercise
+    /// the scanner's preparation/claim boundary and decrypt its actual files.
+    #[test]
+    fn imported_transcript_stages_an_encrypted_object_before_claim_and_reuses_it_on_retry() {
+        let (files, manager) = crate::meeting::session::tests::importing_manager();
+        let path = files.path().join("sona-cloud-live-smoke.txt");
+        fs::write(
+            &path,
+            concat!(
+                "Sona live cloud sync check\n\n",
+                "Alex  0:00\n",
+                "This is a disposable deployment verification meeting.\n\n",
+                "Sam  0:05\n",
+                "We agreed to verify encrypted upload and deletion, then remove this sample.\n",
+            ),
+        )
+        .expect("write supported Otter export");
+        let snapshot = tauri::async_runtime::block_on(manager.import_transcript(path))
+            .expect("the transcript imports through the production entry point");
+        let store = tauri::async_runtime::block_on(manager.store()).expect("the store mounts");
+        assert!(queue_session_upload(&store, snapshot.session_id).expect("queue imported meeting"));
+        let pending = store
+            .cloud_outboxes_for_session(snapshot.session_id)
+            .expect("read queued meeting")
+            .into_iter()
+            .find(|record| record.kind == CloudOutboxKind::Object)
+            .expect("the imported meeting has an upload intent");
+        let access = CloudAccess {
+            store: Arc::clone(&store),
+            state: crate::meeting::store::CloudState {
+                vault_id: TEST_VAULT_ID.to_owned(),
+                device_id: TEST_DEVICE_ID.to_owned(),
+                endpoint: "https://sync.example.test".to_owned(),
+                cursor: None,
+                snapshot_high_water: None,
+                clock_offset_ms: 0,
+                paused: false,
+            },
+            client: CloudClient::new("https://sync.example.test").expect("valid endpoint"),
+            keys: CloudSyncKeys {
+                vault_root: zeroize::Zeroizing::new(TEST_VAULT_ROOT),
+                signing_seed: zeroize::Zeroizing::new([3; 32]),
+                pairing_secret: zeroize::Zeroizing::new([4; 32]),
+            },
+        };
+        let PreparedOutboxClaim {
+            record,
+            preparation,
+        } = CloudSyncRuntime::prepare_outbox_claim(
+            &access,
+            &pending,
+            "import-claim",
+            pending.next_attempt_utc_ms,
+        )
+        .expect("prepare and claim the queued meeting")
+        .expect("the pending upload is claimable");
+        preparation.expect("a valid imported transcript must stage before the claim freezes it");
+        assert_eq!(
+            store.cloud_outbox(&record.outbox_id).unwrap().unwrap().state,
+            CloudOutboxState::Claimed,
+        );
+        let payload = load_staged_payload(&store, &record).expect("read staged ciphertext");
+        let revision_id = record.remote_revision_id.as_deref().expect("upload revision");
+        let chunk_count = u32::try_from(payload.chunks.len()).expect("chunk count");
+        let RemoteManifest::Meeting(manifest) = open_remote_manifest(
+            &TEST_VAULT_ROOT,
+            TEST_VAULT_ID,
+            &record.object_id,
+            revision_id,
+            chunk_count,
+            &payload.manifest,
+        )
+        .expect("the staged manifest authenticates as a meeting")
+        else {
+            panic!("a transcript-only meeting was staged as a recording");
+        };
+        assert_eq!(manifest.chunk_count, chunk_count);
+        let mut plaintext = Vec::with_capacity(
+            usize::try_from(manifest.plaintext_bytes).expect("bundle length"),
+        );
+        for chunk in &payload.chunks {
+            let decoded = open_object_revision_payload(
+                &TEST_VAULT_ROOT,
+                &ObjectRevisionCryptoContext {
+                    vault_id: TEST_VAULT_ID,
+                    object_id: &record.object_id,
+                    revision_id,
+                    index: u64::from(chunk.index),
+                    total: u64::from(chunk_count),
+                    content_kind: ObjectContentKind::Chunk,
+                    source_format: OBJECT_SOURCE_FORMAT,
+                },
+                &chunk.bytes,
+            )
+            .expect("the staged transcript chunk authenticates");
+            plaintext.extend_from_slice(&decoded);
+        }
+        assert_eq!(
+            u64::try_from(plaintext.len()).unwrap(),
+            manifest.plaintext_bytes,
+        );
+        assert_eq!(sha256_base64url(&plaintext), manifest.plaintext_sha256);
+        let bundle = CloudMeetingBundleV1::from_json_bytes(&plaintext)
+            .expect("the decrypted imported meeting passes all bundle integrity guards");
+        assert_eq!(bundle.session.session_id, snapshot.session_id);
+        assert_eq!(bundle.session.phase, MeetingPhase::ReviewReady);
+        assert_eq!(bundle.session.title, "Sona live cloud sync check");
+        let turns = bundle
+            .transcript_segments
+            .iter()
+            .map(|segment| {
+                let speaker = bundle
+                    .speakers
+                    .iter()
+                    .find(|speaker| speaker.speaker_id == segment.speaker_id)
+                    .expect("the imported turn retains its speaker");
+                (
+                    speaker.display_name.as_str(),
+                    segment.base_text.as_str(),
+                    segment.start_offset_ns,
+                    segment.end_offset_ns,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            turns,
+            vec![
+                (
+                    "Alex",
+                    "This is a disposable deployment verification meeting.",
+                    0,
+                    5_000_000_000,
+                ),
+                (
+                    "Sam",
+                    "We agreed to verify encrypted upload and deletion, then remove this sample.",
+                    5_000_000_000,
+                    7_000_000_000,
+                ),
+            ],
+        );
+
+        let pending = store
+            .release_cloud_outbox_claim(
+                &record.outbox_id,
+                "import-claim",
+                pending.next_attempt_utc_ms,
+            )
+            .expect("defer the upload before any network request");
+        let resumed = CloudSyncRuntime::prepare_outbox_claim(
+            &access,
+            &pending,
+            "retry-claim",
+            pending.next_attempt_utc_ms,
+        )
+        .expect("prepare the deferred upload")
+        .expect("the deferred upload is claimable");
+        resumed.preparation.expect("retry keeps the staged payload");
+        let resumed_payload =
+            load_staged_payload(&store, &resumed.record).expect("read resumed ciphertext");
+        assert_eq!(resumed_payload.manifest, payload.manifest);
+        assert_eq!(
+            resumed_payload
+                .chunks
+                .iter()
+                .map(|chunk| chunk.bytes.as_slice())
+                .collect::<Vec<_>>(),
+            payload
+                .chunks
+                .iter()
+                .map(|chunk| chunk.bytes.as_slice())
+                .collect::<Vec<_>>(),
+            "retry must reuse the same authenticated bytes, not encrypt a new snapshot",
+        );
+    }
 
     struct PhoneObject {
         sealed_manifest: Vec<u8>,
