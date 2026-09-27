@@ -108,7 +108,7 @@ export function clusterHue(key: string): number {
 export function canonicalJson(value: Json): Uint8Array {
   const sorted = (node: Json): Json => {
     if (Array.isArray(node)) return node.map(sorted);
-    if (node !== null && typeof node === "object") {
+    if (node instanceof Object) {
       const out: { [key: string]: Json } = {};
       for (const [key, child] of Object.entries(node).sort(([a], [b]) =>
         a < b ? -1 : 1,
