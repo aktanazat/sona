@@ -140,6 +140,9 @@
               pkg-config
               wrapGAppsHook4
               bun
+              # `next build` runs through its `node` shebang. Without Node on the
+              # path Bun stands in, and it cannot load Next's compiled runtime.
+              nodejs
               # pkgs.bun2nix (from overlay), not the flake input — `with pkgs;`
               # doesn't shadow function arguments in Nix.
               pkgs.bun2nix.hook # Sets up node_modules from pre-fetched bun cache
