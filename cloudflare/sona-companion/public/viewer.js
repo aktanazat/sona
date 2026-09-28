@@ -386,7 +386,7 @@ export function parseShareDocument(source) {
     value.version === 1 &&
       boundedText(value.title, MAX_TITLE_CHARS) &&
       DOCUMENT_INCLUDES.has(value.include) &&
-      typeof value.notes_out_of_date === "boolean" &&
+      (value.notes_out_of_date === true || value.notes_out_of_date === false) &&
       Array.isArray(value.sections) &&
       value.sections.length <= MAX_DOCUMENT_SECTIONS,
   );
