@@ -3079,6 +3079,7 @@ mod tests {
     /// `build_stream` dispatches it: timed packets while a meeting captures,
     /// only an acknowledgement while one closes, nothing while it is paused,
     /// and the idle downmix otherwise.
+    #[cfg(target_os = "macos")]
     fn device_callback(
         control: &MeetingCallbackControl,
         producer: &mut CaptureProducer,
@@ -3112,6 +3113,11 @@ mod tests {
 
     /// A consumer worker with a microphone meeting capturing, fed 10 ms
     /// buffers of speech through `device_callback`.
+    ///
+    /// macOS only, like the segment test above: a meeting start completes
+    /// once the capture has a host-clock bridge, and only the CoreAudio
+    /// backend supplies one (`cpal_host_monotonic_anchor_ns`).
+    #[cfg(target_os = "macos")]
     struct MeetingRig {
         cmd_tx: mpsc::Sender<Cmd>,
         worker: thread::JoinHandle<()>,
@@ -3124,6 +3130,7 @@ mod tests {
         scratch: Vec<f32>,
     }
 
+    #[cfg(target_os = "macos")]
     impl MeetingRig {
         /// A meeting that has started, with every packet fed so far read.
         fn capturing() -> Self {
@@ -3275,6 +3282,7 @@ mod tests {
     /// The dictation shortcut works while a meeting records: the dictation
     /// hears the room from its start to its stop, and the meeting keeps every
     /// packet, before, during and after it.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_dictation_during_a_meeting_hears_the_room_and_the_meeting_keeps_every_packet() {
         let mut rig = MeetingRig::capturing();
@@ -3314,6 +3322,7 @@ mod tests {
     /// and resuming hands the lane back to timed packets. An untimed block left
     /// in the lane at the resume would poison the meeting's drain: no packet
     /// after it, and a break in the capture that is not the pause.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_dictation_across_a_meeting_pause_keeps_hearing_and_the_meeting_resumes_whole() {
         use crate::meeting::types::SourceGapReason;
