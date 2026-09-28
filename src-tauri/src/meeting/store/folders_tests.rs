@@ -145,7 +145,10 @@ fn a_folder_holds_references_and_deleting_it_keeps_the_meetings() {
     let standup = reviewable_meeting(&store, "Standup", 2_000);
     let created = create(&store, "Q3", 0);
     let created = create(&store, "Clients", created.folders.revision);
-    let (q3, clients) = (folder_named(&created, "Q3"), folder_named(&created, "Clients"));
+    let (q3, clients) = (
+        folder_named(&created, "Q3"),
+        folder_named(&created, "Clients"),
+    );
     assert_eq!(
         created
             .folders
@@ -166,7 +169,10 @@ fn a_folder_holds_references_and_deleting_it_keeps_the_meetings() {
     );
     assert_eq!(listed(&store, Some(clients)), vec![kickoff]);
     assert_eq!(listed(&store, None), vec![standup, kickoff]);
-    assert_eq!(store.meeting_folder_ids(kickoff).unwrap(), vec![clients, q3]);
+    assert_eq!(
+        store.meeting_folder_ids(kickoff).unwrap(),
+        vec![clients, q3]
+    );
 
     let stale = store
         .delete_meeting_folder(
@@ -179,7 +185,11 @@ fn a_folder_holds_references_and_deleting_it_keeps_the_meetings() {
         )
         .unwrap();
     assert_eq!(stale.receipt.result, OperationResult::Rejected);
-    assert_eq!(stale.folders.folders.len(), 2, "a stale write changes nothing");
+    assert_eq!(
+        stale.folders.folders.len(),
+        2,
+        "a stale write changes nothing"
+    );
 
     let deleted = store
         .delete_meeting_folder(

@@ -2472,7 +2472,9 @@ impl TranscriptionManager {
                             moonshine_engine
                                 .transcribe(window, &TranscribeOptions::default())
                                 .map(|r| r.text)
-                                .map_err(|e| anyhow::anyhow!("Moonshine transcription failed: {}", e))
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Moonshine transcription failed: {}", e)
+                                })
                         })
                     }
                     // Streaming encoding still has a finite batch decoder
@@ -2483,7 +2485,10 @@ impl TranscriptionManager {
                                 .transcribe(window, &TranscribeOptions::default())
                                 .map(|r| r.text)
                                 .map_err(|e| {
-                                    anyhow::anyhow!("Moonshine streaming transcription failed: {}", e)
+                                    anyhow::anyhow!(
+                                        "Moonshine streaming transcription failed: {}",
+                                        e
+                                    )
                                 })
                         })
                     }
@@ -2506,7 +2511,9 @@ impl TranscriptionManager {
                             sense_voice_engine
                                 .transcribe_with(window, &params)
                                 .map(|r| r.text)
-                                .map_err(|e| anyhow::anyhow!("SenseVoice transcription failed: {}", e))
+                                .map_err(|e| {
+                                    anyhow::anyhow!("SenseVoice transcription failed: {}", e)
+                                })
                         })
                     }
                     // GigaAM's upstream inference window is 25 seconds.
@@ -2681,10 +2688,9 @@ fn transcribe_cpp_window(
             }
             Ok(transcript.text)
         }
-        Err(transcribe_cpp::Error::InputTooLong(_)
-            | transcribe_cpp::Error::OutputTruncated { .. })
-            if splits_left > 0 && audio.len() > 16_000 =>
-        {
+        Err(
+            transcribe_cpp::Error::InputTooLong(_) | transcribe_cpp::Error::OutputTruncated { .. },
+        ) if splits_left > 0 && audio.len() > 16_000 => {
             transcribe_windows(audio, audio.len() / 2, |window| {
                 transcribe_cpp_window(session, window, options, detected_language, splits_left - 1)
             })
@@ -3169,9 +3175,10 @@ fn restricted_language_for_audio(
         }
         _ => return Ok(None),
     };
-    Ok(restrict_detected_language(detected.as_deref(), &text, &candidates).map(|language| {
-        crate::managers::model::effective_language(language, supported, true)
-    }))
+    Ok(
+        restrict_detected_language(detected.as_deref(), &text, &candidates)
+            .map(|language| crate::managers::model::effective_language(language, supported, true)),
+    )
 }
 
 /// Resolve the persisted language intent into the language a specific model can

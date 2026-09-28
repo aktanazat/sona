@@ -865,9 +865,18 @@ mod tests {
 
     #[test]
     fn a_call_records_the_whole_mix_and_a_meeting_app_only_itself() {
-        assert_eq!(system_audio_route(Some("com.apple.facetime")), Vec::<String>::new());
-        assert_eq!(system_audio_route(Some("com.apple.mobilephone")), Vec::<String>::new());
-        assert_eq!(system_audio_route(Some("us.zoom.xos")), vec!["us.zoom.xos".to_string()]);
+        assert_eq!(
+            system_audio_route(Some("com.apple.facetime")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            system_audio_route(Some("com.apple.mobilephone")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            system_audio_route(Some("us.zoom.xos")),
+            vec!["us.zoom.xos".to_string()]
+        );
         assert_eq!(system_audio_route(None), Vec::<String>::new());
     }
 

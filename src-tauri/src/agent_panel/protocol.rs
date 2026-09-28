@@ -683,33 +683,66 @@ impl SonaChatActionV1 {
                 }
                 vec![session_id.uuid().to_string(), speaker_id.uuid().to_string()]
             }
-            Self::DraftEmail { recipients, subject, body, .. } => {
-                if recipients.is_empty() || recipients.len() > MAX_ACTION_RECIPIENTS
-                    || recipients.iter().any(|recipient| !crate::integrations::valid_email(recipient))
+            Self::DraftEmail {
+                recipients,
+                subject,
+                body,
+                ..
+            } => {
+                if recipients.is_empty()
+                    || recipients.len() > MAX_ACTION_RECIPIENTS
+                    || recipients
+                        .iter()
+                        .any(|recipient| !crate::integrations::valid_email(recipient))
                     || !is_message_text(subject, MAX_ACTION_TEXT_BYTES)
                     || subject.contains(['\n', '\t'])
                     || !is_message_text(body, MAX_ACTION_BODY_BYTES)
-                { return Err(ProposalValidationError::InvalidAction); }
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
                 Vec::new()
             }
-            Self::PostSlack { connection_id, text, .. } => {
-                if uuid::Uuid::parse_str(connection_id).is_err() || !is_message_text(text, MAX_ACTION_BODY_BYTES) {
+            Self::PostSlack {
+                connection_id,
+                text,
+                ..
+            } => {
+                if uuid::Uuid::parse_str(connection_id).is_err()
+                    || !is_message_text(text, MAX_ACTION_BODY_BYTES)
+                {
                     return Err(ProposalValidationError::InvalidAction);
                 }
                 vec![connection_id.clone()]
             }
-            Self::CreateCalendarEvent { title, start_utc_ms, end_utc_ms, notes, location, .. } => {
-                if !is_message_text(title, MAX_ACTION_TEXT_BYTES) || title.contains(['\n', '\t'])
-                    || *start_utc_ms < 1 || *end_utc_ms > MAX_ACTION_EVENT_UTC_MS
+            Self::CreateCalendarEvent {
+                title,
+                start_utc_ms,
+                end_utc_ms,
+                notes,
+                location,
+                ..
+            } => {
+                if !is_message_text(title, MAX_ACTION_TEXT_BYTES)
+                    || title.contains(['\n', '\t'])
+                    || *start_utc_ms < 1
+                    || *end_utc_ms > MAX_ACTION_EVENT_UTC_MS
                     || *end_utc_ms <= *start_utc_ms
                     || end_utc_ms.saturating_sub(*start_utc_ms) > MAX_ACTION_EVENT_DURATION_MS
                     || (!notes.is_empty() && !is_message_text(notes, MAX_ACTION_BODY_BYTES))
                     || (!location.is_empty() && !is_message_text(location, MAX_ACTION_TEXT_BYTES))
-                { return Err(ProposalValidationError::InvalidAction); }
+                {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
                 Vec::new()
             }
-            Self::SendNotes { connection_id, session_id, .. } => {
-                if uuid::Uuid::parse_str(connection_id).is_err() { return Err(ProposalValidationError::InvalidAction); }
+            Self::SendNotes {
+                connection_id,
+                session_id,
+                ..
+            } => {
+                if uuid::Uuid::parse_str(connection_id).is_err() {
+                    return Err(ProposalValidationError::InvalidAction);
+                }
                 vec![connection_id.clone(), session_id.uuid().to_string()]
             }
         };
@@ -2010,23 +2043,65 @@ mod tests {
     fn external_actions_validate_destinations_content_and_time_before_approval() {
         let connection = "de305d54-75b4-431b-adb2-eb6b9e546014";
         let pack = format!("connection: {connection}");
-        let slack = SonaChatActionV1::PostSlack { reason: "Share the update.".into(), connection_id: connection.into(), text: "Ready.".into() };
+        let slack = SonaChatActionV1::PostSlack {
+            reason: "Share the update.".into(),
+            connection_id: connection.into(),
+            text: "Ready.".into(),
+        };
         assert_eq!(slack.validate(Some(&pack)), Ok(()));
-        assert_eq!(slack.validate(None), Err(ProposalValidationError::ForeignActionId));
+        assert_eq!(
+            slack.validate(None),
+            Err(ProposalValidationError::ForeignActionId)
+        );
         let mail = |recipients, body| SonaChatActionV1::DraftEmail {
-            reason: "Prepare a follow-up.".into(), recipients, subject: "Next steps".into(), body,
+            reason: "Prepare a follow-up.".into(),
+            recipients,
+            subject: "Next steps".into(),
+            body,
         };
-        assert_eq!(mail(vec!["alex@example.com".into()], "Thanks.".into()).validate(None), Ok(()));
-        assert_eq!(mail(vec![], "Thanks.".into()).validate(None), Err(ProposalValidationError::InvalidAction));
-        assert_eq!(mail(vec!["alex@example.com\nBcc:other@example.com".into()], "Thanks.".into()).validate(None), Err(ProposalValidationError::InvalidAction));
-        assert_eq!(mail(vec!["alex@example.com".into()], "é".repeat(4097)).validate(None), Err(ProposalValidationError::InvalidAction));
+        assert_eq!(
+            mail(vec!["alex@example.com".into()], "Thanks.".into()).validate(None),
+            Ok(())
+        );
+        assert_eq!(
+            mail(vec![], "Thanks.".into()).validate(None),
+            Err(ProposalValidationError::InvalidAction)
+        );
+        assert_eq!(
+            mail(
+                vec!["alex@example.com\nBcc:other@example.com".into()],
+                "Thanks.".into()
+            )
+            .validate(None),
+            Err(ProposalValidationError::InvalidAction)
+        );
+        assert_eq!(
+            mail(vec!["alex@example.com".into()], "é".repeat(4097)).validate(None),
+            Err(ProposalValidationError::InvalidAction)
+        );
         let event = |start, end| SonaChatActionV1::CreateCalendarEvent {
-            reason: "Reserve time.".into(), title: "Review".into(), start_utc_ms: start, end_utc_ms: end,
-            notes: String::new(), location: String::new(),
+            reason: "Reserve time.".into(),
+            title: "Review".into(),
+            start_utc_ms: start,
+            end_utc_ms: end,
+            notes: String::new(),
+            location: String::new(),
         };
-        assert_eq!(event(1, 1 + MAX_ACTION_EVENT_DURATION_MS).validate(None), Ok(()));
-        for (start, end) in [(0,1),(1,1),(2,1),(1,2 + MAX_ACTION_EVENT_DURATION_MS),(MAX_ACTION_EVENT_UTC_MS,MAX_ACTION_EVENT_UTC_MS + 1)] {
-            assert_eq!(event(start,end).validate(None), Err(ProposalValidationError::InvalidAction));
+        assert_eq!(
+            event(1, 1 + MAX_ACTION_EVENT_DURATION_MS).validate(None),
+            Ok(())
+        );
+        for (start, end) in [
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (1, 2 + MAX_ACTION_EVENT_DURATION_MS),
+            (MAX_ACTION_EVENT_UTC_MS, MAX_ACTION_EVENT_UTC_MS + 1),
+        ] {
+            assert_eq!(
+                event(start, end).validate(None),
+                Err(ProposalValidationError::InvalidAction)
+            );
         }
     }
 }

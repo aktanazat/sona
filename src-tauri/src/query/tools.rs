@@ -1684,7 +1684,9 @@ mod tests {
     use crate::meeting::detection::machine::{
         CalendarAttendee, CalendarEventSummary, ParticipationStatus,
     };
-    use crate::meeting::folder_types::{MeetingFolderCreateRequest, MeetingFolderMembershipRequest};
+    use crate::meeting::folder_types::{
+        MeetingFolderCreateRequest, MeetingFolderMembershipRequest,
+    };
     use crate::meeting::loop_types::{MeetingLoopId, MeetingLoopKind};
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
     use crate::meeting::store::workflow_core_tests::{
@@ -2425,7 +2427,14 @@ mod tests {
             result_json(loops_result(&corpus.store, None, LoopFilter::Done, None, 20).unwrap());
         assert_eq!(value["rows"], json!([]));
         let (value, _) = result_json(
-            loops_result(&corpus.store, None, LoopFilter::Open, Some(PersonId::new()), 20).unwrap(),
+            loops_result(
+                &corpus.store,
+                None,
+                LoopFilter::Open,
+                Some(PersonId::new()),
+                20,
+            )
+            .unwrap(),
         );
         assert_eq!(value["rows"], json!([]), "nobody is linked as an owner yet");
     }
@@ -2755,8 +2764,7 @@ mod tests {
         let (value, _) = result_json(meeting_result(&store, folder, inside).unwrap());
         assert_eq!(value["title"], "Design review");
 
-        let (value, _) =
-            result_json(recent_meetings(&store, folder, WHEN - 30 * DAY, 10).unwrap());
+        let (value, _) = result_json(recent_meetings(&store, folder, WHEN - 30 * DAY, 10).unwrap());
         assert_eq!(
             value["rows"]
                 .as_array()
@@ -2807,7 +2815,10 @@ mod tests {
             "search excludes the outside meeting and dictation: {value}"
         );
         assert_eq!(
-            sources.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            sources
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
             only_inside
         );
     }

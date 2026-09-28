@@ -533,7 +533,9 @@ impl AudioRecorder {
     /// Update dictation gain without replacing the open microphone stream.
     pub fn set_quiet_speech_enabled(&self, enabled: bool) {
         if let Some(config) = &self.vad {
-            config.quiet_speech_enabled.store(enabled, Ordering::Relaxed);
+            config
+                .quiet_speech_enabled
+                .store(enabled, Ordering::Relaxed);
         }
     }
 
@@ -3006,7 +3008,11 @@ mod tests {
         let mut scratch = Vec::new();
         let mut drain = |reader: &mut PacketLaneReader| {
             let mut packets = 0;
-            while reader.pop_into(&mut scratch).expect("read meeting packet").is_some() {
+            while reader
+                .pop_into(&mut scratch)
+                .expect("read meeting packet")
+                .is_some()
+            {
                 assert!(
                     scratch == speech || scratch == silence,
                     "quiet dictation gain changed a raw meeting packet"
@@ -3179,12 +3185,19 @@ mod tests {
             // ahead of the first timed packet is not what a real start sees.
             let deadline = Instant::now() + Duration::from_secs(2);
             while rig.control.mode.load(Ordering::Acquire) != MEETING_CALLBACK_CAPTURING {
-                assert!(Instant::now() < deadline, "the meeting callback was never armed");
+                assert!(
+                    Instant::now() < deadline,
+                    "the meeting callback was never armed"
+                );
                 thread::sleep(Duration::from_millis(1));
             }
             let (start, fed) = rig.pump_until(&started);
             assert!(start.is_ok(), "the meeting source never started");
-            assert_eq!(rig.wait_for_packets(fed), fed, "the meeting lost its first packets");
+            assert_eq!(
+                rig.wait_for_packets(fed),
+                fed,
+                "the meeting lost its first packets"
+            );
             rig
         }
 
@@ -3517,8 +3530,11 @@ mod tests {
             let ready = start_with_policy(&cmd_tx, VadPolicy::Disabled);
             let input = [0.03125; 480];
             capture_into_lane(&input, 1, None, &mut producer);
-            ready.recv_timeout(Duration::from_secs(1)).expect("recording ready");
-            let recorded = stop_and_collect(&cmd_tx, &mut producer, &input).expect("recorded audio");
+            ready
+                .recv_timeout(Duration::from_secs(1))
+                .expect("recording ready");
+            let recorded =
+                stop_and_collect(&cmd_tx, &mut producer, &input).expect("recorded audio");
             cmd_tx.send(Cmd::Shutdown).expect("send shutdown");
             worker.join().expect("join consumer");
 

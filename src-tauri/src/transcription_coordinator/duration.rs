@@ -25,7 +25,12 @@ impl RecordingDeadline {
     }
 
     pub(super) fn next_deadline(&self) -> Instant {
-        self.started_at + if self.warned { STOP_AFTER } else { WARNING_AFTER }
+        self.started_at
+            + if self.warned {
+                STOP_AFTER
+            } else {
+                WARNING_AFTER
+            }
     }
 
     pub(super) fn action(&mut self, now: Instant) -> Option<DurationAction> {
@@ -97,6 +102,9 @@ mod tests {
         let restarted = start + Duration::from_secs(1210);
         let mut second = RecordingDeadline::new(restarted);
         assert_eq!(second.action(restarted), None);
-        assert_eq!(second.next_deadline(), restarted + Duration::from_secs(1140));
+        assert_eq!(
+            second.next_deadline(),
+            restarted + Duration::from_secs(1140)
+        );
     }
 }

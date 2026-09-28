@@ -318,7 +318,9 @@ impl MeetingStore {
                       WHERE folder_id = ?1",
                     params![
                         id(request.folder_id),
-                        request.template.map(MeetingNotesTemplate::artifact_template_id),
+                        request
+                            .template
+                            .map(MeetingNotesTemplate::artifact_template_id),
                         now
                     ],
                 )?;
@@ -439,7 +441,9 @@ fn folders_in(connection: &Connection) -> Result<Vec<MeetingFolder>, StoreError>
         "SELECT folder_id, prompt_id FROM meeting_folder_prompts ORDER BY folder_id, position",
     )?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     for (folder_id, prompt_id) in rows {

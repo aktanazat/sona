@@ -1,7 +1,6 @@
 use super::analytics::{
-    merge_turns, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
-    MeetingLiveHelp, MeetingLiveHelpKind, MeetingNotesTemplate, MeetingProvisionalTranscript,
-    MeetingUserNotes,
+    merge_turns, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp, MeetingLiveHelp,
+    MeetingLiveHelpKind, MeetingNotesTemplate, MeetingProvisionalTranscript, MeetingUserNotes,
 };
 use super::capture::{MeetingCaptureSource, PacketLaneReadError, PacketLaneReader, PacketSink};
 use super::clock::host_monotonic_now_ns;
@@ -905,7 +904,9 @@ impl MeetingSessionManager {
                 }
             }
         }
-        let due_transcripts = store.due_transcript_retention_sessions(now_utc_ms).map_err(map_store_error)?;
+        let due_transcripts = store
+            .due_transcript_retention_sessions(now_utc_ms)
+            .map_err(map_store_error)?;
         let mut purged = 0;
         let mut failed = 0;
         for session_id in due_transcripts {
@@ -1245,12 +1246,16 @@ impl MeetingSessionManager {
             }
         }
         let settings = self.app.as_ref().map(crate::settings::get_settings);
-        let enabled = announce_in_chat && settings.as_ref().is_some_and(|s| s.meeting_disclosure_enabled);
-        let line = settings.map(|s| s.meeting_disclosure_message)
+        let enabled = announce_in_chat
+            && settings
+                .as_ref()
+                .is_some_and(|s| s.meeting_disclosure_enabled);
+        let line = settings
+            .map(|s| s.meeting_disclosure_message)
             .unwrap_or_else(crate::settings::default_meeting_disclosure_message);
-        if let Err(error) = store.request_session_disclosure(
-            session_id, &line, composer_app.as_deref(), enabled,
-        ) {
+        if let Err(error) =
+            store.request_session_disclosure(session_id, &line, composer_app.as_deref(), enabled)
+        {
             log::warn!("Meeting {session_id:?} could not arm its disclosure: {error:?}");
             return;
         }
@@ -1418,7 +1423,8 @@ impl MeetingSessionManager {
                 composer_app_for(context.trigger_bundle_id.as_deref()),
                 true,
                 false,
-            ).await;
+            )
+            .await;
         }
         Ok(result)
     }
@@ -1557,11 +1563,19 @@ impl MeetingSessionManager {
         line: String,
     ) -> Result<MeetingSessionDisclosure, MeetingCommandError> {
         let store = self.store().await?;
-        let enabled = self.app.as_ref()
+        let enabled = self
+            .app
+            .as_ref()
             .is_some_and(|app| crate::settings::get_settings(app).meeting_disclosure_enabled);
         let actor = self.actor_lock();
-        let recording = actor.active.as_ref().is_some_and(|active| active.session_id == session_id)
-            && store.session_snapshot(session_id).map_err(map_store_error)?.phase
+        let recording = actor
+            .active
+            .as_ref()
+            .is_some_and(|active| active.session_id == session_id)
+            && store
+                .session_snapshot(session_id)
+                .map_err(map_store_error)?
+                .phase
                 == MeetingPhase::CapturingRecording;
         store.attempt_session_disclosure(session_id, |frozen, composer_app| {
             if !recording || !enabled {
@@ -1600,11 +1614,22 @@ impl MeetingSessionManager {
         request: MeetingStartRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let composer_app = composer_app_for(None);
-        let result = self.start_with_provenance(request, MeetingConsentProvenance::Direct).await?;
+        let result = self
+            .start_with_provenance(request, MeetingConsentProvenance::Direct)
+            .await?;
         if result.snapshot.phase == MeetingPhase::CapturingRecording {
             let store = self.store().await?;
-            let event = store.meeting_calendar_facts(result.snapshot.session_id).map_err(map_store_error)?;
-            self.arm_disclosure(result.snapshot.session_id, event.as_ref(), composer_app, true, false).await;
+            let event = store
+                .meeting_calendar_facts(result.snapshot.session_id)
+                .map_err(map_store_error)?;
+            self.arm_disclosure(
+                result.snapshot.session_id,
+                event.as_ref(),
+                composer_app,
+                true,
+                false,
+            )
+            .await;
         }
         Ok(result)
     }
@@ -1855,7 +1880,10 @@ impl MeetingSessionManager {
         &self,
         session_id: MeetingSessionId,
     ) -> Result<super::call_speakers::CallNameStatus, MeetingCommandError> {
-        self.store().await?.call_name_status(session_id).map_err(map_store_error)
+        self.store()
+            .await?
+            .call_name_status(session_id)
+            .map_err(map_store_error)
     }
 
     pub async fn call_names_set(
@@ -1866,26 +1894,49 @@ impl MeetingSessionManager {
     ) -> Result<super::call_speakers::CallNameStatus, MeetingCommandError> {
         let store = self.store().await?;
         let mut actor = self.actor_lock();
-        let active = actor.active.as_mut().filter(|active| active.session_id == session_id)
+        let active = actor
+            .active
+            .as_mut()
+            .filter(|active| active.session_id == session_id)
             .ok_or(MeetingCommandError::NotFound)?;
-        let previous = store.call_name_status(session_id).map_err(map_store_error)?;
+        let previous = store
+            .call_name_status(session_id)
+            .map_err(map_store_error)?;
         // Changing automatic use does not interrupt the selected AX identity.
-        if previous.enabled && active.call_names.is_some() && target_id.is_some()
-            && previous.target.as_ref().map(|target| &target.id) == target_id.as_ref() {
-            store.set_call_names_automatic(session_id, automatically_use).map_err(map_store_error)?;
+        if previous.enabled
+            && active.call_names.is_some()
+            && target_id.is_some()
+            && previous.target.as_ref().map(|target| &target.id) == target_id.as_ref()
+        {
+            store
+                .set_call_names_automatic(session_id, automatically_use)
+                .map_err(map_store_error)?;
         } else if let Some(target_id) = target_id {
             let plan = store.processing_plan(session_id).map_err(map_store_error)?;
             let target = super::call_speakers::selected_target(&plan, &target_id)
                 .ok_or(MeetingCommandError::InvalidRequest)?;
             drop(active.call_names.take());
-            active.call_names = Some(super::call_speakers::CallNameSampler::start(
-                Arc::clone(&store), plan, target, automatically_use,
-            ).map_err(map_store_error)?);
+            active.call_names = Some(
+                super::call_speakers::CallNameSampler::start(
+                    Arc::clone(&store),
+                    plan,
+                    target,
+                    automatically_use,
+                )
+                .map_err(map_store_error)?,
+            );
         } else {
             drop(active.call_names.take());
-            store.finish_call_names(session_id, "off", "Call-name reading is off. Earlier observed names are kept.")
+            store
+                .finish_call_names(
+                    session_id,
+                    "off",
+                    "Call-name reading is off. Earlier observed names are kept.",
+                )
                 .map_err(map_store_error)?;
-            store.set_call_names_automatic(session_id, automatically_use).map_err(map_store_error)?;
+            store
+                .set_call_names_automatic(session_id, automatically_use)
+                .map_err(map_store_error)?;
         }
         drop(actor);
         store.call_name_status(session_id).map_err(map_store_error)
@@ -1897,7 +1948,9 @@ impl MeetingSessionManager {
         speaker_id: SpeakerId,
     ) -> Result<super::call_speakers::CallNameStatus, MeetingCommandError> {
         let store = self.store().await?;
-        store.dismiss_call_name(session_id, speaker_id).map_err(map_store_error)?;
+        store
+            .dismiss_call_name(session_id, speaker_id)
+            .map_err(map_store_error)?;
         store.call_name_status(session_id).map_err(map_store_error)
     }
 
@@ -2255,10 +2308,21 @@ impl MeetingSessionManager {
             )
             .await?;
         if let Some(notes) = notes {
-            let saved = store.notes_template_fallback(session_id, self.default_notes_template())
-                .and_then(|choice| store.save_user_notes(session_id, notes, choice.template, choice.custom_template_id, 0));
+            let saved = store
+                .notes_template_fallback(session_id, self.default_notes_template())
+                .and_then(|choice| {
+                    store.save_user_notes(
+                        session_id,
+                        notes,
+                        choice.template,
+                        choice.custom_template_id,
+                        0,
+                    )
+                });
             if let Err(error) = saved {
-                return Err(self.abandon_import(session_id, map_store_error(error)).await);
+                return Err(self
+                    .abandon_import(session_id, map_store_error(error))
+                    .await);
             }
         }
         match self
@@ -2741,7 +2805,9 @@ impl MeetingSessionManager {
         request: MeetingMutationRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
-        store.require_retained_transcript(request.session_id).map_err(map_store_error)?;
+        store
+            .require_retained_transcript(request.session_id)
+            .map_err(map_store_error)?;
         let receipt = required_transition_by(
             &store,
             actor,
@@ -2904,26 +2970,46 @@ impl MeetingSessionManager {
             return Err(MeetingCommandError::NotFound);
         }
 
-        let preferences = self.app.as_ref()
+        let preferences = self
+            .app
+            .as_ref()
             .map(|app| crate::settings::get_settings(app).meeting_prep)
             .unwrap_or_default();
-        let calendar = store.meeting_calendar_facts(session_id).map_err(map_store_error)?;
-        let addresses = calendar.as_ref().map(|event| recipient_addresses(&event.attendees)).unwrap_or_default();
-        let mut mail = super::mail_context::read(preferences.email_context_enabled, &addresses, utc_now_ms()).await;
+        let calendar = store
+            .meeting_calendar_facts(session_id)
+            .map_err(map_store_error)?;
+        let addresses = calendar
+            .as_ref()
+            .map(|event| recipient_addresses(&event.attendees))
+            .unwrap_or_default();
+        let mut mail =
+            super::mail_context::read(preferences.email_context_enabled, &addresses, utc_now_ms())
+                .await;
         let mut mail_context_status = mail.status_text().to_string();
         // Email never reaches the relay, even if remote meeting notes are on.
         // Without a local model the email is left out, never the draft.
-        let local = if mail.threads.is_empty() { None } else { self.processing.local_text_generator() };
+        let local = if mail.threads.is_empty() {
+            None
+        } else {
+            self.processing.local_text_generator()
+        };
         if local.is_none() && !mail.threads.is_empty() {
             mail.threads.clear();
             mail_context_status = super::prep::EMAIL_NEEDS_LOCAL_MODEL.into();
         }
-        let generator = local.or_else(|| self.processing.text_generator_for_session(&store, session_id));
+        let generator = local.or_else(|| {
+            self.processing
+                .text_generator_for_session(&store, session_id)
+        });
         let generated = match generator {
             Some(generator) => {
                 let engine = generator.model_id();
                 let prompt = follow_up_prompt(&preferences.about_me);
-                let budget = super::processing::evidence_budget(generator.as_ref(), &prompt, FOLLOW_UP_MAX_TOKENS);
+                let budget = super::processing::evidence_budget(
+                    generator.as_ref(),
+                    &prompt,
+                    FOLLOW_UP_MAX_TOKENS,
+                );
                 let record = evidence.as_prompt_input();
                 let mut input = String::new();
                 let had_email = !mail.threads.is_empty();
@@ -2931,14 +3017,22 @@ impl MeetingSessionManager {
                     input.clear();
                     input.push_str(&record);
                     input.push_str("\n\nCALENDAR AND RECENT EMAIL (context only):\n");
-                    input.push_str(&serde_json::json!({"calendar": calendar, "email": mail.threads}).to_string());
-                    if input.len() <= budget || mail.threads.is_empty() { break; }
+                    input.push_str(
+                        &serde_json::json!({"calendar": calendar, "email": mail.threads})
+                            .to_string(),
+                    );
+                    if input.len() <= budget || mail.threads.is_empty() {
+                        break;
+                    }
                     mail.threads.pop();
                 }
                 if had_email && mail.threads.is_empty() {
-                    mail_context_status = "Email was left out because the local model's context was full.".into();
+                    mail_context_status =
+                        "Email was left out because the local model's context was full.".into();
                 }
-                if input.len() > budget { return Err(MeetingCommandError::EngineFailure); }
+                if input.len() > budget {
+                    return Err(MeetingCommandError::EngineFailure);
+                }
                 let message = tauri::async_runtime::spawn_blocking(move || {
                     generator.generate(&prompt, &input, FOLLOW_UP_MAX_TOKENS, ReplyShape::Prose)
                 })
@@ -2985,16 +3079,27 @@ impl MeetingSessionManager {
         refresh: bool,
     ) -> Result<super::prep::MeetingBrief, String> {
         let _turn = super::prep::brief_gate().lock().await;
-        let store = self.store().await.map_err(|_| "The meeting store is unavailable.")?;
-        let preferences = self.app.as_ref()
+        let store = self
+            .store()
+            .await
+            .map_err(|_| "The meeting store is unavailable.")?;
+        let preferences = self
+            .app
+            .as_ref()
             .map(|app| crate::settings::get_settings(app).meeting_prep)
             .unwrap_or_default();
         let sources = super::prep::gather_sources(&store, &event)
             .map_err(|_| "Past meeting context could not be read.")?;
         // Email may reach only a local model. Everything else follows the
         // remote choice of every meeting the brief draws on.
-        let local = if preferences.email_context_enabled { self.processing.local_text_generator() } else { None };
-        let general = self.processing.text_generator_for_context(&store, &event.series_key, &sources);
+        let local = if preferences.email_context_enabled {
+            self.processing.local_text_generator()
+        } else {
+            None
+        };
+        let general =
+            self.processing
+                .text_generator_for_context(&store, &event.series_key, &sources);
         let mut key = super::prep::cache_key(&event, &preferences, &sources)?;
         for generator in [&local, &general].into_iter().flatten() {
             key.push_str(generator.model_id());
@@ -3002,34 +3107,51 @@ impl MeetingSessionManager {
         }
         let now = utc_now_ms();
         if !refresh {
-            if let Some(brief) = store.cached_brief(&event.event_key, &key, now)
-                .map_err(|_| "The saved brief could not be read.")? {
+            if let Some(brief) = store
+                .cached_brief(&event.event_key, &key, now)
+                .map_err(|_| "The saved brief could not be read.")?
+            {
                 return Ok(brief);
             }
         }
         let web = super::prep_web::research(
-            self.app.as_ref(), self.secrets.as_ref(), &store, &event.attendees,
-        ).await;
+            self.app.as_ref(),
+            self.secrets.as_ref(),
+            &store,
+            &event.attendees,
+        )
+        .await;
         let addresses = recipient_addresses(&event.attendees);
-        let mut mail = super::mail_context::read(preferences.email_context_enabled, &addresses, now).await;
+        let mut mail =
+            super::mail_context::read(preferences.email_context_enabled, &addresses, now).await;
         let email_left_out = !mail.threads.is_empty() && local.is_none();
         if email_left_out {
             mail.threads.clear();
         }
-        let generator = if mail.threads.is_empty() { general } else { local };
+        let generator = if mail.threads.is_empty() {
+            general
+        } else {
+            local
+        };
         let end = event.end_utc_ms;
         let requested_preferences = preferences.clone();
         let mut brief = tauri::async_runtime::spawn_blocking(move || {
             super::prep::generate_brief(event, preferences, sources, mail, web, generator, now)
-        }).await.map_err(|_| "The brief could not be prepared.")??;
+        })
+        .await
+        .map_err(|_| "The brief could not be prepared.")??;
         if email_left_out {
             brief.status.push(' ');
             brief.status.push_str(super::prep::EMAIL_NEEDS_LOCAL_MODEL);
         }
-        if self.app.as_ref().is_some_and(|app| crate::settings::get_settings(app).meeting_prep != requested_preferences) {
+        if self.app.as_ref().is_some_and(|app| {
+            crate::settings::get_settings(app).meeting_prep != requested_preferences
+        }) {
             return Err("Your preferences changed. Open the brief again to use them.".into());
         }
-        store.keep_brief(&key, end, &brief).map_err(|_| "The brief could not be saved.")?;
+        store
+            .keep_brief(&key, end, &brief)
+            .map_err(|_| "The brief could not be saved.")?;
         Ok(brief)
     }
 
@@ -3543,11 +3665,16 @@ impl MeetingSessionManager {
                 .unwrap_or(0),
         );
         let kind = if let Some(custom_id) = custom_template_id_from_artifact(&template_id) {
-            store.custom_template(custom_id).map_err(map_store_error)?
-                .map(|template| template.name).unwrap_or_else(|| "Custom template".to_string())
+            store
+                .custom_template(custom_id)
+                .map_err(map_store_error)?
+                .map(|template| template.name)
+                .unwrap_or_else(|| "Custom template".to_string())
         } else {
             MeetingNotesTemplate::from_artifact_template_id(&template_id)
-                .unwrap_or_default().label().to_string()
+                .unwrap_or_default()
+                .label()
+                .to_string()
         };
         let page = ledger::build_page(ledger::LedgerPageInput {
             title: &review.session.title,
@@ -3637,7 +3764,12 @@ impl MeetingSessionManager {
                 .action_item_states(session_id)
                 .map_err(map_store_error)?,
             notes: store
-                .user_notes(session_id, store.notes_template_fallback(session_id, self.default_notes_template()).map_err(map_store_error)?)
+                .user_notes(
+                    session_id,
+                    store
+                        .notes_template_fallback(session_id, self.default_notes_template())
+                        .map_err(map_store_error)?,
+                )
                 .map_err(map_store_error)?,
         })
     }
@@ -3647,8 +3779,12 @@ impl MeetingSessionManager {
         session_id: MeetingSessionId,
     ) -> Result<MeetingUserNotes, MeetingCommandError> {
         let store = self.store().await?;
-        let fallback = store.notes_template_fallback(session_id, self.default_notes_template()).map_err(map_store_error)?;
-        store.user_notes(session_id, fallback).map_err(map_store_error)
+        let fallback = store
+            .notes_template_fallback(session_id, self.default_notes_template())
+            .map_err(map_store_error)?;
+        store
+            .user_notes(session_id, fallback)
+            .map_err(map_store_error)
     }
 
     /// Save the user's notes and chosen template. This is autosaved while a
@@ -3659,7 +3795,8 @@ impl MeetingSessionManager {
         request: MeetingUserNotesSaveRequest,
     ) -> Result<MeetingUserNotes, MeetingCommandError> {
         let store = self.store().await?;
-        let notes = store.save_user_notes(
+        let notes = store
+            .save_user_notes(
                 request.session_id,
                 &request.body,
                 request.template,
@@ -3667,7 +3804,11 @@ impl MeetingSessionManager {
                 request.expected_note_revision,
             )
             .map_err(map_store_error)?;
-        self.emit_session_changed(&store.session_snapshot(request.session_id).map_err(map_store_error)?);
+        self.emit_session_changed(
+            &store
+                .session_snapshot(request.session_id)
+                .map_err(map_store_error)?,
+        );
         Ok(notes)
     }
 
@@ -3697,7 +3838,9 @@ impl MeetingSessionManager {
         request: MeetingReenhanceRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
-        store.require_retained_transcript(request.session_id).map_err(map_store_error)?;
+        store
+            .require_retained_transcript(request.session_id)
+            .map_err(map_store_error)?;
         store
             .save_user_notes(
                 request.session_id,
@@ -3790,13 +3933,16 @@ impl MeetingSessionManager {
     }
 
     fn default_notes_template(&self) -> NotesTemplateChoice {
-        self.app.as_ref().map(|app| {
-            let settings = crate::settings::get_settings(app);
-            NotesTemplateChoice {
-                template: settings.meeting_notes_template,
-                custom_template_id: settings.meeting_notes_custom_template_id,
-            }
-        }).unwrap_or_default()
+        self.app
+            .as_ref()
+            .map(|app| {
+                let settings = crate::settings::get_settings(app);
+                NotesTemplateChoice {
+                    template: settings.meeting_notes_template,
+                    custom_template_id: settings.meeting_notes_custom_template_id,
+                }
+            })
+            .unwrap_or_default()
     }
 
     pub async fn retention_get(&self) -> Result<MeetingRetentionSnapshot, MeetingCommandError> {
@@ -3834,8 +3980,13 @@ impl MeetingSessionManager {
         })
     }
 
-    pub async fn transcript_retention_get(&self) -> Result<MeetingTranscriptRetentionSnapshot, MeetingCommandError> {
-        self.store().await?.transcript_retention_policy().map_err(map_store_error)
+    pub async fn transcript_retention_get(
+        &self,
+    ) -> Result<MeetingTranscriptRetentionSnapshot, MeetingCommandError> {
+        self.store()
+            .await?
+            .transcript_retention_policy()
+            .map_err(map_store_error)
     }
 
     pub async fn transcript_retention_set(
@@ -3843,10 +3994,17 @@ impl MeetingSessionManager {
         request: MeetingRetentionSetRequest,
     ) -> Result<MeetingTranscriptRetentionMutationResult, MeetingCommandError> {
         let store = self.store().await?;
-        let receipt = store.set_transcript_retention_policy(
-            request.operation_id, utc_now_ms(), request.expected_revision, &request.policy,
-        ).map_err(map_store_error)?;
-        let snapshot = store.transcript_retention_policy().map_err(map_store_error)?;
+        let receipt = store
+            .set_transcript_retention_policy(
+                request.operation_id,
+                utc_now_ms(),
+                request.expected_revision,
+                &request.policy,
+            )
+            .map_err(map_store_error)?;
+        let snapshot = store
+            .transcript_retention_policy()
+            .map_err(map_store_error)?;
         Ok(MeetingTranscriptRetentionMutationResult { receipt, snapshot })
     }
 
@@ -5172,29 +5330,64 @@ pub(crate) mod tests {
         let snapshot = review_ready_session(&manager);
         let session_id = snapshot.session_id;
         let store = tauri::async_runtime::block_on(manager.store()).unwrap();
-        let saved = store.save_user_notes(session_id, "Keep my own notes", MeetingNotesTemplate::General, None, 0).unwrap();
+        let saved = store
+            .save_user_notes(
+                session_id,
+                "Keep my own notes",
+                MeetingNotesTemplate::General,
+                None,
+                0,
+            )
+            .unwrap();
         let now = snapshot.retention_deadline_utc_ms.unwrap() + 86_400_000;
-        store.set_transcript_retention_policy(
-            MeetingOperationId::new(), now - 7 * 86_400_000, 0,
-            &MeetingRetentionPolicy::DeleteAfterDays { days: 1 },
-        ).unwrap();
-        assert!(store.purge_transcript_at(session_id, now).unwrap().is_some());
+        store
+            .set_transcript_retention_policy(
+                MeetingOperationId::new(),
+                now - 7 * 86_400_000,
+                0,
+                &MeetingRetentionPolicy::DeleteAfterDays { days: 1 },
+            )
+            .unwrap();
+        assert!(store
+            .purge_transcript_at(session_id, now)
+            .unwrap()
+            .is_some());
         let current = store.session_snapshot(session_id).unwrap();
         let request = || MeetingMutationRequest {
-            operation_id: MeetingOperationId::new(), session_id, expected_revision: current.revision,
+            operation_id: MeetingOperationId::new(),
+            session_id,
+            expected_revision: current.revision,
         };
-        assert!(matches!(tauri::async_runtime::block_on(manager.artifacts_regenerate(request())),
-            Err(MeetingCommandError::TranscriptDeleted)));
-        assert!(matches!(tauri::async_runtime::block_on(manager.recovery_finalize(request())),
-            Err(MeetingCommandError::TranscriptDeleted)));
-        assert!(matches!(tauri::async_runtime::block_on(manager.artifacts_reenhance(MeetingReenhanceRequest {
-            operation_id: MeetingOperationId::new(), session_id, expected_revision: current.revision,
-            body: "Do not overwrite on a refused rewrite".to_owned(), template: MeetingNotesTemplate::General,
-            custom_template_id: None,
-            expected_note_revision: saved.revision,
-        })), Err(MeetingCommandError::TranscriptDeleted)));
-        assert_eq!(store.user_notes(session_id, MeetingNotesTemplate::General.into()).unwrap(), saved);
-        assert_eq!(store.session_snapshot(session_id).unwrap().revision, current.revision);
+        assert!(matches!(
+            tauri::async_runtime::block_on(manager.artifacts_regenerate(request())),
+            Err(MeetingCommandError::TranscriptDeleted)
+        ));
+        assert!(matches!(
+            tauri::async_runtime::block_on(manager.recovery_finalize(request())),
+            Err(MeetingCommandError::TranscriptDeleted)
+        ));
+        assert!(matches!(
+            tauri::async_runtime::block_on(manager.artifacts_reenhance(MeetingReenhanceRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id,
+                expected_revision: current.revision,
+                body: "Do not overwrite on a refused rewrite".to_owned(),
+                template: MeetingNotesTemplate::General,
+                custom_template_id: None,
+                expected_note_revision: saved.revision,
+            })),
+            Err(MeetingCommandError::TranscriptDeleted)
+        ));
+        assert_eq!(
+            store
+                .user_notes(session_id, MeetingNotesTemplate::General.into())
+                .unwrap(),
+            saved
+        );
+        assert_eq!(
+            store.session_snapshot(session_id).unwrap().revision,
+            current.revision
+        );
     }
 
     #[test]
@@ -6265,10 +6458,17 @@ pub(crate) mod tests {
             .expect("the imported meeting is readable");
         assert_eq!(review.session.phase, MeetingPhase::ReviewReady);
         let store = tauri::async_runtime::block_on(manager.store()).unwrap();
-        let bundle = store.export_cloud_meeting_bundle(snapshot.session_id).unwrap();
+        let bundle = store
+            .export_cloud_meeting_bundle(snapshot.session_id)
+            .unwrap();
         let recorded_duration_ms = i64::try_from(
-            review.session.elapsed_offset_ns.expect("imported audio has a measured duration") / 1_000_000,
-        ).expect("the short fixture duration fits in milliseconds");
+            review
+                .session
+                .elapsed_offset_ns
+                .expect("imported audio has a measured duration")
+                / 1_000_000,
+        )
+        .expect("the short fixture duration fits in milliseconds");
         assert_eq!(
             bundle.session.ended_at_utc_ms,
             Some(1_700_000_000_000 + recorded_duration_ms),
@@ -6772,7 +6972,8 @@ pub(crate) mod tests {
 
         let draft = tauri::async_runtime::block_on(
             manager.follow_up_draft(MeetingOperationId::new(), session_id),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(draft.source, MeetingFollowUpSource::Generated);
         assert_eq!(draft.message.as_deref(), Some(""));
     }

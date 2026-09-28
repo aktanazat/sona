@@ -59,8 +59,12 @@ struct SearchRequest<'a> {
 impl<'a> SearchRequest<'a> {
     fn new(query: &'a str) -> Self {
         Self {
-            q: query, count: 3, result_filter: "web", text_decorations: false,
-            spellcheck: false, operators: false,
+            q: query,
+            count: 3,
+            result_filter: "web",
+            text_decorations: false,
+            spellcheck: false,
+            operators: false,
         }
     }
 }
@@ -72,7 +76,10 @@ pub(crate) struct WebResearch {
 
 impl WebResearch {
     fn without_results(status: impl Into<String>) -> Self {
-        Self { results: Vec::new(), status: status.into() }
+        Self {
+            results: Vec::new(),
+            status: status.into(),
+        }
     }
 }
 
@@ -81,16 +88,22 @@ impl WebResearch {
 /// both phrases together below Brave's 600-character / 75-word query limit.
 fn phrase(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.is_empty() || value.contains('@') || value.contains("://")
-        || value.chars().any(char::is_control) || value.chars().count() > 120
-        || value.split_whitespace().count() > 30 {
+    if value.is_empty()
+        || value.contains('@')
+        || value.contains("://")
+        || value.chars().any(char::is_control)
+        || value.chars().count() > 120
+        || value.split_whitespace().count() > 30
+    {
         return None;
     }
     Some(value.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn attendee_query(attendee: &CalendarAttendee, company: Option<&str>) -> Option<String> {
-    if attendee.is_self || attendee.status == ParticipationStatus::Declined { return None; }
+    if attendee.is_self || attendee.status == ParticipationStatus::Declined {
+        return None;
+    }
     let name = phrase(&attendee.name)?;
     match company.and_then(phrase) {
         Some(company) => Some(format!("{name} {company}")),
@@ -101,20 +114,40 @@ fn attendee_query(attendee: &CalendarAttendee, company: Option<&str>) -> Option<
 
 fn queries(store: &MeetingStore, attendees: &[CalendarAttendee]) -> Result<Vec<String>, String> {
     let emails = super::follow_up::recipient_addresses(attendees);
-    let matched = store.person_ids_for_calendar_emails(&emails)
+    let matched = store
+        .person_ids_for_calendar_emails(&emails)
         .map_err(|_| "Attendee companies could not be read. Refresh the brief to try again.")?;
     let mut result = Vec::new();
     let mut seen = HashSet::new();
-    for attendee in attendees.iter().filter(|attendee| !attendee.is_self && attendee.status != ParticipationStatus::Declined) {
-        let email = attendee.email.as_deref().map(|value| value.trim().to_lowercase());
+    for attendee in attendees
+        .iter()
+        .filter(|attendee| !attendee.is_self && attendee.status != ParticipationStatus::Declined)
+    {
+        let email = attendee
+            .email
+            .as_deref()
+            .map(|value| value.trim().to_lowercase());
         let company = if let Some(person_id) = email.as_ref().and_then(|email| matched.get(email)) {
-            store.person_detail(*person_id)
-                .map_err(|_| "An attendee's company could not be read. Refresh the brief to try again.")?
-                .detail.person.organization
-        } else { None };
-        let company = company.or_else(|| email.as_deref().and_then(MeetingStore::organization_from_email));
+            store
+                .person_detail(*person_id)
+                .map_err(|_| {
+                    "An attendee's company could not be read. Refresh the brief to try again."
+                })?
+                .detail
+                .person
+                .organization
+        } else {
+            None
+        };
+        let company = company.or_else(|| {
+            email
+                .as_deref()
+                .and_then(MeetingStore::organization_from_email)
+        });
         if let Some(query) = attendee_query(attendee, company.as_deref()) {
-            if seen.insert(query.to_lowercase()) { result.push(query); }
+            if seen.insert(query.to_lowercase()) {
+                result.push(query);
+            }
         }
     }
     Ok(result)
@@ -123,18 +156,34 @@ fn queries(store: &MeetingStore, attendees: &[CalendarAttendee]) -> Result<Vec<S
 fn parse_results(bytes: &[u8]) -> Result<Vec<WebResult>, String> {
     let response: SearchResponse = serde_json::from_slice(bytes)
         .map_err(|_| "Brave Search returned an unreadable response.")?;
-    if response.kind != "search" { return Err("Brave Search returned an unexpected response.".into()); }
-    let Some(web) = response.web else { return Ok(Vec::new()); };
-    Ok(web.results.into_iter().filter(|result| {
-        if result.title.trim().is_empty() { return false; }
-        let Ok(url) = url::Url::parse(&result.url) else { return false; };
-        matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
-            && url.username().is_empty() && url.password().is_none()
-    }).take(RESULTS_PER_PERSON).map(|result| WebResult {
-        title: result.title.chars().take(240).collect(),
-        url: result.url,
-        description: result.description.chars().take(1_200).collect(),
-    }).collect())
+    if response.kind != "search" {
+        return Err("Brave Search returned an unexpected response.".into());
+    }
+    let Some(web) = response.web else {
+        return Ok(Vec::new());
+    };
+    Ok(web
+        .results
+        .into_iter()
+        .filter(|result| {
+            if result.title.trim().is_empty() {
+                return false;
+            }
+            let Ok(url) = url::Url::parse(&result.url) else {
+                return false;
+            };
+            matches!(url.scheme(), "https" | "http")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+        .take(RESULTS_PER_PERSON)
+        .map(|result| WebResult {
+            title: result.title.chars().take(240).collect(),
+            url: result.url,
+            description: result.description.chars().take(1_200).collect(),
+        })
+        .collect())
 }
 
 fn http_error(status: reqwest::StatusCode) -> String {
@@ -146,17 +195,29 @@ fn http_error(status: reqwest::StatusCode) -> String {
 }
 
 async fn search(client: &Client, token: &str, query: &str) -> Result<Vec<WebResult>, String> {
-    let mut key = HeaderValue::from_str(token).map_err(|_| "The saved Brave key is invalid. Replace it in Meeting settings.")?;
+    let mut key = HeaderValue::from_str(token)
+        .map_err(|_| "The saved Brave key is invalid. Replace it in Meeting settings.")?;
     key.set_sensitive(true);
-    let mut response = client.get(ENDPOINT)
+    let mut response = client
+        .get(ENDPOINT)
         .header("X-Subscription-Token", key)
         .header(reqwest::header::ACCEPT, "application/json")
         .query(&SearchRequest::new(query))
-        .send().await.map_err(|_| "Brave Search could not be reached. Check your connection and try again.")?;
-    if !response.status().is_success() { return Err(http_error(response.status())); }
+        .send()
+        .await
+        .map_err(|_| "Brave Search could not be reached. Check your connection and try again.")?;
+    if !response.status().is_success() {
+        return Err(http_error(response.status()));
+    }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "The Brave Search response was interrupted.")? {
-        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES { return Err("The Brave Search response was too large.".into()); }
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "The Brave Search response was interrupted.")?
+    {
+        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err("The Brave Search response was too large.".into());
+        }
         bytes.extend_from_slice(&chunk);
     }
     parse_results(&bytes)
@@ -165,17 +226,29 @@ async fn search(client: &Client, token: &str, query: &str) -> Result<Vec<WebResu
 fn credential_error(error: SecretResolveError) -> String {
     match error {
         SecretResolveError::NotFound => MISSING_KEY.into(),
-        SecretResolveError::Store(_) => "Keychain could not read the Brave key. Unlock it and try again in Meeting settings.".into(),
+        SecretResolveError::Store(_) => {
+            "Keychain could not read the Brave key. Unlock it and try again in Meeting settings."
+                .into()
+        }
     }
 }
 
 pub(crate) async fn research(
-    app: Option<&AppHandle>, secrets: &SecretManager, store: &MeetingStore,
+    app: Option<&AppHandle>,
+    secrets: &SecretManager,
+    store: &MeetingStore,
     attendees: &[CalendarAttendee],
 ) -> WebResearch {
-    let Some(app) = app else { return WebResearch::without_results("Web research is off."); };
-    if !crate::settings::get_settings(app).meeting_prep.web_research_enabled {
-        return WebResearch::without_results("Web research is off. You can enable Brave Search in Meeting settings.");
+    let Some(app) = app else {
+        return WebResearch::without_results("Web research is off.");
+    };
+    if !crate::settings::get_settings(app)
+        .meeting_prep
+        .web_research_enabled
+    {
+        return WebResearch::without_results(
+            "Web research is off. You can enable Brave Search in Meeting settings.",
+        );
     }
     let token = match secrets.resolve(SecretAccount::meeting_brave_search()).await {
         Ok(token) => token,
@@ -188,23 +261,44 @@ pub(crate) async fn research(
     if queries.is_empty() {
         return WebResearch::without_results("No attendee has enough name or company information for web research. No search was sent.");
     }
-    let Ok(client) = CLIENT.as_ref() else { return WebResearch::without_results("A secure connection to Brave Search could not be prepared."); };
+    let Ok(client) = CLIENT.as_ref() else {
+        return WebResearch::without_results(
+            "A secure connection to Brave Search could not be prepared.",
+        );
+    };
     let mut results = Vec::new();
     let mut seen = HashSet::new();
     for (index, query) in queries.iter().take(MAX_PEOPLE).enumerate() {
         // One query per second also works with Brave's entry-level rate limit.
-        if index > 0 { tokio::time::sleep(Duration::from_secs(1)).await; }
-        if !crate::settings::get_settings(app).meeting_prep.web_research_enabled {
-            return WebResearch::without_results("Web research was turned off. Its results were left out.");
+        if index > 0 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        if !crate::settings::get_settings(app)
+            .meeting_prep
+            .web_research_enabled
+        {
+            return WebResearch::without_results(
+                "Web research was turned off. Its results were left out.",
+            );
         }
         match search(client, token.expose(), query).await {
-            Ok(found) => for result in found {
-                if seen.insert(result.url.clone()) { results.push(result); }
-            },
-            Err(error) => return WebResearch {
-                status: if results.is_empty() { error } else { format!("Some searches could not finish. {error} The completed results are below.") },
-                results,
-            },
+            Ok(found) => {
+                for result in found {
+                    if seen.insert(result.url.clone()) {
+                        results.push(result);
+                    }
+                }
+            }
+            Err(error) => {
+                return WebResearch {
+                    status: if results.is_empty() {
+                        error
+                    } else {
+                        format!("Some searches could not finish. {error} The completed results are below.")
+                    },
+                    results,
+                }
+            }
         }
     }
     let mut status = if results.is_empty() {
@@ -212,51 +306,86 @@ pub(crate) async fn research(
     } else {
         "External results from Brave Search. Names can match different people; check each source before relying on it.".to_string()
     };
-    if queries.len() > MAX_PEOPLE { status.push_str(" Research is limited to the first six eligible attendees per brief."); }
+    if queries.len() > MAX_PEOPLE {
+        status.push_str(" Research is limited to the first six eligible attendees per brief.");
+    }
     WebResearch { results, status }
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn meeting_web_research_connection(secrets: State<'_, Arc<SecretManager>>) -> Result<SecretState, String> {
-    Ok(secrets.state(SecretAccount::meeting_brave_search(), None).await)
+pub async fn meeting_web_research_connection(
+    secrets: State<'_, Arc<SecretManager>>,
+) -> Result<SecretState, String> {
+    Ok(secrets
+        .state(SecretAccount::meeting_brave_search(), None)
+        .await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_web_research_key_set(
-    secrets: State<'_, Arc<SecretManager>>, manager: State<'_, Arc<MeetingSessionManager>>, token: String,
+    secrets: State<'_, Arc<SecretManager>>,
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    token: String,
 ) -> Result<SecretState, String> {
     let token = Zeroizing::new(token);
-    if token.is_empty() || token.len() > 4_096 || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+    if token.is_empty() || token.len() > 4_096 || !token.bytes().all(|byte| byte.is_ascii_graphic())
+    {
         return Err("Paste the Brave Search API key without spaces or line breaks.".into());
     }
     let _turn = super::prep::brief_gate().lock().await;
-    let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
-    let state = secrets.replace(SecretAccount::meeting_brave_search(), token).await
-        .map_err(|_| "The Brave key could not be saved in Keychain. Unlock Keychain and try again.")?;
-    store.clear_briefs().map_err(|_| "The key was saved, but saved briefs could not be cleared. Refresh the brief.")?;
+    let store = manager
+        .store()
+        .await
+        .map_err(|_| "The meeting library is unavailable.")?;
+    let state = secrets
+        .replace(SecretAccount::meeting_brave_search(), token)
+        .await
+        .map_err(|_| {
+            "The Brave key could not be saved in Keychain. Unlock Keychain and try again."
+        })?;
+    store.clear_briefs().map_err(|_| {
+        "The key was saved, but saved briefs could not be cleared. Refresh the brief."
+    })?;
     Ok(state)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_web_research_key_remove(
-    secrets: State<'_, Arc<SecretManager>>, manager: State<'_, Arc<MeetingSessionManager>>,
+    secrets: State<'_, Arc<SecretManager>>,
+    manager: State<'_, Arc<MeetingSessionManager>>,
 ) -> Result<SecretState, String> {
     let _turn = super::prep::brief_gate().lock().await;
-    let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
-    let state = secrets.remove(SecretAccount::meeting_brave_search()).await
-        .map_err(|_| "The Brave key could not be removed from Keychain. Unlock it and try again.")?;
-    store.clear_briefs().map_err(|_| "The key was removed, but saved briefs could not be cleared. Refresh the brief.")?;
+    let store = manager
+        .store()
+        .await
+        .map_err(|_| "The meeting library is unavailable.")?;
+    let state = secrets
+        .remove(SecretAccount::meeting_brave_search())
+        .await
+        .map_err(|_| {
+            "The Brave key could not be removed from Keychain. Unlock it and try again."
+        })?;
+    store.clear_briefs().map_err(|_| {
+        "The key was removed, but saved briefs could not be cleared. Refresh the brief."
+    })?;
     Ok(state)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn meeting_web_research_test(secrets: State<'_, Arc<SecretManager>>) -> Result<String, String> {
-    let token = secrets.resolve(SecretAccount::meeting_brave_search()).await.map_err(credential_error)?;
-    let client = CLIENT.as_ref().map_err(|_| "A secure connection to Brave Search could not be prepared.")?;
+pub async fn meeting_web_research_test(
+    secrets: State<'_, Arc<SecretManager>>,
+) -> Result<String, String> {
+    let token = secrets
+        .resolve(SecretAccount::meeting_brave_search())
+        .await
+        .map_err(credential_error)?;
+    let client = CLIENT
+        .as_ref()
+        .map_err(|_| "A secure connection to Brave Search could not be prepared.")?;
     // Explicitly testing the service sends only this fixed public query.
     search(client, token.expose(), "Brave Search").await?;
     Ok("Brave Search accepted the saved key. Enable web research and save your preparation settings to use it in briefs.".into())
@@ -267,7 +396,12 @@ mod tests {
     use super::*;
 
     fn attendee(name: &str) -> CalendarAttendee {
-        CalendarAttendee { name: name.into(), email: Some("private-address@acme.com".into()), status: ParticipationStatus::Accepted, is_self: false }
+        CalendarAttendee {
+            name: name.into(),
+            email: Some("private-address@acme.com".into()),
+            status: ParticipationStatus::Accepted,
+            is_self: false,
+        }
     }
 
     #[test]
@@ -276,7 +410,10 @@ mod tests {
         let query = attendee_query(&person, Some("Acme")).unwrap();
         assert_eq!(query, "Dana Lee Acme");
         let request = serde_json::to_value(SearchRequest::new(&query)).unwrap();
-        assert_eq!(request, serde_json::json!({"q":"Dana Lee Acme","count":3,"result_filter":"web","text_decorations":false,"spellcheck":false,"operators":false}));
+        assert_eq!(
+            request,
+            serde_json::json!({"q":"Dana Lee Acme","count":3,"result_filter":"web","text_decorations":false,"spellcheck":false,"operators":false})
+        );
         assert!(attendee_query(&attendee("private-address@acme.com"), Some("Acme")).is_none());
     }
 
@@ -289,13 +426,22 @@ mod tests {
         person.status = ParticipationStatus::Declined;
         assert!(attendee_query(&person, Some("Acme")).is_none());
         assert!(attendee_query(&attendee("Dana"), None).is_none());
-        assert_eq!(attendee_query(&attendee("Dana Lee"), None), Some("Dana Lee".into()));
+        assert_eq!(
+            attendee_query(&attendee("Dana Lee"), None),
+            Some("Dana Lee".into())
+        );
     }
 
     #[test]
     fn valid_no_results_is_distinct_from_a_bad_provider_payload() {
-        assert!(parse_results(br#"{"type":"search","web":{"results":[]}}"#).unwrap().is_empty());
-        assert!(parse_results(br#"{"type":"search","query":{"original":"Dana Lee"}}"#).unwrap().is_empty());
+        assert!(parse_results(br#"{"type":"search","web":{"results":[]}}"#)
+            .unwrap()
+            .is_empty());
+        assert!(
+            parse_results(br#"{"type":"search","query":{"original":"Dana Lee"}}"#)
+                .unwrap()
+                .is_empty()
+        );
         assert!(parse_results(br#"{"type":"error"}"#).is_err());
         assert!(parse_results(br#"{}"#).is_err());
     }

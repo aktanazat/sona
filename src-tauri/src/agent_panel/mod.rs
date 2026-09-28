@@ -133,7 +133,10 @@ impl StoredAction {
             state,
             operation_id,
             can_undo: matches!(&self.state, StoredActionState::Applied(applied) if !matches!(applied.undo, ActionUndo::Unavailable)),
-            detail: match &self.state { StoredActionState::Failed(detail) => Some(detail.clone()), _ => None },
+            detail: match &self.state {
+                StoredActionState::Failed(detail) => Some(detail.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -144,7 +147,9 @@ impl StoredAction {
     const fn to_run(&self) -> Option<&SonaChatActionV1> {
         match self.state {
             StoredActionState::Pending => Some(&self.action),
-            StoredActionState::Applied(_) | StoredActionState::Dismissed | StoredActionState::Failed(_) => None,
+            StoredActionState::Applied(_)
+            | StoredActionState::Dismissed
+            | StoredActionState::Failed(_) => None,
         }
     }
 
@@ -789,7 +794,9 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                     let available = MAX_CONTEXT_PACK_BYTES.saturating_sub(capabilities.len());
                     if pack.len() > available {
                         let mut boundary = available;
-                        while !pack.is_char_boundary(boundary) { boundary -= 1; }
+                        while !pack.is_char_boundary(boundary) {
+                            boundary -= 1;
+                        }
                         pack.truncate(boundary);
                     }
                     pack.push_str(&capabilities);
@@ -1179,7 +1186,14 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         let calendar = self.app.try_state::<Arc<dyn CalendarSource>>();
         match (meetings, history, calendar) {
             (Some(meetings), Some(history), Some(calendar)) => {
-                tools::run(meetings.inner(), history.inner(), calendar.inner(), call, folder_id).await
+                tools::run(
+                    meetings.inner(),
+                    history.inner(),
+                    calendar.inner(),
+                    call,
+                    folder_id,
+                )
+                .await
             }
             _ => ToolResult {
                 id: call.id.clone(),
@@ -1355,8 +1369,11 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             return self.turn_status(&request.turn_id);
         };
         let app = R::native_handle(&self.app);
-        let operation_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID,
-            format!("{}:action:{}", request.turn_id, request.action_index).as_bytes()).to_string();
+        let operation_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{}:action:{}", request.turn_id, request.action_index).as_bytes(),
+        )
+        .to_string();
         match actions::apply(&app, meetings, &action, &operation_id).await {
             Ok(applied) => self.settle_action(&request, StoredActionState::Applied(applied)),
             Err(detail) => self.settle_action(&request, StoredActionState::Failed(detail)),
@@ -1383,7 +1400,10 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         let undo = {
             let state = self.lock_state();
             match self.stored_action(&state, &request)?.reversal() {
-                Reversal::Settled => { drop(state); return self.turn_status(&request.turn_id); }
+                Reversal::Settled => {
+                    drop(state);
+                    return self.turn_status(&request.turn_id);
+                }
                 Reversal::Unapplied => None,
                 Reversal::Undo(undo) => Some(undo.clone()),
             }
@@ -1457,11 +1477,17 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         let _operation = self.action_operation.lock().await;
         {
             let mut state = self.lock_state();
-            let active = state.turn.as_mut().filter(|turn| turn.turn_id == request.turn_id)
+            let active = state
+                .turn
+                .as_mut()
+                .filter(|turn| turn.turn_id == request.turn_id)
                 .ok_or(AgentPanelCommandErrorV1::UnknownTurn)?;
-            action.validate(active.request.context_pack())
+            action
+                .validate(active.request.context_pack())
                 .map_err(|_| AgentPanelCommandErrorV1::InvalidRequest)?;
-            let card = active.actions.get_mut(request.action_index as usize)
+            let card = active
+                .actions
+                .get_mut(request.action_index as usize)
                 .ok_or(AgentPanelCommandErrorV1::UnknownAction)?;
             if !matches!(card.state, StoredActionState::Pending) {
                 return Err(AgentPanelCommandErrorV1::InvalidRequest);
@@ -3320,7 +3346,10 @@ mod tests {
         manager.record_exchange("command-2-2", exchange("Meanwhile?"));
         let status = manager.current_status();
         assert_eq!(status.conversation_id.as_deref(), Some("conversation-busy"));
-        assert_eq!(status.turn.map(|turn| turn.turn_id), Some("turn-busy".to_string()));
+        assert_eq!(
+            status.turn.map(|turn| turn.turn_id),
+            Some("turn-busy".to_string())
+        );
         assert_eq!(
             history::turns_of(&manager.app, "command-2-2").expect("exchange was persisted"),
             exchange("Meanwhile?")

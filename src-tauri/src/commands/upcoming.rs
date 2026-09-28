@@ -29,12 +29,19 @@ pub async fn meeting_upcoming_events(
     let window = upcoming_window(Local::now(), days);
     let detection = Arc::clone(&detection);
     let enabled = crate::settings::get_settings(detection.app_handle()).detection_calendar_enabled;
-    let access = if enabled { detection.calendar_access() }
-        else { crate::meeting::detection::calendar::CalendarAccess::NotDetermined };
+    let access = if enabled {
+        detection.calendar_access()
+    } else {
+        crate::meeting::detection::calendar::CalendarAccess::NotDetermined
+    };
     let occurrences = if enabled {
         tauri::async_runtime::spawn_blocking(move || {
             detection.calendar_events_between(window.0, window.1)
-        }).await.map_err(|_| MeetingCommandError::EngineFailure)?
-    } else { Vec::new() };
+        })
+        .await
+        .map_err(|_| MeetingCommandError::EngineFailure)?
+    } else {
+        Vec::new()
+    };
     manager.upcoming_events(access, window, occurrences).await
 }

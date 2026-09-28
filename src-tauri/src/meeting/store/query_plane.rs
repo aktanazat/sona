@@ -372,8 +372,12 @@ impl MeetingStore {
         let transaction = connection.transaction()?;
         let session = super::id(session_id);
         let current_key: String = transaction.query_row(
-            &format!("SELECT ({}) FROM meeting_sessions m WHERE m.id = ?1", semantic_index_key_sql()),
-            params![session], |row| row.get(0),
+            &format!(
+                "SELECT ({}) FROM meeting_sessions m WHERE m.id = ?1",
+                semantic_index_key_sql()
+            ),
+            params![session],
+            |row| row.get(0),
         )?;
         if current_key != key {
             return Err(StoreError::Conflict);

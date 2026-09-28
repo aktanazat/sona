@@ -266,8 +266,7 @@ pub fn writing_style(
         Some(CleanupLevel::None) | None => None,
     };
     let cleanup_len = cleanup.map_or(0, |block| block.len() + CLEANUP_CONTRACT.len() + 4);
-    let mut system =
-        String::with_capacity(NORMALIZER.len() + base_len + cleanup_len + 1_100);
+    let mut system = String::with_capacity(NORMALIZER.len() + base_len + cleanup_len + 1_100);
     system.push_str(NORMALIZER);
     system.push_str("\n\n");
     if let Some(prompt) = custom_prompt {
@@ -492,7 +491,6 @@ mod tests {
             )
         );
     }
-
 
     fn run_with_samples(samples: Vec<PersonaSample>) -> RunPlan {
         let mut settings = get_default_settings();

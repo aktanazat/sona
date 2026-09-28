@@ -721,7 +721,8 @@ impl MeetingStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_voice_people_revision_in(&transaction, matched.people_revision)?;
-        let mut speaker_revision = active_speaker_revision_in(&transaction, session_id, speaker_id)?;
+        let mut speaker_revision =
+            active_speaker_revision_in(&transaction, session_id, speaker_id)?;
         if speaker_revision != expected_speaker_revision {
             return Err(StoreError::StaleRevision);
         }

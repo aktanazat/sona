@@ -189,8 +189,7 @@ fn apply_numeric_backtracks(text: &str) -> Cow<'_, str> {
         let start = whole.start();
         let end = whole.end();
         let prefix = &corrected[..start];
-        let suffix = corrected[end..]
-            .trim_start_matches(&['.', ',', '!', '?', ';', ':', '…'][..]);
+        let suffix = corrected[end..].trim_start_matches(&['.', ',', '!', '?', ';', ':', '…'][..]);
         let starts_at_word = prefix.is_empty() || prefix.ends_with(char::is_whitespace);
         let ends_at_word = suffix.is_empty() || suffix.starts_with(char::is_whitespace);
         // A quote can span sentences. Defer quoted or previously quoted
@@ -567,7 +566,10 @@ mod tests {
 
     #[test]
     fn numeric_backtracks_apply_left_to_right() {
-        assert_eq!(spoken_edits("Meet at 2 actually 3 actually 4."), "Meet at 4.");
+        assert_eq!(
+            spoken_edits("Meet at 2 actually 3 actually 4."),
+            "Meet at 4."
+        );
     }
 
     #[test]
@@ -612,7 +614,10 @@ mod tests {
     #[test]
     fn numeric_backtrack_requires_english_evidence() {
         let text = "Let's meet at 2, actually 3.";
-        assert_eq!(apply_spoken_edits(text, &OutputLanguageEvidence::Unknown, true), text);
+        assert_eq!(
+            apply_spoken_edits(text, &OutputLanguageEvidence::Unknown, true),
+            text
+        );
     }
 
     #[test]

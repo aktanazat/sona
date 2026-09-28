@@ -250,7 +250,10 @@ impl CoordinatorState {
             Stage::Recording { duration, .. } => Some(duration.next_deadline()),
             Stage::Idle | Stage::Processing => None,
         };
-        self.grace_deadline().into_iter().chain(recording_deadline).min()
+        self.grace_deadline()
+            .into_iter()
+            .chain(recording_deadline)
+            .min()
     }
 
     /// Check on every loop, not just receive timeouts: repeated keyboard
@@ -267,7 +270,10 @@ impl CoordinatorState {
             Some(DurationAction::Warn) => return Some(Effect::DurationWarning),
             None => {}
         }
-        if self.grace_deadline().is_some_and(|deadline| now >= deadline) {
+        if self
+            .grace_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
             self.on_grace_expired()
         } else {
             None
@@ -989,7 +995,8 @@ mod tests {
                 }) => {
                     self.starts += 1;
                     let plan = self.microphone_opens.then(Self::run_plan);
-                    self.state.on_started(intent, pressed_at, latched, self.clock, plan);
+                    self.state
+                        .on_started(intent, pressed_at, latched, self.clock, plan);
                 }
                 Some(Effect::Stop { .. }) => self.stops += 1,
                 Some(Effect::DurationWarning) => self.warnings += 1,

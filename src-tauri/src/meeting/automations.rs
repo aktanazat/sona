@@ -252,7 +252,9 @@ pub(crate) fn run_for_meeting(
             ),
         }
     }
-    if let Err(error) = super::prompts::run_folder_prompts(store, processing, session_id, started_at_utc_ms) {
+    if let Err(error) =
+        super::prompts::run_folder_prompts(store, processing, session_id, started_at_utc_ms)
+    {
         log::warn!("Could not run folder prompts for {session_id:?}: {error:?}");
     }
     receipts

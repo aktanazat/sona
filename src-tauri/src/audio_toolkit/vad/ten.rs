@@ -317,7 +317,8 @@ impl VoiceActivityDetector for TenVad {
             probability = probability.max(self.run_hop()?);
         }
 
-        if probability > super::quiet_speech::detection_threshold(self.threshold, self.quiet_speech) {
+        if probability > super::quiet_speech::detection_threshold(self.threshold, self.quiet_speech)
+        {
             Ok(VadFrame::Speech(frame))
         } else {
             Ok(VadFrame::Noise)

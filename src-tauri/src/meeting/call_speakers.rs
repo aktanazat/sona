@@ -47,16 +47,31 @@ pub(crate) struct CallObservation {
 
 impl CallObservation {
     fn unavailable(detail: &str) -> Self {
-        Self { state: "unavailable".into(), detail: detail.into(), participants: Vec::new(), active_ids: Vec::new() }
+        Self {
+            state: "unavailable".into(),
+            detail: detail.into(),
+            participants: Vec::new(),
+            active_ids: Vec::new(),
+        }
     }
 
     pub(crate) fn valid(&self) -> bool {
-        matches!(self.state.as_str(), "reading" | "roster_only" | "unavailable")
-            && self.participants.len() <= 128 && self.active_ids.len() <= 128
+        matches!(
+            self.state.as_str(),
+            "reading" | "roster_only" | "unavailable"
+        ) && self.participants.len() <= 128
+            && self.active_ids.len() <= 128
             && self.detail.len() <= 1024
-            && self.participants.iter().all(|person| !person.id.is_empty() && person.id.len() <= 64
-                && !person.name.is_empty() && person.name.len() <= 256)
-            && self.active_ids.iter().all(|id| self.participants.iter().any(|person| person.id == *id))
+            && self.participants.iter().all(|person| {
+                !person.id.is_empty()
+                    && person.id.len() <= 64
+                    && !person.name.is_empty()
+                    && person.name.len() <= 256
+            })
+            && self
+                .active_ids
+                .iter()
+                .all(|id| self.participants.iter().any(|person| person.id == *id))
     }
 }
 
@@ -87,33 +102,53 @@ pub struct CallNameStatus {
 
 impl Default for CallNameStatus {
     fn default() -> Self {
-        Self { enabled: false, automatically_use: false, state: "off".into(),
+        Self {
+            enabled: false,
+            automatically_use: false,
+            state: "off".into(),
             detail: "Call names are off. Nothing is read until you choose a call.".into(),
-            target: None, roster: Vec::new(), suggestions: Vec::new() }
+            target: None,
+            roster: Vec::new(),
+            suggestions: Vec::new(),
+        }
     }
 }
 
 pub(crate) fn targets(plan: &MeetingRunPlan) -> CallNameTargets {
     if !plan.requested_sources.contains(&SourceKind::SystemAudio) {
-        return CallNameTargets { state: "unavailable".into(), detail: "This recording does not capture call audio.".into(), targets: Vec::new() };
+        return CallNameTargets {
+            state: "unavailable".into(),
+            detail: "This recording does not capture call audio.".into(),
+            targets: Vec::new(),
+        };
     }
     let mut result = platform::targets();
     let allowed = &plan.frozen_system_audio_application_bundle_ids;
     if !allowed.is_empty() {
-        result.targets.retain(|target| allowed.iter().any(|bundle| bundle.eq_ignore_ascii_case(&target.bundle_id)));
+        result.targets.retain(|target| {
+            allowed
+                .iter()
+                .any(|bundle| bundle.eq_ignore_ascii_case(&target.bundle_id))
+        });
         if result.targets.is_empty() {
             result.state = "unavailable".into();
-            result.detail = "No readable joined call belongs to this recording's selected audio app.".into();
+            result.detail =
+                "No readable joined call belongs to this recording's selected audio app.".into();
         }
     }
     result
 }
 
 pub(crate) fn selected_target(plan: &MeetingRunPlan, id: &str) -> Option<CallNameTarget> {
-    if !plan.requested_sources.contains(&SourceKind::SystemAudio) { return None; }
+    if !plan.requested_sources.contains(&SourceKind::SystemAudio) {
+        return None;
+    }
     platform::target(id).filter(|target| {
         plan.frozen_system_audio_application_bundle_ids.is_empty()
-            || plan.frozen_system_audio_application_bundle_ids.iter().any(|bundle| bundle.eq_ignore_ascii_case(&target.bundle_id))
+            || plan
+                .frozen_system_audio_application_bundle_ids
+                .iter()
+                .any(|bundle| bundle.eq_ignore_ascii_case(&target.bundle_id))
     })
 }
 
@@ -126,25 +161,42 @@ pub(crate) struct CallNameSampler {
 
 impl CallNameSampler {
     pub(crate) fn start(
-        store: Arc<MeetingStore>, plan: MeetingRunPlan, target: CallNameTarget, automatically_use: bool,
+        store: Arc<MeetingStore>,
+        plan: MeetingRunPlan,
+        target: CallNameTarget,
+        automatically_use: bool,
     ) -> Result<Self, StoreError> {
         store.begin_call_names(&plan, &target, automatically_use)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
         let session_id = plan.session_id;
         let failed_store = Arc::clone(&store);
-        let handle = thread::Builder::new().name("call-names".into()).spawn(move || {
-            let result = sample_call(&store, &plan, &target.id, &stopping);
-            platform::release(&target.id);
-            if let Err(error) = result {
-                log::warn!("Call-name sampling stopped: {error:?}");
-                let _ = store.finish_call_names(session_id, "unavailable", "Call names stopped because the recording could not be read or saved.");
-            }
-        }).map_err(|_| {
-            let _ = failed_store.finish_call_names(session_id, "unavailable", "The call-name reader could not start.");
-            StoreError::Unavailable
-        })?;
-        Ok(Self { stop, handle: Some(handle) })
+        let handle = thread::Builder::new()
+            .name("call-names".into())
+            .spawn(move || {
+                let result = sample_call(&store, &plan, &target.id, &stopping);
+                platform::release(&target.id);
+                if let Err(error) = result {
+                    log::warn!("Call-name sampling stopped: {error:?}");
+                    let _ = store.finish_call_names(
+                        session_id,
+                        "unavailable",
+                        "Call names stopped because the recording could not be read or saved.",
+                    );
+                }
+            })
+            .map_err(|_| {
+                let _ = failed_store.finish_call_names(
+                    session_id,
+                    "unavailable",
+                    "The call-name reader could not start.",
+                );
+                StoreError::Unavailable
+            })?;
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
     }
 }
 
@@ -153,19 +205,32 @@ impl Drop for CallNameSampler {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             handle.thread().unpark();
-            if handle.join().is_err() { log::warn!("Call-name reader ended unexpectedly"); }
+            if handle.join().is_err() {
+                log::warn!("Call-name reader ended unexpectedly");
+            }
         }
     }
 }
 
-fn sample_call(store: &MeetingStore, plan: &MeetingRunPlan, target: &str, stop: &AtomicBool) -> Result<(), StoreError> {
+fn sample_call(
+    store: &MeetingStore,
+    plan: &MeetingRunPlan,
+    target: &str,
+    stop: &AtomicBool,
+) -> Result<(), StoreError> {
     let mut last_observation: Option<CallObservation> = None;
     let mut last_ns: Option<u64> = None;
     while !stop.load(Ordering::Acquire) {
         let snapshot = store.session_snapshot(plan.session_id)?;
         match snapshot.phase {
-            MeetingPhase::CapturingPaused | MeetingPhase::CapturingPausing | MeetingPhase::CapturingResuming => {
-                store.call_names_state(plan.session_id, "paused", "Call names are paused with the recording.")?;
+            MeetingPhase::CapturingPaused
+            | MeetingPhase::CapturingPausing
+            | MeetingPhase::CapturingResuming => {
+                store.call_names_state(
+                    plan.session_id,
+                    "paused",
+                    "Call names are paused with the recording.",
+                )?;
                 last_ns = None;
                 last_observation = None;
                 thread::park_timeout(Duration::from_secs(1));
@@ -174,23 +239,51 @@ fn sample_call(store: &MeetingStore, plan: &MeetingRunPlan, target: &str, stop: 
             MeetingPhase::CapturingRecording => {}
             _ => break,
         }
-        if !snapshot.sources.iter().any(|source| source.source_kind == SourceKind::SystemAudio
-            && matches!(source.health, SourceHealth::Healthy | SourceHealth::Degraded)) {
-            return store.finish_call_names(plan.session_id, "unavailable", "Call audio is unavailable. Reading names has stopped.");
+        if !snapshot.sources.iter().any(|source| {
+            source.source_kind == SourceKind::SystemAudio
+                && matches!(
+                    source.health,
+                    SourceHealth::Healthy | SourceHealth::Degraded
+                )
+        }) {
+            return store.finish_call_names(
+                plan.session_id,
+                "unavailable",
+                "Call audio is unavailable. Reading names has stopped.",
+            );
         }
         let before = host_monotonic_now_ns();
         let observation = platform::sample(target);
         let now = host_monotonic_now_ns();
-        if stop.load(Ordering::Acquire) { break; }
-        if !observation.valid() || now.saturating_sub(before) > MAX_OBSERVATION_GAP_NS {
-            return store.finish_call_names(plan.session_id, "unavailable", "The call's participant tree did not answer reliably.");
+        if stop.load(Ordering::Acquire) {
+            break;
         }
-        let offset_ns = now.checked_sub(plan.session_clock_anchor.host_monotonic_anchor_ns).ok_or(StoreError::Invalid)?;
-        let continuous = last_ns.is_some_and(|last| offset_ns > last && offset_ns - last <= MAX_OBSERVATION_GAP_NS);
+        if !observation.valid() || now.saturating_sub(before) > MAX_OBSERVATION_GAP_NS {
+            return store.finish_call_names(
+                plan.session_id,
+                "unavailable",
+                "The call's participant tree did not answer reliably.",
+            );
+        }
+        let offset_ns = now
+            .checked_sub(plan.session_clock_anchor.host_monotonic_anchor_ns)
+            .ok_or(StoreError::Invalid)?;
+        let continuous = last_ns
+            .is_some_and(|last| offset_ns > last && offset_ns - last <= MAX_OBSERVATION_GAP_NS);
         let unchanged = continuous && last_observation.as_ref() == Some(&observation);
-        match store.record_call_observation(plan.session_id, offset_ns, &observation, continuous, unchanged) {
+        match store.record_call_observation(
+            plan.session_id,
+            offset_ns,
+            &observation,
+            continuous,
+            unchanged,
+        ) {
             Ok(true) => {}
-            Ok(false) => return store.finish_call_names(plan.session_id, "limit_reached", "This recording has reached its call-name history limit. Earlier names are kept."),
+            Ok(false) => return store.finish_call_names(
+                plan.session_id,
+                "limit_reached",
+                "This recording has reached its call-name history limit. Earlier names are kept.",
+            ),
             Err(StoreError::Conflict) => {
                 // Pause or stop can win while AX is answering. That late
                 // observation belongs to no recorded interval.
@@ -201,13 +294,21 @@ fn sample_call(store: &MeetingStore, plan: &MeetingRunPlan, target: &str, stop: 
             Err(error) => return Err(error),
         }
         if observation.state == "unavailable" {
-            return store.finish_call_names(plan.session_id, &observation.state, &observation.detail);
+            return store.finish_call_names(
+                plan.session_id,
+                &observation.state,
+                &observation.detail,
+            );
         }
         last_ns = Some(offset_ns);
         last_observation = Some(observation);
         thread::park_timeout(Duration::from_secs(1));
     }
-    store.finish_call_names(plan.session_id, "stopped", "Call-name reading has stopped. Recorded names are available in review.")
+    store.finish_call_names(
+        plan.session_id,
+        "stopped",
+        "Call-name reading has stopped. Recorded names are available in review.",
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -227,7 +328,9 @@ mod platform {
     // SAFETY: callers pass only the bridge's nullable, owned strdup result.
     // The bridge's matching free consumes it exactly once after JSON decoding.
     unsafe fn decode<T: serde::de::DeserializeOwned>(pointer: *mut c_char) -> Option<T> {
-        if pointer.is_null() { return None; }
+        if pointer.is_null() {
+            return None;
+        }
         let result = serde_json::from_slice(CStr::from_ptr(pointer).to_bytes()).ok();
         sona_call_roster_free_string(pointer);
         result
@@ -236,7 +339,9 @@ mod platform {
     pub(super) fn targets() -> CallNameTargets {
         // SAFETY: the linked Swift bridge returns the owned string decode expects.
         unsafe { decode(sona_call_roster_targets_json()) }.unwrap_or_else(|| CallNameTargets {
-            state: "unavailable".into(), detail: "The call-name reader did not answer.".into(), targets: Vec::new(),
+            state: "unavailable".into(),
+            detail: "The call-name reader did not answer.".into(),
+            targets: Vec::new(),
         })
     }
 
@@ -247,7 +352,9 @@ mod platform {
     }
 
     pub(super) fn sample(target: &str) -> CallObservation {
-        let Ok(target) = CString::new(target) else { return CallObservation::unavailable("Invalid call selection.") };
+        let Ok(target) = CString::new(target) else {
+            return CallObservation::unavailable("Invalid call selection.");
+        };
         // SAFETY: target lives through the call; decode owns the returned bridge string.
         unsafe { decode(sona_call_roster_sample_json(target.as_ptr())) }
             .unwrap_or_else(|| CallObservation::unavailable("The call-name reader did not answer."))
@@ -265,9 +372,17 @@ mod platform {
 mod platform {
     use super::*;
     pub(super) fn targets() -> CallNameTargets {
-        CallNameTargets { state: "unavailable".into(), detail: "Reading call names requires macOS Accessibility.".into(), targets: Vec::new() }
+        CallNameTargets {
+            state: "unavailable".into(),
+            detail: "Reading call names requires macOS Accessibility.".into(),
+            targets: Vec::new(),
+        }
     }
-    pub(super) fn target(_: &str) -> Option<CallNameTarget> { None }
-    pub(super) fn sample(_: &str) -> CallObservation { CallObservation::unavailable("Reading call names requires macOS Accessibility.") }
+    pub(super) fn target(_: &str) -> Option<CallNameTarget> {
+        None
+    }
+    pub(super) fn sample(_: &str) -> CallObservation {
+        CallObservation::unavailable("Reading call names requires macOS Accessibility.")
+    }
     pub(super) fn release(_: &str) {}
 }

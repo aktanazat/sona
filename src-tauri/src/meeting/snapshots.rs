@@ -210,7 +210,12 @@ impl Fingerprint {
     }
 
     fn distance(&self, other: &Self) -> f32 {
-        let total: f32 = self.0.iter().zip(&other.0).map(|(a, b)| (a - b).abs()).sum();
+        let total: f32 = self
+            .0
+            .iter()
+            .zip(&other.0)
+            .map(|(a, b)| (a - b).abs())
+            .sum();
         // SAFETY: the fixed 32 by 32 fingerprint has 1024 cells, which fits in u16.
         let cell_count = u16::try_from(self.0.len()).expect("a 32 by 32 fingerprint fits in u16");
         total / f32::from(cell_count)
@@ -356,11 +361,19 @@ pub(crate) fn write_export_images(
     if snapshots.is_empty() {
         return Ok(());
     }
-    let folder = export_path.with_file_name(export_folder_name(export_path).ok_or(StoreError::Invalid)?);
+    let folder =
+        export_path.with_file_name(export_folder_name(export_path).ok_or(StoreError::Invalid)?);
     std::fs::create_dir_all(&folder)?;
     for (index, snapshot) in snapshots.iter().enumerate() {
-        let png = store.meeting_snapshot_png(session_id, snapshot.snapshot_id, MeetingSnapshotSize::Full)?;
-        std::fs::write(folder.join(export_image_name(index, snapshot.offset_ns)), png)?;
+        let png = store.meeting_snapshot_png(
+            session_id,
+            snapshot.snapshot_id,
+            MeetingSnapshotSize::Full,
+        )?;
+        std::fs::write(
+            folder.join(export_image_name(index, snapshot.offset_ns)),
+            png,
+        )?;
     }
     Ok(())
 }
@@ -408,9 +421,10 @@ impl MeetingSnapshotService {
         };
         // Emitting fails only when the payload cannot be serialized, which a
         // plain record never does; the next change sends a fresh one anyway.
-        let _ = self
-            .app
-            .emit(<MeetingSnapshotChangedEvent as tauri_specta::Event>::NAME, payload);
+        let _ = self.app.emit(
+            <MeetingSnapshotChangedEvent as tauri_specta::Event>::NAME,
+            payload,
+        );
     }
 
     async fn store(&self) -> Result<Arc<MeetingStore>, MeetingSnapshotError> {
@@ -519,7 +533,9 @@ impl MeetingSnapshotService {
         }
         let frame = match platform::capture(targets, WATCH_WIDTH) {
             Ok(frame) => frame,
-            Err(MeetingSnapshotError::ScreenRecordingDenied) => return MeetingSnapshotWatch::Denied,
+            Err(MeetingSnapshotError::ScreenRecordingDenied) => {
+                return MeetingSnapshotWatch::Denied
+            }
             Err(MeetingSnapshotError::Unsupported) => return MeetingSnapshotWatch::Off,
             Err(_) => {
                 // The window went away; when it comes back, wait for it to
@@ -535,7 +551,10 @@ impl MeetingSnapshotService {
         if targets.len() != 1 || targets.first() != Some(&frame.bundle_id) {
             targets.clear();
             targets.push(frame.bundle_id.clone());
-            self.sessions().entry(session_id).or_default().capture_bundle_id = Some(frame.bundle_id.clone());
+            self.sessions()
+                .entry(session_id)
+                .or_default()
+                .capture_bundle_id = Some(frame.bundle_id.clone());
         }
         let Some(fingerprint) = Fingerprint::from_rgba(&frame.pixels, frame.width, frame.height)
         else {
@@ -600,7 +619,9 @@ impl MeetingSnapshotService {
         let frontmost = crate::context::frontmost_application_identifier()
             .map(|identifier| identifier.to_lowercase())
             .filter(|identifier| {
-                configured.iter().any(|app| app.eq_ignore_ascii_case(identifier))
+                configured
+                    .iter()
+                    .any(|app| app.eq_ignore_ascii_case(identifier))
                     || super::detection::apps::is_browser_bundle_id(identifier)
             });
         let candidates = if planned.is_empty() {
@@ -638,7 +659,10 @@ impl MeetingSnapshotService {
         }
         if trigger == MeetingSnapshotTrigger::Automatic
             && (!crate::settings::get_settings(&self.app).meeting_screen_snapshots_enabled
-                || self.sessions().get(&session_id).is_some_and(|watch| watch.turned_off))
+                || self
+                    .sessions()
+                    .get(&session_id)
+                    .is_some_and(|watch| watch.turned_off))
         {
             return Err(MeetingSnapshotError::NotRecording);
         }
@@ -646,8 +670,8 @@ impl MeetingSnapshotService {
         let frame = platform::capture(targets, FULL_WIDTH)?;
         let captured_at_ns = super::clock::host_monotonic_now_ns();
         let captured_at_utc_ms = chrono::Utc::now().timestamp_millis();
-        let offset_ns = captured_at_ns
-            .saturating_sub(plan.session_clock_anchor.host_monotonic_anchor_ns);
+        let offset_ns =
+            captured_at_ns.saturating_sub(plan.session_clock_anchor.host_monotonic_anchor_ns);
         let (width, height) = (frame.width, frame.height);
         let image = RgbaImage::from_raw(width, height, frame.pixels)
             .ok_or(MeetingSnapshotError::CaptureFailed)?;
@@ -670,20 +694,30 @@ impl MeetingSnapshotService {
         }
         if trigger == MeetingSnapshotTrigger::Automatic
             && (!crate::settings::get_settings(&self.app).meeting_screen_snapshots_enabled
-                || self.sessions().get(&session_id).is_some_and(|watch| watch.turned_off))
+                || self
+                    .sessions()
+                    .get(&session_id)
+                    .is_some_and(|watch| watch.turned_off))
         {
             return Err(MeetingSnapshotError::NotRecording);
         }
         store.insert_meeting_snapshot(&summary, &png, &thumbnail_png)?;
-        self.sessions().entry(session_id).or_default().capture_bundle_id = summary.app_bundle_id.clone();
+        self.sessions()
+            .entry(session_id)
+            .or_default()
+            .capture_bundle_id = summary.app_bundle_id.clone();
         let fingerprint =
             fingerprint.or_else(|| Fingerprint::from_rgba(image.as_raw(), width, height));
         if let Some(fingerprint) = fingerprint {
-            self.sessions().entry(session_id).or_default().detector.kept(
-                fingerprint,
-                super::clock::host_monotonic_now_ns(),
-                trigger == MeetingSnapshotTrigger::Automatic,
-            );
+            self.sessions()
+                .entry(session_id)
+                .or_default()
+                .detector
+                .kept(
+                    fingerprint,
+                    super::clock::host_monotonic_now_ns(),
+                    trigger == MeetingSnapshotTrigger::Automatic,
+                );
         }
         self.emit(session_id);
         Ok(summary)
@@ -828,7 +862,10 @@ mod platform {
 
     /// Looks at the first candidate app's largest window on screen, at most
     /// `maximum_width` pixels wide. Never asks for Screen Recording.
-    pub(super) fn capture(targets: &[String], maximum_width: u32) -> Result<Frame, MeetingSnapshotError> {
+    pub(super) fn capture(
+        targets: &[String],
+        maximum_width: u32,
+    ) -> Result<Frame, MeetingSnapshotError> {
         let owned: Vec<CString> = targets
             .iter()
             .filter_map(|target| CString::new(target.as_str()).ok())
@@ -876,7 +913,8 @@ mod platform {
             .and_then(|count| count.checked_mul(4));
         // SAFETY: on success the bridge hands over a `width * height * 4`
         // byte buffer it allocated; it is copied once and freed by the bridge.
-        let copied = length.map(|length| unsafe { std::slice::from_raw_parts(pixels, length) }.to_vec());
+        let copied =
+            length.map(|length| unsafe { std::slice::from_raw_parts(pixels, length) }.to_vec());
         // SAFETY: pixels is the bridge's live calloc allocation; no slice borrows it at this sole free.
         unsafe { sona_meeting_snapshot_free(pixels) };
         let pixels = copied.ok_or(MeetingSnapshotError::CaptureFailed)?;
@@ -884,7 +922,12 @@ mod platform {
         let bundle_id = unsafe { CStr::from_ptr(bundle_id.as_ptr()) }
             .to_string_lossy()
             .into_owned();
-        Ok(Frame { pixels, width, height, bundle_id })
+        Ok(Frame {
+            pixels,
+            width,
+            height,
+            bundle_id,
+        })
     }
 }
 
@@ -896,7 +939,10 @@ mod platform {
         false
     }
 
-    pub(super) fn capture(_targets: &[String], _maximum_width: u32) -> Result<Frame, MeetingSnapshotError> {
+    pub(super) fn capture(
+        _targets: &[String],
+        _maximum_width: u32,
+    ) -> Result<Frame, MeetingSnapshotError> {
         Err(MeetingSnapshotError::Unsupported)
     }
 }
@@ -927,19 +973,37 @@ mod tests {
     fn a_frame_is_kept_once_it_changed_enough_and_holds_still() {
         let mut detector = detector_that_kept(100, 0);
         // 20 of 255 levels, about 0.08, is under the 0.12 threshold.
-        assert_eq!(detector.consider(frame(120), 60 * SECOND), ChangeVerdict::Unchanged);
+        assert_eq!(
+            detector.consider(frame(120), 60 * SECOND),
+            ChangeVerdict::Unchanged
+        );
         // 40 of 255, about 0.16, is new, but it moved since the last look.
-        assert_eq!(detector.consider(frame(140), 63 * SECOND), ChangeVerdict::Settling);
-        assert_eq!(detector.consider(frame(140), 66 * SECOND), ChangeVerdict::Keep);
+        assert_eq!(
+            detector.consider(frame(140), 63 * SECOND),
+            ChangeVerdict::Settling
+        );
+        assert_eq!(
+            detector.consider(frame(140), 66 * SECOND),
+            ChangeVerdict::Keep
+        );
     }
 
     // Contract: no two automatic pictures are closer than twenty seconds.
     #[test]
     fn a_new_picture_within_twenty_seconds_of_the_last_waits() {
         let mut detector = detector_that_kept(0, 0);
-        assert_eq!(detector.consider(frame(255), 10 * SECOND), ChangeVerdict::Settling);
-        assert_eq!(detector.consider(frame(255), 13 * SECOND), ChangeVerdict::TooSoon);
-        assert_eq!(detector.consider(frame(255), 20 * SECOND), ChangeVerdict::Keep);
+        assert_eq!(
+            detector.consider(frame(255), 10 * SECOND),
+            ChangeVerdict::Settling
+        );
+        assert_eq!(
+            detector.consider(frame(255), 13 * SECOND),
+            ChangeVerdict::TooSoon
+        );
+        assert_eq!(
+            detector.consider(frame(255), 20 * SECOND),
+            ChangeVerdict::Keep
+        );
     }
 
     // Contract: the automatic mode keeps at most the meeting's limit, however
@@ -951,7 +1015,13 @@ mod tests {
             detector.kept(frame(0), u64::from(index) * 30 * SECOND, true);
         }
         let later = u64::from(AUTOMATIC_SNAPSHOT_LIMIT) * 30 * SECOND;
-        assert_eq!(detector.consider(frame(255), later), ChangeVerdict::LimitReached);
-        assert_eq!(detector.consider(frame(255), later + 3 * SECOND), ChangeVerdict::LimitReached);
+        assert_eq!(
+            detector.consider(frame(255), later),
+            ChangeVerdict::LimitReached
+        );
+        assert_eq!(
+            detector.consider(frame(255), later + 3 * SECOND),
+            ChangeVerdict::LimitReached
+        );
     }
 }

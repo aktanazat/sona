@@ -1409,9 +1409,15 @@ impl DetectionRuntime {
             return None;
         }
         let store = self.meetings.store().await.ok()?;
-        let previous = store.previous_series_brief(&event.series_key, event.start_utc_ms).ok().flatten();
-        let loops = previous.as_ref().and_then(|previous| store.meeting_loops(previous.session_id).ok())
-            .map(|loops| loops.rows).unwrap_or_default();
+        let previous = store
+            .previous_series_brief(&event.series_key, event.start_utc_ms)
+            .ok()
+            .flatten();
+        let loops = previous
+            .as_ref()
+            .and_then(|previous| store.meeting_loops(previous.session_id).ok())
+            .map(|loops| loops.rows)
+            .unwrap_or_default();
         let mut mine_open_loop_count = 0_u64;
         let mut waiting_on_count = 0_u64;
         let mut mine_open_loops = Vec::with_capacity(2);
@@ -1483,8 +1489,11 @@ impl DetectionRuntime {
             title: event.title.clone(),
             start_utc_ms: event.start_utc_ms,
             last_meeting_id: previous.as_ref().map(|previous| previous.session_id),
-            headline: previous.map(|previous| previous.headline)
-                .unwrap_or_else(|| "Open the brief for people, past conversations and a suggested agenda.".into()),
+            headline: previous
+                .map(|previous| previous.headline)
+                .unwrap_or_else(|| {
+                    "Open the brief for people, past conversations and a suggested agenda.".into()
+                }),
             mine_open_loops,
             mine_open_loop_count,
             waiting_on_count,
@@ -1502,9 +1511,18 @@ impl DetectionRuntime {
         }
         let ritual_id = format!("prep:{}", card.event_key);
         if let Some(session_id) = card.last_meeting_id {
-            if !self.meetings.record_ritual_activity(
-                WorkflowEventKind::MeetingPrepPresented, &ritual_id, session_id, &card.event_key,
-            ).await { return; }
+            if !self
+                .meetings
+                .record_ritual_activity(
+                    WorkflowEventKind::MeetingPrepPresented,
+                    &ritual_id,
+                    session_id,
+                    &card.event_key,
+                )
+                .await
+            {
+                return;
+            }
         }
         if self.active_capture().await.is_some() {
             return;
@@ -1515,7 +1533,11 @@ impl DetectionRuntime {
             .saturating_add(59_999)
             / 60_000;
         let minutes = minutes.max(1);
-        let when = if minutes == 1 { "in 1 minute".to_string() } else { format!("in {minutes} minutes") };
+        let when = if minutes == 1 {
+            "in 1 minute".to_string()
+        } else {
+            format!("in {minutes} minutes")
+        };
         let pending = PendingPanel::Ritual(PendingRitual {
             notification_title: format!("{} — {when}", event.title),
             ritual: MeetingRitual::Prep(card),
@@ -1587,7 +1609,12 @@ impl DetectionRuntime {
     }
 
     pub(crate) async fn present_wrap(self: &Arc<Self>, session_id: MeetingSessionId) {
-        if !crate::settings::get_settings(&self.app).meeting_prep.notes_ready_enabled { return; }
+        if !crate::settings::get_settings(&self.app)
+            .meeting_prep
+            .notes_ready_enabled
+        {
+            return;
+        }
         let Some(card) = self.wrap_card(session_id).await else {
             return;
         };
@@ -1733,7 +1760,9 @@ impl DetectionRuntime {
         // A calendar meeting that has started with the microphone live is a
         // detection, not a reminder, so only unscheduled calls follow this switch.
         if !matches!(prompt, PromptKind::CalendarEvent { .. })
-            && !crate::settings::get_settings(&self.app).meeting_prep.ad_hoc_alerts_enabled
+            && !crate::settings::get_settings(&self.app)
+                .meeting_prep
+                .ad_hoc_alerts_enabled
         {
             return;
         }
@@ -1972,9 +2001,18 @@ impl DetectionRuntime {
                     return false;
                 }
                 if let Some(session_id) = card.last_meeting_id {
-                    if !self.meetings.record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepRecordArmed, ritual_id, session_id, ritual_id,
-                    ).await { return false; }
+                    if !self
+                        .meetings
+                        .record_ritual_activity(
+                            WorkflowEventKind::MeetingPrepRecordArmed,
+                            ritual_id,
+                            session_id,
+                            ritual_id,
+                        )
+                        .await
+                    {
+                        return false;
+                    }
                 }
                 self.finish_ritual(ritual_id);
                 true
@@ -1985,28 +2023,48 @@ impl DetectionRuntime {
                 let calendar = Arc::clone(&self.calendar);
                 let event_key = card.event_key.clone();
                 let Ok(Some(event)) =
-                    tauri::async_runtime::spawn_blocking(move || calendar.event_by_key(&event_key)).await
+                    tauri::async_runtime::spawn_blocking(move || calendar.event_by_key(&event_key))
+                        .await
                 else {
                     return false;
                 };
                 if let Some(session_id) = card.last_meeting_id {
-                    if !self.meetings.record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepRecordArmed, ritual_id, session_id, ritual_id,
-                    ).await { return false; }
+                    if !self
+                        .meetings
+                        .record_ritual_activity(
+                            WorkflowEventKind::MeetingPrepRecordArmed,
+                            ritual_id,
+                            session_id,
+                            ritual_id,
+                        )
+                        .await
+                    {
+                        return false;
+                    }
                 }
                 self.finish_ritual(ritual_id);
                 let prompt = PromptKind::CalendarEvent {
                     event_key: event.event_key.clone(),
                     event_title: event.title.clone(),
                 };
-                self.open_capture(&prompt, Some(event.end_utc_ms), utc_now_ms(), Some(event)).await;
+                self.open_capture(&prompt, Some(event.end_utc_ms), utc_now_ms(), Some(event))
+                    .await;
                 true
             }
             (MeetingRitual::Prep(card), MeetingRitualAction::PrepOpenBrief) => {
                 if let Some(session_id) = card.last_meeting_id {
-                    if !self.meetings.record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepBriefOpened, ritual_id, session_id, ritual_id,
-                    ).await { return false; }
+                    if !self
+                        .meetings
+                        .record_ritual_activity(
+                            WorkflowEventKind::MeetingPrepBriefOpened,
+                            ritual_id,
+                            session_id,
+                            ritual_id,
+                        )
+                        .await
+                    {
+                        return false;
+                    }
                 }
                 // The native surface opens the occurrence, not the last recording.
                 self.finish_ritual(ritual_id);
@@ -2014,9 +2072,18 @@ impl DetectionRuntime {
             }
             (MeetingRitual::Prep(card), MeetingRitualAction::PrepDismiss) => {
                 if let Some(session_id) = card.last_meeting_id {
-                    if !self.meetings.record_ritual_activity(
-                        WorkflowEventKind::MeetingPrepDismissed, ritual_id, session_id, ritual_id,
-                    ).await { return false; }
+                    if !self
+                        .meetings
+                        .record_ritual_activity(
+                            WorkflowEventKind::MeetingPrepDismissed,
+                            ritual_id,
+                            session_id,
+                            ritual_id,
+                        )
+                        .await
+                    {
+                        return false;
+                    }
                 }
                 self.finish_ritual(ritual_id);
                 true

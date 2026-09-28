@@ -185,7 +185,6 @@ fn secure_input_holds_keys_now() -> bool {
     }
 }
 
-
 /// The one place a trailing space is added, so every route dispatches the same
 /// string and the receipt describes the same delivery.
 fn compose_final_text(mut text: String, settings: &DeliveryPlan) -> String {

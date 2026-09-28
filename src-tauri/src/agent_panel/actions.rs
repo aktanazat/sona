@@ -62,8 +62,12 @@ pub(crate) enum ActionUndo {
         speaker_id: SpeakerId,
         display_name: String,
     },
-    ConnectionSend { receipt_id: String },
-    CalendarEvent { event_id: String },
+    ConnectionSend {
+        receipt_id: String,
+    },
+    CalendarEvent {
+        event_id: String,
+    },
     Unavailable,
 }
 
@@ -116,35 +120,95 @@ pub(crate) async fn apply(
             name,
             ..
         } => rename_speaker(manager, *session_id, *speaker_id, name).await,
-        SonaChatActionV1::DraftEmail { recipients, subject, body, .. } => {
-            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
-            if !store.connection_preferences().map_err(|_| "Could not read connection permissions.")?.email_drafts_enabled {
+        SonaChatActionV1::DraftEmail {
+            recipients,
+            subject,
+            body,
+            ..
+        } => {
+            let store = manager
+                .store()
+                .await
+                .map_err(|_| "The meeting library is unavailable.")?;
+            if !store
+                .connection_preferences()
+                .map_err(|_| "Could not read connection permissions.")?
+                .email_drafts_enabled
+            {
                 return Err("Enable email drafts in Settings > Connections first.".into());
             }
             let result = crate::meeting::mail_context::compose(recipients, subject, body).await;
             if result.state != crate::meeting::mail_context::MailContextState::Ready {
                 return Err(result.status_text().into());
             }
-            return Ok(AppliedAction { operation_id: None, undo: ActionUndo::Unavailable });
+            return Ok(AppliedAction {
+                operation_id: None,
+                undo: ActionUndo::Unavailable,
+            });
         }
-        SonaChatActionV1::CreateCalendarEvent { title, start_utc_ms, end_utc_ms, notes, location, .. } => {
-            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
-            if !store.connection_preferences().map_err(|_| "Could not read connection permissions.")?.calendar_actions_enabled {
+        SonaChatActionV1::CreateCalendarEvent {
+            title,
+            start_utc_ms,
+            end_utc_ms,
+            notes,
+            location,
+            ..
+        } => {
+            let store = manager
+                .store()
+                .await
+                .map_err(|_| "The meeting library is unavailable.")?;
+            if !store
+                .connection_preferences()
+                .map_err(|_| "Could not read connection permissions.")?
+                .calendar_actions_enabled
+            {
                 return Err("Enable calendar actions in Settings > Connections first.".into());
             }
-            let event_id = crate::integrations::calendar::create(title, *start_utc_ms, *end_utc_ms, notes, location).await?;
-            return Ok(AppliedAction { operation_id: Some(event_id.clone()), undo: ActionUndo::CalendarEvent { event_id } });
+            let event_id = crate::integrations::calendar::create(
+                title,
+                *start_utc_ms,
+                *end_utc_ms,
+                notes,
+                location,
+            )
+            .await?;
+            return Ok(AppliedAction {
+                operation_id: Some(event_id.clone()),
+                undo: ActionUndo::CalendarEvent { event_id },
+            });
         }
-        SonaChatActionV1::PostSlack { connection_id, text, .. } => {
-            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
-            return applied_send(crate::integrations::send_slack(app, &store, connection_id, text, operation_id).await?);
+        SonaChatActionV1::PostSlack {
+            connection_id,
+            text,
+            ..
+        } => {
+            let store = manager
+                .store()
+                .await
+                .map_err(|_| "The meeting library is unavailable.")?;
+            return applied_send(
+                crate::integrations::send_slack(app, &store, connection_id, text, operation_id)
+                    .await?,
+            );
         }
-        SonaChatActionV1::SendNotes { connection_id, session_id, .. } => {
-            let store = manager.store().await.map_err(|_| "The meeting library is unavailable.")?;
+        SonaChatActionV1::SendNotes {
+            connection_id,
+            session_id,
+            ..
+        } => {
+            let store = manager
+                .store()
+                .await
+                .map_err(|_| "The meeting library is unavailable.")?;
             let request = crate::integrations::types::SendNotesRequest {
-                connection_id: connection_id.clone(), session_id: *session_id, operation_id: operation_id.into(),
+                connection_id: connection_id.clone(),
+                session_id: *session_id,
+                operation_id: operation_id.into(),
             };
-            return applied_send(crate::integrations::send_notes(app, &store, &request, None).await?);
+            return applied_send(
+                crate::integrations::send_notes(app, &store, &request, None).await?,
+            );
         }
     };
     result.map_err(|_| "This change could not be applied. The meeting may have changed.".into())
@@ -193,9 +257,16 @@ fn applied_send(receipt: crate::integrations::types::SendReceipt) -> Result<Appl
         return Err(receipt.detail);
     }
     let undo = if receipt.undo.is_some() {
-        ActionUndo::ConnectionSend { receipt_id: receipt.id.clone() }
-    } else { ActionUndo::Unavailable };
-    Ok(AppliedAction { operation_id: Some(receipt.id), undo })
+        ActionUndo::ConnectionSend {
+            receipt_id: receipt.id.clone(),
+        }
+    } else {
+        ActionUndo::Unavailable
+    };
+    Ok(AppliedAction {
+        operation_id: Some(receipt.id),
+        undo,
+    })
 }
 
 /// The revision every write against a loop must carry, and its current owner.

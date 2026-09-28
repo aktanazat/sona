@@ -1,8 +1,8 @@
 use super::analytics::{
     merge_turns, talk_metrics, tracker_results, AnalyticsSegment, KeywordTracker, MeetingAnalytics,
     MeetingCatchUp, MeetingCatchUpState, MeetingLiveHelp, MeetingLiveHelpItem, MeetingLiveHelpKind,
-    MeetingLiveHelpState, MeetingProvisionalSegment,
-    MeetingProvisionalTranscript, CATCH_UP_MAX_BULLETS,
+    MeetingLiveHelpState, MeetingProvisionalSegment, MeetingProvisionalTranscript,
+    CATCH_UP_MAX_BULLETS,
 };
 use super::diarization::{
     model_manifest, wespeaker_embedding_model_key, DiarizationEngineKind, DiarizationError,
@@ -31,7 +31,9 @@ use super::store::{
     DiarizationAssignmentInput, DurableTrackRecord, MeetingEvidence, MeetingStore, StoreError,
     StoreTransition, TranscriptRevisionInput, TranscriptSegmentInput,
 };
-use super::template_types::{same_section_title, MeetingNotesLanguage, NotesTemplate, NotesTemplateChoice};
+use super::template_types::{
+    same_section_title, MeetingNotesLanguage, NotesTemplate, NotesTemplateChoice,
+};
 use super::types::*;
 use super::voice_identity::{
     automatic_identity_mode, coalesce_evidence, fallback_evidence_span, identity_source_allowed,
@@ -788,8 +790,12 @@ impl MeetingProcessingService {
         series_key: &str,
         sources: &[super::prep::BriefSource],
     ) -> Option<Arc<dyn MeetingTextGenerator>> {
-        let restricted = store.series_preferences(series_key).map_or(true, |value| value.remote_intelligence_opt_out)
-            || sources.iter().filter_map(|source| source.meeting_id)
+        let restricted = store
+            .series_preferences(series_key)
+            .map_or(true, |value| value.remote_intelligence_opt_out)
+            || sources
+                .iter()
+                .filter_map(|source| source.meeting_id)
                 .any(|id| self.series_opted_out_of_remote(store, id));
         let engines = self.text_engines(restricted);
         match engines.choice {
@@ -800,7 +806,9 @@ impl MeetingProcessingService {
     }
 
     pub(crate) fn local_text_generator(&self) -> Option<Arc<dyn MeetingTextGenerator>> {
-        self.local_engine().generator().filter(|generator| generator.is_available())
+        self.local_engine()
+            .generator()
+            .filter(|generator| generator.is_available())
     }
 
     /// Where the next meeting's text would go, for a series not kept here.
@@ -1275,7 +1283,11 @@ impl MeetingProcessingService {
                     log::warn!("meeting finalization workflow event failed: {error:?}");
                 }
                 if let Some(app) = self.app.as_ref() {
-                    crate::integrations::after_notes_ready(Arc::clone(&store), app.clone(), session_id);
+                    crate::integrations::after_notes_ready(
+                        Arc::clone(&store),
+                        app.clone(),
+                        session_id,
+                    );
                     if let Some(runtime) =
                         app.try_state::<Arc<crate::meeting::detection::DetectionRuntime>>()
                     {
@@ -2088,8 +2100,12 @@ impl MeetingProcessingService {
         let template = &evidence.template;
         let template_id = template.artifact_template_id();
         let settings = self.app.as_ref().map(crate::settings::get_settings);
-        let language = settings.as_ref().map(|settings| settings.meeting_notes_language).unwrap_or_default();
-        let mut system_prompt = artifact_system_prompt(template, !evidence.user_notes.is_empty(), language);
+        let language = settings
+            .as_ref()
+            .map(|settings| settings.meeting_notes_language)
+            .unwrap_or_default();
+        let mut system_prompt =
+            artifact_system_prompt(template, !evidence.user_notes.is_empty(), language);
         if let Some(settings) = settings {
             system_prompt.push_str(&settings.meeting_prep.about_me.prompt_context());
         }
@@ -2322,13 +2338,16 @@ impl MeetingProcessingService {
     /// settings here keeps template choice out of the capture plan, which is
     /// frozen at start and must stay reproducible.
     fn default_notes_template(&self) -> NotesTemplateChoice {
-        self.app.as_ref().map(|app| {
-            let settings = crate::settings::get_settings(app);
-            NotesTemplateChoice {
-                template: settings.meeting_notes_template,
-                custom_template_id: settings.meeting_notes_custom_template_id,
-            }
-        }).unwrap_or_default()
+        self.app
+            .as_ref()
+            .map(|app| {
+                let settings = crate::settings::get_settings(app);
+                NotesTemplateChoice {
+                    template: settings.meeting_notes_template,
+                    custom_template_id: settings.meeting_notes_custom_template_id,
+                }
+            })
+            .unwrap_or_default()
     }
 
     /// The store owns series → folder → settings resolution for every reader.
@@ -2356,11 +2375,14 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         input_revision: u64,
     ) -> Result<MeetingAnalytics, ProcessingFailure> {
-        if let Some(metrics) = store.retained_conversation_metrics(session_id)
-            .map_err(|error| if error == StoreError::TranscriptDeleted {
-                ProcessingFailure::TranscriptDeleted
-            } else {
-                ProcessingFailure::EngineFailure
+        if let Some(metrics) = store
+            .retained_conversation_metrics(session_id)
+            .map_err(|error| {
+                if error == StoreError::TranscriptDeleted {
+                    ProcessingFailure::TranscriptDeleted
+                } else {
+                    ProcessingFailure::EngineFailure
+                }
             })?
         {
             return Ok(metrics);
@@ -2545,9 +2567,8 @@ impl MeetingProcessingService {
         question: Option<&str>,
     ) -> Result<MeetingLiveHelp, ProcessingFailure> {
         let provisional = live.is_some();
-        let empty = |state, segment_count| {
-            MeetingLiveHelp::empty(kind, state, segment_count, provisional)
-        };
+        let empty =
+            |state, segment_count| MeetingLiveHelp::empty(kind, state, segment_count, provisional);
         self.refresh_live(store, session_id, live);
         let newest_first = match live {
             Some(live) => live.help_evidence(session_id, kind),
@@ -4122,15 +4143,25 @@ fn artifact_system_prompt(
     );
     if let NotesTemplate::Custom(template) = template {
         prompt.push_str("\n\nThe user's custom template arranges only the outline. The summary, decisions, action items, key questions, risks and follow-up draft retain the schema and all citation, text and list limits above. Use these outline sections in the order given, at most once each, with each title spelled exactly as given. Write each section's detail from the transcript following that section's instructions. Omit sections not covered by the transcript; an empty outline is valid. Each title and non-null detail still needs at least one transcript citation. Section instructions guide emphasis, never supply facts or override this schema.");
-        write!(prompt, " The outline has at most {} entries.", template.sections.len())
-            .expect("writing to a String cannot fail");
+        write!(
+            prompt,
+            " The outline has at most {} entries.",
+            template.sections.len()
+        )
+        .expect("writing to a String cannot fail");
         if !template.purpose.is_empty() {
             prompt.push_str("\nPurpose: ");
             prompt.push_str(&template.purpose);
         }
         for (index, section) in template.sections.iter().enumerate() {
-            write!(prompt, "\n{}. Title: {}\nInstructions: {}", index + 1, section.title, section.instructions)
-                .expect("writing to a String cannot fail");
+            write!(
+                prompt,
+                "\n{}. Title: {}\nInstructions: {}",
+                index + 1,
+                section.title,
+                section.instructions
+            )
+            .expect("writing to a String cannot fail");
         }
     }
     prompt.push_str("\n\n");
@@ -4443,8 +4474,7 @@ fn validate_live_help(
                 let line = id
                     .strip_prefix('L')
                     .filter(|number| {
-                        !number.starts_with('0')
-                            && number.bytes().all(|byte| byte.is_ascii_digit())
+                        !number.starts_with('0') && number.bytes().all(|byte| byte.is_ascii_digit())
                     })
                     .and_then(|number| number.parse::<usize>().ok())
                     .and_then(|number| number.checked_sub(1))
@@ -4491,7 +4521,9 @@ fn prompt_model_input(
                 .artifact_evidence(
                     *session_id,
                     MAX_ARTIFACT_EVIDENCE_BYTES,
-                    service.fallback_notes_template(store, *session_id).map_err(|_| ProcessingFailure::EngineFailure)?,
+                    service
+                        .fallback_notes_template(store, *session_id)
+                        .map_err(|_| ProcessingFailure::EngineFailure)?,
                 )
                 .map_err(|_| ProcessingFailure::EngineFailure)?;
             if evidence.transcript.is_empty() && evidence.manual_notes.is_empty() {
@@ -4636,21 +4668,31 @@ fn validate_artifact_output(
     template: &NotesTemplate,
 ) -> Result<GeneratedMeetingArtifacts, ()> {
     let (summary, summary_trace) = validate_summary_lines(&output.summary, evidence)?;
-    let mut outline = output.outline.iter().take(32).map(|topic| {
-        Ok(MeetingOutlineTopic {
-            title: validate_cited_text(&topic.title, evidence)?,
-            detail: topic.detail.as_ref()
-                .map(|detail| validate_cited_text(detail, evidence)).transpose()?,
+    let mut outline = output
+        .outline
+        .iter()
+        .take(32)
+        .map(|topic| {
+            Ok(MeetingOutlineTopic {
+                title: validate_cited_text(&topic.title, evidence)?,
+                detail: topic
+                    .detail
+                    .as_ref()
+                    .map(|detail| validate_cited_text(detail, evidence))
+                    .transpose()?,
+            })
         })
-    }).collect::<Result<Vec<_>, ()>>()?;
+        .collect::<Result<Vec<_>, ()>>()?;
     if let NotesTemplate::Custom(template) = template {
         if output.outline.len() > template.sections.len() {
             return Err(());
         }
         let mut next_section = 0;
         for topic in &mut outline {
-            let offset = template.sections[next_section..].iter()
-                .position(|section| same_section_title(&section.title, &topic.title.text)).ok_or(())?;
+            let offset = template.sections[next_section..]
+                .iter()
+                .position(|section| same_section_title(&section.title, &topic.title.text))
+                .ok_or(())?;
             let index = next_section + offset;
             topic.title.text.clone_from(&template.sections[index].title);
             next_section = index + 1;
@@ -5830,7 +5872,10 @@ mod tests {
     fn live_reply(key: &str, points: usize, cites: &[&str]) -> String {
         let point = serde_json::json!({ "text": "They moved the launch to May.", "cites": cites });
         let mut reply = serde_json::Map::new();
-        reply.insert(key.to_string(), serde_json::Value::Array(vec![point; points]));
+        reply.insert(
+            key.to_string(),
+            serde_json::Value::Array(vec![point; points]),
+        );
         serde_json::Value::Object(reply).to_string()
     }
 
@@ -7029,7 +7074,8 @@ mod tests {
             user_notes: String::new(),
             template: MeetingNotesTemplate::default().into(),
         };
-        let system_prompt = artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::Auto);
+        let system_prompt =
+            artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::Auto);
         let window = AppleIntelligenceGenerator
             .context_window_bytes()
             .expect("the on-device engine spends one window");
@@ -7111,7 +7157,11 @@ mod tests {
 
         assert_eq!(
             key(&without_notes),
-            key(&artifact_system_prompt(&template, false, MeetingNotesLanguage::Auto)),
+            key(&artifact_system_prompt(
+                &template,
+                false,
+                MeetingNotesLanguage::Auto
+            )),
             "the same pack read by the same instructions is the same generation"
         );
         assert_ne!(
@@ -7124,14 +7174,22 @@ mod tests {
     #[test]
     fn custom_notes_edits_and_language_changes_invalidate_cached_generations() {
         let mut template = custom_notes_template();
-        let key = |template: &NotesTemplate, language| generation_key(
-            "same transcript", 7, &template.artifact_template_id(),
-            &artifact_system_prompt(template, false, language),
-            "apple-intelligence", ARTIFACT_MODEL_VERSION, GenerationIntent::Pipeline,
-        );
+        let key = |template: &NotesTemplate, language| {
+            generation_key(
+                "same transcript",
+                7,
+                &template.artifact_template_id(),
+                &artifact_system_prompt(template, false, language),
+                "apple-intelligence",
+                ARTIFACT_MODEL_VERSION,
+                GenerationIntent::Pipeline,
+            )
+        };
         let original = key(&template, MeetingNotesLanguage::Auto);
         assert_ne!(original, key(&template, MeetingNotesLanguage::English));
-        let NotesTemplate::Custom(custom) = &mut template else { unreachable!() };
+        let NotesTemplate::Custom(custom) = &mut template else {
+            unreachable!()
+        };
         custom.sections[0].instructions = "Focus on the approved price.".to_string();
         assert_ne!(original, key(&template, MeetingNotesLanguage::Auto));
     }
@@ -7419,8 +7477,12 @@ mod tests {
     fn the_shape_the_corrected_prompt_asks_for_parses_and_validates() {
         let raw = first_json_value::<RawArtifactOutput>(&corrected_second_press())
             .expect("the corrected shape is what the struct declares");
-        let artifacts = validate_artifact_output(&raw, &press_evidence(), &MeetingNotesTemplate::General.into())
-            .expect("every citation names a segment that was in evidence");
+        let artifacts = validate_artifact_output(
+            &raw,
+            &press_evidence(),
+            &MeetingNotesTemplate::General.into(),
+        )
+        .expect("every citation names a segment that was in evidence");
 
         assert_eq!(artifacts.summary.text.lines().count(), 3);
         assert_eq!(artifacts.summary_trace.len(), 3);
@@ -7460,8 +7522,12 @@ mod tests {
 
         let raw = first_json_value::<RawArtifactOutput>(&omitted)
             .expect("an omitted Option needs no #[serde(default)] to read as None");
-        let artifacts = validate_artifact_output(&raw, &press_evidence(), &MeetingNotesTemplate::General.into())
-            .expect("dropping an unknown owner is not a validation failure");
+        let artifacts = validate_artifact_output(
+            &raw,
+            &press_evidence(),
+            &MeetingNotesTemplate::General.into(),
+        )
+        .expect("dropping an unknown owner is not a validation failure");
         assert_eq!(artifacts.action_items[0].owner_text, None);
         assert_eq!(artifacts.action_items[0].due_text, None);
         assert_eq!(artifacts.outline[0].detail, None);
@@ -7472,7 +7538,12 @@ mod tests {
         let mut value: serde_json::Value = first_json_value(&corrected_second_press()).unwrap();
         value["summary"][0]["citations"] = serde_json::json!(["about_me"]);
         let raw: RawArtifactOutput = serde_json::from_value(value).unwrap();
-        assert!(validate_artifact_output(&raw, &press_evidence(), &MeetingNotesTemplate::General.into()).is_err());
+        assert!(validate_artifact_output(
+            &raw,
+            &press_evidence(),
+            &MeetingNotesTemplate::General.into()
+        )
+        .is_err());
     }
 
     /// The refusal no press has produced yet. `validate_summary_lines` requires
@@ -7495,7 +7566,12 @@ mod tests {
         let raw = first_json_value::<RawArtifactOutput>(&emptied)
             .expect("an empty summary is a shape the struct accepts");
         assert!(
-            validate_artifact_output(&raw, &press_evidence(), &MeetingNotesTemplate::General.into()).is_err(),
+            validate_artifact_output(
+                &raw,
+                &press_evidence(),
+                &MeetingNotesTemplate::General.into()
+            )
+            .is_err(),
             "notes with nothing to read at a glance are not notes, so validation \
              refuses them — the prompt has to ask for the floor"
         );
@@ -7507,48 +7583,87 @@ mod tests {
             template_id: MeetingTemplateId::new(),
             name: "Pricing review".to_string(),
             purpose: String::new(),
-            sections: ["Price", "Rollout", "Risks"].into_iter().map(|title| MeetingTemplateSection {
-                title: title.to_string(), instructions: String::new(),
-            }).collect(),
-            created_at_utc_ms: 1, updated_at_utc_ms: 1,
+            sections: ["Price", "Rollout", "Risks"]
+                .into_iter()
+                .map(|title| MeetingTemplateSection {
+                    title: title.to_string(),
+                    instructions: String::new(),
+                })
+                .collect(),
+            created_at_utc_ms: 1,
+            updated_at_utc_ms: 1,
         })
     }
 
     fn custom_notes_output(titles: &[&str]) -> RawArtifactOutput {
         let mut value: serde_json::Value = first_json_value(&corrected_second_press()).unwrap();
-        value["outline"] = serde_json::json!(titles.iter().map(|title| serde_json::json!({
-            "title": {"text": title, "citations": [PRESS_TIER_SEGMENT]}, "detail": null
-        })).collect::<Vec<_>>());
+        value["outline"] = serde_json::json!(titles
+            .iter()
+            .map(|title| serde_json::json!({
+                "title": {"text": title, "citations": [PRESS_TIER_SEGMENT]}, "detail": null
+            }))
+            .collect::<Vec<_>>());
         serde_json::from_value(value).unwrap()
     }
 
     #[test]
     fn custom_notes_outline_accepts_ordered_subsets_and_restores_titles() {
         let artifacts = validate_artifact_output(
-            &custom_notes_output(&[" price ", "RISKS"]), &press_evidence(), &custom_notes_template(),
-        ).unwrap();
-        assert_eq!(artifacts.outline.iter().map(|topic| topic.title.text.as_str()).collect::<Vec<_>>(),
-            vec!["Price", "Risks"]);
-        assert_eq!(artifacts.outline[0].title.citations[0].segment_id.uuid().to_string(), PRESS_TIER_SEGMENT);
+            &custom_notes_output(&[" price ", "RISKS"]),
+            &press_evidence(),
+            &custom_notes_template(),
+        )
+        .unwrap();
+        assert_eq!(
+            artifacts
+                .outline
+                .iter()
+                .map(|topic| topic.title.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Price", "Risks"]
+        );
+        assert_eq!(
+            artifacts.outline[0].title.citations[0]
+                .segment_id
+                .uuid()
+                .to_string(),
+            PRESS_TIER_SEGMENT
+        );
     }
 
     #[test]
     fn custom_notes_outline_rejects_unknown_repeated_and_reordered_sections() {
-        for titles in [vec!["Unknown"], vec!["Price", " price "], vec!["Risks", "Price"]] {
-            assert!(validate_artifact_output(
-                &custom_notes_output(&titles), &press_evidence(), &custom_notes_template(),
-            ).is_err(), "refuse {titles:?}");
+        for titles in [
+            vec!["Unknown"],
+            vec!["Price", " price "],
+            vec!["Risks", "Price"],
+        ] {
+            assert!(
+                validate_artifact_output(
+                    &custom_notes_output(&titles),
+                    &press_evidence(),
+                    &custom_notes_template(),
+                )
+                .is_err(),
+                "refuse {titles:?}"
+            );
         }
     }
 
     #[test]
     fn custom_notes_outline_can_be_empty_without_losing_the_notes() {
         let artifacts = validate_artifact_output(
-            &custom_notes_output(&[]), &press_evidence(), &custom_notes_template(),
-        ).unwrap();
+            &custom_notes_output(&[]),
+            &press_evidence(),
+            &custom_notes_template(),
+        )
+        .unwrap();
         assert!(artifacts.outline.is_empty());
         assert_eq!(artifacts.summary_trace.len(), 3);
-        assert_eq!(artifacts.action_items[0].owner_text.as_deref(), Some("Stephen"));
+        assert_eq!(
+            artifacts.action_items[0].owner_text.as_deref(),
+            Some("Stephen")
+        );
     }
 
     /// Evidence for the reference ledger's own segments. Its citations run

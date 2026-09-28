@@ -212,14 +212,16 @@ impl MeetingStore {
         session_id: MeetingSessionId,
         artifact_id: MeetingArtifactId,
     ) -> Result<bool, StoreError> {
-        self.connection()?.query_row(
-            "SELECT EXISTS(
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(
                 SELECT 1 FROM saved_prompt_runs
                  WHERE prompt_id = ?1 AND target_kind = 'meeting'
                    AND target_id = ?2 AND artifact_id = ?3)",
-            params![id(prompt_id), id(session_id), id(artifact_id)],
-            |row| row.get(0),
-        ).map_err(Into::into)
+                params![id(prompt_id), id(session_id), id(artifact_id)],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     /// The notes revision a meeting currently shows, or `None` when nothing has

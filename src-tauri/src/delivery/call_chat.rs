@@ -8,7 +8,10 @@ pub struct CallChatResult {
 
 impl CallChatResult {
     pub fn not_posted(reason: &str) -> Self {
-        Self { receipt: DeliveryReceipt::not_dispatched(), reason: reason.to_string() }
+        Self {
+            receipt: DeliveryReceipt::not_dispatched(),
+            reason: reason.to_string(),
+        }
     }
 }
 
@@ -16,13 +19,17 @@ impl CallChatResult {
 /// No clipboard, focused-input insertion, keyboard event, or retry is allowed.
 pub fn announce(text: &str, bundle_id: Option<&str>) -> CallChatResult {
     if text.trim().is_empty() || text.chars().count() > 1_000 || text.contains('\0') {
-        return CallChatResult::not_posted("The saved notice is empty or too long. Send a notice yourself.");
+        return CallChatResult::not_posted(
+            "The saved notice is empty or too long. Send a notice yourself.",
+        );
     }
     let Some(bundle_id) = bundle_id else {
         return CallChatResult::not_posted("The meeting app could not be identified.");
     };
     #[cfg(target_os = "macos")]
-    { native::announce(text, bundle_id) }
+    {
+        native::announce(text, bundle_id)
+    }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = bundle_id;
@@ -43,10 +50,18 @@ mod native {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "snake_case")]
-    enum Outcome { NotPosted, SendRequested, AlreadyPresent, DraftOnly }
+    enum Outcome {
+        NotPosted,
+        SendRequested,
+        AlreadyPresent,
+        DraftOnly,
+    }
 
     #[derive(Deserialize)]
-    struct NativeResult { outcome: Outcome, reason: String }
+    struct NativeResult {
+        outcome: Outcome,
+        reason: String,
+    }
 
     pub(super) fn announce(text: &str, bundle_id: &str) -> CallChatResult {
         let (Ok(text), Ok(bundle_id)) = (CString::new(text), CString::new(bundle_id)) else {
@@ -60,20 +75,26 @@ mod native {
             return uncertain();
         }
         // SAFETY: the non-null result is a live NUL-terminated strdup allocation owned by this call.
-        let result = unsafe { serde_json::from_slice::<NativeResult>(CStr::from_ptr(pointer).to_bytes()) };
+        let result =
+            unsafe { serde_json::from_slice::<NativeResult>(CStr::from_ptr(pointer).to_bytes()) };
         // SAFETY: the bridge pairs strdup with free; parsing kept no borrows, and this is the only free.
         unsafe { sona_call_chat_free_string(pointer) };
         match result {
             Ok(result) => {
                 let (method, outcome) = match result.outcome {
                     Outcome::NotPosted | Outcome::AlreadyPresent => (
-                        DeliveryMethod::None, DeliveryOutcome::DefinitelyNotDispatched,
+                        DeliveryMethod::None,
+                        DeliveryOutcome::DefinitelyNotDispatched,
                     ),
                     Outcome::SendRequested | Outcome::DraftOnly => (
-                        DeliveryMethod::AccessibilityInsertion, DeliveryOutcome::DispatchedButUnconfirmed,
+                        DeliveryMethod::AccessibilityInsertion,
+                        DeliveryOutcome::DispatchedButUnconfirmed,
                     ),
                 };
-                CallChatResult { receipt: DeliveryReceipt::new(method, outcome), reason: result.reason }
+                CallChatResult {
+                    receipt: DeliveryReceipt::new(method, outcome),
+                    reason: result.reason,
+                }
             }
             Err(_) => uncertain(),
         }

@@ -34,7 +34,10 @@ impl MeetingSessionManager {
     }
 
     pub async fn companies_list(&self) -> Result<CompaniesListResult, MeetingCommandError> {
-        self.store().await?.companies_list().map_err(map_store_error)
+        self.store()
+            .await?
+            .companies_list()
+            .map_err(map_store_error)
     }
 
     pub async fn person_context(

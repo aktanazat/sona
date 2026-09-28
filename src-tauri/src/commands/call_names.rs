@@ -30,7 +30,9 @@ pub async fn meeting_call_names_set(
     target_id: Option<String>,
     automatically_use: bool,
 ) -> Result<CallNameStatus, MeetingCommandError> {
-    manager.call_names_set(session_id, target_id, automatically_use).await
+    manager
+        .call_names_set(session_id, target_id, automatically_use)
+        .await
 }
 
 #[tauri::command]

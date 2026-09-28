@@ -2118,7 +2118,9 @@ impl RunPlan {
         let selection = match capture_selection() {
             context::SelectionCapture::Captured(selection) => selection,
             context::SelectionCapture::Unavailable(reason) if answers_in_chat => {
-                log::debug!("Command run without a selection ({reason:?}): a question goes to the chat");
+                log::debug!(
+                    "Command run without a selection ({reason:?}): a question goes to the chat"
+                );
                 String::new()
             }
             context::SelectionCapture::Unavailable(reason) => {
@@ -2421,7 +2423,10 @@ mod tests {
         settings.modes[0].prompt.custom_prompt = Some("Keep my exact voice.".to_string());
         let before = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
         let mut old_json = serde_json::to_value(&settings.modes[0]).unwrap();
-        old_json["llm"].as_object_mut().unwrap().remove("cleanup_level");
+        old_json["llm"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_level");
         let restored: ModeDefinition = serde_json::from_value(old_json).unwrap();
         assert_eq!(restored, settings.modes[0]);
         settings.modes[0] = restored;
@@ -2438,7 +2443,10 @@ mod tests {
         let mut settings = configured_settings();
         settings.modes[0].llm.enabled = false;
         let mut old_json = serde_json::to_value(&settings.modes[0]).unwrap();
-        old_json["llm"].as_object_mut().unwrap().remove("cleanup_level");
+        old_json["llm"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_level");
         settings.modes[0] = serde_json::from_value(old_json).unwrap();
         let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
         assert_eq!(run.prompt().cleanup_level, None);

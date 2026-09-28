@@ -1,7 +1,7 @@
 use crate::cloud_sync::types::{
     CloudBrowserShareCreateRequest, CloudBrowserShareResult, CloudConflictResolveRequest,
-    CloudNoteShareCreateRequest, CloudNoteShareListRequest,
-    CloudMeetingStatus, CloudPairingAcceptRequest, CloudPairingApproveRequest, CloudPairingOffer,
+    CloudMeetingStatus, CloudNoteShareCreateRequest, CloudNoteShareListRequest,
+    CloudPairingAcceptRequest, CloudPairingApproveRequest, CloudPairingOffer,
     CloudPairingOfferRequest, CloudShareCreateRequest, CloudShareImportRequest,
     CloudShareImportResult, CloudShareListRequest, CloudShareResult, CloudShareRevokeRequest,
     CloudShareSummary, CloudSyncBootstrapRequest, CloudSyncBootstrapResult, CloudSyncOverview,
@@ -186,7 +186,10 @@ pub async fn cloud_note_share_create(
     runtime: State<'_, Arc<CloudSyncRuntime>>,
     request: CloudNoteShareCreateRequest,
 ) -> Result<CloudBrowserShareResult, CloudSyncErrorKind> {
-    runtime.note_share_create(request).await.map_err(|error| error.kind())
+    runtime
+        .note_share_create(request)
+        .await
+        .map_err(|error| error.kind())
 }
 
 #[tauri::command]
@@ -195,7 +198,10 @@ pub async fn cloud_note_share_list(
     runtime: State<'_, Arc<CloudSyncRuntime>>,
     request: CloudNoteShareListRequest,
 ) -> Result<Vec<CloudShareSummary>, CloudSyncErrorKind> {
-    runtime.note_share_list(request).await.map_err(|error| error.kind())
+    runtime
+        .note_share_list(request)
+        .await
+        .map_err(|error| error.kind())
 }
 
 #[tauri::command]
@@ -204,7 +210,10 @@ pub async fn cloud_browser_share_link(
     runtime: State<'_, Arc<CloudSyncRuntime>>,
     request: CloudShareRevokeRequest,
 ) -> Result<CloudBrowserShareResult, CloudSyncErrorKind> {
-    runtime.browser_share_link(request).await.map_err(|error| error.kind())
+    runtime
+        .browser_share_link(request)
+        .await
+        .map_err(|error| error.kind())
 }
 
 #[tauri::command]

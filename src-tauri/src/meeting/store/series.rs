@@ -28,12 +28,12 @@ use super::{
     MeetingStore, StoreError,
 };
 use crate::meeting::analytics::MeetingNotesTemplate;
-use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::series_types::{
     MeetingSeriesAlwaysRecordSetRequest, MeetingSeriesDigestSetRequest,
     MeetingSeriesMutationResult, MeetingSeriesPreferences, MeetingSeriesRemoteOptOutSetRequest,
     MeetingSeriesRemoteRoster, MeetingSeriesRemoteRow, MeetingSeriesTemplateSetRequest,
 };
+use crate::meeting::template_types::MeetingTemplateId;
 use crate::meeting::types::{
     GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId, MeetingSessionId,
 };
@@ -539,13 +539,21 @@ fn series_template_in(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some((template, custom)) = stored else { return Ok((None, None)); };
+    let Some((template, custom)) = stored else {
+        return Ok((None, None));
+    };
     if let Some(custom) = custom {
         let template_id = MeetingTemplateId::from_uuid(parse_uuid(&custom)?);
         let exists = super::custom_templates::custom_template_exists_in(connection, template_id)?;
         return Ok((None, exists.then_some(template_id)));
     }
-    Ok((template.as_deref().map(decode_series_template).transpose()?, None))
+    Ok((
+        template
+            .as_deref()
+            .map(decode_series_template)
+            .transpose()?,
+        None,
+    ))
 }
 
 /// Clearing a deleted template must preserve the series' other choices.
@@ -556,7 +564,8 @@ pub(super) fn forget_custom_template_in(
     let mut statement = connection.prepare(
         "SELECT series_key FROM meeting_series_preferences WHERE custom_template_id = ?1",
     )?;
-    let keys = statement.query_map(params![id(template_id)], |row| row.get::<_, String>(0))?
+    let keys = statement
+        .query_map(params![id(template_id)], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     if keys.is_empty() {

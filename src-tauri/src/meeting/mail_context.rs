@@ -29,16 +29,23 @@ pub struct MailContext {
 
 impl MailContext {
     pub fn off() -> Self {
-        Self { state: MailContextState::Off, threads: Vec::new() }
+        Self {
+            state: MailContextState::Off,
+            threads: Vec::new(),
+        }
     }
 
     pub fn status_text(&self) -> &'static str {
         match self.state {
             MailContextState::Off => "Email context is off. You can enable it in Meeting settings.",
-            MailContextState::Ready => "Recent email from Mail is included. Email stays on this Mac.",
+            MailContextState::Ready => {
+                "Recent email from Mail is included. Email stays on this Mac."
+            }
             MailContextState::Empty => "No recent email with these attendees was found in Mail.",
             MailContextState::NotConfigured => "Add an account in Mail to include recent email.",
-            MailContextState::PermissionDenied => "Allow Sona to control Mail in System Settings > Privacy & Security > Automation.",
+            MailContextState::PermissionDenied => {
+                "Allow Sona to control Mail in System Settings > Privacy & Security > Automation."
+            }
             MailContextState::Unavailable => "Mail could not be read. Open Mail and try again.",
         }
     }
@@ -128,7 +135,9 @@ async fn run(script: &str, input: &impl Serialize) -> MailContext {
             .arg(input)
             .kill_on_drop(true)
             .output();
-        if let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(30), child).await {
+        if let Ok(Ok(output)) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), child).await
+        {
             if output.status.success() {
                 if let Ok(context) = serde_json::from_slice(&output.stdout) {
                     return context;
@@ -136,31 +145,60 @@ async fn run(script: &str, input: &impl Serialize) -> MailContext {
             }
             // osascript can report TCC denial before the JavaScript handler runs.
             if String::from_utf8_lossy(&output.stderr).contains("-1743") {
-                return MailContext { state: MailContextState::PermissionDenied, threads: Vec::new() };
+                return MailContext {
+                    state: MailContextState::PermissionDenied,
+                    threads: Vec::new(),
+                };
             }
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (script, input);
-    MailContext { state: MailContextState::Unavailable, threads: Vec::new() }
+    MailContext {
+        state: MailContextState::Unavailable,
+        threads: Vec::new(),
+    }
 }
 
 pub(crate) async fn read(enabled: bool, addresses: &[String], until_utc_ms: i64) -> MailContext {
-    if !enabled { return MailContext::off(); }
-    run(READ_SCRIPT, &ReadRequest {
-        addresses,
-        since: until_utc_ms.saturating_sub(30 * 24 * 60 * 60_000),
-        until: until_utc_ms,
-        probe: false,
-    }).await
+    if !enabled {
+        return MailContext::off();
+    }
+    run(
+        READ_SCRIPT,
+        &ReadRequest {
+            addresses,
+            since: until_utc_ms.saturating_sub(30 * 24 * 60 * 60_000),
+            until: until_utc_ms,
+            probe: false,
+        },
+    )
+    .await
 }
 
 pub(crate) async fn probe() -> MailContext {
-    run(READ_SCRIPT, &ReadRequest { addresses: &[], since: 0, until: 0, probe: true }).await
+    run(
+        READ_SCRIPT,
+        &ReadRequest {
+            addresses: &[],
+            since: 0,
+            until: 0,
+            probe: true,
+        },
+    )
+    .await
 }
 
 pub(crate) async fn compose(recipients: &[String], subject: &str, body: &str) -> MailContext {
-    run(COMPOSE_SCRIPT, &ComposeRequest { recipients, subject, body }).await
+    run(
+        COMPOSE_SCRIPT,
+        &ComposeRequest {
+            recipients,
+            subject,
+            body,
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -169,14 +207,16 @@ mod tests {
 
     #[test]
     fn mail_denial_is_a_readable_state_not_empty_mail() {
-        let context: MailContext = serde_json::from_str(r#"{"state":"permission_denied","threads":[]}"#).unwrap();
+        let context: MailContext =
+            serde_json::from_str(r#"{"state":"permission_denied","threads":[]}"#).unwrap();
         assert_eq!(context.state, MailContextState::PermissionDenied);
         assert!(context.status_text().contains("Automation"));
     }
 
     #[test]
     fn unconfigured_mail_does_not_claim_a_successful_read() {
-        let context: MailContext = serde_json::from_str(r#"{"state":"not_configured","threads":[]}"#).unwrap();
+        let context: MailContext =
+            serde_json::from_str(r#"{"state":"not_configured","threads":[]}"#).unwrap();
         assert_eq!(context.state, MailContextState::NotConfigured);
         assert!(context.status_text().contains("Add an account"));
     }

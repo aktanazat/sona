@@ -7,7 +7,9 @@
 //! re-deriving, but the transcript remains the only source of truth: every
 //! value below can be recomputed from it at any time.
 
-use super::types::{MeetingArtifactId, MeetingSessionId, MeetingTemplateId, SpeakerId, TranscriptSegmentId};
+use super::types::{
+    MeetingArtifactId, MeetingSessionId, MeetingTemplateId, SpeakerId, TranscriptSegmentId,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 

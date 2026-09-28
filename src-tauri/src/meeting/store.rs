@@ -2673,17 +2673,19 @@ impl MeetingStore {
         validate_cloud_chunks(&chunks)?;
         let transaction = connection.transaction().map_err(StoreError::from)?;
         for chunk in &chunks {
-            transaction.execute(
-                "INSERT INTO meeting_cloud_outbox_chunks (
+            transaction
+                .execute(
+                    "INSERT INTO meeting_cloud_outbox_chunks (
                     outbox_id, chunk_index, size_bytes, sha256, accepted, accepted_at_utc_ms
                  ) VALUES (?1, ?2, ?3, ?4, 0, NULL)",
-                params![
-                    outbox_id,
-                    i64::from(chunk.chunk_index),
-                    to_i64(chunk.size_bytes)?,
-                    chunk.sha256,
-                ],
-            ).map_err(StoreError::from)?;
+                    params![
+                        outbox_id,
+                        i64::from(chunk.chunk_index),
+                        to_i64(chunk.size_bytes)?,
+                        chunk.sha256,
+                    ],
+                )
+                .map_err(StoreError::from)?;
         }
         transaction.commit().map_err(StoreError::from)?;
         Ok(())
@@ -2770,7 +2772,8 @@ impl MeetingStore {
              WHERE source_session_id = ?1 AND tombstone = 0
              ORDER BY object_id",
         )?;
-        let heads = statement.query_map(params![id(session_id)], cloud_head_from_row)?
+        let heads = statement
+            .query_map(params![id(session_id)], cloud_head_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         drop(connection);
@@ -2816,7 +2819,9 @@ impl MeetingStore {
         )?;
         let connection = self.connection()?;
         if let Some(session_id) = conflict.source_session_id {
-            if session_row(&connection, session_id)?.transcript_purged_at_utc_ms.is_some()
+            if session_row(&connection, session_id)?
+                .transcript_purged_at_utc_ms
+                .is_some()
                 && !bundle.transcript_segments.is_empty()
             {
                 return Err(StoreError::TranscriptDeleted);
@@ -3860,7 +3865,11 @@ impl MeetingStore {
             && next_phase == MeetingPhase::Starting)
             .then_some(now);
         let completed = next_phase == MeetingPhase::ReviewReady;
-        let ended_at_utc_ms = matches!(next_phase, MeetingPhase::Stopping | MeetingPhase::ReviewReady).then_some(now);
+        let ended_at_utc_ms = matches!(
+            next_phase,
+            MeetingPhase::Stopping | MeetingPhase::ReviewReady
+        )
+        .then_some(now);
         let delete_after_utc_ms = if completed {
             let policy: MeetingRetentionPolicy = decode_json(&current.retention_policy_json)?;
             policy.delete_after_utc_ms(now)
@@ -4208,8 +4217,14 @@ impl MeetingStore {
             .transpose()?;
         let mut allowed_actions = allowed_actions(row.phase);
         if row.transcript_purged_at_utc_ms.is_some() {
-            allowed_actions.retain(|action| !matches!(action,
-                AllowedMeetingAction::Regenerate | AllowedMeetingAction::FinalizePartial | AllowedMeetingAction::Resume));
+            allowed_actions.retain(|action| {
+                !matches!(
+                    action,
+                    AllowedMeetingAction::Regenerate
+                        | AllowedMeetingAction::FinalizePartial
+                        | AllowedMeetingAction::Resume
+                )
+            });
         }
         let elapsed_offset_ns = sources
             .iter()
@@ -4306,7 +4321,8 @@ impl MeetingStore {
     ) -> Result<MeetingSessionDisclosure, StoreError> {
         let (line, composer_app) = {
             let mut connection = self.connection()?;
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let held = session_disclosure_in(&transaction, session_id)?;
             let MeetingSessionDisclosure::Pending { line, composer_app } = held else {
                 return Ok(held);
@@ -4457,7 +4473,11 @@ impl MeetingStore {
               ORDER BY m.created_at_utc_ms DESC, m.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
         })?;
         rows.map(|row| {
             let (session, created_at_utc_ms, recorded_duration_ns) = row?;
@@ -4466,7 +4486,8 @@ impl MeetingStore {
                 created_at_utc_ms,
                 recorded_duration_ns,
             })
-        }).collect()
+        })
+        .collect()
     }
 
     /// Return the dense meeting trend from one read-only projection. All
@@ -5313,8 +5334,11 @@ impl MeetingStore {
             return Err(StoreError::Conflict);
         }
         let duration_ms = to_i64(end_offset_ns / 1_000_000)?;
-        let ended_at_utc_ms = current.started_at_utc_ms.ok_or(StoreError::Corrupt)?
-            .checked_add(duration_ms).ok_or(StoreError::Invalid)?;
+        let ended_at_utc_ms = current
+            .started_at_utc_ms
+            .ok_or(StoreError::Corrupt)?
+            .checked_add(duration_ms)
+            .ok_or(StoreError::Invalid)?;
         let changed = transaction.execute(
             "UPDATE meeting_capture_windows
              SET end_offset_ns = ?1, close_reason = 'stopped'
@@ -5723,7 +5747,8 @@ impl MeetingStore {
         let notes = user_notes_row(&connection, session_id, default_template)?;
         let template = match notes.custom_template_id {
             Some(template_id) => NotesTemplate::Custom(
-                custom_templates::custom_template_in(&connection, template_id)?.ok_or(StoreError::Corrupt)?,
+                custom_templates::custom_template_in(&connection, template_id)?
+                    .ok_or(StoreError::Corrupt)?,
             ),
             None => NotesTemplate::BuiltIn(notes.template),
         };
@@ -6492,7 +6517,9 @@ impl MeetingStore {
                  WHERE source_session_id = ?1 AND kind IN ('object', 'tombstone') AND state = 'claimed')",
                 params![id(session_id)], |row| row.get(0),
             )?;
-            if claimed { return Err(StoreError::Conflict); }
+            if claimed {
+                return Err(StoreError::Conflict);
+            }
             transaction.execute(
                 "UPDATE meeting_cloud_outbox SET state = 'cancelled', claim_token = NULL,
                     claimed_at_utc_ms = NULL, updated_at_utc_ms = ?2
@@ -6532,7 +6559,15 @@ impl MeetingStore {
             "UPDATE meeting_sessions SET revision = ?2 WHERE id = ?1",
             params![id(session_id), to_i64(revision)?],
         )?;
-        append_event(&transaction, session_id, revision, current.phase, current.phase, "restored", None)?;
+        append_event(
+            &transaction,
+            session_id,
+            revision,
+            current.phase,
+            current.phase,
+            "restored",
+            None,
+        )?;
         folders::restore_trashed_memberships_in(&transaction, &id(job_id), &id(session_id))?;
         transaction.execute(
             "UPDATE meeting_deletion_receipts
@@ -7032,7 +7067,10 @@ impl MeetingStore {
 
     fn repair_session_tracks(&self, session_id: MeetingSessionId) -> Result<(), StoreError> {
         let connection = self.connection()?;
-        if session_row(&connection, session_id)?.transcript_purged_at_utc_ms.is_some() {
+        if session_row(&connection, session_id)?
+            .transcript_purged_at_utc_ms
+            .is_some()
+        {
             return Ok(());
         }
         let mut statement = connection.prepare(
@@ -8505,7 +8543,15 @@ fn user_notes_row(
             "SELECT body, template_id, note_revision, updated_at_utc_ms, custom_template_id
              FROM meeting_user_notes WHERE session_id = ?1",
             params![id(session_id)],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
     let Some((body, template_id, note_revision, updated_at_utc_ms, custom_id)) = row else {
@@ -8517,7 +8563,8 @@ fn user_notes_row(
         let custom_id = MeetingTemplateId::from_uuid(parse_uuid(&custom_id)?);
         if custom_templates::custom_template_exists_in(connection, custom_id)? {
             NotesTemplateChoice {
-                template: MeetingNotesTemplate::from_artifact_template_id(&template_id).unwrap_or(fallback.template),
+                template: MeetingNotesTemplate::from_artifact_template_id(&template_id)
+                    .unwrap_or(fallback.template),
                 custom_template_id: Some(custom_id),
             }
         } else {
@@ -8525,7 +8572,8 @@ fn user_notes_row(
         }
     } else {
         MeetingNotesTemplate::from_artifact_template_id(&template_id)
-            .map(NotesTemplateChoice::from).unwrap_or(fallback)
+            .map(NotesTemplateChoice::from)
+            .unwrap_or(fallback)
     };
     Ok(MeetingUserNotes {
         session_id,
@@ -9850,7 +9898,10 @@ fn validate_cloud_share_source(
     input: &CloudShareInput,
 ) -> Result<(), StoreError> {
     let Some(session_id) = input.source_session_id else {
-        let note_id = input.object_id.strip_prefix("note_").ok_or(StoreError::Invalid)?;
+        let note_id = input
+            .object_id
+            .strip_prefix("note_")
+            .ok_or(StoreError::Invalid)?;
         Uuid::parse_str(note_id).map_err(|_| StoreError::Invalid)?;
         return if input.content_kind == CloudShareContentKind::BrowserMarkdown {
             Ok(())
@@ -10413,10 +10464,18 @@ fn export_cloud_meeting_bundle_in(
         audio_included: false,
         transcript_purged_at_utc_ms: session.18,
         retained_analytics: if session.18.is_some() {
-            connection.query_row("SELECT metrics_json FROM meeting_conversation_metrics WHERE session_id = ?1",
-                params![id(session_id)], |row| row.get::<_, String>(0)).optional()?
-                .map(|json| decode_json(&json)).transpose()?
-        } else { None },
+            connection
+                .query_row(
+                    "SELECT metrics_json FROM meeting_conversation_metrics WHERE session_id = ?1",
+                    params![id(session_id)],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|json| decode_json(&json))
+                .transpose()?
+        } else {
+            None
+        },
         session: bundle_session,
         run_plans,
         consents,
@@ -10429,7 +10488,11 @@ fn export_cloud_meeting_bundle_in(
         transcript_segments,
         segment_edits,
         notes,
-        user_notes: Some(user_notes_row(connection, session_id, MeetingNotesTemplate::General.into())?),
+        user_notes: Some(user_notes_row(
+            connection,
+            session_id,
+            MeetingNotesTemplate::General.into(),
+        )?),
         artifacts,
         artifact_revisions,
         questions,
@@ -11146,14 +11209,25 @@ mod tests {
         let shares = store.cloud_note_shares(Some(&object_id)).unwrap();
         assert_eq!(shares[0].share_id, input.share_id);
         assert_eq!(shares[0].state, CloudShareState::Pending);
-        assert!(store.cloud_note_shares(Some(&format!("note_{}", Uuid::new_v4()))).unwrap().is_empty());
-        store.revoke_cloud_share(&input.share_id, utc_now_ms()).unwrap();
-        assert_eq!(store.cloud_note_shares(None).unwrap()[0].state, CloudShareState::Revoked);
+        assert!(store
+            .cloud_note_shares(Some(&format!("note_{}", Uuid::new_v4())))
+            .unwrap()
+            .is_empty());
+        store
+            .revoke_cloud_share(&input.share_id, utc_now_ms())
+            .unwrap();
+        assert_eq!(
+            store.cloud_note_shares(None).unwrap()[0].state,
+            CloudShareState::Revoked
+        );
 
         let mut invalid = input;
         invalid.share_id = "invalidCapabilityShare".to_owned();
         invalid.content_kind = CloudShareContentKind::CapabilityBundle;
-        assert!(matches!(store.create_cloud_share(invalid), Err(StoreError::Invalid)));
+        assert!(matches!(
+            store.create_cloud_share(invalid),
+            Err(StoreError::Invalid)
+        ));
     }
 
     fn store() -> (TempDir, Arc<MeetingStore>) {
@@ -12463,7 +12537,9 @@ mod tests {
         let revision = review_ready_session(&store, session_id);
         let object_id = "object_123456789";
         let remote_revision_id = "revision_1234567";
-        let bundle = store.export_cloud_meeting_bundle(session_id).expect("remote bundle");
+        let bundle = store
+            .export_cloud_meeting_bundle(session_id)
+            .expect("remote bundle");
         let conflict = CloudConflict {
             object_id: object_id.to_string(),
             source_session_id: Some(session_id),
@@ -12473,7 +12549,9 @@ mod tests {
             remote_bundle_relative_path: format!(".cloud-conflicts/{object_id}.bundle"),
         };
         store
-            .cache_cloud_conflict(&conflict, &bundle, |path, bytes| Ok(fs::write(path, bytes)?))
+            .cache_cloud_conflict(&conflict, &bundle, |path, bytes| {
+                Ok(fs::write(path, bytes)?)
+            })
             .expect("cache conflict");
         let local = store
             .resolve_cloud_conflict_keep_local(object_id, "keep-local".to_string(), 2)
@@ -12487,7 +12565,9 @@ mod tests {
             .expect("conflict lookup")
             .is_none());
         store
-            .cache_cloud_conflict(&conflict, &bundle, |path, bytes| Ok(fs::write(path, bytes)?))
+            .cache_cloud_conflict(&conflict, &bundle, |path, bytes| {
+                Ok(fs::write(path, bytes)?)
+            })
             .expect("recache conflict");
         let head = store
             .resolve_cloud_conflict_use_remote(object_id, session_id)
@@ -13489,7 +13569,10 @@ mod tests {
             job_id
         };
         let job_id = trash(DeletionCause::User);
-        assert!(store.meeting_folder_ids(session_id).expect("folders").is_empty());
+        assert!(store
+            .meeting_folder_ids(session_id)
+            .expect("folders")
+            .is_empty());
         store
             .restore_trashed_meeting(job_id, 20)
             .expect("restore the deletion");
@@ -13509,7 +13592,11 @@ mod tests {
         store
             .delete_trashed_meeting(job_id)
             .expect("delete forever");
-        assert!(!store.root.join(".trash").join(job_id.uuid().to_string()).exists());
+        assert!(!store
+            .root
+            .join(".trash")
+            .join(job_id.uuid().to_string())
+            .exists());
         assert!(store.meeting_trash(20).expect("trash list").is_empty());
         assert_eq!(
             store.restore_trashed_meeting(job_id, 20),
@@ -13632,27 +13719,50 @@ mod tests {
         let (_directory, store) = store();
         let session_id = MeetingSessionId::new();
         review_ready_session(&store, session_id);
-        store.request_session_disclosure(session_id, "Recording with consent.", Some("us.zoom.xos"), true)
+        store
+            .request_session_disclosure(
+                session_id,
+                "Recording with consent.",
+                Some("us.zoom.xos"),
+                true,
+            )
             .expect("arm disclosure");
         let sent = std::cell::RefCell::new(Vec::new());
-        let result = store.attempt_session_disclosure(session_id, |line, _| {
-            store.request_session_disclosure(session_id, "A duplicate.", None, true)
-                .expect("duplicate start");
-            let concurrent = store.attempt_session_disclosure(session_id, |text, _| {
+        let result = store
+            .attempt_session_disclosure(session_id, |line, _| {
+                store
+                    .request_session_disclosure(session_id, "A duplicate.", None, true)
+                    .expect("duplicate start");
+                let concurrent = store
+                    .attempt_session_disclosure(session_id, |text, _| {
+                        sent.borrow_mut().push(text.to_string());
+                        crate::delivery::CallChatResult::not_posted("unexpected second send")
+                    })
+                    .expect("concurrent request");
+                assert_eq!(
+                    concurrent,
+                    MeetingSessionDisclosure::Posting {
+                        line: line.to_string()
+                    }
+                );
+                sent.borrow_mut().push(line.to_string());
+                crate::delivery::CallChatResult::not_posted("chat is unavailable")
+            })
+            .expect("attempt");
+        let replay = store
+            .attempt_session_disclosure(session_id, |text, _| {
                 sent.borrow_mut().push(text.to_string());
-                crate::delivery::CallChatResult::not_posted("unexpected second send")
-            }).expect("concurrent request");
-            assert_eq!(concurrent, MeetingSessionDisclosure::Posting { line: line.to_string() });
-            sent.borrow_mut().push(line.to_string());
-            crate::delivery::CallChatResult::not_posted("chat is unavailable")
-        }).expect("attempt");
-        let replay = store.attempt_session_disclosure(session_id, |text, _| {
-            sent.borrow_mut().push(text.to_string());
-            crate::delivery::CallChatResult::not_posted("unexpected replay")
-        }).expect("reconnect");
+                crate::delivery::CallChatResult::not_posted("unexpected replay")
+            })
+            .expect("reconnect");
         assert_eq!(*sent.borrow(), vec!["Recording with consent."]);
         assert_eq!(replay, result);
-        assert_eq!(store.session_disclosure(session_id).expect("durable result"), result);
+        assert_eq!(
+            store
+                .session_disclosure(session_id)
+                .expect("durable result"),
+            result
+        );
     }
 
     #[test]
@@ -13660,26 +13770,48 @@ mod tests {
         let (_directory, store) = store();
         let session_id = MeetingSessionId::new();
         review_ready_session(&store, session_id);
-        store.request_session_disclosure(session_id, "Recording notice.", Some("us.zoom.xos"), true)
+        store
+            .request_session_disclosure(session_id, "Recording notice.", Some("us.zoom.xos"), true)
             .expect("arm disclosure");
-        let result = store.attempt_session_disclosure(session_id, |_, _| {
-            crate::delivery::CallChatResult::not_posted("More than one chat composer is visible.")
-        }).expect("refusal");
+        let result = store
+            .attempt_session_disclosure(session_id, |_, _| {
+                crate::delivery::CallChatResult::not_posted(
+                    "More than one chat composer is visible.",
+                )
+            })
+            .expect("refusal");
         let sent = std::cell::Cell::new(false);
-        store.request_session_disclosure(session_id, "Another notice.", None, true)
+        store
+            .request_session_disclosure(session_id, "Another notice.", None, true)
             .expect("duplicate start");
-        let replay = store.attempt_session_disclosure(session_id, |_, _| {
-            sent.set(true);
-            crate::delivery::CallChatResult::not_posted("unexpected retry")
-        }).expect("reconnect");
-        assert!(!sent.get(), "an ambiguous composer must not become a later send");
+        let replay = store
+            .attempt_session_disclosure(session_id, |_, _| {
+                sent.set(true);
+                crate::delivery::CallChatResult::not_posted("unexpected retry")
+            })
+            .expect("reconnect");
+        assert!(
+            !sent.get(),
+            "an ambiguous composer must not become a later send"
+        );
         assert_eq!(replay, result);
-        let MeetingSessionDisclosure::Attempted { receipt, line, reason } = replay else {
+        let MeetingSessionDisclosure::Attempted {
+            receipt,
+            line,
+            reason,
+        } = replay
+        else {
             panic!("the refusal must be visible");
         };
-        assert_eq!(receipt.outcome, crate::delivery::DeliveryOutcome::DefinitelyNotDispatched);
+        assert_eq!(
+            receipt.outcome,
+            crate::delivery::DeliveryOutcome::DefinitelyNotDispatched
+        );
         assert_eq!(line, "Recording notice.");
-        assert_eq!(reason.as_deref(), Some("More than one chat composer is visible."));
+        assert_eq!(
+            reason.as_deref(),
+            Some("More than one chat composer is visible.")
+        );
     }
 
     #[test]
@@ -13687,15 +13819,19 @@ mod tests {
         let (_directory, store) = store();
         let session_id = MeetingSessionId::new();
         review_ready_session(&store, session_id);
-        store.request_session_disclosure(session_id, "Recording notice.", None, false)
+        store
+            .request_session_disclosure(session_id, "Recording notice.", None, false)
             .expect("opt out");
-        store.request_session_disclosure(session_id, "Recording notice.", Some("us.zoom.xos"), true)
+        store
+            .request_session_disclosure(session_id, "Recording notice.", Some("us.zoom.xos"), true)
             .expect("changed default");
         let sent = std::cell::Cell::new(false);
-        let result = store.attempt_session_disclosure(session_id, |_, _| {
-            sent.set(true);
-            crate::delivery::CallChatResult::not_posted("unexpected send")
-        }).expect("attempt");
+        let result = store
+            .attempt_session_disclosure(session_id, |_, _| {
+                sent.set(true);
+                crate::delivery::CallChatResult::not_posted("unexpected send")
+            })
+            .expect("attempt");
         assert_eq!(result, MeetingSessionDisclosure::Disabled);
         assert!(!sent.get());
     }

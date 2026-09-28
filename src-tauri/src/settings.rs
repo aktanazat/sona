@@ -3156,7 +3156,8 @@ pub fn change_meeting_transcription_language_setting(
 }
 
 pub fn default_meeting_disclosure_message() -> String {
-    "I'm recording this meeting with Sona to take notes. Please tell me if you'd prefer I stop.".to_string()
+    "I'm recording this meeting with Sona to take notes. Please tell me if you'd prefer I stop."
+        .to_string()
 }
 
 #[tauri::command]
@@ -3690,7 +3691,8 @@ mod tests {
     fn custom_notes_settings_load_legacy_and_salvage_wrong_types() {
         let legacy: AppSettings = serde_json::from_value(serde_json::json!({
             "meeting_notes_template": "standup"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(legacy.meeting_notes_custom_template_id, None);
         assert_eq!(legacy.meeting_notes_language, MeetingNotesLanguage::Auto);
         assert_eq!(legacy.meeting_notes_template, MeetingNotesTemplate::Standup);
@@ -3710,10 +3712,15 @@ mod tests {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
             "meeting_notes_custom_template_id": template_id,
             "meeting_notes_language": "english"
-        })).unwrap();
-        let restored: AppSettings = serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        }))
+        .unwrap();
+        let restored: AppSettings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
         assert_eq!(restored.meeting_notes_custom_template_id, Some(template_id));
-        assert_eq!(restored.meeting_notes_language, MeetingNotesLanguage::English);
+        assert_eq!(
+            restored.meeting_notes_language,
+            MeetingNotesLanguage::English
+        );
     }
 
     #[test]
@@ -5014,7 +5021,10 @@ mod tests {
     fn salvage_resets_wrong_typed_pill_fields_and_keeps_the_rest() {
         let mut stored = serde_json::Value::Object(default_settings_document().0);
         let map = stored.as_object_mut().unwrap();
-        map.insert("hud_pill_hidden_until_ms".into(), serde_json::json!("later"));
+        map.insert(
+            "hud_pill_hidden_until_ms".into(),
+            serde_json::json!("later"),
+        );
         map.insert("hud_pill_position".into(), serde_json::json!(7));
         map.insert("hud_pill_enabled".into(), serde_json::json!(true));
 

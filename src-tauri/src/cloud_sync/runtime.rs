@@ -21,16 +21,14 @@ use crate::{
         cloud_bundle::CloudMeetingBundleV1,
         session::{ImportRecordingRequest, MeetingSessionManager, RecordingOrigin},
         store::{
-            cloud_phone_notes_object_id,
-            CloudCapabilitiesCache, CloudConflict, CloudHead, CloudOutboxChunk, CloudOutboxInput,
-            CloudOutboxKind, CloudOutboxRecord, CloudOutboxState, CloudOutboxUpdate,
-            CloudShareContentKind, CloudShareInput, CloudShareRecord, CloudShareState,
-            CloudShareUpdate, MeetingStore, StoreError,
+            cloud_phone_notes_object_id, CloudCapabilitiesCache, CloudConflict, CloudHead,
+            CloudOutboxChunk, CloudOutboxInput, CloudOutboxKind, CloudOutboxRecord,
+            CloudOutboxState, CloudOutboxUpdate, CloudShareContentKind, CloudShareInput,
+            CloudShareRecord, CloudShareState, CloudShareUpdate, MeetingStore, StoreError,
         },
         types::{
             MeetingCommandError, MeetingConsentProvenance, MeetingListFilter,
-            MeetingNavigationDestination, MeetingPhase, MeetingSessionId,
-            MANUAL_DEFAULT_TITLE,
+            MeetingNavigationDestination, MeetingPhase, MeetingSessionId, MANUAL_DEFAULT_TITLE,
         },
     },
     portable,
@@ -60,8 +58,7 @@ use super::{
     share_document::{meeting_document, SHARE_DOCUMENT_KIND, SHARE_DOCUMENT_SOURCE_FORMAT},
     share_file::{parse_worker_share_transport, read_share_file, write_share_file},
     types::{
-        CloudBrowserShareCreateRequest, CloudBrowserShareResult,
-        CloudConflictChoice,
+        CloudBrowserShareCreateRequest, CloudBrowserShareResult, CloudConflictChoice,
         CloudConflictResolveRequest, CloudMeetingStatus, CloudObjectState,
         CloudPairingAcceptRequest, CloudPairingApproveRequest, CloudPairingOffer,
         CloudPairingOfferRequest, CloudShareCreateRequest, CloudShareImportRequest,
@@ -1332,9 +1329,14 @@ impl CloudSyncRuntime {
     ) -> Result<CloudBrowserShareResult, CloudRuntimeError> {
         self.reject_portable()?;
         let store = self.queueable_store().await?;
-        let review = store.review_snapshot(request.session_id).map_err(map_store_error)?;
+        let review = store
+            .review_snapshot(request.session_id)
+            .map_err(map_store_error)?;
         let user_notes = store
-            .user_notes(request.session_id, crate::meeting::analytics::MeetingNotesTemplate::default().into())
+            .user_notes(
+                request.session_id,
+                crate::meeting::analytics::MeetingNotesTemplate::default().into(),
+            )
             .map_err(map_store_error)?;
         let document = meeting_document(&review, &user_notes.body, request.include)
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
@@ -1346,17 +1348,9 @@ impl CloudSyncRuntime {
                 CloudShareContentKind::BrowserMarkdown,
             )
             .await?;
-        let (root, _) = self.stage_share(
-            &store,
-            &share.outbox,
-            &share.record,
-            Some(document),
-        )?;
-        let share_url = browser_share_url(
-            &share.access.state.endpoint,
-            &share.record.share_id,
-            &root,
-        );
+        let (root, _) = self.stage_share(&store, &share.outbox, &share.record, Some(document))?;
+        let share_url =
+            browser_share_url(&share.access.state.endpoint, &share.record.share_id, &root);
         self.emit_changed(Some(request.session_id), Some(CloudObjectState::Queued));
         Ok(CloudBrowserShareResult {
             share_id: share.record.share_id,
@@ -2381,9 +2375,11 @@ impl CloudSyncRuntime {
             store.stage_cloud_outbox_chunks(&record.outbox_id, |directory| {
                 write_staged_file(directory, OBJECT_MANIFEST_FILE, &manifest)?;
                 let mut chunks = Vec::with_capacity(
-                    usize::try_from(chunk_count).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+                    usize::try_from(chunk_count)
+                        .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
                 );
-                for (index, plaintext_chunk) in plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
+                for (index, plaintext_chunk) in
+                    plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
                 {
                     let index =
                         u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
@@ -2505,9 +2501,11 @@ impl CloudSyncRuntime {
             store.stage_cloud_outbox_chunks(&record.outbox_id, |directory| {
                 write_staged_file(directory, OBJECT_MANIFEST_FILE, &manifest)?;
                 let mut chunks = Vec::with_capacity(
-                    usize::try_from(chunk_count).map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+                    usize::try_from(chunk_count)
+                        .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
                 );
-                for (index, plaintext_chunk) in plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
+                for (index, plaintext_chunk) in
+                    plaintext.chunks(MAX_PLAINTEXT_CHUNK_BYTES).enumerate()
                 {
                     let index =
                         u32::try_from(index).map_err(|_| CloudRuntimeError::IntegrityFailure)?;
@@ -3314,7 +3312,12 @@ impl CloudSyncRuntime {
         match result {
             Ok(()) => Ok(true),
             Err(StoreError::TranscriptDeleted) => {
-                acknowledge_remote_revision(store, input.object_id, input.revision_id, input.sequence)?;
+                acknowledge_remote_revision(
+                    store,
+                    input.object_id,
+                    input.revision_id,
+                    input.sequence,
+                )?;
                 Ok(false)
             }
             Err(error) => Err(map_store_error(error)),
@@ -3827,12 +3830,17 @@ pub(crate) fn queue_session_upload(
         store.cloud_head(&phone_object_id)
     } else {
         store.cloud_head_for_session(session_id)
-    }.map_err(map_store_error)?;
+    }
+    .map_err(map_store_error)?;
     let object_id = match existing_head.as_ref() {
         Some(head) if head.tombstone => return Ok(false),
         Some(head) => head.object_id.clone(),
         None => {
-            let object_id = if phone_recording { phone_object_id } else { random_opaque_id()? };
+            let object_id = if phone_recording {
+                phone_object_id
+            } else {
+                random_opaque_id()?
+            };
             store
                 .upsert_cloud_head(&CloudHead {
                     object_id: object_id.clone(),
@@ -3864,10 +3872,17 @@ pub(crate) fn queue_session_upload(
         base_remote_revision_id = previous.remote_revision_id.clone();
     }
     let revision = random_opaque_id()?;
-    let notes = store.user_notes(session_id, crate::meeting::analytics::MeetingNotesTemplate::General.into())
+    let notes = store
+        .user_notes(
+            session_id,
+            crate::meeting::analytics::MeetingNotesTemplate::General.into(),
+        )
         .map_err(map_store_error)?;
     let idempotency_key = stable_idempotency_value(&[
-        "object", &object_id, &snapshot.revision.to_string(), &notes.revision.to_string(),
+        "object",
+        &object_id,
+        &snapshot.revision.to_string(),
+        &notes.revision.to_string(),
     ]);
     store
         .enqueue_cloud_outbox(CloudOutboxInput {
@@ -4609,11 +4624,18 @@ mod tests {
         .expect("the pending upload is claimable");
         preparation.expect("a valid imported transcript must stage before the claim freezes it");
         assert_eq!(
-            store.cloud_outbox(&record.outbox_id).unwrap().unwrap().state,
+            store
+                .cloud_outbox(&record.outbox_id)
+                .unwrap()
+                .unwrap()
+                .state,
             CloudOutboxState::Claimed,
         );
         let payload = load_staged_payload(&store, &record).expect("read staged ciphertext");
-        let revision_id = record.remote_revision_id.as_deref().expect("upload revision");
+        let revision_id = record
+            .remote_revision_id
+            .as_deref()
+            .expect("upload revision");
         let chunk_count = u32::try_from(payload.chunks.len()).expect("chunk count");
         let RemoteManifest::Meeting(manifest) = open_remote_manifest(
             &TEST_VAULT_ROOT,
@@ -4623,14 +4645,12 @@ mod tests {
             chunk_count,
             &payload.manifest,
         )
-        .expect("the staged manifest authenticates as a meeting")
-        else {
+        .expect("the staged manifest authenticates as a meeting") else {
             panic!("a transcript-only meeting was staged as a recording");
         };
         assert_eq!(manifest.chunk_count, chunk_count);
-        let mut plaintext = Vec::with_capacity(
-            usize::try_from(manifest.plaintext_bytes).expect("bundle length"),
-        );
+        let mut plaintext =
+            Vec::with_capacity(usize::try_from(manifest.plaintext_bytes).expect("bundle length"));
         for chunk in &payload.chunks {
             let decoded = open_object_revision_payload(
                 &TEST_VAULT_ROOT,
@@ -4878,16 +4898,18 @@ mod tests {
         assert_eq!(bytes.len(), WAVE_HEADER_BYTES + audio.len());
         assert_eq!(&bytes[WAVE_HEADER_BYTES..], audio.as_slice());
 
-        let snapshot =
-            tauri::async_runtime::block_on(manager.import_recording_with_notes(ImportRecordingRequest {
+        let snapshot = tauri::async_runtime::block_on(manager.import_recording_with_notes(
+            ImportRecordingRequest {
                 path: staged.path().to_owned(),
                 title: Some("Phone recording".to_owned()),
                 recorded_at_utc_ms: Some(1_788_305_031_276),
                 origin: RecordingOrigin::PairedDevice {
                     device_id: TEST_DEVICE_ID.to_owned(),
                 },
-            }, Some("Confirm the launch date.")))
-            .expect("the pulled recording imports");
+            },
+            Some("Confirm the launch date."),
+        ))
+        .expect("the pulled recording imports");
         let review = tauri::async_runtime::block_on(manager.get(snapshot.session_id))
             .expect("the imported meeting is readable");
 
@@ -4896,8 +4918,16 @@ mod tests {
         assert_eq!(review.session.started_at_utc_ms, Some(1_788_305_031_276));
         assert!(!review.transcript.is_empty());
         assert!(review.tracks[0].durable_record_count > 0);
-        assert_eq!(store.user_notes(snapshot.session_id, crate::meeting::analytics::MeetingNotesTemplate::General.into())
-            .expect("phone notes persist before processing").body, "Confirm the launch date.");
+        assert_eq!(
+            store
+                .user_notes(
+                    snapshot.session_id,
+                    crate::meeting::analytics::MeetingNotesTemplate::General.into()
+                )
+                .expect("phone notes persist before processing")
+                .body,
+            "Confirm the launch date."
+        );
     }
 
     /// A phone may upload a recording with no title. The staged file is named
@@ -4988,51 +5018,109 @@ mod tests {
         assert!(queue_session_upload(&store, pulled).expect("phone notes queue"));
         let phone_outboxes = store.cloud_outboxes_for_session(pulled).expect("outboxes");
         assert_eq!(phone_outboxes.len(), 1);
-        assert_eq!(phone_outboxes[0].object_id, cloud_phone_notes_object_id(pulled));
+        assert_eq!(
+            phone_outboxes[0].object_id,
+            cloud_phone_notes_object_id(pulled)
+        );
         assert_ne!(phone_outboxes[0].object_id, TEST_OBJECT_ID);
-        assert_eq!(store.cloud_head_for_session(pulled).expect("primary head").expect("audio head").object_id,
-                   TEST_OBJECT_ID);
+        assert_eq!(
+            store
+                .cloud_head_for_session(pulled)
+                .expect("primary head")
+                .expect("audio head")
+                .object_id,
+            TEST_OBJECT_ID
+        );
         let revision = store.session_snapshot(pulled).expect("snapshot").revision;
-        let (_, deletion) = store.reserve_deletion(
-            crate::meeting::types::MeetingOperationId::new(), 10, pulled, revision,
-            crate::meeting::types::DeletionCause::User,
-        ).expect("reserve deletion");
-        let revision = store.session_snapshot(pulled).expect("deleting snapshot").revision;
-        store.enqueue_cloud_tombstone_for_session(pulled, revision, "delete-phone".to_owned(), 0)
+        let (_, deletion) = store
+            .reserve_deletion(
+                crate::meeting::types::MeetingOperationId::new(),
+                10,
+                pulled,
+                revision,
+                crate::meeting::types::DeletionCause::User,
+            )
+            .expect("reserve deletion");
+        let revision = store
+            .session_snapshot(pulled)
+            .expect("deleting snapshot")
+            .revision;
+        store
+            .enqueue_cloud_tombstone_for_session(pulled, revision, "delete-phone".to_owned(), 0)
             .expect("both phone objects delete");
-        let tombstones: Vec<_> = store.cloud_outboxes_for_session(pulled).expect("tombstones")
-            .into_iter().filter(|row| row.kind == CloudOutboxKind::Tombstone).collect();
+        let tombstones: Vec<_> = store
+            .cloud_outboxes_for_session(pulled)
+            .expect("tombstones")
+            .into_iter()
+            .filter(|row| row.kind == CloudOutboxKind::Tombstone)
+            .collect();
         assert_eq!(tombstones.len(), 2);
         assert!(tombstones.iter().any(|row| row.object_id == TEST_OBJECT_ID));
-        assert!(tombstones.iter().any(|row| row.object_id == cloud_phone_notes_object_id(pulled)));
+        assert!(tombstones
+            .iter()
+            .any(|row| row.object_id == cloud_phone_notes_object_id(pulled)));
         for row in &tombstones {
             let deleted_revision = format!("deleted-{}", row.object_id);
-            store.upsert_cloud_head(&CloudHead {
-                object_id: row.object_id.clone(), source_session_id: Some(pulled),
-                remote_revision_id: Some(deleted_revision.clone()), tombstone: true,
-                acknowledged_revision_id: Some(deleted_revision), change_sequence: 20,
-            }).expect("the worker acknowledged deletion");
+            store
+                .upsert_cloud_head(&CloudHead {
+                    object_id: row.object_id.clone(),
+                    source_session_id: Some(pulled),
+                    remote_revision_id: Some(deleted_revision.clone()),
+                    tombstone: true,
+                    acknowledged_revision_id: Some(deleted_revision),
+                    change_sequence: 20,
+                })
+                .expect("the worker acknowledged deletion");
         }
         store.finish_deletion(deletion).expect("move to trash");
-        let restored = store.restore_trashed_meeting(deletion, utc_now_ms()).expect("restore");
+        let restored = store
+            .restore_trashed_meeting(deletion, utc_now_ms())
+            .expect("restore");
         assert_eq!(restored, pulled);
-        let restored_revision = store.session_snapshot(pulled).expect("restored snapshot").revision;
-        assert!(restored_revision > phone_outboxes[0].source_revision.expect("original revision"));
+        let restored_revision = store
+            .session_snapshot(pulled)
+            .expect("restored snapshot")
+            .revision;
+        assert!(
+            restored_revision
+                > phone_outboxes[0]
+                    .source_revision
+                    .expect("original revision")
+        );
         for row in &tombstones {
-            let head = store.cloud_head(&row.object_id).expect("head").expect("retained identifier");
+            let head = store
+                .cloud_head(&row.object_id)
+                .expect("head")
+                .expect("retained identifier");
             assert!(!head.tombstone);
-            assert_eq!(head.remote_revision_id, Some(format!("deleted-{}", row.object_id)));
+            assert_eq!(
+                head.remote_revision_id,
+                Some(format!("deleted-{}", row.object_id))
+            );
             assert!(head.acknowledged_revision_id.is_none());
         }
-        assert!(store.cloud_outboxes_for_session(pulled).expect("outboxes").iter()
+        assert!(store
+            .cloud_outboxes_for_session(pulled)
+            .expect("outboxes")
+            .iter()
             .all(|row| row.kind != CloudOutboxKind::Tombstone));
         assert!(queue_session_upload(&store, pulled).expect("restored notes are uploadable"));
-        let restored_upload = store.cloud_outboxes_for_session(pulled).expect("restored outboxes")
-            .into_iter().find(|row| row.kind == CloudOutboxKind::Object && row.state == CloudOutboxState::Pending)
+        let restored_upload = store
+            .cloud_outboxes_for_session(pulled)
+            .expect("restored outboxes")
+            .into_iter()
+            .find(|row| {
+                row.kind == CloudOutboxKind::Object && row.state == CloudOutboxState::Pending
+            })
             .expect("a fresh upload, not the canceled pre-deletion upload");
-        assert_eq!(restored_upload.object_id, cloud_phone_notes_object_id(pulled));
-        assert_eq!(restored_upload.base_remote_revision_id,
-            Some(format!("deleted-{}", cloud_phone_notes_object_id(pulled))));
+        assert_eq!(
+            restored_upload.object_id,
+            cloud_phone_notes_object_id(pulled)
+        );
+        assert_eq!(
+            restored_upload.base_remote_revision_id,
+            Some(format!("deleted-{}", cloud_phone_notes_object_id(pulled)))
+        );
         assert_eq!(restored_upload.source_revision, Some(restored_revision));
 
         let picked = import(RecordingOrigin::LocalFile);
@@ -5158,43 +5246,82 @@ mod tests {
         let store = tauri::async_runtime::block_on(manager.store()).unwrap();
         let audio = vec![1_u8; 32_000];
         let object = phone_object(audio.clone(), &sha256_base64url(&audio), TEST_DEVICE_ID);
-        let staged = stage(&object, store.cloud_recording_staging_path(TEST_OBJECT_ID).unwrap()).unwrap();
-        let snapshot = tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
-            path: staged.path().to_owned(), title: Some("Retained notes".to_owned()),
-            recorded_at_utc_ms: Some(1_700_000_000_000), origin: RecordingOrigin::LocalFile,
-        })).unwrap();
+        let staged = stage(
+            &object,
+            store.cloud_recording_staging_path(TEST_OBJECT_ID).unwrap(),
+        )
+        .unwrap();
+        let snapshot =
+            tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
+                path: staged.path().to_owned(),
+                title: Some("Retained notes".to_owned()),
+                recorded_at_utc_ms: Some(1_700_000_000_000),
+                origin: RecordingOrigin::LocalFile,
+            }))
+            .unwrap();
         tauri::async_runtime::block_on(manager.get(snapshot.session_id)).unwrap();
-        let old_bundle = CloudMeetingBundleV1::export_from_store(&store, snapshot.session_id).unwrap();
+        let old_bundle =
+            CloudMeetingBundleV1::export_from_store(&store, snapshot.session_id).unwrap();
         assert!(!old_bundle.transcript_segments.is_empty());
-        store.upsert_cloud_head(&CloudHead {
-            object_id: TEST_OBJECT_ID.to_owned(), source_session_id: Some(snapshot.session_id),
-            remote_revision_id: Some("before-retention".to_owned()), tombstone: false,
-            acknowledged_revision_id: Some("before-retention".to_owned()), change_sequence: 1,
-        }).unwrap();
+        store
+            .upsert_cloud_head(&CloudHead {
+                object_id: TEST_OBJECT_ID.to_owned(),
+                source_session_id: Some(snapshot.session_id),
+                remote_revision_id: Some("before-retention".to_owned()),
+                tombstone: false,
+                acknowledged_revision_id: Some("before-retention".to_owned()),
+                change_sequence: 1,
+            })
+            .unwrap();
         let now = 1_700_000_000_000 + 30 * 86_400_000;
-        store.set_transcript_retention_policy(
-            crate::meeting::types::MeetingOperationId::new(), now - 7 * 86_400_000, 0,
-            &crate::meeting::types::MeetingRetentionPolicy::DeleteAfterDays { days: 1 },
-        ).unwrap();
-        assert!(store.purge_transcript_at(snapshot.session_id, now).unwrap().is_some());
+        store
+            .set_transcript_retention_policy(
+                crate::meeting::types::MeetingOperationId::new(),
+                now - 7 * 86_400_000,
+                0,
+                &crate::meeting::types::MeetingRetentionPolicy::DeleteAfterDays { days: 1 },
+            )
+            .unwrap();
+        assert!(store
+            .purge_transcript_at(snapshot.session_id, now)
+            .unwrap()
+            .is_some());
         let input = |bundle, revision_id, sequence| ConflictCacheInput {
-            object_id: TEST_OBJECT_ID, revision_id, sequence,
-            source_session_id: Some(snapshot.session_id), source_revision: Some(snapshot.revision),
+            object_id: TEST_OBJECT_ID,
+            revision_id,
+            sequence,
+            source_session_id: Some(snapshot.session_id),
+            source_revision: Some(snapshot.revision),
             bundle,
         };
-        assert!(!CloudSyncRuntime::cache_conflict(&store, input(&old_bundle, TEST_REVISION_ID, 12)).unwrap());
+        assert!(!CloudSyncRuntime::cache_conflict(
+            &store,
+            input(&old_bundle, TEST_REVISION_ID, 12)
+        )
+        .unwrap());
         let head = store.cloud_head(TEST_OBJECT_ID).unwrap().unwrap();
-        assert_eq!(head.acknowledged_revision_id.as_deref(), Some(TEST_REVISION_ID));
+        assert_eq!(
+            head.acknowledged_revision_id.as_deref(),
+            Some(TEST_REVISION_ID)
+        );
         assert_eq!(head.source_session_id, Some(snapshot.session_id));
         assert_eq!(head.change_sequence, 12);
         assert!(store.cloud_conflict(TEST_OBJECT_ID).unwrap().is_none());
-        let cache_path = store.root().join(format!(".cloud-conflicts/{TEST_OBJECT_ID}.bundle"));
+        let cache_path = store
+            .root()
+            .join(format!(".cloud-conflicts/{TEST_OBJECT_ID}.bundle"));
         assert!(!cache_path.exists());
 
-        let mut notes_only = CloudMeetingBundleV1::export_from_store(&store, snapshot.session_id).unwrap();
+        let mut notes_only =
+            CloudMeetingBundleV1::export_from_store(&store, snapshot.session_id).unwrap();
         notes_only.session.title = "Updated remote notes".to_owned();
-        assert!(CloudSyncRuntime::cache_conflict(&store, input(&notes_only, "notesrevision12345", 13)).unwrap());
-        let cached = CloudMeetingBundleV1::from_json_bytes(&fs::read(&cache_path).unwrap()).unwrap();
+        assert!(CloudSyncRuntime::cache_conflict(
+            &store,
+            input(&notes_only, "notesrevision12345", 13)
+        )
+        .unwrap());
+        let cached =
+            CloudMeetingBundleV1::from_json_bytes(&fs::read(&cache_path).unwrap()).unwrap();
         assert_eq!(cached.session.title, "Updated remote notes");
         assert!(cached.transcript_segments.is_empty());
         assert_eq!(cached.transcript_purged_at_utc_ms, Some(now));
@@ -5207,7 +5334,10 @@ mod tests {
             Err(CloudRuntimeError::Storage)
         ));
         assert_eq!(store.cloud_head(TEST_OBJECT_ID).unwrap().unwrap(), head);
-        assert_eq!(store.require_retained_transcript(snapshot.session_id), Err(StoreError::TranscriptDeleted));
+        assert_eq!(
+            store.require_retained_transcript(snapshot.session_id),
+            Err(StoreError::TranscriptDeleted)
+        );
     }
 
     /// The signature the pull path checks after the chunks are on disk. The

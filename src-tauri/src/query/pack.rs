@@ -179,14 +179,7 @@ async fn for_folder(
         StoreError::NotFound => QueryError::InvalidRequest,
         error => QueryError::from(error),
     })?;
-    let (rows, more) = folder_search(
-        meetings,
-        history,
-        question,
-        &folder,
-        PACK_HITS,
-    )
-    .await?;
+    let (rows, more) = folder_search(meetings, history, question, &folder, PACK_HITS).await?;
     let search_done = started.elapsed();
     let rows = without_excluded_series(&store, rows);
     let scope = folder.line(&store);

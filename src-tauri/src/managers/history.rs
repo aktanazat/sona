@@ -2050,9 +2050,8 @@ impl HistoryManager {
             total_words: history_trend_value(total_words, "word count")?,
             total_duration_ms: history_trend_value(total_duration_ms, "duration")?,
             words_per_minute,
-            words_per_minute_dictations: u32::try_from(speed_dictations).map_err(|_| {
-                anyhow!("history usage speed window exceeds the supported range")
-            })?,
+            words_per_minute_dictations: u32::try_from(speed_dictations)
+                .map_err(|_| anyhow!("history usage speed window exceeds the supported range"))?,
             time_saved_ms: typing_ms.saturating_sub(timed_duration_ms),
             current_streak_days,
             longest_streak_days,

@@ -58,21 +58,27 @@ impl super::session::MeetingSessionManager {
 /// All retained meetings, including unfinished ones with whatever content
 /// exists now. Trash is not retained meeting content. Fail the whole export
 /// on a read error, so an incomplete file cannot look like a complete backup.
-fn render_csv(store: &super::store::MeetingStore) -> Result<String, super::types::MeetingCommandError> {
+fn render_csv(
+    store: &super::store::MeetingStore,
+) -> Result<String, super::types::MeetingCommandError> {
     use super::types::MeetingCommandError;
     use super::workflow_engine::map_store_error;
 
     let meetings = store.csv_meetings().map_err(map_store_error)?;
     let mut writer = csv_writer().map_err(|_| MeetingCommandError::ExportFailed)?;
     for meeting in meetings {
-        let review = store.review_snapshot(meeting.session_id).map_err(map_store_error)?;
+        let review = store
+            .review_snapshot(meeting.session_id)
+            .map_err(map_store_error)?;
         if review.session.phase == MeetingPhase::Deleting {
             return Err(MeetingCommandError::DeletionInProgress);
         }
         write_csv_meeting(&mut writer, &meeting, &review)
             .map_err(|_| MeetingCommandError::ExportFailed)?;
     }
-    let bytes = writer.into_inner().map_err(|_| MeetingCommandError::ExportFailed)?;
+    let bytes = writer
+        .into_inner()
+        .map_err(|_| MeetingCommandError::ExportFailed)?;
     String::from_utf8(bytes).map_err(|_| MeetingCommandError::ExportFailed)
 }
 
@@ -80,9 +86,17 @@ fn csv_writer() -> Result<csv::Writer<Vec<u8>>, ExportError> {
     let mut writer = csv::WriterBuilder::new()
         .terminator(csv::Terminator::CRLF)
         .from_writer(Vec::new());
-    writer.write_record([
-        "title", "date", "duration", "participants", "summary", "action items", "transcript",
-    ]).map_err(|_| ExportError::Render)?;
+    writer
+        .write_record([
+            "title",
+            "date",
+            "duration",
+            "participants",
+            "summary",
+            "action items",
+            "transcript",
+        ])
+        .map_err(|_| ExportError::Render)?;
     Ok(writer)
 }
 
@@ -95,12 +109,20 @@ fn write_csv_meeting(
     review: &MeetingReviewSnapshot,
 ) -> Result<(), ExportError> {
     let date = chrono::DateTime::from_timestamp_millis(
-        review.session.started_at_utc_ms.unwrap_or(meeting.created_at_utc_ms),
+        review
+            .session
+            .started_at_utc_ms
+            .unwrap_or(meeting.created_at_utc_ms),
     )
     .ok_or(ExportError::Render)?
     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let duration = meeting.recorded_duration_ns
-        .map(|value| u64::try_from(value).map(format_offset).map_err(|_| ExportError::Render))
+    let duration = meeting
+        .recorded_duration_ns
+        .map(|value| {
+            u64::try_from(value)
+                .map(format_offset)
+                .map_err(|_| ExportError::Render)
+        })
         .transpose()?
         .unwrap_or_default();
     let mut participants = String::new();
@@ -134,13 +156,31 @@ fn write_csv_meeting(
         if !transcript.is_empty() {
             transcript.push('\n');
         }
-        let speaker = speakers.get(&segment.assigned_speaker_id).copied().unwrap_or("Unknown speaker");
-        let text = segment.replacement_text.as_deref().unwrap_or(&segment.base.text);
-        let _ = write!(transcript, "[{}] {speaker}: {text}", format_offset(segment.base.start_offset_ns));
+        let speaker = speakers
+            .get(&segment.assigned_speaker_id)
+            .copied()
+            .unwrap_or("Unknown speaker");
+        let text = segment
+            .replacement_text
+            .as_deref()
+            .unwrap_or(&segment.base.text);
+        let _ = write!(
+            transcript,
+            "[{}] {speaker}: {text}",
+            format_offset(segment.base.start_offset_ns)
+        );
     }
-    writer.write_record([
-        review.session.title.as_str(), &date, &duration, &participants, summary, &actions, &transcript,
-    ]).map_err(|_| ExportError::Render)
+    writer
+        .write_record([
+            review.session.title.as_str(),
+            &date,
+            &duration,
+            &participants,
+            summary,
+            &actions,
+            &transcript,
+        ])
+        .map_err(|_| ExportError::Render)
 }
 
 pub fn render(
@@ -300,7 +340,10 @@ fn render_markdown(document: &ExportDocument<'_>) -> String {
                 super::snapshots::export_image_name(index, snapshot.offset_ns),
             );
         }
-        let _ = writeln!(markdown, "\nThe images are saved in a snapshots folder beside the exported file.");
+        let _ = writeln!(
+            markdown,
+            "\nThe images are saved in a snapshots folder beside the exported file."
+        );
     }
 
     markdown
@@ -532,21 +575,42 @@ mod tests {
         let session_id = review.session.session_id;
         let speaker_id = SpeakerId::new();
         review.speakers = vec![MeetingSpeaker {
-            speaker_id, session_id, source_kind: SourceKind::Microphone,
-            display_name: "Priya".to_string(), revision: 1,
+            speaker_id,
+            session_id,
+            source_kind: SourceKind::Microphone,
+            display_name: "Priya".to_string(),
+            revision: 1,
         }];
         review.artifacts = vec![
-            revision(session_id, MeetingArtifactState::OutOfDate, 20, "Do not export this."),
-            revision(session_id, MeetingArtifactState::Current, 10, "Said \"yes\", then\nshipped."),
+            revision(
+                session_id,
+                MeetingArtifactState::OutOfDate,
+                20,
+                "Do not export this.",
+            ),
+            revision(
+                session_id,
+                MeetingArtifactState::Current,
+                10,
+                "Said \"yes\", then\nshipped.",
+            ),
         ];
         let segment = EffectiveTranscriptSegment {
             base: TranscriptSegment {
-                segment_id: TranscriptSegmentId::new(), transcript_revision_id: TranscriptRevisionId::new(),
-                track_id: SourceTrackId::new(), ordinal: 0, start_offset_ns: 0, end_offset_ns: 1_000_000_000,
-                speaker_id, text: "Uncorrected words".to_string(), confidence_milli: None,
+                segment_id: TranscriptSegmentId::new(),
+                transcript_revision_id: TranscriptRevisionId::new(),
+                track_id: SourceTrackId::new(),
+                ordinal: 0,
+                start_offset_ns: 0,
+                end_offset_ns: 1_000_000_000,
+                speaker_id,
+                text: "Uncorrected words".to_string(),
+                confidence_milli: None,
             },
             replacement_text: Some("Send \"it\", today\nplease.".to_string()),
-            removed: false, edit_revision: Some(1), assigned_speaker_id: speaker_id,
+            removed: false,
+            edit_revision: Some(1),
+            assigned_speaker_id: speaker_id,
             speaker_assignment: SpeakerAssignmentKind::LocalSpeaker,
         };
         let mut removed = segment.clone();
@@ -555,18 +619,23 @@ mod tests {
         removed.replacement_text = Some("Removed words".to_string());
         review.transcript = vec![segment, removed];
         let metadata = CsvMeeting {
-            session_id, created_at_utc_ms: 0, recorded_duration_ns: Some(3_723_456_000_000),
+            session_id,
+            created_at_utc_ms: 0,
+            recorded_duration_ns: Some(3_723_456_000_000),
         };
         // PANIC: the fixture has a valid timestamp and an in-memory CSV sink.
         let mut writer = csv_writer().expect("CSV header");
         write_csv_meeting(&mut writer, &metadata, &review).expect("CSV meeting");
         let actual = String::from_utf8(writer.into_inner().expect("CSV bytes")).expect("UTF-8");
-        assert_eq!(actual, concat!(
-            "title,date,duration,participants,summary,action items,transcript\r\n",
-            "\"Launch, \"\"Q3\"\"\r\nplan\",1970-01-01T00:00:00.000Z,01:02:03.456,Priya,",
-            "\"Said \"\"yes\"\", then\nshipped.\",Draft the launch note — Priya (due Friday),",
-            "\"[00:00:00.000] Priya: Send \"\"it\"\", today\nplease.\"\r\n",
-        ));
+        assert_eq!(
+            actual,
+            concat!(
+                "title,date,duration,participants,summary,action items,transcript\r\n",
+                "\"Launch, \"\"Q3\"\"\r\nplan\",1970-01-01T00:00:00.000Z,01:02:03.456,Priya,",
+                "\"Said \"\"yes\"\", then\nshipped.\",Draft the launch note — Priya (due Friday),",
+                "\"[00:00:00.000] Priya: Send \"\"it\"\", today\nplease.\"\r\n",
+            )
+        );
     }
 
     #[test]

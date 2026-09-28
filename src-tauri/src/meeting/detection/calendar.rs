@@ -125,7 +125,12 @@ pub trait CalendarSource: Send + Sync {
     /// `select_event`, or `None`. Returning one event rather than a list is
     /// deliberate: the decision table only ever asks about the current moment,
     /// and a list would invite callers to invent their own precedence.
-    fn next_event(&self, now_utc_ms: i64, lookahead_ms: i64, lead_seconds: i64) -> Option<CalendarEventSummary>;
+    fn next_event(
+        &self,
+        now_utc_ms: i64,
+        lookahead_ms: i64,
+        lead_seconds: i64,
+    ) -> Option<CalendarEventSummary>;
 
     /// Reads one occurrence with its agenda, only when preparing or recording it.
     fn event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary>;
@@ -149,7 +154,12 @@ impl CalendarSource for NoCalendar {
         CalendarAccess::Unavailable
     }
 
-    fn next_event(&self, _now_utc_ms: i64, _lookahead_ms: i64, _lead_seconds: i64) -> Option<CalendarEventSummary> {
+    fn next_event(
+        &self,
+        _now_utc_ms: i64,
+        _lookahead_ms: i64,
+        _lead_seconds: i64,
+    ) -> Option<CalendarEventSummary> {
         None
     }
 
@@ -298,14 +308,16 @@ pub use macos::EventKitCalendar;
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        event_text, named_attendee_with_email, occurrence_key, occurrence_start, participation_status, select_event,
-        CalendarAccess, CalendarEventSummary, CalendarOccurrence, CalendarSource, EventCandidate,
-        ParticipationStatus,
+        event_text, named_attendee_with_email, occurrence_key, occurrence_start,
+        participation_status, select_event, CalendarAccess, CalendarEventSummary,
+        CalendarOccurrence, CalendarSource, EventCandidate, ParticipationStatus,
     };
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::Bool;
-    use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStatus, EKEventStore};
+    use objc2_event_kit::{
+        EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStatus, EKEventStore,
+    };
     use objc2_foundation::{NSDate, NSError};
     use std::sync::mpsc;
     use std::sync::Mutex;
@@ -406,7 +418,12 @@ mod macos {
             }
         }
 
-        fn next_event(&self, now_utc_ms: i64, lookahead_ms: i64, lead_seconds: i64) -> Option<CalendarEventSummary> {
+        fn next_event(
+            &self,
+            now_utc_ms: i64,
+            lookahead_ms: i64,
+            lead_seconds: i64,
+        ) -> Option<CalendarEventSummary> {
             if self.access() != CalendarAccess::Authorized {
                 return None;
             }
@@ -465,26 +482,39 @@ mod macos {
         }
 
         fn event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary> {
-            if self.access() != CalendarAccess::Authorized { return None; }
+            if self.access() != CalendarAccess::Authorized {
+                return None;
+            }
             let start_ms = occurrence_start(event_key)?;
-            objc2::rc::autoreleasepool(|_| self.with_store(|store| {
-                // Calendar events all start after 1970, so a negative key finds nothing.
-                let seconds = |ms: i64| u64::try_from(ms).ok().map(|ms| std::time::Duration::from_millis(ms).as_secs_f64());
-                let start = NSDate::dateWithTimeIntervalSince1970(seconds(start_ms)?);
-                let end = NSDate::dateWithTimeIntervalSince1970(seconds(start_ms.checked_add(1)?)?);
-                // SAFETY: both dates are live for this construction call.
-                let predicate = unsafe { store.predicateForEventsWithStartDate_endDate_calendars(&start, &end, None) };
-                // SAFETY: the predicate came from this same store.
-                let events = unsafe { store.eventsMatchingPredicate(&predicate) };
-                events.iter().find_map(|event| {
-                    let mut summary = summarize(&event)?;
-                    if summary.event_key != event_key || self_participation(&event) == ParticipationStatus::Declined {
-                        return None;
-                    }
-                    enrich(&event, &mut summary);
-                    Some(summary)
+            objc2::rc::autoreleasepool(|_| {
+                self.with_store(|store| {
+                    // Calendar events all start after 1970, so a negative key finds nothing.
+                    let seconds = |ms: i64| {
+                        u64::try_from(ms)
+                            .ok()
+                            .map(|ms| std::time::Duration::from_millis(ms).as_secs_f64())
+                    };
+                    let start = NSDate::dateWithTimeIntervalSince1970(seconds(start_ms)?);
+                    let end =
+                        NSDate::dateWithTimeIntervalSince1970(seconds(start_ms.checked_add(1)?)?);
+                    // SAFETY: both dates are live for this construction call.
+                    let predicate = unsafe {
+                        store.predicateForEventsWithStartDate_endDate_calendars(&start, &end, None)
+                    };
+                    // SAFETY: the predicate came from this same store.
+                    let events = unsafe { store.eventsMatchingPredicate(&predicate) };
+                    events.iter().find_map(|event| {
+                        let mut summary = summarize(&event)?;
+                        if summary.event_key != event_key
+                            || self_participation(&event) == ParticipationStatus::Declined
+                        {
+                            return None;
+                        }
+                        enrich(&event, &mut summary);
+                        Some(summary)
+                    })
                 })
-            }))
+            })
         }
 
         fn events_between(&self, start_utc_ms: i64, end_utc_ms: i64) -> Vec<CalendarOccurrence> {
@@ -513,7 +543,9 @@ mod macos {
                             // window, including something that began yesterday
                             // and runs into it. A row that has already ended is
                             // not upcoming.
-                            if summary.end_utc_ms <= start_utc_ms || self_participation(&event) == ParticipationStatus::Declined {
+                            if summary.end_utc_ms <= start_utc_ms
+                                || self_participation(&event) == ParticipationStatus::Declined
+                            {
                                 return None;
                             }
                             enrich_participants(&event, &mut summary);
@@ -545,7 +577,9 @@ mod macos {
     /// more. `enrich` adds the rest, for the one event that is selected.
     fn summarize(event: &EKEvent) -> Option<CalendarEventSummary> {
         // SAFETY: a plain property read on this live event.
-        if unsafe { event.status() } == EKEventStatus::Canceled { return None; }
+        if unsafe { event.status() } == EKEventStatus::Canceled {
+            return None;
+        }
         // SAFETY: plain property reads on a live event.
         let (start, end, all_day) =
             unsafe { (event.startDate(), event.endDate(), event.isAllDay()) };
@@ -741,7 +775,10 @@ mod tests {
         let next_in_45s = candidate(45_000, 3, ParticipationStatus::Accepted);
         let next_in_5m = candidate(5 * MINUTE_MS, 3, ParticipationStatus::Accepted);
 
-        assert_eq!(select_event([&running_over, &next_in_45s], NOW, 60), Some(1));
+        assert_eq!(
+            select_event([&running_over, &next_in_45s], NOW, 60),
+            Some(1)
+        );
         assert_eq!(
             select_event([&running_over, &next_in_5m], NOW, 60),
             Some(0),

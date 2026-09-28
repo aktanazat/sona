@@ -101,10 +101,7 @@ pub fn change_command_mode_enabled_setting(app: AppHandle, enabled: bool) -> Res
 /// cannot change where the answer in flight lands.
 #[tauri::command]
 #[specta::specta]
-pub fn change_command_answers_in_chat_setting(
-    app: AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
+pub fn change_command_answers_in_chat_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     crate::settings::update_settings(&app, |settings| {
         settings.command_answers_in_chat = enabled;
     })?;
@@ -184,30 +181,130 @@ const COURTESY_OPENERS: &[&str] = &[
 /// open a question as easily, and an unclear wording with a selection is an
 /// edit anyway.
 const EDIT_VERBS: &[&str] = &[
-    "rewrite", "reword", "rephrase", "paraphrase", "revise", "edit", "make", "change", "turn",
-    "convert", "fix", "correct", "proofread", "spell", "punctuate", "shorten", "condense",
-    "tighten", "trim", "cut", "expand", "lengthen", "simplify", "clarify", "improve", "polish",
-    "clean", "translate", "format", "reformat", "capitalize", "capitalise", "uppercase",
-    "lowercase", "bold", "italicize", "italicise", "indent", "bullet", "sort", "reorder",
-    "rearrange", "reverse", "split", "merge", "combine", "join", "remove", "delete", "strip",
-    "add", "insert", "replace", "swap", "put", "wrap", "adjust", "tweak", "update",
+    "rewrite",
+    "reword",
+    "rephrase",
+    "paraphrase",
+    "revise",
+    "edit",
+    "make",
+    "change",
+    "turn",
+    "convert",
+    "fix",
+    "correct",
+    "proofread",
+    "spell",
+    "punctuate",
+    "shorten",
+    "condense",
+    "tighten",
+    "trim",
+    "cut",
+    "expand",
+    "lengthen",
+    "simplify",
+    "clarify",
+    "improve",
+    "polish",
+    "clean",
+    "translate",
+    "format",
+    "reformat",
+    "capitalize",
+    "capitalise",
+    "uppercase",
+    "lowercase",
+    "bold",
+    "italicize",
+    "italicise",
+    "indent",
+    "bullet",
+    "sort",
+    "reorder",
+    "rearrange",
+    "reverse",
+    "split",
+    "merge",
+    "combine",
+    "join",
+    "remove",
+    "delete",
+    "strip",
+    "add",
+    "insert",
+    "replace",
+    "swap",
+    "put",
+    "wrap",
+    "adjust",
+    "tweak",
+    "update",
 ];
 
 /// Openers that ask for something to read rather than text to put back. Each
 /// is matched at a word boundary: "is" opens "is this right?", not "island".
 const QUESTION_OPENERS: &[&str] = &[
-    "what", "why", "how", "who", "whom", "whose", "when", "where", "which", "is", "are", "am",
-    "was", "were", "does", "did", "should", "shall", "will", "would", "could", "can", "may",
-    "might", "must", "explain", "summarize", "summarise", "sum up", "describe", "define",
-    "tell me", "give me", "show me", "list", "count", "compare", "calculate", "compute",
-    "check", "find", "search", "look up", "identify", "suggest", "recommend", "brainstorm",
-    "answer", "help me", "any", "anything",
+    "what",
+    "why",
+    "how",
+    "who",
+    "whom",
+    "whose",
+    "when",
+    "where",
+    "which",
+    "is",
+    "are",
+    "am",
+    "was",
+    "were",
+    "does",
+    "did",
+    "should",
+    "shall",
+    "will",
+    "would",
+    "could",
+    "can",
+    "may",
+    "might",
+    "must",
+    "explain",
+    "summarize",
+    "summarise",
+    "sum up",
+    "describe",
+    "define",
+    "tell me",
+    "give me",
+    "show me",
+    "list",
+    "count",
+    "compare",
+    "calculate",
+    "compute",
+    "check",
+    "find",
+    "search",
+    "look up",
+    "identify",
+    "suggest",
+    "recommend",
+    "brainstorm",
+    "answer",
+    "help me",
+    "any",
+    "anything",
 ];
 
 /// Whether `text` opens with `phrase` as whole words.
 fn opens_with(text: &str, phrase: &str) -> bool {
-    text.strip_prefix(phrase)
-        .is_some_and(|rest| rest.chars().next().is_none_or(|next| !next.is_alphanumeric()))
+    text.strip_prefix(phrase).is_some_and(|rest| {
+        rest.chars()
+            .next()
+            .is_none_or(|next| !next.is_alphanumeric())
+    })
 }
 
 fn strip_courtesy(mut text: &str) -> &str {
@@ -290,7 +387,10 @@ pub(crate) async fn process_command(
         CommandRoute::Answer => answer_in_chat(app, run, command, instruction, language).await,
         CommandRoute::NothingToEdit => {
             debug!("Command edit spoken with nothing selected; nothing was changed");
-            let _ = app.emit("recording-error", RecordingErrorEvent::typed(NO_SELECTION_ERROR));
+            let _ = app.emit(
+                "recording-error",
+                RecordingErrorEvent::typed(NO_SELECTION_ERROR),
+            );
             // No provider was asked anything: the row in the Library keeps the
             // spoken words and says no processing produced text.
             ProcessedTranscription {
@@ -362,7 +462,12 @@ async fn answer_in_chat(
             rewrite: RewriteOutcome::NotRequested,
         };
     }
-    let rendered = render_answer(question, command.selection(), language, run.context().target());
+    let rendered = render_answer(
+        question,
+        command.selection(),
+        language,
+        run.context().target(),
+    );
     log_prompt_budget("Command answer", &rendered);
 
     let answered = post_process_transcription(app, run, &rendered, question).await;
@@ -619,7 +724,13 @@ mod tests {
             assert_eq!(classify_instruction(edit), SpokenIntent::Edit, "{edit:?}");
         }
 
-        let unclear = ["", "in French", "as a haiku", "write a limerick about cats", "island"];
+        let unclear = [
+            "",
+            "in French",
+            "as a haiku",
+            "write a limerick about cats",
+            "island",
+        ];
         for wording in unclear {
             assert_eq!(
                 classify_instruction(wording),
@@ -687,7 +798,10 @@ mod tests {
                 failure: AgentPanelTurnFailureV1::Unreachable
             })
         );
-        assert_eq!(chat_failure(RewriteOutcome::Failed), AgentPanelTurnFailureV1::Failed);
+        assert_eq!(
+            chat_failure(RewriteOutcome::Failed),
+            AgentPanelTurnFailureV1::Failed
+        );
     }
 
     #[test]

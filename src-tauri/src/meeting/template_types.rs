@@ -253,7 +253,9 @@ mod tests {
                 })
                 .collect(),
         };
-        let normalized = at_limits.normalized().expect("every field is at its ceiling");
+        let normalized = at_limits
+            .normalized()
+            .expect("every field is at its ceiling");
         assert_eq!(normalized.name, "n".repeat(MAX_TEMPLATE_NAME_BYTES));
         assert_eq!(normalized.sections[3].title, "Section 3");
 
@@ -262,18 +264,31 @@ mod tests {
         assert!(long_name.normalized().is_err(), "a name one byte over");
 
         let mut long_instructions = at_limits.clone();
-        long_instructions.sections[0].instructions =
-            "i".repeat(MAX_SECTION_INSTRUCTIONS_BYTES + 1);
-        assert!(long_instructions.normalized().is_err(), "instructions one byte over");
+        long_instructions.sections[0].instructions = "i".repeat(MAX_SECTION_INSTRUCTIONS_BYTES + 1);
+        assert!(
+            long_instructions.normalized().is_err(),
+            "instructions one byte over"
+        );
 
         let mut too_many = at_limits.clone();
         too_many.sections.push(section("One more"));
         assert!(too_many.normalized().is_err(), "a ninth section");
 
-        assert!(draft("Weekly", Vec::new()).normalized().is_err(), "no sections");
-        assert!(draft("   ", vec![section("Wins")]).normalized().is_err(), "a blank name");
-        assert!(draft("Two\nlines", vec![section("Wins")]).normalized().is_err());
-        assert!(draft("Weekly", vec![section(" ")]).normalized().is_err(), "a blank title");
+        assert!(
+            draft("Weekly", Vec::new()).normalized().is_err(),
+            "no sections"
+        );
+        assert!(
+            draft("   ", vec![section("Wins")]).normalized().is_err(),
+            "a blank name"
+        );
+        assert!(draft("Two\nlines", vec![section("Wins")])
+            .normalized()
+            .is_err());
+        assert!(
+            draft("Weekly", vec![section(" ")]).normalized().is_err(),
+            "a blank title"
+        );
         assert!(
             draft("Weekly", vec![section("Wins"), section(" wINS ")])
                 .normalized()
@@ -286,7 +301,10 @@ mod tests {
     fn a_custom_artifact_id_names_its_template_and_nothing_else() {
         let template_id = MeetingTemplateId::new();
         let artifact_id = custom_artifact_template_id(template_id);
-        assert_eq!(custom_template_id_from_artifact(&artifact_id), Some(template_id));
+        assert_eq!(
+            custom_template_id_from_artifact(&artifact_id),
+            Some(template_id)
+        );
         for built_in in MeetingNotesTemplate::ALL {
             assert_eq!(
                 custom_template_id_from_artifact(built_in.artifact_template_id()),

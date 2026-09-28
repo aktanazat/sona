@@ -53,7 +53,9 @@ impl CloudSyncRuntime {
         let record = match record {
             Ok(record) => record,
             Err(error) => {
-                store.cancel_cloud_outbox(&outbox.outbox_id).map_err(map_store_error)?;
+                store
+                    .cancel_cloud_outbox(&outbox.outbox_id)
+                    .map_err(map_store_error)?;
                 return Err(map_store_error(error));
             }
         };
@@ -61,13 +63,20 @@ impl CloudSyncRuntime {
         let (mut root, _) = match staged {
             Ok(staged) => staged,
             Err(error) => {
-                store.cancel_cloud_outbox(&outbox.outbox_id).map_err(map_store_error)?;
-                store.update_cloud_share(&record.share_id, CloudShareUpdate {
-                    expires_at_utc_ms: record.expires_at_utc_ms,
-                    state: CloudShareState::Failed,
-                    outbox_id: Some(outbox.outbox_id),
-                    revoked_at_utc_ms: None,
-                }).map_err(map_store_error)?;
+                store
+                    .cancel_cloud_outbox(&outbox.outbox_id)
+                    .map_err(map_store_error)?;
+                store
+                    .update_cloud_share(
+                        &record.share_id,
+                        CloudShareUpdate {
+                            expires_at_utc_ms: record.expires_at_utc_ms,
+                            state: CloudShareState::Failed,
+                            outbox_id: Some(outbox.outbox_id),
+                            revoked_at_utc_ms: None,
+                        },
+                    )
+                    .map_err(map_store_error)?;
                 return Err(error);
             }
         };
@@ -86,10 +95,15 @@ impl CloudSyncRuntime {
         &self,
         request: CloudNoteShareListRequest,
     ) -> Result<Vec<CloudShareSummary>, CloudRuntimeError> {
-        let store = self.meetings.cloud_store().await
+        let store = self
+            .meetings
+            .cloud_store()
+            .await
             .map_err(|_| CloudRuntimeError::SetupRequired)?;
         let object_id = request.note_id.as_deref().map(note_object_id).transpose()?;
-        let records = store.cloud_note_shares(object_id.as_deref()).map_err(map_store_error)?;
+        let records = store
+            .cloud_note_shares(object_id.as_deref())
+            .map_err(map_store_error)?;
         share_summaries(&store, records)
     }
 
@@ -100,16 +114,24 @@ impl CloudSyncRuntime {
         request: CloudShareRevokeRequest,
     ) -> Result<CloudBrowserShareResult, CloudRuntimeError> {
         let access = self.configured_access().await?;
-        let record = access.store.cloud_share(&request.share_id).map_err(map_store_error)?
+        let record = access
+            .store
+            .cloud_share(&request.share_id)
+            .map_err(map_store_error)?
             .ok_or(CloudRuntimeError::Conflict)?;
         if record.content_kind != CloudShareContentKind::BrowserMarkdown
-            || !matches!(record.state, CloudShareState::Pending | CloudShareState::Active)
+            || !matches!(
+                record.state,
+                CloudShareState::Pending | CloudShareState::Active
+            )
             || record.expires_at_utc_ms <= adjusted_now_ms(access.state.clock_offset_ms)
         {
             return Err(CloudRuntimeError::Conflict);
         }
-        let mut root = fixed_array_32(base64_url_decode(&record.encrypted_link_material)
-            .map_err(|_| CloudRuntimeError::IntegrityFailure)?)?;
+        let mut root = fixed_array_32(
+            base64_url_decode(&record.encrypted_link_material)
+                .map_err(|_| CloudRuntimeError::IntegrityFailure)?,
+        )?;
         let share_url = browser_share_url(&access.state.endpoint, &record.share_id, &root);
         root.zeroize();
         Ok(CloudBrowserShareResult {
@@ -130,19 +152,25 @@ pub(super) fn share_summaries(
     store: &MeetingStore,
     records: Vec<CloudShareRecord>,
 ) -> Result<Vec<CloudShareSummary>, CloudRuntimeError> {
-    records.into_iter().map(|record| {
-        let outbox = record.outbox_id.as_deref()
-            .map(|id| store.cloud_outbox(id).map_err(map_store_error))
-            .transpose()?.flatten();
-        Ok(CloudShareSummary {
-            share_id: record.share_id,
-            kind: match record.content_kind {
-                CloudShareContentKind::CapabilityBundle => CloudShareKind::File,
-                CloudShareContentKind::BrowserMarkdown => CloudShareKind::Browser,
-            },
-            expires_at_utc_ms: record.expires_at_utc_ms,
-            state: share_lifecycle(record.state, outbox.map(|item| item.state)),
-            revoked_at_utc_ms: record.revoked_at_utc_ms,
+    records
+        .into_iter()
+        .map(|record| {
+            let outbox = record
+                .outbox_id
+                .as_deref()
+                .map(|id| store.cloud_outbox(id).map_err(map_store_error))
+                .transpose()?
+                .flatten();
+            Ok(CloudShareSummary {
+                share_id: record.share_id,
+                kind: match record.content_kind {
+                    CloudShareContentKind::CapabilityBundle => CloudShareKind::File,
+                    CloudShareContentKind::BrowserMarkdown => CloudShareKind::Browser,
+                },
+                expires_at_utc_ms: record.expires_at_utc_ms,
+                state: share_lifecycle(record.state, outbox.map(|item| item.state)),
+                revoked_at_utc_ms: record.revoked_at_utc_ms,
+            })
         })
-    }).collect()
+        .collect()
 }

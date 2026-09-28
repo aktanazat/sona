@@ -293,7 +293,8 @@ impl CloudMeetingBundleV1 {
         validate_optional_text(&self.session.diarization_model_version)?;
         validate_row_budget(self)?;
         if let Some(notes) = &self.user_notes {
-            if notes.session_id != self.session.session_id || i64::try_from(notes.revision).is_err() {
+            if notes.session_id != self.session.session_id || i64::try_from(notes.revision).is_err()
+            {
                 return Err(StoreError::Invalid);
             }
             validate_text(&notes.body)?;
@@ -455,11 +456,16 @@ impl CloudMeetingBundleV1 {
                 .map(|segment| segment.segment_id),
         )?;
         if self.transcript_purged_at_utc_ms.is_some()
-            && (!segment_ids.is_empty() || !self.segment_edits.is_empty() || !self.diarization_assignments.is_empty())
+            && (!segment_ids.is_empty()
+                || !self.segment_edits.is_empty()
+                || !self.diarization_assignments.is_empty())
         {
             return Err(StoreError::Invalid);
         }
-        let cited_segment_ids = self.transcript_purged_at_utc_ms.is_none().then_some(&segment_ids);
+        let cited_segment_ids = self
+            .transcript_purged_at_utc_ms
+            .is_none()
+            .then_some(&segment_ids);
         let mut segment_ordinals = HashSet::new();
         for segment in &self.transcript_segments {
             if !transcript_revision_ids.contains(&segment.transcript_revision_id)
@@ -530,7 +536,12 @@ impl CloudMeetingBundleV1 {
             validate_text(question.question.as_deref().ok_or(StoreError::Invalid)?)?;
             validate_optional_text(&question.answer)?;
             for citation in &question.citations {
-                validate_citation(citation, self.session.session_id, cited_segment_ids, &note_ids)?;
+                validate_citation(
+                    citation,
+                    self.session.session_id,
+                    cited_segment_ids,
+                    &note_ids,
+                )?;
             }
         }
 
@@ -849,12 +860,20 @@ mod tests {
         let session_id = bundle.session.session_id;
         let revision_id = TranscriptRevisionId::new();
         let segment_id = TranscriptSegmentId::new();
-        bundle.transcript_revisions.push(CloudBundleTranscriptRevision {
-            transcript_revision_id: revision_id, engine_id: "local".to_owned(), model_version: None,
-            destination: ProcessingDestination::Local, source_set: vec![SourceKind::Microphone],
-            language: "en".to_owned(), state: CloudBundleTaskState::Completed,
-            created_at_utc_ms: 1, completed_at_utc_ms: Some(2), error_code: None,
-        });
+        bundle
+            .transcript_revisions
+            .push(CloudBundleTranscriptRevision {
+                transcript_revision_id: revision_id,
+                engine_id: "local".to_owned(),
+                model_version: None,
+                destination: ProcessingDestination::Local,
+                source_set: vec![SourceKind::Microphone],
+                language: "en".to_owned(),
+                state: CloudBundleTaskState::Completed,
+                created_at_utc_ms: 1,
+                completed_at_utc_ms: Some(2),
+                error_code: None,
+            });
         bundle.session.current_transcript_revision_id = Some(revision_id);
         let content: GeneratedMeetingArtifacts = serde_json::from_value(serde_json::json!({
             "summary": {"text": "Keep the decision", "citations": [{
@@ -862,20 +881,39 @@ mod tests {
             }]},
             "outline": [], "decisions": [], "action_items": [], "key_questions": [], "risks": [],
             "follow_up_draft": {"text": "Keep the follow-up", "citations": []}
-        })).expect("generated notes");
+        }))
+        .expect("generated notes");
         bundle.artifact_revisions.push(MeetingArtifactRevision {
-            artifact_id: MeetingArtifactId::new(), session_id, transcript_revision_id: revision_id,
-            input_revision: 2, template_id: "meeting-review".to_owned(), template_version: 1,
-            generation_key: "retained-notes".to_owned(), state: MeetingArtifactState::Current,
-            generated_at_utc_ms: 3, content: Some(content),
+            artifact_id: MeetingArtifactId::new(),
+            session_id,
+            transcript_revision_id: revision_id,
+            input_revision: 2,
+            template_id: "meeting-review".to_owned(),
+            template_version: 1,
+            generation_key: "retained-notes".to_owned(),
+            state: MeetingArtifactState::Current,
+            generated_at_utc_ms: 3,
+            content: Some(content),
         });
         bundle.questions.push(MeetingAnswer {
-            question_id: MeetingQuestionId::new(), session_id, scope: MeetingQuestionScope::ThisMeeting,
-            question: Some("What was decided?".to_owned()), state: MeetingAnswerState::Supported,
-            answer: Some("Keep the draft.".to_owned()), citations: vec![MeetingCitation {
-                kind: CitationKind::Transcript, session_id, entity_id: segment_id.uuid().to_string(),
-                start_offset_ns: Some(1), end_offset_ns: Some(2),
-            }], input_revision: 2, revision: 1, created_at_utc_ms: 3, through_offset_ns: None, provisional: false,
+            question_id: MeetingQuestionId::new(),
+            session_id,
+            scope: MeetingQuestionScope::ThisMeeting,
+            question: Some("What was decided?".to_owned()),
+            state: MeetingAnswerState::Supported,
+            answer: Some("Keep the draft.".to_owned()),
+            citations: vec![MeetingCitation {
+                kind: CitationKind::Transcript,
+                session_id,
+                entity_id: segment_id.uuid().to_string(),
+                start_offset_ns: Some(1),
+                end_offset_ns: Some(2),
+            }],
+            input_revision: 2,
+            revision: 1,
+            created_at_utc_ms: 3,
+            through_offset_ns: None,
+            provisional: false,
         });
         assert_eq!(bundle.validate(), Err(StoreError::Invalid));
         bundle.transcript_purged_at_utc_ms = Some(10);
@@ -883,25 +921,39 @@ mod tests {
         metrics.talk.segment_count = 7;
         bundle.retained_analytics = Some(metrics.clone());
         let bytes = bundle.to_json_bytes().expect("purged notes serialize");
-        let restored = CloudMeetingBundleV1::from_json_bytes(&bytes).expect("purged notes deserialize");
+        let restored =
+            CloudMeetingBundleV1::from_json_bytes(&bytes).expect("purged notes deserialize");
         assert_eq!(restored, bundle);
         let (_dir, store) = super::super::store::workflow_core_tests::store();
-        restored.import_into_store(&store).expect("purged bundle imports");
-        let exported = CloudMeetingBundleV1::export_from_store(&store, session_id).expect("purged bundle exports");
+        restored
+            .import_into_store(&store)
+            .expect("purged bundle imports");
+        let exported = CloudMeetingBundleV1::export_from_store(&store, session_id)
+            .expect("purged bundle exports");
         assert_eq!(exported.artifact_revisions, bundle.artifact_revisions);
         assert_eq!(exported.questions, bundle.questions);
         assert_eq!(exported.retained_analytics, Some(metrics));
         assert_eq!(exported.transcript_purged_at_utc_ms, Some(10));
         assert!(exported.transcript_segments.is_empty());
-        assert_eq!(store.require_retained_transcript(session_id), Err(StoreError::TranscriptDeleted));
+        assert_eq!(
+            store.require_retained_transcript(session_id),
+            Err(StoreError::TranscriptDeleted)
+        );
 
         let invalid_span = tampered(&bundle, |value| {
-            value["artifact_revisions"][0]["content"]["summary"]["citations"][0]["end_offset_ns"] = serde_json::json!(1);
+            value["artifact_revisions"][0]["content"]["summary"]["citations"][0]["end_offset_ns"] =
+                serde_json::json!(1);
         });
-        assert_eq!(CloudMeetingBundleV1::from_json_bytes(&invalid_span), Err(StoreError::Invalid));
+        assert_eq!(
+            CloudMeetingBundleV1::from_json_bytes(&invalid_span),
+            Err(StoreError::Invalid)
+        );
         bundle.segment_edits.push(CloudBundleSegmentEdit {
-            segment_id, edit_sequence: 1, replacement_text: "Must not survive".to_owned(),
-            removed: false, operator_at_utc_ms: 3,
+            segment_id,
+            edit_sequence: 1,
+            replacement_text: "Must not survive".to_owned(),
+            removed: false,
+            operator_at_utc_ms: 3,
         });
         assert_eq!(bundle.validate(), Err(StoreError::Invalid));
     }
@@ -913,26 +965,43 @@ mod tests {
         let decoded = CloudMeetingBundleV1::from_json_bytes(&bytes).expect("old bundle opens");
         assert_eq!(decoded.transcript_purged_at_utc_ms, None);
         let (_dir, store) = super::super::store::workflow_core_tests::store();
-        decoded.import_into_store(&store).expect("old bundle imports");
-        assert_eq!(store.require_retained_transcript(bundle.session.session_id), Ok(()));
+        decoded
+            .import_into_store(&store)
+            .expect("old bundle imports");
+        assert_eq!(
+            store.require_retained_transcript(bundle.session.session_id),
+            Ok(())
+        );
     }
 
     #[test]
     fn own_notes_round_trip_and_old_bundles_still_open() {
         let mut bundle = review_ready_bundle();
         let legacy = bundle.to_json_bytes().expect("legacy bundle");
-        assert!(CloudMeetingBundleV1::from_json_bytes(&legacy).expect("old bundle").user_notes.is_none());
+        assert!(CloudMeetingBundleV1::from_json_bytes(&legacy)
+            .expect("old bundle")
+            .user_notes
+            .is_none());
         let mut notes = super::super::analytics::MeetingUserNotes::empty(
-            bundle.session.session_id, super::super::analytics::MeetingNotesTemplate::General);
+            bundle.session.session_id,
+            super::super::analytics::MeetingNotesTemplate::General,
+        );
         notes.body = "Ask about the renewal date.".to_owned();
         notes.revision = 1;
         bundle.user_notes = Some(notes.clone());
-        assert_eq!(CloudMeetingBundleV1::from_json_bytes(&bundle.to_json_bytes().expect("notes bundle"))
-            .expect("notes round trip").user_notes, Some(notes));
+        assert_eq!(
+            CloudMeetingBundleV1::from_json_bytes(&bundle.to_json_bytes().expect("notes bundle"))
+                .expect("notes round trip")
+                .user_notes,
+            Some(notes)
+        );
         let foreign = tampered(&bundle, |value| {
             value["user_notes"]["session_id"] = serde_json::json!(MeetingSessionId::new());
         });
-        assert_eq!(CloudMeetingBundleV1::from_json_bytes(&foreign), Err(StoreError::Invalid));
+        assert_eq!(
+            CloudMeetingBundleV1::from_json_bytes(&foreign),
+            Err(StoreError::Invalid)
+        );
     }
 
     #[test]

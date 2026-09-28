@@ -122,7 +122,8 @@ fn split_thumbnail(plaintext: &[u8]) -> Result<(&[u8], MeetingSnapshotSummary), 
     let length_start = plaintext.len().checked_sub(4).ok_or(StoreError::Corrupt)?;
     let mut length = [0_u8; 4];
     length.copy_from_slice(&plaintext[length_start..]);
-    let record_length = usize::try_from(u32::from_le_bytes(length)).map_err(|_| StoreError::Corrupt)?;
+    let record_length =
+        usize::try_from(u32::from_le_bytes(length)).map_err(|_| StoreError::Corrupt)?;
     if record_length > MAXIMUM_RECORD_BYTES {
         return Err(StoreError::Corrupt);
     }
@@ -240,13 +241,19 @@ impl MeetingStore {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, StoreError> {
         let key = self.snapshot_key(session, snapshot)?;
-        let cipher =
-            Aes256Gcm::new_from_slice(key.as_ref()).map_err(|_| StoreError::EncryptionUnavailable)?;
+        let cipher = Aes256Gcm::new_from_slice(key.as_ref())
+            .map_err(|_| StoreError::EncryptionUnavailable)?;
         let mut nonce = [0_u8; NONCE_BYTES];
         getrandom::fill(&mut nonce).map_err(|_| StoreError::Unavailable)?;
         let aad = authenticated_data(part, session, snapshot);
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: &aad })
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
             .map_err(|_| StoreError::EncryptionUnavailable)?;
         let mut sealed = Vec::with_capacity(SNAPSHOT_MAGIC.len() + NONCE_BYTES + ciphertext.len());
         sealed.extend_from_slice(SNAPSHOT_MAGIC);
@@ -267,13 +274,16 @@ impl MeetingStore {
             return Err(StoreError::Corrupt);
         }
         let key = self.snapshot_key(session, snapshot)?;
-        let cipher =
-            Aes256Gcm::new_from_slice(key.as_ref()).map_err(|_| StoreError::EncryptionUnavailable)?;
+        let cipher = Aes256Gcm::new_from_slice(key.as_ref())
+            .map_err(|_| StoreError::EncryptionUnavailable)?;
         let aad = authenticated_data(part, session, snapshot);
         cipher
             .decrypt(
                 Nonce::from_slice(&sealed[SNAPSHOT_MAGIC.len()..body_start]),
-                Payload { msg: &sealed[body_start..], aad: &aad },
+                Payload {
+                    msg: &sealed[body_start..],
+                    aad: &aad,
+                },
             )
             .map_err(|_| StoreError::Corrupt)
     }
@@ -416,7 +426,9 @@ impl MeetingStore {
             MeetingSnapshotSize::Thumbnail => Part::Thumbnail,
             MeetingSnapshotSize::Full => Part::Image,
         };
-        let path = self.snapshot_directory(session_id)?.join(part.file_name(snapshot));
+        let path = self
+            .snapshot_directory(session_id)?
+            .join(part.file_name(snapshot));
         let sealed = fs::read(&path).map_err(|error| match error.kind() {
             ErrorKind::NotFound => StoreError::NotFound,
             _ => StoreError::from(error),
@@ -449,7 +461,11 @@ impl MeetingStore {
             "DELETE FROM meeting_snapshots WHERE snapshot_id = ?1 AND session_id = ?2",
             params![snapshot.to_string(), id(session_id)],
         )?;
-        if changed == 1 { Ok(()) } else { Err(StoreError::NotFound) }
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::NotFound)
+        }
     }
 
     /// Rebuilds the rows of a meeting brought back from the trash. The cloud
@@ -479,7 +495,8 @@ impl MeetingStore {
             let Ok(sealed) = fs::read(&path) else {
                 continue;
             };
-            let Ok(plaintext) = self.open_snapshot_part(Part::Thumbnail, session, snapshot, &sealed)
+            let Ok(plaintext) =
+                self.open_snapshot_part(Part::Thumbnail, session, snapshot, &sealed)
             else {
                 continue;
             };
@@ -492,13 +509,18 @@ impl MeetingStore {
             {
                 let byte_length = u64::try_from(sealed.len())
                     .map_err(|_| StoreError::Corrupt)?
-                    .checked_add(fs::metadata(directory.join(Part::Image.file_name(snapshot)))?.len())
+                    .checked_add(
+                        fs::metadata(directory.join(Part::Image.file_name(snapshot)))?.len(),
+                    )
                     .ok_or(StoreError::Corrupt)?;
                 recovered.push((summary, byte_length));
             }
         }
         let connection = self.connection()?;
-        if session_row(&connection, session_id)?.transcript_purged_at_utc_ms.is_some() {
+        if session_row(&connection, session_id)?
+            .transcript_purged_at_utc_ms
+            .is_some()
+        {
             return Ok(());
         }
         for (summary, byte_length) in &recovered {
@@ -537,7 +559,10 @@ mod tests {
             .snapshot_directory(session_id)
             .unwrap()
             .join(Part::Image.file_name(summary.snapshot_id.uuid()));
-        assert_eq!(store.meeting_snapshots(session_id).unwrap(), vec![summary.clone()]);
+        assert_eq!(
+            store.meeting_snapshots(session_id).unwrap(),
+            vec![summary.clone()]
+        );
         assert_eq!(
             store
                 .meeting_snapshot_png(session_id, summary.snapshot_id, MeetingSnapshotSize::Full)

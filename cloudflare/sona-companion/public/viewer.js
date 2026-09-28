@@ -14,7 +14,11 @@ const MAX_DOCUMENT_SECTIONS = 32;
 // below has its twin there.
 const DOCUMENT_KIND = "notes_document";
 const DOCUMENT_FORMAT = "sona-share-document-v1";
-const DOCUMENT_INCLUDES = new Set(["notes", "notes_and_transcript", "everything"]);
+const DOCUMENT_INCLUDES = new Set([
+  "notes",
+  "notes_and_transcript",
+  "everything",
+]);
 const clockTime = /^\d{1,4}:\d{2}(?::\d{2})?$/u;
 
 function utf8(value) {

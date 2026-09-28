@@ -107,7 +107,12 @@ pub(super) fn scratch_document(
 ) -> Result<(String, Vec<u8>), ShareDocumentTooLarge> {
     let mut sections = Vec::new();
     push_section(&mut sections, "Note", paragraphs(body));
-    encode_document(bounded_title(title), CloudBrowserShareInclude::Notes, false, sections)
+    encode_document(
+        bounded_title(title),
+        CloudBrowserShareInclude::Notes,
+        false,
+        sections,
+    )
 }
 
 fn encode_document(
@@ -184,7 +189,11 @@ fn generated_sections(content: &GeneratedMeetingArtifacts, sections: &mut Vec<Se
         cited_items(&content.key_questions),
     );
     push_section(sections, "Risks", cited_items(&content.risks));
-    push_section(sections, "Follow up", paragraphs(&content.follow_up_draft.text));
+    push_section(
+        sections,
+        "Follow up",
+        paragraphs(&content.follow_up_draft.text),
+    );
 }
 
 /// Consecutive lines of one speaker read as one turn, as they do on the
@@ -351,11 +360,11 @@ mod tests {
     use super::*;
     use crate::meeting::types::{
         AllowedMeetingAction, CaptureCompleteness, DiarizationStatus, EffectiveTranscriptSegment,
-        ManualNote, ManualNoteId, MeetingActionItem, MeetingArtifactId,
-        MeetingDiarizationSnapshot, MeetingOutlineTopic, MeetingPhase, MeetingSessionId,
-        MeetingSessionSnapshot, MeetingSpeaker, ProcessingFailure, ProcessingStatus, SourceKind,
-        SourceTrackId, SpeakerAssignmentKind, StorageAvailability, TranscriptRevisionId,
-        TranscriptSegment, TranscriptSegmentId,
+        ManualNote, ManualNoteId, MeetingActionItem, MeetingArtifactId, MeetingDiarizationSnapshot,
+        MeetingOutlineTopic, MeetingPhase, MeetingSessionId, MeetingSessionSnapshot,
+        MeetingSpeaker, ProcessingFailure, ProcessingStatus, SourceKind, SourceTrackId,
+        SpeakerAssignmentKind, StorageAvailability, TranscriptRevisionId, TranscriptSegment,
+        TranscriptSegmentId,
     };
 
     const SECOND: u64 = 1_000_000_000;
@@ -497,7 +506,13 @@ mod tests {
         ];
         review.transcript = vec![
             segment(priya, 0, "We ship in May.", None, false),
-            segment(priya, 5, "The venue is bookd.", Some("The venue is booked."), false),
+            segment(
+                priya,
+                5,
+                "The venue is bookd.",
+                Some("The venue is booked."),
+                false,
+            ),
             segment(aktan, 40, "Off the record.", None, true),
             segment(aktan, 65, "Who writes the note?", None, false),
         ];
@@ -617,8 +632,9 @@ mod tests {
 
     #[test]
     fn scratch_note_preserves_paragraphs_without_interpreting_markup() {
-        let (title, bytes) = scratch_document("  Draft\nnote ", "First line\nnext line\n\n<img src=x>")
-            .expect("note document");
+        let (title, bytes) =
+            scratch_document("  Draft\nnote ", "First line\nnext line\n\n<img src=x>")
+                .expect("note document");
         assert_eq!(title, "Draft note");
         assert_eq!(
             String::from_utf8(bytes).expect("utf-8"),
