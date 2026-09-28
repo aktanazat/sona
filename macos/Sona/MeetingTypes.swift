@@ -198,6 +198,7 @@ enum MeetingEngineFailureCause: String, Decodable {
     case voiceDetection = "voice_detection"
     case evidencePack = "evidence_pack"
     case modelRefused = "model_refused"
+    case timedOut = "timed_out"
     case replyNotStructured = "reply_not_structured"
     case replyRejected = "reply_rejected"
     case panicked
@@ -209,6 +210,7 @@ enum MeetingEngineFailureCause: String, Decodable {
         case .voiceDetection: "speech detection refused part of a track"
         case .evidencePack: "the transcript would not fit the model's prompt"
         case .modelRefused: "the model did not answer"
+        case .timedOut: "the model ran out of time"
         case .replyNotStructured: "the model's reply was not the shape asked for"
         case .replyRejected: "the model cited a moment that is not in the transcript"
         case .panicked: "the notes pipeline crashed"

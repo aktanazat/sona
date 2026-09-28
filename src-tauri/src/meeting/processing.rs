@@ -258,6 +258,14 @@ pub enum MeetingTextGenerationError {
     /// `relay_generator::generation_error` no longer folds it into `Failed`:
     /// something downstream branches on it now.
     ReplyNotStructured,
+    /// The engine was reached and its time limit ended the turn while the
+    /// model was still working.
+    ///
+    /// Apart from `Failed` because a reader is told something different: the
+    /// model ran out of time, where `Failed` reads as a model that had nothing
+    /// to say. Pressing the button again is a fair chance, because the next
+    /// run may finish inside the limit.
+    TimedOut,
     /// The engine was never reached: it is not configured, or its transport
     /// refused before anything was generated. Nothing ran, so nothing is
     /// recorded as having failed to run.
@@ -1134,7 +1142,9 @@ impl MeetingProcessingService {
             Err(MeetingTextGenerationError::Unreachable) => {
                 failed(PromptRunFailure::ModelUnreachable)
             }
-            Err(MeetingTextGenerationError::Failed) => failed(PromptRunFailure::ModelFailed),
+            Err(MeetingTextGenerationError::Failed | MeetingTextGenerationError::TimedOut) => {
+                failed(PromptRunFailure::ModelFailed)
+            }
             /* Answered in the wrong shape, which for a prompt is what
              * `SchemaMismatch` already names: the same reason a reply that
              * parsed and did not match this prompt's schema is given. */
@@ -2155,6 +2165,15 @@ impl MeetingProcessingService {
                     EngineFailureCause::ModelRefused,
                 ));
             }
+            /* Cut short by the engine's time limit while the model was still
+             * working. Named apart from the refusal above, which reads as a
+             * model that had nothing to say. */
+            Err(MeetingTextGenerationError::TimedOut) => {
+                record_failure();
+                return Ok(ArtifactGenerationOutcome::Failed(
+                    EngineFailureCause::TimedOut,
+                ));
+            }
             /* Answered in a shape this pass cannot read. Named apart from
              * the refusal above because the retry a reader is offered is
              * worth pressing here and not there. */
@@ -2460,9 +2479,12 @@ impl MeetingProcessingService {
                 ))
             }
             /* A recap has one line of copy for a generation that came back
-             * unusable, and a shape it could not read is one of those. */
+             * unusable, and a shape it could not read or a turn that ran out
+             * of time is one of those. */
             Err(
-                MeetingTextGenerationError::Failed | MeetingTextGenerationError::ReplyNotStructured,
+                MeetingTextGenerationError::Failed
+                | MeetingTextGenerationError::ReplyNotStructured
+                | MeetingTextGenerationError::TimedOut,
             ) => {
                 return Ok(MeetingCatchUp::empty(
                     MeetingCatchUpState::Failed,
@@ -2572,7 +2594,9 @@ impl MeetingProcessingService {
                 return Ok(empty(MeetingLiveHelpState::ModelUnavailable, segment_count))
             }
             Err(
-                MeetingTextGenerationError::Failed | MeetingTextGenerationError::ReplyNotStructured,
+                MeetingTextGenerationError::Failed
+                | MeetingTextGenerationError::ReplyNotStructured
+                | MeetingTextGenerationError::TimedOut,
             ) => return Ok(empty(MeetingLiveHelpState::Failed, segment_count)),
         };
         let items = match validate_live_help(kind, &model_output, &read) {
@@ -4958,6 +4982,7 @@ fn read_ledger(
                 MeetingTextGenerationError::ReplyNotStructured => {
                     EngineFailureCause::ReplyNotStructured
                 }
+                MeetingTextGenerationError::TimedOut => EngineFailureCause::TimedOut,
                 /* The engine that wrote the notes a moment ago and then went
                  * away is, to this pass, an engine that refused. */
                 MeetingTextGenerationError::Unreachable | MeetingTextGenerationError::Failed => {

@@ -120,8 +120,8 @@ processing_status
              | {"kind":"failed","reason":"local_model_unavailable"|
                 "remote_unavailable"|"engine_failure"|"cancelled"|"interrupted",
                 "cause":"storage"|"transcription"|"voice_detection"|
-                "evidence_pack"|"model_refused"|"reply_not_structured"|
-                "reply_rejected"|"panicked"|null}
+                "evidence_pack"|"model_refused"|"timed_out"|
+                "reply_not_structured"|"reply_rejected"|"panicked"|null}
              — `cause` names which part refused and is non-null only under
                `engine_failure`.
 headline     {"kind":"none"} | {"kind":"words","words":int}

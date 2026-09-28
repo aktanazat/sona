@@ -2000,6 +2000,7 @@
         "voice_detection": "Röstidentifieringen avvisade en del av ett spår",
         "evidence_pack": "Transkriptionen rymdes inte inom modellens gräns",
         "model_refused": "Modellen returnerade inget användbart",
+        "timed_out": "Modellen hann inte bli klar i tid",
         "reply_not_structured": "Modellens svar hade inte det förväntade formatet",
         "reply_rejected": "Modellens svar citerade något som inte finns i transkriptionen",
         "panicked": "Bearbetningen stoppades oväntat"

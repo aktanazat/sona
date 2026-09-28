@@ -2000,6 +2000,7 @@
         "voice_detection": "Stemmeregistreringen afviste en del af et spor",
         "evidence_pack": "Transskriptionen oversteg modellens grænse",
         "model_refused": "Modellen returnerede intet brugbart",
+        "timed_out": "Modellen løb tør for tid",
         "reply_not_structured": "Modellens svar var ikke i det forventede format",
         "reply_rejected": "Modellens svar citerede noget, der ikke findes i transskriptionen",
         "panicked": "Behandlingen stoppede uventet"

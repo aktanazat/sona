@@ -2000,6 +2000,7 @@
         "voice_detection": "Ses algılama bir kaydın bir bölümünü reddetti",
         "evidence_pack": "Döküm bu modelin sınırına sığmadı",
         "model_refused": "Model kullanılabilir bir sonuç döndürmedi",
+        "timed_out": "Modelin süresi doldu",
         "reply_not_structured": "Modelin yanıtı beklenen biçimde değildi",
         "reply_rejected": "Modelin yanıtı dökümde olmayan bir şeye atıfta bulundu",
         "panicked": "İşleme beklenmedik şekilde durdu"

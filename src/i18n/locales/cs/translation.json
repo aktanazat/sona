@@ -2014,6 +2014,7 @@
         "voice_detection": "Detekce hlasu odmítla část stopy",
         "evidence_pack": "Přepis se nevešel do limitu tohoto modelu",
         "model_refused": "Model nevrátil nic použitelného",
+        "timed_out": "Modelu došel čas",
         "reply_not_structured": "Odpověď modelu nebyla v očekávaném formátu",
         "reply_rejected": "Odpověď modelu citovala něco, co v přepisu není",
         "panicked": "Zpracování se neočekávaně zastavilo"

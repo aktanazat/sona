@@ -241,6 +241,9 @@ pub enum EngineFailureCause {
     EvidencePack,
     /// The engine ran and returned nothing usable.
     ModelRefused,
+    /// The engine's time limit ended the run while the model was still
+    /// working: the relay's worker stopped it before it answered.
+    TimedOut,
     /// The reply was not the JSON the prompt asked for — prose where an object
     /// was required, or a first value that would not parse.
     ReplyNotStructured,

@@ -2007,6 +2007,7 @@
         "voice_detection": "Il rilevamento della voce ha rifiutato parte di una traccia",
         "evidence_pack": "La trascrizione non rientrava nel limite di questo modello",
         "model_refused": "Il modello non ha restituito nulla di utilizzabile",
+        "timed_out": "Il modello ha esaurito il tempo a disposizione",
         "reply_not_structured": "La risposta del modello non era nel formato previsto",
         "reply_rejected": "La risposta del modello citava qualcosa che non è nella trascrizione",
         "panicked": "L'elaborazione si è interrotta in modo inatteso"

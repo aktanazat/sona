@@ -2000,6 +2000,7 @@
         "voice_detection": "Stemdetectie weigerde een deel van een spoor",
         "evidence_pack": "Het transcript paste niet binnen de limiet van dit model",
         "model_refused": "Het model gaf niets bruikbaars terug",
+        "timed_out": "Het model kwam tijd tekort",
         "reply_not_structured": "Het antwoord van het model had niet de verwachte indeling",
         "reply_rejected": "Het antwoord van het model citeerde iets dat niet in het transcript staat",
         "panicked": "De verwerking stopte onverwacht"

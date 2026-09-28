@@ -2000,6 +2000,7 @@
         "voice_detection": "Die Stimmerkennung hat einen Teil einer Spur abgelehnt",
         "evidence_pack": "Das Transkript passte nicht in das Limit dieses Modells",
         "model_refused": "Das Modell hat nichts Verwertbares zurückgegeben",
+        "timed_out": "Dem Modell ist die Zeit ausgegangen",
         "reply_not_structured": "Die Antwort des Modells hatte nicht das erwartete Format",
         "reply_rejected": "Die Antwort des Modells zitierte etwas, das nicht im Transkript steht",
         "panicked": "Die Verarbeitung wurde unerwartet beendet"

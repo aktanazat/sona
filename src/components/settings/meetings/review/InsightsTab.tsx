@@ -36,7 +36,8 @@ const NOTE_TEXT = "text-[14px] leading-[21px] text-pretty";
  * nothing: the same evidence reaches the same engine and ends the same way,
  * so a Regenerate link here would be a button that lies. The three that come
  * out of the model's own answer are worth pressing again, because the next
- * answer is a different one. */
+ * answer is a different one, and so is a run the time limit cut short: the
+ * next one may finish inside it. */
 const FAILURE_CAUSES = {
   storage: { line: "meetings.processing.cause.storage", retry: false },
   transcription: {
@@ -55,6 +56,7 @@ const FAILURE_CAUSES = {
     line: "meetings.processing.cause.model_refused",
     retry: true,
   },
+  timed_out: { line: "meetings.processing.cause.timed_out", retry: true },
   reply_not_structured: {
     line: "meetings.processing.cause.reply_not_structured",
     retry: true,

@@ -4480,18 +4480,18 @@ fn map_processing_error(error: ProcessingFailure) -> MeetingCommandError {
 /// Every outcome leaves the press with no engine text, and every one is the
 /// command's answer rather than something to paper over: `Unreachable` is an
 /// engine that was chosen and then went away before the call, `Failed` is one
-/// that answered with nothing usable, and `ReplyNotStructured` is one that
-/// answered in the wrong form. The only caller asks for
-/// [`ReplyShape::Prose`], which no reply can be the wrong form of, so the
-/// third arm is here to keep this total rather than because a draft can reach
-/// it - and a shape refusal that somehow did arrive is the same thing to the
-/// sheet as nothing usable.
+/// that answered with nothing usable, `TimedOut` is one its time limit cut
+/// short, and `ReplyNotStructured` is one that answered in the wrong form. The
+/// only caller asks for [`ReplyShape::Prose`], which no reply can be the wrong
+/// form of, so the shape refusal is here to keep this total rather than
+/// because a draft can reach it - and one that somehow did arrive is the same
+/// thing to the sheet as nothing usable.
 const fn map_generation_error(error: MeetingTextGenerationError) -> MeetingCommandError {
     match error {
         MeetingTextGenerationError::Unreachable => MeetingCommandError::RemoteUnavailable,
-        MeetingTextGenerationError::Failed | MeetingTextGenerationError::ReplyNotStructured => {
-            MeetingCommandError::EngineFailure
-        }
+        MeetingTextGenerationError::Failed
+        | MeetingTextGenerationError::ReplyNotStructured
+        | MeetingTextGenerationError::TimedOut => MeetingCommandError::EngineFailure,
     }
 }
 
@@ -6718,6 +6718,10 @@ pub(crate) mod tests {
             ),
             (
                 MeetingTextGenerationError::ReplyNotStructured,
+                MeetingCommandError::EngineFailure,
+            ),
+            (
+                MeetingTextGenerationError::TimedOut,
                 MeetingCommandError::EngineFailure,
             ),
         ] {

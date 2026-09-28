@@ -1993,6 +1993,7 @@
         "voice_detection": "Phát hiện giọng nói đã từ chối một phần của bản ghi",
         "evidence_pack": "Bản chép lời vượt quá giới hạn của mô hình này",
         "model_refused": "Mô hình không trả về kết quả dùng được",
+        "timed_out": "Mô hình đã hết thời gian",
         "reply_not_structured": "Phản hồi của mô hình không đúng định dạng mong đợi",
         "reply_rejected": "Phản hồi của mô hình dẫn nội dung không có trong bản chép lời",
         "panicked": "Quá trình xử lý đã dừng bất ngờ"

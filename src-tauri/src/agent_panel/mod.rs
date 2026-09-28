@@ -2462,14 +2462,15 @@ pub(crate) fn relay_is_reachable<R: tauri::Runtime>(app: &AppHandle<R>) -> bool 
     configured_relay_status(app) == AgentPanelRelayStatusV1::Ready
 }
 
-/// Why a headless turn produced no text, in the only two shapes a caller
-/// outside the panel can act on.
+/// Why a headless turn produced no text, in the only shapes a caller outside
+/// the panel can act on.
 ///
 /// The twelve [`RelayError`] variants are relay semantics and stay in this
 /// module: nothing in a meeting can act differently on `OwnershipRejected`
 /// than on `ResponseTooLarge`. What it can do is tell its reader "your server
-/// was not reached" rather than "these notes could not be written", so that is
-/// the one distinction that crosses the boundary.
+/// was not reached" or "the model ran out of time" rather than "these notes
+/// could not be written", so those are the distinctions that cross the
+/// boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChatTurnError {
     /// The relay was never reached: switched off, unpaired, misconfigured, or
@@ -2488,6 +2489,13 @@ pub(crate) enum ChatTurnError {
     /// failure used to arrive as `SUCCEEDED` carrying prose, and cost two days
     /// of diagnosis because no surface on either host said what had happened.
     ReplyNotStructured,
+    /// The relay's worker stopped the turn at its own time limit while the
+    /// model was still working.
+    ///
+    /// Apart from `Failed` because the reader is told the model ran out of
+    /// time; "did not answer" reads as a model with nothing to say, which is
+    /// the opposite of what happened.
+    TimedOut,
 }
 
 /// Which of the two a relay error is.
@@ -2627,6 +2635,9 @@ pub(crate) async fn run_chat_turn(
             );
             return Err(ChatTurnError::ReplyNotStructured);
         }
+        if job.failure == Some(RelayJobFailure::TimedOut) {
+            return Err(ChatTurnError::TimedOut);
+        }
         return Err(ChatTurnError::Failed);
     }
     let response = job.response.ok_or(ChatTurnError::Failed)?;
@@ -2657,7 +2668,9 @@ fn turn_failure_for_job(failure: RelayJobFailure) -> AgentPanelTurnFailureV1 {
         RelayJobFailure::Refused | RelayJobFailure::ReplyNotStructured => {
             AgentPanelTurnFailureV1::Refused
         }
-        RelayJobFailure::Failed => AgentPanelTurnFailureV1::Failed,
+        /* The panel's wire enum has no word for time, and a turn the worker's
+         * limit ended is a failed turn to its reader. */
+        RelayJobFailure::TimedOut | RelayJobFailure::Failed => AgentPanelTurnFailureV1::Failed,
     }
 }
 
@@ -3632,6 +3645,10 @@ mod tests {
         );
         assert_eq!(
             turn_failure_for_job(RelayJobFailure::Failed),
+            AgentPanelTurnFailureV1::Failed
+        );
+        assert_eq!(
+            turn_failure_for_job(RelayJobFailure::TimedOut),
             AgentPanelTurnFailureV1::Failed
         );
     }
