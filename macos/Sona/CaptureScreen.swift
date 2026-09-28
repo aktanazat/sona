@@ -157,13 +157,18 @@ struct CaptureScreen: View {
             setAlwaysRecord: { key, on, revision in
                 Self.write(try await store.setAlwaysRecord(seriesKey: key, alwaysRecord: on, revision: revision), key)
             },
-            setTemplate: { key, template, revision in
-                let mapped = template.flatMap { MeetingSeriesTemplate(rawValue: $0.rawValue) }
-                return Self.write(try await store.setTemplate(seriesKey: key, template: mapped, revision: revision), key)
+            setTemplate: { key, choice, revision in
+                let mapped = choice?.builtIn.flatMap { MeetingSeriesTemplate(rawValue: $0.rawValue) }
+                return Self.write(
+                    try await store.setTemplate(
+                        seriesKey: key, template: mapped, customTemplateId: choice?.customTemplateId,
+                        revision: revision),
+                    key)
             },
             setDigestIncluded: { key, included, revision in
                 Self.write(try await store.setDigestIncluded(seriesKey: key, included: included, revision: revision), key)
-            })
+            },
+            templates: store.templates)
     }
 
     private static func write(_ mutation: MeetingSeriesMutation, _ key: String) -> OverviewSeriesWrite {
@@ -175,6 +180,7 @@ struct CaptureScreen: View {
                 seriesKey: seriesKey,
                 alwaysRecord: stored.alwaysRecord,
                 template: stored.template.flatMap { OverviewTemplate(rawValue: $0.rawValue) },
+                customTemplateId: stored.customTemplateId,
                 digestIncluded: stored.digestIncluded),
             revision: stored.revision)
     }

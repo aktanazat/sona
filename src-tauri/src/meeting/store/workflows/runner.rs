@@ -465,6 +465,7 @@ fn payload_i64(payload: &serde_json::Value, key: &str) -> Result<i64, StoreError
 fn error_code(error: StoreError) -> &'static str {
     match error {
         StoreError::NotFound => "not_found",
+        StoreError::TranscriptDeleted => "transcript_deleted",
         StoreError::Conflict => "conflict",
         StoreError::Invalid => "invalid_event_payload",
         StoreError::EncryptionUnavailable => "encryption_unavailable",

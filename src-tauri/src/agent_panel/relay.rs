@@ -115,6 +115,12 @@ pub(crate) enum RelayJobFailure {
     /// thing either way; the meeting engine names it in the log, because it
     /// is the one refusal whose cause is a shape rather than content.
     ReplyNotStructured,
+    /// The worker stopped the run at its own time limit (`omp_timeout`)
+    /// while the model was still working.
+    ///
+    /// Apart from `Failed` because a reader is told a different thing: the
+    /// model ran out of time, not that it had nothing to say.
+    TimedOut,
     Failed,
 }
 
@@ -728,11 +734,15 @@ impl RelayJobWire {
 /// set by `rejection_result` in `omp_bridge/worker/vps_sona.py` and is the one
 /// refusal that used to arrive as a success: the relay recorded `SUCCEEDED`,
 /// the message held prose, and the parse failed here with nothing written down
-/// anywhere about why. Everything else stays the blanket refusal it was.
+/// anywhere about why. `omp_timeout` is the same file's `FAILURE_OMP_TIMEOUT`:
+/// the worker's time limit ended the run while the model was still working,
+/// and a reader is told that rather than that the model had nothing to say.
+/// Everything else stays the blanket refusal it was.
 fn failed_job_reason(result: Option<&serde_json::Value>) -> RelayJobFailure {
     match failed_job_error_code(result) {
         Some("sona_reply_not_structured") => RelayJobFailure::ReplyNotStructured,
         Some("sona_response_rejected") => RelayJobFailure::Refused,
+        Some("omp_timeout") => RelayJobFailure::TimedOut,
         _ => RelayJobFailure::Failed,
     }
 }
@@ -1269,6 +1279,7 @@ mod tests {
         state.turn = Some(ActiveTurn {
             turn_id,
             workspace,
+            folder_id: None,
             idempotency_key: idempotency_key.to_string(),
             model_alias: SONA_MODEL_ALIAS.to_string(),
             request: turn,
@@ -1875,6 +1886,16 @@ mod tests {
             })),
             Some(RelayJobFailure::Failed)
         );
+        /* The worker's own time limit, in the bytes the box produced for relay
+         * job 9739fd03 while that limit was 180 s. A run the limit cut short
+         * is told apart from one that answered with nothing. */
+        assert_eq!(
+            failure(serde_json::json!({
+                "error": "omp run exceeded 180s",
+                "error_code": "omp_timeout"
+            })),
+            Some(RelayJobFailure::TimedOut)
+        );
         /* The bytes below are the ones the box actually produced, copied from
          * relay job 14e6b661: `rejection_result` in
          * `omp_bridge/worker/vps_sona.py` builds the sentence from the
@@ -2325,18 +2346,10 @@ mod tests {
             let cached = manager.model_alias(&client, false).await;
             let forced = manager.model_alias(&client, true).await;
 
-            let store = app
-                .handle()
-                .store(crate::portable::store_path(
-                    crate::settings::SETTINGS_STORE_PATH,
-                ))
-                .expect("settings store");
-            let mut settings = crate::settings::get_settings(app.handle());
-            settings.agent_panel_relay_key_id = Some("relay-test-rotated".to_string());
-            store.set(
-                "settings",
-                serde_json::to_value(&settings).expect("serialize rotated settings"),
-            );
+            crate::settings::update_settings(app.handle(), |settings| {
+                settings.agent_panel_relay_key_id = Some("relay-test-rotated".to_string());
+            })
+            .expect("persist the rotated pairing");
             let rotated = manager.model_alias(&client, false).await;
             assert_eq!(first, "fast");
             assert_eq!(cached, "fast");

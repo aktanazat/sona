@@ -66,7 +66,7 @@ struct PeopleListView: View {
                         }
                     }
                 } else {
-                    PeopleOrganizationStrip(entries: entries, store: store)
+                    PeopleCompaniesSection(store: store)
                     Card {
                         ForEach(entries) { entry in
                             PersonListRow(entry: entry) { store.openPerson(entry.person.id) }
@@ -90,41 +90,75 @@ struct PeopleListView: View {
     }
 }
 
-/// The organizations the loaded rows already carry, as a strip above them.
-///
-/// Derived from the rows rather than asked for: every person already says
-/// where they are, so a second command for the same fact would be a second
-/// answer to it. A corpus with no calendar domains on it draws nothing, which
-/// is the honest absence — there is no organization to name.
-struct PeopleOrganizationStrip: View {
-    let entries: [PersonListEntry]
+/// The companies the people are at, newest meeting first, each with what its
+/// page holds, counted. A company is the people whose calendar addresses
+/// share a work domain, so a row opens the same page a person's header does.
+struct PeopleCompaniesSection: View {
     let store: PeopleStore
 
     var body: some View {
-        let organizations = PeopleModel.organizations(entries)
-        if !organizations.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Organizations").sectionLabel()
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 150), spacing: 8, alignment: .leading)],
-                    alignment: .leading,
-                    spacing: 8
-                ) {
-                    ForEach(organizations, id: \.name) { organization in
-                        Button {
-                            store.openOrganization(organization.name)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Text(organization.name).lineLimit(1)
-                                Text("\(organization.count)").monospacedDigit().foregroundStyle(Theme.inkTertiary)
-                            }
-                        }
-                        .buttonStyle(.compact)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Companies").sectionLabel()
+            Card {
+                if store.companiesFailed {
+                    CardRow {
+                        Text("Couldn't load companies.").bodyText(15, Theme.inkSecondary)
+                    } trailing: {
+                        Button("Retry") { store.reload() }.buttonStyle(.compact)
                     }
+                } else if let companies = store.companies {
+                    if companies.isEmpty {
+                        CardRow {
+                            Text("Companies appear once people from a work address join your meetings.")
+                                .bodyText(15, Theme.inkSecondary)
+                        }
+                    } else {
+                        ForEach(companies) { company in
+                            CompanyRow(company: company) { store.openOrganization(company.slug) }
+                        }
+                    }
+                } else {
+                    CardRow { Text("Loading…").bodyText(15, Theme.inkSecondary) }
                 }
             }
-            .padding(.bottom, 20)
         }
+        .padding(.bottom, 20)
+    }
+}
+
+/// One company, one row, read like a person's: the name, then its people,
+/// its meetings and how long ago the last one was.
+struct CompanyRow: View {
+    let company: CompanySummary
+    let open: () -> Void
+
+    var body: some View {
+        CardRow(action: open) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(company.name).font(TypeScale.label()).foregroundStyle(Theme.ink).lineLimit(1)
+                Text(facts).metaText().monospacedDigit().lineLimit(1)
+            }
+        } trailing: {
+            HStack(spacing: 10) {
+                if company.openLoopsCount > 0 {
+                    Chip(PeopleModel.openItems(company.openLoopsCount))
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.inkTertiary)
+            }
+        }
+    }
+
+    private var facts: String {
+        var parts = [
+            PeopleModel.people(Int(company.peopleCount)),
+            PeopleModel.meetings(company.meetingsCount),
+        ]
+        if let last = company.lastMeetingAtUtcMs {
+            parts.append("Last met \(PeopleFormat.elapsed(PeopleFormat.date(last)))")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -1430,9 +1464,25 @@ struct VoiceIdentitySection: View {
     let store: VoiceIdentityStore
 
     var body: some View {
-        if !store.speakers.isEmpty {
-            PageSection("Speakers") {
-                Card {
+        PageSection("Speakers") {
+            Card {
+                if !store.loaded {
+                    CardRow {
+                        Text("Reading speakers…").bodyText(14, Theme.inkSecondary)
+                    }
+                } else if store.speakers.isEmpty, let error = store.error {
+                    CardRow {
+                        Text(error).bodyText(14, Theme.inkSecondary)
+                    } trailing: {
+                        Button("Try again") { reload() }
+                            .buttonStyle(.compact)
+                    }
+                } else if store.speakers.isEmpty {
+                    CardRow {
+                        Text("Speakers show up here once the transcript is ready.")
+                            .bodyText(14, Theme.inkSecondary)
+                    }
+                } else {
                     if !store.unresolved.isEmpty {
                         CardRow {
                             Text(
@@ -1459,10 +1509,15 @@ struct VoiceIdentitySection: View {
                     }
                 }
             }
-            .sheet(isPresented: asking) {
-                VoiceIdentitySheet(store: store)
-            }
         }
+        .sheet(isPresented: asking) {
+            VoiceIdentitySheet(store: store)
+        }
+    }
+
+    private func reload() {
+        guard let sessionId = store.sessionId else { return }
+        Task { await store.load(sessionId) }
     }
 
     /// The sheet is up exactly while the store holds a question, and closing
@@ -1473,6 +1528,27 @@ struct VoiceIdentitySection: View {
             set: { shown in
                 if !shown { store.ask(nil) }
             })
+    }
+}
+
+/// One meeting's speakers on its review page: the store is built once per
+/// page and re-read whenever the page moves to another meeting.
+struct MeetingVoiceIdentitySection: View {
+    let sessionId: String
+    @Environment(AppModel.self) private var model
+    @State private var store: VoiceIdentityStore?
+
+    var body: some View {
+        Group {
+            if let store {
+                VoiceIdentitySection(store: store)
+            }
+        }
+        .task(id: sessionId) {
+            let store = self.store ?? VoiceIdentityStore(core: model.core)
+            self.store = store
+            await store.load(sessionId)
+        }
     }
 }
 
@@ -1520,8 +1596,22 @@ struct VoiceIdentitySheet: View {
             Text("Choose a person").metaText(Theme.inkSecondary)
             Picker("", selection: $target) {
                 Text("New person").tag("")
-                ForEach(people) { entry in
-                    Text(entry.person.displayName).tag(entry.person.id)
+                let here = people.filter { store.inMeeting.contains($0.person.id) }
+                if here.isEmpty {
+                    ForEach(people) { entry in
+                        Text(entry.person.displayName).tag(entry.person.id)
+                    }
+                } else {
+                    Section("In this meeting") {
+                        ForEach(here) { entry in
+                            Text(entry.person.displayName).tag(entry.person.id)
+                        }
+                    }
+                    Section("Everyone else") {
+                        ForEach(people.filter { !store.inMeeting.contains($0.person.id) }) { entry in
+                            Text(entry.person.displayName).tag(entry.person.id)
+                        }
+                    }
                 }
             }
             .labelsHidden()

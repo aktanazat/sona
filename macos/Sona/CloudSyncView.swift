@@ -9,6 +9,7 @@ struct CloudSyncView: View {
     /// The integrator's way to a meeting's own page, so a conflicted meeting
     /// is one press from the transcript it disagrees about.
     var openMeeting: (String) -> Void = { _ in }
+    @State private var showingNoteLinks = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -16,6 +17,16 @@ struct CloudSyncView: View {
             account
             tasks
             meetings
+            PageSection("Note links") {
+                Card {
+                    CardRow {
+                        Text("Manage links to your scratchpad notes, including deleted notes.").bodyText()
+                    } trailing: {
+                        Button("Manage links") { showingNoteLinks = true }
+                            .buttonStyle(.secondary)
+                    }
+                }
+            }
         }
         .sheet(isPresented: replacingVault) {
             CloudVaultReplaceSheet(busy: store.busy) {
@@ -23,6 +34,9 @@ struct CloudSyncView: View {
             } cancel: {
                 store.dismissRecoveryConflict()
             }
+        }
+        .sheet(isPresented: $showingNoteLinks) {
+            CloudNoteShareView(note: nil)
         }
     }
 
@@ -334,6 +348,15 @@ private struct CloudSyncMeetingRow: View {
             )
             .labelsHidden()
             .datePickerStyle(.field)
+        }
+        CloudSyncFieldRow(label: "Link shows") {
+            Picker("", selection: $store.shareInclude) {
+                ForEach(CloudShareInclude.allCases) { include in
+                    Text(include.label).tag(include)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
         }
         CloudSyncTaskAction {
             Spacer()

@@ -157,7 +157,7 @@ pub(crate) trait AutomationEffects: Send + Sync {
     fn post_webhook(&self, url: &str, body: &[u8]) -> EffectOutcome;
 }
 
-/// Run every enabled automation for the meeting that just finished.
+/// Run enabled series automations, then saved folder prompts, for the meeting.
 ///
 /// Spawns, and returns immediately: the caller is the processing job thread, and
 /// the meeting is already in review by the time this is called. In a headless
@@ -251,6 +251,11 @@ pub(crate) fn run_for_meeting(
                 plan.automation.kind.as_str()
             ),
         }
+    }
+    if let Err(error) =
+        super::prompts::run_folder_prompts(store, processing, session_id, started_at_utc_ms)
+    {
+        log::warn!("Could not run folder prompts for {session_id:?}: {error:?}");
     }
     receipts
 }
@@ -421,7 +426,7 @@ fn plans_for_meeting(
             // The template only fills in the default when no notes row
             // exists, and an export reads the body alone.
             let user_notes = store
-                .user_notes(session_id, MeetingNotesTemplate::default())
+                .user_notes(session_id, MeetingNotesTemplate::default().into())
                 .ok()?;
             export::render(
                 MeetingExportFormat::Json,

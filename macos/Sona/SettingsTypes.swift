@@ -57,7 +57,7 @@ enum DictationSpelling: String, CaseIterable, Hashable, Sendable {
     }
 }
 
-/// Which screen edge the recording overlay and the idle pill sit on.
+/// Which screen edge the recording overlay sits on.
 enum OverlayPosition: String, CaseIterable, Hashable, Sendable {
     case top, bottom
 
@@ -67,6 +67,25 @@ enum OverlayPosition: String, CaseIterable, Hashable, Sendable {
         case .bottom: "Bottom"
         }
     }
+}
+
+/// Which screen edge the idle pill is docked to. The recording overlay knows
+/// only top and bottom; the pill can also stand on a side, where it turns
+/// upright.
+enum HudPillEdge: String, CaseIterable, Hashable, Sendable {
+    case top, bottom, left, right
+
+    var label: String {
+        switch self {
+        case .top: "Top"
+        case .bottom: "Bottom"
+        case .left: "Left"
+        case .right: "Right"
+        }
+    }
+
+    /// A side edge lays the pill out top to bottom.
+    var isVertical: Bool { self == .left || self == .right }
 }
 
 /// How much the recording overlay shows.
@@ -225,6 +244,7 @@ struct SettingsModelCapability: Decodable {
     let id: String
     let supportedLanguages: [String]?
     let supportsLanguageDetection: Bool?
+    let supportsLanguageSelection: Bool?
     let supportsTranslation: Bool?
 }
 
@@ -236,6 +256,7 @@ struct SettingsModelCapability: Decodable {
 struct AppSettings: Decodable {
     var bindings: [String: BindingRecord] = [:]
     var pushToTalk = true
+    var quietSpeechEnabled = false
     var audioFeedback = false
     var audioFeedbackVolume: Double = 1
     var soundTheme: SoundTheme = .marimba
@@ -249,6 +270,7 @@ struct AppSettings: Decodable {
     var selectedOutputDevice: String?
     var translateToEnglish = false
     var selectedLanguage = "auto"
+    var dictationLanguages: [String] = []
     var englishSpelling: DictationSpelling = .asSpoken
     var overlayPosition: OverlayPosition = .bottom
     var overlayStyle: OverlayStyle = .live
@@ -264,28 +286,39 @@ struct AppSettings: Decodable {
     var fillerWordRemovalEnabled = true
     var vadEnabled = true
     var commandModeEnabled = true
+    var commandAnswersInChat = true
     var learnDestinationCorrections = false
     var dictationProjectRoot: String?
+    /// Whether a saved dictation records the app it went into. On by
+    /// default, as the core defaults it.
+    var countWordsPerApp = true
     var transcribeAccelerator: AcceleratorTranscribe = .auto
     var ortAccelerator: AcceleratorOrt = .auto
     var transcribeGpuDevice: String?
     var hudPillEnabled = false
-    var hudPillPosition: OverlayPosition = .bottom
+    var hudPillPosition: HudPillEdge = .bottom
+    /// When the pill was hidden for an hour: the moment it comes back, in
+    /// milliseconds since 1970. Absent when it is not hidden.
+    var hudPillHiddenUntilMs: Int64?
     /// Written on the debug page, read here: it is what puts the fifteen
     /// second unload on the timeout menu.
     var debugMode = false
 
     private enum Key: String, CodingKey {
         case bindings, pushToTalk, audioFeedback, audioFeedbackVolume, soundTheme
+        case quietSpeechEnabled
         case startHidden, autostartEnabled, selectedModel, alwaysOnMicrophone
         case selectedMicrophone, selectedChannel, clamshellMicrophone, selectedOutputDevice
         case translateToEnglish, selectedLanguage, englishSpelling, overlayPosition
+        case dictationLanguages
         case overlayStyle, modelUnloadTimeout, muteWhileRecording, appendTrailingSpace
         case experimentalEnabled, lazyStreamClose, keyboardImplementation, showTrayIcon
         case typingTool, externalScriptPath, fillerWordRemovalEnabled, vadEnabled
         case commandModeEnabled, transcribeAccelerator, ortAccelerator, transcribeGpuDevice
-        case hudPillEnabled, hudPillPosition, debugMode, learnDestinationCorrections
+        case hudPillEnabled, hudPillPosition, hudPillHiddenUntilMs, debugMode, learnDestinationCorrections
         case dictationProjectRoot
+        case countWordsPerApp
+        case commandAnswersInChat
     }
 
     init() {}
@@ -310,6 +343,7 @@ struct AppSettings: Decodable {
         startHidden = value(.startHidden, startHidden)
         autostartEnabled = value(.autostartEnabled, autostartEnabled)
         selectedModel = value(.selectedModel, selectedModel)
+        quietSpeechEnabled = value(.quietSpeechEnabled, quietSpeechEnabled)
         alwaysOnMicrophone = value(.alwaysOnMicrophone, alwaysOnMicrophone)
         selectedMicrophone = try? box.decodeIfPresent(String.self, forKey: .selectedMicrophone)
         selectedChannel = try? box.decodeIfPresent(Int.self, forKey: .selectedChannel)
@@ -317,6 +351,7 @@ struct AppSettings: Decodable {
         selectedOutputDevice = try? box.decodeIfPresent(String.self, forKey: .selectedOutputDevice)
         translateToEnglish = value(.translateToEnglish, translateToEnglish)
         selectedLanguage = value(.selectedLanguage, selectedLanguage)
+        dictationLanguages = value(.dictationLanguages, dictationLanguages)
         englishSpelling = choice(.englishSpelling, englishSpelling)
         overlayPosition = choice(.overlayPosition, overlayPosition)
         overlayStyle = choice(.overlayStyle, overlayStyle)
@@ -332,13 +367,16 @@ struct AppSettings: Decodable {
         fillerWordRemovalEnabled = value(.fillerWordRemovalEnabled, fillerWordRemovalEnabled)
         vadEnabled = value(.vadEnabled, vadEnabled)
         commandModeEnabled = value(.commandModeEnabled, commandModeEnabled)
+        commandAnswersInChat = value(.commandAnswersInChat, commandAnswersInChat)
         learnDestinationCorrections = value(.learnDestinationCorrections, learnDestinationCorrections)
         dictationProjectRoot = try? box.decodeIfPresent(String.self, forKey: .dictationProjectRoot)
+        countWordsPerApp = value(.countWordsPerApp, countWordsPerApp)
         transcribeAccelerator = choice(.transcribeAccelerator, transcribeAccelerator)
         ortAccelerator = choice(.ortAccelerator, ortAccelerator)
         transcribeGpuDevice = try? box.decodeIfPresent(String.self, forKey: .transcribeGpuDevice)
         hudPillEnabled = value(.hudPillEnabled, hudPillEnabled)
         hudPillPosition = choice(.hudPillPosition, hudPillPosition)
+        hudPillHiddenUntilMs = try? box.decodeIfPresent(Int64.self, forKey: .hudPillHiddenUntilMs)
         debugMode = value(.debugMode, debugMode)
     }
 
@@ -432,6 +470,19 @@ enum LanguageCatalog {
         if detects { return "auto" }
         if supports(supported, "en") { return "en" }
         return base(supported[0])
+    }
+
+    /// Toggle a choice without putting two scripts of the same language in
+    /// the set. Replacing a variant keeps the primary-first order.
+    static func toggling(_ code: String, in selected: [String]) -> [String] {
+        if selected.contains(code) { return selected.filter { $0 != code } }
+        var next = selected
+        if let index = next.firstIndex(where: { base($0) == base(code) }) {
+            next[index] = code
+        } else {
+            next.append(code)
+        }
+        return next
     }
 
     /// The languages worth offering for a model: everything it recognizes,

@@ -11,6 +11,7 @@ mod wire;
 use crate::managers::history::HistoryManager;
 use crate::meeting::detection::calendar::CalendarSource;
 use crate::meeting::session::MeetingSessionManager;
+use crate::meeting::types::MeetingFolderId;
 use crate::query::tools::{self, ToolCall, ToolResult};
 use actions::{ActionUndo, AppliedAction};
 use config::{AppliedSettings, ConfigError, SettingUndo};
@@ -90,6 +91,7 @@ enum StoredActionState {
     Pending,
     Applied(AppliedAction),
     Dismissed,
+    Failed(String),
 }
 
 /// What putting one card back takes.
@@ -123,12 +125,18 @@ impl StoredAction {
                 applied.operation_id.clone(),
             ),
             StoredActionState::Dismissed => (AgentPanelActionStateV1::Dismissed, None),
+            StoredActionState::Failed(_) => (AgentPanelActionStateV1::Failed, None),
         };
         AgentPanelActionV1 {
             action_index: index,
             action: self.action.clone(),
             state,
             operation_id,
+            can_undo: matches!(&self.state, StoredActionState::Applied(applied) if !matches!(applied.undo, ActionUndo::Unavailable)),
+            detail: match &self.state {
+                StoredActionState::Failed(detail) => Some(detail.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -139,13 +147,15 @@ impl StoredAction {
     const fn to_run(&self) -> Option<&SonaChatActionV1> {
         match self.state {
             StoredActionState::Pending => Some(&self.action),
-            StoredActionState::Applied(_) | StoredActionState::Dismissed => None,
+            StoredActionState::Applied(_)
+            | StoredActionState::Dismissed
+            | StoredActionState::Failed(_) => None,
         }
     }
 
     const fn reversal(&self) -> Reversal<'_> {
         match &self.state {
-            StoredActionState::Pending => Reversal::Unapplied,
+            StoredActionState::Pending | StoredActionState::Failed(_) => Reversal::Unapplied,
             StoredActionState::Applied(applied) => Reversal::Undo(&applied.undo),
             StoredActionState::Dismissed => Reversal::Settled,
         }
@@ -155,6 +165,7 @@ impl StoredAction {
 struct ActiveTurn {
     turn_id: String,
     workspace: AgentPanelWorkspaceV1,
+    folder_id: Option<MeetingFolderId>,
     idempotency_key: String,
     request: PanelTurnV1,
     allowed: SonaAllowedValuesV1,
@@ -432,6 +443,7 @@ pub(crate) struct AgentPanelManager<R: tauri::Runtime = tauri::Wry> {
     history_write: Mutex<()>,
     nonce_cache: Arc<ResponseNonceCache>,
     model_catalog: tokio::sync::Mutex<Option<ModelCatalogCache>>,
+    action_operation: tokio::sync::Mutex<()>,
     poll_generation: AtomicU64,
 }
 
@@ -443,6 +455,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             history_write: Mutex::new(()),
             nonce_cache: Arc::new(ResponseNonceCache::default()),
             model_catalog: tokio::sync::Mutex::new(None),
+            action_operation: tokio::sync::Mutex::new(()),
             poll_generation: AtomicU64::new(0),
         }
     }
@@ -594,6 +607,44 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         Ok(self.current_status())
     }
 
+    /// File one exchange that never went through the relay — a voice command
+    /// answered by the mode's own rewrite provider — as a conversation of its
+    /// own, and put it on the sheet.
+    ///
+    /// A turn in flight keeps the sheet: the answer on its way belongs to the
+    /// conversation that asked for it. The exchange still goes to disk, so
+    /// the recent-chats menu reaches it.
+    pub(crate) fn record_exchange(&self, conversation_id: &str, turns: Vec<SonaAgentChatTurnV1>) {
+        let invalidation_id = {
+            let mut state = self.lock_state();
+            if state
+                .turn
+                .as_ref()
+                .is_some_and(|active| !active.state.is_terminal())
+            {
+                drop(state);
+                let _history_write = match self.history_write.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Err(error) = history::remember(&self.app, conversation_id, &turns) {
+                    log::warn!("Failed to persist a voice command exchange: {error}");
+                }
+                return;
+            }
+            state.conversation_id = Some(conversation_id.to_string());
+            state.conversation = turns;
+            state.unsaved = false;
+            state.turn = None;
+            state.proposal = None;
+            self.refresh_configured_status_locked(&mut state);
+            state.invalidate()
+        };
+        self.remember_conversation();
+        self.emit_turn(invalidation_id, None, None);
+        self.emit_proposal(invalidation_id, None, None);
+    }
+
     /// Write the conversation on screen to the history file.
     ///
     /// Called wherever a turn is pushed onto the scrollback, and nowhere else:
@@ -734,6 +785,24 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         let idempotency_key = relay::new_idempotency_key().map_err(map_relay_error)?;
         let turn_id = request.turn_id.clone();
         let started_at_utc_ms = chrono::Utc::now().timestamp_millis();
+        let mut context_pack = request.context_pack.clone();
+        if request.workspace == AgentPanelWorkspaceV1::SonaChat {
+            let app = R::native_handle(&self.app);
+            if app.try_state::<Arc<MeetingSessionManager>>().is_some() {
+                if let Ok(capabilities) = crate::integrations::chat_context(&app).await {
+                    let pack = context_pack.get_or_insert_with(String::new);
+                    let available = MAX_CONTEXT_PACK_BYTES.saturating_sub(capabilities.len());
+                    if pack.len() > available {
+                        let mut boundary = available;
+                        while !pack.is_char_boundary(boundary) {
+                            boundary -= 1;
+                        }
+                        pack.truncate(boundary);
+                    }
+                    pack.push_str(&capabilities);
+                }
+            }
+        }
         let invalidation_id = {
             let mut state = self.lock_state();
             if state
@@ -777,7 +846,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                         turn_id: turn_id.clone(),
                         user_message: request.message.clone(),
                         recent_turns,
-                        context_pack: request.context_pack,
+                        context_pack,
                         screenshot: request.screenshot,
                         tools_allowed: request.tools_allowed,
                         locale: request.locale,
@@ -797,10 +866,11 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                 outcome: None,
             });
             state.proposal = None;
-            let base_pack = turn.context_pack().map(str::to_string);
+            let base_pack = request.context_pack;
             state.turn = Some(ActiveTurn {
                 turn_id: turn.turn_id().to_string(),
                 workspace: turn.workspace(),
+                folder_id: request.folder_id,
                 idempotency_key,
                 request: turn,
                 allowed,
@@ -848,6 +918,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             return Err(AgentPanelCommandErrorV1::TurnActive);
         }
         if active.workspace != request.workspace
+            || active.folder_id != request.folder_id
             || active.request.user_message() != request.message
             || active.request.locale() != request.locale
             || active.base_pack.as_deref() != request.context_pack.as_deref()
@@ -980,7 +1051,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     /// has nothing to send the relay, since the job that asked is done and
     /// the next one was never made, so the round ends the turn itself.
     async fn run_tool_round(&self, turn_id: &str) -> Result<bool, AgentPanelCommandErrorV1> {
-        let (calls, round, invalidation_id) = {
+        let (calls, round, folder_id, invalidation_id) = {
             let mut state = self.lock_state();
             let active = state
                 .turn
@@ -1034,7 +1105,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
                     tool: Some(call.tool.clone()),
                 });
             }
-            (calls, round, state.invalidate())
+            (calls, round, active.folder_id, state.invalidate())
         };
         self.emit_turn(
             invalidation_id,
@@ -1044,7 +1115,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
 
         let mut results = Vec::with_capacity(calls.len());
         for call in &calls {
-            results.push(self.run_tool(call).await);
+            results.push(self.run_tool(call, folder_id).await);
         }
         let idempotency_key = match relay::new_idempotency_key() {
             Ok(key) => key,
@@ -1109,13 +1180,20 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     /// app's managed state; a process without them (a headless run that never
     /// built a meeting manager) answers every call with one line of error, so
     /// the model reads that and stops asking.
-    async fn run_tool(&self, call: &ToolCall) -> ToolResult {
+    async fn run_tool(&self, call: &ToolCall, folder_id: Option<MeetingFolderId>) -> ToolResult {
         let meetings = self.app.try_state::<Arc<MeetingSessionManager>>();
         let history = self.app.try_state::<Arc<HistoryManager>>();
         let calendar = self.app.try_state::<Arc<dyn CalendarSource>>();
         match (meetings, history, calendar) {
             (Some(meetings), Some(history), Some(calendar)) => {
-                tools::run(meetings.inner(), history.inner(), calendar.inner(), call).await
+                tools::run(
+                    meetings.inner(),
+                    history.inner(),
+                    calendar.inner(),
+                    call,
+                    folder_id,
+                )
+                .await
             }
             _ => ToolResult {
                 id: call.id.clone(),
@@ -1282,6 +1360,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     where
         R: NativeAgentPanelRuntime,
     {
+        let _operation = self.action_operation.lock().await;
         let to_run = {
             let state = self.lock_state();
             self.stored_action(&state, &request)?.to_run().cloned()
@@ -1290,10 +1369,15 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             return self.turn_status(&request.turn_id);
         };
         let app = R::native_handle(&self.app);
-        let applied = actions::apply(&app, meetings, &action)
-            .await
-            .map_err(|_| AgentPanelCommandErrorV1::ActionFailed)?;
-        self.settle_action(&request, StoredActionState::Applied(applied))
+        let operation_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{}:action:{}", request.turn_id, request.action_index).as_bytes(),
+        )
+        .to_string();
+        match actions::apply(&app, meetings, &action, &operation_id).await {
+            Ok(applied) => self.settle_action(&request, StoredActionState::Applied(applied)),
+            Err(detail) => self.settle_action(&request, StoredActionState::Failed(detail)),
+        }
     }
 
     /// Put one offered change back: refuse it before it happens, or reverse it
@@ -1312,10 +1396,14 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     where
         R: NativeAgentPanelRuntime,
     {
+        let _operation = self.action_operation.lock().await;
         let undo = {
             let state = self.lock_state();
             match self.stored_action(&state, &request)?.reversal() {
-                Reversal::Settled => return self.turn_status(&request.turn_id),
+                Reversal::Settled => {
+                    drop(state);
+                    return self.turn_status(&request.turn_id);
+                }
                 Reversal::Unapplied => None,
                 Reversal::Undo(undo) => Some(undo.clone()),
             }
@@ -1379,6 +1467,37 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             Some(status.state),
         );
         Ok(status)
+    }
+
+    pub(crate) async fn edit_action(
+        &self,
+        request: AgentPanelActionRequestV1,
+        action: SonaChatActionV1,
+    ) -> Result<AgentPanelTurnStatusV1, AgentPanelCommandErrorV1> {
+        let _operation = self.action_operation.lock().await;
+        {
+            let mut state = self.lock_state();
+            let active = state
+                .turn
+                .as_mut()
+                .filter(|turn| turn.turn_id == request.turn_id)
+                .ok_or(AgentPanelCommandErrorV1::UnknownTurn)?;
+            action
+                .validate(active.request.context_pack())
+                .map_err(|_| AgentPanelCommandErrorV1::InvalidRequest)?;
+            let card = active
+                .actions
+                .get_mut(request.action_index as usize)
+                .ok_or(AgentPanelCommandErrorV1::UnknownAction)?;
+            if !matches!(card.state, StoredActionState::Pending) {
+                return Err(AgentPanelCommandErrorV1::InvalidRequest);
+            }
+            if std::mem::discriminant(&card.action) != std::mem::discriminant(&action) {
+                return Err(AgentPanelCommandErrorV1::InvalidRequest);
+            }
+            card.action = action;
+        }
+        self.settle_action(&request, StoredActionState::Pending)
     }
 
     fn turn_status(
@@ -2370,14 +2489,15 @@ pub(crate) fn relay_is_reachable<R: tauri::Runtime>(app: &AppHandle<R>) -> bool 
     configured_relay_status(app) == AgentPanelRelayStatusV1::Ready
 }
 
-/// Why a headless turn produced no text, in the only two shapes a caller
-/// outside the panel can act on.
+/// Why a headless turn produced no text, in the only shapes a caller outside
+/// the panel can act on.
 ///
 /// The twelve [`RelayError`] variants are relay semantics and stay in this
 /// module: nothing in a meeting can act differently on `OwnershipRejected`
 /// than on `ResponseTooLarge`. What it can do is tell its reader "your server
-/// was not reached" rather than "these notes could not be written", so that is
-/// the one distinction that crosses the boundary.
+/// was not reached" or "the model ran out of time" rather than "these notes
+/// could not be written", so those are the distinctions that cross the
+/// boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChatTurnError {
     /// The relay was never reached: switched off, unpaired, misconfigured, or
@@ -2396,6 +2516,13 @@ pub(crate) enum ChatTurnError {
     /// failure used to arrive as `SUCCEEDED` carrying prose, and cost two days
     /// of diagnosis because no surface on either host said what had happened.
     ReplyNotStructured,
+    /// The relay's worker stopped the turn at its own time limit while the
+    /// model was still working.
+    ///
+    /// Apart from `Failed` because the reader is told the model ran out of
+    /// time; "did not answer" reads as a model with nothing to say, which is
+    /// the opposite of what happened.
+    TimedOut,
 }
 
 /// Which of the two a relay error is.
@@ -2535,6 +2662,9 @@ pub(crate) async fn run_chat_turn(
             );
             return Err(ChatTurnError::ReplyNotStructured);
         }
+        if job.failure == Some(RelayJobFailure::TimedOut) {
+            return Err(ChatTurnError::TimedOut);
+        }
         return Err(ChatTurnError::Failed);
     }
     let response = job.response.ok_or(ChatTurnError::Failed)?;
@@ -2565,7 +2695,9 @@ fn turn_failure_for_job(failure: RelayJobFailure) -> AgentPanelTurnFailureV1 {
         RelayJobFailure::Refused | RelayJobFailure::ReplyNotStructured => {
             AgentPanelTurnFailureV1::Refused
         }
-        RelayJobFailure::Failed => AgentPanelTurnFailureV1::Failed,
+        /* The panel's wire enum has no word for time, and a turn the worker's
+         * limit ended is a failed turn to its reader. */
+        RelayJobFailure::TimedOut | RelayJobFailure::Failed => AgentPanelTurnFailureV1::Failed,
     }
 }
 
@@ -3071,6 +3203,7 @@ mod tests {
             turn: Some(ActiveTurn {
                 turn_id: turn_id.to_string(),
                 workspace: AgentPanelWorkspaceV1::SonaChat,
+                folder_id: None,
                 idempotency_key: format!("{turn_id}-key"),
                 request,
                 allowed: SonaAllowedValuesV1::default(),
@@ -3172,6 +3305,54 @@ mod tests {
             &manager,
             "conversation-canceled-job",
             SonaAgentChatOutcomeV1::Canceled,
+        );
+    }
+
+    /// A voice command exchange lands on the sheet and on disk when nothing is
+    /// in flight, and only on disk when a turn is: the conversation that asked
+    /// keeps the screen until its answer comes.
+    #[test]
+    fn a_recorded_exchange_takes_the_sheet_unless_a_turn_is_running() {
+        let exchange = |question: &str| {
+            vec![
+                SonaAgentChatTurnV1 {
+                    role: SonaAgentChatRoleV1::User,
+                    message: question.to_string(),
+                    outcome: None,
+                },
+                SonaAgentChatTurnV1 {
+                    role: SonaAgentChatRoleV1::Assistant,
+                    message: "Forty-two.".to_string(),
+                    outcome: None,
+                },
+            ]
+        };
+
+        let (_data_dir, _app, manager) = panel_manager_for_test();
+        manager.record_exchange("command-1-1", exchange("What is the answer?"));
+        let status = manager.current_status();
+        assert_eq!(status.conversation_id.as_deref(), Some("command-1-1"));
+        assert_eq!(status.conversation, exchange("What is the answer?"));
+        assert!(status.turn.is_none());
+        assert!(!status.unsaved);
+        assert_eq!(
+            history::turns_of(&manager.app, "command-1-1").expect("exchange was persisted"),
+            exchange("What is the answer?")
+        );
+
+        let (_data_dir, _app, manager) = panel_manager_for_test();
+        *manager.lock_state() =
+            active_chat_state("conversation-busy", "turn-busy", "Still being answered");
+        manager.record_exchange("command-2-2", exchange("Meanwhile?"));
+        let status = manager.current_status();
+        assert_eq!(status.conversation_id.as_deref(), Some("conversation-busy"));
+        assert_eq!(
+            status.turn.map(|turn| turn.turn_id),
+            Some("turn-busy".to_string())
+        );
+        assert_eq!(
+            history::turns_of(&manager.app, "command-2-2").expect("exchange was persisted"),
+            exchange("Meanwhile?")
         );
     }
 
@@ -3494,6 +3675,10 @@ mod tests {
         );
         assert_eq!(
             turn_failure_for_job(RelayJobFailure::Failed),
+            AgentPanelTurnFailureV1::Failed
+        );
+        assert_eq!(
+            turn_failure_for_job(RelayJobFailure::TimedOut),
             AgentPanelTurnFailureV1::Failed
         );
     }

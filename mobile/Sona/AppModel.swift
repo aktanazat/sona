@@ -51,6 +51,23 @@ final class AppModel: NSObject, ObservableObject {
     @Published private(set) var startingRecording = false
     /// The draft the keyboard can insert, or nothing waiting for it.
     @Published private(set) var keyboardDraft: UUID?
+    @Published var meetingTitle = UserDefaults.standard.string(forKey: "sona.meeting.title") ?? "" {
+        didSet { UserDefaults.standard.set(meetingTitle, forKey: "sona.meeting.title") }
+    }
+    @Published var meetingNotes = UserDefaults.standard.string(forKey: "sona.meeting.notes") ?? "" {
+        didSet { UserDefaults.standard.set(meetingNotes, forKey: "sona.meeting.notes") }
+    }
+    @Published private(set) var keyboardReturn = false
+
+    let library = PhoneLibrary()
+    let calendar = PhoneCalendar()
+    let calls = PhoneCalls()
+    private var keyboardSignal: KeyboardSignal?
+    private var keyboardTicker: Task<Void, Never>?
+    private var keyboardRequestID: UUID?
+    private var lastKeyboardRequestID: UUID?
+    private var keyboardDocumentID: UUID?
+    private var pendingURL: URL?
 
     let recorder = PhoneRecorder()
     let dictation = PhoneDictation()
@@ -86,11 +103,12 @@ final class AppModel: NSObject, ObservableObject {
         recorder.onInterrupted = { [weak self] in
             self?.stopRecording()
         }
-        /* A voice thought ends where dictation ends: the transcript and the sound it was
-         * read from are queued together the moment the session settles. */
-        dictation.onEnded = { [weak self] in
-            self?.collectVoiceThought()
+        dictation.onEnded = { [weak self] capture in self?.collectDictation(capture) }
+        dictation.onStateChanged = { [weak self] in self?.publishKeyboardState() }
+        keyboardSignal = KeyboardSignal(.command) { [weak self] in
+            Task { @MainActor in self?.receiveKeyboardCommand() }
         }
+        publishKeyboardState()
         /* Tapping either call notification is the operator asking to record now, and
          * the note is titled after the call it followed. */
         callOffers.onOfferAccepted = { [weak self] in
@@ -104,6 +122,7 @@ final class AppModel: NSObject, ObservableObject {
         Task {
             await queue.retryParked()
             await drain()
+            await refreshBoard()
         }
     }
 
@@ -116,6 +135,7 @@ final class AppModel: NSObject, ObservableObject {
         consentAccepted = true
         /* The one notification prompt in the app, asked where its purpose is stated. */
         Task { await callOffers.requestNotifications() }
+        if let pendingURL { handle(pendingURL) }
     }
 
     var offersAfterCalls: Bool {
@@ -130,19 +150,106 @@ final class AppModel: NSObject, ObservableObject {
 
     /// False while the microphone belongs to a recording, so the dictation screen can say
     /// so before the operator taps.
-    var canStartDictation: Bool { !recorder.isRecording && !startingRecording }
+    var canStartDictation: Bool { consentAccepted && !recorder.isRecording && !startingRecording }
 
     func startDictation() {
         guard canStartDictation else { return }
-        dictation.start()
+        if keyboardReturn {
+            guard UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
+            startKeyboardDictation(requestID: UUID(), documentID: keyboardDocumentID)
+        } else {
+            dictation.start()
+        }
+    }
+
+    func handle(_ url: URL) {
+        pendingURL = url
+        guard consentAccepted else { return }
+        if url == DictationLink.meetingURL {
+            pendingURL = nil
+            startRecording()
+        } else if DictationLink.opens(url) {
+            keyboardDocumentID = DictationLink.keyboardDocument(url)
+            keyboardReturn = keyboardDocumentID != nil
+            guard !keyboardReturn || UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey) else { return }
+            pendingURL = nil
+            startDictation()
+        }
+    }
+
+    func keyboardPermissionChanged(_ enabled: Bool) {
+        if !enabled {
+            dictation.cancel()
+            dictation.endWarmSession()
+            withdrawKeyboardDraft()
+            keyboardRequestID = nil
+            lastKeyboardRequestID = nil
+        } else if let pendingURL { handle(pendingURL) }
+        publishKeyboardState()
+    }
+
+    private func startKeyboardDictation(requestID: UUID, documentID: UUID?) {
+        guard canStartDictation, !dictation.isBusy else { return }
+        keyboardRequestID = requestID
+        lastKeyboardRequestID = requestID
+        keyboardDocumentID = documentID
+        dictation.start(keyboard: true)
+    }
+
+    private func receiveKeyboardCommand() {
+        do {
+            guard let command = try KeyboardSessionStore.shared().takeCommand(),
+                  UserDefaults.standard.bool(forKey: DictationPreferences.keyboardKey)
+            else { return }
+            switch command.action {
+            case .start:
+                guard dictation.isWarm else { publishKeyboardState(); return }
+                startKeyboardDictation(requestID: command.requestID, documentID: command.documentID)
+            case .stop:
+                guard command.requestID == keyboardRequestID else { return }
+                if dictation.phase == .authorizing { dictation.cancel() } else { dictation.finish() }
+            case .cancel:
+                guard command.requestID == keyboardRequestID else { return }
+                dictation.cancel()
+            }
+        } catch { library.error = error.localizedDescription }
+    }
+
+    private func publishKeyboardState() {
+        let phase: KeyboardSessionState.Phase
+        switch dictation.phase {
+        case .listening: phase = .listening
+        case .authorizing, .finishing: phase = .finishing
+        case .idle:
+            keyboardRequestID = nil
+            phase = dictation.isWarm ? .ready : (dictation.notice == nil ? .off : .failed)
+        }
+        do {
+            try KeyboardSessionStore.shared().publish(KeyboardSessionState(
+                phase: phase, expiresAt: dictation.warmUntil ?? .distantPast,
+                heartbeat: Date(), requestID: keyboardRequestID ?? lastKeyboardRequestID, message: dictation.notice
+            ))
+        } catch { library.error = error.localizedDescription }
+        if dictation.isWarm, keyboardTicker == nil {
+            keyboardTicker = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled, let self else { return }
+                    if !dictation.isWarm { keyboardTicker = nil; publishKeyboardState(); return }
+                    publishKeyboardState()
+                }
+            }
+        }
     }
 
     func startRecording() {
-        guard !startingRecording, !recorder.isRecording else { return }
+        guard consentAccepted, !startingRecording, !recorder.isRecording else { return }
         /* A recording takes the microphone from dictation instead of refusing: the
          * transcript so far stays on the dictation screen, and an offer the operator
          * accepted from a call notification must not fail with a microphone error. */
         dictation.cancel()
+        dictation.endWarmSession()
+        keyboardReturn = false
         startingRecording = true
         Task {
             defer { startingRecording = false }
@@ -182,6 +289,8 @@ final class AppModel: NSObject, ObservableObject {
         guard recorder.isRecording else { return }
         let wasAfterCall = afterCall
         afterCall = false
+        let notes = meetingNotes
+        let chosenTitle = meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let finished = recorder.stop() else {
             /* Stopping with nothing to keep is the one outcome that must never pass in
              * silence: the operator watched a clock run and has to be told it is gone. */
@@ -190,24 +299,47 @@ final class AppModel: NSObject, ObservableObject {
         }
         AppModel.tap()
         Task {
-            await enqueue(
+            let kept = await enqueue(
                 audio: finished.audio,
                 recordedAtUtcMs: finished.recordedAtUtcMs,
-                title: AppModel.title(
+                title: chosenTitle.isEmpty ? AppModel.title(
                     prefix: wasAfterCall
                         ? NSLocalizedString("title.afterCall", comment: "")
                         : NSLocalizedString("title.phone", comment: ""),
                     utcMs: finished.recordedAtUtcMs
-                )
+                ) : chosenTitle,
+                notes: notes
             )
+            if kept && !recorder.isRecording && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
+                meetingTitle = ""
+                meetingNotes = ""
+            }
         }
     }
 
-    private func enqueue(audio: CapturedAudio, recordedAtUtcMs: Int64, title: String) async {
-        _ = try? await queue.enqueue(
-            audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title
-        )
-        await drain()
+    @discardableResult
+    private func enqueue(audio: CapturedAudio, recordedAtUtcMs: Int64, title: String, notes: String = "") async -> Bool {
+        do {
+            try library.keep(kind: .meeting, title: title, text: notes,
+                             date: Date(timeIntervalSince1970: Double(recordedAtUtcMs) / 1000), audio: audio)
+            _ = try await queue.enqueue(audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes)
+            await drain()
+            return true
+        } catch { library.error = error.localizedDescription; return false }
+    }
+
+    @discardableResult
+    func importRecording(_ url: URL, title: String? = nil, recordedAt: Date = Date()) async -> Bool {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        let destination = FileManager.default.temporaryDirectory.appending(path: "import-\(UUID().uuidString).pcm")
+        do {
+            let audio = try await Task.detached {
+                try transcodeToCaptureFormat(source: url, destination: destination)
+            }.value
+            return await enqueue(audio: audio, recordedAtUtcMs: Int64(recordedAt.timeIntervalSince1970 * 1000),
+                                 title: title ?? url.deletingPathExtension().lastPathComponent)
+        } catch { library.error = error.localizedDescription; return false }
     }
 
     /// Run the outbox and report where it ended up, so the one status line can say
@@ -249,9 +381,10 @@ final class AppModel: NSObject, ObservableObject {
         pairingMessage = nil
         do {
             let client = try CompanionClient(endpoint: endpoint)
-            /* The Mac rejects an offer whose expiry is outside its own fifteen-minute
-             * window, so the phone's clock is corrected before the record is signed. */
-            try? await client.syncClock()
+            /* Reaching the vault proves the address before a code is shown for it, and
+             * corrects the phone's clock: the Mac rejects an offer whose expiry is
+             * outside its own fifteen-minute window. */
+            try await client.syncClock()
             let offer = try Pairing.candidateOffer(
                 identity: vault.identity,
                 vaultId: vaultId,
@@ -262,26 +395,29 @@ final class AppModel: NSObject, ObservableObject {
             VaultKeychain.save(state)
             vault = state
             pairingOffer = offer
-        } catch {
+        } catch CompanionError.invalidEndpoint {
             pairingMessage = "pair.badEndpoint"
+        } catch is CompanionError {
+            pairingMessage = "pair.unreachable"
+        } catch {
+            pairingMessage = "pair.failed"
         }
     }
 
     /// Read the approval the desktop wrote and store the vault root it carries.
     func finishPairing() async {
-        guard let pending = vault.pending else {
+        let endpoint = endpointDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var pending = vault.pending, !endpoint.isEmpty else {
             pairingMessage = "pair.needFields"
             return
         }
+        /* The offer names this phone and the vault, not the address, so the approval is
+         * read from the address in the field: a mistyped one is corrected there, because
+         * the vault refuses a second approval for a device it already knows. */
+        pending.endpoint = endpoint
         pairingMessage = nil
         do {
-            let client = try CompanionClient(endpoint: pending.endpoint)
-            let device = try await client.selfDevice(
-                identity: vault.identity, vaultId: pending.vaultId
-            )
-            let credentials = try Pairing.acceptApproval(
-                identity: vault.identity, pending: pending, selfDevice: device
-            )
+            let credentials = try await Pairing.finish(identity: vault.identity, pending: pending)
             var state = vault
             state.credentials = credentials
             state.pending = nil
@@ -294,6 +430,12 @@ final class AppModel: NSObject, ObservableObject {
             await drain()
         } catch PairingError.notApprovedYet {
             pairingMessage = "pair.notApproved"
+        } catch PairingError.offerExpired {
+            pairingMessage = "pair.expired"
+        } catch CompanionError.invalidEndpoint {
+            pairingMessage = "pair.badEndpoint"
+        } catch CompanionError.transport, CompanionError.invalidResponse {
+            pairingMessage = "pair.unreachable"
         } catch {
             pairingMessage = "pair.failed"
         }
@@ -307,25 +449,37 @@ final class AppModel: NSObject, ObservableObject {
         dictation.start(keepingAudio: true)
     }
 
-    private func collectVoiceThought() {
-        guard let kept = dictation.takeAudio() else { return }
-        let audio = kept.audio
+    private func collectDictation(_ capture: DictationCapture) {
+        if capture.audio != nil || !capture.text.isEmpty {
+            do {
+                try library.keep(kind: capture.isThought ? .note : .dictation,
+                                 title: String(capture.text.prefix(80)), text: capture.text,
+                                 date: capture.startedAt, audio: capture.audio)
+            } catch { library.error = error.localizedDescription }
+        }
+        if keyboardRequestID != nil, !capture.isThought, capture.error == nil, !capture.text.isEmpty {
+            do {
+                keyboardDraft = try KeyboardDraftStore.shared()
+                    .save(text: capture.text, documentID: keyboardDocumentID).id
+            } catch { library.error = error.localizedDescription }
+        }
+        keyboardRequestID = nil
+        guard let audio = capture.audio else { return }
+        guard capture.isThought else {
+            try? FileManager.default.removeItem(at: audio.url)
+            return
+        }
         let thought = QueuedThought(
-            origin: .voice,
-            text: dictation.insertableText,
-            link: nil,
-            attachments: [
-                ThoughtAttachment(
-                    kind: .audio(durationMs: audio.durationMs),
-                    file: "audio.pcm",
-                    byteLength: audio.byteLength,
-                    sha256: audio.sha256
-                ),
-            ]
+            origin: .voice, text: capture.text, link: nil,
+            attachments: [ThoughtAttachment(kind: .audio(durationMs: audio.durationMs),
+                file: "audio.pcm", byteLength: audio.byteLength, sha256: audio.sha256)]
         )
         AppModel.tap()
         thoughtsKept += 1
-        Task { await enqueue(thought: thought, capturedAtUtcMs: kept.startedAtUtcMs, files: [audio.url]) }
+        Task {
+            await enqueue(thought: thought, capturedAtUtcMs: Int64(capture.startedAt.timeIntervalSince1970 * 1000),
+                          files: [audio.url])
+        }
     }
 
     /// Typed text, with any photos already on disk. Text that is one address is a link.
@@ -334,6 +488,9 @@ final class AppModel: NSObject, ObservableObject {
     func captureTyped(_ text: String, images: [CapturedImage]) -> Bool {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return false }
+        do {
+            try library.keep(kind: .note, title: String(text.prefix(80)), text: text)
+        } catch { library.error = error.localizedDescription; return false }
         let thought = QueuedThought(
             origin: .typed,
             text: text,
@@ -410,10 +567,12 @@ final class AppModel: NSObject, ObservableObject {
     /// through a failed sync; only the status line says the vault was out of reach.
     func refreshBoard() async {
         guard isPaired, boardState != .syncing else { return }
+        if let current = await reader.current() { dictation.profile = current.dictationProfile ?? .empty }
         boardState = .syncing
         if board == nil { board = await reader.current() }
         do {
             board = try await reader.sync()
+            dictation.profile = board?.dictationProfile ?? .empty
             boardState = .idle
         } catch {
             boardState = .offline

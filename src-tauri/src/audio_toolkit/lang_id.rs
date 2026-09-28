@@ -84,12 +84,90 @@ pub fn detect_output_language(text: &str, supported_languages: &[String]) -> Opt
     iso639_1_for_whatlang(info.lang()).map(str::to_string)
 }
 
+/// Pick one of the user's languages for a complete dictation. An audio model's
+/// detected language wins when selected; otherwise text detection is restricted
+/// to the set. Short or unrepresentable text uses the first (primary) choice.
+/// This is separate from the fail-closed filler-removal detector above.
+pub fn restrict_detected_language<'a>(
+    detected: Option<&str>,
+    text: &str,
+    selected: &'a [String],
+) -> Option<&'a str> {
+    let primary = selected.first()?;
+    if selected.len() == 1 {
+        return Some(primary);
+    }
+    let selected_code = |detected: &str| {
+        selected
+            .iter()
+            .find(|code| {
+                code.split(['-', '_'])
+                    .next()
+                    .zip(detected.split(['-', '_']).next())
+                    .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+            })
+            .map(String::as_str)
+    };
+    if let Some(language) = detected.and_then(selected_code) {
+        return Some(language);
+    }
+    detect_output_language(text, selected)
+        .as_deref()
+        .and_then(selected_code)
+        .or(Some(primary.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn langs(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn restricted_detection_never_returns_an_unselected_model_language() {
+        let selected = langs(&["en", "pt"]);
+        assert_eq!(
+            restrict_detected_language(
+                Some("es"),
+                "eu vi um carro na rua ontem de manhã quando fui ao mercado",
+                &selected,
+            ),
+            Some("pt")
+        );
+    }
+
+    #[test]
+    fn restricted_detection_keeps_selected_model_language_and_script_variant() {
+        let selected = langs(&["en", "zh-Hant"]);
+        assert_eq!(
+            restrict_detected_language(Some("zh"), "hello", &selected),
+            Some("zh-Hant")
+        );
+    }
+
+    #[test]
+    fn restricted_detection_uses_primary_for_ambiguous_speech() {
+        let selected = langs(&["fr", "en"]);
+        assert_eq!(
+            restrict_detected_language(Some("es"), "", &selected),
+            Some("fr")
+        );
+    }
+
+    #[test]
+    fn restricted_detection_with_one_language_needs_no_evidence() {
+        let selected = langs(&["uk"]);
+        assert_eq!(
+            restrict_detected_language(Some("ru"), "", &selected),
+            Some("uk")
+        );
+    }
+
+    #[test]
+    fn empty_selection_does_not_restrict_detection() {
+        assert_eq!(restrict_detected_language(Some("fr"), "bonjour", &[]), None);
     }
 
     #[test]

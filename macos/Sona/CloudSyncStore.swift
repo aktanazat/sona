@@ -65,6 +65,9 @@ final class CloudSyncStore {
     var vaultId = ""
     /// A week out, the default the old panel opened with.
     var shareExpiry = Date().addingTimeInterval(7 * 24 * 60 * 60)
+    /// What the next browser link carries. Notes only unless the person picks
+    /// more.
+    var shareInclude: CloudShareInclude = .notes
 
     /// The last thing the core could not do, shown until the next success. A
     /// command's refusal outlives a reload, the way the old panel kept its
@@ -420,7 +423,7 @@ final class CloudSyncStore {
             let result: CloudShareBrowserResult = try await core.request(
                 "cloud_browser_share_create",
                 CloudSyncRequest(request: CloudShareBrowserBody(
-                    sessionId: sessionId, expiresAtUtcMs: expiresAtUtcMs)))
+                    sessionId: sessionId, expiresAtUtcMs: expiresAtUtcMs, include: shareInclude)))
             browserShare = CloudShareLink(sessionId: sessionId, result: result)
             await refresh()
         }
@@ -611,10 +614,31 @@ struct CloudShareCreateBody: Encodable {
 struct CloudShareBrowserBody: Encodable {
     let sessionId: String
     let expiresAtUtcMs: Int64
+    let include: CloudShareInclude
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case expiresAtUtcMs = "expires_at_utc_ms"
+        case include
+    }
+}
+
+/// `CloudBrowserShareInclude`: how much of a meeting a browser link carries.
+/// The transcript, then the notes typed during the meeting, come on top of
+/// the notes, never instead of them.
+enum CloudShareInclude: String, CaseIterable, Identifiable, Encodable {
+    case notes
+    case notesAndTranscript = "notes_and_transcript"
+    case everything
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .notes: "Notes only"
+        case .notesAndTranscript: "Notes and transcript"
+        case .everything: "Everything"
+        }
     }
 }
 

@@ -7,6 +7,10 @@ struct MeetingReviewView: View {
     let settings: MeetingSettingsStore
     var openPerson: (String) -> Void = { _ in }
     var openMeetingSettings: () -> Void = {}
+    /// Opens the agent with a question about this meeting begun, for the
+    /// person to finish and send.
+    var askAgent: ((String) -> Void)?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingDelete = false
 
     var body: some View {
@@ -14,8 +18,9 @@ struct MeetingReviewView: View {
             BackLink(title: "Meetings") { store.closeReview() }
                 .padding(.bottom, 20)
             if let snapshot = store.snapshot {
-                MeetingReviewHeader(store: store, snapshot: snapshot, delete: { confirmingDelete = true })
-                MeetingsNoticeBand(store: store)
+                MeetingReviewHeader(
+                    store: store, snapshot: snapshot, delete: { confirmingDelete = true },
+                    openMeetingSettings: openMeetingSettings, askAgent: askAgent)
                 MeetingReviewTabs(store: store)
                 pane(snapshot)
             } else if let failure = store.reviewFailure {
@@ -26,14 +31,36 @@ struct MeetingReviewView: View {
                 Text("That meeting is no longer here.").bodyText(15, Theme.inkSecondary)
             }
         }
+        .overlay(alignment: .bottom) { toast }
         .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
         .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
+        .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
+            MeetingFilingSheet(store: store)
+        }
         .alert("Delete this meeting?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
             Button("Keep it", role: .cancel) {}
         } message: {
-            Text("It goes to the trash for a week, then Sona removes it for good.")
+            Text("It goes to the trash for 30 days, then Sona removes it for good.")
         }
+    }
+
+    /// What just worked floats at the foot of the window and leaves by
+    /// itself, so the page under it never moves. Without motion it only
+    /// fades.
+    private var toast: some View {
+        ZStack {
+            if let notice = store.notice {
+                MeetingReviewToast(store: store, notice: notice)
+                    .transition(
+                        reduceMotion
+                            ? AnyTransition.opacity
+                            : AnyTransition.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .frame(maxWidth: 560)
+        .padding(.bottom, 24)
+        .animation(.easeOut(duration: 0.2), value: store.notice)
     }
 
     @ViewBuilder
@@ -75,16 +102,61 @@ struct MeetingReviewView: View {
     }
 }
 
+/// What just worked, said once: an export, a written ledger and the way to
+/// find it. It stays while the pointer rests on it and leaves four seconds
+/// after.
+private struct MeetingReviewToast: View {
+    let store: MeetingsStore
+    let notice: String
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(notice)
+                .font(TypeScale.body(13))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(2)
+                .truncationMode(.middle)
+            if store.savedLedgerPath != nil {
+                Button("Show in Finder") {
+                    store.openSavedLedger()
+                    store.dismissNotice()
+                }
+                .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+        .onHover { hovering = $0 }
+        .task(id: hovering ? nil : notice) {
+            guard !hovering else { return }
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            store.dismissNotice()
+            store.dismissSavedLedger()
+        }
+    }
+}
+
 // MARK: - The head of the page
 
-/// The title a person can correct, the facts of the recording, what the last
-/// write did, and the menu of everything this meeting allows.
+/// The title a person can correct, the facts of the recording, one line for
+/// whatever needs saying, and the menu of everything else this meeting
+/// allows.
 struct MeetingReviewHeader: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
     let delete: () -> Void
+    var openMeetingSettings: () -> Void = {}
+    var askAgent: ((String) -> Void)?
     @State private var editing = false
     @State private var draft = ""
+    /// The line that confirms a copy, cleared after a moment.
+    @State private var copied: String?
+    @State private var copyGeneration = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -94,22 +166,7 @@ struct MeetingReviewHeader: View {
                 actions
             }
             Text(facts).metaText(Theme.inkSecondary)
-            if let unattributed {
-                Text(unattributed).metaText()
-            }
-            if snapshot.session.processingStatus != .succeeded {
-                Text(snapshot.session.processingStatus.label)
-                    .bodyText(14, snapshot.session.processingStatus.isFailed ? Theme.live : Theme.accent)
-            }
-            if let receipt = store.receiptLine {
-                Text(receipt).metaText()
-            }
-            if let pending = store.pending {
-                Text("\(pending)…").metaText(Theme.accent)
-            }
-            if snapshot.remoteCancellationPending {
-                remoteCancellation
-            }
+            status
         }
         .padding(.bottom, 24)
     }
@@ -134,26 +191,65 @@ struct MeetingReviewHeader: View {
         }
     }
 
+    /// What is under way, the one action worth a button, and the menu that
+    /// holds the rest, the agent first.
     private var actions: some View {
         HStack(spacing: 10) {
+            if let doing = store.pending ?? (store.catchingUp ? "Catching up" : nil) {
+                Text("\(doing)…").metaText(Theme.accent)
+            }
+            if let copied {
+                Text(copied).metaText(Theme.inkSecondary)
+                    .task(id: copyGeneration) {
+                        try? await Task.sleep(for: .seconds(2))
+                        guard !Task.isCancelled else { return }
+                        self.copied = nil
+                    }
+            }
             if store.hasLedger {
                 Button("Follow up") { store.openFollowUp() }
                     .buttonStyle(SecondaryButton(compact: true))
             }
+            if store.canExport {
+                MeetingSendToMenu(sessionId: snapshot.session.sessionId)
+            }
             Menu {
+                Button("Add to folder…") {
+                    store.openFiling(snapshot.session.sessionId, title: snapshot.session.title)
+                }
+                Divider()
+                if let askAgent {
+                    Button("Ask about this meeting") { askAgent(question) }
+                    Divider()
+                }
                 if store.editable {
                     Button("Rename", action: start)
                 }
-                if store.canRegenerate {
+                if store.canRegenerate || store.transcriptDeleted {
                     Button("Write the notes again") { store.regenerate() }
+                        .disabled(store.transcriptDeleted)
+                        .help(store.transcriptDeleted ? MeetingCommandError.transcriptDeleted.label : "Write new notes")
+                }
+                Button("Catch me up") { store.runCatchUp() }
+                    .disabled(store.catchingUp)
+                Divider()
+                Button("Copy notes") { copyNotes(asMarkdown: false) }
+                    .disabled(!MeetingNotesCopy.hasNotes(snapshot, userNotes: store.notesBody))
+                Button("Copy notes as Markdown") { copyNotes(asMarkdown: true) }
+                    .disabled(!MeetingNotesCopy.hasNotes(snapshot, userNotes: store.notesBody))
+                if store.canExport || store.hasLedger {
+                    Divider()
                 }
                 if store.canExport {
-                    Divider()
                     Button("Export as Markdown") { store.exportOpenMeeting(.markdown) }
                     Button("Export as JSON") { store.exportOpenMeeting(.json) }
                 }
                 if store.hasLedger {
                     Button("Save the ledger as HTML") { store.exportOpenLedger() }
+                }
+                if let receipt = store.receiptLine {
+                    Divider()
+                    Text(receipt)
                 }
                 if store.canDelete {
                     Divider()
@@ -173,17 +269,130 @@ struct MeetingReviewHeader: View {
         }
     }
 
-    private var remoteCancellation: some View {
-        HStack(spacing: 14) {
-            Text("Sona asked the remote engine to stop, and it has not answered yet.")
-                .bodyText(14, Theme.accent)
-            if store.canCancelRemote {
-                Button("Cancel the remote run") { store.cancelRemote() }
-                    .buttonStyle(SecondaryButton(compact: true))
-                    .disabled(store.busy)
+    private func copyNotes(asMarkdown: Bool) {
+        guard MeetingNotesCopy.copy(snapshot, userNotes: store.notesBody, asMarkdown: asMarkdown) else {
+            return
+        }
+        copied = asMarkdown ? "Markdown copied" : "Notes copied"
+        copyGeneration += 1
+    }
+
+    /// The start of a question for the agent: this meeting by name and by
+    /// link, left open for the person to finish.
+    private var question: String {
+        "About “\(snapshot.session.title)” (sona://meeting/\(snapshot.session.sessionId)): "
+    }
+
+    /// At most one line under the facts: what the core refused, else a remote
+    /// run that has not stopped, else what became of the notes and the
+    /// voices. Each carries the one thing to do about it.
+    @ViewBuilder
+    private var status: some View {
+        if let error = store.error {
+            statusLine(AttributedString(error), color: Theme.live) {
+                Button("Dismiss") { store.dismissError() }
+                    .buttonStyle(QuietButton(compact: true))
+            }
+        } else if store.transcriptDeleted {
+            statusLine(AttributedString(MeetingCommandError.transcriptDeleted.label + " Your notes are kept.")) {
+                EmptyView()
+            }
+        } else if snapshot.remoteCancellationPending {
+            statusLine(AttributedString("Sona asked the remote engine to stop, and it has not answered yet.")) {
+                if store.canCancelRemote {
+                    Button("Cancel the remote run") { store.cancelRemote() }
+                        .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                        .disabled(store.busy)
+                }
+            }
+        } else if let standing {
+            statusLine(standing) {
+                if processing.offersSettings {
+                    Button("Open Settings", action: openMeetingSettings)
+                        .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                }
+                if processing.isFailed, store.canRegenerate {
+                    Button("Try again") { store.regenerate() }
+                        .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                        .disabled(store.busy)
+                }
             }
         }
-        .padding(.top, 4)
+    }
+
+    private func statusLine<Actions: View>(
+        _ text: AttributedString, color: Color = Theme.inkSecondary, @ViewBuilder actions: () -> Actions
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(text)
+                .metaText(color)
+                .textSelection(.enabled)
+            actions()
+        }
+    }
+
+    private var processing: MeetingProcessingStatus { snapshot.session.processingStatus }
+
+    /// "Notes failed: the model did not answer · Separating speakers
+    /// failed · 12 lines have no speaker yet". Only the failure's own word
+    /// takes live red.
+    private var standing: AttributedString? {
+        var parts: [AttributedString] = []
+        if let notes { parts.append(notes) }
+        if let voices { parts.append(AttributedString(voices)) }
+        if let unattributed { parts.append(AttributedString(unattributed)) }
+        guard var line = parts.first else { return nil }
+        for part in parts.dropFirst() {
+            line.append(AttributedString(" · "))
+            line.append(part)
+        }
+        return line
+    }
+
+    /// What became of the notes, when they are not simply written.
+    private var notes: AttributedString? {
+        switch processing {
+        case .succeeded:
+            return nil
+        case .pending, .running:
+            return AttributedString("\(processing.label)…")
+        case .cancelled:
+            return AttributedString(processing.label)
+        case let .failed(reason, cause):
+            var line = AttributedString("Notes failed")
+            line.foregroundColor = Theme.live
+            line.append(AttributedString(": \(Self.why(reason, cause))"))
+            return line
+        }
+    }
+
+    /// The rest of "Notes failed: …".
+    private static func why(_ reason: MeetingProcessingFailure, _ cause: MeetingEngineFailureCause?) -> String {
+        switch reason {
+        case .engineFailure: cause?.label ?? "the engine failed"
+        case .localModelUnavailable: "the chosen engine was not ready"
+        case .remoteUnavailable: "your server was not reachable"
+        case .cancelled: "the run was cancelled"
+        case .interrupted: "Sona closed before they were written"
+        case .transcriptDeleted: "the transcript was deleted by your retention settings"
+        }
+    }
+
+    /// Where telling the voices apart stands, when it is not simply done.
+    private var voices: String? {
+        let separation = snapshot.diarization.status
+        switch separation {
+        case .notRequested, .succeeded: return nil
+        case .downloading, .running: return "\(separation.label)…"
+        case .modelUnavailable, .failed: return separation.label
+        }
+    }
+
+    /// The lines Sona heard but could not put a voice to.
+    private var unattributed: String? {
+        let count = snapshot.transcript.filter { $0.speakerAssignment == .unknown && !$0.removed }.count
+        guard count > 0 else { return nil }
+        return count == 1 ? "1 line has no speaker yet" : "\(count) lines have no speaker yet"
     }
 
     /// "12 Mar at 09:30 · 48m · Microphone + System audio", and the gaps when
@@ -204,15 +413,6 @@ struct MeetingReviewHeader: View {
         return parts.joined(separator: " · ")
     }
 
-    /// The lines Sona heard but could not put a voice to.
-    private var unattributed: String? {
-        let count = snapshot.transcript.filter { $0.speakerAssignment == .unknown && !$0.removed }.count
-        guard count > 0 else { return nil }
-        return count == 1
-            ? "1 line has no speaker yet."
-            : "\(count) lines have no speaker yet."
-    }
-
     private func start() {
         draft = snapshot.session.title
         editing = true
@@ -227,12 +427,14 @@ struct MeetingReviewHeader: View {
     }
 }
 
-/// The three readings, with the one in front of the reader underlined.
+/// The three readings, with the one in front of the reader underlined, and
+/// the transcript's search at the end of the row. The row keeps one height
+/// on every tab, so switching never moves the page.
 struct MeetingReviewTabs: View {
     let store: MeetingsStore
 
     var body: some View {
-        HStack(spacing: 24) {
+        HStack(alignment: .firstTextBaseline, spacing: 24) {
             ForEach(MeetingReviewTab.allCases) { tab in
                 Button {
                     store.choose(tab: tab)
@@ -251,48 +453,115 @@ struct MeetingReviewTabs: View {
                 .buttonStyle(.plain)
             }
             Spacer(minLength: 0)
+            if store.tab == .transcript && !store.transcriptDeleted {
+                TranscriptSearchField(store: store)
+            }
         }
+        .frame(height: 36, alignment: .bottom)
         .overlay(alignment: .bottom) { Hairline() }
         .padding(.bottom, 24)
+    }
+}
+
+/// "Search this meeting", small enough to share the row with the tabs. ⌘F
+/// or the magnifier puts the cursor in it, escape empties it, and while a
+/// query is typed it counts what the core found.
+private struct TranscriptSearchField: View {
+    let store: MeetingsStore
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button { focused = true } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.inkTertiary)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("f", modifiers: .command)
+            .accessibilityLabel("Search this meeting")
+            TextField(
+                "Search this meeting", text: query,
+                prompt: Text("Search this meeting").foregroundStyle(Theme.inkTertiary)
+            )
+            .textFieldStyle(.plain)
+            .font(TypeScale.body(13))
+            .foregroundStyle(Theme.ink)
+            .focused($focused)
+            .onExitCommand {
+                if store.transcriptQuery.isEmpty { focused = false } else { store.searchTranscript("") }
+            }
+            if !store.transcriptQuery.isEmpty {
+                if let hits = store.searchHits {
+                    Text("\(hits.count)")
+                        .font(TypeScale.body(12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                        .accessibilityLabel(hits.count == 1 ? "1 match" : "\(hits.count) matches")
+                }
+                Button { store.searchTranscript("") } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.inkTertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear the search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 240, height: 28)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+    }
+
+    private var query: Binding<String> {
+        Binding(get: { store.transcriptQuery }, set: { store.searchTranscript($0) })
     }
 }
 
 // MARK: - The words
 
 /// The transcript: who spoke, what they said, what Sona missed, and the way
-/// to correct any of it.
+/// to correct any of it. A voice's name holds what can be done about it.
 struct TranscriptPane: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var editingSegment: TranscriptSegmentId?
+    @State private var renaming: MeetingSpeaker?
+    @State private var name = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
-            SpeakerRoster(store: store, snapshot: snapshot)
-            search
+            if !store.transcriptDeleted && !store.elsewhereHits.isEmpty {
+                elsewhere
+            }
             turns
-            if !store.gapRuns.isEmpty {
+            if !store.transcriptDeleted && !store.gapRuns.isEmpty {
                 gaps
             }
         }
+        .alert("Rename this voice", isPresented: renamingPresented) {
+            TextField("Name", text: $name)
+            Button("Save") {
+                let next = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let speaker = renaming, !next.isEmpty, next != speaker.displayName {
+                    store.renameSpeaker(speaker.speakerId, to: next)
+                }
+                renaming = nil
+            }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        }
     }
 
-    private var search: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SearchField(prompt: "Search this meeting", text: query)
-            if let hits = store.searchHits {
-                Text(hits.isEmpty ? "Nothing said matches that." : "\(hits.count) matches")
-                    .metaText()
-            }
-            if !store.elsewhereHits.isEmpty {
-                Card {
-                    ForEach(store.elsewhereHits) { hit in
-                        CardRow {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(hit.kind == .title ? "In the title" : "In a note").metaText()
-                                Text(hit.excerpt).bodyText(14)
-                            }
-                        }
+    /// What the search found outside the words: the title, a note.
+    private var elsewhere: some View {
+        Card {
+            ForEach(store.elsewhereHits) { hit in
+                CardRow {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(hit.kind == .title ? "In the title" : "In a note").metaText()
+                        Text(hit.excerpt).bodyText(14)
                     }
                 }
             }
@@ -301,27 +570,32 @@ struct TranscriptPane: View {
 
     private var turns: some View {
         ScrollViewReader { proxy in
-            PageSection(store.speakerNames.isEmpty ? "Transcript" : "Transcript · \(store.speakerNames.count) voices") {
-                Card {
-                    if store.turns.isEmpty {
-                        CardRow {
-                            Text(emptyLine).bodyText(14, Theme.inkSecondary)
-                        }
-                    } else {
-                        ForEach(store.turns) { turn in
-                            TranscriptTurnRow(
-                                store: store,
-                                turn: turn,
-                                editing: $editingSegment
-                            )
-                            .id(turn.segments.first?.base.segmentId ?? turn.id)
-                        }
+            Card {
+                if store.turns.isEmpty {
+                    CardRow {
+                        Text(emptyLine).bodyText(14, Theme.inkSecondary)
+                    }
+                } else {
+                    ForEach(store.turns) { turn in
+                        TranscriptTurnRow(
+                            store: store,
+                            turn: turn,
+                            speakers: snapshot.speakers,
+                            editing: $editingSegment,
+                            rename: { speaker in
+                                name = speaker.displayName
+                                renaming = speaker
+                            }
+                        )
+                        .id(turn.segments.first?.base.segmentId ?? turn.id)
                     }
                 }
             }
             .onChange(of: store.jump) { _, jump in
-                guard let jump else { return }
-                withAnimation { proxy.scrollTo(jump.segmentId, anchor: .center) }
+                guard let jump, store.canJumpTo(jump.segmentId) else { return }
+                withAnimation(reduceMotion ? nil : .default) {
+                    proxy.scrollTo(jump.segmentId, anchor: .center)
+                }
                 store.clearJump()
             }
         }
@@ -343,7 +617,10 @@ struct TranscriptPane: View {
     }
 
     private var emptyLine: String {
-        store.transcriptQuery.isEmpty
+        if store.transcriptDeleted {
+            return MeetingCommandError.transcriptDeleted.label + " Audio playback and rewriting are unavailable."
+        }
+        return store.transcriptQuery.isEmpty
             ? "Nothing was transcribed for this meeting."
             : "Nothing said matches “\(store.transcriptQuery)”."
     }
@@ -356,87 +633,20 @@ struct TranscriptPane: View {
         return parts.isEmpty ? "One gap" : parts.joined(separator: " · ")
     }
 
-    private var query: Binding<String> {
-        Binding(get: { store.transcriptQuery }, set: { store.searchTranscript($0) })
-    }
-}
-
-/// The roster: one chip a voice, each renameable, each mergeable into another.
-struct SpeakerRoster: View {
-    let store: MeetingsStore
-    let snapshot: MeetingReviewSnapshot
-    @State private var renaming: MeetingSpeaker?
-    @State private var name = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(snapshot.diarization.status.label).metaText()
-            if !snapshot.speakers.isEmpty {
-                HStack(spacing: 10) {
-                    ForEach(snapshot.speakers) { speaker in
-                        chip(speaker)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .alert("Rename this voice", isPresented: renamingPresented) {
-            TextField("Name", text: $name)
-            Button("Save") {
-                let next = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let speaker = renaming, !next.isEmpty, next != speaker.displayName {
-                    store.renameSpeaker(speaker.speakerId, to: next)
-                }
-                renaming = nil
-            }
-            Button("Cancel", role: .cancel) { renaming = nil }
-        }
-    }
-
-    private func chip(_ speaker: MeetingSpeaker) -> some View {
-        Menu {
-            if store.editable {
-                Button("Rename") {
-                    name = speaker.displayName
-                    renaming = speaker
-                }
-                ForEach(others(speaker)) { other in
-                    Button("Same person as \(other.displayName)") {
-                        store.mergeSpeaker(speaker.speakerId, into: other.speakerId)
-                    }
-                }
-            } else {
-                Text("This meeting cannot be edited.")
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Text(speaker.displayName).font(TypeScale.label(13)).foregroundStyle(Theme.accent)
-                Text(speaker.sourceKind.label).font(TypeScale.body(11)).foregroundStyle(Theme.inkTertiary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Theme.accentSoft, in: Capsule())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-    }
-
-    private func others(_ speaker: MeetingSpeaker) -> [MeetingSpeaker] {
-        snapshot.speakers.filter { $0.speakerId != speaker.speakerId }
-    }
-
     private var renamingPresented: Binding<Bool> {
         Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })
     }
 }
 
-/// One voice, one stretch: the clock, the name, and the words. A press on a
-/// line opens it for correction.
+/// One voice, one stretch: the clock, the name, and the words. The name opens
+/// what can be done about the voice; a press on a line opens it for
+/// correction.
 struct TranscriptTurnRow: View {
     let store: MeetingsStore
     let turn: TranscriptTurn
+    let speakers: [MeetingSpeaker]
     @Binding var editing: TranscriptSegmentId?
+    let rename: (MeetingSpeaker) -> Void
 
     var body: some View {
         CardRow {
@@ -446,14 +656,43 @@ struct TranscriptTurnRow: View {
                     .foregroundStyle(Theme.inkTertiary)
                     .frame(width: 62, alignment: .leading)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(store.speakerName(turn.speakerId))
-                        .font(TypeScale.label(13))
-                        .foregroundStyle(Theme.accent)
+                    voice
                     ForEach(turn.segments) { segment in
                         line(segment)
                     }
                 }
             }
+        }
+    }
+
+    /// The name, and behind it the two corrections a voice takes: a new
+    /// name, or the same person as another voice.
+    @ViewBuilder
+    private var voice: some View {
+        let label = Text(store.speakerName(turn.speakerId))
+            .font(TypeScale.label(13))
+            .foregroundStyle(Theme.accent)
+        if let speaker = speakers.first(where: { $0.speakerId == turn.speakerId }) {
+            Menu {
+                if store.editable {
+                    Button("Rename…") { rename(speaker) }
+                    ForEach(speakers.filter { $0.speakerId != speaker.speakerId }) { other in
+                        Button("Same person as \(other.displayName)") {
+                            store.mergeSpeaker(speaker.speakerId, into: other.speakerId)
+                        }
+                    }
+                } else {
+                    Text("This meeting cannot be edited.")
+                }
+            } label: {
+                label
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityHint(store.editable ? "Rename this voice or merge it with another" : "")
+        } else {
+            label
         }
     }
 
@@ -553,11 +792,14 @@ struct MeetingInsightsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
             MeetingPeopleBand(store: store, openPerson: openPerson)
+            MeetingVoiceIdentitySection(sessionId: snapshot.session.sessionId)
+            CallNamesReviewSection(store: store, snapshot: snapshot)
             MeetingAnalyticsStrip(store: store)
-            ArtifactPane(store: store, snapshot: snapshot, openMeetingSettings: openMeetingSettings)
+            ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
             MeetingQuestionsCard(store: store, snapshot: snapshot)
             MeetingNotesCard(store: store, snapshot: snapshot)
-            MeetingUserNotesCard(store: store)
+            MeetingSnapshotsSection(sessionId: snapshot.session.sessionId)
+            MeetingUserNotesCard(store: store, templates: settings.templates)
             MeetingSeriesSection(
                 store: settings, sessionId: snapshot.session.sessionId,
                 openMeetingSettings: openMeetingSettings)
@@ -607,61 +849,104 @@ struct MeetingPeopleBand: View {
     }
 }
 
-/// Who talked, for how long, and how the room handed over.
+/// Who talked, for how long, and how the room handed over: the numbers this
+/// meeting can say something with, in one strip, then a thin bar a voice.
 struct MeetingAnalyticsStrip: View {
     let store: MeetingsStore
 
     var body: some View {
         if let talk = store.talk {
-            PageSection("How it went") {
-                Card {
-                    CardRow {
-                        HStack(alignment: .top, spacing: 40) {
-                            Stat(label: "Talk", value: store.talkLeaders.isEmpty ? "—" : store.talkLeaders)
-                            Stat(label: "Longest run", value: talk.longestMonologueNs.meetingTalkDuration)
-                            Stat(label: "Patience", value: store.patience)
-                            Stat(label: "Handovers", value: "\(talk.interactionCount) / \(talk.turnCount) turns")
+            Card {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .firstTextBaseline, spacing: 32) {
+                        figure(talk.longestMonologueNs.meetingTalkDuration, "Longest run")
+                        if let patience = store.patience {
+                            figure(patience, "Patience")
+                        }
+                        if let handovers = store.handovers {
+                            figure("\(handovers)", "Handovers in \(talk.turnCount) turns")
                         }
                     }
-                    ForEach(talk.speakers) { share in
-                        CardRow {
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 10) {
-                                    Text(store.speakerName(share.speakerId)).bodyText(14)
-                                    Text(share.sharePermille.meetingTalkShare).metaText(Theme.accent)
-                                    Text(share.speakingNs.meetingTalkDuration).metaText()
-                                    Text("\(share.turnCount) turns").metaText()
-                                }
-                                Meter(fraction: Double(share.sharePermille) / 1000)
-                                    .frame(height: 6)
-                            }
-                        }
-                    }
-                    ForEach(store.trackers) { tracker in
-                        CardRow {
-                            HStack(spacing: 10) {
-                                Text(tracker.name).bodyText(14)
-                                Text(tracker.hitCount == 1 ? "1 mention" : "\(tracker.hitCount) mentions")
-                                    .metaText()
-                            }
-                        } trailing: {
-                            if let first = tracker.segmentIds.first {
-                                Button("Show first") { store.jumpTo(first) }
-                                    .buttonStyle(QuietButton(color: Theme.accent))
+                    let shares = store.talkShares
+                    if !shares.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(shares) { share in
+                                bar(share)
                             }
                         }
                     }
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .bottom) { Hairline() }
+                ForEach(store.trackers) { tracker in
+                    CardRow {
+                        HStack(spacing: 10) {
+                            Text(tracker.name).bodyText(14)
+                            Text(tracker.hitCount == 1 ? "1 mention" : "\(tracker.hitCount) mentions")
+                                .metaText()
+                        }
+                    } trailing: {
+                        if let first = tracker.segmentIds.first {
+                            Button("Show first") { store.jumpTo(first) }
+                                .buttonStyle(QuietButton(color: Theme.accent))
+                                .disabled(!store.canJumpTo(first))
+                        }
+                    }
+                }
             }
+            .padding(.bottom, 32)
         }
+    }
+
+    /// A number over its name: 17 points, never wrapped.
+    private func figure(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(TypeScale.headline)
+                .monospacedDigit()
+                .foregroundStyle(Theme.ink)
+            Text(label).metaText()
+        }
+        .lineLimit(1)
+        .fixedSize()
+    }
+
+    /// One voice on one line: the name, a thin bar of its share, the share,
+    /// and the time it held.
+    private func bar(_ share: SpeakerTalkShare) -> some View {
+        HStack(spacing: 12) {
+            Text(store.speakerName(share.speakerId))
+                .font(TypeScale.body(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+                .frame(width: 120, alignment: .leading)
+            Meter(fraction: Double(share.sharePermille) / 1000)
+                .frame(maxWidth: 360)
+            Text(share.sharePermille.meetingTalkShare)
+                .font(TypeScale.label(13))
+                .monospacedDigit()
+                .foregroundStyle(Theme.ink)
+                .frame(width: 40, alignment: .trailing)
+            Text(share.speakingNs.meetingTalkDuration)
+                .font(TypeScale.body(13))
+                .monospacedDigit()
+                .foregroundStyle(Theme.inkTertiary)
+                .frame(width: 56, alignment: .trailing)
+        }
+        .help(share.turnCount == 1 ? "1 turn" : "\(share.turnCount) turns")
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// Everything one generation of the model wrote, or the reason nothing was.
+/// Everything one generation of the model wrote. When nothing was, the
+/// status line under the title already says why and offers the retry.
 struct ArtifactPane: View {
     let store: MeetingsStore
     let snapshot: MeetingReviewSnapshot
-    var openMeetingSettings: () -> Void = {}
+    /// For naming the person's own template a generation was written with.
+    let templates: MeetingTemplatesStore
 
     var body: some View {
         if let artifact = snapshot.readableArtifact, let content = artifact.content {
@@ -677,8 +962,7 @@ struct ArtifactPane: View {
                 if !content.risks.isEmpty { cited("Risks", content.risks) }
                 followUp(content)
             }
-        } else {
-            ArtifactFailureCard(store: store, snapshot: snapshot, openMeetingSettings: openMeetingSettings)
+            .task { await templates.loadIfNeeded() }
         }
     }
 
@@ -687,7 +971,7 @@ struct ArtifactPane: View {
             Card {
                 if let lines = content.summary.tracedLines(content.summaryTrace) {
                     ForEach(lines) { line in
-                        CardRow(action: line.segmentId.map { id in { store.jumpTo(id) } }) {
+                        CardRow(action: line.segmentId.flatMap(store.citationAction)) {
                             HStack(alignment: .firstTextBaseline, spacing: 12) {
                                 if let offset = line.startOffsetNs {
                                     Text(offset.meetingOffsetClock)
@@ -705,7 +989,7 @@ struct ArtifactPane: View {
                     }
                 }
                 CardRow {
-                    Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(artifact.templateId) v\(artifact.templateVersion)")
+                    Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(templateWords(artifact)) v\(artifact.templateVersion)")
                         .metaText()
                 } trailing: {
                     if store.canRegenerate {
@@ -716,6 +1000,13 @@ struct ArtifactPane: View {
                 }
             }
         }
+    }
+
+    /// What the generation was written with: a built-in's own id, or the
+    /// name of the person's template, which is never shown as its raw id.
+    private func templateWords(_ artifact: MeetingArtifactRevision) -> String {
+        guard let templateId = artifact.customTemplateId else { return artifact.templateId }
+        return templates.name(templateId) ?? "Custom template"
     }
 
     private func outline(_ content: MeetingGeneratedArtifacts) -> some View {
@@ -776,6 +1067,7 @@ struct ArtifactPane: View {
                                 store.jumpTo(citation.segmentId)
                             }
                             .buttonStyle(QuietButton())
+                            .disabled(!store.canJumpTo(citation.segmentId))
                         }
                     }
                 }
@@ -810,10 +1102,8 @@ struct ArtifactPane: View {
                         : content.followUpDraft.text)
                         .bodyText()
                 } trailing: {
-                    if store.hasLedger {
-                        Button("Draft it") { store.openFollowUp() }
-                            .buttonStyle(SecondaryButton(compact: true))
-                    }
+                    Button("Draft follow-up") { store.openFollowUp() }
+                        .buttonStyle(SecondaryButton(compact: true))
                 }
             }
         }
@@ -825,47 +1115,7 @@ struct ArtifactPane: View {
     }
 
     private func jump(_ line: ArtifactCitedText) -> (() -> Void)? {
-        guard let citation = line.citations.first else { return nil }
-        return { store.jumpTo(citation.segmentId) }
-    }
-}
-
-/// Nothing was written, and the one line that says why.
-struct ArtifactFailureCard: View {
-    let store: MeetingsStore
-    let snapshot: MeetingReviewSnapshot
-    var openMeetingSettings: () -> Void = {}
-
-    private var status: MeetingProcessingStatus { snapshot.session.processingStatus }
-
-    var body: some View {
-        PageSection("Notes") {
-            Card {
-                CardRow {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(status.label).bodyText()
-                        Text(status.explanation).metaText(Theme.inkSecondary)
-                        if let advice = status.settingsAdvice {
-                            Text(advice).metaText(Theme.accent)
-                        }
-                    }
-                } trailing: {
-                    HStack(spacing: 12) {
-                        if status.offersSettings {
-                            Button("Open Settings", action: openMeetingSettings)
-                                .buttonStyle(SecondaryButton(compact: true))
-                        }
-                        if status.isFailed, store.canRegenerate {
-                            Button("Try again") { store.regenerate() }
-                                .buttonStyle(SecondaryButton(compact: true))
-                                .disabled(store.busy)
-                        }
-                        Button("Refresh") { Task { await store.refreshSnapshot() } }
-                            .buttonStyle(QuietButton())
-                    }
-                }
-            }
-        }
+        line.citations.first.flatMap { store.citationAction($0.segmentId) }
     }
 }
 
@@ -1010,51 +1260,57 @@ struct MeetingNotesCard: View {
     }
 }
 
-/// The pane a person writes in: a template, whatever they type, saved as they
-/// go, and the way to put it in front of the model.
+/// The page a person writes in: a line with how it is kept, its template and
+/// the way to put it in front of the model, then an editor that grows with
+/// what is typed.
 struct MeetingUserNotesCard: View {
     let store: MeetingsStore
+    /// The person's own templates, for the picker to name beside the
+    /// built-ins. A list that could not be read costs only the custom names.
+    let templates: MeetingTemplatesStore
 
     var body: some View {
-        PageSection("Your own notes") {
+        VStack(alignment: .leading, spacing: 12) {
+            header
             Card {
-                ChoiceRow(
-                    title: "Template",
-                    detail: store.notesSavedLine,
-                    choices: MeetingNotesTemplate.allCases,
-                    label: { $0.label },
-                    selection: template
-                )
-                CardRow {
-                    TextEditor(text: notesText)
-                        .font(TypeScale.body())
-                        .foregroundStyle(Theme.ink)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 160)
-                        .onDisappear { store.flushNotes() }
-                }
+                MeetingNotesEditor(text: notesText)
+                    .onDisappear { store.flushNotes() }
                 if store.notesState == .conflict {
                     CardRow {
                         Text("Sona could not save that. The notes on disk may have changed; reopen the meeting to see them.")
                             .bodyText(14, Theme.live)
                     }
                 }
-                ActionRow(
-                    title: "Write the notes again with mine",
-                    detail: "Sona puts what you typed in front of the model and regenerates.",
-                    button: "Re-enhance",
-                    busy: store.enhancing
-                ) {
-                    store.reenhance()
-                }
-                ActionRow(
-                    title: "Catch me up",
-                    detail: "A handful of lines on what has been said so far.",
-                    button: "Catch up",
-                    busy: store.catchingUp
-                ) {
-                    store.runCatchUp()
-                }
+            }
+        }
+        .padding(.bottom, 32)
+        .task { await templates.loadIfNeeded() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text("Your own notes").sectionLabel()
+            if let saved = store.notesSavedLine {
+                Text(saved).metaText()
+            }
+            Spacer(minLength: 12)
+            MeetingTemplateMenu(
+                builtIns: MeetingNotesTemplate.allCases,
+                builtInLabel: { $0.label },
+                templates: templates,
+                selection: template
+            ) {
+                Text(templateLabel)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.inkSecondary)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(store.userNotes == nil || store.enhancing || store.busy)
+            if store.canRegenerate, !store.notesBody.isEmpty {
+                Button("Rewrite with my notes") { store.reenhance() }
+                    .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                    .disabled(store.enhancing || store.busy)
             }
         }
     }
@@ -1063,8 +1319,61 @@ struct MeetingUserNotesCard: View {
         Binding(get: { store.notesBody }, set: { store.typeNotes($0) })
     }
 
-    private var template: Binding<MeetingNotesTemplate> {
-        Binding(get: { store.userNotes?.template ?? .general }, set: { store.choose(template: $0) })
+    /// The meeting's choice: its custom template when it has one, else the
+    /// built-in. Never nil on the way out: the menu offers no "app default".
+    private var template: Binding<MeetingTemplateChoice<MeetingNotesTemplate>?> {
+        Binding(
+            get: {
+                MeetingTemplateChoice(
+                    builtIn: store.userNotes?.template ?? .general,
+                    customTemplateId: store.userNotes?.customTemplateId)
+            },
+            set: { choice in
+                if let choice { store.choose(template: choice) }
+            })
+    }
+
+    /// "General meeting template", or the name of the person's own template
+    /// the meeting chose; never its raw id.
+    private var templateLabel: String {
+        switch template.wrappedValue {
+        case let .custom(templateId)?: templates.name(templateId) ?? "Custom template"
+        default: "\((store.userNotes?.template ?? .general).label) template"
+        }
+    }
+}
+
+/// Notes that grow with what is typed: three lines when empty, a line more
+/// for every line written, so the page scrolls and the editor never does.
+private struct MeetingNotesEditor: View {
+    @Binding var text: String
+
+    var body: some View {
+        // The editor cannot size itself to its words; a hidden copy of them
+        // can. The copy wraps a little narrower, so it is never the shorter.
+        Text(text + " ")
+            .font(TypeScale.body())
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 54, alignment: .topLeading)
+            .padding(.bottom, 8)
+            .hidden()
+            .overlay(alignment: .topLeading) {
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("Start typing…")
+                            .font(TypeScale.body())
+                            .foregroundStyle(Theme.inkTertiary)
+                            .padding(.horizontal, 5)
+                    }
+                    TextEditor(text: $text)
+                        .font(TypeScale.body())
+                        .foregroundStyle(Theme.ink)
+                        .scrollContentBackground(.hidden)
+                        .scrollDisabled(true)
+                }
+            }
+            .padding(.horizontal, 15)
+            .padding(.vertical, 16)
     }
 }
 
@@ -1148,7 +1457,7 @@ struct LedgerPane: View {
         PageSection("Where people stood") {
             Card {
                 ForEach(Array(ledger.stances.enumerated()), id: \.offset) { _, stance in
-                    CardRow(action: stance.citations.first.map { c in { store.jumpTo(c.segmentId) } }) {
+                    CardRow(action: stance.citations.first.flatMap { store.citationAction($0.segmentId) }) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 8) {
                                 Text(stance.from).bodyText(14)
@@ -1221,8 +1530,7 @@ struct LedgerThreadRow: View {
     }
 
     private var jump: (() -> Void)? {
-        guard let citation = thread.receipt.citations.first else { return nil }
-        return { store.jumpTo(citation.segmentId) }
+        thread.receipt.citations.first.flatMap { store.citationAction($0.segmentId) }
     }
 }
 
@@ -1304,6 +1612,7 @@ struct LoopRowView: View {
                 if let citation = row.citations.first {
                     Button(citation.startOffsetNs.meetingOffsetClock) { store.jumpTo(citation.segmentId) }
                         .buttonStyle(QuietButton(color: Theme.accent))
+                        .disabled(!store.canJumpTo(citation.segmentId))
                 }
             }
         }
@@ -1374,6 +1683,7 @@ struct FollowUpSheet: View {
                     Text("Follow up").font(TypeScale.headline).foregroundStyle(Theme.ink)
                     if let draft = store.followUp {
                         Text(draft.source.label).metaText(Theme.inkSecondary)
+                        Text(draft.mailContextStatus).metaText(Theme.inkSecondary)
                     }
                 }
                 Spacer(minLength: 20)
@@ -1381,22 +1691,28 @@ struct FollowUpSheet: View {
             }
             .padding(24)
             Hairline()
+            ErrorNote(store.error).padding(.horizontal, 24)
             ScrollView {
-                Text(store.followUp?.body ?? (store.drafting ? "Writing the draft…" : "No draft."))
-                    .bodyText()
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(24)
+                VStack(alignment: .leading, spacing: 12) {
+                    if store.drafting { ProgressView("Writing the draft…") }
+                    Text(store.followUp.map { $0.body.isEmpty ? "No follow-up is needed for this meeting." : $0.body }
+                        ?? (store.drafting ? "" : "No draft."))
+                        .bodyText()
+                        .textSelection(.enabled)
+                    Text("Sona opens a draft. Only you can send it.").metaText(Theme.inkSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
             }
             Hairline()
             HStack(spacing: 12) {
                 Spacer(minLength: 0)
                 Button("Copy") { store.copyFollowUp() }
                     .buttonStyle(.secondary)
-                    .disabled(store.followUp == nil)
-                Button("Open in Mail") { store.mailFollowUp() }
+                    .disabled(store.followUp?.body.isEmpty != false || store.pending != nil)
+                Button(store.pending == "Opening Mail" ? "Opening…" : "Open in Mail") { store.mailFollowUp() }
                     .buttonStyle(.primary)
-                    .disabled(store.followUp == nil)
+                    .disabled(store.followUp?.body.isEmpty != false || store.pending != nil)
             }
             .padding(24)
         }

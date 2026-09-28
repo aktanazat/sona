@@ -72,6 +72,7 @@ pub enum AgentPanelActionStateV1 {
     Pending,
     Applied,
     Dismissed,
+    Failed,
 }
 
 /// One card under an answer: what the assistant offered to change, whether it
@@ -89,6 +90,8 @@ pub struct AgentPanelActionV1 {
     pub action: SonaChatActionV1,
     pub state: AgentPanelActionStateV1,
     pub operation_id: Option<String>,
+    pub can_undo: bool,
+    pub detail: Option<String>,
 }
 
 /// One row of the sheet's "Worked for Ns" disclosure.
@@ -176,6 +179,9 @@ pub struct AgentPanelSendTurnRequestV1 {
     pub message: String,
     pub locale: String,
     pub workspace: AgentPanelWorkspaceV1,
+    /// When present, corpus lookups may read only this folder's meetings.
+    #[serde(default)]
+    pub folder_id: Option<crate::meeting::types::MeetingFolderId>,
     /// Evidence for this one question: quotes, ids and `sona://` links, built
     /// by whoever is asking. The panel does not assemble packs, and a turn
     /// without one is an ordinary question.

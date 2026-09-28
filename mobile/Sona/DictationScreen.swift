@@ -1,4 +1,5 @@
 import SwiftUI
+import Speech
 
 struct DictationScreen: View {
     @ObservedObject var model: AppModel
@@ -6,7 +7,7 @@ struct DictationScreen: View {
     /* Observed for the recording state that `model.canStartDictation` reads: AppModel
      * does not republish it. */
     @ObservedObject var recorder: PhoneRecorder
-    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(DictationPreferences.keyboardKey) private var keyboardEnabled = false
     @State private var saveError: String?
 
     var body: some View {
@@ -18,7 +19,22 @@ struct DictationScreen: View {
                 Text("dictation.privacy")
                     .font(.subheadline)
                     .foregroundStyle(Theme.textSecondary)
-                TextEditor(text: $dictation.text)
+                if model.keyboardReturn {
+                    Text("keyboard.swipeBack").font(.headline)
+                        .accessibilityIdentifier("keyboard-return-instruction")
+                }
+                if let until = dictation.warmUntil {
+                    HStack {
+                        Text("keyboard.warmUntil \(until.formatted(date: .omitted, time: .shortened))").font(.footnote)
+                        Spacer()
+                        Button("keyboard.endSession", action: dictation.endWarmSession)
+                    }
+                }
+                TextEditor(text: Binding(get: { dictation.text }, set: {
+                    dictation.text = $0
+                    model.withdrawKeyboardDraft()
+                    saveError = nil
+                }))
                     .scrollContentBackground(.hidden)
                     .padding(8)
                     .frame(minHeight: 180)
@@ -57,6 +73,10 @@ struct DictationScreen: View {
                         .foregroundStyle(Theme.recording)
                 }
                 Divider()
+                Toggle("keyboard.enable", isOn: $keyboardEnabled)
+                    .onChange(of: keyboardEnabled) { _, enabled in model.keyboardPermissionChanged(enabled) }
+                Text("keyboard.permission").font(.footnote).foregroundStyle(Theme.textSecondary)
+                PhoneDictationSettings(dictation: dictation)
                 Text("dictation.setupTitle")
                     .font(.headline)
                 Text("dictation.setup")
@@ -70,16 +90,6 @@ struct DictationScreen: View {
         }
         .background(Theme.background)
         .tint(Theme.accent)
-        .onChange(of: dictation.text) { _, _ in
-            /* Edited text is not the text the operator approved, so it stops being
-             * insertable the moment it changes. */
-            model.withdrawKeyboardDraft()
-            saveError = nil
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background { dictation.cancel() }
-        }
-        .onDisappear { dictation.cancel() }
     }
 
     private var controls: some View {
@@ -91,7 +101,7 @@ struct DictationScreen: View {
                         .frame(minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!model.canStartDictation)
+                .disabled(!model.canStartDictation || (model.keyboardReturn && !keyboardEnabled))
                 .accessibilityIdentifier("dictation-start")
             case .listening:
                 Button(action: dictation.finish) {
@@ -121,5 +131,78 @@ struct DictationScreen: View {
         } catch {
             saveError = error.localizedDescription
         }
+    }
+}
+
+private struct PhoneDictationSettings: View {
+    @ObservedObject var dictation: PhoneDictation
+    @AppStorage(DictationPreferences.minutesKey) private var minutes = 5
+    @AppStorage(DictationPreferences.styleKey) private var style = ""
+    @State private var languages = DictationPreferences.languages
+    @State private var activeLanguage = DictationPreferences.activeLanguage
+    @State private var choosesLanguages = false
+    private static let supportedLanguages = SFSpeechRecognizer.supportedLocales()
+        .map(\.identifier).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("keyboard.sessionLength", selection: $minutes) {
+                ForEach([1, 5, 15, 30], id: \.self) { Text("keyboard.minutes \($0)").tag($0) }
+            }.disabled(dictation.isBusy)
+            Text("keyboard.sessionPrivacy").font(.footnote).foregroundStyle(Theme.textSecondary)
+            Picker("dictation.language", selection: $activeLanguage) {
+                ForEach(languages, id: \.self) { Text(Self.languageName($0)).tag($0) }
+            }
+            .disabled(dictation.isBusy)
+            .onChange(of: activeLanguage) { _, value in DictationPreferences.activeLanguage = value }
+            Button("dictation.chooseLanguages") { choosesLanguages = true }.frame(minHeight: 44)
+            Text("dictation.oneLanguage").font(.footnote).foregroundStyle(Theme.textSecondary)
+            Picker("dictation.style", selection: $style) {
+                Text("dictation.noStyle").tag("")
+                ForEach(dictation.profile.styles) { Text($0.name).tag($0.id) }
+            }.disabled(dictation.isBusy || !PhoneDictation.stylesAvailable)
+            if !PhoneDictation.stylesAvailable {
+                Text("dictation.styleUnavailable").font(.footnote).foregroundStyle(Theme.textSecondary)
+            }
+            if dictation.profile.vocabulary.isEmpty && dictation.profile.replacements.isEmpty && dictation.profile.snippets.isEmpty && dictation.profile.styles.isEmpty {
+                Text("dictation.profileEmpty").font(.footnote).foregroundStyle(Theme.textSecondary)
+            } else {
+                Text("dictation.profileSynced").font(.footnote).foregroundStyle(Theme.textSecondary)
+                DisclosureGroup("dictation.vocabulary") {
+                    ForEach(dictation.profile.vocabulary, id: \.self) { word in
+                        LabeledContent(word.spoken.isEmpty ? word.written : word.spoken, value: word.written)
+                    }
+                }
+                DisclosureGroup("dictation.replacements") {
+                    ForEach(dictation.profile.replacements, id: \.self) { word in
+                        LabeledContent(word.spoken, value: word.written)
+                    }
+                }
+                DisclosureGroup("dictation.snippets") {
+                    ForEach(dictation.profile.snippets, id: \.self) { snippet in
+                        LabeledContent(snippet.trigger, value: snippet.expansion)
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $choosesLanguages) {
+            NavigationStack {
+                List(Self.supportedLanguages, id: \.self) { language in
+                    Toggle(Self.languageName(language), isOn: Binding(get: { languages.contains(language) }, set: { enabled in
+                        if enabled { languages.append(language) }
+                        else if languages.count > 1 { languages.removeAll { $0 == language } }
+                        DictationPreferences.languages = languages
+                        activeLanguage = DictationPreferences.activeLanguage
+                    }))
+                    .disabled(dictation.isBusy || (languages.count == 1 && languages.contains(language)))
+                }
+                .navigationTitle("dictation.chooseLanguages")
+                .toolbar { Button("library.done") { choosesLanguages = false } }
+            }
+        }
+    }
+
+    private static func languageName(_ id: String) -> String {
+        Locale.current.localizedString(forIdentifier: id) ?? id
     }
 }

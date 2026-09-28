@@ -259,6 +259,30 @@ pub struct OrganizationDetailResult {
     pub detail: OrganizationDetail,
 }
 
+/// One company on the companies list: the union an organization page reads,
+/// counted instead of listed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CompanySummary {
+    /// The label as its people carry it.
+    pub name: String,
+    /// What `organization_detail` answers to.
+    pub slug: String,
+    pub people_count: u64,
+    /// Meetings with anybody here, each counted once.
+    pub meetings_count: u64,
+    pub last_meeting_at_utc_ms: Option<i64>,
+    /// Open items with anybody here, each counted once.
+    pub open_loops_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct CompaniesListResult {
+    pub schema_version: u32,
+    pub revision: u64,
+    /// Most recent meeting first; companies with no meeting yet last, by name.
+    pub companies: Vec<CompanySummary>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct PersonBriefingLastMeeting {
     pub id: MeetingSessionId,

@@ -36,6 +36,7 @@ const ERROR_TITLE_KEYS = {
   microphone_permission_denied: "errors.micPermissionDeniedTitle",
   no_input_device: "errors.noInputDeviceTitle",
   no_model_selected: "errors.noModelSelectedTitle",
+  model_not_downloaded: "errors.modelNotDownloadedTitle",
   no_speech_save_failed: "errors.noSpeechSaveFailedTitle",
   capture_overrun: "errors.captureOverrunTitle",
   cloud_unavailable: "errors.cloudUnavailableTitle",

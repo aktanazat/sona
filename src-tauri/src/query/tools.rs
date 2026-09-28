@@ -20,6 +20,17 @@
 //! result is text that leaves the machine, and naming the exclusion would put
 //! the fact of it on the server that was not allowed to see the series.
 //!
+//! # A chat limited to one folder
+//!
+//! A chat opened on a folder ("Ask about these meetings") may run five of
+//! the ten: `search`, `recent` (meetings), `meeting`, `transcript` and
+//! `loops`, each cut to the folder's meetings by one [`FolderScope`] read at
+//! the start of every call, so a folder deleted mid-chat refuses the next
+//! call rather than widening it. A meeting outside the folder gets the same
+//! sentence an absent one gets, for the reason above. The other five read
+//! the calendar, the dictation history or a person's page, which no folder
+//! bounds, and are refused with one line saying so.
+//!
 //! # Bounds
 //!
 //! One result is at most [`TOOL_RESULT_MAX_BYTES`] of JSON. A result that
@@ -31,7 +42,9 @@
 //! in the next round and asks differently, or stops.
 
 use super::external::{current_artifacts, loops_reason, speaker_names, transcript_line};
-use super::pack::{one_line, series_opted_out_of_remote, without_excluded_series};
+use super::pack::{
+    folder_search, one_line, series_opted_out_of_remote, without_excluded_series, FolderScope,
+};
 use super::{
     bounded, dictation_row, loop_link, meeting_link, person_link, token, QueryError, QueryRow,
     QueryRowKind, QueryScope, MAX_SNIPPET_CHARS, MAX_TITLE_CHARS,
@@ -50,8 +63,8 @@ use crate::meeting::people_types::{PersonId, PersonLinkConfidence};
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::{
-    MeetingHistoryHeadline, MeetingHistorySummary, MeetingListFilter, MeetingReviewSnapshot,
-    MeetingSessionId, MeetingTrendPoint, MeetingTrendProjection,
+    MeetingFolderId, MeetingHistoryHeadline, MeetingHistorySummary, MeetingListFilter,
+    MeetingReviewSnapshot, MeetingSessionId, MeetingTrendPoint, MeetingTrendProjection,
 };
 use crate::meeting::upcoming::upcoming_window;
 use crate::meeting::upcoming_types::MeetingUpcomingRow;
@@ -150,7 +163,8 @@ pub struct ToolResult {
     pub sources: Vec<QueryRow>,
 }
 
-/// Run one call against the corpus this Mac holds.
+/// Run one call against the corpus this Mac holds, or against one folder of
+/// it when the chat is limited to one (see the module header).
 ///
 /// The calendar read behind `upcoming` blocks on EventKit, so it runs off the
 /// async runtime's worker threads, as `meeting_upcoming_events` runs it.
@@ -159,8 +173,9 @@ pub async fn run(
     history: &Arc<HistoryManager>,
     calendar: &Arc<dyn CalendarSource>,
     call: &ToolCall,
+    folder_id: Option<MeetingFolderId>,
 ) -> ToolResult {
-    match answer(meetings, history, calendar, call).await {
+    match answer(meetings, history, calendar, call, folder_id).await {
         Ok(outcome) => finish(call, outcome),
         Err(error) => failure(call, &error),
     }
@@ -171,6 +186,7 @@ async fn answer(
     history: &Arc<HistoryManager>,
     calendar: &Arc<dyn CalendarSource>,
     call: &ToolCall,
+    folder_id: Option<MeetingFolderId>,
 ) -> Result<Outcome, String> {
     let request = parse(call)?;
     let now = Local::now();
@@ -178,26 +194,40 @@ async fn answer(
         .store()
         .await
         .map_err(|error| refusal(QueryError::from(error)))?;
+    let folder = folder_id
+        .map(|folder_id| folder_scope(&store, folder_id))
+        .transpose()?;
+    let folder = folder.as_ref();
+    if let Some(folder) = folder.filter(|_| !request.within_folder()) {
+        return Err(folder_only(folder));
+    }
     match request {
         Request::Search {
             query,
             scope,
             limit,
         } => {
-            let page = super::search(meetings, history, scope, &query, Some(limit), None)
-                .await
-                .map_err(refusal)?;
-            Ok(search_result(
-                &store,
-                page.entries,
-                page.next_cursor.is_some(),
-            ))
+            let (rows, more) = match folder {
+                None => {
+                    let page = super::search(meetings, history, scope, &query, Some(limit), None)
+                        .await
+                        .map_err(refusal)?;
+                    (page.entries, page.next_cursor.is_some())
+                }
+                Some(folder) => {
+                    folder_search_scope(scope, folder)?;
+                    folder_search(meetings, history, &query, folder, limit)
+                        .await
+                        .map_err(refusal)?
+                }
+            };
+            Ok(search_result(&store, rows, more))
         }
         Request::Recent {
             scope: RecentScope::Meetings,
             limit,
             days,
-        } => recent_meetings(&store, window_start(now, days)?, limit),
+        } => recent_meetings(&store, folder, window_start(now, days)?, limit),
         Request::Recent {
             scope: RecentScope::Dictations,
             limit,
@@ -210,18 +240,18 @@ async fn answer(
                 .map_err(|_| HISTORY_UNREADABLE.to_string())?;
             Ok(recent_dictations(&store, entries, limit))
         }
-        Request::Meeting { session_id } => meeting_result(&store, session_id),
+        Request::Meeting { session_id } => meeting_result(&store, folder, session_id),
         Request::Transcript {
             session_id,
             offset,
             limit,
-        } => transcript_result(&store, session_id, offset, limit),
+        } => transcript_result(&store, folder, session_id, offset, limit),
         Request::Person { person_id } => person_result(&store, person_id),
         Request::Loops {
             status,
             person_id,
             limit,
-        } => loops_result(&store, status, person_id, limit),
+        } => loops_result(&store, folder, status, person_id, limit),
         Request::Upcoming { days } => {
             let window = (now.timestamp_millis(), upcoming_window(now, days).1);
             let source = Arc::clone(calendar);
@@ -273,6 +303,35 @@ async fn answer(
 }
 
 const HISTORY_UNREADABLE: &str = "the dictation history could not be read";
+
+/* ---------------------------------------------------------------- folder */
+
+/// The folder this call is limited to, as [`FolderScope`] reads it. A folder
+/// that no longer exists refuses the call: the chat promised one folder,
+/// and answering from the whole corpus instead would be a quiet widening.
+fn folder_scope(store: &MeetingStore, folder_id: MeetingFolderId) -> Result<FolderScope, String> {
+    FolderScope::read(store, folder_id).map_err(|error| match error {
+        StoreError::NotFound => "the folder this chat is limited to no longer exists".to_string(),
+        error => store_refusal(error),
+    })
+}
+
+/// The one refusal a tool the folder cannot bound gets.
+fn folder_only(folder: &FolderScope) -> String {
+    format!(
+        "this chat is limited to the meetings in the folder \"{}\"",
+        one_line(&folder.folder.name)
+    )
+}
+
+/// Scoped search returns meetings only. Other tools cannot use a search
+/// scope to read dictations or a person's cross-meeting history.
+fn folder_search_scope(scope: QueryScope, folder: &FolderScope) -> Result<(), String> {
+    match scope {
+        QueryScope::All | QueryScope::Meetings => Ok(()),
+        QueryScope::Dictations | QueryScope::People | QueryScope::Loops => Err(folder_only(folder)),
+    }
+}
 
 /* ------------------------------------------------------------ arguments */
 
@@ -329,6 +388,26 @@ enum Request {
     Activity {
         days: u32,
     },
+}
+
+impl Request {
+    /// Whether a chat limited to one folder may run this call: the tools
+    /// that read meetings, which a folder bounds, and not the ones that read
+    /// the calendar, the dictation history or a person's page, which it
+    /// cannot.
+    const fn within_folder(&self) -> bool {
+        matches!(
+            self,
+            Self::Search { .. }
+                | Self::Recent {
+                    scope: RecentScope::Meetings,
+                    ..
+                }
+                | Self::Meeting { .. }
+                | Self::Transcript { .. }
+                | Self::Loops { .. }
+        )
+    }
 }
 
 /// Check a call against the catalogue: the tool has to exist, its arguments
@@ -759,18 +838,26 @@ fn search_result(store: &MeetingStore, rows: Vec<QueryRow>, more: bool) -> Outco
 }
 
 /// Meetings newer than `since_utc_ms`, newest first, from the same list the
-/// Library shows.
+/// Library shows. Inside a folder the list is the folder's own — the store
+/// cuts the pages to it — and each page is cut again to the members the
+/// call was scoped with, so every tool in one call sees the folder at the
+/// same moment.
 fn recent_meetings(
     store: &MeetingStore,
+    folder: Option<&FolderScope>,
     since_utc_ms: i64,
     limit: usize,
 ) -> Result<Outcome, String> {
+    let filter = MeetingListFilter {
+        folder_id: folder.map(|folder| folder.folder.folder_id),
+        ..MeetingListFilter::default()
+    };
     let mut rows = Vec::new();
     let mut cursor = None;
     let mut exhausted = false;
     for _ in 0..RECENT_MAX_PAGES {
         let page = store
-            .list_sessions(cursor, RECENT_PAGE_ROWS, &MeetingListFilter::default())
+            .list_sessions(cursor, RECENT_PAGE_ROWS, &filter)
             .map_err(store_refusal)?;
         exhausted = !page.has_more;
         let mut candidates = Vec::new();
@@ -782,6 +869,10 @@ fn recent_meetings(
             cursor = Some(summary.created_at_utc_ms);
             candidates.push(summary_row(&summary));
         }
+        let candidates = match folder {
+            Some(folder) => folder.keep(candidates),
+            None => candidates,
+        };
         rows.extend(without_excluded_series(store, candidates));
         if rows.len() > limit || exhausted {
             break;
@@ -821,8 +912,12 @@ fn recent_dictations(store: &MeetingStore, entries: Vec<HistoryEntry>, limit: us
 
 /// The meeting as its review screen reads it, for the model: what was said
 /// about it, what it left open, and where it landed.
-fn meeting_result(store: &MeetingStore, session_id: MeetingSessionId) -> Result<Outcome, String> {
-    let snapshot = review(store, session_id)?;
+fn meeting_result(
+    store: &MeetingStore,
+    folder: Option<&FolderScope>,
+    session_id: MeetingSessionId,
+) -> Result<Outcome, String> {
+    let snapshot = review(store, folder, session_id)?;
     let artifacts = current_artifacts(&snapshot);
     let row = allowed_meeting(store, &snapshot)?;
     let facts = store.meeting_calendar_facts(session_id).ok().flatten();
@@ -1116,11 +1211,12 @@ fn ledger_json(ledger: &MeetingLedger) -> LedgerJson<'_> {
 /// continues where this one stopped.
 fn transcript_result(
     store: &MeetingStore,
+    folder: Option<&FolderScope>,
     session_id: MeetingSessionId,
     offset: usize,
     limit: usize,
 ) -> Result<Outcome, String> {
-    let snapshot = review(store, session_id)?;
+    let snapshot = review(store, folder, session_id)?;
     let row = allowed_meeting(store, &snapshot)?;
     let lines = snapshot
         .transcript
@@ -1275,9 +1371,12 @@ fn person_result(store: &MeetingStore, person_id: PersonId) -> Result<Outcome, S
 /// A meeting whose series is kept off the server is skipped before its rows
 /// are counted, so it leaves no trace in `scanned` either: a `reason` that
 /// said "filtered out" for a call that passed no filter would name the
-/// exclusion from the shape of the page.
+/// exclusion from the shape of the page. A meeting outside the folder a
+/// chat is limited to is skipped the same way, so the page reads as a
+/// corpus of the folder's meetings.
 fn loops_result(
     store: &MeetingStore,
+    folder: Option<&FolderScope>,
     status: LoopFilter,
     person_id: Option<PersonId>,
     limit: usize,
@@ -1288,7 +1387,9 @@ fn loops_result(
     let mut more = false;
     let corpus = store.corpus_loops().map_err(store_refusal)?;
     'corpus: for meeting in corpus.meetings {
-        if series_opted_out_of_remote(store, meeting.session_id) {
+        if folder.is_some_and(|folder| !folder.allows(meeting.session_id))
+            || series_opted_out_of_remote(store, meeting.session_id)
+        {
             continue;
         }
         for row in meeting.rows {
@@ -1529,10 +1630,18 @@ fn activity_result(
 
 /* -------------------------------------------------------------- meetings */
 
+/// The meeting as its review screen reads it, if this call may read it. A
+/// meeting outside the folder a chat is limited to is refused before it is
+/// read, with the sentence an absent meeting gets: "outside your folder"
+/// would confirm the meeting exists, and the module header's reason holds.
 fn review(
     store: &MeetingStore,
+    folder: Option<&FolderScope>,
     session_id: MeetingSessionId,
 ) -> Result<MeetingReviewSnapshot, String> {
+    if folder.is_some_and(|folder| !folder.allows(session_id)) {
+        return Err(no_meeting(session_id));
+    }
     store
         .review_snapshot(session_id)
         .map_err(|error| match error {
@@ -1574,6 +1683,9 @@ mod tests {
     use crate::meeting::detection::calendar::CalendarOccurrence;
     use crate::meeting::detection::machine::{
         CalendarAttendee, CalendarEventSummary, ParticipationStatus,
+    };
+    use crate::meeting::folder_types::{
+        MeetingFolderCreateRequest, MeetingFolderMembershipRequest,
     };
     use crate::meeting::loop_types::{MeetingLoopId, MeetingLoopKind};
     use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
@@ -1811,6 +1923,39 @@ mod tests {
         }
     }
 
+    /// A folder with one meeting filed in it.
+    fn filed(store: &MeetingStore, name: &str, session_id: MeetingSessionId) -> MeetingFolderId {
+        let created = store
+            .create_meeting_folder(
+                &MeetingFolderCreateRequest {
+                    operation_id: MeetingOperationId::new(),
+                    name: name.to_string(),
+                    expected_revision: store.meeting_folder_list().unwrap().revision,
+                },
+                WHEN,
+            )
+            .unwrap();
+        let folder_id = created
+            .folders
+            .folders
+            .iter()
+            .find(|folder| folder.name == name)
+            .expect("the folder is listed")
+            .folder_id;
+        store
+            .add_meeting_to_folder(
+                &MeetingFolderMembershipRequest {
+                    operation_id: MeetingOperationId::new(),
+                    folder_id,
+                    session_id,
+                    expected_revision: created.folders.revision,
+                },
+                WHEN,
+            )
+            .unwrap();
+        folder_id
+    }
+
     #[test]
     fn the_catalogue_is_the_relays_table() {
         let names = TOOL_ARGS.iter().map(|(name, _)| *name).collect::<Vec<_>>();
@@ -1974,7 +2119,7 @@ mod tests {
         reviewable_meeting(&corpus.store, "Kickoff", WHEN - 40 * DAY);
 
         let (value, sources) =
-            result_json(recent_meetings(&corpus.store, WHEN - 30 * DAY, 10).unwrap());
+            result_json(recent_meetings(&corpus.store, None, WHEN - 30 * DAY, 10).unwrap());
 
         let rows = value["rows"].as_array().unwrap();
         assert_eq!(
@@ -1992,7 +2137,8 @@ mod tests {
         assert_eq!(value["more"], false);
         assert_eq!(sources.len(), 1);
 
-        let (value, _) = result_json(recent_meetings(&corpus.store, WHEN - 60 * DAY, 1).unwrap());
+        let (value, _) =
+            result_json(recent_meetings(&corpus.store, None, WHEN - 60 * DAY, 1).unwrap());
         let rows = value["rows"].as_array().unwrap();
         assert_eq!(rows[0]["title"], "Design review");
         assert_eq!(
@@ -2028,7 +2174,8 @@ mod tests {
     fn a_meeting_opens_with_its_ledger_and_refuses_when_its_series_is_kept_local() {
         let corpus = corpus();
 
-        let (value, sources) = result_json(meeting_result(&corpus.store, corpus.allowed).unwrap());
+        let (value, sources) =
+            result_json(meeting_result(&corpus.store, None, corpus.allowed).unwrap());
 
         assert_eq!(value["title"], "Design review");
         assert_eq!(value["when"], when(WHEN - DAY));
@@ -2069,13 +2216,13 @@ mod tests {
         assert_eq!(sources[0].snippet, "Dana's tier question stayed open.");
 
         assert_eq!(
-            meeting_result(&corpus.store, corpus.excluded).unwrap_err(),
+            meeting_result(&corpus.store, None, corpus.excluded).unwrap_err(),
             no_meeting(corpus.excluded),
             "the refusal reads like not found"
         );
         let unknown = MeetingSessionId::new();
         assert_eq!(
-            meeting_result(&corpus.store, unknown).unwrap_err(),
+            meeting_result(&corpus.store, None, unknown).unwrap_err(),
             no_meeting(unknown),
             "an unknown meeting is refused with the same sentence"
         );
@@ -2107,7 +2254,7 @@ mod tests {
 
         let result = finish(
             &call("meeting", Value::Null),
-            meeting_result(&store, session_id).unwrap(),
+            meeting_result(&store, None, session_id).unwrap(),
         );
 
         assert!(result.ok);
@@ -2135,7 +2282,7 @@ mod tests {
         let corpus = corpus();
 
         let (value, sources) =
-            result_json(transcript_result(&corpus.store, corpus.allowed, 0, 80).unwrap());
+            result_json(transcript_result(&corpus.store, None, corpus.allowed, 0, 80).unwrap());
 
         assert_eq!(value["total"], 1);
         assert_eq!(value["segments"][0]["index"], 0);
@@ -2152,11 +2299,11 @@ mod tests {
         assert_eq!(sources[0].link, meeting_link(corpus.allowed));
 
         let (value, _) =
-            result_json(transcript_result(&corpus.store, corpus.allowed, 5, 80).unwrap());
+            result_json(transcript_result(&corpus.store, None, corpus.allowed, 5, 80).unwrap());
         assert_eq!(value["segments"], json!([]));
 
         assert_eq!(
-            transcript_result(&corpus.store, corpus.excluded, 0, 80).unwrap_err(),
+            transcript_result(&corpus.store, None, corpus.excluded, 0, 80).unwrap_err(),
             no_meeting(corpus.excluded)
         );
     }
@@ -2176,7 +2323,7 @@ mod tests {
 
         let result = finish(
             &call("transcript", Value::Null),
-            transcript_result(&store, session_id, 10, 200).unwrap(),
+            transcript_result(&store, None, session_id, 10, 200).unwrap(),
         );
 
         assert!(result.ok);
@@ -2243,7 +2390,7 @@ mod tests {
         finalize(&corpus.store, corpus.allowed);
 
         let (value, sources) =
-            result_json(loops_result(&corpus.store, LoopFilter::Open, None, 20).unwrap());
+            result_json(loops_result(&corpus.store, None, LoopFilter::Open, None, 20).unwrap());
 
         let rows = value["rows"].as_array().unwrap();
         // The ledger seeds one loop per unresolved thread, open question and
@@ -2277,10 +2424,17 @@ mod tests {
         assert_eq!(value["more"], false);
 
         let (value, _) =
-            result_json(loops_result(&corpus.store, LoopFilter::Done, None, 20).unwrap());
+            result_json(loops_result(&corpus.store, None, LoopFilter::Done, None, 20).unwrap());
         assert_eq!(value["rows"], json!([]));
         let (value, _) = result_json(
-            loops_result(&corpus.store, LoopFilter::Open, Some(PersonId::new()), 20).unwrap(),
+            loops_result(
+                &corpus.store,
+                None,
+                LoopFilter::Open,
+                Some(PersonId::new()),
+                20,
+            )
+            .unwrap(),
         );
         assert_eq!(value["rows"], json!([]), "nobody is linked as an owner yet");
     }
@@ -2294,7 +2448,7 @@ mod tests {
         let corpus = corpus();
 
         let (value, _) =
-            result_json(loops_result(&corpus.store, LoopFilter::Open, None, 20).unwrap());
+            result_json(loops_result(&corpus.store, None, LoopFilter::Open, None, 20).unwrap());
         assert_eq!(value["rows"], json!([]));
         assert_eq!(value["reason"], "awaiting_continuity", "{value}");
 
@@ -2302,12 +2456,12 @@ mod tests {
         finalize(&corpus.store, corpus.allowed);
 
         let (value, _) =
-            result_json(loops_result(&corpus.store, LoopFilter::Open, None, 20).unwrap());
+            result_json(loops_result(&corpus.store, None, LoopFilter::Open, None, 20).unwrap());
         assert_eq!(value["rows"].as_array().unwrap().len(), 3);
         assert_eq!(value["reason"], Value::Null, "{value}");
 
         let (value, _) =
-            result_json(loops_result(&corpus.store, LoopFilter::Done, None, 20).unwrap());
+            result_json(loops_result(&corpus.store, None, LoopFilter::Done, None, 20).unwrap());
         assert_eq!(value["rows"], json!([]));
         assert_eq!(value["reason"], "filtered_out", "{value}");
     }
@@ -2335,7 +2489,8 @@ mod tests {
         exclude(&store, "weekly-pricing");
         finalize(&store, session_id);
 
-        let (value, _) = result_json(loops_result(&store, LoopFilter::All, None, 20).unwrap());
+        let (value, _) =
+            result_json(loops_result(&store, None, LoopFilter::All, None, 20).unwrap());
 
         assert_eq!(value["rows"], json!([]));
         assert_eq!(value["reason"], "no_rows", "{value}");
@@ -2570,9 +2725,101 @@ mod tests {
         let expected =
             MeetingLoopId::derive(session_id, MeetingLoopKind::Loop, "Enterprise tier pricing");
 
-        let (value, _) = result_json(loops_result(&store, LoopFilter::All, None, 50).unwrap());
+        let (value, _) =
+            result_json(loops_result(&store, None, LoopFilter::All, None, 50).unwrap());
 
         assert_eq!(value["rows"][0]["loop_id"], expected.as_str());
         assert_eq!(value["rows"][0]["link"], loop_link(&expected));
+    }
+
+    /// One contract, at every surface a folder chat can reach a meeting
+    /// through: a meeting outside the folder is never handed back. Neither
+    /// meeting is in a kept series, so the folder is the only thing keeping
+    /// the outside one out.
+    #[test]
+    fn a_folder_scoped_call_never_reaches_a_meeting_outside_the_folder() {
+        let (_directory, store) = store();
+        let outside = reviewable_meeting(&store, "Pricing sync", WHEN);
+        let inside = reviewable_meeting(&store, "Design review", WHEN - DAY);
+        for session_id in [outside, inside] {
+            note(&store, session_id, "The launch needs a second pass.");
+            artifact(&store, session_id, "Summary.", "Headline.");
+            finalize(&store, session_id);
+        }
+        let scope = FolderScope::read(&store, filed(&store, "Clients", inside)).unwrap();
+        let folder = Some(&scope);
+        let only_inside = [inside.uuid().to_string()];
+        let (unscoped, _) = result_json(meeting_result(&store, None, outside).unwrap());
+        assert_eq!(unscoped["title"], "Pricing sync");
+
+        assert_eq!(
+            meeting_result(&store, folder, outside).unwrap_err(),
+            no_meeting(outside),
+            "the outside meeting is refused as if it did not exist"
+        );
+        assert_eq!(
+            transcript_result(&store, folder, outside, 0, 80).unwrap_err(),
+            no_meeting(outside)
+        );
+        let (value, _) = result_json(meeting_result(&store, folder, inside).unwrap());
+        assert_eq!(value["title"], "Design review");
+
+        let (value, _) = result_json(recent_meetings(&store, folder, WHEN - 30 * DAY, 10).unwrap());
+        assert_eq!(
+            value["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            only_inside,
+            "{value}"
+        );
+
+        let (value, _) =
+            result_json(loops_result(&store, folder, LoopFilter::All, None, 20).unwrap());
+        let mut loop_meetings = value["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["meeting"]["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        loop_meetings.dedup();
+        assert_eq!(loop_meetings, only_inside, "{value}");
+
+        let page = super::super::assemble(
+            &store,
+            None,
+            vec![entry(7, WHEN / 1000, "The launch needs a second pass.")],
+            super::super::SearchRequest {
+                scope: QueryScope::All,
+                query: "launch",
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .unwrap();
+        let (value, sources) = result_json(search_result(
+            &store,
+            scope.keep(page.entries),
+            page.next_cursor.is_some(),
+        ));
+        assert_eq!(
+            value["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            only_inside,
+            "search excludes the outside meeting and dictation: {value}"
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            only_inside
+        );
     }
 }

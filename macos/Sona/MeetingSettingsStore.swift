@@ -64,22 +64,26 @@ private struct MeetingSeriesTemplateWrite: Encodable {
     let operationId = MeetingSettingsStore.operationId()
     let seriesKey: String
     let template: MeetingSeriesTemplate?
+    let customTemplateId: String?
     let expectedRevision: Int
 
     private enum CodingKeys: String, CodingKey {
         case operationId = "operation_id"
         case seriesKey = "series_key"
         case template
+        case customTemplateId = "custom_template_id"
         case expectedRevision = "expected_revision"
     }
 
-    /// A null template is the mutation that hands the series back to the app
-    /// default, so the key is always present.
+    /// Both null is the mutation that hands the series back to the app
+    /// default, so both keys are always present. A custom id wins over the
+    /// built-in when both are sent.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(operationId, forKey: .operationId)
         try container.encode(seriesKey, forKey: .seriesKey)
         try container.encode(template, forKey: .template)
+        try container.encode(customTemplateId, forKey: .customTemplateId)
         try container.encode(expectedRevision, forKey: .expectedRevision)
     }
 }
@@ -144,6 +148,10 @@ private struct MeetingDigestMinuteWrite: Encodable {
     let minuteOfDay: Int
 }
 
+private struct MeetingTranscriptionLanguageWrite: Encodable {
+    let language: String
+}
+
 private struct MeetingSeriesKeyParam: Encodable {
     let seriesKey: String
 }
@@ -164,6 +172,10 @@ private struct MeetingSettingsSessionParam: Encodable {
 /// would claim otherwise.
 @MainActor @Observable final class MeetingSettingsStore {
     private let core: Core
+    /// The person's own templates, which the Templates section edits and
+    /// every template picker names. Its own object because the list is read
+    /// by surfaces that never open this page.
+    let templates: MeetingTemplatesStore
 
     /// The last thing that went wrong where no row owns the failure.
     private(set) var error: String?
@@ -186,6 +198,10 @@ private struct MeetingSettingsSessionParam: Encodable {
     private(set) var settings = MeetingSettingsSnapshot()
     private(set) var settingsRead = false
     private(set) var digestSaving = false
+    private(set) var transcriptionLanguageSaving = false
+    private(set) var notesTemplateSaving = false
+    private(set) var notesLanguageSaving = false
+    private(set) var disclosureSaving = false
     private(set) var remoteSaving = false
     private(set) var engineSaving = false
     private(set) var engineStatus: MeetingLocalEngineStatus?
@@ -213,6 +229,10 @@ private struct MeetingSettingsSessionParam: Encodable {
     private(set) var retention: MeetingRetentionSnapshot?
     private(set) var retentionSaving = false
     private(set) var retentionNote: String?
+    private(set) var transcriptRetention: MeetingTranscriptRetentionSnapshot?
+    private(set) var transcriptRetentionLoading = false
+    private(set) var transcriptRetentionSaving = false
+    private(set) var transcriptRetentionNote: String?
 
     // Keyword trackers.
     private(set) var trackers: [MeetingTracker] = []
@@ -240,6 +260,7 @@ private struct MeetingSettingsSessionParam: Encodable {
 
     init(core: Core) {
         self.core = core
+        templates = MeetingTemplatesStore(core: core)
 
         core.observe(CoreEvent.meetingDetectionStatus) { [weak self] line in
             guard let self, let status: MeetingDetectionStatus = try? Core.payload(line) else { return }
@@ -266,9 +287,11 @@ private struct MeetingSettingsSessionParam: Encodable {
         async let detection: Void = loadDetection()
         async let settings: Void = loadSettings()
         async let retention: Void = loadRetention()
+        async let transcriptRetention: Void = loadTranscriptRetention()
         async let trackers: Void = loadTrackers()
         async let roster: Void = loadRoster()
-        _ = await (detection, settings, retention, trackers, roster)
+        async let templateList: Void = templates.load()
+        _ = await (detection, settings, retention, transcriptRetention, trackers, roster, templateList)
     }
 
     /// The identifier a fenced write is retried under. Lowercase, like the
@@ -501,6 +524,60 @@ private struct MeetingSettingsSessionParam: Encodable {
         }
     }
 
+    /// The default template for new notes: a built-in, or one of the person's
+    /// own. A custom choice still sends the built-in it stands in for, which
+    /// is what the core writes with once the custom template is deleted.
+    func setNotesTemplate(_ choice: MeetingTemplateChoice<MeetingNotesTemplate>) async {
+        guard !notesTemplateSaving else { return }
+        notesTemplateSaving = true
+        defer { notesTemplateSaving = false }
+        await writeSetting(
+            "change_meeting_notes_template_setting",
+            MeetingNotesTemplateWrite(
+                template: choice.builtIn ?? settings.notesTemplate,
+                customTemplateId: choice.customTemplateId))
+    }
+
+    func setNotesLanguage(_ language: MeetingNotesLanguage) async {
+        guard !notesLanguageSaving, language != settings.notesLanguage else { return }
+        notesLanguageSaving = true
+        defer { notesLanguageSaving = false }
+        await writeSetting("change_meeting_notes_language_setting", MeetingNotesLanguageWrite(language: language))
+    }
+
+    func setDisclosure(enabled: Bool, message: String) async -> Bool {
+        guard settingsRead, !disclosureSaving else { return false }
+        disclosureSaving = true
+        defer { disclosureSaving = false }
+        do {
+            try await core.request(
+                "change_meeting_disclosure_setting",
+                ["enabled": JSONValue.bool(enabled), "message": .string(message)])
+            let next: MeetingSettingsSnapshot = try await core.request("get_app_settings")
+            settings = next
+            settingsRead = true
+            guard settings.disclosureEnabled == enabled,
+                  settings.disclosureMessage == message.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                error = "The notice changed before Sona could confirm it. Your draft is still here."
+                return false
+            }
+            error = nil
+            return true
+        } catch {
+            fail(error, "The recording notice did not save.")
+            return false
+        }
+    }
+
+    func setTranscriptionLanguage(_ language: String) async {
+        guard !transcriptionLanguageSaving else { return }
+        transcriptionLanguageSaving = true
+        defer { transcriptionLanguageSaving = false }
+        await writeSetting(
+            "change_meeting_transcription_language_setting",
+            MeetingTranscriptionLanguageWrite(language: language))
+    }
+
     func setDigestEnabled(_ enabled: Bool) async {
         guard !digestSaving else { return }
         digestSaving = true
@@ -723,6 +800,38 @@ private struct MeetingSettingsSessionParam: Encodable {
         retentionSaving = false
     }
 
+    func loadTranscriptRetention() async {
+        guard !transcriptRetentionLoading else { return }
+        transcriptRetentionLoading = true
+        defer { transcriptRetentionLoading = false }
+        do {
+            transcriptRetention = try await core.request("meeting_transcript_retention_get")
+            transcriptRetentionNote = nil
+        } catch {
+            transcriptRetentionNote = Self.sentence(error, "Couldn't read the recording retention setting.")
+        }
+    }
+
+    func setTranscriptRetention(_ policy: MeetingRetentionPolicy) async {
+        guard let snapshot = transcriptRetention, !transcriptRetentionSaving,
+              !transcriptRetentionLoading, policy != snapshot.policy else { return }
+        transcriptRetentionSaving = true
+        transcriptRetentionNote = nil
+        defer { transcriptRetentionSaving = false }
+        do {
+            let mutation: MeetingTranscriptRetentionMutation = try await core.request(
+                "meeting_transcript_retention_set",
+                MeetingSettingsEnvelope(
+                    request: MeetingRetentionWrite(expectedRevision: snapshot.revision, policy: policy)))
+            transcriptRetention = mutation.snapshot
+            if mutation.receipt.result != .committed {
+                transcriptRetentionNote = "This setting changed in another window. Choose again."
+            }
+        } catch {
+            transcriptRetentionNote = Self.sentence(error, "Couldn't save the recording retention setting. Try again.")
+        }
+    }
+
     // MARK: - Keyword trackers
 
     func loadTrackers() async {
@@ -863,15 +972,19 @@ private struct MeetingSettingsSessionParam: Encodable {
         try await core.request("meeting_series_template_for_session", MeetingSettingsSessionParam(sessionId: sessionId))
     }
 
+    /// A built-in, one of the person's own templates, or neither for the app
+    /// default. A custom id is the series' whole answer: the built-in is not
+    /// sent beside it.
     @discardableResult
-    func setTemplate(seriesKey: String, template: MeetingSeriesTemplate?, revision: Int) async throws
-        -> MeetingSeriesMutation
-    {
+    func setTemplate(
+        seriesKey: String, template: MeetingSeriesTemplate?, customTemplateId: String? = nil, revision: Int
+    ) async throws -> MeetingSeriesMutation {
         try await core.request(
             "meeting_series_template_set",
             MeetingSettingsEnvelope(
                 request: MeetingSeriesTemplateWrite(
-                    seriesKey: seriesKey, template: template, expectedRevision: revision)))
+                    seriesKey: seriesKey, template: customTemplateId == nil ? template : nil,
+                    customTemplateId: customTemplateId, expectedRevision: revision)))
     }
 
     @discardableResult

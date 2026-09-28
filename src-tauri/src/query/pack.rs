@@ -42,6 +42,17 @@
 //! short, it is evidence the operator said may not be sent, and naming its
 //! absence on the wire would put the fact of the exclusion on the server that
 //! was not allowed to see the series.
+//!
+//! # A pack limited to one folder
+//!
+//! A chat opened on a folder ("Ask about these meetings") promises to answer
+//! from that folder alone, and the promise is kept in code rather than in a
+//! prompt: [`for_question`] given a folder searches meetings only, keeps the
+//! rows whose meeting is filed in it ([`FolderScope`]), draws no dictation
+//! in, and puts one line naming the folder where the corpus card would go.
+//! The card counts the whole corpus, and a model told "412 meetings" while it
+//! can reach nine would answer aggregate questions about meetings it cannot
+//! see. The tools (`tools.rs`) hold the same line with the same type.
 
 use super::{
     loop_link, meeting_link, QueryError, QueryRow, QueryRowKind, QueryScope, QUERY_SCHEMA_VERSION,
@@ -49,15 +60,16 @@ use super::{
 use crate::agent_panel::protocol::MAX_CONTEXT_PACK_BYTES;
 use crate::managers::history::HistoryManager;
 use crate::meeting::detection::calendar::CalendarSource;
+use crate::meeting::folder_types::MeetingFolder;
 use crate::meeting::loop_types::MeetingLoopId;
 use crate::meeting::people_types::{PersonDetail, PersonLinkConfidence};
 use crate::meeting::session::MeetingSessionManager;
-use crate::meeting::store::MeetingStore;
-use crate::meeting::types::MeetingSessionId;
+use crate::meeting::store::{MeetingStore, StoreError};
+use crate::meeting::types::{MeetingFolderId, MeetingSessionId};
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
@@ -101,10 +113,14 @@ pub async fn for_question(
     history: &Arc<HistoryManager>,
     calendar: &Arc<dyn CalendarSource>,
     question: &str,
+    folder_id: Option<MeetingFolderId>,
 ) -> Result<QueryPack, QueryError> {
     let question = question.trim();
     if question.is_empty() {
         return Err(QueryError::InvalidRequest);
+    }
+    if let Some(folder_id) = folder_id {
+        return for_folder(meetings, history, question, folder_id).await;
     }
     // One debug line per assembled pack, naming where the wall time went. A
     // pack is the only thing between a typed question and a signed submission,
@@ -141,6 +157,136 @@ pub async fn for_question(
         pack: format!("{card}\n\n{}", evidence.pack),
         sources: evidence.sources,
     })
+}
+
+/// [`for_question`] for a chat limited to one folder: the folder's meetings
+/// are the corpus, so the rows are theirs alone, no dictation is drawn in,
+/// and one line naming the folder stands in for the corpus card (see the
+/// module header).
+///
+/// A folder that no longer exists is [`QueryError::InvalidRequest`]: a
+/// deleted folder is not an empty one, and a pack built over the whole
+/// corpus for a chat that promised one folder would be a quiet widening.
+async fn for_folder(
+    meetings: &Arc<MeetingSessionManager>,
+    history: &Arc<HistoryManager>,
+    question: &str,
+    folder_id: MeetingFolderId,
+) -> Result<QueryPack, QueryError> {
+    let started = Instant::now();
+    let store = meetings.store().await?;
+    let folder = FolderScope::read(&store, folder_id).map_err(|error| match error {
+        StoreError::NotFound => QueryError::InvalidRequest,
+        error => QueryError::from(error),
+    })?;
+    let (rows, more) = folder_search(meetings, history, question, &folder, PACK_HITS).await?;
+    let search_done = started.elapsed();
+    let rows = without_excluded_series(&store, rows);
+    let scope = folder.line(&store);
+    let ceiling = MAX_CONTEXT_PACK_BYTES.saturating_sub(scope.len() + 2);
+    let evidence = build_within(question, rows, more, ceiling);
+    let finished = started.elapsed();
+    log::debug!(
+        "Folder context pack assembled in {finished:?}: search {search_done:?}, \
+         exclude+render {:?}",
+        finished - search_done,
+    );
+    Ok(QueryPack {
+        schema_version: evidence.schema_version,
+        pack: format!("{scope}\n\n{}", evidence.pack),
+        sources: evidence.sources,
+    })
+}
+
+/// The folder one chat is limited to, and the meetings filed in it at the
+/// moment the call began.
+///
+/// Read once per pack or tool call rather than held across a conversation:
+/// a meeting filed or removed mid-chat is seen by the next call, and a
+/// folder deleted mid-chat refuses the next call instead of quietly widening
+/// it to the whole corpus. Membership is decided here and nowhere else: a
+/// row is kept when the meeting behind it is a member, and a dictation or a
+/// person row, which has no meeting behind it, never is.
+pub(super) struct FolderScope {
+    pub(super) folder: MeetingFolder,
+    members: HashSet<MeetingSessionId>,
+}
+
+impl FolderScope {
+    pub(super) fn read(
+        store: &MeetingStore,
+        folder_id: MeetingFolderId,
+    ) -> Result<Self, StoreError> {
+        let (folder, members) = store.meeting_folder_members(folder_id)?;
+        Ok(Self { folder, members })
+    }
+
+    /// Whether one meeting is in the folder.
+    pub(super) fn allows(&self, session_id: MeetingSessionId) -> bool {
+        self.members.contains(&session_id)
+    }
+
+    /// Only meeting rows may appear in a folder search or pack.
+    pub(super) fn keep(&self, mut rows: Vec<QueryRow>) -> Vec<QueryRow> {
+        rows.retain(|row| {
+            row.kind == QueryRowKind::Meeting
+                && session_behind(row).is_some_and(|session_id| self.allows(session_id))
+        });
+        rows
+    }
+
+    /// Count only meetings whose series may leave this Mac, just as the
+    /// unscoped corpus card does.
+    fn line(&self, store: &MeetingStore) -> String {
+        let count = self
+            .members
+            .iter()
+            .filter(|session_id| !series_opted_out_of_remote(store, **session_id))
+            .count();
+        format!(
+            "folder scope: \"{}\" ({count} {}); only these meetings can be read",
+            one_line(&self.folder.name),
+            if count == 1 { "meeting" } else { "meetings" },
+        )
+    }
+}
+
+/// Bound a folder search to the same scan depth as a recent-meetings call.
+/// Pages are cut to the folder before counting hits; an unfinished scan is
+/// reported as such rather than claimed to be exhaustive.
+const FOLDER_SEARCH_PAGES: usize = 4;
+const FOLDER_SEARCH_PAGE_ROWS: usize = 100;
+
+/// Search meeting rows only, stopping after `limit` in-folder matches and
+/// reporting whether the scan has more to read.
+pub(super) async fn folder_search(
+    meetings: &Arc<MeetingSessionManager>,
+    history: &Arc<HistoryManager>,
+    query: &str,
+    folder: &FolderScope,
+    limit: usize,
+) -> Result<(Vec<QueryRow>, bool), QueryError> {
+    let mut rows = Vec::new();
+    let mut cursor = None;
+    for _ in 0..FOLDER_SEARCH_PAGES {
+        let page = super::search(
+            meetings,
+            history,
+            QueryScope::Meetings,
+            query,
+            Some(FOLDER_SEARCH_PAGE_ROWS),
+            cursor,
+        )
+        .await?;
+        rows.extend(folder.keep(page.entries));
+        cursor = page.next_cursor;
+        if rows.len() > limit || cursor.is_none() {
+            break;
+        }
+    }
+    let more = rows.len() > limit || cursor.is_some();
+    rows.truncate(limit);
+    Ok((rows, more))
 }
 
 /// Assemble the pack for one person: their meetings, and what is open with them.

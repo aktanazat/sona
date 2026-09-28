@@ -6,10 +6,8 @@ import SwiftUI
 
 // MARK: - The live screen
 
-/// The screen a running meeting owns: the title, the clock, Stop, and the
-/// words as they arrive. Round 7 took the telemetry off this page — a signal
-/// reading capture never publishes, and a durability lag nobody acts on — so
-/// what is left is what a person watches.
+/// The running call, with the words as they arrive, the listener's own notes
+/// and help that reads the call without interrupting its recording.
 struct MeetingLiveView: View {
     let store: MeetingLiveStore
 
@@ -23,22 +21,57 @@ struct MeetingLiveView: View {
     /// and stays open, draft intact, when it refused.
     @State private var noteSaving = false
     @State private var discardOpen = false
+    @State private var highlightedLine: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var session: MeetingSessionSnapshot? { store.live?.session }
 
     var body: some View {
-        Page {
-            if let session {
-                header(session)
-                ErrorNote(store.error)
-                warnings
-                transcript
-            } else {
-                Text("This meeting is no longer recording.")
-                    .bodyText(14, Theme.inkSecondary)
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                if let session {
+                    if geometry.size.width >= 820 {
+                        VStack(alignment: .leading, spacing: 0) {
+                            captureHeader(session)
+                            HStack(alignment: .top, spacing: 24) {
+                                ScrollView { transcript }
+                                    .scrollIndicators(.never)
+                                    .frame(maxWidth: .infinity)
+                                ScrollView {
+                                    ownNotes
+                                    help(proxy)
+                                }
+                                .scrollIndicators(.never)
+                                .frame(width: 320)
+                            }
+                        }
+                        .frame(maxWidth: Theme.contentMax, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.horizontal, Theme.margin)
+                        .padding(.top, 40)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    } else {
+                        Page {
+                            captureHeader(session)
+                            ownNotes
+                            help(proxy)
+                            transcript
+                        }
+                    }
+                } else {
+                    Page {
+                        Text("This meeting is no longer recording.")
+                            .bodyText(14, Theme.inkSecondary)
+                    }
+                }
             }
         }
         .sheet(isPresented: $noteOpen) { note }
+        .onDisappear { Task { await store.flushLiveNotes() } }
+        .task(id: highlightedLine) {
+            guard highlightedLine != nil else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            highlightedLine = nil
+        }
         .confirmationDialog(
             "Stop and discard this session?",
             isPresented: $discardOpen,
@@ -56,6 +89,18 @@ struct MeetingLiveView: View {
     // MARK: The head of the page
 
     @ViewBuilder
+    private func captureHeader(_ session: MeetingSessionSnapshot) -> some View {
+        header(session)
+        ErrorNote(store.error)
+        warnings
+        MeetingSnapshotStrip(sessionId: session.sessionId)
+        CallNamesLiveControl(sessionId: session.sessionId)
+        if let state = store.active, state.snapshot.sessionId == session.sessionId {
+            MeetingDisclosureStatus(store: store, disclosure: state.disclosure)
+        }
+    }
+
+    @ViewBuilder
     private func header(_ session: MeetingSessionSnapshot) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(session.title).titleText().lineLimit(1)
@@ -66,22 +111,24 @@ struct MeetingLiveView: View {
             if session.phase != .capturingRecording {
                 Text(session.phase.label).metaText(Theme.inkSecondary)
             }
-            // The core reports the offset once per read; the screen counts on
-            // from it every second while the capture runs, and stands still
-            // while it is paused.
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                HStack(spacing: 6) {
-                    LiveDot(state: dot(session))
-                    Text(store.elapsed(at: context.date))
-                        .font(TypeScale.mono(13))
-                        .foregroundStyle(Theme.ink)
-                        .monospacedDigit()
+            // The store keeps the capture's clock; this counts on from it
+            // every second while the capture runs, and stands still while
+            // it is paused.
+            HStack(spacing: 6) {
+                LiveDot(state: dot(session))
+                if let clock = store.clocks[session.sessionId] {
+                    MeetingClockText(clock: clock, size: 13, color: Theme.ink)
                 }
             }
-            .accessibilityLabel("Elapsed")
-            Button("Stop") { store.stop() }
-                .buttonStyle(.primary)
-                .disabled(!session.allows(.stop) || store.pending != nil)
+            if session.phase.isActive {
+                Button("Stop") { store.stop() }
+                    .buttonStyle(.primary)
+                    .disabled(!session.allows(.stop) || store.pending != nil)
+            } else {
+                Button("Read meeting") { store.readStoppedMeeting() }
+                    .buttonStyle(.primary)
+                    .disabled(store.pending != nil)
+            }
             menu(session)
         }
         .padding(.bottom, 24)
@@ -91,7 +138,7 @@ struct MeetingLiveView: View {
     /// stopping or processing.
     private func dot(_ session: MeetingSessionSnapshot) -> CaptureState {
         switch session.phase {
-        case .capturingRecording: .recording(since: Date())
+        case .capturingRecording: .recording(since: session.captureStart)
         case .capturingPaused: .idle
         default: .working(session.phase.label)
         }
@@ -109,6 +156,7 @@ struct MeetingLiveView: View {
             }
             Button("Add a note") { noteOpen = true }
                 .disabled(store.pending != nil)
+            MeetingSnapshotMenuItem(sessionId: session.sessionId)
             Divider()
             Button("Discard", role: .destructive) { discardOpen = true }
                 .disabled(!session.allows(.discard) || store.pending != nil)
@@ -145,8 +193,8 @@ struct MeetingLiveView: View {
         PageSection("Transcript") {
             if store.showsProvisional {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(store.provisional.enumerated()), id: \.offset) { _, segment in
-                        line(at: segment.startOffsetNs, segment.text)
+                    ForEach(Array(store.provisional.enumerated()), id: \.offset) { index, segment in
+                        line(at: segment.startOffsetNs, segment.text, anchor: "live-\(index)")
                     }
                     Text("Provisional. The final transcript is written when the meeting ends.")
                         .metaText(Theme.inkTertiary)
@@ -158,14 +206,16 @@ struct MeetingLiveView: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(store.lines, id: \.base.segmentId) { segment in
-                        line(at: segment.base.startOffsetNs, segment.text)
+                        line(
+                            at: segment.base.startOffsetNs, segment.text,
+                            anchor: "stored-\(segment.base.segmentId)")
                     }
                 }
             }
         }
     }
 
-    private func line(at offsetNs: Int64, _ text: String) -> some View {
+    private func line(at offsetNs: Int64, _ text: String, anchor: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 20) {
             Text(offsetNs.meetingOffsetClock)
                 .font(TypeScale.mono(12))
@@ -173,6 +223,165 @@ struct MeetingLiveView: View {
                 .frame(width: 62, alignment: .trailing)
             Text(text).bodyText(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+        .background(highlightedLine == anchor ? Theme.accentSoft : Color.clear)
+        .id(anchor)
+    }
+
+    private func jump(to offset: Int64, using proxy: ScrollViewProxy) {
+        let anchor: String
+        if store.showsProvisional {
+            guard let index = store.provisional.firstIndex(where: { $0.startOffsetNs == offset })
+                ?? store.provisional.lastIndex(where: { $0.startOffsetNs <= offset }) else { return }
+            anchor = "live-\(index)"
+        } else {
+            guard let segment = store.lines.first(where: { $0.base.startOffsetNs == offset })
+                ?? store.lines.last(where: { $0.base.startOffsetNs <= offset }) else { return }
+            anchor = "stored-\(segment.base.segmentId)"
+        }
+        highlightedLine = anchor
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+            proxy.scrollTo(anchor, anchor: .center)
+        }
+    }
+
+    // MARK: Your own notes
+
+    private var ownNotes: some View {
+        PageSection("Your own notes") {
+            if store.notesLoading {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Opening your notes…").metaText()
+                }
+            } else if store.userNotes == nil {
+                ErrorNote(store.notesError ?? "Your notes could not be opened.")
+                Button("Try again") { store.reloadLiveNotes() }.buttonStyle(.secondary)
+            } else {
+                Text("These guide the notes Sona writes when the call ends.")
+                    .metaText(Theme.inkSecondary)
+                Card {
+                    ZStack(alignment: .topLeading) {
+                        if store.notesBody.isEmpty {
+                            Text("Start typing…").bodyText(14, Theme.inkTertiary)
+                                .padding(.horizontal, 5)
+                                .padding(.top, 8)
+                                .allowsHitTesting(false)
+                        }
+                        TextEditor(text: Binding(
+                            get: { store.notesBody }, set: { store.typeLiveNotes($0) }))
+                            .font(TypeScale.body(14))
+                            .foregroundStyle(Theme.ink)
+                            .scrollContentBackground(.hidden)
+                            .frame(height: 180)
+                            .disabled(store.pending != nil)
+                            .accessibilityLabel("Your own notes")
+                    }
+                    .padding(12)
+                }
+                if let saved = store.liveNotesSavedLine {
+                    Text(saved).metaText(Theme.inkTertiary)
+                }
+                if store.notesError != nil {
+                    Text("Your notes have not saved. They are still here.")
+                        .bodyText(13, Theme.inkSecondary)
+                    ErrorNote(store.notesError)
+                    HStack {
+                        Button("Keep what I wrote") { store.keepLiveNotes() }
+                            .buttonStyle(.secondary)
+                            .disabled(store.notesState == .saving)
+                        Button("Copy my notes") { store.copyLiveNotes() }.buttonStyle(.quiet)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Help without stopping the call
+
+    private func help(_ proxy: ScrollViewProxy) -> some View {
+        PageSection("During the call") {
+            Card {
+                ForEach(
+                    Array([MeetingLiveHelpKind.recent, .questions, .say].enumerated()), id: \.offset
+                ) { index, kind in
+                    if index > 0 { Hairline() }
+                    CardRow(action: { store.askLiveHelp(kind) }) {
+                        Text(kind.label).bodyText(14)
+                    }
+                }
+            }
+            .disabled(store.helpLoading)
+            HStack(spacing: 8) {
+                InputField(
+                    prompt: "Ask about this call",
+                    text: Binding(get: { store.helpQuestion }, set: { store.setHelpQuestion($0) }))
+                    .onSubmit { store.askLiveHelp(.ask) }
+                    .accessibilityLabel("Ask about this call")
+                Button("Ask") { store.askLiveHelp(.ask) }
+                    .buttonStyle(.secondary)
+                    .disabled(!store.canAskLiveHelp)
+            }
+            if store.helpQuestion.unicodeScalars.count > 500 {
+                Text("Keep your question under 500 characters.").metaText(Theme.inkSecondary)
+            }
+            if let kind = store.helpKind {
+                helpAnswer(kind, proxy: proxy)
+            } else {
+                Text("Ask about what is being said. Recording keeps going.")
+                    .metaText(Theme.inkTertiary)
+            }
+        }
+    }
+
+    private func helpAnswer(_ kind: MeetingLiveHelpKind, proxy: ScrollViewProxy) -> some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(kind.label).bodyText(14)
+                    Spacer()
+                    Button("Dismiss") { store.dismissLiveHelp() }.buttonStyle(.quiet)
+                }
+                if let question = store.helpQuestionShown {
+                    Text(question).bodyText(13, Theme.inkSecondary)
+                }
+                if store.helpLoading {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading the call…").metaText()
+                    }
+                } else if let error = store.helpError {
+                    ErrorNote(error)
+                    Button("Try again") { store.retryLiveHelp() }.buttonStyle(.secondary)
+                } else if let answer = store.liveHelp {
+                    if let label = answer.state.label {
+                        Text(label).bodyText(13, Theme.inkSecondary)
+                        Button("Try again") { store.retryLiveHelp() }.buttonStyle(.secondary)
+                    } else {
+                        ForEach(Array(answer.items.enumerated()), id: \.offset) { _, item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.text).bodyText(14).textSelection(.enabled)
+                                Button(item.startOffsetNs.meetingOffsetClock) {
+                                    jump(to: item.startOffsetNs, using: proxy)
+                                }
+                                .buttonStyle(.quiet)
+                                .accessibilityLabel(
+                                    "Jump to \(item.startOffsetNs.meetingOffsetClock) in the transcript")
+                            }
+                        }
+                    }
+                    if let from = answer.fromOffsetNs, let through = answer.throughOffsetNs {
+                        Text("Read from \(from.meetingOffsetClock) to \(through.meetingOffsetClock).")
+                            .metaText(Theme.inkTertiary)
+                    }
+                    if answer.provisional {
+                        Text("Based on the words recognized so far.")
+                            .metaText(Theme.inkTertiary)
+                    }
+                }
+            }
+            .padding(14)
         }
     }
 
@@ -211,6 +420,49 @@ struct MeetingLiveView: View {
         }
         .onDisappear { noteSaving = false }
     }
+}
+
+// MARK: - The clock
+
+/// A capture's clock, drawn. Running, it counts on once a second on a
+/// schedule that starts at the clock's own start instant, so each tick lands
+/// on a whole second of the meeting, and a redraw that hands it the same
+/// clock keeps the same schedule. Standing, it is a still number.
+struct MeetingClockText: View {
+    let clock: MeetingCaptureClock
+    var size: CGFloat = 12
+    var color: Color = Theme.inkSecondary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if let since = clock.runningSince {
+            TimelineView(.periodic(from: since, by: 1)) { context in
+                face(clock.elapsedNs(at: context.date))
+            }
+        } else {
+            face(clock.standingNs)
+        }
+    }
+
+    /// The digits roll from one second to the next; with motion reduced,
+    /// they change in place.
+    private func face(_ elapsedNs: Int64) -> some View {
+        let reading = elapsedNs.meetingOffsetClock
+        return Text(reading)
+            .font(TypeScale.mono(size))
+            .foregroundStyle(color)
+            .monospacedDigit()
+            .contentTransition(reduceMotion ? .identity : .numericText())
+            .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: reading)
+            .accessibilityLabel("Elapsed")
+            .accessibilityValue(reading)
+    }
+}
+
+private extension MeetingSessionSnapshot {
+    /// When the capture started, as the live dot carries it: the same date
+    /// on every redraw, so a redraw hands the dot the state it already has.
+    var captureStart: Date { (startedAtUtcMs ?? 0).meetingDate }
 }
 
 // MARK: - The consent panel
@@ -266,7 +518,7 @@ struct DetectionPromptView: View {
     let prompt: DetectionPromptEvent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(prompt.prompt.consentTitle).headlineText()
             Text(
                 prompt.showIntroduction
@@ -277,7 +529,7 @@ struct DetectionPromptView: View {
             if let brief = store.seriesBrief {
                 Text(brief).bodyText(13, Theme.inkSecondary)
             }
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 if prompt.prompt.isCalendar {
                     Toggle(
                         "Always record this meeting",
@@ -286,12 +538,13 @@ struct DetectionPromptView: View {
                             set: { store.setAlwaysRecordSeries($0, for: prompt) }))
                 }
                 Toggle(
-                    "Put a notice in the chat",
+                    "Post a recording notice",
                     isOn: Binding(
                         get: { store.announceInChat(prompt) },
                         set: { store.setAnnounceInChat($0, for: prompt) }))
+                .disabled(store.settings?.meetingDisclosureEnabled != true)
                 if store.announceInChat(prompt) {
-                    Text("Typed into the meeting's chat box for you to send.")
+                    Text("Sent only to an identified empty meeting chat. Otherwise, copy it yourself.")
                         .metaText(Theme.inkTertiary)
                         .padding(.leading, 20)
                 }
@@ -311,89 +564,110 @@ struct DetectionPromptView: View {
     }
 }
 
-/// The session the panel is watching: the clock, and the two things a person
-/// does from here — stop it, or stop it recording this series by itself. The
-/// dot carries the colour; the word beside it is plain ink.
+/// The session the panel is watching, in one row: the dot, the word, the
+/// clock, and Stop. The dot carries the colour; the word beside it is plain
+/// ink. The title sits under the row, and so does the chat notice's outcome
+/// when the person asked for one, because it asks them to send it. Telling
+/// this series to stop recording itself waits behind the `…`.
 struct MeetingConsentActiveCard: View {
     let store: MeetingLiveStore
     let state: MeetingConsentPanelSessionState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let paused = state.snapshot.phase == .capturingPaused
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                let paused = state.snapshot.phase == .capturingPaused
-                LiveDot(state: paused ? .idle : .recording(since: Date()))
+                LiveDot(state: paused ? .idle : .recording(since: state.snapshot.captureStart))
                 Text(paused ? "Paused" : "Recording")
                     .font(TypeScale.label(13))
                     .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
-                Spacer()
-                Text((state.snapshot.elapsedOffsetNs ?? 0).meetingOffsetClock)
-                    .font(TypeScale.mono(12))
-                    .foregroundStyle(Theme.inkSecondary)
-            }
-            Text(state.snapshot.title)
-                .font(TypeScale.label(14))
-                .foregroundStyle(Theme.ink)
-                .lineLimit(1)
-            if let line = state.disclosure.outcomeLine {
-                Text(line).bodyText(12, Theme.inkSecondary)
-            }
-            HStack(spacing: 8) {
-                Spacer()
-                if state.standingSeriesKey != nil {
-                    Button("Forget this series") { store.forgetSeries() }
-                        .buttonStyle(QuietButton(compact: true))
-                        .disabled(store.pending != nil)
+                if let clock = store.clocks[state.snapshot.sessionId] {
+                    MeetingClockText(clock: clock)
                 }
+                Spacer(minLength: 8)
                 Button("Stop") { store.stopFromPanel() }
                     .buttonStyle(.compact)
                     .disabled(store.pending != nil)
+                if state.standingSeriesKey != nil {
+                    PanelMore {
+                        Button("Forget this series") { store.forgetSeries() }
+                            .disabled(store.pending != nil)
+                    }
+                }
             }
+            Text(state.snapshot.title)
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+            MeetingDisclosureStatus(store: store, disclosure: state.disclosure)
         }
     }
 }
 
 // MARK: - The rituals
 
-/// A running recording Sona started by itself, and the one answer that keeps
-/// it from doing that again for this app.
+/// A running recording Sona started by itself, in the same row as the
+/// panel's own, with the app it is recording under it. The one answer that
+/// keeps it from doing that again for this app waits behind the `…`.
 struct RitualRecordingView: View {
     let store: MeetingLiveStore
     let event: RitualEvent
     let card: RitualRecordingCard
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        // The card is an event; the phase is the session's. Paused is the
+        // one state the card would otherwise misreport.
+        let paused = store.active?.snapshot.sessionId == card.sessionId
+            && store.active?.snapshot.phase == .capturingPaused
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                // The card is an event; the phase is the session's. Paused
-                // is the one state the card would otherwise misreport.
-                let paused = store.active?.snapshot.sessionId == card.sessionId
-                    && store.active?.snapshot.phase == .capturingPaused
-                LiveDot(state: paused ? .idle : .recording(since: Date()))
+                LiveDot(state: paused ? .idle : .recording(since: card.startedAtUtcMs.meetingDate))
                 Text(paused ? "Paused" : "Recording started")
                     .font(TypeScale.label(13))
                     .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
-                Spacer()
-                Text(card.startedAtUtcMs.meetingElapsed(since: Date()))
-                    .font(TypeScale.mono(12))
-                    .foregroundStyle(Theme.inkSecondary)
-            }
-            Text(card.appName)
-                .font(TypeScale.label(14))
-                .foregroundStyle(Theme.ink)
-                .lineLimit(1)
-            HStack(spacing: 8) {
-                Spacer()
-                Button("Don't record this app automatically") {
-                    store.respond(event, action: .recordingForgetApp)
+                if let clock = store.clocks[card.sessionId] {
+                    MeetingClockText(clock: clock)
                 }
-                .buttonStyle(QuietButton(compact: true))
-                .disabled(store.pending != nil)
+                Spacer(minLength: 8)
                 Button("Stop") { store.respond(event, action: .recordingStop) }
                     .buttonStyle(.compact)
                     .disabled(store.pending != nil)
+                PanelMore {
+                    Button("Don't record this app automatically") {
+                        store.respond(event, action: .recordingForgetApp)
+                    }
+                    .disabled(store.pending != nil)
+                }
+            }
+            Text(card.appName)
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+            if let active = store.active, active.snapshot.sessionId == card.sessionId {
+                MeetingDisclosureStatus(store: store, disclosure: active.disclosure)
             }
         }
+    }
+}
+
+/// The `…` on a recording card: the answer the card keeps but rarely needs,
+/// out of the row, so the row is the recording and its Stop.
+private struct PanelMore<Items: View>: View {
+    @ViewBuilder let items: Items
+
+    var body: some View {
+        Menu {
+            items
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 26, height: 30)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel("More")
     }
 }
 
@@ -404,6 +678,16 @@ struct RitualPrepView: View {
     let event: RitualEvent
     let card: RitualPrepCard
     var onOpenBrief: (String) -> Void = { _ in }
+    @Environment(AppModel.self) private var model
+    @State private var preview = BriefPreview.loading
+
+    /// What the card shows of the brief. Briefs are prepared ahead of time,
+    /// so most cards read a saved one.
+    private enum BriefPreview {
+        case loading
+        case ready([MeetingBriefPoint])
+        case failed(String)
+    }
 
     private var minutes: Int {
         max(0, Int((card.startUtcMs.meetingDate.timeIntervalSinceNow / 60).rounded()))
@@ -412,10 +696,10 @@ struct RitualPrepView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Prep").metaText(Theme.accent)
-            Text("\(card.title) — in \(minutes) minutes").bodyText(14)
+            Text("\(card.title) — in \(minutes) \(minutes == 1 ? "minute" : "minutes")").bodyText(14)
             if !card.headline.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Last time:").metaText()
+                    Text(card.lastMeetingId == nil ? "Context:" : "Last time:").metaText()
                     Text(card.headline).bodyText(13, Theme.inkSecondary)
                 }
             }
@@ -439,11 +723,12 @@ struct RitualPrepView: View {
                     }
                 }
             }
+            briefSection
             HStack(spacing: 8) {
                 Spacer()
                 Button("Open brief") {
                     store.respond(event, action: .prepOpenBrief)
-                    onOpenBrief(card.lastMeetingId)
+                    onOpenBrief(card.eventKey)
                 }
                 .buttonStyle(QuietButton(compact: true))
                 .disabled(store.pending != nil)
@@ -453,8 +738,41 @@ struct RitualPrepView: View {
                     }
                     .buttonStyle(PrimaryButton(compact: true))
                     .disabled(store.pending != nil)
+                } else {
+                    Button("Record") {
+                        store.respond(event, action: .prepRecord)
+                    }
+                    .buttonStyle(PrimaryButton(compact: true))
+                    .disabled(store.pending != nil)
                 }
             }
+        }
+        .task(id: card.eventKey) {
+            preview = .loading
+            do {
+                let brief = try await model.prep.preview(card.eventKey)
+                preview = .ready(brief.content.highlights + brief.content.agenda)
+            } catch {
+                preview = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    @ViewBuilder private var briefSection: some View {
+        switch preview {
+        case .loading:
+            Text("Preparing the brief…").metaText()
+        case let .ready(points) where points.isEmpty:
+            Text("The brief has nothing to add yet.").metaText()
+        case let .ready(points):
+            VStack(alignment: .leading, spacing: 2) {
+                Text("From the brief:").metaText()
+                ForEach(Array(points.prefix(2).enumerated()), id: \.offset) { _, point in
+                    Text(point.text).bodyText(13, Theme.inkSecondary).lineLimit(2)
+                }
+            }
+        case let .failed(message):
+            Text(message).bodyText(13, Theme.live).lineLimit(2)
         }
     }
 }

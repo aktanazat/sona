@@ -133,104 +133,115 @@ struct MicrophoneRow: View {
     }
 }
 
-/// The spoken language: a search field over the codes the loaded model can
-/// recognize, and a reset back to letting Sona detect it.
+/// One fixed language, a primary-first set, or unrestricted auto detection.
 struct LanguageRow: View {
     let store: SettingsStore
     @State private var open = false
     @State private var query = ""
 
+    private var selected: [String] { store.dictationLanguages }
+    private var busy: Bool { !store.loaded || store.isBusy("dictation_languages") }
+
+    private var detail: String {
+        if !store.selectsLanguage, store.supportedLanguages.count > 1 {
+            return "This model chooses its own language and may use languages outside your list."
+        }
+        if selected.count > 1 {
+            return "Sona chooses one for each dictation. If unsure, it uses \(LanguageCatalog.name(selected[0]))."
+        }
+        if let language = selected.first, language != store.effectiveLanguage {
+            return "\(LanguageCatalog.name(language)) is not in this model. It uses \(LanguageCatalog.name(store.effectiveLanguage))."
+        }
+        return selected.isEmpty
+            ? "Detect the language for each dictation. A mode can choose its own language."
+            : "Pick more languages to switch between them automatically."
+    }
+
     var body: some View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Language").bodyText()
-                if store.settings.selectedLanguage != store.effectiveLanguage {
-                    /// The stored intent is not what will be used, because
-                    /// this model cannot recognize it. Say so rather than
-                    /// show a language that will not happen.
-                    Text("\(LanguageCatalog.name(store.settings.selectedLanguage)) is not in this model, so \(LanguageCatalog.name(store.effectiveLanguage)) is used")
-                        .metaText()
-                }
+                Text("Dictation languages").bodyText()
+                Text(detail).metaText()
             }
         } trailing: {
-            HStack(spacing: 10) {
-                if store.settings.selectedLanguage != "auto" {
-                    Button("Reset") { Task { await store.resetLanguage() } }
-                        .buttonStyle(.quiet)
-                        .disabled(store.isBusy("selected_language"))
-                }
-                Button {
-                    query = ""
-                    open = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Text(LanguageCatalog.name(store.effectiveLanguage))
-                            .font(TypeScale.body(14))
-                            .foregroundStyle(Theme.ink)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.inkTertiary)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.radiusControl)
-                            .strokeBorder(Theme.border, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-                .disabled(store.isBusy("selected_language"))
-                .popover(isPresented: $open, arrowEdge: .bottom) { picker }
+            Button {
+                query = ""
+                open = true
+            } label: {
+                Text(selected.isEmpty ? "Auto detect" : selected.map(LanguageCatalog.name).joined(separator: ", "))
+                    .lineLimit(2)
+                    .frame(maxWidth: 240)
             }
+            .buttonStyle(.secondary)
+            .accessibilityLabel("Choose dictation languages")
+            .disabled(busy)
+            .popover(isPresented: $open, arrowEdge: .bottom) { picker }
         }
     }
 
     private var picker: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
+            if store.detectsLanguage {
+                Toggle("Auto detect any language", isOn: Binding(
+                    get: { selected.isEmpty },
+                    set: { enabled in
+                        if enabled { Task { await store.setDictationLanguages([]) } }
+                    }
+                ))
+                .toggleStyle(.checkbox)
+                .padding(12)
+                .disabled(busy || selected.isEmpty)
+                Hairline()
+            }
             SearchField(prompt: "Search languages", text: $query)
                 .padding(12)
+            Text("Select one or more. The first is your primary language. For cloud dictation, choose one to keep it fixed.")
+                .metaText()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
             Hairline()
             if matches.isEmpty {
-                Text("No languages found")
-                    .metaText()
-                    .padding(20)
+                Text("No languages found").metaText().padding(20)
             } else {
                 ScrollView {
-                    VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(matches) { option in
-                            Button {
-                                open = false
-                                Task { await store.setLanguage(option.code) }
-                            } label: {
-                                HStack {
-                                    Text(option.name).bodyText(14)
-                                    Spacer(minLength: 12)
-                                    if option.code == store.effectiveLanguage {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundStyle(Theme.accent)
-                                    }
+                            Toggle(option.name, isOn: Binding(
+                                get: { selected.contains(option.code) },
+                                set: { _ in
+                                    let next = LanguageCatalog.toggling(option.code, in: selected)
+                                    Task { await store.setDictationLanguages(next) }
                                 }
-                                .padding(.horizontal, 14)
-                                .frame(height: 30)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
+                            ))
+                            .toggleStyle(.checkbox)
+                            .bodyText(14)
+                            .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                            .padding(.horizontal, 14)
+                            .disabled(busy)
                         }
                     }
                     .padding(.vertical, 6)
                 }
                 .frame(maxHeight: 260)
             }
+            Hairline()
+            HStack {
+                ErrorNote(store.error)
+                Spacer()
+                Button("Done") { open = false }.buttonStyle(.quiet)
+            }
+            .padding(12)
         }
-        .frame(width: 260)
+        .frame(width: 320)
         .background(Theme.surface)
     }
 
     private var matches: [LanguageOption] {
         let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let all = store.languageChoices
+        var all = store.languageChoices.filter { $0.code != "auto" }
+        for code in selected where !all.contains(where: { $0.code == code }) {
+            all.append(LanguageOption(code: code, name: LanguageCatalog.name(code)))
+        }
         guard !needle.isEmpty else { return all }
         return all.filter { $0.name.lowercased().contains(needle) || $0.code.hasPrefix(needle) }
     }

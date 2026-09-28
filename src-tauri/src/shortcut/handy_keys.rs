@@ -5,21 +5,28 @@
 //!
 //! ## Architecture
 //!
-//! The implementation uses a dedicated manager thread that owns the `HotkeyManager`:
+//! One event thread owns the `KeyboardListener` and matches its key events
+//! against a registry that callers edit directly:
 //!
 //! ```text
-//! ┌─────────────────┐     commands      ┌──────────────────────┐
-//! │   Main Thread   │ ───────────────▶ │   Manager Thread     │
-//! │                 │   (via channel)   │                      │
-//! │ - register()    │                   │ - owns HotkeyManager │
-//! │ - unregister()  │                   │ - polls for events   │
-//! └─────────────────┘                   │ - dispatches actions │
+//! ┌─────────────────┐   lock registry   ┌──────────────────────┐
+//! │ Callers         │ ────────────────▶ │ Registry             │
+//! │ - register()    │                   │ - bindings, pressed  │
+//! │ - unregister()  │                   │ - blocking set       │
+//! └─────────────────┘                   └──────────────────────┘
+//!                                                  ▲
+//!                                                  │ match each key event
+//!                                       ┌──────────────────────┐
+//!                                       │ Event thread         │
+//!                                       │ - blocks on recv()   │
+//!                                       │ - dispatches actions │
 //!                                       └──────────────────────┘
 //! ```
 //!
-//! This design ensures thread-safety since `HotkeyManager` is only accessed
-//! from a single thread. Commands (register/unregister) are sent via an mpsc
-//! channel and responses are synchronously awaited.
+//! The listener's tap thread parks in its run loop and the event thread
+//! blocks on the listener's channel with no deadline, so an idle keyboard
+//! wakes neither. The event thread releases the registry before dispatching,
+//! so an action may register or unregister shortcuts itself.
 //!
 //! ## Recording Mode
 //!
@@ -27,41 +34,119 @@
 //! polled from a dedicated recording thread. Events are emitted to the frontend
 //! via Tauri's event system.
 
-use handy_keys::{Hotkey, HotkeyId, HotkeyManager, HotkeyState, KeyboardListener};
+use handy_keys::{BlockingHotkeys, Hotkey, KeyEvent, KeyboardListener};
 use log::{debug, error, info};
 use serde::Serialize;
 use specta::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::settings::{self, get_settings, ShortcutBinding};
 
 use super::handler::handle_shortcut_event;
 
-/// Commands that can be sent to the hotkey manager thread
-enum ManagerCommand {
-    Register {
-        binding_id: String,
-        shortcut: String,
-        response: Sender<Result<(), String>>,
-    },
-    Unregister {
-        binding_id: String,
-        response: Sender<Result<(), String>>,
-    },
-    Shutdown,
+/// A registered binding and whether its chord is held right now.
+struct RegisteredHotkey {
+    hotkey: Hotkey,
+    shortcut: String,
+    pressed: bool,
+}
+
+/// Registered bindings, matched against every key event the listener reports.
+///
+/// `blocking` is the set the listener's tap consults to swallow a chord. It
+/// holds exactly the registered hotkeys, so it changes only beside `bindings`.
+struct Registry {
+    bindings: HashMap<String, RegisteredHotkey>,
+    blocking: BlockingHotkeys,
+}
+
+/// A binding whose chord went down or came up.
+struct Transition {
+    binding_id: String,
+    shortcut: String,
+    is_pressed: bool,
+}
+
+impl Registry {
+    /// Refuses a chord that is already registered, even to this binding; a
+    /// binding registered again with a new chord gives up its old one.
+    fn register(&mut self, binding_id: &str, shortcut: &str, hotkey: Hotkey) -> Result<(), String> {
+        if self
+            .bindings
+            .values()
+            .any(|registered| registered.hotkey == hotkey)
+        {
+            return Err(format!("Hotkey already registered: {hotkey}"));
+        }
+        let previous = self.bindings.insert(
+            binding_id.to_string(),
+            RegisteredHotkey {
+                hotkey,
+                shortcut: shortcut.to_string(),
+                pressed: false,
+            },
+        );
+        let mut blocking = lock_recover(&self.blocking);
+        if let Some(previous) = previous {
+            blocking.remove(&previous.hotkey);
+        }
+        blocking.insert(hotkey);
+        Ok(())
+    }
+
+    /// Whether the binding was registered.
+    fn unregister(&mut self, binding_id: &str) -> bool {
+        let Some(registered) = self.bindings.remove(binding_id) else {
+            return false;
+        };
+        lock_recover(&self.blocking).remove(&registered.hotkey);
+        true
+    }
+
+    /// The transitions one key event causes, with the semantics of handy-keys'
+    /// own manager: a chord presses when its key goes down with matching
+    /// modifiers, and releases when its key comes up or, for a modifier event,
+    /// when the held modifiers stop matching. A modifier event that still
+    /// matches (tapping Shift while a Cmd-only chord is held) releases nothing.
+    fn transitions(&mut self, event: &KeyEvent) -> Vec<Transition> {
+        let mut transitions = Vec::new();
+        for (binding_id, registered) in &mut self.bindings {
+            let hotkey = registered.hotkey;
+            let changes = if event.is_key_down {
+                !registered.pressed
+                    && hotkey.key == event.key
+                    && hotkey.modifiers.matches(event.modifiers)
+            } else {
+                registered.pressed
+                    && match event.key {
+                        Some(_) => hotkey.key == event.key,
+                        None => !hotkey.modifiers.matches(event.modifiers),
+                    }
+            };
+            if changes {
+                registered.pressed = event.is_key_down;
+                transitions.push(Transition {
+                    binding_id: binding_id.clone(),
+                    shortcut: registered.shortcut.clone(),
+                    is_pressed: event.is_key_down,
+                });
+            }
+        }
+        transitions
+    }
 }
 
 /// State for the handy-keys shortcut manager
 pub struct HandyKeysState {
-    /// Channel to send commands to the manager thread (wrapped in Mutex for Sync)
-    command_sender: Mutex<Sender<ManagerCommand>>,
-    /// Handle to the manager thread (wrapped in Mutex for Sync, allows proper join on drop)
-    thread_handle: Mutex<Option<JoinHandle<()>>>,
+    /// The bindings the event thread matches, or why the keyboard listener
+    /// could not start (on macOS, without accessibility permission). The event
+    /// thread holds only a weak reference, so dropping the state ends the
+    /// thread at its next key event, which drops the listener.
+    registry: Result<Arc<Mutex<Registry>>, String>,
     /// Recording listener for UI key capture (only active during recording)
     recording_listener: Mutex<Option<KeyboardListener>>,
     /// Flag indicating if we're in recording mode
@@ -89,18 +174,35 @@ pub struct FrontendKeyEvent {
 
 impl HandyKeysState {
     /// Create a new HandyKeysState
+    ///
+    /// A listener that cannot start fails each registration rather than the
+    /// state: an error here makes the caller switch to Tauri shortcuts for
+    /// good, which cannot hold a modifier-only chord once permission arrives.
     pub fn new(app: AppHandle) -> Result<Self, String> {
-        let (cmd_tx, cmd_rx) = mpsc::channel::<ManagerCommand>();
-
-        // Start the manager thread
-        let app_clone = app.clone();
-        let thread_handle = thread::spawn(move || {
-            Self::manager_thread(cmd_rx, app_clone);
-        });
+        let blocking: BlockingHotkeys = Arc::new(Mutex::new(HashSet::new()));
+        let registry = match KeyboardListener::new_with_blocking(Arc::clone(&blocking)) {
+            Ok(listener) => {
+                let registry = Arc::new(Mutex::new(Registry {
+                    bindings: HashMap::new(),
+                    blocking,
+                }));
+                let events = Arc::downgrade(&registry);
+                thread::Builder::new()
+                    .name("sona-shortcut-keys".to_string())
+                    .spawn(move || Self::dispatch_key_events(listener, events, app))
+                    .map_err(|e| format!("Failed to start the shortcut event thread: {e}"))?;
+                info!("handy-keys event thread started");
+                Ok(registry)
+            }
+            Err(e) => {
+                let reason = format!("Failed to create keyboard listener: {e}");
+                error!("{reason}");
+                Err(reason)
+            }
+        };
 
         Ok(Self {
-            command_sender: Mutex::new(cmd_tx),
-            thread_handle: Mutex::new(Some(thread_handle)),
+            registry,
             recording_listener: Mutex::new(None),
             is_recording: AtomicBool::new(false),
             recording_binding_id: Mutex::new(None),
@@ -108,157 +210,59 @@ impl HandyKeysState {
         })
     }
 
-    /// The main manager thread - owns the HotkeyManager and processes commands
-    fn manager_thread(cmd_rx: Receiver<ManagerCommand>, app: AppHandle) {
-        info!("handy-keys manager thread started");
-
-        // Create the HotkeyManager in this thread
-        let manager = match HotkeyManager::new_with_blocking() {
-            Ok(m) => m,
-            Err(e) => {
-                error!("Failed to create HotkeyManager: {}", e);
-                return;
-            }
-        };
-
-        // Maps binding IDs to HotkeyIds and their shortcut labels.
-        let mut binding_to_hotkey: HashMap<String, HotkeyId> = HashMap::new();
-        let mut hotkey_to_binding: HashMap<HotkeyId, (String, String)> = HashMap::new(); // (binding_id, shortcut)
-
-        loop {
-            // Check for hotkey events (non-blocking)
-            while let Some(event) = manager.try_recv() {
-                if let Some((binding_id, shortcut)) = hotkey_to_binding.get(&event.id) {
-                    debug!(
-                        "handy-keys event: binding={}, hotkey={}, state={:?}",
-                        binding_id, shortcut, event.state
-                    );
-                    let is_pressed = event.state == HotkeyState::Pressed;
-                    let _ = handle_shortcut_event(&app, binding_id, shortcut, is_pressed);
-                }
-            }
-
-            // Check for commands (non-blocking with timeout)
-            match cmd_rx.recv_timeout(std::time::Duration::from_millis(10)) {
-                Ok(cmd) => match cmd {
-                    ManagerCommand::Register {
-                        binding_id,
-                        shortcut,
-                        response,
-                    } => {
-                        let result = Self::do_register(
-                            &manager,
-                            &mut binding_to_hotkey,
-                            &mut hotkey_to_binding,
-                            &binding_id,
-                            &shortcut,
-                        );
-                        let _ = response.send(result);
-                    }
-                    ManagerCommand::Unregister {
-                        binding_id,
-                        response,
-                    } => {
-                        let result = Self::do_unregister(
-                            &manager,
-                            &mut binding_to_hotkey,
-                            &mut hotkey_to_binding,
-                            &binding_id,
-                        );
-                        let _ = response.send(result);
-                    }
-                    ManagerCommand::Shutdown => {
-                        info!("handy-keys manager thread shutting down");
-                        break;
-                    }
-                },
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // No command, continue
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    info!("Command channel disconnected, shutting down");
-                    break;
-                }
+    /// Dispatches every chord transition until the state is dropped. `recv`
+    /// has no deadline, so this thread wakes only for a key event.
+    fn dispatch_key_events(
+        listener: KeyboardListener,
+        registry: Weak<Mutex<Registry>>,
+        app: AppHandle,
+    ) {
+        while let Ok(event) = listener.recv() {
+            let Some(registry) = registry.upgrade() else {
+                break;
+            };
+            let transitions = lock_recover(&registry).transitions(&event);
+            drop(registry);
+            for transition in transitions {
+                debug!(
+                    "handy-keys event: binding={}, hotkey={}, pressed={}",
+                    transition.binding_id, transition.shortcut, transition.is_pressed
+                );
+                let _ = handle_shortcut_event(
+                    &app,
+                    &transition.binding_id,
+                    &transition.shortcut,
+                    transition.is_pressed,
+                );
             }
         }
-
-        info!("handy-keys manager thread stopped");
-    }
-
-    /// Register a hotkey
-    fn do_register(
-        manager: &HotkeyManager,
-        binding_to_hotkey: &mut HashMap<String, HotkeyId>,
-        hotkey_to_binding: &mut HashMap<HotkeyId, (String, String)>,
-        binding_id: &str,
-        shortcut: &str,
-    ) -> Result<(), String> {
-        let hotkey: Hotkey = shortcut
-            .parse()
-            .map_err(|e| format!("Failed to parse hotkey '{}': {}", shortcut, e))?;
-
-        let id = manager
-            .register(hotkey)
-            .map_err(|e| format!("Failed to register hotkey: {}", e))?;
-
-        binding_to_hotkey.insert(binding_id.to_string(), id);
-        hotkey_to_binding.insert(id, (binding_id.to_string(), shortcut.to_string()));
-
-        debug!(
-            "Registered handy-keys shortcut: {} -> {:?}",
-            binding_id, hotkey
-        );
-        Ok(())
-    }
-
-    /// Unregister a hotkey
-    fn do_unregister(
-        manager: &HotkeyManager,
-        binding_to_hotkey: &mut HashMap<String, HotkeyId>,
-        hotkey_to_binding: &mut HashMap<HotkeyId, (String, String)>,
-        binding_id: &str,
-    ) -> Result<(), String> {
-        if let Some(id) = binding_to_hotkey.remove(binding_id) {
-            manager
-                .unregister(id)
-                .map_err(|e| format!("Failed to unregister hotkey: {}", e))?;
-            hotkey_to_binding.remove(&id);
-            debug!("Unregistered handy-keys shortcut: {}", binding_id);
-        }
-        Ok(())
+        info!("handy-keys event thread stopped");
     }
 
     /// Register a shortcut binding
     pub fn register(&self, binding: &ShortcutBinding) -> Result<(), String> {
-        let (tx, rx) = mpsc::channel();
-        self.command_sender
-            .lock()
-            .map_err(|_| "Failed to lock command_sender")?
-            .send(ManagerCommand::Register {
-                binding_id: binding.id.clone(),
-                shortcut: binding.current_binding.clone(),
-                response: tx,
-            })
-            .map_err(|_| "Failed to send register command")?;
-
-        rx.recv()
-            .map_err(|_| "Failed to receive register response")?
+        let registry = self.registry.as_ref().map_err(Clone::clone)?;
+        let hotkey: Hotkey = binding.current_binding.parse().map_err(|e| {
+            format!(
+                "Failed to parse hotkey '{}': {}",
+                binding.current_binding, e
+            )
+        })?;
+        lock_recover(registry).register(&binding.id, &binding.current_binding, hotkey)?;
+        debug!(
+            "Registered handy-keys shortcut: {} -> {:?}",
+            binding.id, hotkey
+        );
+        Ok(())
     }
 
     /// Unregister a shortcut binding
     pub fn unregister(&self, binding: &ShortcutBinding) -> Result<(), String> {
-        let (tx, rx) = mpsc::channel();
-        self.command_sender
-            .lock()
-            .map_err(|_| "Failed to lock command_sender")?
-            .send(ManagerCommand::Unregister {
-                binding_id: binding.id.clone(),
-                response: tx,
-            })
-            .map_err(|_| "Failed to send unregister command")?;
-
-        rx.recv()
-            .map_err(|_| "Failed to receive unregister response")?
+        let registry = self.registry.as_ref().map_err(Clone::clone)?;
+        if lock_recover(registry).unregister(&binding.id) {
+            debug!("Unregistered handy-keys shortcut: {}", binding.id);
+        }
+        Ok(())
     }
 
     /// Start recording mode for a specific binding
@@ -366,18 +370,13 @@ impl Drop for HandyKeysState {
         // Signal recording to stop
         self.recording_running.store(false, Ordering::SeqCst);
         self.is_recording.store(false, Ordering::SeqCst);
+    }
+}
 
-        // Send shutdown command
-        if let Ok(sender) = self.command_sender.lock() {
-            let _ = sender.send(ManagerCommand::Shutdown);
-        }
-
-        // Wait for the manager thread to finish
-        if let Ok(mut handle) = self.thread_handle.lock() {
-            if let Some(h) = handle.take() {
-                let _ = h.join();
-            }
-        }
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -561,7 +560,129 @@ pub fn stop_handy_keys_recording(app: AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::FrontendKeyEvent;
+    use super::{lock_recover, FrontendKeyEvent, Registry};
+    use handy_keys::{Hotkey, Key, KeyEvent, Modifiers};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
+
+    fn chord(shortcut: &str) -> Result<Hotkey, String> {
+        shortcut
+            .parse()
+            .map_err(|error| format!("'{shortcut}' is not a chord: {error}"))
+    }
+
+    fn registry(bindings: &[(&str, &str)]) -> Result<Registry, String> {
+        let mut registry = Registry {
+            bindings: HashMap::new(),
+            blocking: Arc::new(Mutex::new(HashSet::new())),
+        };
+        for (binding_id, shortcut) in bindings {
+            registry.register(binding_id, shortcut, chord(shortcut)?)?;
+        }
+        Ok(registry)
+    }
+
+    fn event(modifiers: Modifiers, key: Option<Key>, is_key_down: bool) -> KeyEvent {
+        KeyEvent {
+            modifiers,
+            key,
+            is_key_down,
+            changed_modifier: None,
+        }
+    }
+
+    /// The press (`true`) and release (`false`) transitions each event causes.
+    fn replay(registry: &mut Registry, events: &[KeyEvent]) -> Vec<Vec<bool>> {
+        events
+            .iter()
+            .map(|event| {
+                registry
+                    .transitions(event)
+                    .iter()
+                    .map(|transition| transition.is_pressed)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_held_modifier_chord_survives_a_shift_tap_and_releases_when_lifted() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "option")])?;
+        let transitions = replay(
+            &mut registry,
+            &[
+                event(Modifiers::OPT_LEFT, None, true),
+                event(Modifiers::OPT_LEFT | Modifiers::SHIFT_LEFT, None, true),
+                event(Modifiers::OPT_LEFT, None, false),
+                event(Modifiers::empty(), None, false),
+            ],
+        );
+        assert_eq!(transitions, [vec![true], vec![], vec![], vec![false]]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_chord_presses_once_through_key_repeat_and_releases_on_key_up() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "option+space")])?;
+        let transitions = replay(
+            &mut registry,
+            &[
+                event(Modifiers::OPT_LEFT, None, true),
+                event(Modifiers::OPT_LEFT, Some(Key::Space), true),
+                event(Modifiers::OPT_LEFT, Some(Key::Space), true),
+                event(Modifiers::OPT_LEFT, Some(Key::Space), false),
+            ],
+        );
+        assert_eq!(transitions, [vec![], vec![true], vec![], vec![false]]);
+        Ok(())
+    }
+
+    #[test]
+    fn lifting_the_modifier_first_releases_a_key_chord() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "option+space")])?;
+        let transitions = replay(
+            &mut registry,
+            &[
+                event(Modifiers::OPT_LEFT, Some(Key::Space), true),
+                event(Modifiers::empty(), None, false),
+                event(Modifiers::empty(), Some(Key::Space), false),
+            ],
+        );
+        assert_eq!(transitions, [vec![true], vec![false], vec![]]);
+        Ok(())
+    }
+
+    #[test]
+    fn the_tap_blocks_exactly_the_registered_chords() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "option+space")])?;
+
+        registry.register("transcribe", "option+k", chord("option+k")?)?;
+        assert_eq!(
+            *lock_recover(&registry.blocking),
+            HashSet::from([chord("option+k")?]),
+            "a re-registered binding moves its block to the new chord"
+        );
+
+        assert!(registry.unregister("transcribe"));
+        assert!(lock_recover(&registry.blocking).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_chord_another_binding_holds_is_refused_and_keeps_firing_the_first() -> Result<(), String> {
+        let mut registry = registry(&[("transcribe", "option+space")])?;
+
+        let refused = registry.register("cancel", "option+space", chord("option+space")?);
+        assert!(refused.is_err(), "the duplicate chord was accepted");
+
+        let fired = registry.transitions(&event(Modifiers::OPT_LEFT, Some(Key::Space), true));
+        let fired: Vec<&str> = fired
+            .iter()
+            .map(|transition| transition.binding_id.as_str())
+            .collect();
+        assert_eq!(fired, ["transcribe"]);
+        Ok(())
+    }
 
     #[test]
     fn frontend_key_event_preserves_the_hotkey_string_wire_field() -> Result<(), String> {

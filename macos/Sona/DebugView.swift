@@ -319,6 +319,8 @@ private struct LogViewerRow: View {
                 )
             }
         }
+        // The tail runs while this row is on screen and stops when it leaves.
+        .task { await store.followLogs() }
     }
 }
 

@@ -342,6 +342,19 @@ fn get_mute() -> Option<bool> {
     None
 }
 
+/// Whether something other than Sona is playing sound right now, or `None`
+/// where that cannot be told. Only macOS answers, through CoreAudio; the mute
+/// on the other platforms goes ahead as it always has.
+#[cfg(target_os = "macos")]
+fn output_playing_elsewhere() -> Option<bool> {
+    crate::audio_toolkit::audio::core_audio::other_process_is_playing()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn output_playing_elsewhere() -> Option<bool> {
+    None
+}
+
 /// Restores the system mute state after our forced mute, given the state
 /// captured just before we muted. We only ever need to unmute — and only when
 /// the system was NOT already muted beforehand. If the prior state was muted,
@@ -465,6 +478,7 @@ fn create_audio_recorder(
                 router.feed(frame);
             }
         });
+    recorder.set_quiet_speech_enabled(get_settings(app_handle).quiet_speech_enabled);
 
     Ok(recorder)
 }
@@ -556,6 +570,25 @@ impl MicrophoneCaptureLease {
 
     fn is_active(&self) -> bool {
         lock_recover(&self.token).is_some()
+    }
+
+    fn holder(&self) -> Option<CaptureOwner> {
+        let held = *lock_recover(&self.token);
+        held.map(|token| token.owner)
+    }
+
+    /// Hands a held lease to another owner under a fresh generation, so the old
+    /// token can no longer release it. False when `token` is not the holder.
+    fn transfer(&self, token: CaptureLeaseToken, owner: CaptureOwner) -> bool {
+        let mut held = lock_recover(&self.token);
+        if *held != Some(token) {
+            return false;
+        }
+        *held = Some(CaptureLeaseToken {
+            owner,
+            generation: self.next_generation.fetch_add(1, Ordering::AcqRel) + 1,
+        });
+        true
     }
 }
 
@@ -674,6 +707,14 @@ impl AudioRecordingManager {
         }
 
         Ok(manager)
+    }
+
+    /// Applies gain to dictation's resampled frames only, including a recorder
+    /// whose microphone is already open for a meeting or the idle window.
+    pub fn set_quiet_speech_enabled(&self, enabled: bool) {
+        if let Some(recorder) = lock_recover(&self.recorder).as_ref() {
+            recorder.set_quiet_speech_enabled(enabled);
+        }
     }
 
     /* ---------- helper methods --------------------------------------------- */
@@ -877,8 +918,30 @@ impl AudioRecordingManager {
         self.capture_lease.is_active()
     }
 
+    /// Whether the open stream is still delivering, so a second capture can
+    /// share it. A stream that needs a reopen cannot be shared: the reopen
+    /// would close it under its owner.
+    fn stream_is_running(&self) -> bool {
+        let is_open = *lock_recover(&self.is_open);
+        is_open
+            && lock_recover(&self.recorder)
+                .as_ref()
+                .is_some_and(|rec| !rec.needs_reopen())
+    }
+
     fn release_meeting_microphone(&self, lease: CaptureLeaseToken) {
-        if !self.capture_lease.release(lease) {
+        // A dictation that started on the meeting's stream keeps the
+        // microphone: the lease passes to it, and its own return to idle
+        // releases the lease and closes the stream. The state lock orders this
+        // against a dictation starting or stopping.
+        let state = lock_recover(&self.state);
+        if !matches!(*state, RecordingState::Idle) {
+            let _ = self.capture_lease.transfer(lease, CaptureOwner::Dictation);
+            return;
+        }
+        let released = self.capture_lease.release(lease);
+        drop(state);
+        if !released {
             return;
         }
         if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
@@ -903,12 +966,25 @@ impl AudioRecordingManager {
 
     /* ---------- microphone life-cycle -------------------------------------- */
 
-    /// Applies mute if mute_while_recording is enabled and stream is open.
-    /// Snapshots the system's prior mute state first so `remove_mute` can
+    /// Applies mute for the still-current recording if mute_while_recording
+    /// is enabled, something other than Sona is playing, and the stream is
+    /// open. Snapshots the system's prior mute state so `remove_mute` can
     /// restore it instead of unconditionally unmuting.
-    pub fn apply_mute(&self) {
+    pub fn apply_mute(&self, generation: u64) {
         let settings = get_settings(&self.app_handle);
         if !settings.mute_while_recording {
+            return;
+        }
+        // A dictation riding a meeting's stream must not silence the call the
+        // meeting is recording.
+        if self.capture_lease.holder() == Some(CaptureOwner::Meeting) {
+            return;
+        }
+        // Nothing playing means nothing to mute, and a mute then would only
+        // silence a notification that arrives mid-dictation. When the check
+        // itself is unavailable the mute goes ahead, as it always did.
+        if output_playing_elsewhere() == Some(false) {
+            debug!("Mute skipped: nothing is playing");
             return;
         }
 
@@ -922,7 +998,15 @@ impl AudioRecordingManager {
             return;
         }
         if *is_open {
-            mute_guard.prev_muted = get_mute();
+            let prev_muted = get_mute();
+            // Stop/cancel invalidate first, then take mute_state to restore.
+            // Check under that same lock after the slow playback/mute reads:
+            // either they already ended this generation, or their restore
+            // will follow this mute. A late start cue cannot mute afterwards.
+            if !self.is_recording_readiness_current(generation) {
+                return;
+            }
+            mute_guard.prev_muted = prev_muted;
             set_mute(true);
             mute_guard.did_mute = true;
             debug!("Mute applied (prev_muted={:?})", mute_guard.prev_muted);
@@ -1276,16 +1360,28 @@ impl AudioRecordingManager {
         if !matches!(*state, RecordingState::Idle) {
             return Err("Already recording".to_string());
         }
-        let Some(token) = self.capture_lease.try_acquire(CaptureOwner::Dictation) else {
-            return Err("Microphone is leased by an active capture".to_string());
+        // A dictation during a meeting shares the meeting's open stream: the
+        // meeting keeps its lease and every packet, and the recorder hands the
+        // dictation a copy of the same samples. If the meeting ends first, its
+        // release passes the lease to this dictation.
+        let token = match self.capture_lease.try_acquire(CaptureOwner::Dictation) {
+            Some(token) => Some(token),
+            None if self.capture_lease.holder() == Some(CaptureOwner::Meeting)
+                && self.stream_is_running() =>
+            {
+                None
+            }
+            None => return Err("Microphone is leased by an active capture".to_string()),
         };
 
         self.close_generation.fetch_add(1, Ordering::SeqCst);
-        if let Err(error) = self.start_microphone_stream() {
-            let message = error.to_string();
-            self.capture_lease.release(token);
-            error!("Failed to open microphone stream: {message}");
-            return Err(message);
+        if let Some(token) = token {
+            if let Err(error) = self.start_microphone_stream() {
+                let message = error.to_string();
+                self.capture_lease.release(token);
+                error!("Failed to open microphone stream: {message}");
+                return Err(message);
+            }
         }
 
         let result = lock_recover(&self.recorder)
@@ -1299,7 +1395,9 @@ impl AudioRecordingManager {
         let receiver = match result {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.capture_lease.release(token);
+                if let Some(token) = token {
+                    self.capture_lease.release(token);
+                }
                 return Err(error);
             }
         };
@@ -1551,6 +1649,12 @@ impl AudioRecordingManager {
                 }
 
                 *lock_recover(&self.is_recording) = false;
+
+                // A cancelled dictation ends the mute like a finished one does.
+                // Only a stream close restored it before, so with the microphone
+                // held open (always-on, lazy close, a meeting capture) the Mac
+                // stayed silent until the stream finally closed.
+                self.remove_mute();
 
                 // In on-demand mode, close the mic (lazily if the setting is enabled)
                 if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
@@ -1818,6 +1922,32 @@ mod microphone_capture_lease_tests {
         assert!(lease.release_owner(CaptureOwner::Meeting));
         assert!(!lease.is_active());
         assert!(!lease.release_owner(CaptureOwner::Meeting));
+    }
+
+    /// A meeting that ends while a dictation rides its stream hands the lease to
+    /// the dictation. If the meeting's old token could still release it, the
+    /// dictation would lose the microphone mid-sentence; if the dictation's
+    /// return to idle could not release it, the microphone would stay leased
+    /// with nobody left to free it.
+    #[test]
+    fn a_transferred_lease_answers_only_to_its_new_owner() {
+        let lease = MicrophoneCaptureLease::new();
+        let meeting = lease
+            .try_acquire(CaptureOwner::Meeting)
+            .expect("meeting acquires the microphone");
+
+        assert!(lease.transfer(meeting, CaptureOwner::Dictation));
+        assert_eq!(lease.holder(), Some(CaptureOwner::Dictation));
+        assert!(!lease.owns(meeting));
+        assert!(!lease.release(meeting));
+        assert!(
+            !lease.transfer(meeting, CaptureOwner::Native),
+            "a stale token handed the lease on"
+        );
+        assert!(lease.try_acquire(CaptureOwner::Meeting).is_none());
+
+        assert!(lease.release_owner(CaptureOwner::Dictation));
+        assert_eq!(lease.holder(), None);
     }
 }
 

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import UniformTypeIdentifiers
 
 // MARK: - What the screens show
 
@@ -118,6 +119,9 @@ private struct NotesDraft {
     let sessionId: MeetingSessionId
     let body: String
     let template: MeetingNotesTemplate
+    /// One of the person's own templates, which is then the meeting's whole
+    /// choice; `template` rides along as the fallback for when it is gone.
+    let customTemplateId: String?
     let expectedNoteRevision: Int
 }
 
@@ -155,37 +159,6 @@ extension MeetingProcessingStatus {
         switch failure {
         case .localModelUnavailable, .remoteUnavailable: true
         default: false
-        }
-    }
-
-    /// The one line under a failure that a setting can fix: what to check,
-    /// where. The engine row under Settings says which condition it is in —
-    /// Apple Intelligence off or still preparing, an endpoint without its
-    /// context window, a model the endpoint does not serve — so the page
-    /// sends the reader there instead of guessing which one it was.
-    var settingsAdvice: String? {
-        switch failure {
-        case .localModelUnavailable:
-            "The engine row under Settings › Meetings says what it is waiting on."
-        case .remoteUnavailable:
-            "Check the server under Settings › Meetings, or turn off writing on your server to use this Mac."
-        default:
-            nil
-        }
-    }
-
-    /// The sentence under the reason: why nothing was written.
-    var explanation: String {
-        switch self {
-        case .pending, .running:
-            "Sona is writing the notes for this meeting. This page fills in when it lands."
-        case .succeeded:
-            "Nothing was generated for this meeting."
-        case .cancelled:
-            "Processing was cancelled, so nothing was written."
-        case let .failed(_, cause):
-            cause.map { "Nothing was written because \($0.label)." }
-                ?? "Sona could not write the notes for this meeting."
         }
     }
 }
@@ -325,6 +298,28 @@ final class MeetingsStore {
     private(set) var trash: [MeetingTrashEntry] = []
     private(set) var trashLoading = false
     private(set) var restoring: MeetingDeletionJobId?
+    private(set) var discarding: MeetingDeletionJobId?
+
+    // MARK: Folders
+
+    /// Every folder by name. A folder holds references, so the same meeting
+    /// can sit in several.
+    private(set) var folders: [MeetingFolder] = []
+    private(set) var foldersLoading = true
+    private(set) var foldersError: String?
+    /// Why the last folder write did not land, for the sheet that made it.
+    private(set) var folderError: String?
+    private(set) var folderBusy = false
+    /// The folder the list is narrowed to; nil lists every meeting.
+    private(set) var folderId: MeetingFolderId?
+    /// The meeting the filing sheet is open for.
+    private(set) var filing: MeetingFiling?
+    /// Saved prompts written about a meeting: the only kind a folder runs.
+    private(set) var meetingPrompts: [SavedPrompt] = []
+    private(set) var meetingPromptsLoading = false
+    private(set) var meetingPromptsError: String?
+    /// The revision the next folder write carries.
+    @ObservationIgnored private var foldersRevision = 0
 
     // MARK: The open meeting
 
@@ -416,6 +411,7 @@ final class MeetingsStore {
                 self.closeReview()
             }
             self.reloadListSoon()
+            Task { await self.loadFolders() }
         }
         // A preflight is the live store's gate, not a page to read; opening it
         // here would put an empty review in front of the consent.
@@ -434,10 +430,11 @@ final class MeetingsStore {
         }
     }
 
-    /// The first load: a page of meetings and the trend over them.
+    /// The first load: a page of meetings, the trend over them, and the folders.
     func start() async {
         await loadPage()
         await loadTrend()
+        await loadFolders()
     }
 
     // MARK: - Events
@@ -544,11 +541,14 @@ final class MeetingsStore {
         }
     }
 
-    /// The line where the list would be: nothing recorded, or nothing matching.
+    /// The line where the list would be: nothing recorded, nothing matching,
+    /// or a folder with nothing in it.
     var emptyLine: String {
-        committedQuery.isEmpty
-            ? "No meetings yet. Record one and it lands here."
-            : "No meetings match “\(committedQuery)”."
+        if !committedQuery.isEmpty { return "No meetings match “\(committedQuery)”." }
+        if let folder = chosenFolder {
+            return "Nothing in “\(folder.name)” yet. Add a meeting from its menu."
+        }
+        return "No meetings yet. Record one and it lands here."
     }
 
     private func loadPage() async {
@@ -562,7 +562,8 @@ final class MeetingsStore {
                     limit: MeetingsStore.pageSize,
                     titleQuery: committedQuery,
                     status: status,
-                    window: window
+                    window: window,
+                    folderId: folderId
                 )
             )
             entries = page.entries
@@ -614,14 +615,35 @@ final class MeetingsStore {
 
     func restore(_ entry: MeetingTrashEntry) {
         Task {
+            guard restoring == nil, discarding == nil else { return }
+            error = nil
             restoring = entry.jobId
             defer { restoring = nil }
             do {
                 let restored: MeetingSessionSnapshot = try await core.request(
-                    "meeting_trash_restore", MeetingRequest.trashRestore(entry.jobId))
+                    "meeting_trash_restore", MeetingRequest.trashJob(entry.jobId))
                 notice = "“\(restored.title)” is back."
                 await loadTrash()
                 await loadPage()
+                await loadFolders()
+            } catch {
+                self.error = reason(error)
+            }
+        }
+    }
+
+    /// Remove one deleted meeting now instead of when its 30 days are up.
+    /// There is no way back from this one.
+    func deleteForever(_ entry: MeetingTrashEntry) {
+        Task {
+            guard restoring == nil, discarding == nil else { return }
+            error = nil
+            discarding = entry.jobId
+            defer { discarding = nil }
+            do {
+                try await core.request("meeting_trash_delete_forever", MeetingRequest.trashJob(entry.jobId))
+                notice = "“\(entry.title)” is gone for good."
+                await loadTrash()
             } catch {
                 self.error = reason(error)
             }
@@ -642,11 +664,211 @@ final class MeetingsStore {
                 self.receive(result.receipt)
                 if result.removed {
                     if sessionId == self.openSessionId { self.closeReview() }
-                    self.notice = "Deleted. It waits in the trash for a week."
+                    self.notice = "Deleted. It waits in the trash for 30 days."
                 }
                 await self.loadPage()
+                await self.loadFolders()
             }
         }
+    }
+
+    // MARK: - Folders
+
+    func loadFolders() async {
+        do {
+            let list: MeetingFolderList = try await core.request("meeting_folder_list")
+            apply(list)
+            foldersError = nil
+        } catch {
+            foldersError = reason(error)
+        }
+        foldersLoading = false
+    }
+
+    func retryFolders() {
+        foldersLoading = true
+        Task { await loadFolders() }
+    }
+
+    /// A folder list the core answered with. A chosen folder that is gone
+    /// hands the list back to every meeting.
+    private func apply(_ list: MeetingFolderList) {
+        folders = list.folders
+        foldersRevision = list.revision
+        guard let folderId, !list.folders.contains(where: { $0.folderId == folderId }) else { return }
+        self.folderId = nil
+        cursors = []
+        Task { await loadPage() }
+    }
+
+    var chosenFolder: MeetingFolder? {
+        folderId.flatMap { chosen in folders.first { $0.folderId == chosen } }
+    }
+
+    /// Narrow the list to one folder's meetings, or nil for every meeting.
+    func choose(folder: MeetingFolderId?) {
+        guard folder != folderId else { return }
+        folderId = folder
+        cursors = []
+        Task { await loadPage() }
+    }
+
+    /// Why a name cannot be a folder's, said before the core is asked: the
+    /// core holds a name to 1 through 80 characters once trimmed, and to one
+    /// no other folder has, ignoring case. `except` is the folder renamed.
+    func folderNameProblem(_ raw: String, except: MeetingFolderId? = nil) -> String? {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "Give the folder a name." }
+        if name.unicodeScalars.count > MeetingFolderLimit.nameCharacters {
+            return "Keep the name to \(MeetingFolderLimit.nameCharacters) characters."
+        }
+        if name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            return "Use a name without tabs, line breaks, or control characters."
+        }
+        let taken = folders.contains {
+            $0.folderId != except && $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }
+        return taken ? "Another folder has that name." : nil
+    }
+
+    func clearFolderError() {
+        folderError = nil
+    }
+
+    /// Make a folder. Answers with it, so the sheet that asked can close or
+    /// file a meeting in it.
+    func createFolder(named raw: String) async -> MeetingFolder? {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard await writeFolders(
+            "meeting_folder_create", MeetingRequest.folderCreate(name: name, revision: foldersRevision))
+        else { return nil }
+        return folders.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    func renameFolder(_ folder: MeetingFolder, to raw: String) async -> Bool {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await writeFolders(
+            "meeting_folder_rename",
+            MeetingRequest.folderRename(folder.folderId, name: name, revision: foldersRevision))
+    }
+
+    /// Delete one folder. The meetings in it stay where they were.
+    func deleteFolder(_ folder: MeetingFolder) {
+        Task {
+            let deleted = await writeFolders(
+                "meeting_folder_delete", MeetingRequest.folderDelete(folder.folderId, revision: foldersRevision))
+            if deleted {
+                notice = "Deleted the folder “\(folder.name)”. Its meetings stay."
+            }
+        }
+    }
+
+    /// The template and the saved prompts a meeting filed here gets, replaced
+    /// together.
+    func setFolderDefaults(_ folder: MeetingFolder, template: MeetingNotesTemplate?, promptIds: [String]) async -> Bool {
+        await writeFolders(
+            "meeting_folder_set_defaults",
+            MeetingRequest.folderDefaults(
+                folder.folderId, template: template, promptIds: promptIds, revision: foldersRevision))
+    }
+
+    /// The saved prompts a folder can run. A prompt about a person or a
+    /// series is left out: the core refuses one on a folder.
+    func loadMeetingPrompts() async {
+        meetingPromptsLoading = true
+        defer { meetingPromptsLoading = false }
+        do {
+            let list: SavedPromptList = try await core.request("saved_prompt_list")
+            meetingPrompts = list.prompts.filter { $0.target == .meeting }
+            meetingPromptsError = nil
+        } catch {
+            meetingPromptsError = reason(error)
+        }
+    }
+
+    /// One folder write. The list it answers with replaces the one here,
+    /// refused or not, so the next write carries the revision the core is
+    /// on.
+    private func writeFolders(_ command: String, _ args: [String: JSONValue]) async -> Bool {
+        guard !folderBusy else { return false }
+        folderBusy = true
+        defer { folderBusy = false }
+        do {
+            let result: MeetingFolderMutationResult = try await core.request(command, args)
+            apply(result.folders)
+            if let sessionId = filing?.sessionId { await loadFiling(sessionId) }
+            guard result.receipt.result == .committed else {
+                folderError = result.receipt.reasonCodes.contains(.staleRevision)
+                    ? "Your folders changed in another window. Sona read them again, so try once more."
+                    : result.receipt.refusal
+                return false
+            }
+            folderError = nil
+            return true
+        } catch {
+            folderError = reason(error)
+            await loadFolders()
+            if let sessionId = filing?.sessionId { await loadFiling(sessionId) }
+            return false
+        }
+    }
+
+    // MARK: - Filing one meeting
+
+    /// Open the filing sheet for one meeting and read which folders hold it.
+    func openFiling(_ sessionId: MeetingSessionId, title: String) {
+        filing = MeetingFiling(sessionId: sessionId, title: title)
+        folderError = nil
+        Task {
+            await loadFolders()
+            await loadFiling(sessionId)
+        }
+    }
+
+    func closeFiling() {
+        filing = nil
+        folderError = nil
+    }
+
+    func retryFiling() {
+        guard let sessionId = filing?.sessionId else { return }
+        filing?.error = nil
+        Task { await loadFiling(sessionId) }
+    }
+
+    private func loadFiling(_ sessionId: MeetingSessionId) async {
+        do {
+            let ids: [MeetingFolderId] = try await core.request(
+                "meeting_folders_for_session", MeetingRequest.session(sessionId))
+            guard filing?.sessionId == sessionId else { return }
+            filing?.folderIds = Set(ids)
+            filing?.error = nil
+        } catch {
+            guard filing?.sessionId == sessionId else { return }
+            filing?.error = reason(error)
+        }
+    }
+
+    /// File the meeting the sheet is open for in one folder, or take it out.
+    func setFiled(_ folder: MeetingFolder, _ filed: Bool) {
+        Task { await file(folder, filed) }
+    }
+
+    /// Make a folder from the filing sheet and file the meeting in it.
+    func createFolderAndFile(named name: String) async -> Bool {
+        guard filing?.folderIds != nil, let folder = await createFolder(named: name) else { return false }
+        return await file(folder, true)
+    }
+
+    @discardableResult
+    private func file(_ folder: MeetingFolder, _ filed: Bool) async -> Bool {
+        guard let sessionId = filing?.sessionId, filing?.folderIds != nil else { return false }
+        let args = MeetingRequest.folderMembership(folder.folderId, sessionId: sessionId, revision: foldersRevision)
+        let written = await writeFolders(
+            filed ? "meeting_folder_add_meeting" : "meeting_folder_remove_meeting", args)
+        guard written else { return false }
+        if folderId == folder.folderId { await loadPage() }
+        return true
     }
 
     // MARK: - Exporting
@@ -689,6 +911,24 @@ final class MeetingsStore {
 
     func dismissSavedLedger() {
         savedLedgerPath = nil
+    }
+
+    /// Every meeting as one CSV, one row each. The save panel comes first,
+    /// so a person who changes their mind costs no export; then the core
+    /// writes the rows and the file lands where they chose, the same way the
+    /// vocabulary exports.
+    func exportAllCsv() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = "sona-meetings.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            await act("Exporting") {
+                let csv: String = try await self.core.request("meeting_export_all_csv")
+                try csv.write(to: url, atomically: true, encoding: .utf8)
+                self.notice = "Every meeting is in \(url.lastPathComponent)."
+            }
+        }
     }
 
     // MARK: - Opening one meeting
@@ -768,6 +1008,12 @@ final class MeetingsStore {
                 "meeting_get", MeetingRequest.session(sessionId))
             guard isOpen(sessionId) else { return }
             snapshot = next
+            if next.session.transcriptDeleted {
+                transcriptTask?.cancel()
+                transcriptQuery = ""
+                searchHits = nil
+                jump = nil
+            }
             reviewFailure = nil
             settleTab(next)
             await loadAnalytics(next)
@@ -928,7 +1174,7 @@ final class MeetingsStore {
         searchHits = nil
         transcriptTask?.cancel()
         let needle = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !needle.isEmpty, let sessionId = openSessionId else { return }
+        guard !transcriptDeleted, !needle.isEmpty, let sessionId = openSessionId else { return }
         transcriptTask = Task { [weak self] in
             try? await Task.sleep(for: MeetingsStore.searchSettle)
             guard !Task.isCancelled, let self else { return }
@@ -948,6 +1194,7 @@ final class MeetingsStore {
     /// A citation press: the transcript tab, the search cleared, and the
     /// segment scrolled to.
     func jumpTo(_ segmentId: TranscriptSegmentId) {
+        guard canJumpTo(segmentId) else { return }
         chosenTab = .transcript
         tab = .transcript
         transcriptQuery = ""
@@ -960,11 +1207,22 @@ final class MeetingsStore {
         jump = nil
     }
 
+    var transcriptDeleted: Bool { snapshot?.session.transcriptDeleted ?? false }
+
+    func canJumpTo(_ segmentId: TranscriptSegmentId) -> Bool {
+        !transcriptDeleted && (snapshot?.transcript.contains { $0.base.segmentId == segmentId } ?? false)
+    }
+
+    func citationAction(_ segmentId: TranscriptSegmentId) -> (() -> Void)? {
+        guard canJumpTo(segmentId) else { return nil }
+        return { [weak self] in self?.jumpTo(segmentId) }
+    }
+
     // MARK: - Editing what the core wrote
 
     var editable: Bool { snapshot?.session.allows(.edit) ?? false }
     var busy: Bool { pending != nil }
-    var canRegenerate: Bool { snapshot?.session.allows(.regenerate) ?? false }
+    var canRegenerate: Bool { !transcriptDeleted && (snapshot?.session.allows(.regenerate) ?? false) }
     var canExport: Bool { (snapshot?.canExport ?? false) && (snapshot?.session.allows(.export) ?? false) }
     var canDelete: Bool { snapshot?.session.allows(.delete) ?? false }
     var canCancelRemote: Bool {
@@ -1161,21 +1419,27 @@ final class MeetingsStore {
 
     var trackers: [MeetingTrackerResult] { analytics?.analytics.trackers ?? [] }
 
-    /// "Ada 62% · Bo 31%": the two loudest, the way the strip's own band
-    /// summarises itself.
-    var talkLeaders: String {
-        guard let talk else { return "" }
-        return talk.speakers
+    /// The voices that said something, loudest first: a thin bar each.
+    var talkShares: [SpeakerTalkShare] {
+        (talk?.speakers ?? [])
+            .filter { $0.turnCount > 0 }
             .sorted { $0.sharePermille > $1.sharePermille }
-            .prefix(2)
-            .map { "\(speakerName($0.speakerId)) \($0.sharePermille.meetingTalkShare)" }
-            .joined(separator: " · ")
     }
 
     /// `formatPatience`: milliseconds under a second, one decimal above it.
-    var patience: String {
-        guard let gap = talk?.medianSwitchGapMs else { return "—" }
+    /// A room of one has no switch to wait through, so it reads nothing.
+    var patience: String? {
+        guard talkShares.count > 1, let gap = talk?.medianSwitchGapMs else { return nil }
         return gap < 1_000 ? "\(gap)ms" : String(format: "%.1fs", Double(gap) / 1_000)
+    }
+
+    /// How often the room changed hands, while two voices each hold at least
+    /// one turn in twenty. Below that one side is listening, and a count of
+    /// handovers to a listener says nothing.
+    var handovers: Int? {
+        guard let talk, talk.interactionCount > 0 else { return nil }
+        let talkers = talk.speakers.filter { $0.turnCount > 0 && $0.turnCount * 20 >= talk.turnCount }
+        return talkers.count > 1 ? talk.interactionCount : nil
     }
 
     // MARK: - Loops and commitments
@@ -1283,7 +1547,7 @@ final class MeetingsStore {
         guard let sessionId = openSessionId, let notes = userNotes else { return nil }
         return NotesDraft(
             sessionId: sessionId, body: notesBody, template: notes.template,
-            expectedNoteRevision: savedNoteRevision)
+            customTemplateId: notes.customTemplateId, expectedNoteRevision: savedNoteRevision)
     }
 
     /// Autosave, 1.2 seconds after the last keystroke.
@@ -1310,13 +1574,23 @@ final class MeetingsStore {
         Task { await persist(draft) }
     }
 
-    func choose(template: MeetingNotesTemplate) {
-        guard let notes = userNotes, template != notes.template, let sessionId = openSessionId else { return }
-        notesTask?.cancel()
+    /// The meeting's own template: a built-in or one of the person's own.
+    /// Picking one rewrites the notes with it while the meeting can still be
+    /// rewritten, which is what choosing a template is for; a meeting that
+    /// cannot be rewritten only remembers the choice.
+    func choose(template choice: MeetingTemplateChoice<MeetingNotesTemplate>) {
+        guard let notes = userNotes, let sessionId = openSessionId,
+              choice != MeetingTemplateChoice(builtIn: notes.template, customTemplateId: notes.customTemplateId)
+        else { return }
         let draft = NotesDraft(
-            sessionId: sessionId, body: notesBody, template: template,
-            expectedNoteRevision: savedNoteRevision)
-        Task { await persist(draft) }
+            sessionId: sessionId, body: notesBody, template: choice.builtIn ?? notes.template,
+            customTemplateId: choice.customTemplateId, expectedNoteRevision: savedNoteRevision)
+        if canRegenerate {
+            rewrite(draft)
+        } else {
+            notesTask?.cancel()
+            Task { await persist(draft) }
+        }
     }
 
     /// One save, addressed to the meeting the draft names. The editor only
@@ -1331,7 +1605,7 @@ final class MeetingsStore {
                 "save_meeting_user_notes",
                 MeetingRequest.userNotesSave(
                     draft.sessionId, body: draft.body, template: draft.template,
-                    expectedNoteRevision: draft.expectedNoteRevision)
+                    customTemplateId: draft.customTemplateId, expectedNoteRevision: draft.expectedNoteRevision)
             )
             guard isOpen(draft.sessionId) else { return saved }
             savedNoteRevision = saved.revision
@@ -1362,7 +1636,14 @@ final class MeetingsStore {
     /// a rewrite that fails must not leave the next keystroke's save
     /// refused as stale.
     func reenhance() {
-        guard snapshot?.session != nil, let draft = pendingDraft else { return }
+        guard let draft = pendingDraft else { return }
+        rewrite(draft)
+    }
+
+    /// Saves `draft`, then writes the notes again from it: the words and the
+    /// template it names are what the model reads.
+    private func rewrite(_ draft: NotesDraft) {
+        guard snapshot?.session != nil else { return }
         notesTask?.cancel()
         Task {
             enhancing = true
@@ -1409,6 +1690,7 @@ final class MeetingsStore {
         guard let sessionId = openSessionId else { return }
         followUpOpen = true
         followUp = nil
+        error = nil
         Task {
             drafting = true
             defer { drafting = false }
@@ -1433,32 +1715,44 @@ final class MeetingsStore {
         notice = "The draft is on the clipboard."
     }
 
-    /// Hand the draft to the mail client. Over the URL bound the core answers
-    /// `clipboard`, which means the body goes on the clipboard and the message
-    /// opens empty with a note saying so.
+    /// With "Open drafts in Mail" on, Mail gets the complete draft in a
+    /// visible compose window. Otherwise the default mail app opens from a
+    /// mailto link, and a draft too long for the link goes on the clipboard.
+    /// Nothing is ever sent.
     func mailFollowUp() {
-        guard let draft = followUp else { return }
-        let body = draft.body
+        guard let draft = followUp, !draft.body.isEmpty, pending == nil else { return }
+        pending = "Opening Mail"
+        error = nil
         Task {
+            defer { pending = nil }
             do {
+                let preferences: MeetingPrepPreferences = try await core.request("meeting_prep_preferences_get")
+                if preferences.mailComposeEnabled {
+                    let mail: MeetingMailContext = try await core.request(
+                        "meeting_follow_up_compose",
+                        ["sessionId": JSONValue.string(draft.sessionId), "body": .string(draft.body)])
+                    guard mail.state == .ready else {
+                        error = mail.state.detail
+                        return
+                    }
+                    followUpOpen = false
+                    notice = "Mail is open with the full draft. Review it before sending."
+                    return
+                }
                 let mail: MeetingFollowUpMail = try await core.request(
                     "meeting_follow_up_mail",
                     MeetingRequest.followUpMail(
-                        draft.sessionId, body: body,
-                        overBoundNote: "The draft is on your clipboard: paste it here.")
-                )
-                if mail.body == .clipboard {
-                    copy(body)
-                }
-                guard let url = URL(string: mail.url) else {
-                    error = "The core answered with a mail address Sona cannot open."
+                        draft.sessionId, body: draft.body,
+                        overBoundNote: "The follow-up is on the clipboard. Paste it here."))
+                if mail.body == .clipboard { copy(draft.body) }
+                guard let url = URL(string: mail.url), NSWorkspace.shared.open(url) else {
+                    error = "No mail app opened. Copy the draft instead."
                     return
                 }
-                NSWorkspace.shared.open(url)
                 followUpOpen = false
                 notice = mail.body == .clipboard
-                    ? "Mail is open and the draft is on your clipboard."
-                    : "Mail is open with the draft in it."
+                    ? "The draft is on the clipboard. Paste it into the new email."
+                    : "Your mail app is open with the draft. Review it before sending."
             } catch {
                 self.error = reason(error)
             }
@@ -1509,4 +1803,13 @@ final class MeetingsStore {
         guard let failure = error as? CoreError else { return error.localizedDescription }
         return failure.remote(as: MeetingCommandError.self)?.label ?? failure.localizedDescription
     }
+}
+
+/// The meeting the filing sheet is open for, and the folders it sits in once
+/// they are read. Neither set nor error is the read still running.
+struct MeetingFiling: Equatable {
+    let sessionId: MeetingSessionId
+    let title: String
+    var folderIds: Set<MeetingFolderId>?
+    var error: String?
 }

@@ -310,6 +310,7 @@ impl MeetingStore {
         speaker_id: SpeakerId,
     ) -> Result<VoiceEnrollmentEvidence, StoreError> {
         let connection = self.connection()?;
+        super::transcript_retention::require_retained_transcript_in(&connection, session_id)?;
         let mut statement = connection.prepare(
             "SELECT evidence.generation_id, evidence.track_id,
                     evidence.start_offset_ns, evidence.end_offset_ns
@@ -703,6 +704,12 @@ impl MeetingStore {
     }
 
     /// Commit a successful matcher decision only if neither side has changed.
+    ///
+    /// A speaker still carrying the label diarization gave it takes the
+    /// matched person's name and a suggested link to them, in the same
+    /// transaction as the match, so the transcript says who spoke and the
+    /// person's page lists the meeting. A name somebody typed is theirs: the
+    /// match is kept and the name is left alone.
     pub(crate) fn commit_successful_voice_match(
         &self,
         session_id: MeetingSessionId,
@@ -714,7 +721,8 @@ impl MeetingStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_voice_people_revision_in(&transaction, matched.people_revision)?;
-        let speaker_revision = active_speaker_revision_in(&transaction, session_id, speaker_id)?;
+        let mut speaker_revision =
+            active_speaker_revision_in(&transaction, session_id, speaker_id)?;
         if speaker_revision != expected_speaker_revision {
             return Err(StoreError::StaleRevision);
         }
@@ -723,6 +731,58 @@ impl MeetingStore {
         require_profile_model(&profile, wespeaker_embedding_model_key())?;
         if profile.profile_revision != matched.profile_revision || profile.sample_count == 0 {
             return Err(StoreError::StaleRevision);
+        }
+        let current_name: String = transaction.query_row(
+            "SELECT display_name FROM meeting_speakers
+              WHERE speaker_id = ?1 AND session_id = ?2 AND merged_into_speaker_id IS NULL",
+            params![id(speaker_id), id(session_id)],
+            |row| row.get(0),
+        )?;
+        if is_generated_speaker_label(&current_name) {
+            let person = person_by_id_in(&transaction, matched.person_id)?;
+            speaker_revision = speaker_revision
+                .checked_add(1)
+                .ok_or(StoreError::VoiceInvariant)?;
+            transaction.execute(
+                "UPDATE meeting_speakers SET display_name = ?1, revision = ?2
+                  WHERE speaker_id = ?3 AND session_id = ?4 AND merged_into_speaker_id IS NULL",
+                params![
+                    person.display_name,
+                    to_i64(speaker_revision)?,
+                    id(speaker_id),
+                    id(session_id)
+                ],
+            )?;
+            let linked = upsert_link_in(
+                &transaction,
+                session_id,
+                matched.person_id,
+                PersonLinkSource::Speaker,
+                PersonLinkConfidence::Suggested,
+                matched_at_utc_ms,
+            )?;
+            mark_artifacts_out_of_date(&transaction, session_id)?;
+            let session = session_row(&transaction, session_id)?;
+            let next_revision = session
+                .revision
+                .checked_add(1)
+                .ok_or(StoreError::VoiceInvariant)?;
+            transaction.execute(
+                "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
+                params![to_i64(next_revision)?, id(session_id)],
+            )?;
+            append_event(
+                &transaction,
+                session_id,
+                next_revision,
+                session.phase,
+                session.phase,
+                "speaker_matched_by_voice",
+                None,
+            )?;
+            if linked {
+                bump_people_revision_in(&transaction)?;
+            }
         }
         transaction.execute(
             "INSERT INTO voice_speaker_matches (
@@ -883,6 +943,17 @@ impl MeetingStore {
             resolved_person_id,
         })
     }
+}
+
+/// The labels the store writes itself: `Speaker N` for a diarized voice and
+/// `Unknown speaker` for system audio nobody separated. Anything else was
+/// typed by a person or chosen by them, and automatic matching never
+/// overwrites it.
+fn is_generated_speaker_label(name: &str) -> bool {
+    name == "Unknown speaker"
+        || name.strip_prefix("Speaker ").is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 fn resolved_person_id_for_operation_in(
     transaction: &Transaction<'_>,
@@ -1232,6 +1303,9 @@ fn require_enrollment_authorization_in(
     expected_speaker_revision: u64,
 ) -> Result<(), StoreError> {
     let session = session_row(transaction, evidence.session_id)?;
+    if session.transcript_purged_at_utc_ms.is_some() {
+        return Err(StoreError::TranscriptDeleted);
+    }
     if session.revision != expected_meeting_revision {
         return Err(StoreError::StaleRevision);
     }

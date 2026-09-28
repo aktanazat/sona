@@ -34,7 +34,7 @@ struct MeetingStartGateView: View {
                     MeetingStartPreviewCard(
                         facts: facts,
                         armed: store.options?.sources ?? [],
-                        notesTemplate: store.notesTemplate,
+                        notesTemplate: store.notesTemplateChoice,
                         expanded: true)
                         .padding(.bottom, 32)
                 }
@@ -193,9 +193,13 @@ struct MeetingSourceListView: View {
 /// will be kept. The card carries no Start of its own — the screen that shows
 /// it owns the press.
 struct MeetingStartPreviewCard: View {
+    @Environment(AppModel.self) private var model
     let facts: MeetingStartFacts
     var armed: [MeetingSourceKind] = []
-    var notesTemplate: MeetingNotesTemplate?
+    /// A built-in, or one of the person's own templates by id; nil for the
+    /// app default. The name for a custom id is looked up in meeting
+    /// settings, which is where the list lives.
+    var notesTemplate: MeetingTemplateChoice<MeetingNotesTemplate>?
     /// True when the template came from the series rather than the app.
     var templateFromSeries = false
     var expanded = false
@@ -275,6 +279,7 @@ struct MeetingStartPreviewCard: View {
                 }
             }
         }
+        .task { await model.meetingSettings.templates.loadIfNeeded() }
     }
 
     /// The one line under the title: when it is, and how many people.
@@ -313,10 +318,9 @@ struct MeetingStartPreviewCard: View {
             ? "No source chosen"
             : armed.map(\.label).joined(separator: " · ")))
         if let notesTemplate {
-            out.append((
-                "Notes",
-                templateFromSeries
-                    ? "\(notesTemplate.label) for this series" : notesTemplate.label))
+            let name = model.meetingSettings.templates.label(
+                for: notesTemplate, builtIn: { $0.label }, none: "App default")
+            out.append(("Notes", templateFromSeries ? "\(name) for this series" : name))
         } else {
             out.append(("Notes", "App default"))
         }
@@ -379,7 +383,7 @@ struct MeetingSuggestionsView: View {
                         MeetingStartPreviewCard(
                             facts: MeetingStartFacts(suggestion: suggestion),
                             armed: MeetingSourceKind.allCases,
-                            notesTemplate: store.notesTemplate,
+                            notesTemplate: store.notesTemplateChoice,
                             onRecord: { store.start(suggestion) },
                             onSkip: { store.skip(suggestion) })
                     }
@@ -409,7 +413,7 @@ struct MeetingStartCountdownView: View {
                     MeetingStartPreviewCard(
                         facts: MeetingStartFacts(event: countdown.event),
                         armed: MeetingSourceKind.allCases,
-                        notesTemplate: store.notesTemplate,
+                        notesTemplate: store.notesTemplateChoice,
                         expanded: true,
                         notify: notify)
                     // Opening the meeting when it starts is a detection
@@ -562,6 +566,7 @@ struct UpcomingView: View {
 /// One calendar row: the facts, the press, and what the series already
 /// answered for itself.
 struct UpcomingRowView: View {
+    @Environment(AppModel.self) private var model
     let store: MeetingLiveStore
     let row: UpcomingRow
 
@@ -570,9 +575,11 @@ struct UpcomingRowView: View {
             MeetingStartPreviewCard(
                 facts: MeetingStartFacts(row: row),
                 armed: MeetingSourceKind.allCases,
-                notesTemplate: row.series?.template ?? store.notesTemplate,
-                templateFromSeries: row.series?.template != nil,
+                notesTemplate: row.series?.templateChoice ?? store.notesTemplateChoice,
+                templateFromSeries: row.series?.templateChoice != nil,
                 onRecord: { store.start(row) })
+            Button("Open brief") { model.openBrief(row.eventKey) }
+                .buttonStyle(.secondary)
             if let series = row.series {
                 Card {
                     CardRow {
@@ -581,7 +588,8 @@ struct UpcomingRowView: View {
                         VStack(alignment: .trailing, spacing: 2) {
                             Text("Always record this series: \(series.alwaysRecord ? "On" : "Off")")
                                 .metaText()
-                            Text("Notes template: \(series.template?.label ?? "App default")")
+                            Text("Notes template: " + model.meetingSettings.templates.label(
+                                for: series.templateChoice, builtIn: { $0.label }, none: "App default"))
                                 .metaText()
                             Text(
                                 "Include in the evening digest: "

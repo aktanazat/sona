@@ -66,6 +66,24 @@
 		CD0000000000000000000028 /* DictationLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000028 /* DictationLink.swift */; };
 		CC0000000000000000000020 /* KeyboardDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000020 /* KeyboardDraft.swift */; };
 		CC0000000000000000000027 /* KeyboardDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000027 /* KeyboardDraftTests.swift */; };
+		CA0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
+		CC0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
+		CD0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
+		CA0000000000000000000039 /* DictationProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000039 /* DictationProfile.swift */; };
+		CC0000000000000000000039 /* DictationProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000039 /* DictationProfile.swift */; };
+		CA000000000000000000003A /* PhoneMeeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003A /* PhoneMeeting.swift */; };
+		CC000000000000000000003A /* PhoneMeeting.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003A /* PhoneMeeting.swift */; };
+		CA000000000000000000003B /* CallService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003B /* CallService.swift */; };
+		CC000000000000000000003B /* CallService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003B /* CallService.swift */; };
+		CA000000000000000000003C /* PhoneLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003C /* PhoneLibrary.swift */; };
+		CC000000000000000000003C /* PhoneLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003C /* PhoneLibrary.swift */; };
+		CA000000000000000000003D /* PhoneLibraryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003D /* PhoneLibraryScreen.swift */; };
+		CA000000000000000000003E /* PhoneCalendar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003E /* PhoneCalendar.swift */; };
+		CA000000000000000000003F /* SonaIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003F /* SonaIntents.swift */; };
+		CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000040 /* PhoneCallsScreen.swift */; };
+		CC0000000000000000000041 /* PhoneParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000041 /* PhoneParityTests.swift */; };
+		CA0000000000000000000042 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000042 /* Assets.xcassets */; };
+		CB0000000000000000000043 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000043 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -155,6 +173,18 @@
 		BB0000000000000000000036 /* BoardIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardIndexTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000037 /* UploadQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadQueueTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000029 /* SonaKeyboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SonaKeyboard.entitlements; sourceTree = "<group>"; };
+		BB0000000000000000000038 /* KeyboardSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardSession.swift; sourceTree = "<group>"; };
+		BB0000000000000000000039 /* DictationProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationProfile.swift; sourceTree = "<group>"; };
+		BB000000000000000000003A /* PhoneMeeting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMeeting.swift; sourceTree = "<group>"; };
+		BB000000000000000000003B /* CallService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallService.swift; sourceTree = "<group>"; };
+		BB000000000000000000003C /* PhoneLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibrary.swift; sourceTree = "<group>"; };
+		BB000000000000000000003D /* PhoneLibraryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibraryScreen.swift; sourceTree = "<group>"; };
+		BB000000000000000000003E /* PhoneCalendar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCalendar.swift; sourceTree = "<group>"; };
+		BB000000000000000000003F /* SonaIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonaIntents.swift; sourceTree = "<group>"; };
+		BB0000000000000000000040 /* PhoneCallsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCallsScreen.swift; sourceTree = "<group>"; };
+		BB0000000000000000000041 /* PhoneParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneParityTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000042 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		BB0000000000000000000043 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -248,6 +278,10 @@
 				BB000000000000000000001C /* CallOfferMachine.swift */,
 				BB0000000000000000000020 /* KeyboardDraft.swift */,
 				BB0000000000000000000028 /* DictationLink.swift */,
+				BB0000000000000000000038 /* KeyboardSession.swift */,
+				BB0000000000000000000039 /* DictationProfile.swift */,
+				BB000000000000000000003A /* PhoneMeeting.swift */,
+				BB000000000000000000003B /* CallService.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -268,6 +302,12 @@
 				BB0000000000000000000016 /* Info.plist */,
 				BB0000000000000000000017 /* Localizable.strings */,
 				BB0000000000000000000026 /* Sona.entitlements */,
+				BB000000000000000000003C /* PhoneLibrary.swift */,
+				BB000000000000000000003D /* PhoneLibraryScreen.swift */,
+				BB000000000000000000003E /* PhoneCalendar.swift */,
+				BB000000000000000000003F /* SonaIntents.swift */,
+				BB0000000000000000000040 /* PhoneCallsScreen.swift */,
+				BB0000000000000000000042 /* Assets.xcassets */,
 			);
 			path = Sona;
 			sourceTree = "<group>";
@@ -278,6 +318,7 @@
 				BB000000000000000000000E /* SonaWatchApp.swift */,
 				BB000000000000000000000F /* WatchRecorder.swift */,
 				BB0000000000000000000018 /* Localizable.strings */,
+				BB0000000000000000000043 /* Assets.xcassets */,
 			);
 			path = SonaWatch;
 			sourceTree = "<group>";
@@ -292,6 +333,7 @@
 				BB0000000000000000000011 /* DeviceRecordingTests.swift */,
 				BB000000000000000000001E /* CallOfferTests.swift */,
 				BB0000000000000000000027 /* KeyboardDraftTests.swift */,
+				BB0000000000000000000041 /* PhoneParityTests.swift */,
 				AA0000000000000000000008 /* Fixtures */,
 			);
 			path = SonaTests;
@@ -441,6 +483,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CA0000000000000000000017 /* Localizable.strings in Resources */,
+				CA0000000000000000000042 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -449,6 +492,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CB0000000000000000000018 /* Localizable.strings in Resources */,
+				CB0000000000000000000043 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -498,6 +542,15 @@
 				CA0000000000000000000032 /* VaultReader.swift in Sources */,
 				CA0000000000000000000033 /* CaptureScreen.swift in Sources */,
 				CA0000000000000000000034 /* BoardScreen.swift in Sources */,
+				CA0000000000000000000038 /* KeyboardSession.swift in Sources */,
+				CA0000000000000000000039 /* DictationProfile.swift in Sources */,
+				CA000000000000000000003A /* PhoneMeeting.swift in Sources */,
+				CA000000000000000000003B /* CallService.swift in Sources */,
+				CA000000000000000000003C /* PhoneLibrary.swift in Sources */,
+				CA000000000000000000003D /* PhoneLibraryScreen.swift in Sources */,
+				CA000000000000000000003E /* PhoneCalendar.swift in Sources */,
+				CA000000000000000000003F /* SonaIntents.swift in Sources */,
+				CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -536,6 +589,12 @@
 				CC0000000000000000000011 /* DeviceRecordingTests.swift in Sources */,
 				CC0000000000000000000020 /* KeyboardDraft.swift in Sources */,
 				CC0000000000000000000027 /* KeyboardDraftTests.swift in Sources */,
+				CC0000000000000000000038 /* KeyboardSession.swift in Sources */,
+				CC0000000000000000000039 /* DictationProfile.swift in Sources */,
+				CC000000000000000000003A /* PhoneMeeting.swift in Sources */,
+				CC000000000000000000003B /* CallService.swift in Sources */,
+				CC000000000000000000003C /* PhoneLibrary.swift in Sources */,
+				CC0000000000000000000041 /* PhoneParityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -547,6 +606,7 @@
 				CD0000000000000000000020 /* KeyboardDraft.swift in Sources */,
 				CD0000000000000000000023 /* KeyboardViewController.swift in Sources */,
 				CD0000000000000000000028 /* DictationLink.swift in Sources */,
+				CD0000000000000000000038 /* KeyboardSession.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -609,6 +669,7 @@
 		F10000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
@@ -634,6 +695,7 @@
 		F10000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
@@ -659,6 +721,7 @@
 		F10000000000000000000005 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;
@@ -681,6 +744,7 @@
 		F10000000000000000000006 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = AAVB324H37;

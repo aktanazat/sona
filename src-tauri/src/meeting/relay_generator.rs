@@ -6,7 +6,7 @@
 //! allowlist, the same submit-and-poll job shape, the same pinned relay key.
 //! Nothing about the wire lives here — [`crate::agent_panel::run_chat_turn`]
 //! owns that, and this module owns only the shape of the question and what its
-//! two failures mean to a meeting.
+//! failures mean to a meeting.
 //!
 //! Selection lives in `processing::choose_text_engine`, not here. This engine
 //! reports whether it *could* run; whether it *should* is the operator's
@@ -55,12 +55,13 @@ const RELAY_MAX_INPUT_BYTES: usize = 124 * 1024;
 ///
 /// This must exceed one worker attempt, or an ordinary run is recorded here as
 /// a failure while the box is still finishing it. An attempt is bounded and
-/// nothing renews mid-run: the VPS worker's `job_timeout_seconds` of 180s,
+/// nothing renews mid-run: the VPS worker's `job_timeout_seconds` of 600s,
 /// plus the 30s margin on the lease it takes once before the model runs, is
-/// 210s. 240 leaves half a minute of headroom. That 180 is a default in
+/// 630s. 660 leaves half a minute of headroom. That 600 is a default in
 /// `omp_bridge/worker/vps_sona.py` that `/etc/akyl-omp-vps-sona.json` does not
 /// override, so raising it on the box without raising this breaks the
-/// invariant.
+/// invariant. It was 180 until a 15-minute call's ledger, which took 274s,
+/// was cut off at that limit.
 ///
 /// About one attempt, and deliberately not about the job: a job whose lease
 /// expires is re-leased with no cap on attempts, so its total lifetime is
@@ -75,7 +76,7 @@ const RELAY_MAX_INPUT_BYTES: usize = 124 * 1024;
 /// cancelled row — so a number below the worker's ceiling turns an answer that
 /// exists on the relay into a refusal here, which is the failure this number
 /// exists to prevent.
-const RELAY_TURN_DEADLINE: Duration = Duration::from_secs(240);
+const RELAY_TURN_DEADLINE: Duration = Duration::from_secs(660);
 
 /// One poll interval plus two relay HTTP timeouts, recorded here because they
 /// live in `agent_panel` and this file cannot see them.
@@ -104,7 +105,7 @@ const RELAY_TRANSPORT_TAIL: Duration = Duration::from_millis(750 + 15_000 + 15_0
 /// a successful job at about 255.75s — or about 270.75s once it has cancelled —
 /// arrived after this thread had already given up and become the same
 /// false failure the deadline above exists to prevent, one layer down.
-const RELAY_JOIN_TIMEOUT: Duration = Duration::from_secs(275);
+const RELAY_JOIN_TIMEOUT: Duration = Duration::from_secs(695);
 
 /// The one instruction this engine adds to a structured caller's prompt.
 ///
@@ -300,9 +301,12 @@ fn join_turn<T: Send + 'static>(
 
 /// A relay turn's failures, in the meeting layer's own words.
 ///
-/// Two outcomes, three inputs. The panel already reduced twelve transport
+/// Three outcomes, four inputs. The panel already reduced twelve transport
 /// errors to the only distinction a meeting can act on — was the server there
 /// or not — and re-deciding it here would give the same fact two owners.
+/// `TimedOut` keeps its own name: a meeting records it as any failed
+/// generation, and tells its reader the model ran out of time rather than
+/// that it did not answer.
 ///
 /// `ReplyNotStructured` folds into `Failed` deliberately. A meeting does the
 /// same thing with a prose answer as with any other unusable one: record a
@@ -318,6 +322,7 @@ const fn generation_error(error: ChatTurnError) -> MeetingTextGenerationError {
         ChatTurnError::Failed | ChatTurnError::ReplyNotStructured => {
             MeetingTextGenerationError::Failed
         }
+        ChatTurnError::TimedOut => MeetingTextGenerationError::TimedOut,
     }
 }
 
@@ -394,12 +399,12 @@ mod tests {
         );
     }
 
-    /// A relay that was never reached and an answer that came back wrong are
-    /// different facts for a reader, and this is the only place the meeting
-    /// layer learns which it has.
+    /// A relay that was never reached, an answer that came back wrong, and a
+    /// run the worker's time limit ended are different facts for a reader,
+    /// and this is the only place the meeting layer learns which it has.
     ///
     /// A prose answer to a structured request is the second of those. It is
-    /// asserted here rather than left to the catch-all so that adding a third
+    /// asserted here rather than left to the catch-all so that adding another
     /// meeting outcome later is a deliberate act with a failing test behind
     /// it, not a silent widening of a wire-visible enum.
     #[test]
@@ -417,6 +422,10 @@ mod tests {
             MeetingTextGenerationError::Failed,
             "a meeting records an answer in the wrong shape the same way it records any \
              other unusable one; the shape itself is named in the log, not in this enum"
+        );
+        assert_eq!(
+            generation_error(ChatTurnError::TimedOut),
+            MeetingTextGenerationError::TimedOut
         );
     }
 
@@ -458,7 +467,7 @@ mod tests {
         /// it takes once before the model runs. Nothing renews mid-run, so one
         /// attempt cannot outlast this — though a job whose lease expires is
         /// re-leased with no cap on attempts, which no local number can cover.
-        const ONE_WORKER_ATTEMPT: Duration = Duration::from_secs(180 + 30);
+        const ONE_WORKER_ATTEMPT: Duration = Duration::from_secs(600 + 30);
 
         assert!(
             RELAY_TURN_DEADLINE > ONE_WORKER_ATTEMPT,

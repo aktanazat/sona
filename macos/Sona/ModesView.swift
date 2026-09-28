@@ -266,11 +266,23 @@ struct ModeInstructionsSection: View {
     var body: some View {
         PageSection("Instructions") {
             Card {
-                ToggleRow(title: "Clean up with AI", isOn: store.field(\.llm.enabled, false))
+                ToggleRow(
+                    title: "Clean up with AI",
+                    isOn: Binding(
+                        get: { mode.llm.rewriteEnabled },
+                        set: { store.setCleanupEnabled($0) }))
+                ChoiceRow(
+                    title: "Cleanup level",
+                    detail: mode.llm.cleanupDetail,
+                    choices: mode.llm.cleanupChoices,
+                    label: { $0?.label ?? "Current instructions" },
+                    selection: Binding(
+                        get: { mode.llm.cleanupLevel },
+                        set: { store.chooseCleanupLevel($0) }))
                 ModeFieldRow(
                     label: "Your own instructions",
-                    hint: "Anything written here replaces the output style below, rather than being added to it. Leave it empty to use the style.",
-                    disabled: !mode.llm.enabled
+                    hint: "Replaces the output style below. Your cleanup level still limits how much the wording can change.",
+                    disabled: !mode.llm.rewriteEnabled
                 ) {
                     ModeTextBox(
                         text: Binding(
@@ -278,9 +290,9 @@ struct ModeInstructionsSection: View {
                             set: { value in store.edit { $0.prompt.customPrompt = value.isEmpty ? nil : value } }),
                         prompt: "Write it the way I would: short sentences, no bullet points.",
                         lines: 4)
-                    .disabled(!mode.llm.enabled)
+                    .disabled(!mode.llm.rewriteEnabled)
                 }
-                if !mode.llm.enabled {
+                if !mode.llm.rewriteEnabled {
                     ModeInlineNotice("Turn on cleanup and Sona follows these instructions after every dictation.")
                 }
             }
@@ -396,11 +408,11 @@ struct ModeOutputSection: View {
                 }
                 ChoiceRow(
                     title: "Output style",
-                    detail: "Choose behavior by name. Preset instructions are not shown or exported.",
+                    detail: "Your cleanup level limits how much this style can change.",
                     choices: ModePromptPreset.allCases,
                     label: \.label,
                     selection: store.field(\.prompt.preset, .generic))
-                .disabled(!mode.llm.enabled)
+                .disabled(!mode.llm.rewriteEnabled)
             }
         }
     }
@@ -617,7 +629,7 @@ struct ModeRewriteBlock: View {
 
     var body: some View {
         Group {
-            ModeFieldRow(label: "Tone", disabled: !mode.llm.enabled) {
+            ModeFieldRow(label: "Tone", disabled: !mode.llm.rewriteEnabled) {
                 Picker("", selection: store.field(\.tone, .balanced)) {
                     ForEach(ModeTone.allCases) { tone in
                         Text(tone.label).tag(tone)
@@ -625,7 +637,7 @@ struct ModeRewriteBlock: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .disabled(!mode.llm.enabled)
+                .disabled(!mode.llm.rewriteEnabled)
             }
             ChoiceRow(
                 title: "AI provider",
@@ -641,7 +653,7 @@ struct ModeRewriteBlock: View {
                         store.edit { $0.llm.providerId = value == ModeModelOption.inherit ? nil : value }
                         store.loadCatalogIfNeeded()
                     }))
-            .disabled(!mode.llm.enabled)
+            .disabled(!mode.llm.rewriteEnabled)
             if providers.isEmpty {
                 ModeLinkNotice(
                     text: "No AI provider is configured yet. Add one in Settings before this mode can rewrite.",
@@ -657,7 +669,7 @@ struct ModeRewriteBlock: View {
                 title: "Spoken instructions",
                 detail: "End a dictation with \"Sona,\" and the rest of that sentence becomes an edit for the AI to apply, instead of words to type.",
                 isOn: store.field(\.llm.spokenInstructions, false))
-            .disabled(!mode.llm.enabled)
+            .disabled(!mode.llm.rewriteEnabled)
         }
     }
 }
@@ -670,7 +682,7 @@ struct ModeLlmModelRow: View {
     let mode: ModeDefinition
 
     var body: some View {
-        ModeFieldRow(label: "AI model", disabled: !mode.llm.enabled) {
+        ModeFieldRow(label: "AI model", disabled: !mode.llm.rewriteEnabled) {
             if let destination = store.llmDestination, destination.inherited {
                 Text(destination.modelId.isEmpty ? "No model selected" : destination.modelId)
                     .bodyText(14, Theme.inkSecondary)
@@ -679,7 +691,7 @@ struct ModeLlmModelRow: View {
             } else {
                 HStack(spacing: 8) {
                     InputField(prompt: "Model ID", text: store.field(\.llm.modelId, ""))
-                        .disabled(!mode.llm.enabled)
+                        .disabled(!mode.llm.rewriteEnabled)
                     if !catalogIds.isEmpty {
                         Menu {
                             ForEach(catalogIds, id: \.self) { id in

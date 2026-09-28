@@ -6,6 +6,7 @@
 use super::text::OutputLanguageEvidence;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::borrow::Cow;
 use std::ops::Range;
 
 /// Punctuation that ends a spoken *segment*: every mark a transcript renders
@@ -78,6 +79,8 @@ enum SpokenEdit {
 ///   speaking — a second name for a behaviour that already has one.
 const SPOKEN_EDIT_COMMANDS: &[(&str, SpokenEdit)] = &[
     ("scratch that", SpokenEdit::ScratchClause),
+    ("delete that", SpokenEdit::ScratchClause),
+    ("never mind", SpokenEdit::ScratchClause),
     ("delete last word", SpokenEdit::DeleteLastWord),
     ("delete the last word", SpokenEdit::DeleteLastWord),
     ("capitalize that", SpokenEdit::CapitalizeLastWord),
@@ -102,8 +105,7 @@ const SPOKEN_EDIT_COMMANDS: &[(&str, SpokenEdit)] = &[
 /// Matching is word-wise and case-insensitive, so `Scratch that.` and
 /// `scratch  that,` both fire.
 ///
-/// That single rule is the whole false-positive defence, and it is what the
-/// roadmap's named risk needs:
+/// For whole-segment commands, that boundary is the false-positive defence:
 ///
 /// * `scratch that plan` — the segment is `scratch that plan`, which is not a
 ///   command phrase. No continuation-word list is required; any extra word in
@@ -121,6 +123,12 @@ const SPOKEN_EDIT_COMMANDS: &[(&str, SpokenEdit)] = &[
 /// ships off and why the escape hatch is turning it off rather than a
 /// heuristic.
 ///
+/// Numeric backtracking is narrower: adjacent whole integers separated by
+/// `actually`, `actually I meant`, `no wait`, or `I mean` replace the first
+/// integer with the second. It never guesses the span of a corrected phrase,
+/// edits part of a decimal/identifier, or interprets ordinary uses of a cue.
+/// More contextual corrections belong to the selected AI cleanup prompt.
+///
 /// # Language
 ///
 /// English only, and it fails closed: an unknown output language skips the
@@ -130,6 +138,9 @@ pub fn apply_spoken_edits(text: &str, language: &OutputLanguageEvidence, enabled
     if !enabled || !language.is_english() {
         return text.to_string();
     }
+
+    let corrected = apply_numeric_backtracks(text);
+    let text = corrected.as_ref();
 
     let mut output = String::with_capacity(text.len());
     // Set by a fired command so the following segment closes the gap the
@@ -159,6 +170,46 @@ pub fn apply_spoken_edits(text: &str, language: &OutputLanguageEvidence, enabled
     }
 
     output
+}
+
+/// Only whole integers are deterministic here. Units, dates, decimal values,
+/// names, and unpunctuated phrase restatements need the full language context.
+static NUMERIC_BACKTRACK: Lazy<Regex> = Lazy::new(|| {
+    // PANIC: a malformed shipped pattern is a programming error, not user input.
+    Regex::new(
+        r"(?i)\b[0-9]+[ \t]*,?[ \t]+(?:actually(?:[ \t]+i[ \t]+meant)?|i[ \t]+mean|no[ \t]*,?[ \t]+wait)[ \t]*,?[ \t]+[0-9]+\b",
+    )
+    .expect("numeric backtrack pattern is valid")
+});
+
+fn apply_numeric_backtracks(text: &str) -> Cow<'_, str> {
+    let mut corrected = Cow::Borrowed(text);
+    let mut cursor = 0;
+    while let Some(whole) = NUMERIC_BACKTRACK.find_at(&corrected, cursor) {
+        let start = whole.start();
+        let end = whole.end();
+        let prefix = &corrected[..start];
+        let suffix = corrected[end..].trim_start_matches(&['.', ',', '!', '?', ';', ':', '…'][..]);
+        let starts_at_word = prefix.is_empty() || prefix.ends_with(char::is_whitespace);
+        let ends_at_word = suffix.is_empty() || suffix.starts_with(char::is_whitespace);
+        // A quote can span sentences. Defer quoted or previously quoted
+        // passages rather than guessing where the speaker's own voice resumes.
+        let quoted = prefix.contains(&['"', '“', '”', '`'][..]);
+        if !starts_at_word || !ends_at_word || quoted {
+            cursor = end;
+            continue;
+        }
+
+        let replacement_start = whole
+            .as_str()
+            .trim_end_matches(|character: char| character.is_ascii_digit())
+            .len();
+        let remove = start..start + replacement_start;
+        corrected.to_mut().replace_range(remove, "");
+        // Revisit the replacement so "2 actually 3 actually 4" becomes 4.
+        cursor = start;
+    }
+    corrected
 }
 
 /// Appends one segment and the mark run that closed it, or applies the command
@@ -488,6 +539,107 @@ mod tests {
     fn spoken_edits(text: &str) -> String {
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
         apply_spoken_edits(text, &english, true)
+    }
+
+    #[test]
+    fn numeric_backtrack_replaces_the_adjacent_number() {
+        assert_eq!(
+            spoken_edits("Let's meet at 2, actually 3."),
+            "Let's meet at 3."
+        );
+    }
+
+    #[test]
+    fn numeric_backtrack_accepts_an_explicit_restatement() {
+        assert_eq!(spoken_edits("Send 2, actually I meant 3."), "Send 3.");
+    }
+
+    #[test]
+    fn numeric_backtrack_accepts_no_wait() {
+        assert_eq!(spoken_edits("Send 2, no wait, 3."), "Send 3.");
+    }
+
+    #[test]
+    fn numeric_backtrack_accepts_i_mean() {
+        assert_eq!(spoken_edits("Send 2 I mean 3."), "Send 3.");
+    }
+
+    #[test]
+    fn numeric_backtracks_apply_left_to_right() {
+        assert_eq!(
+            spoken_edits("Meet at 2 actually 3 actually 4."),
+            "Meet at 4."
+        );
+    }
+
+    #[test]
+    fn numeric_backtrack_precedes_word_deletion() {
+        assert_eq!(
+            spoken_edits("Meet at 2 actually 3. Delete last word."),
+            "Meet at"
+        );
+    }
+
+    #[test]
+    fn numeric_backtrack_preserves_ordinary_actually() {
+        let text = "I actually enjoyed the movie.";
+        assert_eq!(spoken_edits(text), text);
+    }
+
+    #[test]
+    fn numeric_backtrack_never_replaces_part_of_a_decimal() {
+        let text = "Use 1.2 actually 3.";
+        assert_eq!(spoken_edits(text), text);
+    }
+
+    #[test]
+    fn numeric_backtrack_never_consumes_part_of_the_replacement() {
+        let text = "Use 2 actually 3.5.";
+        assert_eq!(spoken_edits(text), text);
+    }
+
+    #[test]
+    fn numeric_backtrack_preserves_quoted_corrections() {
+        let text = "He said \"Wait. Meet at 2 actually 3 tomorrow\".";
+        assert_eq!(spoken_edits(text), text);
+    }
+
+    #[test]
+    fn numeric_backtrack_is_opt_in() {
+        let text = "Let's meet at 2, actually 3.";
+        let english = OutputLanguageEvidence::UserSelected("en".to_string());
+        assert_eq!(apply_spoken_edits(text, &english, false), text);
+    }
+
+    #[test]
+    fn numeric_backtrack_requires_english_evidence() {
+        let text = "Let's meet at 2, actually 3.";
+        assert_eq!(
+            apply_spoken_edits(text, &OutputLanguageEvidence::Unknown, true),
+            text
+        );
+    }
+
+    #[test]
+    fn delete_that_drops_the_previous_sentence() {
+        assert_eq!(
+            spoken_edits("Keep this. Drop this. Delete that. Done."),
+            "Keep this. Done."
+        );
+    }
+
+    #[test]
+    fn never_mind_drops_the_previous_sentence() {
+        assert_eq!(
+            spoken_edits("Keep this. Drop this. Never mind. Done."),
+            "Keep this. Done."
+        );
+    }
+
+    #[test]
+    fn delete_that_inside_ordinary_speech_stays_text() {
+        let text = "Please delete that file.";
+        assert_eq!(spoken_edits(text), text);
     }
 
     #[test]

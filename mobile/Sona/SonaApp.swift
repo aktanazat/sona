@@ -5,7 +5,7 @@ struct SonaApp: App {
     @StateObject private var model = AppModel()
     @State private var page = Page.capture
 
-    private enum Page { case board, capture, recording, dictation }
+    private enum Page { case board, capture, recording, dictation, library }
 
     var body: some Scene {
         WindowGroup {
@@ -16,12 +16,15 @@ struct SonaApp: App {
                 CaptureScreen(model: model, dictation: model.dictation, recorder: model.recorder)
                     .tabItem { Label("tab.capture", systemImage: "plus.bubble") }
                     .tag(Page.capture)
-                RecordingScreen(model: model, recorder: model.recorder)
+                RecordingScreen(model: model, recorder: model.recorder, calendar: model.calendar)
                     .tabItem { Label("tab.recording", systemImage: "waveform") }
                     .tag(Page.recording)
                 DictationScreen(model: model, dictation: model.dictation, recorder: model.recorder)
                     .tabItem { Label("tab.dictation", systemImage: "keyboard") }
                     .tag(Page.dictation)
+                PhoneLibraryScreen(model: model, library: model.library)
+                    .tabItem { Label("tab.library", systemImage: "note.text") }
+                    .tag(Page.library)
             }
             .tint(Theme.accent)
             /* On the TabView, not on one screen: consent covers the microphone, and
@@ -32,6 +35,8 @@ struct SonaApp: App {
             }
             .onOpenURL { url in
                 if DictationLink.opens(url) { page = .dictation }
+                if url == DictationLink.meetingURL { page = .recording }
+                model.handle(url)
             }
         }
     }

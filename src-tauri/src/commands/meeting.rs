@@ -1,7 +1,7 @@
 use crate::analytics::DashboardTrendRequest;
 use crate::meeting::analytics::{
     KeywordTracker, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
-    MeetingProvisionalTranscript, MeetingUserNotes,
+    MeetingLiveHelp, MeetingLiveHelpKind, MeetingProvisionalTranscript, MeetingUserNotes,
 };
 use crate::meeting::clock::host_monotonic_now_ns;
 use crate::meeting::detection::DetectionRuntime;
@@ -171,11 +171,8 @@ pub fn meeting_consent_panel_fit_disclosure(app: tauri::AppHandle, note: bool) {
     );
 }
 
-/// Post this recording's disclosure line into the meeting's chat.
-///
-/// The line is the caller's because it comes from the i18next catalog. Answers
-/// with what the disclosure is now, so the live surface can say quietly that the
-/// target would not take it.
+/// Attempt only the notice frozen at recording start. Repeated requests read
+/// its durable outcome without sending again.
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_announce_disclosure(
@@ -203,6 +200,90 @@ pub async fn meeting_trash_restore(
     job_id: MeetingDeletionJobId,
 ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
     manager.trash_restore(job_id).await
+}
+
+/// Delete one trashed meeting for good, before its thirty days are up.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_trash_delete_forever(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    job_id: MeetingDeletionJobId,
+) -> Result<(), MeetingCommandError> {
+    manager.trash_delete_forever(job_id).await
+}
+
+/// Every folder, by name, with the fence its changes carry.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_list(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<crate::meeting::folder_types::MeetingFolderList, MeetingCommandError> {
+    manager.folder_list().await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_create(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: crate::meeting::folder_types::MeetingFolderCreateRequest,
+) -> Result<crate::meeting::folder_types::MeetingFolderMutationResult, MeetingCommandError> {
+    manager.folder_create(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_rename(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: crate::meeting::folder_types::MeetingFolderRenameRequest,
+) -> Result<crate::meeting::folder_types::MeetingFolderMutationResult, MeetingCommandError> {
+    manager.folder_rename(request).await
+}
+
+/// Delete one folder. The meetings in it stay.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_delete(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: crate::meeting::folder_types::MeetingFolderDeleteRequest,
+) -> Result<crate::meeting::folder_types::MeetingFolderMutationResult, MeetingCommandError> {
+    manager.folder_delete(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_add_meeting(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: crate::meeting::folder_types::MeetingFolderMembershipRequest,
+) -> Result<crate::meeting::folder_types::MeetingFolderMutationResult, MeetingCommandError> {
+    manager.folder_add_meeting(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_remove_meeting(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: crate::meeting::folder_types::MeetingFolderMembershipRequest,
+) -> Result<crate::meeting::folder_types::MeetingFolderMutationResult, MeetingCommandError> {
+    manager.folder_remove_meeting(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folder_set_defaults(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: crate::meeting::folder_types::MeetingFolderDefaultsSetRequest,
+) -> Result<crate::meeting::folder_types::MeetingFolderMutationResult, MeetingCommandError> {
+    manager.folder_set_defaults(request).await
+}
+
+/// The folders one meeting is filed in, in folder-name order.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_folders_for_session(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<Vec<MeetingFolderId>, MeetingCommandError> {
+    manager.folders_for_session(session_id).await
 }
 
 #[tauri::command]
@@ -446,6 +527,16 @@ pub async fn meeting_export(
     manager.export(request).await
 }
 
+/// One spreadsheet containing every retained meeting, independent of the
+/// window's filters. The native shell chooses the destination file.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_export_all_csv(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<String, MeetingCommandError> {
+    manager.export_all_csv().await
+}
+
 /// Write the meeting's where-did-we-land ledger to a single self-contained
 /// HTML file and answer with the path it was written to.
 #[tauri::command]
@@ -481,6 +572,23 @@ pub async fn meeting_retention_set(
     request: MeetingRetentionSetRequest,
 ) -> Result<MeetingRetentionMutationResult, MeetingCommandError> {
     manager.retention_set(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_transcript_retention_get(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<MeetingTranscriptRetentionSnapshot, MeetingCommandError> {
+    manager.transcript_retention_get().await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_transcript_retention_set(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: MeetingRetentionSetRequest,
+) -> Result<MeetingTranscriptRetentionMutationResult, MeetingCommandError> {
+    manager.transcript_retention_set(request).await
 }
 
 #[tauri::command]
@@ -606,6 +714,20 @@ pub async fn meeting_catch_up(
     session_id: MeetingSessionId,
 ) -> Result<MeetingCatchUp, MeetingCommandError> {
     manager.catch_up(session_id).await
+}
+
+/// Help while a meeting records: what was said in the last few minutes,
+/// questions to ask, something to say, or an answer to `question`, which goes
+/// with `ask` and only with it. Provisional and never saved.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_live_help(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+    kind: MeetingLiveHelpKind,
+    question: Option<String>,
+) -> Result<MeetingLiveHelp, MeetingCommandError> {
+    manager.live_help(session_id, kind, question).await
 }
 
 /// The words the running capture has recognized so far, for the live screen.

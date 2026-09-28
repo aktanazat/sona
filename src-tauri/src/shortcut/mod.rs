@@ -964,6 +964,7 @@ pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Res
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
     settings::update_settings(&app, |settings| {
         settings.selected_language = language;
+        settings.dictation_languages.clear();
     })?;
     Ok(())
 }

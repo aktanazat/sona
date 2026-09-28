@@ -7,9 +7,11 @@
   <key>NSCameraUsageDescription</key>
   <string>Use the camera for a picture-in-picture screen recording on this Mac</string>
   <key>NSCalendarsFullAccessUsageDescription</key>
-  <string>Read upcoming events on this Mac to offer local meeting notes before a call starts</string>
+  <string>Read upcoming events and create calendar events you approve.</string>
   <key>NSCalendarsUsageDescription</key>
-  <string>Read upcoming events on this Mac to offer local meeting notes before a call starts</string>
+  <string>Read upcoming events and create calendar events you approve.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

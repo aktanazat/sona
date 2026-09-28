@@ -19,7 +19,6 @@
 
 use super::machine::{
     CalendarAttendee, CalendarEventSummary, CalendarSignal, ParticipationStatus, ATTENDEE_FLOOR,
-    CALENDAR_LEAD_SECONDS,
 };
 
 /// How far ahead to look for the next event. Wide enough that a tick can never
@@ -59,6 +58,7 @@ pub struct EventCandidate {
 pub fn select_event<'a>(
     candidates: impl IntoIterator<Item = &'a EventCandidate>,
     now_utc_ms: i64,
+    lead_seconds: i64,
 ) -> Option<usize> {
     candidates
         .into_iter()
@@ -72,7 +72,7 @@ pub fn select_event<'a>(
             let meeting = summary.attendee_count >= ATTENDEE_FLOOR;
             let to_start = summary.start_utc_ms - now_utc_ms;
             let tier = match (meeting, to_start <= 0) {
-                (true, false) if to_start <= CALENDAR_LEAD_SECONDS * 1_000 => 0,
+                (true, false) if to_start <= lead_seconds * 1_000 => 0,
                 (true, true) => 1,
                 _ => 2,
             };
@@ -125,16 +125,20 @@ pub trait CalendarSource: Send + Sync {
     /// `select_event`, or `None`. Returning one event rather than a list is
     /// deliberate: the decision table only ever asks about the current moment,
     /// and a list would invite callers to invent their own precedence.
-    fn next_event(&self, now_utc_ms: i64, lookahead_ms: i64) -> Option<CalendarEventSummary>;
+    fn next_event(
+        &self,
+        now_utc_ms: i64,
+        lookahead_ms: i64,
+        lead_seconds: i64,
+    ) -> Option<CalendarEventSummary>;
+
+    /// Reads one occurrence with its agenda, only when preparing or recording it.
+    fn event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary>;
 
     /// Every event that overlaps `[start_utc_ms, end_utc_ms)`, oldest first.
     ///
-    /// D28's Upcoming section is the only caller, and it is user-triggered
-    /// rather than ticked, which is what makes a list affordable here when the
-    /// detection path deliberately refuses one. Rows are enriched with the
-    /// facts a row renders — named attendees, the calendar's title, the join
-    /// URL — and deliberately *not* with the event's notes: an agenda pasted
-    /// into a recurring event is kilobytes nothing on this surface shows.
+    /// Lightweight rows for Upcoming and background preparation. Notes are read
+    /// separately by `event_by_key`, so a menu refresh never copies every agenda.
     fn events_between(&self, start_utc_ms: i64, end_utc_ms: i64) -> Vec<CalendarOccurrence>;
 }
 
@@ -150,7 +154,16 @@ impl CalendarSource for NoCalendar {
         CalendarAccess::Unavailable
     }
 
-    fn next_event(&self, _now_utc_ms: i64, _lookahead_ms: i64) -> Option<CalendarEventSummary> {
+    fn next_event(
+        &self,
+        _now_utc_ms: i64,
+        _lookahead_ms: i64,
+        _lead_seconds: i64,
+    ) -> Option<CalendarEventSummary> {
+        None
+    }
+
+    fn event_by_key(&self, _event_key: &str) -> Option<CalendarEventSummary> {
         None
     }
 
@@ -295,14 +308,16 @@ pub use macos::EventKitCalendar;
 #[cfg(target_os = "macos")]
 mod macos {
     use super::{
-        event_text, named_attendee_with_email, occurrence_key, participation_status, select_event,
-        CalendarAccess, CalendarEventSummary, CalendarOccurrence, CalendarSource, EventCandidate,
-        ParticipationStatus,
+        event_text, named_attendee_with_email, occurrence_key, occurrence_start,
+        participation_status, select_event, CalendarAccess, CalendarEventSummary,
+        CalendarOccurrence, CalendarSource, EventCandidate, ParticipationStatus,
     };
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::Bool;
-    use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStore};
+    use objc2_event_kit::{
+        EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStatus, EKEventStore,
+    };
     use objc2_foundation::{NSDate, NSError};
     use std::sync::mpsc;
     use std::sync::Mutex;
@@ -403,7 +418,12 @@ mod macos {
             }
         }
 
-        fn next_event(&self, now_utc_ms: i64, lookahead_ms: i64) -> Option<CalendarEventSummary> {
+        fn next_event(
+            &self,
+            now_utc_ms: i64,
+            lookahead_ms: i64,
+            lead_seconds: i64,
+        ) -> Option<CalendarEventSummary> {
             if self.access() != CalendarAccess::Authorized {
                 return None;
             }
@@ -451,11 +471,48 @@ mod macos {
                     let index = select_event(
                         candidates.iter().map(|(_, candidate)| candidate),
                         now_utc_ms,
+                        lead_seconds,
                     )?;
                     let (event, candidate) = candidates.swap_remove(index);
                     let mut summary = candidate.summary;
                     enrich(&event, &mut summary);
                     Some(summary)
+                })
+            })
+        }
+
+        fn event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary> {
+            if self.access() != CalendarAccess::Authorized {
+                return None;
+            }
+            let start_ms = occurrence_start(event_key)?;
+            objc2::rc::autoreleasepool(|_| {
+                self.with_store(|store| {
+                    // Calendar events all start after 1970, so a negative key finds nothing.
+                    let seconds = |ms: i64| {
+                        u64::try_from(ms)
+                            .ok()
+                            .map(|ms| std::time::Duration::from_millis(ms).as_secs_f64())
+                    };
+                    let start = NSDate::dateWithTimeIntervalSince1970(seconds(start_ms)?);
+                    let end =
+                        NSDate::dateWithTimeIntervalSince1970(seconds(start_ms.checked_add(1)?)?);
+                    // SAFETY: both dates are live for this construction call.
+                    let predicate = unsafe {
+                        store.predicateForEventsWithStartDate_endDate_calendars(&start, &end, None)
+                    };
+                    // SAFETY: the predicate came from this same store.
+                    let events = unsafe { store.eventsMatchingPredicate(&predicate) };
+                    events.iter().find_map(|event| {
+                        let mut summary = summarize(&event)?;
+                        if summary.event_key != event_key
+                            || self_participation(&event) == ParticipationStatus::Declined
+                        {
+                            return None;
+                        }
+                        enrich(&event, &mut summary);
+                        Some(summary)
+                    })
                 })
             })
         }
@@ -486,7 +543,9 @@ mod macos {
                             // window, including something that began yesterday
                             // and runs into it. A row that has already ended is
                             // not upcoming.
-                            if summary.end_utc_ms <= start_utc_ms {
+                            if summary.end_utc_ms <= start_utc_ms
+                                || self_participation(&event) == ParticipationStatus::Declined
+                            {
                                 return None;
                             }
                             enrich_participants(&event, &mut summary);
@@ -517,6 +576,10 @@ mod macos {
     /// Reduces an `EKEvent` to the fields the decision table reads, and nothing
     /// more. `enrich` adds the rest, for the one event that is selected.
     fn summarize(event: &EKEvent) -> Option<CalendarEventSummary> {
+        // SAFETY: a plain property read on this live event.
+        if unsafe { event.status() } == EKEventStatus::Canceled {
+            return None;
+        }
         // SAFETY: plain property reads on a live event.
         let (start, end, all_day) =
             unsafe { (event.startDate(), event.endDate(), event.isAllDay()) };
@@ -684,11 +747,11 @@ mod tests {
         let accepted_later = candidate(30 * MINUTE_MS, 3, ParticipationStatus::Accepted);
 
         assert_eq!(
-            select_event([&declined_now, &accepted_later], NOW),
+            select_event([&declined_now, &accepted_later], NOW, 60),
             Some(1),
             "the declined meeting under way must not hide the accepted one"
         );
-        assert_eq!(select_event([&declined_now], NOW), None);
+        assert_eq!(select_event([&declined_now], NOW, 60), None);
     }
 
     /* FN10 in the detection map: nearest-by-start picked the solo block five
@@ -699,7 +762,7 @@ mod tests {
         let solo_block_soon = candidate(5 * MINUTE_MS, 1, ParticipationStatus::Unknown);
 
         assert_eq!(
-            select_event([&solo_block_soon, &meeting_under_way], NOW),
+            select_event([&solo_block_soon, &meeting_under_way], NOW, 60),
             Some(1)
         );
     }
@@ -712,12 +775,23 @@ mod tests {
         let next_in_45s = candidate(45_000, 3, ParticipationStatus::Accepted);
         let next_in_5m = candidate(5 * MINUTE_MS, 3, ParticipationStatus::Accepted);
 
-        assert_eq!(select_event([&running_over, &next_in_45s], NOW), Some(1));
         assert_eq!(
-            select_event([&running_over, &next_in_5m], NOW),
+            select_event([&running_over, &next_in_45s], NOW, 60),
+            Some(1)
+        );
+        assert_eq!(
+            select_event([&running_over, &next_in_5m], NOW, 60),
             Some(0),
             "outside the lead window the meeting under way still wins"
         );
+    }
+
+    #[test]
+    fn prep_reminder_lead_survives_an_overlapping_meeting() {
+        let running = candidate(-30 * MINUTE_MS, 3, ParticipationStatus::Accepted);
+        let next = candidate(10 * MINUTE_MS, 3, ParticipationStatus::Accepted);
+        assert_eq!(select_event([&running, &next], NOW, 10 * 60), Some(1));
+        assert_eq!(select_event([&running, &next], NOW - 1, 10 * 60), Some(0));
     }
 
     #[test]
@@ -727,11 +801,11 @@ mod tests {
         let meeting_later = candidate(40 * MINUTE_MS, 4, ParticipationStatus::Accepted);
 
         assert_eq!(
-            select_event([&ended, &meeting_later, &solo_soon], NOW),
+            select_event([&ended, &meeting_later, &solo_soon], NOW, 60),
             Some(2),
             "a solo block reaches the table so it can be declined there for its own reason"
         );
-        assert_eq!(select_event([&ended], NOW), None);
+        assert_eq!(select_event([&ended], NOW, 60), None);
     }
 
     #[test]
@@ -800,7 +874,7 @@ mod tests {
     #[test]
     fn an_absent_calendar_never_produces_an_event() {
         assert_eq!(NoCalendar.access(), CalendarAccess::Unavailable);
-        assert_eq!(NoCalendar.next_event(NOW, lookahead_ms()), None);
+        assert_eq!(NoCalendar.next_event(NOW, lookahead_ms(), 60), None);
         assert_eq!(
             NoCalendar.events_between(NOW, NOW + 8 * 24 * 60 * 60_000),
             Vec::new()

@@ -10,11 +10,11 @@ use super::{
 };
 use crate::meeting::detection::machine::{CalendarAttendee, CalendarEventSummary};
 use crate::meeting::people_types::{
-    organization_slug, MeetingPeopleContextResult, MeetingPersonContextRow, OpenLoopsInboxResult,
-    OrganizationDetail, OrganizationDetailResult, PeopleListResult, PersonBriefingLastMeeting,
-    PersonBriefingRow, PersonContextResult, PersonDetail, PersonDetailResult, PersonId,
-    PersonLinkConfidence, PersonLinkSource, PersonListEntry, PersonListLastMeeting,
-    PersonMeetingLink,
+    organization_slug, CompaniesListResult, CompanySummary, MeetingPeopleContextResult,
+    MeetingPersonContextRow, OpenLoopsInboxResult, OrganizationDetail, OrganizationDetailResult,
+    PeopleListResult, PersonBriefingLastMeeting, PersonBriefingRow, PersonContextResult,
+    PersonDetail, PersonDetailResult, PersonId, PersonLinkConfidence, PersonLinkSource,
+    PersonListEntry, PersonListLastMeeting, PersonMeetingLink,
 };
 use crate::meeting::store::workflows::{
     workflow_succeeded_for_calendar_event_in, workflow_succeeded_for_session_in,
@@ -191,6 +191,15 @@ impl MeetingStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let result = organization_detail_in(&transaction, slug)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    /// Every organization its people carry, with the counts its page shows.
+    pub(crate) fn companies_list(&self) -> Result<CompaniesListResult, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let result = companies_list_in(&transaction)?;
         transaction.commit()?;
         Ok(result)
     }
@@ -424,6 +433,73 @@ fn organization_detail_in(
             recent_meetings,
             open_loops,
         },
+    })
+}
+
+/// The companies list: every organization slug its people carry, each read
+/// through the same gated facts `organization_detail_in` lists, with a
+/// meeting or an open item that several people share counted once.
+fn companies_list_in(connection: &Connection) -> Result<CompaniesListResult, StoreError> {
+    struct Tally {
+        name: String,
+        people: u64,
+        meetings: HashSet<MeetingSessionId>,
+        last: Option<i64>,
+        loops: HashSet<String>,
+    }
+    let list = people_list_in(connection)?;
+    let mut tallies: HashMap<String, Tally> = HashMap::new();
+    for entry in &list.entries {
+        let Some(name) = entry.person.organization.as_deref() else {
+            continue;
+        };
+        let slug = organization_slug(name);
+        if slug.is_empty() {
+            continue;
+        }
+        let mut facts = facts_for_person_in(connection, &entry.person)?;
+        gate_continuity_facts_in(connection, &mut facts)?;
+        let tally = tallies.entry(slug).or_insert_with(|| Tally {
+            name: name.to_owned(),
+            people: 0,
+            meetings: HashSet::new(),
+            last: None,
+            loops: HashSet::new(),
+        });
+        tally.people += 1;
+        for meeting in facts.meetings {
+            tally.last = tally.last.max(Some(meeting.at_utc_ms));
+            tally.meetings.insert(meeting.id);
+        }
+        tally.loops.extend(
+            facts
+                .open_loops
+                .into_iter()
+                .map(|open| open.loop_id.as_str().to_owned()),
+        );
+    }
+    let mut companies = tallies
+        .into_iter()
+        .map(|(slug, tally)| CompanySummary {
+            name: tally.name,
+            slug,
+            people_count: tally.people,
+            meetings_count: u64::try_from(tally.meetings.len()).unwrap_or(u64::MAX),
+            last_meeting_at_utc_ms: tally.last,
+            open_loops_count: u64::try_from(tally.loops.len()).unwrap_or(u64::MAX),
+        })
+        .collect::<Vec<_>>();
+    companies.sort_by(|left, right| {
+        right
+            .last_meeting_at_utc_ms
+            .cmp(&left.last_meeting_at_utc_ms)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+    Ok(CompaniesListResult {
+        schema_version: SCHEMA_VERSION,
+        revision: list.revision,
+        companies,
     })
 }
 

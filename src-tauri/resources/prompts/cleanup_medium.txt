@@ -1,0 +1,3 @@
+[CLEANUP_LEVEL: MEDIUM]
+Remove filler words and fix grammar and punctuation. Tighten wording for clarity and concision without dropping any fact, qualification, commitment, or uncertainty. Keep the speaker's voice and the overall order of their ideas; do not turn the dictation into a summary.
+Use smart formatting where the speech clearly supplies it: turn enumerated items (one, two; first, second) into numbered lists and unordered items into bulleted lists. Format unambiguous spoken numbers, dates, times, email addresses, and URLs into readable written forms. Preserve their exact values and destinations. Never invent an item, date, year, time zone, address, or URL, and leave ambiguous forms as spoken.

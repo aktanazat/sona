@@ -23,6 +23,7 @@ final class ChatStore {
     /// What the reader is typing. Held here so that opening another
     /// conversation can drop it.
     var draft = ""
+    private(set) var folderScope: MeetingFolder?
     /// Which brain the next turn goes to.
     var workspace: AgentPanelWorkspace = .sonaChat {
         didSet {
@@ -58,9 +59,9 @@ final class ChatStore {
     /// The pack the current Ask turn carried quoted at least one row, so the
     /// work line can say the corpus was read.
     private(set) var searchedCorpus = false
-    /// Wall clock in milliseconds, ticked only while a turn runs. Elapsed
-    /// numbers are the one thing on screen that moves with no event behind it.
-    private(set) var now = ChatStore.milliseconds()
+    /// The answer that arrived while the chat was on screen, which is the
+    /// one row that types itself out.
+    private(set) var landing: ChatLanding?
 
     @ObservationIgnored private let core: Core
     /// Which read is the newest. An event storm can start several, and only
@@ -70,7 +71,6 @@ final class ChatStore {
     /// The send in flight, so a stop pressed while the pack is still being
     /// built can end it here, before there is a turn to cancel.
     @ObservationIgnored private var sendTask: Task<Bool, Never>?
-    @ObservationIgnored private var clock: Task<Void, Never>?
     @ObservationIgnored private var voiceStartTask: Task<Void, Never>?
     @ObservationIgnored private var screenshotPicker: ChatScreenshotPicker?
     @ObservationIgnored private var screenshotTask: Task<Void, Never>?
@@ -126,6 +126,17 @@ final class ChatStore {
 
     var canSend: Bool {
         !composerDisabled && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// An empty Ask chat with nothing on its way offers three questions to
+    /// press. They go the moment the field has words in it, an image to
+    /// share, or a voice conversation, because each of those is already the
+    /// next question, and they wait while the corpus is closed to the agent,
+    /// since every one of them is about the corpus.
+    var offersSuggestions: Bool {
+        workspace == .sonaChat && phase == .ready && !consentNeeded && conversation.isEmpty
+            && turn == nil && proposal == nil && draft.isEmpty && screenshot == nil && !voiceActive
+            && !composerDisabled && !sending && folderScope == nil
     }
 
     /// Where the turn's activity belongs in the scrollback: above the answer
@@ -303,8 +314,14 @@ final class ChatStore {
 
     /// Sends what is in the field.
     func send() {
-        let submittedDraft = draft
-        let message = submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        ask(draft)
+    }
+
+    /// Asks `text`: what is in the field, or a suggestion pressed while the
+    /// field is empty. The field is cleared only if it still holds what was
+    /// asked, so a suggestion leaves the field as it was.
+    func ask(_ text: String) {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, !composerDisabled, !running else { return }
         guard message.utf8.count <= Self.maxMessageBytes else {
             error = "That question is too long. Keep it under 8,000 characters."
@@ -314,7 +331,7 @@ final class ChatStore {
         sendTask = Task {
             let sent = await submit(message, screenshot: image)
             if sent {
-                if draft == submittedDraft { draft = "" }
+                if draft == text { draft = "" }
                 if screenshot?.id == image?.id { screenshot = nil }
             }
             return sent
@@ -338,6 +355,7 @@ final class ChatStore {
          * quoted with `sona://` links; Configure turns get none, because a
          * settings change is not a question about a meeting. */
         let allowed = packs
+        let folderId = workspace == .sonaChat ? folderScope?.folderId : nil
         searchedCorpus = false
         sending = true
         defer {
@@ -350,7 +368,7 @@ final class ChatStore {
          * the pack is being built ends the act here, and the field keeps
          * the question. */
         let sent = await run {
-            let pack = allowed ? await self.buildPack(message) : nil
+            let pack = allowed ? await self.buildPack(message, folderId: folderId) : nil
             try Task.checkCancellation()
             return try await self.core.request(
                 "agent_panel_send_turn",
@@ -362,6 +380,7 @@ final class ChatStore {
                         workspace: self.workspace.rawValue,
                         contextPack: pack,
                         toolsAllowed: allowed,
+                        folderId: folderId,
                         screenshot: screenshot?.png)))
         }
         if sent {
@@ -372,10 +391,13 @@ final class ChatStore {
     }
 
     /// The evidence this question carries, and whether it quoted anything.
-    private func buildPack(_ message: String) async -> String? {
+    private func buildPack(_ message: String, folderId: MeetingFolderId?) async -> String? {
         do {
             let built: ChatContextPack = try await core.request(
-                "sona_query_pack", ["question": message])
+                "sona_query_pack", [
+                    "question": JSONValue.string(message),
+                    "folderId": folderId.map { JSONValue.string($0) } ?? .null,
+                ])
             searchedCorpus = !built.sources.isEmpty
             return built.pack
         } catch {
@@ -636,14 +658,56 @@ final class ChatStore {
                 let next: AgentPanelTurnStatus = try await core.request(
                     method, Envelope(request: ActionRequest(turnId: turnId, actionIndex: index)))
                 status?.turn = next
-                tick()
             } catch {
                 report(error)
             }
         }
     }
 
+    func approveReviewedAction(_ index: UInt32, action: JSONValue) async -> Bool {
+        guard let turnId = turn?.turnId, !busy else { return false }
+        inFlight += 1
+        defer { inFlight -= 1 }
+        error = nil
+        do {
+            let request: JSONValue = ["turn_id": .string(turnId), "action_index": .number(Double(index))]
+            let edited: AgentPanelTurnStatus = try await core.request(
+                "connections_edit_chat_action", ["request": request, "action": action])
+            status?.turn = edited
+            let next: AgentPanelTurnStatus = try await core.request(
+                "agent_panel_apply_action", ["request": request])
+            status?.turn = next
+            return true
+        } catch { report(error); return false }
+    }
+
     // MARK: - Conversations
+
+    /// Start fresh so an earlier, unrestricted conversation cannot supply
+    /// evidence from outside this folder.
+    func scope(to folder: MeetingFolder) {
+        guard !busy, !running else {
+            error = "Finish or stop the current answer before asking about a folder."
+            return
+        }
+        stopVoice()
+        cancelScreenshotSelection()
+        Task {
+            if await run({ try await self.core.request("agent_chat_new") }) {
+                workspace = .sonaChat
+                folderScope = folder
+                draft = ""
+                screenshot = nil
+                submittedScreenshot = nil
+                searchedCorpus = false
+            }
+        }
+    }
+
+    func clearFolderScope() {
+        guard !busy, !running else { return }
+        folderScope = nil
+    }
 
     func newChat() {
         guard !busy, !running else { return }
@@ -673,6 +737,7 @@ final class ChatStore {
                 // The work line belongs to the turn that was on screen, not
                 // to whatever this conversation last did.
                 searchedCorpus = false
+                folderScope = nil
             }
         }
     }
@@ -753,8 +818,12 @@ final class ChatStore {
            next.turn?.isRunning == false, next.turn?.failure == nil {
             submittedScreenshot = nil
         }
+        if let landed = ChatLanding.between(status, next, at: .now) {
+            landing = landed
+        } else if switched {
+            landing = nil
+        }
         status = next
-        tick()
         if switched {
             // Another window can start a conversation; the menu follows it.
             Task { await loadHistory() }
@@ -790,33 +859,6 @@ final class ChatStore {
         }
     }
 
-    /// Runs the elapsed clock while a turn runs, and only then.
-    private func tick() {
-        now = Self.milliseconds()
-        guard running else {
-            clock?.cancel()
-            clock = nil
-            return
-        }
-        guard clock == nil else { return }
-        clock = Task { [weak self] in await self?.advance() }
-    }
-
-    private func advance() async {
-        while running {
-            try? await Task.sleep(for: .seconds(1))
-            /* A cancelled clock has already been replaced or cleared by
-             * `tick`, so it must not touch either field on its way out. */
-            if Task.isCancelled { return }
-            now = Self.milliseconds()
-        }
-        clock = nil
-    }
-
-    static func milliseconds() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
-    }
-
     // MARK: - Request bodies
 
     /// Every panel command takes its arguments under one `request` key, and
@@ -832,6 +874,7 @@ final class ChatStore {
         let workspace: String
         let contextPack: String?
         let toolsAllowed: Bool
+        let folderId: MeetingFolderId?
         let screenshot: Data?
 
         enum CodingKeys: String, CodingKey {
@@ -841,6 +884,7 @@ final class ChatStore {
             case workspace
             case contextPack = "context_pack"
             case toolsAllowed = "tools_allowed"
+            case folderId = "folder_id"
             case screenshot
         }
     }

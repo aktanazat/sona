@@ -42,7 +42,7 @@ struct CatalogModel {
     /// Commit sha the catalog's sizes/hashes were generated from. Both HF
     /// acquisition and mirror keys use it, so downloaded bytes provably match
     /// the hashes regardless of source. Cache *lookup* additionally falls back
-    /// to `main` (see `hf_cached_path`) so downloads that predate pinning keep
+    /// to `main` (see `HfCaches::copies`) so downloads that predate pinning keep
     /// resolving.
     revision: Option<String>,
     name: String,

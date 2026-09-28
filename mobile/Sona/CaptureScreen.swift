@@ -8,7 +8,6 @@ struct CaptureScreen: View {
     @ObservedObject var dictation: PhoneDictation
     /* Observed for the recording state behind `model.canStartDictation`. */
     @ObservedObject var recorder: PhoneRecorder
-    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 72
     @State private var draft = ""
@@ -62,11 +61,6 @@ struct CaptureScreen: View {
             Task { await add(items) }
         }
         .onChange(of: model.thoughtsKept) { _, _ in kept = true }
-        /* Leaving mid-sentence keeps what was said: a thought is not a draft. */
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background { dictation.finish() }
-        }
-        .onDisappear { dictation.finish() }
     }
 
     /// The transcript as it forms, over one round control that starts and finishes.

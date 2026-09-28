@@ -22,6 +22,7 @@ typealias MeetingArtifactId = String
 typealias MeetingQuestionId = String
 typealias MeetingLoopId = String
 typealias MeetingDeletionJobId = String
+typealias MeetingFolderId = String
 typealias MeetingExportReceiptId = String
 typealias MeetingDiarizationGenerationId = String
 /// `ManualNoteId`.
@@ -186,6 +187,7 @@ enum MeetingProcessingFailure: String, Decodable {
     case engineFailure = "engine_failure"
     case cancelled
     case interrupted
+    case transcriptDeleted = "transcript_deleted"
 }
 
 /// `EngineFailureCause`: what the run could not do, when the failure was the
@@ -196,6 +198,7 @@ enum MeetingEngineFailureCause: String, Decodable {
     case voiceDetection = "voice_detection"
     case evidencePack = "evidence_pack"
     case modelRefused = "model_refused"
+    case timedOut = "timed_out"
     case replyNotStructured = "reply_not_structured"
     case replyRejected = "reply_rejected"
     case panicked
@@ -206,7 +209,8 @@ enum MeetingEngineFailureCause: String, Decodable {
         case .transcription: "the speech engine refused some of the audio"
         case .voiceDetection: "speech detection refused part of a track"
         case .evidencePack: "the transcript would not fit the model's prompt"
-        case .modelRefused: "the model returned nothing usable"
+        case .modelRefused: "the model did not answer"
+        case .timedOut: "the model ran out of time"
         case .replyNotStructured: "the model's reply was not the shape asked for"
         case .replyRejected: "the model cited a moment that is not in the transcript"
         case .panicked: "the notes pipeline crashed"
@@ -258,6 +262,7 @@ enum MeetingProcessingStatus: Decodable, Equatable {
             case .engineFailure: "Processing failed: \(cause?.label ?? "the engine failed")"
             case .cancelled: "Processing was cancelled"
             case .interrupted: "Sona closed before processing finished"
+            case .transcriptDeleted: "Transcript deleted based on your retention settings."
             }
         }
     }
@@ -320,9 +325,11 @@ struct MeetingSessionSnapshot: Decodable {
     let processingStatus: MeetingProcessingStatus
     let preflightLocalProcessing: MeetingSourceAvailability?
     let retentionDeadlineUtcMs: Int64?
+    let transcriptPurgedAtUtcMs: Int64?
     let allowedActions: [MeetingAllowedAction]
 
     func allows(_ action: MeetingAllowedAction) -> Bool { allowedActions.contains(action) }
+    var transcriptDeleted: Bool { transcriptPurgedAtUtcMs != nil }
 }
 
 /// One utterance recognized while the capture was running: no id, no
@@ -477,6 +484,7 @@ enum MeetingCommandKind: String, Decodable {
     case export
     case delete
     case retentionSet = "retention_set"
+    case transcriptRetentionSet = "transcript_retention_set"
     case remoteCancel = "remote_cancel"
     case loopResolve = "loop_resolve"
     case loopReopen = "loop_reopen"
@@ -490,6 +498,12 @@ enum MeetingCommandKind: String, Decodable {
     case seriesRemoteOptOutSet = "series_remote_opt_out_set"
     case savedPromptSave = "saved_prompt_save"
     case savedPromptDelete = "saved_prompt_delete"
+    case folderCreate = "folder_create"
+    case folderRename = "folder_rename"
+    case folderDelete = "folder_delete"
+    case folderAddMeeting = "folder_add_meeting"
+    case folderRemoveMeeting = "folder_remove_meeting"
+    case folderDefaultsSet = "folder_defaults_set"
 }
 
 /// `OperationReceipt`: what the core did with one command, and why.
@@ -533,6 +547,7 @@ enum MeetingCommandError: String, Decodable {
     case recoveryRequired = "recovery_required"
     case deletionInProgress = "deletion_in_progress"
     case notFound = "not_found"
+    case transcriptDeleted = "transcript_deleted"
     case invalidRequest = "invalid_request"
     case exportCancelled = "export_cancelled"
     case exportFailed = "export_failed"
@@ -558,6 +573,7 @@ enum MeetingCommandError: String, Decodable {
         case .recoveryRequired: "This meeting needs recovery before it can be read."
         case .deletionInProgress: "This meeting is being deleted."
         case .notFound: "That meeting is no longer here."
+        case .transcriptDeleted: "Transcript deleted based on your retention settings."
         case .invalidRequest: "The core refused that request."
         case .exportCancelled: "The export was cancelled."
         case .exportFailed: "The export failed."
@@ -859,6 +875,15 @@ struct MeetingArtifactRevision: Decodable, Identifiable {
     let content: MeetingGeneratedArtifacts?
 
     var id: MeetingArtifactId { artifactId }
+
+    /// The person's own template this generation was written with, by id:
+    /// the core stamps such an artifact `custom:<uuid>`, and a built-in
+    /// keeps its own id. Nil for a built-in.
+    var customTemplateId: String? {
+        let prefix = "custom:"
+        guard templateId.hasPrefix(prefix) else { return nil }
+        return String(templateId.dropFirst(prefix.count))
+    }
 }
 
 /// `CitationKind`.
@@ -1206,6 +1231,49 @@ struct MeetingTrashEntry: Decodable, Identifiable {
     var expiresAt: Date { Date(timeIntervalSince1970: TimeInterval(expiresAtUtcMs) / 1000) }
 }
 
+// MARK: - Folders
+
+/// `MeetingFolder`: one of a person's own folders. A folder holds references,
+/// never meetings: one meeting can sit in several, and deleting a folder
+/// leaves every meeting in it where it was.
+struct MeetingFolder: Decodable, Identifiable, Hashable {
+    let folderId: MeetingFolderId
+    let name: String
+    /// The notes template a meeting filed here is written with when neither
+    /// the meeting nor its calendar series chose one.
+    let template: MeetingNotesTemplate?
+    /// Saved meeting prompts that run on every meeting filed here once its
+    /// notes are ready, in order.
+    let promptIds: [String]
+    /// Meetings filed here now. One in the trash is not counted.
+    let meetingCount: Int
+    let createdAtUtcMs: Int64
+    let updatedAtUtcMs: Int64
+
+    var id: MeetingFolderId { folderId }
+
+    /// "1 meeting", "4 meetings".
+    var countLabel: String { meetingCount == 1 ? "1 meeting" : "\(meetingCount) meetings" }
+}
+
+/// Every folder, by name, and the revision every folder write carries back.
+struct MeetingFolderList: Decodable {
+    let folders: [MeetingFolder]
+    let revision: Int
+}
+
+struct MeetingFolderMutationResult: Decodable {
+    let receipt: MeetingOperationReceipt
+    let folders: MeetingFolderList
+}
+
+/// The bounds the core holds a folder to (`MAX_FOLDER_NAME_CHARS`,
+/// `MAX_FOLDER_PROMPTS`), so a sheet can say so before a write is refused.
+enum MeetingFolderLimit {
+    static let nameCharacters = 80
+    static let prompts = 5
+}
+
 // MARK: - Export
 
 enum MeetingExportFormat: String, Decodable, CaseIterable {
@@ -1298,7 +1366,11 @@ struct MeetingActionItemState: Decodable {
 struct MeetingUserNotes: Decodable {
     let sessionId: MeetingSessionId
     let body: String
+    /// The built-in the notes are written with, or the fallback for
+    /// `customTemplateId` when that is set: the choice is then the custom
+    /// template, which the core has checked exists.
     let template: MeetingNotesTemplate
+    let customTemplateId: String?
     let revision: Int
     let updatedAtUtcMs: Int64
 }
@@ -1367,12 +1439,13 @@ struct MeetingFollowUpDraft: Decodable {
     let mine: [String]
     let decisions: [String]
     let receipt: MeetingOperationReceipt
+    let mailContextStatus: String
 
     /// The words the compose window carries: the model's message, or the
     /// record in `followUpDraftText`'s order — what was said, what I owe,
     /// then what was decided — with a blank line between sections.
     var body: String {
-        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let message {
             return message
         }
         var sections: [String] = []
@@ -1787,8 +1860,11 @@ enum MeetingRequest {
         ["sessionId": .string(sessionId)]
     }
 
+    /// One page of the list. `folderId` narrows it to the meetings filed in
+    /// one folder; nil is every meeting.
     static func list(cursorUtcMs: Int64?, limit: Int, titleQuery: String,
-                     status: MeetingStatusFilter, window: MeetingTimeWindow) -> [String: JSONValue] {
+                     status: MeetingStatusFilter, window: MeetingTimeWindow,
+                     folderId: MeetingFolderId?) -> [String: JSONValue] {
         [
             "cursorUtcMs": cursorUtcMs.map { JSONValue.number(Double($0)) } ?? .null,
             "limit": .number(Double(limit)),
@@ -1796,6 +1872,7 @@ enum MeetingRequest {
                 "status": .string(status.rawValue),
                 "window": .string(window.rawValue),
                 "title_query": .string(titleQuery),
+                "folder_id": folderId.map { JSONValue.string($0) } ?? .null,
             ]),
         ]
     }
@@ -1896,12 +1973,15 @@ enum MeetingRequest {
         ])
     }
 
+    /// `custom_template_id` is always present: null is what hands a meeting
+    /// back to its built-in, and the built-in rides along as the fallback.
     static func userNotesSave(_ sessionId: MeetingSessionId, body: String, template: MeetingNotesTemplate,
-                              expectedNoteRevision: Int) -> [String: JSONValue] {
+                              customTemplateId: String?, expectedNoteRevision: Int) -> [String: JSONValue] {
         wrap([
             "session_id": .string(sessionId),
             "body": .string(body),
             "template": .string(template.rawValue),
+            "custom_template_id": customTemplateId.map { JSONValue.string($0) } ?? .null,
             "expected_note_revision": .number(Double(expectedNoteRevision)),
         ])
     }
@@ -1947,8 +2027,62 @@ enum MeetingRequest {
         ])
     }
 
-    static func trashRestore(_ jobId: MeetingDeletionJobId) -> [String: JSONValue] {
+    /// A trashed meeting by its deletion job: what a restore and a delete
+    /// forever both take.
+    static func trashJob(_ jobId: MeetingDeletionJobId) -> [String: JSONValue] {
         ["jobId": .string(jobId)]
+    }
+
+    // MARK: Folders
+
+    static func folderCreate(name: String, revision: Int) -> [String: JSONValue] {
+        wrap([
+            "operation_id": .string(operationId()),
+            "name": .string(name),
+            "expected_revision": .number(Double(revision)),
+        ])
+    }
+
+    static func folderRename(_ folderId: MeetingFolderId, name: String, revision: Int) -> [String: JSONValue] {
+        wrap([
+            "operation_id": .string(operationId()),
+            "folder_id": .string(folderId),
+            "name": .string(name),
+            "expected_revision": .number(Double(revision)),
+        ])
+    }
+
+    static func folderDelete(_ folderId: MeetingFolderId, revision: Int) -> [String: JSONValue] {
+        wrap([
+            "operation_id": .string(operationId()),
+            "folder_id": .string(folderId),
+            "expected_revision": .number(Double(revision)),
+        ])
+    }
+
+    /// `MeetingFolderMembershipRequest`, which filing a meeting and taking it
+    /// out share.
+    static func folderMembership(_ folderId: MeetingFolderId, sessionId: MeetingSessionId,
+                                 revision: Int) -> [String: JSONValue] {
+        wrap([
+            "operation_id": .string(operationId()),
+            "folder_id": .string(folderId),
+            "session_id": .string(sessionId),
+            "expected_revision": .number(Double(revision)),
+        ])
+    }
+
+    /// The template and the prompt list are replaced together. A null
+    /// template hands the folder's meetings back to the app's default.
+    static func folderDefaults(_ folderId: MeetingFolderId, template: MeetingNotesTemplate?,
+                               promptIds: [String], revision: Int) -> [String: JSONValue] {
+        wrap([
+            "operation_id": .string(operationId()),
+            "folder_id": .string(folderId),
+            "template": template.map { JSONValue.string($0.rawValue) } ?? .null,
+            "prompt_ids": .array(promptIds.map { .string($0) }),
+            "expected_revision": .number(Double(revision)),
+        ])
     }
 }
 

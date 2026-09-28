@@ -343,6 +343,7 @@ impl ImportRuntime for AppImportRuntime {
                 source_kind: HistorySourceKind::File,
                 has_audio: false,
                 capture_status: None,
+                application_identifier: None,
             }),
         )?;
         Ok(entry.map(|entry| entry.id))

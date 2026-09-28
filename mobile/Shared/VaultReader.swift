@@ -4,7 +4,9 @@ import Foundation
 enum BoardObject: Codable, Equatable {
     case thought(ThoughtManifest)
     case card(CardManifest)
-    /// A meeting bundle, a recording, or a format this build does not know.
+    case dictationProfile(DictationProfile)
+    case meeting(PhoneMeeting)
+    /// A recording or a format this build does not know.
     case other
 }
 
@@ -13,6 +15,7 @@ struct BoardHead: Codable, Equatable {
     /// The revision's chunk count, which every chunk's key and AAD bind.
     var chunkCount: Int
     var object: BoardObject
+    var sequence: Int64?
 }
 
 /// The change feed folded into heads, keyed by object id. Pure: the reader decides
@@ -21,6 +24,7 @@ struct BoardIndex: Codable, Equatable {
     var vaultId: String
     var cursor: String?
     var heads: [String: BoardHead] = [:]
+    var readVersion: Int? = 2
 
     /// Whether `change` names a revision the index has not read yet.
     func needsRead(_ change: ChangeRow) -> Bool {
@@ -33,7 +37,7 @@ struct BoardIndex: Codable, Equatable {
 
     mutating func set(_ change: ChangeRow, chunkCount: Int, object: BoardObject) {
         heads[change.objectId] = BoardHead(
-            revisionId: change.revisionId, chunkCount: chunkCount, object: object
+            revisionId: change.revisionId, chunkCount: chunkCount, object: object, sequence: change.sequence
         )
     }
 
@@ -49,6 +53,20 @@ struct BoardIndex: Codable, Equatable {
             guard case let .card(card) = head.object else { return nil }
             return (id, head, card)
         }
+    }
+
+    var dictationProfile: DictationProfile? {
+        heads.values.compactMap { head -> (Int64, DictationProfile)? in
+            guard case .dictationProfile(let profile) = head.object else { return nil }
+            return (head.sequence ?? 0, profile)
+        }.max { $0.0 < $1.0 }?.1
+    }
+
+    var meetings: [PhoneMeeting] {
+        heads.values.compactMap { head in
+            guard case .meeting(let meeting) = head.object else { return nil }
+            return meeting
+        }.sorted { $0.date > $1.date }
     }
 }
 
@@ -149,7 +167,7 @@ actor VaultReader {
         self.credentials = credentials
         if let bytes = try? Data(contentsOf: file),
            let stored = try? JSONDecoder().decode(BoardIndex.self, from: bytes),
-           stored.vaultId == credentials?.vaultId
+           stored.vaultId == credentials?.vaultId, stored.readVersion == 2
         {
             index = stored
         }
@@ -310,9 +328,8 @@ actor VaultReader {
 
     /// Open a head's manifest as a thought, a card, or something else in the vault.
     ///
-    /// `source_format` never travels on the wire, so the reader tries the two formats
-    /// it knows and lets AES-GCM answer: a payload opens under exactly the format its
-    /// writer sealed it with.
+    /// `source_format` never travels on the wire. AES-GCM accepts only the format
+    /// the writer sealed, and recognized formats must also pass their payload checks.
     private func read(
         _ head: ChangeRow, credentials: VaultCredentials, client: CompanionClient
     ) async throws -> (Int, BoardObject) {
@@ -324,6 +341,7 @@ actor VaultReader {
         guard envelope.objectId == head.objectId,
               envelope.revisionId == head.revisionId,
               envelope.cryptoVersion == SonaProtocol.cryptoVersion,
+              envelope.chunkCount > 0,
               let sealed = Base64URL.decode(response.manifest),
               sha256Base64URL(sealed) == envelope.manifestSha256
         else { throw VaultReaderError.integrity }
@@ -355,12 +373,45 @@ actor VaultReader {
         {
             return (envelope.chunkCount, .card(card))
         }
+        for format in [DictationProfile.sourceFormat, PhoneMeeting.sourceFormat, PhoneMeeting.phoneSourceFormat] {
+            guard let manifestBytes = open(format) else { continue }
+            let manifest = try decoder.decode(PhoneObjectManifest.self, from: manifestBytes)
+            guard manifest.version == 1, manifest.source_format == format,
+                  manifest.chunk_count == envelope.chunkCount,
+                  (1...3).contains(manifest.chunk_count),
+                  (1...(8 * 1024 * 1024)).contains(manifest.plaintext_bytes)
+            else { throw VaultReaderError.integrity }
+            var plaintext = Data()
+            plaintext.reserveCapacity(manifest.plaintext_bytes)
+            var encryptedBytes = 0
+            for index in 0..<manifest.chunk_count {
+                let chunk = try await client.chunk(identity: identity, vaultId: credentials.vaultId,
+                                                  objectId: head.objectId, revisionId: head.revisionId, index: index)
+                guard chunk.count <= DeviceRecordingObject.maxEncryptedChunkBytes else { throw VaultReaderError.integrity }
+                encryptedBytes += chunk.count
+                plaintext.append(try openObjectRevisionPayload(vaultRoot: credentials.vaultRoot,
+                    context: ObjectRevisionCryptoContext(vaultId: credentials.vaultId, objectId: head.objectId,
+                        revisionId: head.revisionId, index: UInt64(index), total: UInt64(manifest.chunk_count),
+                        contentKind: .chunk, sourceFormat: format), encryptedPayload: chunk))
+                guard plaintext.count <= manifest.plaintext_bytes else { throw VaultReaderError.integrity }
+            }
+            guard plaintext.count == manifest.plaintext_bytes, Int64(encryptedBytes) == envelope.totalBytes,
+                  sha256Base64URL(plaintext) == manifest.plaintext_sha256 else { throw VaultReaderError.integrity }
+            if format == DictationProfile.sourceFormat {
+                let profile = try decoder.decode(DictationProfile.self, from: plaintext)
+                guard profile.version == 1 else { throw VaultReaderError.integrity }
+                return (envelope.chunkCount, .dictationProfile(profile))
+            }
+            let meeting = try decoder.decode(PhoneMeeting.self, from: plaintext)
+            guard meeting.format_version == 1 else { throw VaultReaderError.integrity }
+            return (envelope.chunkCount, .meeting(meeting))
+        }
         return (envelope.chunkCount, .other)
     }
 
     private func store(_ index: BoardIndex) throws {
         self.index = index
-        try JSONEncoder().encode(index).write(to: file, options: .atomic)
+        try JSONEncoder().encode(index).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     /// The sequence a snapshot `high_water` token names: `h.` + base64url of

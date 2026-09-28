@@ -1,5 +1,5 @@
 use crate::context::{ContextPacket, TargetMetadata};
-use crate::modes::{PromptPreset, RunPlan, Tone};
+use crate::modes::{CleanupLevel, PromptPreset, RunPlan, Tone};
 use crate::settings::{PersonaSample, PERSONA_SAMPLES_MAX};
 use serde::Serialize;
 use specta::Type;
@@ -31,6 +31,10 @@ const MEETING: &str = include_str!("../resources/prompts/meeting.txt");
 const NOTES: &str = include_str!("../resources/prompts/notes.txt");
 const GENERIC_REFORMAT: &str = include_str!("../resources/prompts/generic_reformat.txt");
 const COMMAND: &str = include_str!("../resources/prompts/command.txt");
+const CLEANUP_LIGHT: &str = include_str!("../resources/prompts/cleanup_light.txt");
+const CLEANUP_MEDIUM: &str = include_str!("../resources/prompts/cleanup_medium.txt");
+const CLEANUP_HEAVY: &str = include_str!("../resources/prompts/cleanup_heavy.txt");
+const CLEANUP_CONTRACT: &str = include_str!("../resources/prompts/cleanup_contract.txt");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
 pub struct PromptBudgetReceipt {
@@ -219,13 +223,50 @@ fn serialized_context_len(context: &ContextPacket) -> usize {
 const LEGACY_OUTPUT_PLACEHOLDER: &str = "${output}";
 const OUTPUT_PLACEHOLDER_REFERENCE: &str = "the transcript in the envelope";
 
+/// The system message a rewrite of `run` sends, as far as it is known before
+/// a word is spoken: the voice command's for a command run, the mode's own
+/// for a dictation. A dictation that ends in a spoken instruction switches to
+/// the command's only once its words are in.
+pub fn system_message(run: &RunPlan) -> String {
+    if run.command().is_some() {
+        COMMAND.to_string()
+    } else {
+        render_system(run)
+    }
+}
+
 fn render_system(run: &RunPlan) -> String {
     let prompt_plan = run.prompt();
-    let custom_prompt = prompt_plan.custom_prompt.as_deref();
+    writing_style(
+        prompt_plan.tone,
+        prompt_plan.preset,
+        prompt_plan.custom_prompt.as_deref(),
+        &prompt_plan.persona_samples,
+        run.asr().literal_punctuation,
+        prompt_plan.cleanup_level,
+    )
+}
+
+/// Render saved writing instructions without starting a run or capturing another app.
+pub fn writing_style(
+    tone: Tone,
+    preset: PromptPreset,
+    custom_prompt: Option<&str>,
+    persona_samples: &[PersonaSample],
+    literal_punctuation: bool,
+    cleanup_level: Option<CleanupLevel>,
+) -> String {
     let base_len = custom_prompt
         .map(str::len)
-        .unwrap_or_else(|| prompt_for(prompt_plan.preset).len());
-    let mut system = String::with_capacity(NORMALIZER.len() + base_len + 1_100);
+        .unwrap_or_else(|| prompt_for(preset).len());
+    let cleanup = match cleanup_level {
+        Some(CleanupLevel::Light) => Some(CLEANUP_LIGHT),
+        Some(CleanupLevel::Medium) => Some(CLEANUP_MEDIUM),
+        Some(CleanupLevel::Heavy) => Some(CLEANUP_HEAVY),
+        Some(CleanupLevel::None) | None => None,
+    };
+    let cleanup_len = cleanup.map_or(0, |block| block.len() + CLEANUP_CONTRACT.len() + 4);
+    let mut system = String::with_capacity(NORMALIZER.len() + base_len + cleanup_len + 1_100);
     system.push_str(NORMALIZER);
     system.push_str("\n\n");
     if let Some(prompt) = custom_prompt {
@@ -235,28 +276,34 @@ fn render_system(run: &RunPlan) -> String {
         } else {
             system.push_str(prompt);
         }
-    } else if prompt_plan.preset == PromptPreset::ApplicationContext {
+    } else if preset == PromptPreset::ApplicationContext {
         system.push_str(APPLICATION_CONTEXT_PREAMBLE);
         system.push_str("\n\n");
         system.push_str(APPLICATION_CONTEXT_BODY);
     } else {
-        system.push_str(prompt_for(prompt_plan.preset));
+        system.push_str(prompt_for(preset));
     }
-    if let Some(tone) = tone_block(prompt_plan.tone) {
+    if let Some(tone) = tone_block(tone) {
         system.push_str("\n\n");
         system.push_str(TONE_HEADER);
         system.push_str(tone);
     }
-    if let Some(samples) = persona_block(&prompt_plan.persona_samples) {
+    if let Some(samples) = persona_block(persona_samples) {
         system.push_str("\n\n");
         system.push_str(PERSONA_HEADER);
         system.push_str(&samples);
     }
     system.push_str("\n\nPunctuation policy: ");
-    if run.asr().literal_punctuation {
+    if literal_punctuation {
         system.push_str("literal. Preserve punctuation already present in the transcript.");
     } else {
         system.push_str("normal.");
+    }
+    if let Some(cleanup) = cleanup {
+        system.push_str("\n\n");
+        system.push_str(cleanup);
+        system.push_str("\n\n");
+        system.push_str(CLEANUP_CONTRACT);
     }
     system.push_str("\n\nInput boundary: ");
     system.push_str(DATA_BOUNDARY);
@@ -386,6 +433,63 @@ mod tests {
             target: &TargetMetadata::default(),
             context: &ContextPacket::default(),
         })
+    }
+
+    fn render_cleanup(level: CleanupLevel) -> String {
+        let mut settings = get_default_settings();
+        ensure_mode_settings(&mut settings);
+        settings.modes[0].llm.cleanup_level = Some(level);
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        render_for(&run).system_message
+    }
+
+    #[test]
+    fn light_cleanup_renders_only_its_level_and_the_shared_contract() {
+        let system = render_cleanup(CleanupLevel::Light);
+        assert!(system.contains("[CLEANUP_LEVEL: LIGHT]"));
+        assert!(!system.contains("[CLEANUP_LEVEL: MEDIUM]"));
+        assert!(!system.contains("[CLEANUP_LEVEL: HEAVY]"));
+        assert!(system.contains("[BACKTRACK]"));
+        assert!(system.contains("[REWRITE_OUTPUT]"));
+    }
+
+    #[test]
+    fn medium_cleanup_renders_only_its_level_and_the_shared_contract() {
+        let system = render_cleanup(CleanupLevel::Medium);
+        assert!(system.contains("[CLEANUP_LEVEL: MEDIUM]"));
+        assert!(!system.contains("[CLEANUP_LEVEL: LIGHT]"));
+        assert!(!system.contains("[CLEANUP_LEVEL: HEAVY]"));
+        assert!(system.contains("[BACKTRACK]"));
+        assert!(system.contains("[REWRITE_OUTPUT]"));
+    }
+
+    #[test]
+    fn heavy_cleanup_renders_only_its_level_and_the_shared_contract() {
+        let system = render_cleanup(CleanupLevel::Heavy);
+        assert!(system.contains("[CLEANUP_LEVEL: HEAVY]"));
+        assert!(!system.contains("[CLEANUP_LEVEL: LIGHT]"));
+        assert!(!system.contains("[CLEANUP_LEVEL: MEDIUM]"));
+        assert!(system.contains("[BACKTRACK]"));
+        assert!(system.contains("[REWRITE_OUTPUT]"));
+    }
+
+    #[test]
+    fn cleanup_none_renders_no_cleanup_block() {
+        let system = render_cleanup(CleanupLevel::None);
+        assert!(!system.contains("[CLEANUP_LEVEL:"));
+        assert!(!system.contains("[BACKTRACK]"));
+        assert!(!system.contains("[REWRITE_OUTPUT]"));
+    }
+
+    #[test]
+    fn an_unselected_cleanup_level_keeps_the_existing_system_prompt_bytes() {
+        let system = render_for(&run(Tone::Balanced)).system_message;
+        assert_eq!(
+            system,
+            format!(
+                "{NORMALIZER}\n\n{MINIMALIST_CLEANUP}\n\nPunctuation policy: normal.\n\nInput boundary: {DATA_BOUNDARY}"
+            )
+        );
     }
 
     fn run_with_samples(samples: Vec<PersonaSample>) -> RunPlan {

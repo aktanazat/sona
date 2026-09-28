@@ -2,10 +2,13 @@ import SwiftUI
 
 /// The pill that floats above other windows. Idle, the name of the mode the
 /// next recording goes under: a press starts it, a right-click picks the
-/// mode. While you talk, the sound: eleven bars, the last quarter second of
-/// the microphone, newest on the right, flat while nothing is being heard.
-/// With the live overlay style, the words as the model hears them sit beside
-/// the bars. While the words are worked on, the phase in one word.
+/// mode or puts the pill away for an hour, and a drag carries it to another
+/// edge of the screen. On a side edge it stands upright. While you talk, the
+/// sound: eleven bars, the last quarter second of the microphone, newest on
+/// the right, flat while nothing is being heard, and the minute-left warning
+/// when the dictation is about to reach its limit. With the live overlay
+/// style, the words as the model hears them sit beside the bars. While the
+/// words are worked on, the phase in one word.
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
 
@@ -17,6 +20,7 @@ struct HUDPill: View {
             case .recording:
                 pill {
                     bars
+                    warning
                     liveWords
                 }
             case let .working(kind):
@@ -33,23 +37,37 @@ struct HUDPill: View {
         .padding(8)
     }
 
+    /// The idle pill is not a `Button`: the panel it lives in tells a click
+    /// from a drag, and hands only a whole click through.
     private var idle: some View {
-        Button(action: model.toggleCapture) {
-            HStack(spacing: 6) {
-                Image(systemName: "mic")
-                    .font(.system(size: 10, weight: .semibold))
-                Text(model.pillMode ?? "Dictate")
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+        Group {
+            if model.settings.settings.hudPillPosition.isVertical {
+                VStack(spacing: 6) {
+                    micMark
+                    UprightText(model.pillMode ?? "Dictate")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 12)
+            } else {
+                HStack(spacing: 6) {
+                    micMark
+                    Text(model.pillMode ?? "Dictate")
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
             }
-            .foregroundStyle(Theme.onInvert)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Theme.invert, in: Capsule())
         }
-        .buttonStyle(.plain)
+        .foregroundStyle(Theme.onInvert)
+        .background(Theme.invert, in: Capsule())
+        .contentShape(Capsule())
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel("Start recording")
-        .accessibilityHint("Right-click to choose the mode.")
+        .accessibilityHint("Right-click to choose the mode. Drag to another edge of the screen.")
+        .accessibilityAction { model.toggleCapture() }
         .contextMenu {
             ForEach(model.pillModes) { mode in
                 Button {
@@ -63,7 +81,14 @@ struct HUDPill: View {
                 }
                 .disabled(mode.active)
             }
+            Divider()
+            Button("Hide for an hour") { model.hidePillForAnHour() }
         }
+    }
+
+    private var micMark: some View {
+        Image(systemName: "mic")
+            .font(.system(size: 10, weight: .semibold))
     }
 
     private var bars: some View {
@@ -76,6 +101,15 @@ struct HUDPill: View {
         }
         .frame(height: 14)
         .accessibilityLabel("Recording")
+    }
+
+    /// The last minute of a dictation, said once the core has counted it.
+    @ViewBuilder private var warning: some View {
+        if let seconds = model.pillWarningSeconds {
+            Text(seconds == 60 ? "1 minute left" : "\(seconds) seconds left")
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+        }
     }
 
     /// The words so far, under the live style. The frame is fixed so the
@@ -109,51 +143,152 @@ struct HUDPill: View {
     }
 }
 
+/// A line of text read from bottom to top, as the pill's label runs on a
+/// side edge. Turning a view does not turn the room it takes, so the text
+/// is measured flat and given a frame of its turned size.
+private struct UprightText: View {
+    private let text: String
+    @State private var flat = CGSize.zero
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .lineLimit(1)
+            .fixedSize()
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { flat = $0 }
+            .rotationEffect(.degrees(-90))
+            .frame(width: flat.height, height: flat.width)
+    }
+}
+
 /// Where a floating panel sits on the screen the pointer is on.
 enum PanelPlacement: Equatable {
-    /// Centred along the top or bottom edge.
-    case edge(OverlayPosition)
+    /// Centred along one edge of the screen.
+    case edge(HudPillEdge)
     /// Tucked into the top right corner.
     case topTrailing
 }
 
+extension HudPillEdge {
+    /// The recording overlay's edge, as a pill edge.
+    init(_ position: OverlayPosition) {
+        self = switch position {
+        case .top: .top
+        case .bottom: .bottom
+        }
+    }
+
+    /// The edge of `frame` a point is nearest to.
+    static func nearest(to point: NSPoint, in frame: NSRect) -> HudPillEdge {
+        let distances: [(HudPillEdge, CGFloat)] = [
+            (.left, point.x - frame.minX),
+            (.right, frame.maxX - point.x),
+            (.bottom, point.y - frame.minY),
+            (.top, frame.maxY - point.y),
+        ]
+        return distances.min { $0.1 < $1.1 }?.0 ?? .bottom
+    }
+}
+
+/// The panel underneath: a window that tells a click from a drag before
+/// its view hears either, and takes the keyboard only while a drag is on,
+/// so Escape can end one without the app ever coming to the front.
+private final class DockablePanel: NSPanel {
+    /// Sees every event first. `true` keeps it from the views.
+    var intercept: (@MainActor (NSEvent) -> Bool)?
+    var takesKeys = false
+
+    override var canBecomeKey: Bool { takesKeys }
+
+    override func sendEvent(_ event: NSEvent) {
+        if intercept?(event) == true { return }
+        super.sendEvent(event)
+    }
+}
+
+/// The four strips that light up along the screen's edges while the pill
+/// is being dragged, the one the pill would land on brightest.
+private struct EdgeTargets: View {
+    let nearest: HudPillEdge?
+
+    var body: some View {
+        ZStack {
+            ForEach(HudPillEdge.allCases, id: \.self) { edge in
+                Capsule()
+                    .fill(edge == nearest ? Theme.accent : Theme.invert)
+                    .opacity(edge == nearest ? 0.9 : 0.25)
+                    .frame(
+                        width: edge.isVertical ? 6 : nil,
+                        height: edge.isVertical ? nil : 6)
+                    .padding(edge.isVertical ? .vertical : .horizontal, 96)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: edge.alignment)
+                    .padding(12)
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+}
+
+private extension HudPillEdge {
+    var alignment: Alignment {
+        switch self {
+        case .top: .top
+        case .bottom: .bottom
+        case .left: .leading
+        case .right: .trailing
+        }
+    }
+}
+
+/// One drag of the pill, from the press to the drop.
+private enum PillDrag {
+    /// The mouse is down and has not moved far. Nothing has happened yet:
+    /// the release will make it a click.
+    case pressed(at: NSPoint)
+    /// The pill follows the pointer. `frame` and `at` are where the panel and
+    /// the pointer were when the drag began; `nearest` is the edge it would
+    /// drop on now.
+    case dragging(frame: NSRect, at: NSPoint, nearest: HudPillEdge?)
+}
+
 /// A window that floats above other windows and on every space, without
 /// taking the keyboard away from the app the words are going into, which a
-/// SwiftUI `Window` scene would. Shown with a fresh view each time; the
-/// hosting view keeps it, so a `show` with the same content redraws in
-/// place.
+/// SwiftUI `Window` scene would. It hosts one view for its whole life, a
+/// view that reads its own state, so a change redraws in place: nothing
+/// here swaps the view, and the panel moves only when it is shown after
+/// being hidden, when its placement changes, when the view's size does, or
+/// when it is dragged to another edge.
 @MainActor
 final class FloatingPanel {
-    private var panel: NSPanel?
-    private var host: NSHostingView<AnyView>?
+    private let panel: DockablePanel
+    private let host: NSHostingView<AnyView>
+    private var placement: PanelPlacement?
+    /// The point the placement pins, fixed when the panel is placed: its
+    /// top right corner, or the middle of the edge it stands on. A resize
+    /// grows the panel away from it, so the panel stays on its screen.
+    private var anchor = NSPoint.zero
+    private var drag: PillDrag?
+    /// The edge strips, made the first time a drag begins.
+    private var targets: NSPanel?
+    private var targetsHost: NSHostingView<EdgeTargets>?
+    /// While on, a left press on the panel is the panel's: a release without
+    /// travel is a click, and travel is a drag to another edge. Off, presses
+    /// reach the views as they always did.
+    var dockable = false
+    /// A click, while `dockable`.
+    var onClick: (@MainActor () -> Void)?
+    /// A drop on an edge, while `dockable`.
+    var onDock: (@MainActor (HudPillEdge) -> Void)?
+    /// A press must travel this far to be a drag rather than a click.
+    private static let dragSlop: CGFloat = 4
+    private static let escape: UInt16 = 53
 
-    func show(_ content: some View, at placement: PanelPlacement) {
-        let panel = panel ?? make()
-        self.panel = panel
-        host?.rootView = AnyView(content)
-        panel.setContentSize(host?.fittingSize ?? .zero)
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
-            let visible = screen.visibleFrame
-            let size = panel.frame.size
-            let origin = switch placement {
-            case .edge(.bottom):
-                NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 24)
-            case .edge(.top):
-                NSPoint(x: visible.midX - size.width / 2, y: visible.maxY - size.height - 24)
-            case .topTrailing:
-                NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16)
-            }
-            panel.setFrameOrigin(origin)
-        }
-        panel.orderFrontRegardless()
-    }
-
-    func hide() {
-        panel?.orderOut(nil)
-    }
-
-    private func make() -> NSPanel {
-        let panel = NSPanel(
+    init(_ content: some View) {
+        let panel = DockablePanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -168,8 +303,201 @@ final class FloatingPanel {
         let host = NSHostingView(rootView: AnyView(EmptyView()))
         host.sizingOptions = .intrinsicContentSize
         panel.contentView = host
+        self.panel = panel
         self.host = host
-        return panel
+        host.rootView = AnyView(
+            content
+                .fixedSize()
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak self] size in
+                    self?.fit(size)
+                })
+        panel.intercept = { [weak self] event in self?.intercept(event) ?? false }
+    }
+
+    /// Floats the panel at `placement` on the screen the pointer is on. A
+    /// panel already up at the same placement stays exactly where it is,
+    /// unless `anew` asks for it to be floated again all the same.
+    func show(at placement: PanelPlacement, anew: Bool = false) {
+        guard anew || !panel.isVisible || placement != self.placement else { return }
+        if drag != nil { cancelDrag() }
+        self.placement = placement
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+            anchor = Self.anchor(for: placement, on: screen.visibleFrame)
+        }
+        panel.setFrame(frame(host.fittingSize, at: placement), display: false)
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        if drag != nil { cancelDrag() }
+        panel.orderOut(nil)
+    }
+
+    /// The view's size changed, which is the only time this is called. The
+    /// panel takes the new size around the same anchor, in one move, even
+    /// when AppKit already grew it from the hosting view's intrinsic size.
+    private func fit(_ size: CGSize) {
+        guard let placement, panel.isVisible else { return }
+        if case .dragging = drag { return }
+        let target = frame(size, at: placement)
+        if target != panel.frame { panel.setFrame(target, display: true) }
+    }
+
+    private static func anchor(for placement: PanelPlacement, on visible: NSRect) -> NSPoint {
+        switch placement {
+        case .edge(.bottom): NSPoint(x: visible.midX, y: visible.minY + 24)
+        case .edge(.top): NSPoint(x: visible.midX, y: visible.maxY - 24)
+        case .edge(.left): NSPoint(x: visible.minX + 24, y: visible.midY)
+        case .edge(.right): NSPoint(x: visible.maxX - 24, y: visible.midY)
+        case .topTrailing: NSPoint(x: visible.maxX - 16, y: visible.maxY - 16)
+        }
+    }
+
+    private func frame(_ size: CGSize, at placement: PanelPlacement) -> NSRect {
+        let origin = switch placement {
+        case .edge(.bottom): NSPoint(x: anchor.x - size.width / 2, y: anchor.y)
+        case .edge(.top): NSPoint(x: anchor.x - size.width / 2, y: anchor.y - size.height)
+        case .edge(.left): NSPoint(x: anchor.x, y: anchor.y - size.height / 2)
+        case .edge(.right): NSPoint(x: anchor.x - size.width, y: anchor.y - size.height / 2)
+        case .topTrailing: NSPoint(x: anchor.x - size.width, y: anchor.y - size.height)
+        }
+        return NSRect(origin: origin, size: size)
+    }
+
+    // MARK: Dragging to an edge
+
+    /// Every event the panel gets, before its views. While the panel is
+    /// dockable a left press is the panel's: a release without travel is a
+    /// click, travel moves the panel, and Escape ends the move where it began.
+    private func intercept(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .leftMouseDown:
+            guard dockable, drag == nil else { return false }
+            drag = .pressed(at: NSEvent.mouseLocation)
+            return true
+        case .leftMouseDragged:
+            switch drag {
+            case nil:
+                return false
+            case let .pressed(start):
+                let point = NSEvent.mouseLocation
+                if hypot(point.x - start.x, point.y - start.y) >= Self.dragSlop {
+                    beginDrag(at: start)
+                    follow(point)
+                }
+                return true
+            case .dragging:
+                follow(NSEvent.mouseLocation)
+                return true
+            }
+        case .leftMouseUp:
+            switch drag {
+            case nil:
+                return false
+            case .pressed:
+                drag = nil
+                onClick?()
+                return true
+            case let .dragging(_, _, nearest):
+                drop(on: nearest ?? HudPillEdge.nearest(to: NSEvent.mouseLocation, in: bounds))
+                return true
+            }
+        case .keyDown:
+            guard case .dragging = drag else { return false }
+            if event.keyCode == Self.escape { cancelDrag() }
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The screen the panel is on: the one holding its middle, else the
+    /// pointer's, else the main one.
+    private var screen: NSScreen? {
+        let middle = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+        return NSScreen.screens.first { $0.frame.contains(middle) }
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+            ?? NSScreen.main
+    }
+
+    /// The room the pill can dock in: its screen's, or its own when no
+    /// screen claims it.
+    private var bounds: NSRect { screen?.visibleFrame ?? panel.frame }
+
+    private func beginDrag(at start: NSPoint) {
+        drag = .dragging(frame: panel.frame, at: start, nearest: nil)
+        panel.takesKeys = true
+        panel.makeKey()
+        showTargets(in: bounds)
+    }
+
+    private func follow(_ point: NSPoint) {
+        guard case let .dragging(frame, start, was) = drag else { return }
+        panel.setFrameOrigin(NSPoint(x: frame.origin.x + point.x - start.x, y: frame.origin.y + point.y - start.y))
+        let room = bounds
+        let nearest = HudPillEdge.nearest(to: point, in: room)
+        if nearest != was {
+            drag = .dragging(frame: frame, at: start, nearest: nearest)
+            targetsHost?.rootView = EdgeTargets(nearest: nearest)
+        }
+        // The pill crossed to another screen: the strips follow it there.
+        if let targets, targets.frame != room {
+            targets.setFrame(room, display: true)
+        }
+    }
+
+    /// The drop: the panel snaps to the edge and the owner is told, so the
+    /// edge outlives this launch.
+    private func drop(on edge: HudPillEdge) {
+        endDrag()
+        show(at: .edge(edge), anew: true)
+        onDock?(edge)
+    }
+
+    /// Escape, or a hide mid-drag: back where the drag began.
+    private func cancelDrag() {
+        let frame = if case let .dragging(frame, _, _) = drag { frame } else { panel.frame }
+        endDrag()
+        panel.setFrame(frame, display: true)
+    }
+
+    /// The drag is over, whichever way. Ordering the panel out is what gives
+    /// the keyboard back to the app in front; it is ordered in again by
+    /// whatever placed it next.
+    private func endDrag() {
+        drag = nil
+        targets?.orderOut(nil)
+        panel.takesKeys = false
+        panel.orderOut(nil)
+        panel.orderFrontRegardless()
+    }
+
+    private func showTargets(in room: NSRect) {
+        let targets = self.targets ?? makeTargets()
+        targetsHost?.rootView = EdgeTargets(nearest: nil)
+        targets.setFrame(room, display: false)
+        targets.order(.below, relativeTo: panel.windowNumber)
+    }
+
+    private func makeTargets() -> NSPanel {
+        let targets = NSPanel(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true)
+        targets.isFloatingPanel = true
+        targets.level = .floating
+        targets.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        targets.isOpaque = false
+        targets.backgroundColor = .clear
+        targets.hasShadow = false
+        targets.hidesOnDeactivate = false
+        targets.ignoresMouseEvents = true
+        let host = NSHostingView(rootView: EdgeTargets(nearest: nil))
+        targets.contentView = host
+        self.targets = targets
+        targetsHost = host
+        return targets
     }
 }
 

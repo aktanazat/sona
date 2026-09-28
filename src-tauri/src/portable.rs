@@ -123,9 +123,11 @@ pub fn init() {
     });
 }
 
-/// Keep hf-hub downloads inside the portable data directory. hf-hub appends
-/// its own `hub` component to `HF_HOME` for model snapshots and blobs.
-fn hugging_face_home(data_dir: &Path) -> PathBuf {
+/// Sona's Hugging Face home inside a data directory. hf-hub appends its own
+/// `hub` component for model snapshots and blobs. Portable mode also exports
+/// it as `HF_HOME`, so every hf-hub client stays inside the portable data
+/// directory.
+pub(crate) fn hugging_face_home(data_dir: &Path) -> PathBuf {
     data_dir.join("huggingface")
 }
 

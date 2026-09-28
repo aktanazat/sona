@@ -49,6 +49,17 @@ pub enum PromptPreset {
     Generic,
 }
 
+/// How much an AI rewrite may change the dictation. `None` skips the rewrite,
+/// not the user's separate vocabulary, punctuation, or spoken-edit settings.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupLevel {
+    None,
+    Light,
+    Medium,
+    Heavy,
+}
+
 /// The two direct, user-owned speech providers Sona can use. This remains
 /// separate from [`RequestedEngine`] so settings cannot accidentally create a
 /// remote route by naming an arbitrary provider.
@@ -135,6 +146,13 @@ impl ModeAsrSettings {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
 pub struct ModeLlmSettings {
     pub enabled: bool,
+    /// Absent means the mode keeps its existing prompt byte for byte. A level
+    /// is only recorded when the user chooses one; loading or saving an older
+    /// mode must not silently change its writing style. `enabled` remains the
+    /// master switch, and an explicit `None` also vetoes forced dictation
+    /// cleanup. Voice commands are a separate, explicitly requested rewrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_level: Option<CleanupLevel>,
     /// The provider this mode overrides to, or `None` to inherit
     /// [`AppSettings::post_process_provider_id`].
     ///
@@ -363,6 +381,7 @@ impl ModeDefinition {
             // let the global choice and the mode's row disagree forever.
             llm: ModeLlmSettings {
                 enabled: settings.post_process_enabled,
+                cleanup_level: None,
                 provider_id: None,
                 model_id: String::new(),
                 spoken_instructions: false,
@@ -1255,6 +1274,8 @@ fn effective_vocabulary(
 pub struct AsrPlan {
     pub model_id: String,
     pub language: String,
+    /// Automatic detection is limited to these choices. Empty is unrestricted.
+    pub language_candidates: Vec<String>,
     pub translate_to_english: bool,
     pub custom_words: Vec<VocabularyEntry>,
     pub emoji_replacements: Vec<EmojiReplacement>,
@@ -1286,9 +1307,11 @@ impl AsrPlan {
         } else {
             mode.model_id.clone()
         };
+        let (language, language_candidates) = Self::dictation_language(settings, &mode.language);
         Self {
             model_id,
-            language: mode.language.clone(),
+            language,
+            language_candidates,
             translate_to_english: mode.translate_to_english,
             custom_words: effective_vocabulary(&settings.custom_words, &mode.custom_words),
             emoji_replacements: settings.emoji_replacements.clone(),
@@ -1311,9 +1334,11 @@ impl AsrPlan {
     }
 
     pub fn from_settings(settings: &AppSettings) -> Self {
+        let (language, language_candidates) = Self::dictation_language(settings, "auto");
         Self {
             model_id: settings.selected_model.clone(),
-            language: settings.selected_language.clone(),
+            language,
+            language_candidates,
             translate_to_english: settings.translate_to_english,
             custom_words: settings.custom_words.clone(),
             emoji_replacements: settings.emoji_replacements.clone(),
@@ -1334,6 +1359,32 @@ impl AsrPlan {
             spoken_edits_enabled: settings.spoken_edits_enabled,
         }
     }
+
+    fn dictation_language(settings: &AppSettings, mode_language: &str) -> (String, Vec<String>) {
+        let language = if mode_language == "auto" {
+            settings.selected_language.as_str()
+        } else {
+            mode_language
+        };
+        if language != "auto" {
+            return (language.to_string(), Vec::new());
+        }
+        match settings.dictation_languages.as_slice() {
+            [language] => (language.clone(), Vec::new()),
+            languages => ("auto".to_string(), languages.to_vec()),
+        }
+    }
+
+    /// Every meeting pass uses its frozen language, never the dictation choices
+    /// or the dictation-only request to translate speech into English.
+    pub(crate) fn from_meeting(settings: &AppSettings, model_id: &str, language: &str) -> Self {
+        let mut plan = Self::from_settings(settings);
+        plan.model_id = model_id.to_string();
+        plan.language = if language == "und" { "auto" } else { language }.to_string();
+        plan.language_candidates.clear();
+        plan.translate_to_english = false;
+        plan
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1348,6 +1399,7 @@ pub struct PromptPlan {
     pub tone: Tone,
     pub preset: PromptPreset,
     pub custom_prompt: Option<String>,
+    pub cleanup_level: Option<CleanupLevel>,
     pub llm: Option<ResolvedLlmSettings>,
     pub post_process_requested: bool,
     /// The mode asked for a rewrite that could not be resolved, so none is
@@ -1400,24 +1452,49 @@ impl ContextPlan {
 }
 
 /// The frozen operand of a voice command run: the text that was selected when
-/// the user pressed the command chord.
+/// the user pressed the command chord, and where a spoken question goes.
 ///
 /// The selection is captured before the microphone opens, so the rewrite edits
 /// what the user was looking at when they started speaking even if the screen
 /// changes while they speak. Its presence on a [`RunPlan`] is what makes the run
-/// a command; there is no second flag to keep in step.
+/// a command; there is no second flag to keep in step. The chat toggle is
+/// frozen with it, so flipping the setting mid-recording cannot move the
+/// answer in flight.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandPlan {
     selection: String,
+    answers_in_chat: bool,
 }
 
 impl CommandPlan {
+    /// A command that only edits: the selection is never empty.
     pub(crate) fn new(selection: String) -> Self {
-        Self { selection }
+        Self {
+            selection,
+            answers_in_chat: false,
+        }
+    }
+
+    /// A command whose questions are answered in the chat. An empty
+    /// `selection` is a chord pressed with nothing selected, which can still
+    /// ask but has nothing to edit.
+    pub(crate) fn answering_in_chat(selection: String) -> Self {
+        Self {
+            selection,
+            answers_in_chat: true,
+        }
     }
 
     pub fn selection(&self) -> &str {
         &self.selection
+    }
+
+    pub fn has_selection(&self) -> bool {
+        !self.selection.is_empty()
+    }
+
+    pub fn answers_in_chat(&self) -> bool {
+        self.answers_in_chat
     }
 }
 
@@ -1786,6 +1863,7 @@ impl RunPlan {
                 tone: mode.tone,
                 preset: mode.prompt.preset,
                 custom_prompt: None,
+                cleanup_level: mode.llm.cleanup_level,
                 llm: None,
                 post_process_requested: false,
                 rewrite_unavailable: false,
@@ -1854,7 +1932,14 @@ impl RunPlan {
         rewrite_required: bool,
         project_root: Option<&str>,
     ) -> Result<Self, RunPlanError> {
-        let mut post_process_requested = post_process_override.unwrap_or(mode.llm.enabled);
+        // A command edits a selection rather than cleaning up dictation.
+        let cleanup_level = if rewrite_required {
+            None
+        } else {
+            mode.llm.cleanup_level
+        };
+        let mut post_process_requested = cleanup_level != Some(CleanupLevel::None)
+            && post_process_override.unwrap_or(mode.llm.enabled);
         let mut rewrite_unavailable = false;
         let llm = if post_process_requested {
             match Self::resolve_rewrite(settings, &mode.llm) {
@@ -1932,7 +2017,7 @@ impl RunPlan {
                 (
                     Some(CloudRunPlan::new(
                         provider,
-                        mode.asr.language.clone(),
+                        asr.language.clone(),
                         keyterms,
                         mode.asr.cloud_timestamps,
                     )),
@@ -1971,6 +2056,7 @@ impl RunPlan {
                 tone: mode.tone,
                 preset: mode.prompt.preset,
                 custom_prompt: mode.prompt.custom_prompt,
+                cleanup_level,
                 llm,
                 post_process_requested,
                 rewrite_unavailable,
@@ -2014,10 +2100,12 @@ impl RunPlan {
     /// operand, and the active mode supplies the audio and rewrite settings.
     ///
     /// The selection is read before the microphone opens, so a chord pressed
-    /// with nothing selected costs the user nothing. Command mode always
-    /// rewrites, so the mode's own post-processing switch is overridden — the
-    /// spoken words are an instruction, and pasting them over the selection is
-    /// never what was asked for.
+    /// with nothing selected costs the user nothing — unless questions go to
+    /// the chat, when a chord with nothing selected records a question that
+    /// cannot damage anything. Command mode always rewrites, so the mode's own
+    /// post-processing switch is overridden — the spoken words are an
+    /// instruction, and pasting them over the selection is never what was
+    /// asked for.
     pub fn for_command(settings: &AppSettings) -> Result<Self, RunPlanError> {
         Self::for_command_with_selection(settings, context::capture_selected_text)
     }
@@ -2026,8 +2114,15 @@ impl RunPlan {
         settings: &AppSettings,
         capture_selection: impl FnOnce() -> context::SelectionCapture,
     ) -> Result<Self, RunPlanError> {
+        let answers_in_chat = settings.command_answers_in_chat;
         let selection = match capture_selection() {
             context::SelectionCapture::Captured(selection) => selection,
+            context::SelectionCapture::Unavailable(reason) if answers_in_chat => {
+                log::debug!(
+                    "Command run without a selection ({reason:?}): a question goes to the chat"
+                );
+                String::new()
+            }
             context::SelectionCapture::Unavailable(reason) => {
                 log::debug!("Refusing a command run: no usable selection ({reason:?})");
                 return Err(RunPlanError::CommandWithoutSelection);
@@ -2048,7 +2143,11 @@ impl RunPlan {
         // space or a submit key would corrupt the text it replaced.
         run.delivery.append_trailing_space = false;
         run.delivery.auto_submit = false;
-        run.command = Some(CommandPlan::new(selection));
+        run.command = Some(if answers_in_chat {
+            CommandPlan::answering_in_chat(selection)
+        } else {
+            CommandPlan::new(selection)
+        });
         Ok(run)
     }
 
@@ -2314,6 +2413,108 @@ mod tests {
         ensure_mode_settings(&mut settings);
         settings
     }
+
+    #[test]
+    fn old_mode_json_without_cleanup_level_preserves_its_prompt() {
+        let mut settings = configured_settings();
+        global_local_provider(&mut settings);
+        settings.modes[0].llm.enabled = true;
+        settings.modes[0].tone = Tone::Formal;
+        settings.modes[0].prompt.custom_prompt = Some("Keep my exact voice.".to_string());
+        let before = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        let mut old_json = serde_json::to_value(&settings.modes[0]).unwrap();
+        old_json["llm"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_level");
+        let restored: ModeDefinition = serde_json::from_value(old_json).unwrap();
+        assert_eq!(restored, settings.modes[0]);
+        settings.modes[0] = restored;
+        let after = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        assert!(after.post_process_requested());
+        assert_eq!(
+            crate::prompt_renderer::system_message(&after),
+            crate::prompt_renderer::system_message(&before)
+        );
+    }
+
+    #[test]
+    fn old_disabled_mode_json_stays_disabled() {
+        let mut settings = configured_settings();
+        settings.modes[0].llm.enabled = false;
+        let mut old_json = serde_json::to_value(&settings.modes[0]).unwrap();
+        old_json["llm"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cleanup_level");
+        settings.modes[0] = serde_json::from_value(old_json).unwrap();
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        assert_eq!(run.prompt().cleanup_level, None);
+        assert!(!run.post_process_requested());
+        assert_eq!(run.mode_receipt().rewrite, RewriteOutcome::NotRequested);
+    }
+
+    #[test]
+    fn cleanup_none_skips_even_a_forced_dictation_rewrite() {
+        let mut settings = configured_settings();
+        settings.modes[0].llm.enabled = true;
+        settings.modes[0].llm.cleanup_level = Some(CleanupLevel::None);
+        settings.modes[0].llm.provider_id = Some("missing-provider".to_string());
+        settings.modes[0].llm.spoken_instructions = true;
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveModeWithPostProcess)
+            .unwrap();
+        assert!(!run.post_process_requested());
+        assert!(run.prompt().llm.is_none());
+        assert!(!run.prompt().spoken_instructions);
+        assert_eq!(run.mode_receipt().rewrite, RewriteOutcome::NotRequested);
+    }
+
+    #[test]
+    fn cleanup_master_switch_disables_but_keeps_the_selected_level() {
+        let mut settings = configured_settings();
+        settings.modes[0].llm.enabled = false;
+        settings.modes[0].llm.cleanup_level = Some(CleanupLevel::Heavy);
+        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
+        assert!(!run.post_process_requested());
+        assert_eq!(run.prompt().cleanup_level, Some(CleanupLevel::Heavy));
+        assert_eq!(run.mode_receipt().rewrite, RewriteOutcome::NotRequested);
+    }
+
+    #[test]
+    fn cleanup_level_persists_per_mode_and_freezes_for_each_run() {
+        let mut settings = configured_settings();
+        global_local_provider(&mut settings);
+        let mut mode = settings.modes[0].clone();
+        mode.llm.enabled = true;
+        mode.llm.cleanup_level = Some(CleanupLevel::Medium);
+        let revision = settings.modes_revision;
+        apply_upsert_mode(&mut settings, mode, revision).unwrap();
+        let stored = serde_json::to_value(&settings).unwrap();
+        let mut restored: AppSettings = serde_json::from_value(stored).unwrap();
+        let first = RunPlan::for_intent(&restored, &TranscriptionIntent::ActiveMode).unwrap();
+        restored.modes[0].llm.cleanup_level = Some(CleanupLevel::Light);
+        let next = RunPlan::for_intent(&restored, &TranscriptionIntent::ActiveMode).unwrap();
+        assert_eq!(first.prompt().cleanup_level, Some(CleanupLevel::Medium));
+        assert_eq!(next.prompt().cleanup_level, Some(CleanupLevel::Light));
+        assert_eq!(restored.modes[1].llm.cleanup_level, None);
+        assert!(first.post_process_requested());
+    }
+
+    #[test]
+    fn cleanup_none_does_not_disable_an_explicit_voice_command() {
+        let mut settings = configured_settings();
+        global_local_provider(&mut settings);
+        settings.modes[0].llm.enabled = false;
+        settings.modes[0].llm.cleanup_level = Some(CleanupLevel::None);
+        let run = RunPlan::for_command_with_selection(&settings, || {
+            context::SelectionCapture::Captured("Please improve this sentence.".to_string())
+        })
+        .unwrap();
+        assert!(run.post_process_requested());
+        assert!(run.command().is_some());
+        assert_eq!(run.prompt().cleanup_level, None);
+    }
+
     #[test]
     fn command_chord_captures_only_its_explicit_operand_when_context_is_disabled() {
         let mut settings = configured_settings();
@@ -2349,7 +2550,8 @@ mod tests {
     }
     #[test]
     fn command_chord_refuses_a_missing_explicit_operand_before_context_capture() {
-        let settings = configured_settings();
+        let mut settings = configured_settings();
+        settings.command_answers_in_chat = false;
         let selection_reads = std::cell::Cell::new(0);
 
         let result = RunPlan::for_command_with_selection(&settings, || {
@@ -2359,6 +2561,42 @@ mod tests {
 
         assert!(matches!(result, Err(RunPlanError::CommandWithoutSelection)));
         assert_eq!(selection_reads.get(), 1);
+    }
+
+    /// With answers routed to the chat, a chord with nothing selected still
+    /// records: the plan carries the empty operand and the frozen toggle, and
+    /// the selection is read exactly once either way.
+    #[test]
+    fn command_chord_records_a_question_without_a_selection_when_answers_go_to_chat() {
+        let mut settings = configured_settings();
+        global_local_provider(&mut settings);
+        settings.command_answers_in_chat = true;
+        let selection_reads = std::cell::Cell::new(0);
+
+        let run = RunPlan::for_command_with_selection(&settings, || {
+            selection_reads.set(selection_reads.get() + 1);
+            context::SelectionCapture::Unavailable(context::ContextSourceStatus::Empty)
+        })
+        .expect("a question needs no operand");
+
+        let command = run.command().expect("command plan");
+        assert!(!command.has_selection());
+        assert!(command.answers_in_chat());
+        assert_eq!(selection_reads.get(), 1);
+
+        let selected = RunPlan::for_command_with_selection(&settings, || {
+            context::SelectionCapture::Captured("selected".to_string())
+        })
+        .unwrap();
+        assert_eq!(selected.command().unwrap().selection(), "selected");
+        assert!(selected.command().unwrap().answers_in_chat());
+
+        settings.command_answers_in_chat = false;
+        let edits_only = RunPlan::for_command_with_selection(&settings, || {
+            context::SelectionCapture::Captured("selected".to_string())
+        })
+        .unwrap();
+        assert!(!edits_only.command().unwrap().answers_in_chat());
     }
 
     #[test]

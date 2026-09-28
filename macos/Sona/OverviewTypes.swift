@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// The wire shapes the Overview page reads, and the sentences it writes from
@@ -41,6 +42,95 @@ struct ActivityTrend: Decodable {
     let activeDays: Int
     let currentStreakDays: Int
     let points: [ActivityTrendPoint]
+}
+
+// MARK: - Usage
+
+/// One application in the usage breakdown, by the bundle identifier the row
+/// was saved with. History stores no names: the shell looks one up on this
+/// Mac when it draws the row.
+struct UsageApp: Decodable {
+    let applicationIdentifier: String
+    let dictations: Int
+    let words: Int
+}
+
+/// The rows the breakdown does not name: saved before the app was recorded,
+/// imported, replayed, saved while "Count words per app" was off, or in an
+/// app outside the top few.
+struct UsageOther: Decodable {
+    let dictations: Int
+    let words: Int
+}
+
+/// `get_history_usage_stats`: all-time usage over retained dictation
+/// history. Each figure is defined beside `HistoryUsageStats` in the core;
+/// this side only puts words to it.
+struct UsageStats: Decodable {
+    let dictations: Int
+    let totalWords: Int
+    let totalDurationMs: Int64
+    /// Zero when no recent dictation was short enough to measure, which
+    /// `wordsPerMinuteDictations` says outright.
+    let wordsPerMinute: Int
+    let wordsPerMinuteDictations: Int
+    let timeSavedMs: Int64
+    let currentStreakDays: Int
+    let longestStreakDays: Int
+    let apps: [UsageApp]
+    let other: UsageOther
+}
+
+extension UsageStats {
+    /// "2 h 5 m": what typing the words would have cost, less saying them.
+    var timeSaved: String { (TimeInterval(timeSavedMs) / 1000).spoken }
+
+    /// The line under the tiles: what they rest on, and how the two derived
+    /// ones are measured.
+    var footing: String {
+        let spoken = (TimeInterval(totalDurationMs) / 1000).spoken
+        let basis = [
+            dictations == 1 ? "1 dictation" : "\(dictations.formatted()) dictations",
+            "\(spoken) spoken",
+            "longest streak \(UsageStats.days(longestStreakDays))",
+        ].joined(separator: " · ")
+        let speed: String = switch wordsPerMinuteDictations {
+        case 0: "Speed needs a dictation under six and a half minutes"
+        case 1: "Speed is the last dictation"
+        default: "Speed is the last \(wordsPerMinuteDictations) dictations"
+        }
+        return "\(basis). \(speed); time saved is against typing at 40 words a minute."
+    }
+
+    static func days(_ count: Int) -> String {
+        count == 1 ? "1 day" : "\(count) days"
+    }
+}
+
+/// A breakdown row as the page draws it: the app named and iconed from the
+/// identifier the row was saved with, or the identifier itself when no such
+/// app is on this Mac any more.
+struct UsageAppRow: Identifiable {
+    let id: String
+    let name: String
+    let icon: NSImage?
+    let dictations: Int
+    let words: Int
+
+    /// "1,204 words · 12 dictations"
+    var counts: String {
+        let wordsText = words == 1 ? "1 word" : "\(words.formatted()) words"
+        let dictationsText = dictations == 1 ? "1 dictation" : "\(dictations.formatted()) dictations"
+        return "\(wordsText) · \(dictationsText)"
+    }
+}
+
+/// What the usage read is: still reading, read, or refused. The rows are
+/// named once per read, beside the numbers they came with.
+enum UsageState {
+    case loading
+    case loaded(UsageStats, apps: [UsageAppRow])
+    case failed
 }
 
 /// One local-calendar day of meetings.
@@ -581,6 +671,10 @@ struct OverviewSeries: Decodable, Equatable {
     let seriesKey: String
     var alwaysRecord: Bool
     var template: OverviewTemplate?
+    /// One of the person's own templates, by id, which is then the series'
+    /// whole choice. Optional on the wire: a core that does not send it
+    /// still fills the row, with the built-in or the app default.
+    var customTemplateId: String?
     var digestIncluded: Bool
 }
 
@@ -629,17 +723,23 @@ struct OverviewSeriesWrite {
 /// fence the pane is holding and answers with the stored record.
 struct OverviewSeriesActions {
     var setAlwaysRecord: @MainActor (String, Bool, Int) async throws -> OverviewSeriesWrite
-    var setTemplate: @MainActor (String, OverviewTemplate?, Int) async throws -> OverviewSeriesWrite
+    var setTemplate: @MainActor (String, MeetingTemplateChoice<OverviewTemplate>?, Int) async throws -> OverviewSeriesWrite
     var setDigestIncluded: @MainActor (String, Bool, Int) async throws -> OverviewSeriesWrite
+    /// The person's own templates, for the template row to name beside the
+    /// built-ins.
+    var templates: MeetingTemplatesStore
 
     init(
         setAlwaysRecord: @escaping @MainActor (String, Bool, Int) async throws -> OverviewSeriesWrite,
-        setTemplate: @escaping @MainActor (String, OverviewTemplate?, Int) async throws -> OverviewSeriesWrite,
-        setDigestIncluded: @escaping @MainActor (String, Bool, Int) async throws -> OverviewSeriesWrite
+        setTemplate: @escaping @MainActor (String, MeetingTemplateChoice<OverviewTemplate>?, Int) async throws
+            -> OverviewSeriesWrite,
+        setDigestIncluded: @escaping @MainActor (String, Bool, Int) async throws -> OverviewSeriesWrite,
+        templates: MeetingTemplatesStore
     ) {
         self.setAlwaysRecord = setAlwaysRecord
         self.setTemplate = setTemplate
         self.setDigestIncluded = setDigestIncluded
+        self.templates = templates
     }
 }
 

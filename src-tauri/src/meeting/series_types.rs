@@ -16,7 +16,7 @@
 //! receipts revalidate against.
 
 use super::analytics::MeetingNotesTemplate;
-use super::types::{MeetingOperationId, OperationReceipt};
+use super::types::{MeetingOperationId, MeetingTemplateId, OperationReceipt};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -36,9 +36,10 @@ use specta::Type;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingSeriesPreferences {
     pub series_key: Option<String>,
-    /// `None` when the series exists but has made no choice, which is the state
-    /// that lets artifact generation fall through to the app default.
+    /// `None` when a custom template is chosen or this series has no choice.
     pub template: Option<MeetingNotesTemplate>,
+    #[serde(default)]
+    pub custom_template_id: Option<MeetingTemplateId>,
     /// D28. True unless the operator has taken this series out of the evening
     /// digest; a series with no row at all is included.
     pub digest_included: bool,
@@ -64,14 +65,15 @@ pub struct MeetingSeriesPreferences {
 
 /// Choose, or unchoose, the template for one series.
 ///
-/// `template: None` clears the preference and hands the series back to the app
-/// default. It is the same mutation as choosing, receipt and fence included,
-/// because "stop remembering this" is a decision a person makes on purpose.
+/// Both template fields `None` clears the preference. A custom id takes
+/// precedence when both are supplied.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingSeriesTemplateSetRequest {
     pub operation_id: MeetingOperationId,
     pub series_key: String,
     pub template: Option<MeetingNotesTemplate>,
+    #[serde(default)]
+    pub custom_template_id: Option<MeetingTemplateId>,
     pub expected_revision: u64,
 }
 

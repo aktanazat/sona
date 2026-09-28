@@ -24,8 +24,10 @@ final class OverviewStore {
 
     private(set) var trend: ActivityTrend?
     private(set) var meetings: ActivityMeetingTrend?
-    /// All-time dictation totals, under the paged week.
-    private(set) var stats: HistoryStats?
+    /// All-time usage, under the paged week. Its own state rather than an
+    /// optional: this region's whole content is the read, so a refusal gets
+    /// a row and a retry where the trend's absence gets neither.
+    private(set) var usage: UsageState = .loading
     /// Null until the suggestion read answers: an empty list and an unread
     /// list are not the same claim.
     private(set) var suggestions: [LearningEntry]?
@@ -63,7 +65,7 @@ final class OverviewStore {
             // Saving a dictation changes no count on this page.
             if case .toggled = update { return }
             Task { await self.loadTrend() }
-            Task { await self.loadStats() }
+            Task { await self.loadUsage() }
             // Suggestions are mined from the dictations, so a new one may
             // have just earned a row.
             Task { await self.loadSuggestions() }
@@ -74,7 +76,7 @@ final class OverviewStore {
         core.observe(CoreEvent.historyStorage) { [weak self] _ in
             guard let self else { return }
             Task { await self.loadTrend() }
-            Task { await self.loadStats() }
+            Task { await self.loadUsage() }
         }
         core.observe(CoreEvent.overviewModesChanged) { [weak self] line in
             guard let self, let snapshot: CaptureModeSnapshot = try? Core.payload(line) else { return }
@@ -116,7 +118,7 @@ final class OverviewStore {
         let reads = [
             Task { await self.loadTrend() },
             Task { await self.loadMeetingTrend() },
-            Task { await self.loadStats() },
+            Task { await self.loadUsage() },
             Task { await self.loadModes() },
             Task { await self.loadSuggestions() },
             Task { await self.loadUpcoming() },
@@ -245,11 +247,11 @@ final class OverviewStore {
         return found
     }
 
-    /// The dictation column and the all-time line. Both commands fail with no
-    /// message (`Result<_, ()>` in the core), and they fail on every launch
-    /// until the keychain has unlocked the history database, so a refusal
-    /// leaves the numbers absent, as the web overview did, and the unlock
-    /// event below asks again.
+    /// The dictation column. The command fails with no message
+    /// (`Result<_, ()>` in the core), and it fails on every launch until the
+    /// keychain has unlocked the history database, so a refusal leaves the
+    /// numbers absent, as the web overview did, and the unlock event below
+    /// asks again.
     private func loadTrend() async {
         let request = ActivityTrendParams(request: ActivityTrendRequest(range: Self.trendRange))
         trend = try? await core.request("get_history_trend", request)
@@ -263,8 +265,39 @@ final class OverviewStore {
                                            ActivityTrendParams(request: ActivityTrendRequest(range: Self.trendRange)))
     }
 
-    private func loadStats() async {
-        stats = try? await core.request("get_history_stats")
+    /// The usage tiles. The read that follows a dictation replaces the
+    /// numbers in place: the row never goes back to "Loading…" once it has
+    /// shown a figure, and a refusal keeps its own row with a retry.
+    private func loadUsage() async {
+        do {
+            let stats: UsageStats = try await core.request("get_history_usage_stats")
+            usage = .loaded(stats, apps: stats.apps.map(Self.appRow))
+        } catch {
+            usage = .failed
+        }
+    }
+
+    /// The retry on the failed row.
+    func reloadUsage() {
+        Task { await loadUsage() }
+    }
+
+    /// The identifier the row was saved with, as the app's name and icon on
+    /// this Mac. An app no longer installed keeps its identifier: a guessed
+    /// name would be a claim about the wrong app.
+    private static func appRow(_ app: UsageApp) -> UsageAppRow {
+        let workspace = NSWorkspace.shared
+        guard let url = workspace.urlForApplication(withBundleIdentifier: app.applicationIdentifier) else {
+            return UsageAppRow(
+                id: app.applicationIdentifier, name: app.applicationIdentifier, icon: nil,
+                dictations: app.dictations, words: app.words)
+        }
+        return UsageAppRow(
+            id: app.applicationIdentifier,
+            name: FileManager.default.displayName(atPath: url.path),
+            icon: workspace.icon(forFile: url.path),
+            dictations: app.dictations,
+            words: app.words)
     }
 
     private func loadModes() async {

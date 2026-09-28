@@ -11,6 +11,7 @@ use super::analytics::MeetingNotesTemplate;
 use super::detection::calendar::CalendarAccess;
 use super::detection::machine::ParticipationStatus;
 use super::people_types::PersonId;
+use super::template_types::MeetingTemplateId;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -42,6 +43,8 @@ pub struct MeetingUpcomingSeries {
     /// The notes template this series is remembered by, or `None` for the app
     /// default.
     pub template: Option<MeetingNotesTemplate>,
+    #[serde(default)]
+    pub custom_template_id: Option<MeetingTemplateId>,
     pub digest_included: bool,
 }
 

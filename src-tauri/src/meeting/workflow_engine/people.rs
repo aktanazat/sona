@@ -1,8 +1,9 @@
 use super::{map_store_error, now_utc_ms};
 use crate::meeting::people_types::{
-    MeetingPeopleContextResult, OpenLoopsInboxResult, OrganizationDetailResult, PeopleListResult,
-    PeopleMutationResult, PersonContextResult, PersonDeleteRequest, PersonDetailResult, PersonId,
-    PersonLinkRequest, PersonMergeRequest, PersonRenameRequest, PersonSplitRequest,
+    CompaniesListResult, MeetingPeopleContextResult, OpenLoopsInboxResult,
+    OrganizationDetailResult, PeopleListResult, PeopleMutationResult, PersonContextResult,
+    PersonDeleteRequest, PersonDetailResult, PersonId, PersonLinkRequest, PersonMergeRequest,
+    PersonRenameRequest, PersonSplitRequest,
 };
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
@@ -29,6 +30,13 @@ impl MeetingSessionManager {
         self.store()
             .await?
             .organization_detail(&slug)
+            .map_err(map_store_error)
+    }
+
+    pub async fn companies_list(&self) -> Result<CompaniesListResult, MeetingCommandError> {
+        self.store()
+            .await?
+            .companies_list()
             .map_err(map_store_error)
     }
 

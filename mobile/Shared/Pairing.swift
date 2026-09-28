@@ -26,9 +26,10 @@ struct PairingOffer: Codable, Equatable {
 }
 
 enum PairingError: Error, Equatable {
-    /// The offer expired before the desktop approved it.
+    /// The offer expired before the desktop approved it; only a new code can pair.
     case offerExpired
-    /// The Worker knows this device but has no approval envelope for it yet.
+    /// The desktop has not approved this device yet. Its approval is what introduces the
+    /// device to the Worker, so until then the Worker answers `unauthorized`.
     case notApprovedYet
     /// The Worker's record of this device does not match the offer it was shown.
     case identityMismatch
@@ -75,6 +76,24 @@ enum Pairing {
         )
     }
 
+    /// Fetch the Worker's record of this device and open the approval it carries.
+    static func finish(
+        identity: DeviceIdentity,
+        pending: PendingPairing
+    ) async throws -> VaultCredentials {
+        let client = try CompanionClient(endpoint: pending.endpoint)
+        let device: SelfDeviceResponse
+        do {
+            device = try await client.selfDevice(identity: identity, vaultId: pending.vaultId)
+        } catch CompanionError.api(code: "unauthorized", status: _) {
+            let now = await client.nowUtcMs()
+            throw now < pending.offer.expires_at_utc_ms
+                ? PairingError.notApprovedYet
+                : PairingError.offerExpired
+        }
+        return try acceptApproval(identity: identity, pending: pending, selfDevice: device)
+    }
+
     /// Turn the desktop's approval into vault credentials.
     ///
     /// Mirrors `runtime.rs::pairing_accept`: the Worker's own record of this device must
@@ -92,7 +111,7 @@ enum Pairing {
         guard selfDevice.protocolVersion == SonaProtocol.protocolVersion else {
             throw PairingError.identityMismatch
         }
-        guard let envelopeText = selfDevice.envelope else { throw PairingError.notApprovedYet }
+        guard let envelopeText = selfDevice.envelope else { throw PairingError.identityMismatch }
         guard let envelope = Base64URL.decode(envelopeText) else { throw PairingError.crypto }
         let vaultRoot = try openPairingEnvelope(
             recipientSecretKey: identity.pairingSecret, envelope: envelope

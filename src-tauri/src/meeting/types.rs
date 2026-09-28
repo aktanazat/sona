@@ -49,6 +49,8 @@ meeting_id!(MeetingArtifactId);
 meeting_id!(MeetingDiarizationGenerationId);
 meeting_id!(SavedPromptId);
 meeting_id!(PromptRunId);
+meeting_id!(MeetingFolderId);
+meeting_id!(MeetingTemplateId);
 
 /// The title a recording with no calendar event and no recognised app gets
 /// before anything has been read out of it. One constant because two places
@@ -198,6 +200,7 @@ pub enum ProcessingFailure {
     RemoteUnavailable,
     EngineFailure,
     Cancelled,
+    TranscriptDeleted,
     /// The launch that was recording or processing this meeting ended before
     /// the work finished. Written by startup recovery, never by a run: it is
     /// the terminal status of an attempt nobody is making any more, which is
@@ -238,6 +241,9 @@ pub enum EngineFailureCause {
     EvidencePack,
     /// The engine ran and returned nothing usable.
     ModelRefused,
+    /// The engine's time limit ended the run while the model was still
+    /// working: the relay's worker stopped it before it answered.
+    TimedOut,
     /// The reply was not the JSON the prompt asked for — prose where an object
     /// was required, or a first value that would not parse.
     ReplyNotStructured,
@@ -342,38 +348,29 @@ pub struct MeetingTrashEntry {
     pub expires_at_utc_ms: i64,
 }
 
-/// What one recording's disclosure — the line the consent panel offers to type
-/// into the meeting's own chat box — is doing.
+/// One recording notice. Posting is durably claimed before any external input.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MeetingSessionDisclosure {
-    /// Nobody asked this meeting to announce itself, which is the default.
     NotAsked,
-    /// Asked for and not typed yet. `notetaker` is the name the room is told
-    /// the notes are for: the calendar account's own attendee entry, which is
-    /// the only place this app learns its operator's name.
-    ///
-    /// `composer_app` is the bundle id of the application whose chat box the
-    /// line belongs in: the app that raised the offer, or the meeting app in
-    /// front when a calendar offer was accepted. The one attempt goes to that
-    /// application's focused composer and nowhere else; `None` means no such
-    /// application was in front, and the attempt is refused rather than aimed
-    /// at whatever is focused.
-    ///
-    /// ponytail: falls back to the meeting's title when the calendar names
-    /// nobody, so the one sentence always has something to interpolate. The
-    /// upgrade path is an account name in settings, not a second phrasing.
+    /// A decision for this meeting, not changed by a later default or retry.
+    Disabled,
     Pending {
-        notetaker: String,
+        #[serde(default)]
+        line: String,
         #[serde(default)]
         composer_app: Option<String>,
     },
-    /// Typed, or refused. Delivery's own receipt says which: a target that
-    /// cannot accept an insertion is `definitely_not_dispatched`, and that is
-    /// the case the live surface mentions. Typed is not sent: the line sits
-    /// in the composer until the person sends it.
+    /// A crash here is an uncertain attempt, never permission to retry.
+    Posting {
+        line: String,
+    },
     Attempted {
         receipt: crate::delivery::DeliveryReceipt,
+        #[serde(default)]
+        line: String,
+        #[serde(default)]
+        reason: Option<String>,
     },
 }
 
@@ -415,6 +412,7 @@ pub enum MeetingCommandError {
     RecoveryRequired,
     DeletionInProgress,
     NotFound,
+    TranscriptDeleted,
     InvalidRequest,
     ExportCancelled,
     ExportFailed,
@@ -714,6 +712,22 @@ pub struct MeetingRetentionSnapshot {
     pub revision: u64,
 }
 
+/// Independent of whole-meeting retention. The timestamp moves only when
+/// deletion is enabled or its horizon is shortened, preserving the seven-day notice.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingTranscriptRetentionSnapshot {
+    pub policy: MeetingRetentionPolicy,
+    pub revision: u64,
+    pub changed_at_utc_ms: i64,
+    pub deletion_begins_at_utc_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingTranscriptRetentionMutationResult {
+    pub receipt: OperationReceipt,
+    pub snapshot: MeetingTranscriptRetentionSnapshot,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingReasonCode {
@@ -767,6 +781,7 @@ pub enum MeetingCommandKind {
     Export,
     Delete,
     RetentionSet,
+    TranscriptRetentionSet,
     RemoteCancel,
     LoopResolve,
     LoopReopen,
@@ -780,6 +795,12 @@ pub enum MeetingCommandKind {
     SeriesRemoteOptOutSet,
     SavedPromptSave,
     SavedPromptDelete,
+    FolderCreate,
+    FolderRename,
+    FolderDelete,
+    FolderAddMeeting,
+    FolderRemoveMeeting,
+    FolderDefaultsSet,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -885,6 +906,8 @@ pub struct MeetingSessionSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight_local_processing: Option<SourceAvailability>,
     pub retention_deadline_utc_ms: Option<i64>,
+    #[serde(default)]
+    pub transcript_purged_at_utc_ms: Option<i64>,
     pub allowed_actions: Vec<AllowedMeetingAction>,
 }
 
@@ -964,6 +987,8 @@ pub struct MeetingReviewSnapshot {
     pub diarization: MeetingDiarizationSnapshot,
     pub can_export: bool,
     pub remote_cancellation_pending: bool,
+    #[serde(default)]
+    pub snapshots: Vec<super::snapshots::MeetingSnapshotSummary>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -1035,6 +1060,10 @@ pub struct MeetingListFilter {
     /// Case-insensitive substring of the title. Blank means no constraint.
     #[serde(default)]
     pub title_query: String,
+    /// Only meetings filed in this folder. `None` means every folder and
+    /// none.
+    #[serde(default)]
+    pub folder_id: Option<MeetingFolderId>,
 }
 
 /// The four states a person actually sorts a meeting list by. Each maps onto

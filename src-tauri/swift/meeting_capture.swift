@@ -692,37 +692,43 @@ private final class CaptureBridge: NSObject, SCStreamOutput, SCStreamDelegate, @
             return
         }
 
-        let candidates = content.applications.filter { application in
-            application.processID != ownProcessID && application.bundleIdentifier.lowercased() != ownBundleID
+        let ownApplications = content.applications.filter { application in
+            application.processID == ownProcessID || application.bundleIdentifier.lowercased() == ownBundleID
         }
-        let applications: [SCRunningApplication]
+        let filter: SCContentFilter
         let routeProcessIDs: Set<pid_t>
 
         if requestedBundleIDs.isEmpty {
-            guard !candidates.isEmpty else {
-                reportFailure(.source, FailureCode.noMatchingApplication.rawValue)
-                completion(BridgeResult.sourceUnavailable.rawValue, nil)
-                return
-            }
-            applications = candidates
+            // The whole mix, less Sona. An including-filter lists only the
+            // applications ScreenCaptureKit enumerates, and a call's far end
+            // is rendered by a daemon it never lists (FaceTime and Phone play
+            // through avconferenced), so that filter recorded near silence
+            // for a whole FaceTime call while the other side was talking.
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: ownApplications,
+                exceptingWindows: []
+            )
             routeProcessIDs = []
         } else {
-            let matched = candidates.filter { requestedBundleIDs.contains($0.bundleIdentifier.lowercased()) }
+            let matched = content.applications.filter { application in
+                !ownApplications.contains(application)
+                    && requestedBundleIDs.contains(application.bundleIdentifier.lowercased())
+            }
             let matchedBundleIDs = Set(matched.map { $0.bundleIdentifier.lowercased() })
             guard matchedBundleIDs == requestedBundleIDs else {
                 reportFailure(.route, FailureCode.noMatchingApplication.rawValue)
                 completion(BridgeResult.routeUnavailable.rawValue, nil)
                 return
             }
-            applications = matched
+            filter = SCContentFilter(
+                display: display,
+                including: matched,
+                exceptingWindows: []
+            )
             routeProcessIDs = Set(matched.map(\.processID))
         }
 
-        let filter = SCContentFilter(
-            display: display,
-            including: applications,
-            exceptingWindows: []
-        )
         let configuration = SCStreamConfiguration()
         configuration.capturesAudio = true
         configuration.excludesCurrentProcessAudio = true

@@ -1,4 +1,6 @@
 // Re-export all audio components
+#[cfg(target_os = "macos")]
+pub(crate) mod core_audio;
 mod device;
 mod recorder;
 mod resampler;
