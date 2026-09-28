@@ -14,5 +14,10 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "../cloudflare/sona-companion/src/crypto.ts", "../cloudflare/sona-companion/src/encoding.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "../cloudflare/sona-companion/src/crypto.ts",
+    "../cloudflare/sona-companion/src/encoding.ts"
+  ]
 }

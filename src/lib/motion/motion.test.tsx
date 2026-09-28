@@ -16,7 +16,7 @@ import {
   makeAnimationInstant,
   positionalKeys,
   prefersReducedMotion,
-} from "motion-dom";
+} from "motion";
 import {
   MotionProvider,
   MotionScope,
@@ -323,7 +323,7 @@ const code = (source: string) =>
   source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
 const IMPORTS_MOTION =
-  /from\s+"(motion\/react|motion-dom|framer-motion|@\/lib\/motion)"/;
+  /from\s+"(motion|motion\/react|motion-dom|framer-motion|@\/lib\/motion)"/;
 const APPLIES_MEASURED_CLASS = /snap-measured/;
 
 const MOTION_SURFACES = [

@@ -378,7 +378,11 @@ test("the signed catalog exposes Download for every required ASR family", async 
     .click();
   await page.getByRole("tab", { name: "Advanced", exact: true }).click();
 
-  const openCatalog = page.getByRole("button", { name: "Open", exact: true });
+  /* Advanced carries more than one "Open" row (Prompts sits under Meetings),
+   * so the catalog's button is found through the row that names it. */
+  const openCatalog = page
+    .locator('[data-slot="settings-row"]', { hasText: "Model catalog" })
+    .getByRole("button", { name: "Open", exact: true });
   await expect(openCatalog).toHaveCount(1);
   await openCatalog.click();
   await expect(

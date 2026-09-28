@@ -1416,14 +1416,36 @@ mod tests {
 
     #[test]
     fn diagnostics_separate_permission_from_opt_in_and_platform() {
+        // Browser URL and clipboard recency are macOS readers; elsewhere they
+        // stay Unsupported whatever the permission or opt-in says.
+        let on_platform = |status: ContextSourceStatus, supported: bool| {
+            if supported {
+                status
+            } else {
+                ContextSourceStatus::Unsupported
+            }
+        };
+
         let granted = diagnostics(AccessibilityAccess::Granted, false, false);
         assert_eq!(granted.selected_text, ContextSourceStatus::Captured);
-        assert_eq!(granted.browser_url, ContextSourceStatus::Disabled);
-        assert_eq!(granted.clipboard, ContextSourceStatus::NotRequested);
+        assert_eq!(
+            granted.browser_url,
+            on_platform(ContextSourceStatus::Disabled, SUPPORTS_BROWSER_URL)
+        );
+        assert_eq!(
+            granted.clipboard,
+            on_platform(
+                ContextSourceStatus::NotRequested,
+                SUPPORTS_CLIPBOARD_RECENCY
+            )
+        );
 
         let denied = diagnostics(AccessibilityAccess::Denied, true, true);
         assert_eq!(denied.focused_field, ContextSourceStatus::PermissionDenied);
-        assert_eq!(denied.browser_url, ContextSourceStatus::PermissionDenied);
+        assert_eq!(
+            denied.browser_url,
+            on_platform(ContextSourceStatus::PermissionDenied, SUPPORTS_BROWSER_URL)
+        );
 
         let unsupported = diagnostics(AccessibilityAccess::Unsupported, true, true);
         assert_eq!(unsupported.focused_field, ContextSourceStatus::Unsupported);

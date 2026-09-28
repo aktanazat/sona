@@ -60,8 +60,11 @@ export class Sorter {
       try {
         page = await this.deps.client.changes(feed.cursor);
       } catch (error) {
-        if (!(error instanceof ApiError) || error.code !== "cursor_expired") throw error;
-        this.deps.log("change cursor expired; rebuilding the index from a snapshot");
+        if (!(error instanceof ApiError) || error.code !== "cursor_expired")
+          throw error;
+        this.deps.log(
+          "change cursor expired; rebuilding the index from a snapshot",
+        );
         synced += await this.rebuild(feed);
         continue;
       }
@@ -112,7 +115,8 @@ export class Sorter {
       delete feed.attempts[change.object_id];
       return;
     }
-    if (feed.objects[change.object_id]?.revision_id === change.revision_id) return;
+    if (feed.objects[change.object_id]?.revision_id === change.revision_id)
+      return;
     feed.objects[change.object_id] = await this.read(change);
   }
 
@@ -122,12 +126,16 @@ export class Sorter {
     const revision = { kind: "other" as const, revision_id: head.revision_id };
     let opened;
     try {
-      opened = await openManifest(keys, await client.manifest(head.object_id, head.revision_id));
+      opened = await openManifest(
+        keys,
+        await client.manifest(head.object_id, head.revision_id),
+      );
     } catch (error) {
       log(`object ${head.object_id} is not readable: ${String(error)}`);
       return revision;
     }
-    if (opened.kind === "thought") return { kind: "thought", revision_id: head.revision_id };
+    if (opened.kind === "thought")
+      return { kind: "thought", revision_id: head.revision_id };
     if (opened.kind === "card") {
       const { cluster, thought_id } = opened.manifest;
       return {
@@ -176,11 +184,18 @@ export class Sorter {
         delete feed.attempts[thoughtId];
         filed.add(thoughtId);
         sorted += 1;
-        this.deps.log(`filed thought ${thoughtId} as "${card.title}" in ${card.cluster.name}`);
+        this.deps.log(
+          `filed thought ${thoughtId} as "${card.title}" in ${card.cluster.name}`,
+        );
       } catch (error) {
         const count = (attempt?.count ?? 0) + 1;
-        feed.attempts[thoughtId] = { count, next_at_utc_ms: now + retryDelay(count) };
-        this.deps.log(`thought ${thoughtId} not filed (attempt ${count}): ${String(error)}`);
+        feed.attempts[thoughtId] = {
+          count,
+          next_at_utc_ms: now + retryDelay(count),
+        };
+        this.deps.log(
+          `thought ${thoughtId} not filed (attempt ${count}): ${String(error)}`,
+        );
       }
       await this.deps.state.saveFeed(feed);
     }
@@ -192,15 +207,26 @@ export class Sorter {
     thoughtId: string,
     revisionId: string,
     now: number,
-  ): Promise<{ cluster: Cluster; objectId: string; revisionId: string; title: string }> {
+  ): Promise<{
+    cluster: Cluster;
+    objectId: string;
+    revisionId: string;
+    title: string;
+  }> {
     const { client, identity, keys, model } = this.deps;
-    const opened = await openManifest(keys, await client.manifest(thoughtId, revisionId));
-    if (opened.kind !== "thought") throw new Error("head is no longer a thought");
+    const opened = await openManifest(
+      keys,
+      await client.manifest(thoughtId, revisionId),
+    );
+    if (opened.kind !== "thought")
+      throw new Error("head is no longer a thought");
     const thought = opened.manifest;
     const clusters = this.clusters(feed);
     const card = buildCard({
       classification:
-        thought.text.trim().length === 0 ? null : await classify(model, thought, clusters),
+        thought.text.trim().length === 0
+          ? null
+          : await classify(model, thought, clusters),
       clusters,
       model: model.model,
       sorterDeviceId: identity.deviceId,
@@ -214,8 +240,19 @@ export class Sorter {
     const key = (step: string): Promise<string> =>
       idempotencyKey(["card", objectId, cardRevisionId, step]);
     await client.createUpload(sealed.plan, await key("create"));
-    await client.putChunk(uploadId, 0, sealed.chunk, sealed.chunkDigest, await key("chunk-0"));
+    await client.putChunk(
+      uploadId,
+      0,
+      sealed.chunk,
+      sealed.chunkDigest,
+      await key("chunk-0"),
+    );
     await client.commitUpload(uploadId, await key("commit"));
-    return { cluster: card.cluster, objectId, revisionId: cardRevisionId, title: card.title };
+    return {
+      cluster: card.cluster,
+      objectId,
+      revisionId: cardRevisionId,
+      title: card.title,
+    };
   }
 }

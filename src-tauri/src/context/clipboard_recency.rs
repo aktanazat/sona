@@ -12,9 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// How long before record-start a copy still counts as part of the dictation,
-/// unless the user has narrowed or widened it. Superwhisper's Super Mode uses
-/// the same three seconds, and it is short enough that an unrelated copy from
-/// earlier in the session never reaches a prompt.
+/// unless the user has narrowed or widened it. Three seconds is short enough
+/// that an unrelated copy from earlier in the session never reaches a prompt.
 pub const DEFAULT_CLIPBOARD_PREROLL_MS: u64 = 3_000;
 /// A changed count is fresh only when the observer checked often enough to put
 /// an honest upper bound on its age. This lets scheduling hiccups degrade to

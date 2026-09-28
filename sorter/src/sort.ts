@@ -1,8 +1,17 @@
 import { z } from "zod";
-import { type CardManifest, type Cluster, type ThoughtManifest, clusterHue } from "./objects";
+import {
+  type CardManifest,
+  type Cluster,
+  type ThoughtManifest,
+  clusterHue,
+} from "./objects";
 
 export const PROMPT_VERSION = 1;
-export const UNSORTED: Cluster = { hue: clusterHue("unsorted"), key: "unsorted", name: "Unsorted" };
+export const UNSORTED: Cluster = {
+  hue: clusterHue("unsorted"),
+  key: "unsorted",
+  name: "Unsorted",
+};
 
 export interface SorterModel {
   apiKey: string;
@@ -19,7 +28,9 @@ const Classification = z.object({
 export type Classification = z.infer<typeof Classification>;
 
 const ChatCompletion = z.object({
-  choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1),
+  choices: z
+    .array(z.object({ message: z.object({ content: z.string() }) }))
+    .min(1),
 });
 
 const SYSTEM_PROMPT = `You file one note into a personal brainstorm board. The notes are quick thoughts a person captured by voice or by typing, sometimes with a link. Reply with one JSON object and nothing else:
@@ -40,13 +51,17 @@ export function clusterKey(name: string): string {
   return key.length === 0 ? UNSORTED.key : key;
 }
 
-function userPrompt(thought: ThoughtManifest, clusters: readonly Cluster[]): string {
+function userPrompt(
+  thought: ThoughtManifest,
+  clusters: readonly Cluster[],
+): string {
   const lines = [
     `Existing clusters: ${clusters.length === 0 ? "(none yet)" : clusters.map((cluster) => cluster.name).join(", ")}`,
     `Captured by: ${thought.origin}`,
   ];
   if (thought.link !== null) lines.push(`Link: ${thought.link.url}`);
-  if (thought.images.length > 0) lines.push(`Attached images: ${thought.images.length}`);
+  if (thought.images.length > 0)
+    lines.push(`Attached images: ${thought.images.length}`);
   lines.push("", "Note:", thought.text);
   return lines.join("\n");
 }
@@ -57,24 +72,29 @@ export async function classify(
   thought: ThoughtManifest,
   clusters: readonly Cluster[],
 ): Promise<Classification> {
-  const response = await fetch(`${model.baseUrl.replace(/\/$/u, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${model.apiKey}`,
-      "content-type": "application/json",
+  const response = await fetch(
+    `${model.baseUrl.replace(/\/$/u, "")}/chat/completions`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${model.apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model.model,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userPrompt(thought, clusters) },
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      }),
     },
-    body: JSON.stringify({
-      model: model.model,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt(thought, clusters) },
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.2,
-    }),
-  });
+  );
   if (!response.ok) {
-    throw new Error(`model ${response.status}: ${(await response.text()).slice(0, 200)}`);
+    throw new Error(
+      `model ${response.status}: ${(await response.text()).slice(0, 200)}`,
+    );
   }
   const completion = ChatCompletion.parse(await response.json());
   return parseClassification(completion.choices[0]?.message.content ?? "");
@@ -91,7 +111,10 @@ export function parseClassification(content: string): Classification {
 }
 
 /** Resolve the model's cluster name against the board, so spelling drift never forks a column. */
-export function resolveCluster(name: string, clusters: readonly Cluster[]): Cluster {
+export function resolveCluster(
+  name: string,
+  clusters: readonly Cluster[],
+): Cluster {
   const key = clusterKey(name);
   const existing = clusters.find((cluster) => cluster.key === key);
   if (existing !== undefined) return existing;
@@ -132,7 +155,10 @@ export function buildCard(input: CardInput): CardManifest {
     format_version: 1,
     kind: "card",
     pinned: false,
-    sorter: classification === null ? null : { model: input.model, prompt_version: PROMPT_VERSION },
+    sorter:
+      classification === null
+        ? null
+        : { model: input.model, prompt_version: PROMPT_VERSION },
     summary: classification?.summary ?? "",
     tags: classification?.tags ?? [],
     thought_id: input.thoughtId,

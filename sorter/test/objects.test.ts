@@ -2,14 +2,22 @@
 // so the seal and open sides must agree on the revision context byte for byte.
 import { expect, test } from "bun:test";
 import type { RevisionManifest } from "../src/client";
-import { type CardManifest, type VaultKeys, openManifest, sealCard } from "../src/objects";
+import {
+  type CardManifest,
+  type VaultKeys,
+  openManifest,
+  sealCard,
+} from "../src/objects";
 
 const KEYS: VaultKeys = {
   vaultId: "fixture_vault_0001",
   vaultRoot: new Uint8Array(32).fill(7),
 };
 
-const IDENTITY = { deviceId: "sorter_device_01", signingSeed: new Uint8Array(32).fill(9) };
+const IDENTITY = {
+  deviceId: "sorter_device_01",
+  signingSeed: new Uint8Array(32).fill(9),
+};
 
 const CARD: CardManifest = {
   archived: false,
@@ -44,5 +52,8 @@ test("openManifest returns the card sealCard sealed, read through the Worker's r
     },
     manifest: plan.manifest,
   };
-  expect(await openManifest(KEYS, reply)).toStrictEqual({ kind: "card", manifest: CARD });
+  expect(await openManifest(KEYS, reply)).toStrictEqual({
+    kind: "card",
+    manifest: CARD,
+  });
 });

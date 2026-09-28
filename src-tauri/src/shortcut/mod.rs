@@ -1705,9 +1705,22 @@ mod tests {
             .into_iter()
             .map(|binding| binding.current_binding)
             .collect::<Vec<_>>();
+        // The default chords differ by platform, so the prefixes in use do too.
+        #[cfg(target_os = "macos")]
         assert_eq!(
             cancel_set,
             vec!["escape", "option+escape", "option+shift+escape"],
+            "the cancel set is the bare key plus the prefixes already in use"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            cancel_set,
+            vec![
+                "escape",
+                "ctrl+escape",
+                "ctrl+alt+shift+escape",
+                "ctrl+shift+escape"
+            ],
             "the cancel set is the bare key plus the prefixes already in use"
         );
 
@@ -1744,7 +1757,11 @@ mod tests {
             ::handy_keys::Hotkey::new(::handy_keys::Modifiers::OPT_LEFT, ::handy_keys::Key::Space)
                 .map_err(|error| format!("could not build the recorded chord: {error}"))?
                 .to_handy_string();
+        // handy-keys names the key "option" on macOS and "alt" elsewhere.
+        #[cfg(target_os = "macos")]
         assert_eq!(recorded, "option_left+space");
+        #[cfg(target_os = "linux")]
+        assert_eq!(recorded, "alt_left+space");
 
         handy_keys::validate_shortcut(&recorded)
             .map_err(|error| format!("handy-keys rejected its own recording: {error}"))?;

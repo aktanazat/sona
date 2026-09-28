@@ -34,6 +34,14 @@ pub struct ProjectContext {
 }
 
 pub(super) fn read(policy: ContextPolicy, root: Option<&Path>) -> SourceOutcome<ProjectContext> {
+    read_within(policy, root, SCAN_BUDGET)
+}
+
+fn read_within(
+    policy: ContextPolicy,
+    root: Option<&Path>,
+    budget: Duration,
+) -> SourceOutcome<ProjectContext> {
     if !policy.wants_project() {
         return SourceOutcome::Unavailable(ContextSourceStatus::NotRequested);
     }
@@ -64,7 +72,7 @@ pub(super) fn read(policy: ContextPolicy, root: Option<&Path>) -> SourceOutcome<
         .follow_links(false)
         .max_depth(Some(12));
     for entry in walker.build() {
-        if context.files.len() == MAX_FILES || started.elapsed() >= SCAN_BUDGET {
+        if context.files.len() == MAX_FILES || started.elapsed() >= budget {
             context.truncated = true;
             break;
         }
@@ -183,6 +191,13 @@ fn read_source(path: &Path) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
+    /// These tests are about which names a scan admits, not how long it takes.
+    /// A loaded runner can spend the real budget before the first entry, so
+    /// give them one that cannot run out.
+    fn read_unhurried(root: &Path) -> SourceOutcome<ProjectContext> {
+        read_within(ContextPolicy::Full, Some(root), Duration::MAX)
+    }
+
     #[test]
     fn project_context_contains_only_visible_unignored_names() {
         let root = tempfile::tempdir().unwrap();
@@ -201,7 +216,7 @@ mod tests {
             "pub struct ChatStore;\npub fn load_context() {}\n// not provider input",
         )
         .unwrap();
-        let captured = read(ContextPolicy::Full, Some(root.path()));
+        let captured = read_unhurried(root.path());
         assert_eq!(
             captured,
             SourceOutcome::Captured(ProjectContext {
@@ -221,7 +236,7 @@ mod tests {
         std::fs::write(root.join("private.rs"), "pub struct PrivateToken;").unwrap();
         std::fs::write(root.join("public.rs"), "pub struct PublicToken;").unwrap();
         assert_eq!(
-            read(ContextPolicy::Full, Some(&root)),
+            read_unhurried(&root),
             SourceOutcome::Captured(ProjectContext {
                 files: vec!["public.rs".to_string()],
                 identifiers: vec!["PublicToken".to_string()],
@@ -247,7 +262,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("linked-folder")).unwrap();
         assert_eq!(
-            read(ContextPolicy::Full, Some(root.path())),
+            read_unhurried(root.path()),
             SourceOutcome::Unavailable(ContextSourceStatus::Empty)
         );
     }
@@ -258,7 +273,7 @@ mod tests {
         for index in 0..MAX_FILES + 1 {
             std::fs::write(root.path().join(format!("file-{index}.txt")), "").unwrap();
         }
-        let SourceOutcome::Captured(context) = read(ContextPolicy::Full, Some(root.path())) else {
+        let SourceOutcome::Captured(context) = read_unhurried(root.path()) else {
             panic!("the directory has readable project files");
         };
         assert!(context.files.len() <= MAX_FILES);

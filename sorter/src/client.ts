@@ -54,7 +54,10 @@ const RevisionEnvelope = z.object({
 });
 export type RevisionEnvelope = z.infer<typeof RevisionEnvelope>;
 
-const RevisionManifest = z.object({ envelope: RevisionEnvelope, manifest: z.string() });
+const RevisionManifest = z.object({
+  envelope: RevisionEnvelope,
+  manifest: z.string(),
+});
 export type RevisionManifest = z.infer<typeof RevisionManifest>;
 
 const SelfDevice = z.object({
@@ -112,7 +115,10 @@ const UploadCommitted = z.object({
 export type UploadCommitted = z.infer<typeof UploadCommitted>;
 
 /** What a non-2xx reply may carry; a body that is not JSON reads as `{}`. */
-const Problem = z.object({ code: z.string().catch("unknown"), retryable: z.boolean().catch(false) });
+const Problem = z.object({
+  code: z.string().catch("unknown"),
+  retryable: z.boolean().catch(false),
+});
 
 /** A `high_water` token's payload: the sequence it names. */
 const HighWater = z.object({ v: z.literal(1), w: z.number().int().safe() });
@@ -195,7 +201,10 @@ export class CompanionClient {
     return this.json(ChangesPage, "GET", "/v1/changes", query);
   }
 
-  snapshot(highWater: string | null, after: string | null): Promise<SnapshotPage> {
+  snapshot(
+    highWater: string | null,
+    after: string | null,
+  ): Promise<SnapshotPage> {
     const query: [string, string][] = [["limit", String(PAGE_LIMIT)]];
     if (highWater !== null) query.push(["highWater", highWater]);
     if (after !== null) query.push(["after", after]);
@@ -210,7 +219,11 @@ export class CompanionClient {
     );
   }
 
-  async chunk(objectId: string, revisionId: string, index: number): Promise<Uint8Array> {
+  async chunk(
+    objectId: string,
+    revisionId: string,
+    index: number,
+  ): Promise<Uint8Array> {
     const response = await this.send(
       "GET",
       `/v1/objects/${objectId}/revisions/${revisionId}/chunks/${index}`,
@@ -220,7 +233,10 @@ export class CompanionClient {
     return new Uint8Array(await response.arrayBuffer());
   }
 
-  createUpload(plan: ObjectUploadPlan, idempotencyKey: string): Promise<UploadCreated> {
+  createUpload(
+    plan: ObjectUploadPlan,
+    idempotencyKey: string,
+  ): Promise<UploadCreated> {
     return this.json(UploadCreated, "POST", "/v1/uploads", [], {
       body: utf8(JSON.stringify(plan)),
       contentType: "application/json",
@@ -235,20 +251,35 @@ export class CompanionClient {
     sha256: string,
     idempotencyKey: string,
   ): Promise<ChunkAccepted> {
-    return this.json(ChunkAccepted, "PUT", `/v1/uploads/${uploadId}/chunks/${index}`, [], {
-      body: bytes,
-      contentType: "application/octet-stream",
-      extraHeaders: { "x-sona-chunk-sha256": sha256 },
-      idempotencyKey,
-    });
+    return this.json(
+      ChunkAccepted,
+      "PUT",
+      `/v1/uploads/${uploadId}/chunks/${index}`,
+      [],
+      {
+        body: bytes,
+        contentType: "application/octet-stream",
+        extraHeaders: { "x-sona-chunk-sha256": sha256 },
+        idempotencyKey,
+      },
+    );
   }
 
-  commitUpload(uploadId: string, idempotencyKey: string): Promise<UploadCommitted> {
-    return this.json(UploadCommitted, "POST", `/v1/uploads/${uploadId}/commit`, [], {
-      body: utf8(JSON.stringify({ version: 1 })),
-      contentType: "application/json",
-      idempotencyKey,
-    });
+  commitUpload(
+    uploadId: string,
+    idempotencyKey: string,
+  ): Promise<UploadCommitted> {
+    return this.json(
+      UploadCommitted,
+      "POST",
+      `/v1/uploads/${uploadId}/commit`,
+      [],
+      {
+        body: utf8(JSON.stringify({ version: 1 })),
+        contentType: "application/json",
+        idempotencyKey,
+      },
+    );
   }
 
   private async json<Value>(

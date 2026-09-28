@@ -5,7 +5,7 @@ message: Symbol name encodes its storage shape (suffix `Dict`, `Array`, `Obj`, `
 note: Rename for what the value represents (e.g. `userPreferences`, not `preferencesDict`).
 rule:
   kind: simple_identifier
-  regex: '(Dict|Array|Obj|Str|Map)$'
+  regex: "(Dict|Array|Obj|Str|Map)$"
   any:
     - inside:
         kind: pattern

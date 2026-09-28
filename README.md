@@ -2,6 +2,8 @@
 
 Sona is a local-first desktop app for spoken words: dictation delivered into any app, and meeting notes recorded, transcribed, and remembered on your own Mac. It runs on macOS, with dictation also on Windows and Linux.
 
+Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-source speech-to-text app, and keeps its MIT license. See `NOTICE` for the other projects it draws on.
+
 ## What Sona does
 
 ### Dictation
@@ -57,21 +59,9 @@ Local runs keep captured audio on the device. Cloud transcription sends audio on
 
 meeting sync saves an encrypted copy before uploading. if an upload is interrupted, sona uses that saved copy to try again.
 
-## Releases and install
+## Install
 
-Tagged builds are published on the [releases page](https://github.com/aktanazat/sona/releases). Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds macOS (Apple silicon), Windows, and Linux bundles and attaches them to a draft release for review before publishing.
-
-- macOS: open the `.dmg` and drag Sona to Applications.
-- Windows: run the `.msi` or the NSIS `-setup.exe` installer.
-- Linux: use the `.AppImage`, or install the `.deb` on Debian and Ubuntu.
-
-macOS bundles are signed and notarized only when the repository has the Apple signing secrets configured. Without them the release job still succeeds and produces unsigned bundles, which macOS quarantines on first open; remove the quarantine flag with `xattr -dr com.apple.quarantine /Applications/Sona.app` or build from source instead.
-
-## Compatibility boundaries
-
-Sona implements its speech, mode, context, delivery, history, import, and agent features with open code and public provider APIs. It does not copy or depend on Superwhisper binaries, services, private assets, licensing systems, or enterprise controls.
-
-Three implementation details are intentionally absent because the source evidence does not contain enough information to reproduce them safely: the private X-Signature authentication scheme, the S1 cloud model weights, and server-only decode defaults. Cloud transcription uses direct bring-your-own-key provider connections. Local transcription uses the models and decode settings listed in Sona.
+No builds are published yet; build from source (below). Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds unsigned bundles unless the repository has Apple signing secrets configured.
 
 ## First launch and migration
 

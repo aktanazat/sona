@@ -2246,10 +2246,13 @@ mod tests {
         MAX_NO_SPEECH_HISTORY_SAMPLES,
     };
     use crate::audio_toolkit::vad::{VadFrame, VoiceActivityDetector};
+    #[cfg(target_os = "macos")]
     use crate::meeting::capture::PacketLaneReader;
+    #[cfg(target_os = "macos")]
+    use crate::meeting::types::MeetingCaptureError;
     use crate::meeting::types::{
-        MeetingCaptureError, MeetingSessionId, SessionClockAnchor, SourceEpoch, SourceKind,
-        SourceStartPlan, SourceTrackId,
+        MeetingSessionId, SessionClockAnchor, SourceEpoch, SourceKind, SourceStartPlan,
+        SourceTrackId,
     };
     use cpal::{InputCallbackInfo, InputStreamTimestamp, StreamInstant};
     use std::{
@@ -2372,11 +2375,13 @@ mod tests {
     ///
     /// `reset` clears nothing, because the count is about the whole run rather
     /// than about one session of it.
+    #[cfg(target_os = "macos")]
     struct CountingVad {
         frames_shown: Arc<AtomicUsize>,
         speech_frames: usize,
     }
 
+    #[cfg(target_os = "macos")]
     impl VoiceActivityDetector for CountingVad {
         fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> anyhow::Result<VadFrame<'a>> {
             let shown = self.frames_shown.fetch_add(1, Ordering::AcqRel) + 1;
@@ -2910,6 +2915,11 @@ mod tests {
     /// one failing brings the defect back: a capture that ended when the room
     /// went quiet, with a transcript of three fragments and forty seconds of
     /// audio nobody kept.
+    ///
+    /// macOS only: a meeting start completes once the capture has a host-clock
+    /// bridge, and only the CoreAudio backend supplies one
+    /// (`cpal_host_monotonic_anchor_ns`).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_closed_speech_segment_cannot_end_a_meeting_capture() {
         let frames_shown = Arc::new(AtomicUsize::new(0));
