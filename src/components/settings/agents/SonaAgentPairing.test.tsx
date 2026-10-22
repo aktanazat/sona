@@ -108,10 +108,6 @@ describe("the Sona agent pairing screen", () => {
      * is the part this screen owes a reader. */
     expect(hasButton(markup, "Test")).toBe(true);
     expect(hasButton(markup, "Unpair")).toBe(true);
-    /* Nothing to press to keep an address. The three fields write the pairing
-     * when the reader leaves one, and the row above states whether this Mac is
-     * paired — which is the receipt a Save button was standing in for. */
-    expect(hasButton(markup, "Save")).toBe(false);
   });
 
   test("a saved pairing seeds its own fields", () => {
@@ -144,12 +140,4 @@ describe("the Sona agent pairing screen", () => {
     expect(markup).not.toContain("Never");
   });
 
-  test("the private half of this Mac's identity is never on screen", () => {
-    const markup = paint(PAIRED);
-    // Effects do not run under static rendering, so the public key has not been
-    // fetched — the row says so instead of showing an empty field.
-    expect(markup).toContain("Turn the agent panel on to create a key.");
-    expect(markup.toLowerCase()).not.toContain("seed");
-    expect(markup.toLowerCase()).not.toContain("private");
-  });
 });

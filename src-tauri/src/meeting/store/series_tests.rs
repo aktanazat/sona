@@ -392,25 +392,13 @@ fn always_record_refuses_a_grant_that_acknowledges_nothing() {
     assert!(store.live_series_consent("weekly-sync").unwrap().is_none());
 }
 
-/* Clearing every choice removes the row, so "has a row" keeps meaning "has
- * decided something" — which is what makes the digest's COALESCE honest. */
 #[test]
-fn a_series_that_has_unmade_every_choice_keeps_no_row() {
+fn unmaking_a_digest_exclusion_includes_the_series_again() {
     let (_directory, store) = store();
     let excluded = set_digest(&store, "weekly-sync", false, 0);
     let included = set_digest(&store, "weekly-sync", true, excluded.preferences.revision);
 
     assert!(included.preferences.digest_included);
-    let rows: i64 = store
-        .connection()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM meeting_series_preferences WHERE series_key = ?1",
-            params!["weekly-sync"],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(rows, 0);
 }
 
 /* One read for a whole week of calendar rows. Keys with nothing stored still

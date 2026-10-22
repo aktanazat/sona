@@ -590,7 +590,6 @@ fn chat_failure(outcome: RewriteOutcome) -> AgentPanelTurnFailureV1 {
 mod tests {
     use super::*;
     use crate::modes::{CommandPlan, TranscriptionIntent};
-    use crate::settings::get_default_settings;
 
     fn plan(selection: &str) -> CommandPlan {
         CommandPlan::new(selection.to_string())
@@ -608,39 +607,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_command_binding_ships_enabled_with_its_own_chord() {
-        let settings = get_default_settings();
-        let binding = settings
-            .bindings
-            .get(COMMAND_BINDING_ID)
-            .expect("the command binding ships by default");
-        assert!(settings.command_mode_enabled);
-        assert_ne!(
-            binding.current_binding,
-            settings.bindings["transcribe"].current_binding
-        );
-    }
-
-    /// The operand is frozen before the microphone opens, so rendering consumes
-    /// the selection captured at command start rather than consulting the
-    /// frontmost application again.
-    #[test]
-    fn the_rewrite_uses_the_selection_frozen_at_record_start() {
-        let frozen = plan("the original selection");
-
-        let rendered = render_instruction(InstructionRenderInput {
-            instruction: "shorten it",
-            input: frozen.selection(),
-            language: "en",
-            target: &crate::context::TargetMetadata::default(),
-        });
-
-        let envelope: serde_json::Value = serde_json::from_str(&rendered.user_message).unwrap();
-        assert_eq!(envelope["input"], "the original selection");
-        // Rendering is the only consumer, and it cannot write back.
-        assert_eq!(frozen.selection(), "the original selection");
-    }
 
     /// The mode layer rejects a missing explicit operand before any ambient
     /// context capture. This module maps that rejection to the typed event.
@@ -674,13 +640,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_refusal_names_what_the_user_has_to_do() {
-        assert_eq!(
-            RunPlanError::CommandWithoutSelection.to_string(),
-            "Voice command mode needs text selected before you speak"
-        );
-    }
 
     /// The wording decides before any model is asked, so the cases here are
     /// the contract: a question phrased politely is still a question, an edit

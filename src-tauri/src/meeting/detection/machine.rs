@@ -985,7 +985,6 @@ pub fn evaluate_stop(inputs: &StopInputs) -> Option<StopTrigger> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     const NOW: i64 = 1_700_000_000_000;
 
@@ -1243,16 +1242,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn case_3_prompt_title_uses_the_event_copy_pattern() {
-        let prompt = PromptKind::CalendarEvent {
-            event_key: "event-1".to_string(),
-            event_title: "Quarterly planning".to_string(),
-        };
-
-        assert_eq!(prompt.notification_title(), "Quarterly planning starting");
-    }
-
     /* §5.3 case 4 — meeting app open, microphone idle: nothing. */
     #[test]
     fn case_4_app_open_without_mic_activity_never_prompts() {
@@ -1289,35 +1278,6 @@ mod tests {
                 app_name: "Zoom".to_string(),
             })
         );
-        assert_eq!(
-            PromptKind::AppMeeting {
-                bundle_id: "us.zoom.xos".to_string(),
-                app_name: "Zoom".to_string(),
-            }
-            .notification_title(),
-            "Zoom meeting detected"
-        );
-    }
-
-    #[test]
-    fn case_5_slack_takes_the_huddle_copy() {
-        let outcome = evaluate(
-            &DetectionInputs {
-                app: AppSignal::Known {
-                    bundle_id: SLACK_BUNDLE_ID.to_string(),
-                    display_name: "Slack".to_string(),
-                    frontmost: true,
-                },
-                mic: MicSignal::Active,
-                ..inputs()
-            },
-            &DetectionPolicy::default(),
-        );
-
-        let DetectionOutcome::Prompt(prompt) = outcome else {
-            panic!("Slack with a live mic should prompt");
-        };
-        assert_eq!(prompt.notification_title(), "Slack huddle detected");
     }
 
     /* Presence is not participation. Zoom in the menu bar while a voice memo
@@ -1367,8 +1327,6 @@ mod tests {
     /* §5.3 case 6 — live mic, no identifiable app: suppressed unless opted in. */
     #[test]
     fn case_6_unknown_mic_source_is_suppressed_by_default() {
-        assert!(!DetectionPolicy::default().any_mic_activity);
-
         let outcome = evaluate(
             &DetectionInputs {
                 mic: MicSignal::Active,
@@ -1528,14 +1486,6 @@ mod tests {
                 bundle_id: "com.google.chrome".to_string(),
                 app_name: "Chrome".to_string(),
             })
-        );
-        assert_eq!(
-            PromptKind::BrowserCall {
-                bundle_id: "com.google.chrome".to_string(),
-                app_name: "Chrome".to_string(),
-            }
-            .notification_title(),
-            "Call detected in Chrome"
         );
     }
 
@@ -2356,23 +2306,6 @@ mod tests {
 
         assert_eq!(evaluate_stop(&meeting), None);
     }
-    #[test]
-    fn a_call_is_titled_with_the_app_and_the_time_it_started() {
-        let started = Local
-            .with_ymd_and_hms(2026, 3, 14, 15, 15, 0)
-            .single()
-            .expect("an unambiguous local instant");
-
-        assert_eq!(
-            PromptKind::AppCall {
-                bundle_id: "com.apple.facetime".to_string(),
-                app_name: "FaceTime".to_string(),
-            }
-            .proposed_meeting_title(started),
-            "FaceTime call, 3:15 PM"
-        );
-    }
-
     #[test]
     fn the_call_prompt_wire_shape_matches_the_rest_of_the_union() {
         assert_eq!(

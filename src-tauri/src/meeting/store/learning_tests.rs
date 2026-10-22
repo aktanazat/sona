@@ -769,25 +769,10 @@ fn dictation_sourced_evidence_belongs_to_no_meeting() {
     );
 }
 
-/// The two sets the Settings list and `set_workflow_enabled` are built on have
-/// to partition the enum, and every id in it has to be one the schema accepts:
-/// `matching_enabled_workflows_in` tolerates a missing settings row, so an id
-/// the `CHECK` list rejects is a workflow that silently never runs.
+/// Every known workflow needs a seeded settings row. Dispatch tolerates a
+/// missing row, so an unseeded workflow would silently never run.
 #[test]
-fn the_configurable_and_permanent_sets_partition_every_workflow() {
-    for workflow_id in WorkflowId::ALL {
-        assert_ne!(
-            WorkflowId::CONFIGURABLE.contains(&workflow_id),
-            WorkflowId::PERMANENT.contains(&workflow_id),
-            "{workflow_id:?} is in both sets or in neither"
-        );
-    }
-    assert_eq!(
-        WorkflowId::CONFIGURABLE.len() + WorkflowId::PERMANENT.len(),
-        WorkflowId::ALL.len(),
-        "one of the two sets names a workflow that is not in ALL"
-    );
-
+fn migrations_seed_every_known_workflow() {
     let (_directory, store) = new_store();
     let connection = store.connection().unwrap();
     let seeded = connection

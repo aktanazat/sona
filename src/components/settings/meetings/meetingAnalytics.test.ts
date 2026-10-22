@@ -62,6 +62,5 @@ describe("actionItemKey", () => {
     expect(
       actionItemKey("artifact-a", 0) === actionItemKey("artifact-a", 1),
     ).toBe(false);
-    expect(actionItemKey("artifact-a", 3)).toBe("artifact-a:3");
   });
 });

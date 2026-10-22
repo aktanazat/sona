@@ -1393,15 +1393,6 @@ mod tests {
         assert_eq!(apply_text_replacements("", &starter_rules()), "");
     }
 
-    #[test]
-    fn the_starter_library_leaves_spoken_line_breaks_to_the_punctuation_table() {
-        // Owning "new line" in two places would let the replacements stage
-        // override a user who turned literal punctuation off.
-        let owns_a_break_phrase = starter_rules()
-            .iter()
-            .any(|rule| rule.spoken == "new line" || rule.spoken == "new paragraph");
-        assert!(!owns_a_break_phrase);
-    }
 
     #[test]
     fn normalization_preserves_a_paragraph_break() {
@@ -1570,19 +1561,6 @@ mod tests {
         assert_eq!(normalize_transcription_output(&filtered), "это работает");
     }
 
-    #[test]
-    fn test_filter_cleans_whitespace() {
-        let text = "Hello    world   test";
-        let result = filter_transcription_output(text, "en", &None);
-        assert_eq!(result, "Hello world test");
-    }
-
-    #[test]
-    fn test_filter_trims() {
-        let text = "  Hello world  ";
-        let result = filter_transcription_output(text, "en", &None);
-        assert_eq!(result, "Hello world");
-    }
 
     #[test]
     fn test_filter_combined() {

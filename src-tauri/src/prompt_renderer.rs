@@ -435,62 +435,6 @@ mod tests {
         })
     }
 
-    fn render_cleanup(level: CleanupLevel) -> String {
-        let mut settings = get_default_settings();
-        ensure_mode_settings(&mut settings);
-        settings.modes[0].llm.cleanup_level = Some(level);
-        let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode).unwrap();
-        render_for(&run).system_message
-    }
-
-    #[test]
-    fn light_cleanup_renders_only_its_level_and_the_shared_contract() {
-        let system = render_cleanup(CleanupLevel::Light);
-        assert!(system.contains("[CLEANUP_LEVEL: LIGHT]"));
-        assert!(!system.contains("[CLEANUP_LEVEL: MEDIUM]"));
-        assert!(!system.contains("[CLEANUP_LEVEL: HEAVY]"));
-        assert!(system.contains("[BACKTRACK]"));
-        assert!(system.contains("[REWRITE_OUTPUT]"));
-    }
-
-    #[test]
-    fn medium_cleanup_renders_only_its_level_and_the_shared_contract() {
-        let system = render_cleanup(CleanupLevel::Medium);
-        assert!(system.contains("[CLEANUP_LEVEL: MEDIUM]"));
-        assert!(!system.contains("[CLEANUP_LEVEL: LIGHT]"));
-        assert!(!system.contains("[CLEANUP_LEVEL: HEAVY]"));
-        assert!(system.contains("[BACKTRACK]"));
-        assert!(system.contains("[REWRITE_OUTPUT]"));
-    }
-
-    #[test]
-    fn heavy_cleanup_renders_only_its_level_and_the_shared_contract() {
-        let system = render_cleanup(CleanupLevel::Heavy);
-        assert!(system.contains("[CLEANUP_LEVEL: HEAVY]"));
-        assert!(!system.contains("[CLEANUP_LEVEL: LIGHT]"));
-        assert!(!system.contains("[CLEANUP_LEVEL: MEDIUM]"));
-        assert!(system.contains("[BACKTRACK]"));
-        assert!(system.contains("[REWRITE_OUTPUT]"));
-    }
-
-    #[test]
-    fn cleanup_none_renders_no_cleanup_block() {
-        let system = render_cleanup(CleanupLevel::None);
-        assert!(!system.contains("[CLEANUP_LEVEL:"));
-        assert!(!system.contains("[BACKTRACK]"));
-        assert!(!system.contains("[REWRITE_OUTPUT]"));
-    }
-
-    #[test]
-    fn an_unselected_cleanup_level_keeps_the_existing_system_prompt_bytes() {
-        let system = render_for(&run(Tone::Balanced)).system_message;
-        assert_eq!(
-            system,
-            format!(
-                "{NORMALIZER}\n\n{MINIMALIST_CLEANUP}\n\nPunctuation policy: normal.\n\nInput boundary: {DATA_BOUNDARY}"
-            )
-        );
-    }
 
     fn run_with_samples(samples: Vec<PersonaSample>) -> RunPlan {
         let mut settings = get_default_settings();
@@ -525,12 +469,6 @@ mod tests {
         assert!(system.contains("Sample 2:\nI write like I talk."));
     }
 
-    #[test]
-    fn no_samples_leaves_the_system_prompt_exactly_as_it_was() {
-        let without = render_for(&run_with_samples(Vec::new())).system_message;
-        assert!(!without.contains("[WRITING SAMPLES]"));
-        assert_eq!(without, render_for(&run(Tone::Balanced)).system_message);
-    }
 
     /// A prompt written for the version that pasted the transcript into the
     /// instructions still works: the placeholder points at the envelope

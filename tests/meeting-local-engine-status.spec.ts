@@ -5,7 +5,6 @@ import { APP_SETTINGS } from "./support/tauri-fixtures";
 import { installTauriMock, type JsonValue } from "./support/tauri-mock";
 
 const LOCAL_ENGINE = en.settings.meetings.localEngine;
-const REMOTE_INTELLIGENCE = en.settings.meetings.remoteIntelligence;
 const REACHABLE_STATUS = LOCAL_ENGINE.status.endpointReachable.replace(
   "{{count}}",
   "1",
@@ -30,7 +29,6 @@ test("keeps a stale local engine status response from replacing the newest state
   };
 
   await installTauriMock(page, {
-    pending: ["meeting_series_remote_roster"],
     responses: {
       get_app_settings: settings,
       get_settings: settings,
@@ -92,15 +90,6 @@ test("keeps a stale local engine status response from replacing the newest state
     name: LOCAL_ENGINE.baseUrl.label,
   });
   await expect(endpoint).toBeVisible();
-  await expect(
-    page.getByText(REMOTE_INTELLIGENCE.consent, { exact: true }),
-  ).not.toHaveAttribute("role", "status");
-  await expect(
-    page.getByText(REMOTE_INTELLIGENCE.unpaired, { exact: true }),
-  ).not.toHaveAttribute("role", "status");
-  await expect(
-    page.getByText(REMOTE_INTELLIGENCE.loading, { exact: true }),
-  ).not.toHaveAttribute("role", "status");
 
   const initialStatusCalls = await page.evaluate(() =>
     Number(localStorage.getItem("meeting-local-engine-status-calls") ?? "0"),

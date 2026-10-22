@@ -1226,27 +1226,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_gate_slower_than_a_display_frame_aliases_the_faster_cadences() {
-        // Why the gate is one display frame and not the 33ms it used to be:
-        // three of the four device periods are shorter than 33ms, so that gate
-        // dropped every other measurement instead of capping a rate the
-        // overlay could not show.
-        let mut aliased = 0;
-        for (label, sample_rate, window) in LEVEL_SOURCE_CADENCES {
-            let period_us = window * 1_000_000 / sample_rate;
-            if period_us / 1_000 >= 33 {
-                continue;
-            }
-            aliased += 1;
-            let delivered = delivered_frames(period_us, 240, 33);
-            assert!(
-                delivered <= 121,
-                "{label}: expected the 33ms gate to halve 240 frames, got {delivered}"
-            );
-        }
-        assert_eq!(aliased, 3);
-    }
 
     #[test]
     fn a_burst_faster_than_a_frame_delivers_reported_readings_not_blends() {

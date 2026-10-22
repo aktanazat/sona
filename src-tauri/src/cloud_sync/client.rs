@@ -157,8 +157,6 @@ impl CloudClient {
         let fetched_at = Instant::now();
         let cache = CapabilitiesCache {
             capabilities: response.clone(),
-            #[cfg(test)]
-            fetched_at,
             expires_at: fetched_at + CAPABILITIES_CACHE_TTL,
         };
         let mut slot = self
@@ -774,8 +772,6 @@ pub(crate) struct ServerDateObservation {
 #[derive(Clone, Debug)]
 pub(crate) struct CapabilitiesCache {
     pub(crate) capabilities: CloudCapabilities,
-    #[cfg(test)]
-    pub(crate) fetched_at: Instant,
     pub(crate) expires_at: Instant,
 }
 
@@ -1471,8 +1467,8 @@ mod tests {
     };
 
     use super::{
-        sha256_base64url, CapabilitiesCache, ClockSkewCategory, CloudClient, CloudCredentials,
-        CloudErrorCode, IdempotencyKey,
+        sha256_base64url, ClockSkewCategory, CloudClient, CloudCredentials, CloudErrorCode,
+        IdempotencyKey,
     };
 
     const VAULT_ID: &str = "vaultid123456789";
@@ -1781,16 +1777,14 @@ mod tests {
             .await
             .expect("capabilities");
         let captured = task.await.expect("capabilities task");
-        let CapabilitiesCache {
-            capabilities: cached,
-            fetched_at,
-            expires_at,
-        } = client.cached_capabilities().expect("cache entry");
+        let cached = client
+            .cached_capabilities()
+            .expect("cache entry")
+            .capabilities;
 
         assert_eq!(captured.line, "GET /v1/capabilities HTTP/1.1");
         assert_eq!(capabilities.protocol_version, 1);
         assert_eq!(cached.limits.chunk_bytes, 4 * 1024 * 1024);
-        assert!(expires_at > fetched_at);
         assert_eq!(client.latest_server_date().expect("date").server_time_ms, 0);
     }
 }

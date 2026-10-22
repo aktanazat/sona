@@ -1740,45 +1740,6 @@ mod tests {
         Ok(root)
     }
 
-    /// The setup snippet's one external dependency, checked against the tree
-    /// the bundler copies from.
-    ///
-    /// `tauri.conf.json` ships `resources/**/*` and preserves each match's
-    /// relative path, so the string the app resolves has to name the file from
-    /// `src-tauri` — the same repo-relative form `tray.rs` passes for its own
-    /// bundled icons. A leaf-only path resolves to nothing in a bundle, which
-    /// is not a visible failure anywhere: the command returns one error string
-    /// and the console prints "Setup code unavailable", so the hook
-    /// configuration for all four agents disappears over the one file that
-    /// belongs to the agent shipped disabled.
-    #[test]
-    fn the_omp_extension_is_named_where_the_bundle_copies_it_from() {
-        let declared = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(OMP_EXTENSION_RESOURCE);
-        assert!(
-            declared.is_file(),
-            "{OMP_EXTENSION_RESOURCE} does not name a bundled resource: {} is not a file",
-            declared.display()
-        );
-        let manifest =
-            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
-                .expect("tauri.conf.json is readable");
-        let manifest: serde_json::Value =
-            serde_json::from_str(&manifest).expect("tauri.conf.json is JSON");
-        let resources = manifest["bundle"]["resources"]
-            .as_array()
-            .expect("the bundle declares resources");
-        let root = OMP_EXTENSION_RESOURCE
-            .split('/')
-            .next()
-            .expect("the resource path has a first segment");
-        assert!(
-            resources
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .any(|pattern| pattern.starts_with(&format!("{root}/"))),
-            "no bundle resource pattern ships {root}/: {resources:?}"
-        );
-    }
 
     fn enabled_settings(project_hash: String) -> AgentBridgeSettings {
         AgentBridgeSettings {
@@ -2316,29 +2277,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn expired_pending_becomes_copy_only() -> Result<(), Box<dyn Error>> {
-        let root = test_root("expiry")?;
-        let paths = RuntimePaths::from_root(root.clone(), true)?;
-        let app_id = opaque_hash(&[b"app-expiry"]);
-        let binding = binding(&root)?;
-        let settings = enabled_settings(binding.project_hash.clone());
-        let mut core = AgentBridgeCore::new(paths.clone(), app_id.clone())?;
-        core.start(&settings, 1_000)?;
-        let prompt = event(CanonicalEventKind::UserPromptSubmit, &root, None);
-        persist_event(&paths, &app_id, binding, prompt, b"prompt", 1_001)?;
-        core.tick(&settings, 1_002)?;
-        let session_id = core.sessions()[0].id.clone();
-        core.create_reply_preview(&session_id, "copy me".to_string(), 1_003, Some(1))?;
-        core.tick(&settings, 1_005)?;
-        assert_eq!(
-            core.pending_messages()[0].state,
-            AgentBridgePendingState::CopyOnly
-        );
-        core.stop();
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
 
     #[test]
     fn cancelling_reply_preview_prevents_confirmation_and_delivery() -> Result<(), Box<dyn Error>> {

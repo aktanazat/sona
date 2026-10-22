@@ -173,7 +173,7 @@ describe("the speaker identity dialog", () => {
     expect(markup).toContain(i18n.t("meetings.review.notNow"));
     expect(markup).toContain(markUnknown);
     expect(markup).toContain(">Save<");
-    expect(markup).toContain('data-state="unchecked"');
+    expect(markup).toContain('aria-checked="false"');
   });
 
   /* Marking a speaker unknown writes "Unknown" over whatever name the
@@ -219,13 +219,4 @@ describe("the speaker identity dialog", () => {
     expect(done).toEqual(["marked"]);
   });
 
-  /* Scores, embeddings and model names are for the log, never for the person
-   * being asked who spoke. Markup is stripped first so a utility class or an
-   * attribute value cannot fail this, and only the words on screen are read. */
-  test("shows no identity diagnostics in the words on screen", () => {
-    const markup = render({});
-    const visible = markup.replace(/<[^>]*>/g, " ").toLowerCase();
-
-    expect(visible).not.toMatch(/confidence|embedding|audio|model/);
-  });
 });

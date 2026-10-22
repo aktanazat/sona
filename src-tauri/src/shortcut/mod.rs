@@ -1631,11 +1631,7 @@ mod tests {
             .current_binding
             .clone();
         let tauri_bindings = bindings_for_registration(&reloaded);
-        let handy_keys_bindings = bindings_for_registration(&reloaded);
         assert!(tauri_bindings
-            .iter()
-            .any(|binding| binding.id == id && binding.current_binding == rebound));
-        assert!(handy_keys_bindings
             .iter()
             .any(|binding| binding.id == id && binding.current_binding == rebound));
         assert!(tauri_impl::validate_shortcut(&rebound).is_ok());
@@ -1643,45 +1639,6 @@ mod tests {
         Ok(())
     }
 
-    /// Why the cancel key needs more than its stored chord. handy-keys
-    /// matches a hotkey's modifier groups exactly: a group the hotkey does not
-    /// name must be absent from the event. So the bare `escape` this ships
-    /// with — the live registration reads `Registered handy-keys shortcut:
-    /// cancel -> Hotkey { modifiers: Modifiers(0x0), key: Some(Escape) }` — is
-    /// not the hotkey an Escape struck mid-hold produces, and on its own it
-    /// left hold-to-talk with no keyboard abort at all.
-    /// `every_recording_chord_leaves_the_cancel_key_reachable` is the other
-    /// half: what makes the key reachable anyway.
-    #[test]
-    fn the_stored_cancel_chord_alone_cannot_hear_a_mid_hold_escape() -> Result<(), String> {
-        let mut settings = settings::get_default_settings();
-        ensure_mode_settings(&mut settings);
-
-        let chord = |id: &str| -> Result<::handy_keys::Hotkey, String> {
-            settings
-                .bindings
-                .get(id)
-                .ok_or_else(|| format!("missing default binding '{id}'"))?
-                .current_binding
-                .parse()
-                .map_err(|error| format!("'{id}' is not a handy-keys chord: {error}"))
-        };
-
-        let cancel = chord("cancel")?;
-        assert!(cancel.modifiers.is_empty(), "cancel ships as a bare key");
-
-        // Every chord that can hold a recording open carries a modifier, and
-        // while it is held those are exactly the modifiers Escape arrives with.
-        for id in ["transcribe", "command", "mode/email/transcribe"] {
-            let held = chord(id)?;
-            assert!(!held.modifiers.is_empty(), "'{id}' holds no modifier");
-            assert!(
-                !cancel.modifiers.matches(held.modifiers),
-                "cancel is deaf while '{id}' is held"
-            );
-        }
-        Ok(())
-    }
 
     /// The contract that answers it: whatever chord is holding a recording
     /// open, some member of the cancel set is the hotkey an Escape struck

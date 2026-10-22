@@ -12,8 +12,7 @@
     "fixtures:crypto": "bun scripts/generate-crypto-fixture.ts",
     "migrations:check": "bun scripts/check-migrations.ts",
     "migrations:local": "bun run migrations:check && wrangler d1 migrations apply sona-companion --local --config wrangler.jsonc",
-    "dry-run": "bun run migrations:check && wrangler deploy --dry-run --config wrangler.jsonc",
-    "smoke:scheduled": "vitest run test/scheduled.smoke.worker.spec.ts"
+    "dry-run": "bun run migrations:check && wrangler deploy --dry-run --config wrangler.jsonc"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",

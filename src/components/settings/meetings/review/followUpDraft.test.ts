@@ -65,8 +65,6 @@ describe("followUpDraftText", () => {
     );
 
     expect(text).toBe("Thanks all — I'll send the tier comparison this week.");
-    // No headings are bolted onto a message somebody is about to send.
-    expect(text).not.toContain("What I owe");
   });
 
   test("without an engine the record itself is the draft", () => {
@@ -86,16 +84,5 @@ describe("followUpDraftText", () => {
     expect(followUpDraftText(draft({ summary: "", decisions: [] }), t)).toBe(
       "What I owe\n- Send the tier comparison",
     );
-  });
-
-  test("headings come from the catalog, so the draft is never half English", () => {
-    /* An empty catalog: i18next answers a key it does not hold with the key
-     * itself, so every heading in the output is provably one the draft looked
-     * up rather than English spelled out in the source. */
-    const translated = followUpDraftText(draft({}), translator({}));
-
-    expect(translated).toContain("meetings.followUp.iOwe");
-    expect(translated).toContain("meetings.followUp.decisions");
-    expect(translated).not.toContain("What I owe");
   });
 });

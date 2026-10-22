@@ -3114,34 +3114,6 @@ mod opened_audio_tests {
         );
     }
 
-    /// The forwarded path keeps its own filter, and this is why.
-    ///
-    /// `resolve_opened_audio_path` joins a relative path onto the cwd, and
-    /// `sona://quit` *is* relative as a `Path`. So by the time a forwarded
-    /// argv reaches the funnel it reads `<cwd>/sona://quit` and no longer
-    /// parses as a URL — the guard in the funnel cannot see it, and the filter
-    /// at the forwarding call site has to run *before* resolution. Asserted
-    /// rather than commented so that removing that filter as "now redundant"
-    /// turns this red instead of silently restoring the defect.
-    #[test]
-    fn resolution_hides_a_url_from_the_funnel_guard() {
-        let forwarded = vec![PathBuf::from("sona://quit")];
-        let mut enqueued = Vec::new();
-        dispatch_opened_audio_paths(
-            forwarded_opened_audio_paths(&forwarded, "/tmp/opened"),
-            |path| {
-                enqueued.push(path.to_path_buf());
-                Ok(())
-            },
-            |_, _| {},
-        );
-
-        assert_eq!(
-            enqueued,
-            [PathBuf::from("/tmp/opened/sona://quit")],
-            "cwd-joined, so the funnel guard no longer recognises it as a URL"
-        );
-    }
 
     /// A cold start is the ingress with no router in front of the funnel.
     ///

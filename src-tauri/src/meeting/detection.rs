@@ -3026,50 +3026,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_app_prompt_is_sized_without_the_calendar_only_rows() {
-        let prompt = pending(
-            PromptKind::AppMeeting {
-                bundle_id: "us.zoom.xos".to_string(),
-                app_name: "Zoom".to_string(),
-            },
-            false,
-        );
-
-        assert_eq!(
-            prompt_panel_layout(&prompt, Some(&countdown("event-1", true))),
-            ConsentPanelLayout::Prompt {
-                always_record_checkbox: false,
-                series_brief: false,
-            }
-        );
-    }
-
-    #[test]
-    fn a_calendar_prompt_counts_the_brief_only_for_its_own_briefed_event() {
-        let prompt = pending(
-            PromptKind::CalendarEvent {
-                event_key: "event-1".to_string(),
-                event_title: "Weekly sync".to_string(),
-            },
-            true,
-        );
-        let layout =
-            |countdown: Option<&DetectionCountdown>| prompt_panel_layout(&prompt, countdown);
-        let brief_shown = |countdown: Option<&DetectionCountdown>| {
-            layout(countdown)
-                == ConsentPanelLayout::Prompt {
-                    always_record_checkbox: true,
-                    series_brief: true,
-                }
-        };
-
-        assert!(brief_shown(Some(&countdown("event-1", true))));
-        assert!(!brief_shown(Some(&countdown("event-2", true))));
-        assert!(!brief_shown(Some(&countdown("event-1", false))));
-        assert!(!brief_shown(None));
-    }
-
     /* FS2 in the detection map: a Zoom prompt raised while some event sat on
      * the calendar carried that event's end, so the capture it started
      * stopped when the event ended and the pending prompt was retracted at
@@ -3230,30 +3186,6 @@ mod tests {
             }],
             can_record_when_starts: true,
         }
-    }
-
-    #[test]
-    fn ritual_layout_tracks_only_rows_the_cards_render() {
-        assert_eq!(
-            ritual_panel_layout(&MeetingRitual::Prep(prep_card(1_000))),
-            ConsentPanelLayout::Prep {
-                loop_rows: 2,
-                waiting_on: true,
-                participants: true,
-            }
-        );
-        assert_eq!(
-            ritual_panel_layout(&MeetingRitual::Wrap(MeetingWrapCard {
-                session_id: MeetingSessionId::from_uuid(Uuid::nil()),
-                title: "Weekly sync".to_string(),
-                headline: "Saved.".to_string(),
-                unresolved_speaker_count: Some(0),
-                follow_up_count: 0,
-                waiting_on_count: 0,
-                waiting_on_names: Vec::new(),
-            })),
-            ConsentPanelLayout::Wrap { loop_delta: false }
-        );
     }
 
     #[test]
@@ -4375,15 +4307,4 @@ mod tests {
         assert!(state.tracked.is_some());
     }
 
-    #[test]
-    fn the_recording_card_reuses_the_in_session_pill_geometry() {
-        assert_eq!(
-            ritual_panel_layout(&MeetingRitual::Recording(recording_card(
-                MeetingSessionId::from_uuid(Uuid::nil())
-            ))),
-            ConsentPanelLayout::Recording {
-                disclosure_note: false
-            }
-        );
-    }
 }

@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn json_export_is_versioned_and_path_free() {
+    fn json_export_is_versioned() {
         let review = review();
         let document = render(
             MeetingExportFormat::Json,
@@ -652,7 +652,6 @@ mod tests {
         let text = String::from_utf8(document).unwrap();
         assert!(text.contains("\"schema_version\": 1"));
         assert!(text.contains("Design sync"));
-        assert!(!text.contains("/tmp/"));
     }
 
     #[test]

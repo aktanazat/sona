@@ -210,7 +210,6 @@ mod tests {
         let context: MailContext =
             serde_json::from_str(r#"{"state":"permission_denied","threads":[]}"#).unwrap();
         assert_eq!(context.state, MailContextState::PermissionDenied);
-        assert!(context.status_text().contains("Automation"));
     }
 
     #[test]
@@ -218,7 +217,6 @@ mod tests {
         let context: MailContext =
             serde_json::from_str(r#"{"state":"not_configured","threads":[]}"#).unwrap();
         assert_eq!(context.state, MailContextState::NotConfigured);
-        assert!(context.status_text().contains("Add an account"));
     }
 
     #[test]

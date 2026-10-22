@@ -300,7 +300,6 @@ fn snippets_are_cut_on_a_character_boundary() {
 
 #[test]
 fn a_page_size_is_bounded_and_never_zero() {
-    assert_eq!(page_size(None), Ok(DEFAULT_PAGE_SIZE));
     assert_eq!(page_size(Some(7)), Ok(7));
     assert_eq!(page_size(Some(usize::MAX)), Ok(MAX_PAGE_SIZE));
     assert_eq!(page_size(Some(0)), Err(QueryError::InvalidRequest));

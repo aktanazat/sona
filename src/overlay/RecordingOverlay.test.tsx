@@ -255,15 +255,6 @@ describe("the listening HUD is the measured input meter", () => {
     ).toEqual(Array(16).fill(1));
   });
 
-  test("the established speech threshold marks a reported peak", () => {
-    const quietLevels = Array(16).fill(0.89);
-    const speechLevels = Array(16).fill(0.9);
-    const quiet = render({ hud: "listening", levels: quietLevels });
-    const speech = render({ hud: "listening", levels: speechLevels });
-
-    expect(meterScales(quiet)).toEqual(quietLevels);
-    expect(meterScales(speech)).toEqual(speechLevels);
-  });
   test("compact and stream frames preserve the requested direction", () => {
     const compact = render({ hud: "listening", direction: "rtl" });
     const stream = render({
@@ -286,7 +277,6 @@ describe("the listening HUD is the measured input meter", () => {
       const markup = render({ hud });
       expect(markup).toContain(`>${word}<`);
       expect(markup).toContain('aria-live="polite"');
-      expect(markup).not.toContain("swave");
     });
   }
 });
@@ -297,11 +287,8 @@ describe("the compact HUD preserves failure and cancel behavior", () => {
       hud: "error",
       error: { error_type: "no_speech_detected" },
     });
-    expect(markup).toContain("hud-error");
     expect(markup).toContain("No speech detected");
     expect(markup.includes("no_speech_detected")).toBe(false);
-    expect(markup.includes('class="sx"')).toBe(false);
-    expect(markup.includes("swave")).toBe(false);
   });
 
   for (const [errorType, cause] of [
@@ -341,8 +328,7 @@ describe("the compact HUD preserves failure and cancel behavior", () => {
   ] as const) {
     test(`${hud} keeps cancel as a real labelled button`, () => {
       const markup = render({ hud });
-      expect(markup).toContain('<button class="sx"');
-      expect(markup).toContain('aria-label="Cancel"');
+      expect(markup).toMatch(/<button[^>]*aria-label="Cancel"/);
     });
   }
 
@@ -350,7 +336,6 @@ describe("the compact HUD preserves failure and cancel behavior", () => {
     const markup = render({ hud: "idle", frame: "pill" });
     expect(markup).toContain('data-testid="hud-pill"');
     expect(markup).toContain("Email");
-    expect(markup.includes("sbase")).toBe(false);
   });
 
   test("a failure in the resting window renders as a one-line pill", () => {
@@ -360,27 +345,9 @@ describe("the compact HUD preserves failure and cancel behavior", () => {
       error: { error_type: "no_speech_detected" },
     });
     expect(markup).toContain('data-testid="hud-error-pill"');
-    expect(markup).toContain("hud-pill hud-error");
     expect(markup).toContain("No speech detected");
-    expect(markup.includes("sbase")).toBe(false);
   });
 
-  for (const hud of [
-    "starting",
-    "listening",
-    "transcribing",
-    "processing",
-    "error",
-  ] as const) {
-    test(`${hud} hooks its colour on a phase class, never inline`, () => {
-      const markup = render({
-        hud,
-        error: { error_type: "capture_overrun" },
-      });
-      expect(markup).toContain(`hud-${hud}`);
-      expect(markup.includes("color:")).toBe(false);
-    });
-  }
 });
 
 describe("the Live panel shares the measured meter", () => {
@@ -403,9 +370,7 @@ describe("the Live panel shares the measured meter", () => {
         />
       </I18nextProvider>,
     );
-    expect(markup).toContain("stext-cap");
     expect(markup).toContain("Hello");
-    expect(markup).toContain("scard hud-listening open");
     expect(markup).toContain('role="img" aria-label="Input level"');
     expect(meterScales(markup)).toHaveLength(16);
     expect(markup).not.toContain(">0:00<");

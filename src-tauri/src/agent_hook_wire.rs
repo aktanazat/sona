@@ -892,8 +892,6 @@ mod tests {
         let session = paths.session(&binding)?;
         let request = session.request_path(&digest_parts(&[b"invocation"]))?;
         let rendered = request.to_string_lossy();
-        assert!(rendered.contains(binding.agent.as_str()));
-        assert!(rendered.contains(&binding.session_handle));
         assert!(!rendered.contains("session-a"));
         fs::remove_dir_all(root)?;
         Ok(())

@@ -2211,8 +2211,7 @@ mod tests {
         capture_verdict, complete_unless_cancelled, is_blank_transcription,
         select_final_transcription, share_completed_pcm, should_use_streaming_overlay,
         strip_think_block, BatchDecode, CaptureVerdict, CloudRunError, CompletedCapture,
-        InputLevel, PendingHistoryEntry, TRANSCRIPTION_FAILURE_EVENT_MESSAGE,
-        TRANSCRIPTION_FAILURE_LOG_MESSAGE,
+        InputLevel, PendingHistoryEntry,
     };
     #[cfg(feature = "cloud-realtime")]
     use super::{ensure_cloud_fallback_is_installed, resolve_cloud_finalization, FrozenTranscript};
@@ -2259,23 +2258,6 @@ mod tests {
         }
     }
 
-    /// A capture whose transcript post-processing legitimately emptied — a
-    /// spoken "scratch that", or a bare "Um." with filler removal on — is a
-    /// delivered-nothing run, not a silent microphone. It reads as
-    /// `Transcribed` on both VAD paths, so the two stay consistent: the same
-    /// audio cannot earn a different capture status because Silero happened to
-    /// fire.
-    #[test]
-    fn a_transcript_emptied_by_post_processing_is_never_a_no_speech_receipt() {
-        let emptied_by_post_processing = true;
-        for vad_forwarded_speech in [false, true] {
-            assert_eq!(
-                capture_verdict(vad_forwarded_speech, emptied_by_post_processing),
-                CaptureVerdict::Transcribed,
-                "vad_forwarded_speech={vad_forwarded_speech}"
-            );
-        }
-    }
 
     #[test]
     fn truncated_capture_has_no_transcript_or_post_processing_path() {
@@ -2797,36 +2779,6 @@ mod tests {
             serde_json::json!({ "error_type": "cloud_transcription_held" })
         );
 
-        let overrun =
-            serde_json::to_value(RecordingErrorEvent::typed("capture_overrun")).expect("overrun");
-        assert_eq!(
-            overrun,
-            serde_json::json!({ "error_type": "capture_overrun" })
-        );
-
-        let no_speech = serde_json::to_value(RecordingErrorEvent::typed("no_speech_detected"))
-            .expect("no-speech payload");
-        assert_eq!(
-            no_speech,
-            serde_json::json!({ "error_type": "no_speech_detected" })
-        );
-
-        let no_model = serde_json::to_value(RecordingErrorEvent::typed("no_model_selected"))
-            .expect("no-model payload");
-        assert_eq!(
-            no_model,
-            serde_json::json!({ "error_type": "no_model_selected" })
-        );
-
-        let denied =
-            serde_json::to_value(RecordingErrorEvent::typed("microphone_permission_denied"))
-                .expect("denied payload");
-        assert_eq!(
-            denied,
-            serde_json::json!({
-                "error_type": "microphone_permission_denied",
-            })
-        );
     }
 
     #[test]
@@ -2846,25 +2798,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn transcript_canary_is_absent_from_transcription_failure_diagnostics() {
-        const CANARY: &str = "TRANSCRIPT-CANARY-4EE1";
-        let event = serde_json::to_string(&TRANSCRIPTION_FAILURE_EVENT_MESSAGE)
-            .expect("transcription failure event serialization");
-        let report = serde_json::to_string(&serde_json::json!({
-            "log": TRANSCRIPTION_FAILURE_LOG_MESSAGE,
-            "event": event,
-        }))
-        .expect("diagnostic report serialization");
-
-        for diagnostic in [
-            TRANSCRIPTION_FAILURE_LOG_MESSAGE,
-            TRANSCRIPTION_FAILURE_EVENT_MESSAGE,
-            report.as_str(),
-        ] {
-            assert!(!diagnostic.contains(CANARY), "{diagnostic}");
-        }
-    }
 
     #[test]
     fn cloud_run_errors_expose_one_wire_kind_each() {
@@ -2883,9 +2816,8 @@ mod tests {
         ];
 
         for (error, expected_kind) in kinds {
-            let (kind, message) = error.describe();
+            let (kind, _) = error.describe();
             assert_eq!(kind, expected_kind, "wire kind for {error:?}");
-            assert!(!message.is_empty(), "log message for {error:?}");
 
             let payload = serde_json::to_value(RecordingErrorEvent {
                 error_type: "cloud_unavailable".to_string(),

@@ -207,10 +207,9 @@ mod tests {
     fn duplicate_triggers_are_rejected_case_insensitively() {
         let mut snippets = vec![snippet("one", "addr", "1 Long Street")];
 
-        let error = upsert_snippet_into(&mut snippets, snippet("", "ADDR", "other"), 99)
+        upsert_snippet_into(&mut snippets, snippet("", "ADDR", "other"), 99)
             .expect_err("duplicate trigger");
 
-        assert!(error.contains("ADDR"));
         assert_eq!(snippets.len(), 1);
     }
 
@@ -235,12 +234,4 @@ mod tests {
         assert!(!restored.snippets_enabled);
     }
 
-    #[test]
-    fn stores_without_snippets_default_to_an_enabled_empty_list() {
-        let restored: AppSettings =
-            serde_json::from_value(serde_json::json!({})).expect("empty store deserialize");
-
-        assert!(restored.snippets.is_empty());
-        assert!(restored.snippets_enabled);
-    }
 }

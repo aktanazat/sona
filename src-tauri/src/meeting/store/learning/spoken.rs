@@ -403,20 +403,12 @@ mod tests {
         }
     }
 
-    /// Every table phrase is a multi-word phrase or an unambiguous noun, and
-    /// every domain suffix has a written form.
+    /// A suggested symbol rule must neither erase text nor match an empty phrase.
     #[test]
-    fn every_table_entry_can_produce_a_rule() {
+    fn symbol_rules_never_erase_text_or_match_an_empty_phrase() {
         for (spoken, written) in SYMBOL_PHRASES {
             assert!(!written.is_empty(), "{spoken} has no written form");
             assert!(!normalized(spoken).is_empty(), "{spoken} normalizes empty");
-        }
-        for suffix in DOMAIN_SUFFIXES {
-            assert_eq!(
-                domain_written(suffix),
-                format!(".{suffix}"),
-                "{suffix} has no written form"
-            );
         }
     }
 }

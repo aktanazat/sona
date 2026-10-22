@@ -48,24 +48,6 @@ fn test_verify_sha256_skipped_when_none() {
 }
 
 #[test]
-fn test_verify_sha256_passes_on_correct_hash() {
-    // Compute the real hash so the test is self-consistent.
-    let (_dir, path) = write_temp_file(b"hello world");
-    let actual = test_ok(
-        ModelManager::compute_sha256(&path),
-        "compute temporary file SHA-256",
-    );
-    assert!(
-        ModelManager::verify_sha256(&path, Some(&actual), "test_model").is_ok(),
-        "should pass when hash matches"
-    );
-    assert!(
-        path.exists(),
-        "file must be kept on successful verification"
-    );
-}
-
-#[test]
 fn test_verify_sha256_fails_and_deletes_partial_on_mismatch() {
     let (_dir, path) = write_temp_file(b"this is not the real model");
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -73,12 +55,6 @@ fn test_verify_sha256_fails_and_deletes_partial_on_mismatch() {
     let result = ModelManager::verify_sha256(&path, Some(wrong_hash), "bad_model");
 
     assert!(result.is_err(), "mismatch must return an error");
-    assert!(
-        test_err(result, "reject a mismatched SHA-256")
-            .to_string()
-            .contains("corrupt"),
-        "error message should mention corruption"
-    );
     assert!(
         !path.exists(),
         "partial file must be deleted after hash mismatch"

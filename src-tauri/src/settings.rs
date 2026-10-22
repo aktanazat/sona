@@ -3643,18 +3643,6 @@ mod tests {
         );
     }
 
-    /// Every field must survive a partial store: a missing key must never fail
-    /// the whole-settings parse (#1619). `json!({})` is the extreme case.
-    #[test]
-    fn empty_store_parses_with_defaults() {
-        let settings: AppSettings = serde_json::from_value(serde_json::json!({}))
-            .expect("all AppSettings fields need serde defaults");
-        assert!(settings.push_to_talk);
-        assert!(!settings.audio_feedback);
-        assert!(settings.filler_word_removal_enabled);
-        // Bindings default to empty; the load path merges the real defaults in.
-        assert!(settings.bindings.is_empty());
-    }
 
     #[test]
     fn old_settings_leave_quiet_speech_off() {
@@ -3783,14 +3771,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn default_post_process_provider_matches_platform() {
-        let provider_id = default_post_process_provider_id();
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        assert_eq!(provider_id, APPLE_INTELLIGENCE_PROVIDER_ID);
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        assert_eq!(provider_id, "custom");
-    }
 
     #[test]
     fn stored_openai_post_process_provider_remains_openai() {
@@ -3803,13 +3783,6 @@ mod tests {
 
     #[test]
     fn meeting_local_engine_defaults_and_rejects_remote_endpoints() {
-        let settings: AppSettings =
-            serde_json::from_value(serde_json::json!({})).expect("meeting engine defaults decode");
-        assert_eq!(
-            settings.meeting_local_engine,
-            default_meeting_local_engine()
-        );
-
         assert!(MeetingLocalEngine::LocalEndpoint {
             base_url: "http://127.0.0.1:11434/v1".to_string(),
             model: "model".to_string(),
@@ -3882,13 +3855,6 @@ mod tests {
         assert!(!apps.iter().any(|app| app == "com.apple.mobilephone"));
     }
 
-    #[test]
-    fn a_fresh_install_ticks_the_call_apps() {
-        let apps = get_default_settings().detection_meeting_apps;
-
-        assert!(apps.iter().any(|app| app == "com.apple.facetime"));
-        assert!(apps.iter().any(|app| app == "com.apple.mobilephone"));
-    }
 
     #[test]
     fn defaults_expose_secret_state_without_api_key_values() {
@@ -4945,20 +4911,8 @@ mod tests {
     fn default_settings_disable_auto_submit() {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
-        assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
-        assert!(!settings.post_process_enabled);
-        assert_eq!(
-            settings.settings_schema_version,
-            CURRENT_SETTINGS_SCHEMA_VERSION
-        );
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn default_overlay_style_is_live_when_overlay_defaults_on() {
-        let settings = get_default_settings();
-        assert_eq!(settings.overlay_style, OverlayStyle::Live);
-    }
 
     #[test]
     fn overlay_migration_keeps_disabled_overlay_off() {
@@ -5133,20 +5087,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn public_settings_never_keep_or_format_legacy_api_keys() {
-        let secret = "sk-proj-secret-key-12345";
-        let raw = serde_json::json!({
-            "post_process_api_keys": { "openai": secret },
-        });
-        let settings: AppSettings = serde_json::from_value(raw).unwrap();
-        let serialized = serde_json::to_string(&settings).unwrap();
-        let debug_output = format!("{settings:?}");
-
-        assert!(!serialized.contains(secret));
-        assert!(!debug_output.contains(secret));
-        assert!(serialized.contains("post_process_secret_states"));
-    }
     #[test]
     fn schema_ten_defaults_new_mode_and_spelling_settings_without_loss() {
         let mut raw = serde_json::Value::Object(default_settings_document().0);

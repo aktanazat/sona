@@ -11,7 +11,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::io::{Read, Write};
 #[cfg(test)]
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

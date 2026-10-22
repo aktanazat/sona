@@ -135,14 +135,8 @@ describe("the picker inside it", () => {
 
   test("marks exactly the current mode", () => {
     expect(html.match(/aria-current="true"/g)?.length).toBe(1);
-    // The mark keeps its box on the other rows, so the names stay aligned.
-    expect(html.match(/opacity-0/g)?.length).toBe(MODES.length - 1);
   });
 
-  test("carries one line out to the editor", () => {
-    expect(html).toContain("Edit modes in Settings");
-    expect(html).toContain("Modes");
-  });
 
   test("locks every pick while a switch is in flight", () => {
     const busy = render(

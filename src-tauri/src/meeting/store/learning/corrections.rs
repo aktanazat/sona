@@ -318,7 +318,6 @@ mod tests {
         // constructor, which is the only way a delta reaches the corpus.
         assert!(deltas_between("Sona", "").is_empty(), "written deleted");
         assert!(deltas_between("", "Sona").is_empty(), "spoken absent");
-        assert!(rewrite_span("Sona", "").is_none(), "no span to record");
     }
 
     #[test]

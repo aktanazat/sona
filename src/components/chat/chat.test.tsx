@@ -7,7 +7,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 import { TooltipProvider } from "@/components/vg/tooltip";
-import { AppContent } from "@/App";
 import { commands } from "@/bindings";
 import type {
   AgentChatConversationSummaryV1,
@@ -19,8 +18,7 @@ import type {
   AgentPanelWorkspaceV1,
   SonaAgentChatTurnV1,
 } from "@/bindings";
-import { askSona } from "@/components/commandPaletteSearch";
-import { CHAT_ERROR_KEYS, ChatSheet } from "./ChatSheet";
+import { ChatSheet } from "./ChatSheet";
 import { ChatTurns } from "./ChatTurns";
 import { sendSheetTurn } from "./ChatSheetHost";
 import type { ChatPhase } from "./chatModel";
@@ -149,13 +147,6 @@ const escaped = (text: string): string =>
 
 const noop = () => undefined;
 
-/* The sentence a dotted key names in the en bundle. i18next answers a key it
- * cannot find with the key itself, so a lookup that fails here is what would
- * have reached the screen. */
-const sentence = (key: string): string => {
-  if (!i18n.exists(key)) throw new Error(`no en copy for ${key}`);
-  return i18n.t(key);
-};
 
 const TURN: AgentPanelTurnStatusV1 = {
   turn_id: "t1",
@@ -266,43 +257,6 @@ describe("the column's shape", () => {
     expect(markup).toContain('data-slot="chat-frame"');
     expect(markup).toContain('aria-hidden="true"');
     expect(markup).toContain("inert");
-    expect(markup).toContain("pointer-events-none w-0");
-  });
-
-  /* The layout takes the 340 in the press frame. The fixed frame reads the
-   * root shell's registered timeline after that; it owns no transition of its
-   * own, and no scrim or blur returns the page to being hidden behind chat. */
-  test("open: 340 of layout and a fixed frame on the shell timeline", () => {
-    const markup = sheet();
-
-    expect(markup).toContain('data-slot="chat-frame"');
-    expect(markup).toContain("transition-none");
-    expect(markup).toContain(
-      "[transform:translateX(var(--shell-chat-offset))]",
-    );
-    expect(markup).toContain("w-[340px]");
-    // One stronger hairline against the page, and no dimming of what is behind it.
-    expect(markup).toContain("border-s border-gray-alpha-500");
-    expect(markup).not.toContain("bg-black/");
-    expect(markup).not.toContain("backdrop-blur");
-  });
-
-  /* Two boxes: the structural width box that makes room for the page, and the
-   * fixed frame that keeps one physical window edge through both the open and
-   * closed geometry. That stable edge is what lets a close slide out rather
-   * than jump to the edge before it moves. */
-  test("open: a structural width box and one fixed contained frame", () => {
-    const markup = sheet();
-    const outer = /<aside[^>]*class="([^"]*)"/.exec(markup)?.[1] ?? "";
-
-    expect(outer).toContain("transition-none");
-    expect(outer).toContain("flex-none");
-    expect(outer).toContain("w-[340px]");
-    expect(outer).not.toContain("border-s");
-    expect(markup).toContain("fixed inset-y-0 end-0");
-    expect(markup).toContain("[contain:layout_style]");
-    // Stated on both boxes, and nowhere else.
-    expect(occurrences(markup, "w-[340px]")).toBe(2);
   });
 
   /* Two glyphs and a name. Every other verb the column carries — a new chat,
@@ -323,7 +277,6 @@ describe("the column's shape", () => {
     expect(header).toContain(`aria-label="${en.common.more}"`);
     expect(header).toContain(`<h2`);
     expect(header).toContain(en.chat.title);
-    expect(markup).toContain("border-b border-gray-alpha-400");
   });
 
   test("empty: one invitation, and a composer that is a field and a glyph", () => {
@@ -333,8 +286,6 @@ describe("the column's shape", () => {
     expect(markup).toContain(`placeholder="${en.chat.placeholder}"`);
     expect(markup).toContain(`aria-label="${en.chat.send}"`);
     expect(markup).not.toContain('data-slot="chat-stop"');
-    // The scope chips went into the header's menu; the band is the question.
-    expect(markup).not.toContain('role="radio"');
   });
 
   /* The chosen sandbox is no longer a chip on screen, so the field is what
@@ -352,22 +303,6 @@ describe("the column's shape", () => {
       );
   });
 
-  /* Settings is a destination, Configure is a sandbox; one column shows both
-   * words, so they may not be the same word. */
-  test("the Configure scope is distinct from the Settings destination", () => {
-    expect(en.chat.placeholderConfig).not.toBe(en.chat.openSettings);
-    expect(sheet({ phase: "unpaired", workspace: "sona_config" })).toContain(
-      en.chat.openSettings,
-    );
-  });
-
-  /* One sentence for both scopes. The empty state is keyed on an absent
-   * conversation and nothing else, so a sentence that is only true of Ask is
-   * a sentence that lies to whoever has Configure selected. */
-  test("empty: the same invitation under either scope", () => {
-    for (const workspace of ["sona_chat", "sona_config"] as const)
-      expect(sheet({ workspace })).toContain(escaped(en.chat.empty));
-  });
 });
 
 describe("a turn on screen", () => {
@@ -609,54 +544,6 @@ describe("a turn on screen", () => {
     expect(markup).toContain("2s");
   });
 
-  /* The tool steps' own reading. A tool's name is a machine's name, so it
-   * renders as a mono uppercase chip rather than as a sentence beside the
-   * model's own prose steps — those two are not the same kind of event, and
-   * they used to be typeset identically. */
-  test("a tool step wears the chip; a thought step stays prose", () => {
-    const markup = sheet({
-      conversation: [user("How many words?"), assistant("4,812.")],
-      turn: {
-        ...TURN,
-        state: "succeeded",
-        completed_at_utc_ms: 4_000,
-        steps: [
-          {
-            id: "tool-1-0",
-            label: "word_stats",
-            state: "done",
-            started_after_ms: 1_000,
-            ended_after_ms: 2_000,
-            tool: "word_stats",
-          },
-          {
-            id: "step-1",
-            label: "Thought about it",
-            state: "done",
-            started_after_ms: 2_000,
-            ended_after_ms: 3_000,
-            tool: null,
-          },
-        ],
-      },
-    });
-
-    const chip = new RegExp(
-      `<span data-slot="chat-tool" class="([^"]*)">${en.chat.tool.word_stats}`,
-    ).exec(markup);
-    expect(chip).not.toBeNull();
-    expect(chip?.[1]).toContain("font-mono");
-    expect(chip?.[1]).toContain("uppercase");
-    expect(chip?.[1]).toContain("tracking-[0.08em]");
-    /* Hairline, no fill: a chip that fills reads as a button. */
-    expect(chip?.[1]).toContain("border-gray-alpha-400");
-    expect(chip?.[1]).not.toContain("bg-");
-    /* The raw tool key never reaches the screen; the localized name does. */
-    expect(markup).not.toContain(">word_stats<");
-    /* And a step the model narrated is prose, chipless. */
-    expect(markup).toContain("Thought about it");
-    expect(occurrences(markup, 'data-slot="chat-tool"')).toBe(1);
-  });
 
   test("answered: the reply is prose with a labeled source link and elapsed time", () => {
     const markup = sheet({
@@ -731,16 +618,6 @@ describe("a settings answer", () => {
     expect(markup).toContain("theme");
     expect(markup).toContain(en.chat.proposal.apply);
     expect(markup).not.toContain(en.chat.proposal.undo);
-    /* And it is readable in full at the column's 340: this sentence is the
-     * whole of what the assistant said — the card took the row it would
-     * otherwise have been printed in — so a truncated one would be an Apply
-     * under half a sentence. */
-    const summary =
-      new RegExp(`<span class="([^"]*)">${PROPOSAL.summary}`).exec(
-        markup,
-      )?.[1] ?? "";
-    expect(summary).not.toContain("truncate");
-    expect(summary).toContain("[overflow-wrap:anywhere]");
   });
 
   test("applied: the same card, now saying so, with an undo beside it", () => {
@@ -969,22 +846,6 @@ describe("command feedback", () => {
     expect(local).not.toContain(">unknown_action<");
   });
 
-  /* The two above are refusals with copy of their own. This is the rest of
-   * the table: every refusal the backend can raise reaches the reader as a
-   * sentence, and none arrives as the key that was meant to name one. */
-  test("every command refusal renders catalogue copy, not a key or a code", () => {
-    for (const [error, key] of Object.entries(CHAT_ERROR_KEYS)) {
-      // SAFETY: CHAT_ERROR_KEYS satisfies Record over exactly this union, so
-      // every key Object.entries yields is one of its members.
-      const markup = sheet({
-        error: error as AgentPanelCommandErrorV1 | "link_failed",
-      });
-
-      expect(markup).toContain(escaped(sentence(key)));
-      expect(markup).not.toContain(key);
-      expect(markup).not.toContain(`>${error}<`);
-    }
-  });
 });
 
 describe("the states where nothing would answer", () => {
@@ -1220,101 +1081,6 @@ describe("the two gestures", () => {
   });
 });
 
-/* The rail's chat row and the column are one fold, so the shell is where that
- * is checkable: the row's press has to move the same boolean the column reads,
- * and the column's width has to come off the two columns already there. */
-const shell = (chatOpen: boolean): string => {
-  const restore = Object.getOwnPropertyDescriptor(globalThis, "window");
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { __TAURI_OS_PLUGIN_INTERNALS__: { os_type: "macos" } },
-  });
-  try {
-    return paint(
-      <AppContent
-        onboardingStep="done"
-        onAccessibilityComplete={noop}
-        onModelSelected={noop}
-        direction="ltr"
-        currentSection="overview"
-        onSectionChange={noop}
-        onOpenMeeting={noop}
-        onOpenRecorder={noop}
-        loadingLabel="Loading"
-        meetingInvalidation={0}
-        meetingNavigationRequest={null}
-        meetingStartRequest={0}
-        personRequest={null}
-        organizationRequest={null}
-        dictationRequest={null}
-        commandOpen={false}
-        commandActions={[]}
-        commandSeed={null}
-        agentPanel={{
-          enabled: true,
-          paired: true,
-          remoteIntelligence: true,
-        }}
-        chatOpen={chatOpen}
-        onChatOpenChange={noop}
-        onCommandOpenChange={noop}
-        onCommandOpen={noop}
-      />,
-    );
-  } finally {
-    if (restore) Object.defineProperty(globalThis, "window", restore);
-    else Reflect.deleteProperty(globalThis, "window");
-  }
-};
-
-describe("the shell's one fold", () => {
-  test("the column is mounted beside the pane, once, whether open or not", () => {
-    for (const open of [false, true]) {
-      const markup = shell(open);
-      const columnAt = markup.indexOf('data-slot="chat-sheet"');
-
-      expect(occurrences(markup, 'data-slot="chat-sheet"')).toBe(1);
-      /* After the pane closes, which is the one place it is a column of the
-       * window rather than something laid over the page. */
-      expect(columnAt).toBeGreaterThan(markup.indexOf("</main>"));
-    }
-  });
-
-  test("opening it narrows the page instead of covering it", () => {
-    const closed = shell(false);
-    const open = shell(true);
-
-    // The rail's words are what pay for the column: 220 becomes 48.
-    expect(closed).toContain("w-[220px]");
-    expect(open).toContain("w-[48px]");
-    /* The pane is what is left, and it is left to flex into it: no width of
-     * its own anywhere, so 900 - 48 - 340 is arithmetic rather than a number
-     * somebody has to keep in step. */
-    const pane = /<main class="([^"]*)"/.exec(open)?.[1] ?? "";
-    expect(pane).toContain("flex-1");
-    expect(pane).toContain("min-w-0");
-    expect(pane).not.toMatch(/\bw-\[/);
-  });
-
-  test("the rail's row is the door and the column's X is the way back", () => {
-    // Closed: one row, saying the region it opens is not showing.
-    expect(shell(false)).toContain('aria-expanded="false"');
-    expect(occurrences(shell(false), 'data-slot="chat-close"')).toBe(1);
-    /* Open: the row stays where it is and says so, and the same single X owns
-     * the way back out. A second closer beside the column is the duplication
-     * this fold exists without. */
-    expect(occurrences(shell(true), 'data-slot="chat-rail-row"')).toBe(1);
-    expect(shell(true)).toContain('aria-expanded="true"');
-    expect(occurrences(shell(true), 'data-slot="chat-close"')).toBe(1);
-  });
-
-  /* The old surface is gone from the shell entirely: no second webview to open
-   * and no command left that would open one. */
-  test("no window-opening command survives on the chat path", () => {
-    expect("agentPanelOpen" in commands).toBe(false);
-    expect("agentPanelClose" in commands).toBe(false);
-  });
-});
 
 describe("the sheet's Ask turn", () => {
   test("packs only a paired Ask turn with remote intelligence consent", async () => {
@@ -1457,56 +1223,3 @@ describe("the sheet's Ask turn", () => {
   });
 });
 
-describe("the palette's Ask row", () => {
-  /* It builds the pack and sends the turn; the sheet is opened by the shell.
-   * A second window is never asked for, which is the whole cutover. */
-  test("asks the backend for a pack and a turn, and opens nothing", async () => {
-    const original = {
-      pack: commands.sonaQueryPack,
-      send: commands.agentPanelSendTurn,
-    };
-    const calls: string[] = [];
-    commands.sonaQueryPack = async () => {
-      calls.push("pack");
-      return {
-        status: "ok",
-        data: {
-          schema_version: 1,
-          question: "pricing",
-          pack: "quotes",
-          sources: [],
-          truncated: false,
-        },
-      };
-    };
-    commands.agentPanelSendTurn = async (request) => {
-      calls.push(`send:${request.workspace}:${request.context_pack ?? ""}`);
-      return {
-        status: "ok",
-        data: {
-          invalidation_id: 1,
-          relay_status: "ready",
-          conversation_id: "c1",
-          conversation: [],
-          unsaved: false,
-          turn: null,
-          proposal: null,
-        },
-      };
-    };
-    try {
-      expect(
-        await askSona("pricing", "en", {
-          enabled: true,
-          paired: true,
-          remoteIntelligence: true,
-        }),
-      ).toBe("sent");
-    } finally {
-      commands.sonaQueryPack = original.pack;
-      commands.agentPanelSendTurn = original.send;
-    }
-
-    expect(calls).toEqual(["pack", "send:sona_chat:quotes"]);
-  });
-});

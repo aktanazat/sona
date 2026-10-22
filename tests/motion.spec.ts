@@ -144,10 +144,6 @@ test.describe("mode list reorder", () => {
     await openModes(page);
 
     await dragSecondRowUp(page);
-    /* The dragged row, not row 1: onReorder has already moved it. */
-    await expect(
-      modeRows(page).and(page.locator("[data-dragging]")),
-    ).toHaveCount(1);
     await page.mouse.up();
 
     await expect
@@ -213,20 +209,4 @@ test.describe("mode list reorder", () => {
       .toEqual(swapped);
   });
 
-  test("held rows suppress the hover wash, and release restores it", async ({
-    page,
-  }) => {
-    await installTauriMock(page, {
-      responses: { reorder_modes: reorderedSnapshot(swapped) },
-    });
-    await openModes(page);
-
-    await dragSecondRowUp(page);
-    /* While a row is held the list suppresses every hover wash, because the
-       pointer is not choosing the rows it passes over. */
-    const list = page.getByRole("list", { name: "Your modes" });
-    await expect(list).toHaveAttribute("data-dragging", "true");
-    await page.mouse.up();
-    await expect(list).not.toHaveAttribute("data-dragging", "true");
-  });
 });

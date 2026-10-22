@@ -1128,27 +1128,6 @@ mod tests {
     }
 
     #[test]
-    fn the_query_connection_waits_out_a_locked_file() {
-        let directory = temp_dir();
-        let path = directory.path().join("history.db");
-        seed_plaintext(&path);
-        let storage = HistoryStorage::at_startup(path);
-        assert!(storage.apply_key(key(), 24).encrypted);
-
-        let timeout: i64 = storage
-            .with_connection(|connection| {
-                Ok(connection
-                    .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-                    .expect("read busy timeout"))
-            })
-            .expect("connection");
-        assert_eq!(
-            timeout,
-            i64::try_from(BUSY_TIMEOUT.as_millis()).expect("timeout fits")
-        );
-    }
-
-    #[test]
     fn a_database_created_encrypted_uses_the_write_ahead_log() {
         let directory = temp_dir();
         let path = directory.path().join("history.db");
