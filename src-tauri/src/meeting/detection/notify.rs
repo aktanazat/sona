@@ -915,18 +915,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_action_titles_match_the_prompt_spec() {
-        assert_eq!(START_TITLE, "Start Transcribing");
-        assert_eq!(DISMISS_TITLE, "Dismiss");
-    }
-
-    #[test]
-    fn an_absent_presenter_reports_unavailable_and_posts_nothing() {
-        assert_eq!(NoPrompts.access(), NotificationAccess::Unavailable);
-        assert!(!NoPrompts.present("prompt-1", &PromptKind::UnknownMicSource));
-    }
-
-    #[test]
     fn lower_priority_prompt_waits_without_displacing_panel_owner() {
         let mut slot = PanelSlot::default();
         slot.raise("calendar".to_string(), "calendar", 3, true);

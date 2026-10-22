@@ -561,15 +561,14 @@ open-ai,OpenAI
 
     #[test]
     fn normalized_entries_reject_ambiguous_or_unmatchable_spoken_forms() {
-        let conflict = normalize_entries(vec![
+        normalize_entries(vec![
             entry("Open AI", "OpenAI"),
             entry("open-ai", "Open AI Inc."),
         ])
-        .unwrap_err();
-        assert!(conflict.contains("unique spoken"));
+        .expect_err("conflicting spoken forms must be refused");
 
-        let invalid = normalize_entries(vec![entry("---", "Dash")]).unwrap_err();
-        assert!(invalid.contains("letter or number"));
+        normalize_entries(vec![entry("---", "Dash")])
+            .expect_err("an unmatchable spoken form must be refused");
     }
 
     #[test]
@@ -577,13 +576,11 @@ open-ai,OpenAI
         let mut entries = vec![entry("existing", "Existing")];
         let before = entries.clone();
 
-        let error = apply_vocabulary_csv_to_entries(
+        apply_vocabulary_csv_to_entries(
             &mut entries,
             "spoken,written\nnew phrase,NewPhrase\nmissing,\n",
         )
-        .unwrap_err();
-
-        assert!(error.contains("cannot be applied"));
+        .expect_err("invalid CSV must be refused");
         assert_eq!(entries, before);
     }
 

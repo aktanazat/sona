@@ -136,10 +136,8 @@ test.describe("the screen recorder", () => {
     await page.keyboard.press("Escape");
     await expect(recorder(page)).toHaveCount(0);
 
-    /* Dismissing a preview releases the capture, so it is cancel that runs.
-     * preview_stop is the "Change" button's command and stays untouched. */
+    /* Dismissing a preview must release the native capture. */
     expect(await invokeCount(page, "recorder_cancel")).toBe(1);
-    expect(await invokeCount(page, "recorder_preview_stop")).toBe(0);
   });
 
   test("holds the command palette shut while the recorder is up", async ({

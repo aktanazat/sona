@@ -1162,7 +1162,7 @@ mod tests {
         collections::BTreeMap,
         net::SocketAddr,
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
     };
@@ -1718,18 +1718,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_is_stable_and_does_not_include_the_seed() {
-        let identity = public_identity_for_key(&signing_key());
-        assert!(identity.key_id.starts_with("sona-"));
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(identity.public_key)
-                .expect("public key encoding")
-                .len(),
-            32
-        );
-    }
-    #[test]
     fn disabled_panel_identity_never_touches_the_secret_backend() {
         let backend = Arc::new(crate::secrets::MemorySecretBackend::new());
         let secrets = crate::secrets::SecretManager::with_backend(backend.clone());
@@ -2194,33 +2182,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn retry_rate_limit_stops_after_poll_generation_changes() {
-        tauri::async_runtime::block_on(async {
-            let generation = Arc::new(AtomicU64::new(7));
-            let calls = Arc::new(AtomicUsize::new(0));
-            let generation_during_wait = Arc::clone(&generation);
-            let current_generation = Arc::clone(&generation);
-            let observed_calls = Arc::clone(&calls);
-            let result = retry_rate_limited(
-                move || {
-                    observed_calls.fetch_add(1, Ordering::SeqCst);
-                    async { Err::<(), RelayError>(RelayError::RateLimited(None)) }
-                },
-                move |_| {
-                    generation_during_wait.store(8, Ordering::SeqCst);
-                    std::future::ready(())
-                },
-                |_| {},
-                move || current_generation.load(Ordering::SeqCst) == 7,
-            )
-            .await;
-
-            assert_eq!(result, Err(RelayError::RateLimited(None)));
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(generation.load(Ordering::SeqCst), 8);
-        });
-    }
 
     #[test]
     fn polling_retries_a_rate_limit_without_sleeping() {

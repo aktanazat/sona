@@ -90,10 +90,6 @@ fn a_failed_delivery_has_a_durable_readable_receipt_and_never_replays_silently()
 fn automatic_sends_are_opt_in_future_only_and_disconnect_removes_the_grant() {
     let (_directory, store) = store();
     let connection = connection();
-    assert_eq!(
-        store.connection_preferences().unwrap(),
-        ConnectionPreferences::default()
-    );
     store.save_connection(&connection).unwrap();
     let session = reviewable_meeting(&store, "Planning", 100);
     let mut rule = AutoSendRule {

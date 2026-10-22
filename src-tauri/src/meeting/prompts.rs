@@ -333,21 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn the_seeded_prompts_are_ordinary_editable_rows() {
-        let (_directory, store) = store();
-
-        let list = store.saved_prompts().unwrap();
-
-        assert_eq!(list.prompts.len(), 3);
-        assert_eq!(list.prompts[0].name, "Decisions with owners");
-        assert!(list
-            .prompts
-            .iter()
-            .all(|prompt| prompt.output == PromptOutput::Text
-                && prompt.target == PromptTarget::Meeting));
-    }
-
-    #[test]
     fn saving_listing_and_deleting_round_trips() {
         let (_directory, store) = store();
         let seeded = store.saved_prompts().unwrap().prompts.len();

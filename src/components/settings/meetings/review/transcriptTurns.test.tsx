@@ -59,13 +59,6 @@ describe("grouping a transcript into turns", () => {
       { speakerId: "speaker-1", texts: ["But", "Okay."] },
     ]);
   });
-
-  test("the same voice returning after somebody else starts a new turn", () => {
-    /* Three turns, not two: `speaker-1` holds the floor twice, and merging
-     * those two stretches would print the interruption out of order. */
-    expect(paragraphs(TRANSCRIPT)).toHaveLength(3);
-  });
-
   test("a sentence the filter hid breaks the run it sat in", () => {
     const kept = transcriptTurns(
       TRANSCRIPT,

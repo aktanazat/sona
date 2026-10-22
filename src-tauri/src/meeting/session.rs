@@ -7323,36 +7323,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The two stop buttons in the app's own windows are different presses,
-    /// and a stop that loses its phase or revision race renders as done on
-    /// whichever one was pressed. Until the surface rode on the request, the
-    /// log said `Operator` for both and said nothing at all for the press
-    /// that changed nothing, so the one question a reader has afterwards -
-    /// which button did nothing - had no answer anywhere.
-    #[test]
-    fn a_stop_names_the_surface_that_pressed_it() {
-        assert_eq!(
-            MeetingStopCause::Operator(MeetingStopSurface::MeetingLive).describe(),
-            "the live meeting screen"
-        );
-        assert_eq!(
-            MeetingStopCause::Operator(MeetingStopSurface::ConsentPanel).describe(),
-            "the consent panel"
-        );
-        assert_eq!(MeetingStopCause::Tray.describe(), "the tray");
-        assert_eq!(
-            MeetingStopCause::RecordingCard.describe(),
-            "the recording card"
-        );
-        assert_eq!(
-            MeetingStopCause::Detection(
-                crate::meeting::detection::machine::StopTrigger::SleepBoundary
-            )
-            .describe(),
-            "detection on sleep_boundary"
-        );
-    }
-
     /// A press that arrives against a revision the meeting has already moved
     /// past stops nothing, and the pressing surface still renders done. The
     /// receipt is the only place that disagreement is visible, so it has to

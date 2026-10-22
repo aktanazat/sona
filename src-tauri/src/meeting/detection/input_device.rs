@@ -479,13 +479,6 @@ impl SelfInputDeviceLease {
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_idle_lease_is_not_held() {
-        let lease = SelfInputDeviceLease::default();
-
-        assert!(!lease.is_held());
-    }
-
     /// The cooldown is measured from the close, and a process that has never
     /// opened the microphone has nothing to cool down from. Detection would
     /// otherwise suppress its own ad-hoc path from launch.
@@ -545,9 +538,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_unavailable_device_reports_idle() {
-        assert_eq!(UnavailableInputDevice.mic_signal(), MicSignal::Idle);
-        assert_eq!(UnavailableInputDevice.output_signal(), OutputSignal::Idle);
-    }
 }

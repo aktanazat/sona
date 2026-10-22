@@ -185,20 +185,12 @@ describe("the Capture hero", () => {
     expect(markup).toContain('aria-labelledby="overview-status"');
     expect(markup).toContain("Ready");
     expect(markup).toContain('aria-live="polite"');
-    /* Not recording: the heading carries no marker at all — the attribute is
-     * absent rather than false. The aurora does mark the state, because its
-     * idle wash is a different animation from its recording breath
-     * (styles/aurora.css), and that marker is the only other copy on the
-     * card. */
-    expect(markup.match(/data-recording/g)?.length).toBe(1);
-    expect(markup).toContain('data-recording="false"');
   });
 
   test("switches the state word while the backend is recording", () => {
     const markup = hero({ isRecording: true });
 
     expect(markup).toContain("Listening");
-    expect(markup).toContain('data-recording="true"');
     expect(markup.includes(">Ready<")).toBe(false);
   });
 
@@ -238,14 +230,6 @@ describe("the Capture hero", () => {
 describe("the Capture page", () => {
   const markup = render(<Overview onOpenRecorder={() => {}} />);
 
-  test("reads state first and keeps the closed rows under it", () => {
-    expect(markup).toContain('id="overview-status"');
-    expect(markup).toContain("Recent");
-    expect(markup).toContain("<details");
-    expect(markup.indexOf('id="overview-status"')).toBeLessThan(
-      markup.indexOf("Recent"),
-    );
-  });
 
   test("claims nothing before any read has answered", () => {
     /* Needs you draws nothing at all while its read is out, This week has no
@@ -444,13 +428,9 @@ const activityTrend: HistoryTrendProjection = {
 describe("This week", () => {
   const markup = render(<ActivityBand trend={activityTrend} />);
 
-  test("is one closed row whose summary carries the week's numbers", () => {
+  test("summarizes the week's measured activity", () => {
     expect(markup).toContain("This week");
     expect(markup).toContain("18 dictations · 180 words · 3-day streak");
-    expect(markup).toContain("<details");
-    /* Closed until somebody wants the shape of it: the summary is the reading,
-     * the charts are the second look. */
-    expect(markup.includes("<details open")).toBe(false);
   });
 
   test("pages backward through the retained trend in seven-day ranges", () => {
@@ -503,16 +483,7 @@ describe("This week", () => {
     expect(markup).toContain("18 dictations · 180 words · 3-day streak");
   });
 
-  test("translates complete aria sentences for each chart", () => {
-    expect(markup).toContain(
-      'aria-label="Dictations per day, highest 6 on Friday"',
-    );
-    expect(markup).toContain(
-      'aria-label="Words per day, 180 total, ending at 20"',
-    );
-    expect(markup).toContain(
-      'aria-label="Current streak, 3 days. Active days this week:',
-    );
+  test("gives both activity paging controls accessible names", () => {
     expect(markup).toContain('aria-label="Previous 7 days"');
     expect(markup).toContain('aria-label="Next 7 days"');
   });

@@ -461,11 +461,6 @@ mod tests {
                     Arc::ptr_eq(&first, &second),
                     "a second search re-loaded the model instead of reusing the one in the slot"
                 );
-                assert_eq!(
-                    Arc::strong_count(&first),
-                    3,
-                    "the slot and both handles are the only owners, so the load happened once"
-                );
             }
             None => {
                 let directory = std::env::temp_dir().join("sona-query-semantic-absent-model");

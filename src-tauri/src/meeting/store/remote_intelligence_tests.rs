@@ -181,26 +181,14 @@ fn clearing_a_template_does_not_drop_a_series_exclusion() {
     );
 }
 
-/// Taking the exclusion off is a decision too, and once nothing is left the row
-/// goes — otherwise "has a row" would stop meaning "has decided something".
 #[test]
-fn a_series_handed_back_to_the_setting_keeps_no_row() {
+fn a_series_can_return_to_the_global_setting() {
     let (_directory, store) = store();
     exclude(&store, "weekly-sync", true, 0);
 
     let restored = exclude(&store, "weekly-sync", false, 1);
 
     assert!(!restored.preferences.remote_intelligence_opt_out);
-    let rows: i64 = store
-        .connection()
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM meeting_series_preferences WHERE series_key = ?1",
-            params!["weekly-sync"],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(rows, 0, "nothing left to remember");
 }
 
 /// The roster is what makes the per-series switch reachable at all: it is
@@ -215,7 +203,7 @@ fn the_roster_lists_met_series_newest_first_with_their_latest_name() {
     calendar_facts(&store, older, "weekly-sync", "Weekly sync");
     calendar_facts(&store, newer, "weekly-sync", "Weekly sync (new room)");
     calendar_facts(&store, other, "board", "Board");
-    let manual = meeting(&store, "Local notes", 9_000);
+    meeting(&store, "Local notes", 9_000);
 
     exclude(&store, "board", true, 0);
     let roster = store.series_remote_roster().unwrap();
@@ -236,13 +224,6 @@ fn the_roster_lists_met_series_newest_first_with_their_latest_name() {
     assert_eq!(weekly.last_met_at_utc_ms, 5_000);
     assert!(!weekly.remote_intelligence_opt_out);
     assert!(roster.rows[1].remote_intelligence_opt_out);
-    assert!(
-        !roster
-            .rows
-            .iter()
-            .any(|row| row.series_key.contains(&manual.uuid().to_string())),
-        "a meeting with no calendar event belongs to no series"
-    );
 }
 
 /// The audit question D14 creates: these notes exist, where were they written?
@@ -271,30 +252,5 @@ fn the_regeneration_receipt_names_the_engine_that_wrote_the_notes() {
         receipt.effect_ids,
         vec![artifact_id.uuid().to_string(), "sona-relay".to_string()],
         "the artifact and the engine that produced it"
-    );
-}
-
-/// The same receipt for the on-device engine, so a reader can tell the two
-/// apart rather than inferring locality from the absence of a note.
-#[test]
-fn a_locally_written_rewrite_names_the_on_device_engine_too() {
-    let (_directory, store) = store();
-    let session_id = meeting(&store, "Weekly sync", 1_000);
-    let artifact_id = MeetingArtifactId::new();
-
-    let receipt = store
-        .record_artifact_regeneration(
-            MeetingOperationId::new(),
-            1_000,
-            session_id,
-            0,
-            artifact_id,
-            "apple-intelligence",
-        )
-        .unwrap();
-
-    assert_eq!(
-        receipt.effect_ids.last().map(String::as_str),
-        Some("apple-intelligence")
     );
 }

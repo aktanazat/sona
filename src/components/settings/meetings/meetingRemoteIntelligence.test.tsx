@@ -101,29 +101,14 @@ describe("meeting intelligence", () => {
     );
   });
 
-  test("shows the local engine choice and its availability line", () => {
-    const markup = paint();
-
-    expect(markup).toContain(i18n.t("settings.meetings.localEngine.label"));
-    expect(markup).toContain(
-      i18n.t("settings.meetings.localEngine.status.checking"),
-    );
-  });
-
   test("cannot be turned on before a server is paired", () => {
     const markup = paint();
 
     expect(markup).toContain(
       i18n.t("settings.meetings.remoteIntelligence.unpaired"),
     );
-    expect(markup).toMatch(/disabled/);
-  });
-
-  test("offers no per-series list while it is off", () => {
-    const markup = paint();
-
-    expect(markup).not.toContain(
-      i18n.t("settings.meetings.remoteIntelligence.seriesTitle"),
+    expect(markup).toMatch(
+      /<button(?=[^>]*role="switch")(?=[^>]*disabled="")[^>]*>/,
     );
   });
 });

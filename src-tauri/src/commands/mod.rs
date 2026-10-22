@@ -176,33 +176,6 @@ pub fn open_license_notices(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parent_notices_resolve_where_the_bundle_places_them() {
-        let resource_dir = Path::new("/Applications/Sona.app/Contents/Resources");
-        for name in ["LICENSE", "NOTICE"] {
-            assert_eq!(
-                bundled_notice_path(resource_dir, name),
-                resource_dir.join("_up_").join(name)
-            );
-        }
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../../tauri.conf.json"))
-                .expect("tauri.conf.json is JSON");
-        let resources = manifest["bundle"]["resources"]
-            .as_array()
-            .expect("bundle resource declarations");
-        for source in ["../LICENSE", "../NOTICE"] {
-            assert!(
-                resources.iter().any(|value| value.as_str() == Some(source)),
-                "{source} is a bundled parent resource"
-            );
-        }
-    }
-}
 
 /// Check if Apple Intelligence is available on this device.
 /// Called by the frontend when the user selects Apple Intelligence provider.

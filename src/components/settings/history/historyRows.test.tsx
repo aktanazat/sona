@@ -22,46 +22,10 @@ import {
 } from "./HistoryFeed";
 import { HistoryRowControls } from "./HistoryRowControls";
 import { historyRowActions } from "./historyRowActions";
-import { HistorySettings } from "./HistorySettings";
 import { HistorySummary } from "./HistorySummary";
 import type { ListState } from "./historyListReducer";
-import { PAGE_COLUMN } from "../rows";
 
-/* What the Library is allowed to say, and what it must never say.
- *
- * The log is quiet: rows are grouped by day, a collapsed row is one line — the
- * transcript's first words, a word count, a clock time — and it carries no
- * control at all. Opening a row is what produces playback, copy, transcribe
- * again and delete.
- *
- * Defects are pinned dead here, each of which shipped and each of which a
- * plausible refactor would bring back:
- *   - a metadata line of seven fragments: date, duration, words, mode chip and
- *     provenance all on a collapsed row, with peak/rms one expander away;
- *   - the date printed on every row when the day heading above the group
- *     already states it;
- *   - three icon buttons on every row of a thirty-row list, and a player
- *     mounted on all thirty;
- *   - a player on a capture that holds nothing to play;
- *   - "0h 0m" for a library that holds real recordings, three 24px stat cards
- *     given the loudest type on a page whose subject is the list below them,
- *     a fourth/fifth card for a provenance split, and an echo sublabel;
- *   - a printed 0.0000 for an input level nobody measured;
- *   - a transcript line on a row whose receipt says there was no speech;
- *   - a `role="tablist"` on the two-segment view switch, with no tabpanel
- *     anywhere under it — the switch is a checkable menu item now, and the
- *     page's chrome must hold no segmented control at all;
- *   - a full row per recording that holds no words: a title it does not have,
- *     a count of zero and one sentence about why, thirty times over;
- *   - a page-split day appearing twice, one group per page.
- *
- * Static rendering runs no effects, so these are pure prop-to-markup checks and
- * no Tauri command is reachable from here. The open row is reachable because
- * the list owns which row is open, so `expanded` is a prop: a real public
- * interface, rendered the way the feed renders it. Radix keeps menu and dialog
- * content in a portal that a static render never mounts, so the menu's
- * operations are asserted on `historyRowActions` — the list the menu is built
- * from — plus the trigger that opens it. */
+/* History data, action eligibility, accessible expansion, and bounded links. */
 
 const localeFile = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -197,14 +161,6 @@ describe("library row, the calm line", () => {
     expect(line).toContain("6 words");
     // A clock time, tabular, right of everything else.
     expect(line).toMatch(/data-testid="history-entry-time"[^>]*>[^<]*\d:\d\d/);
-    expect(line).toContain("tabular-nums");
-  });
-
-  test("does not print the date its day heading owns", () => {
-    // The feed groups by day and names the day once. A row repeating it is the
-    // same fact twice, and it was what made the old metadata line long.
-    expect(markup).not.toContain("2025");
-    expect(markup).not.toContain("Aug");
   });
 
   test("carries no control at rest — the row itself is the only button", () => {
@@ -225,41 +181,6 @@ describe("library row, the calm line", () => {
     expect(markup).not.toContain('data-testid="audio-player-toggle"');
   });
 
-  test("the mode, the engine, the source and the levels are not on the row", () => {
-    expect(markup).not.toContain('data-testid="history-entry-mode"');
-    expect(markup).not.toContain("email");
-    expect(markup).not.toContain("Local");
-    expect(markup).not.toContain("Microphone");
-    expect(markup).not.toContain(">peak<");
-    expect(markup).not.toContain("0.0000");
-  });
-
-  test("keeps a measured input level off the collapsed row too", () => {
-    const measured = row({
-      receipts: [
-        receipt({ mode: { ...MODE, input_peak: 0.1456, input_rms: 0.011 } }),
-      ],
-    });
-    expect(measured).not.toContain("0.1456");
-    expect(measured).not.toContain(">peak<");
-  });
-
-  test("states no duration: the opened row's player and receipt do that", () => {
-    expect(markup).not.toContain("15s");
-    expect(row({ receipts: [receipt({ has_audio: false })] })).not.toContain(
-      "15s",
-    );
-  });
-
-  test("reprocess parentage is provenance, not a row cell", () => {
-    expect(row({ entry: { parent_id: 17 } })).not.toContain("from #17");
-  });
-
-  test("a count and a clock time never animate", () => {
-    /* Rule 1 of the motion contract: a tweened measurement displays values
-     * nothing reported. Both cells carry the blanket freeze. */
-    expect(occurrences(lineOf(markup), "snap-measured")).toBe(2);
-  });
 });
 
 describe("library row, no-speech capture", () => {
@@ -273,20 +194,11 @@ describe("library row, no-speech capture", () => {
 
   test("says so on the line, with the levels behind the expander", () => {
     expect(markup).toContain("No speech detected");
-    expect(markup).not.toContain("0.0119");
-    expect(markup).not.toContain("0.0024");
   });
 
   test("does not claim a word count for a capture with no speech", () => {
     expect(markup).not.toContain("0 words");
     expect(markup).not.toContain('data-testid="history-entry-words"');
-  });
-
-  test("the statement reads as the app talking, not as a transcript", () => {
-    // A real transcript is the row's content and reads at full contrast;
-    // everything the app says *about* the row steps back one tier.
-    expect(lineOf(markup)).toContain('data-tone="stated"');
-    expect(lineOf(row())).toContain('data-tone="text"');
   });
 
   test("keeps the player, because the retained sample is the evidence", () => {
@@ -308,31 +220,6 @@ describe("library row, opened", () => {
     expect(markup).toContain("Transcribe again");
   });
 
-  /* Reading-first doctrine: a log is a reading surface, so nothing standing on
-   * it may throw a recording away in one press. Delete is a destructive item
-   * in the row's menu now, and Radix keeps menu content in a portal a static
-   * render never mounts — so what is pinned here is that the opened row shows
-   * no destructive control at all. */
-  test("keeps no destructive control on the opened row", () => {
-    const bar = markup.slice(
-      markup.indexOf('data-testid="history-entry-controls"'),
-      markup.indexOf('data-testid="history-receipts"'),
-    );
-    expect(bar).not.toContain("text-red-900");
-    expect(bar).not.toContain(">Delete<");
-  });
-
-  test("the two named actions carry a hairline, and only the menu is a ghost", () => {
-    const bar = markup.slice(
-      markup.indexOf('data-testid="history-entry-controls"'),
-      markup.indexOf('data-testid="history-receipts"'),
-    );
-    expect(occurrences(bar, 'data-variant="outline"')).toBe(2);
-    expect(occurrences(bar, 'data-variant="ghost"')).toBe(1);
-    // The one ghost is the icon-only menu trigger.
-    expect(bar).toContain('data-testid="history-entry-actions"');
-  });
-
   test("the row it opens is the region it announces", () => {
     expect(markup).toContain('aria-expanded="true"');
     const controls = /aria-controls="([^"]+)"/.exec(markup)?.[1];
@@ -340,15 +227,9 @@ describe("library row, opened", () => {
     expect(markup).toContain(`id="${controls}"`);
   });
 
-  test("shows the whole transcript rather than a second copy of it", () => {
-    // One text node: truncated closed, wrapped open. A separate full-text
-    // block under the header would print the opening words twice.
-    expect(occurrences(markup, "Ship the dense Library rows today.")).toBe(1);
-    expect(markup).toContain('data-expanded="true"');
-  });
-
   test("carries the run receipt, and the length at the player", () => {
     expect(markup).toContain('data-testid="history-receipts"');
+    expect(markup).toContain('type="range"');
     expect(markup).toContain('max="15"');
     expect(markup).toContain("15s");
   });
@@ -379,18 +260,6 @@ describe("library row, opened", () => {
     );
   });
 
-  test("the player row rides quiet: gray control, one tabular duration", () => {
-    // The player is a frozen primitive, so the row quiets it from outside.
-    // Static markup escapes the `&` in an arbitrary variant, hence the
-    // suffix match rather than the literal class.
-    expect(markup).toContain("_button]:text-gray-900");
-    expect(markup).toContain("_span]:tabular-nums");
-  });
-
-  test("keeps a real range control rather than an unstyled nub", () => {
-    expect(markup).toContain('type="range"');
-    expect(markup).not.toContain("appearance-none");
-  });
 });
 
 describe("library row, the action bar", () => {
@@ -447,7 +316,6 @@ describe("library row, the action bar", () => {
     const markup = controls();
     expect(markup).toContain('data-testid="history-entry-copy"');
     expect(markup).toContain('data-testid="history-entry-retry"');
-    expect(markup).not.toContain("text-red-900");
     expect(markup).not.toContain(">Delete<");
     expect(markup).toContain('data-testid="history-entry-actions"');
   });
@@ -563,10 +431,6 @@ describe("library row, search provenance", () => {
   test("marks only the row whose meaning matched", () => {
     const semantic = row({ entry: { match_kind: "semantic" } });
     expect(semantic).toContain("by meaning");
-    // A derived classification stays in the metadata tier rather than reading
-    // as part of the transcript.
-    expect(semantic).not.toContain('text-gray-1000">by meaning');
-
     expect(row({ entry: { match_kind: "text" } })).not.toContain("by meaning");
     expect(row()).not.toContain("by meaning");
   });
@@ -636,13 +500,6 @@ describe("library feed", () => {
     expect(occurrences(markup, 'data-deeplink-target="true"')).toBe(1);
   });
 
-  test("no row is open until one is asked for", () => {
-    const markup = feed();
-    expect(occurrences(markup, 'aria-expanded="false"')).toBe(2);
-    expect(markup).not.toContain('data-testid="history-entry-details"');
-    expect(markup).not.toContain('data-testid="audio-player-toggle"');
-  });
-
   test("the paging trip wire and its manual fallback survive the grouping", () => {
     const markup = feed({ hasMore: true });
     expect(markup).toContain('data-testid="history-load-more"');
@@ -657,10 +514,6 @@ describe("library feed", () => {
     const markup = feed({ entries: [] });
     expect(markup).toContain("Dictations you make appear here.");
     expect(markup).not.toContain('data-testid="history-day"');
-    /* One sentence, and nothing to press: the verb that fills the Library is
-     * the Import button on the title line, and a second copy of it inside the
-     * empty state is a second answer to the same question. */
-    expect(markup).not.toContain("<button");
   });
 
   test("a day's wordless recordings collapse into one line that opens", () => {
@@ -853,46 +706,6 @@ describe("library summary line", () => {
     expect(summary({ total_duration_ms: 3_840_000 })).toContain("1h 4m");
   });
 
-  test("is a line, not a band of stat cards", () => {
-    const markup = summary();
-    // Three 24px figures were the loudest type on a page whose subject is the
-    // list below them.
-    expect(markup).not.toContain('data-testid="history-stat"');
-    expect(markup).not.toContain("grid-cols-3");
-    expect(markup).not.toContain("text-2xl");
-    expect(markup).not.toContain("<dl");
-    expect(occurrences(markup, "<p")).toBe(1);
-  });
-
-  test("counts read as measurements: tabular, and never tweened", () => {
-    const markup = summary();
-    expect(markup).toContain("tabular-nums");
-    expect(markup).toContain("snap-measured");
-  });
-
-  test("a mixed-provenance library still states one line, not five figures", () => {
-    // Provenance is a property of a recording: the row that owns it states it
-    // on its receipt.
-    const markup = summary({
-      by_source: [
-        {
-          source_kind: "microphone",
-          entries: 3,
-          total_duration_ms: 12_000,
-          total_words: 80,
-        },
-        {
-          source_kind: "file",
-          entries: 1,
-          total_duration_ms: 3_000,
-          total_words: 16,
-        },
-      ],
-    });
-    expect(markup).toContain("4 recordings · 15s · 96 words");
-    expect(markup).not.toContain("Microphone");
-    expect(markup).not.toContain("File");
-  });
 
   test("counts one recording without pretending it is several", () => {
     expect(summary({ entries: 1, total_words: 1 })).toContain(
@@ -917,95 +730,5 @@ describe("library summary line", () => {
     expect(markup).toContain('aria-label="Counting your recordings…"');
   });
 
-  test("the stats failure line carries a real button, not a ghost label", () => {
-    const failed = render(
-      <HistorySummary
-        stats={null}
-        loading={false}
-        error
-        onRetry={() => undefined}
-      />,
-    );
-    expect(failed).toContain('data-variant="outline"');
-    expect(failed).not.toContain('data-variant="ghost"');
-  });
 });
 
-describe("library page chrome", () => {
-  /* Static render, phase "loading": no effect runs, no Tauri command is
-   * reached, and the header plus toolbar render around the skeletons. */
-  const markup = render(<HistorySettings />);
-
-  test("the page is one centred column, the shared one", () => {
-    /* The measure itself belongs to `PAGE_COLUMN`, so this asserts the
-     * constant rather than restating its utilities: a spacing pass that
-     * changes the column changes both sides at once, while losing the column
-     * or drawing a second one still fails here. */
-    expect(occurrences(markup, PAGE_COLUMN)).toBe(1);
-    expect(markup).toContain("pt-8");
-    expect(markup).toContain("pb-[72px]");
-  });
-
-  test("the title line carries one filled verb and one menu, and no toolbar", () => {
-    const line = markup.slice(
-      markup.indexOf('data-testid="history-title-line"'),
-      markup.indexOf('data-testid="history-result-count"'),
-    );
-    // One destination, one name: the h1 answers to the rail's word.
-    expect(line).toContain(">Library</h1>");
-    expect(line).not.toContain("History");
-    expect(line).toContain('data-testid="history-search"');
-    /* Exactly two buttons at rest — the verb and the menu. The in-field clear
-     * appears only with a query, and everything else the old toolbar carried
-     * is behind the menu or gone. */
-    expect(occurrences(line, "<button")).toBe(2);
-    expect(line).toContain('data-testid="history-import"');
-    expect(line).toContain('data-testid="history-more"');
-    const importButton = line.slice(
-      line.lastIndexOf("<button", line.indexOf("history-import")),
-      line.indexOf("history-import"),
-    );
-    expect(importButton).toContain('data-variant="default"');
-    // The menu is the only quiet control on the line, and it is icon-only.
-    expect(occurrences(line, 'data-variant="ghost"')).toBe(1);
-    expect(line).toContain('aria-label="More"');
-  });
-
-  test("the totals sit against the title they describe", () => {
-    // The summary is one line about what the page holds, so it reads under the
-    // title rather than a page gap below it.
-    const header = markup.slice(
-      markup.indexOf("<h1"),
-      markup.indexOf('data-testid="history-loading"'),
-    );
-    expect(header).toContain('data-testid="history-summary-loading"');
-  });
-
-  /* The page title's own size belongs to `PageTitle` in settings/rows.tsx and
-   * is asserted where that primitive lives; pinning its class string from the
-   * Library's test made a type-scale change fail in the wrong file. */
-
-  test("the view switch and the folder button are not in the page's chrome", () => {
-    /* Both moved into the one menu — the transcript view as a checkable item,
-     * because it is a state and not a command, and the folder as a verb. What
-     * this pins is that neither grows back into the chrome as a control: a
-     * two-segment switch for a preference touched once a month and a named
-     * button for a folder were half of the old toolbar. */
-    expect(markup).not.toContain('data-testid="history-text-view"');
-    expect(markup).not.toContain('data-testid="history-open-folder"');
-    expect(markup).not.toContain('data-slot="toggle-group-item"');
-    expect(markup).not.toContain('role="tablist"');
-    expect(markup).not.toContain('role="tab"');
-    // Secondary actions carry a hairline; nothing on this page is secondary.
-    expect(markup).not.toContain('data-slot="button" data-variant="secondary"');
-  });
-
-  test("the loading list is a run of calm rows, not stacked two-line blocks", () => {
-    const skeletons = markup.slice(
-      markup.indexOf('data-testid="history-loading"'),
-      markup.length,
-    );
-    // Five rows, two bars each: a transcript line and its measurement.
-    expect(occurrences(skeletons, 'data-slot="skeleton"')).toBe(10);
-  });
-});

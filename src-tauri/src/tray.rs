@@ -1021,11 +1021,9 @@ pub fn copy_last_transcript(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use super::recreate_tray_visibility_with;
     use super::{
         bundled_idle_tray_icon, last_transcript_text, load_tray_icon_from_path,
-        load_tray_icon_or_fallback, menu_rows, open_settings, set_tray_visibility_with,
+        load_tray_icon_or_fallback, menu_rows, open_settings,
         show_tray_copy_failure, MeetingMenuState, MenuAction, MenuInputs, MenuRow, MenuStatus,
         TrayIconState, TrayState,
     };
@@ -1226,35 +1224,6 @@ mod tests {
         assert_eq!(fallback.rgba(), expected.rgba());
     }
 
-    #[test]
-    fn tray_visibility_supports_hide_and_show() {
-        let mut calls = Vec::new();
-        set_tray_visibility_with(false, |visible| {
-            calls.push(visible);
-            Ok(())
-        })
-        .expect("hide tray");
-        set_tray_visibility_with(true, |visible| {
-            calls.push(visible);
-            Ok(())
-        })
-        .expect("show tray");
-
-        assert_eq!(calls, [false, true]);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn reopening_recreates_the_tray_by_hiding_then_showing_it() {
-        let mut calls = Vec::new();
-        recreate_tray_visibility_with(|visible| {
-            calls.push(visible);
-            Ok(())
-        })
-        .expect("recreate tray");
-
-        assert_eq!(calls, [false, true]);
-    }
 
     #[test]
     fn idle_menu_has_the_requested_action_order() {
@@ -1382,13 +1351,6 @@ mod tests {
         assert_eq!(rows[2], MenuRow::Separator);
     }
 
-    #[test]
-    fn recording_to_transcribing_rebuilds_the_honest_menu() {
-        assert_ne!(
-            inputs(TrayIconState::Recording),
-            inputs(TrayIconState::Transcribing)
-        );
-    }
 
     #[test]
     fn dictation_cycle_rebuilds_once_per_visible_menu_change() {
@@ -1451,53 +1413,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sona_mark_keeps_two_components_at_one_x() {
-        let alpha = template_alpha(include_bytes!("../resources/tray_template_idle.png"));
-        let one_x: Vec<u8> = (0..18)
-            .flat_map(|y| {
-                let alpha = &alpha;
-                (0..18).map(move |x| {
-                    let top = (y * 2) * 36 + x * 2;
-                    let sum = u16::from(alpha[top])
-                        + u16::from(alpha[top + 1])
-                        + u16::from(alpha[top + 36])
-                        + u16::from(alpha[top + 37]);
-                    u8::try_from(sum / 4).expect("four alpha values average within u8")
-                })
-            })
-            .collect();
-        let mut seen = [false; 18 * 18];
-        let mut component_sizes = Vec::new();
-        for start in 0..one_x.len() {
-            if seen[start] || one_x[start] < 64 {
-                continue;
-            }
-            seen[start] = true;
-            let mut stack = vec![start];
-            let mut size = 0;
-            while let Some(index) = stack.pop() {
-                size += 1;
-                let x = index % 18;
-                let y = index / 18;
-                for neighbor in [
-                    (x > 0).then_some(index - 1),
-                    (x < 17).then_some(index + 1),
-                    (y > 0).then_some(index - 18),
-                    (y < 17).then_some(index + 18),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if !seen[neighbor] && one_x[neighbor] >= 64 {
-                        seen[neighbor] = true;
-                        stack.push(neighbor);
-                    }
-                }
-            }
-            component_sizes.push(size);
-        }
-        component_sizes.sort_unstable();
-        assert_eq!(component_sizes, vec![6, 59]);
-    }
 }

@@ -243,10 +243,7 @@ fn resolving_commits_a_receipt_and_moves_the_row() {
     let row = row_for(&result.loops.rows, &commitment);
     assert_eq!(row.status, MeetingLoopStatus::Done);
     assert_eq!(row.revision, 1);
-    assert_eq!(
-        row.resolved_at_utc_ms,
-        Some(row.resolved_at_utc_ms.unwrap())
-    );
+    assert!(row.resolved_at_utc_ms.is_some());
     assert_eq!(
         row.resolving_operation_id.as_deref(),
         Some(operation_id.uuid().to_string().as_str()),

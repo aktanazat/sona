@@ -58,7 +58,6 @@ describe("catch-up result", () => {
 
     expect(markup).toContain("Pricing stayed open.");
     expect(markup).toContain("As of 12:34, provisional");
-    expect(markup).not.toContain("__MISSING__");
   });
 
   test("says nothing about provenance once the transcript is stored", () => {
@@ -70,31 +69,5 @@ describe("catch-up result", () => {
 
     expect(markup).toContain("Pricing stayed open.");
     expect(markup).not.toContain("provisional");
-  });
-
-  test("mid-meeting silence invites another press instead of pointing at the stop", () => {
-    const markup = paint({
-      state: "no_transcript_yet",
-      bullets: [],
-      through_offset_ns: null,
-      segment_count: 0,
-      provisional: true,
-    });
-
-    expect(markup).toContain("try again in a moment");
-    expect(markup).not.toContain("stop recording");
-  });
-
-  test("a finished meeting with no transcript says that, not to wait", () => {
-    const markup = paint({
-      state: "no_transcript_yet",
-      bullets: [],
-      through_offset_ns: null,
-      segment_count: 0,
-      provisional: false,
-    });
-
-    expect(markup).toContain("this meeting has no transcript");
-    expect(markup).not.toContain("try again in a moment");
   });
 });

@@ -37,6 +37,8 @@ bun run preview
 
 ## Checks
 
+keep tests for observable behavior, data integrity, privacy, public contracts and measured resource limits. remove tests that only pin wording, code layout, private bookkeeping or an answer supplied by the test itself. a meaningful failing test stays.
+
 ```bash
 bun run build
 bun run lint

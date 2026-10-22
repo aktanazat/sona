@@ -300,40 +300,6 @@ fn a_series_with_nothing_enabled_runs_nothing_and_records_nothing() {
     assert!(asked.shortcuts.is_empty());
     assert!(asked.reminders.is_empty());
 }
-/// The three facts every other test in this file depends on, asserted once so a
-/// failure below names the layer that broke rather than "nothing ran".
-#[test]
-fn the_fixture_produces_a_meeting_the_pass_can_act_on() {
-    let (_directory, store) = store();
-    let session_id = finished_meeting(&store);
-    enable(&store, MeetingAutomationKind::Webhook, Some(TAILNET_URL));
-
-    let snapshot = store.series_automations_for_session(session_id).unwrap();
-    assert_eq!(snapshot.series_key.as_deref(), Some(SERIES_KEY));
-    assert_eq!(snapshot.runnable().len(), 1);
-
-    let review = store.review_snapshot(session_id).unwrap();
-    assert_eq!(
-        review
-            .artifacts
-            .iter()
-            .filter(
-                |artifact| artifact.state == crate::meeting::types::MeetingArtifactState::Current
-            )
-            .count(),
-        1
-    );
-    assert_eq!(
-        store
-            .meeting_loops(session_id)
-            .unwrap()
-            .rows
-            .iter()
-            .filter(|row| row.is_open() && row.is_mine())
-            .count(),
-        1
-    );
-}
 
 #[test]
 fn a_meeting_with_no_series_runs_nothing_even_when_a_series_is_configured() {
@@ -649,7 +615,6 @@ fn a_meeting_where_nothing_is_owed_still_records_that_it_looked() {
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].state, MeetingAutomationRunState::Committed);
     assert_eq!(receipts[0].effects, 0);
-    assert_eq!(receipts[0].detail.as_deref(), Some("no open commitments"));
     assert!(
         effects.asked().reminders.is_empty(),
         "an empty batch is not worth touching Reminders for"

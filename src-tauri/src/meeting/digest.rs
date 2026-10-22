@@ -323,14 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn one_of_a_thing_is_singular() {
-        assert_eq!(
-            digest_body(counts(1, 1, 1, 1)).as_deref(),
-            Some("1 meeting, 1 loop closed, 1 suggestion waiting, 1 loop overdue with others")
-        );
-    }
-
-    #[test]
     fn a_clause_worth_zero_is_left_out_rather_than_printed() {
         assert_eq!(
             digest_body(counts(2, 0, 0, 0)).as_deref(),

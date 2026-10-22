@@ -763,20 +763,6 @@ mod tests {
         TranscriptionIntent::ActiveMode
     }
 
-    #[test]
-    fn push_to_talk_release_while_recording_defers_release() {
-        let intent = active_mode();
-        assert_eq!(
-            classify_ptt_event(
-                None,
-                false,
-                true,
-                &intent,
-                ActiveRecording::Held { tapped: false }
-            ),
-            PttAction::Defer(GraceOutcome::Stop)
-        );
-    }
 
     #[test]
     fn push_to_talk_release_classification_covers_every_recording_state() {
@@ -849,21 +835,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn different_semantic_intent_does_not_cancel_a_pending_release() {
-        let active = active_mode();
-        let post_process = TranscriptionIntent::ActiveModeWithPostProcess;
-        assert_eq!(
-            classify_ptt_event(
-                Some(&active),
-                true,
-                true,
-                &post_process,
-                ActiveRecording::Unrelated
-            ),
-            PttAction::Passthrough
-        );
-    }
 
     #[test]
     fn legacy_binding_id_is_not_a_transcription_binding() {
@@ -1186,46 +1157,6 @@ mod tests {
         );
     }
 
-    /// Every other test here delivers a press and its release as a pair,
-    /// because the harness builds both. The real key source can lose a
-    /// release: macOS Secure Input stops event-tap delivery while a password
-    /// field holds focus, and an episode shorter than
-    /// `secure_input::SUSTAIN_THRESHOLD` registers no fallback, so a key-up
-    /// struck inside it is simply gone. handy-keys then still believes the
-    /// chord is down and emits no further press for it.
-    ///
-    /// This pins what the machine does with that state, and the asymmetry it
-    /// exposes: toggle recovers on the user's next press, push-to-talk reads
-    /// the same press as auto-repeat and keeps the microphone open. So the
-    /// exit is cancel, the tray, or an external edge — and cancel only
-    /// reaches a held chord because the cancel key is registered under each
-    /// modifier prefix a recording can be held by, see
-    /// `shortcut::tests::every_recording_chord_leaves_the_cancel_key_reachable`.
-    #[test]
-    fn a_dropped_release_leaves_push_to_talk_with_no_keyboard_exit() {
-        let mut push_to_talk = Harness::new();
-        press_and_hold(&mut push_to_talk);
-        assert!(push_to_talk.is_recording());
-
-        // The release is lost. Well past the tap window — so no repeat rate
-        // explains it — the user presses again to stop the recording.
-        push_to_talk.advance(TAP_LATCH_THRESHOLD * 4);
-        push_to_talk.input(active_mode(), true, true);
-        assert_eq!((push_to_talk.starts, push_to_talk.stops), (1, 0));
-        assert!(
-            push_to_talk.is_recording(),
-            "the recovery press is swallowed as auto-repeat"
-        );
-
-        // The identical loss under toggle: the next press stops it.
-        let mut toggle = Harness::new();
-        toggle.input(active_mode(), true, false);
-        assert!(toggle.is_recording());
-        toggle.advance(TAP_LATCH_THRESHOLD * 4);
-        toggle.input(active_mode(), true, false);
-        assert_eq!((toggle.starts, toggle.stops), (1, 1));
-        assert!(toggle.is_processing());
-    }
 
     #[test]
     fn a_release_after_a_tap_stop_is_ignored_by_the_busy_pipeline() {

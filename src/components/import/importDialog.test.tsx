@@ -10,8 +10,6 @@ import type { AudioImportJob, AudioImportStatus } from "@/bindings";
 import { MEDIA_IMPORT_EXTENSIONS } from "@/hooks/useAudioImport";
 import { MEETING_IMPORT_EXTENSIONS } from "@/hooks/useMeetingImport";
 import { HistoryAudioImportSection } from "../settings/history/HistoryAudioImportSection";
-import { ImportDialogHost } from "./ImportDialog";
-import { useImportDialogStore } from "./importDialogStore";
 import {
   addImportPaths,
   audioJobRowState,
@@ -187,23 +185,6 @@ describe("what a job says about its row", () => {
   });
 });
 
-describe("the shell's mount", () => {
-  test("nothing is drawn until an import is asked for", () => {
-    useImportDialogStore.setState({ request: null, open: false, seq: 0 });
-
-    expect(render(<ImportDialogHost />)).toBe("");
-  });
-
-  test("closing keeps the request, so the dialog has a title on the way out", () => {
-    const { openImport, closeImport } = useImportDialogStore.getState();
-    openImport({ kind: "meeting" });
-    closeImport();
-
-    const state = useImportDialogStore.getState();
-    expect(state.open).toBe(false);
-    expect(state.request?.kind).toBe("meeting");
-  });
-});
 
 describe("the import list Library keeps after the dialog closes", () => {
   test("a failed import still says why", () => {

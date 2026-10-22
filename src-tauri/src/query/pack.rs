@@ -673,22 +673,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_same_rows_render_the_same_bytes() {
-        let rows = || {
-            vec![
-                row(QueryRowKind::Meeting, "m-1", "Pricing sync", "The tier."),
-                row(QueryRowKind::Dictation, "7", "Note", "Send the deck."),
-                row(QueryRowKind::Person, "p-1", "Steven Park", "Tiers."),
-            ]
-        };
-
-        assert_eq!(
-            build("pricing", rows(), false).pack,
-            build("pricing", rows(), false).pack
-        );
-    }
-
     /// The rule the panel enforces on the wire, enforced here instead of
     /// discovered there: a transcript that contains a newline, a tab or a NUL
     /// must not be able to write a line of the pack's own structure.

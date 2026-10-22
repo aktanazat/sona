@@ -151,37 +151,3 @@ const renderWithEnglishCopy = async (
   );
 };
 
-/* Each step re-parses the node as a namespace record, so a path that dives
- * through a string — or a key that is missing — fails AT the read with zod's
- * own error naming the shape, instead of rendering `[object Object]`. */
-const englishSentence = (dottedPath: string): string => {
-  let node: LocaleNode = englishCopy;
-  for (const key of dottedPath.split(".")) {
-    node = localeRecord.parse(node)[key] ?? "";
-  }
-  return z.string().parse(node);
-};
-
-describe("spoken editing commands row", () => {
-  test("states which phrases fire and which stay as text", async () => {
-    const limits = englishSentence(
-      "settings.advanced.spokenEdits.enabledDescription",
-    );
-
-    expect(limits).toContain("delete the last word");
-    // The row names its own limits rather than promising general editing.
-    expect(limits).toContain("English only");
-    expect(limits).toContain("scratch that plan");
-  });
-
-  test("carries those limits on an affordance, not as a second sentence", async () => {
-    const markup = await renderWithEnglishCopy(<CustomWords />);
-
-    expect(markup).toContain("Obey spoken editing commands");
-    // The hint is reachable and named, and its text is not printed under the
-    // label: a row states its setting once.
-    expect(markup).toContain('aria-label="Obey spoken editing commands"');
-    expect(markup).toContain('data-slot="tooltip-trigger"');
-    expect(markup.includes("English only")).toBe(false);
-  });
-});

@@ -71,12 +71,3 @@ impl VoiceActivityDetector for SileroVad {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::SILERO_FRAME_SAMPLES;
-
-    #[test]
-    fn silero_frame_length_is_a_30_millisecond_whisper_window() {
-        assert_eq!(SILERO_FRAME_SAMPLES, 480);
-    }
-}

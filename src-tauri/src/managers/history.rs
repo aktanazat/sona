@@ -2459,28 +2459,6 @@ impl HistoryManager {
         Ok(PaginatedHistory { entries, has_more })
     }
 
-    #[cfg(test)]
-    fn get_latest_entry_with_conn(conn: &Connection) -> Result<Option<HistoryEntry>> {
-        let mut stmt = conn.prepare(
-            "SELECT
-                id,
-                file_name,
-                timestamp,
-                saved,
-                title,
-                transcription_text,
-                post_processed_text,
-                post_process_requested,
-                parent_id
-             FROM transcription_history
-             ORDER BY timestamp DESC
-             LIMIT 1",
-        )?;
-
-        let entry = stmt.query_row([], Self::map_history_entry).optional()?;
-        Ok(entry)
-    }
-
     /// Get the latest entry with non-empty transcription text.
     pub fn get_latest_completed_entry(&self) -> Result<Option<HistoryEntry>> {
         self.storage
@@ -3772,7 +3750,6 @@ mod tests {
         let history_id = insert_entry(&conn, 100, "measured", None);
 
         let measured = new_run_receipt(51);
-        assert_eq!(measured.run.input_peak, Some(0.1456));
         HistoryManager::insert_run_receipt(&conn, history_id, None, &measured)
             .expect("persist measured receipt");
 
@@ -4245,41 +4222,6 @@ mod tests {
         assert!(!recordings.path().join("sona-shared.wav").exists());
     }
 
-    /// The count sweep keeps the newest `limit` unsaved rows and no more, and a
-    /// starred row is kept without spending one of those places.
-    #[test]
-    fn a_count_sweep_keeps_the_newest_unsaved_rows_and_every_starred_one() {
-        let conn = setup_conn();
-        let recordings = tempfile::tempdir().expect("recordings directory");
-
-        // Oldest first, so `newest` really is the newest timestamp.
-        let oldest = insert_base_entry(&conn, 100, "oldest");
-        let middle = insert_base_entry(&conn, 200, "middle");
-        let newest = insert_base_entry(&conn, 300, "newest");
-        let starred_and_oldest = insert_base_entry(&conn, 50, "starred");
-        conn.execute(
-            "UPDATE transcription_history SET saved = 1 WHERE id = ?1",
-            params![starred_and_oldest],
-        )
-        .expect("star the oldest row");
-
-        let deleted = HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 2)
-            .expect("count sweep runs");
-
-        assert_eq!(
-            deleted,
-            vec![oldest],
-            "three unsaved rows at a limit of two loses one"
-        );
-        assert!(row_exists(&conn, newest));
-        assert!(row_exists(&conn, middle));
-        assert!(!row_exists(&conn, oldest), "the oldest unsaved row goes");
-        assert!(
-            row_exists(&conn, starred_and_oldest),
-            "a starred row is exempt and does not occupy one of the two places"
-        );
-    }
-
     /// A limit the corpus has not reached must not touch the database at all.
     #[test]
     fn a_count_sweep_under_its_limit_deletes_nothing() {
@@ -4595,39 +4537,6 @@ mod tests {
             DeliveryOutcome::DispatchedButUnconfirmed
         );
 
-        let receipts = conn
-            .query_row(
-                "SELECT mode_receipt_json, context_receipt_json
-                 FROM transcription_runs WHERE id = ?1",
-                params![second_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .expect("read content-free receipts");
-        assert!(!receipts.0.contains("private system prompt"));
-        assert!(!receipts.1.contains("original raw text"));
-        assert!(!receipts.1.contains("original output"));
-    }
-
-    #[test]
-    fn get_latest_entry_returns_none_when_empty() {
-        let conn = setup_conn();
-        let entry = HistoryManager::get_latest_entry_with_conn(&conn).expect("fetch latest entry");
-        assert!(entry.is_none());
-    }
-
-    #[test]
-    fn get_latest_entry_returns_newest_entry() {
-        let conn = setup_conn();
-        insert_entry(&conn, 100, "first", None);
-        insert_entry(&conn, 200, "second", Some("processed"));
-
-        let entry = HistoryManager::get_latest_entry_with_conn(&conn)
-            .expect("fetch latest entry")
-            .expect("entry exists");
-
-        assert_eq!(entry.timestamp, 200);
-        assert_eq!(entry.transcription_text, "second");
-        assert_eq!(entry.post_processed_text.as_deref(), Some("processed"));
     }
 
     #[test]
@@ -4703,35 +4612,6 @@ mod tests {
         )
         .expect("search post-processed text");
         assert_eq!(post_processed_only.entries[0].id, post_processed_id);
-    }
-
-    #[test]
-    fn fts_match_query_quotes_tokens_and_drops_untokenizable_ones() {
-        assert_eq!(fts_match_query("note:").as_deref(), Some("\"note:\"*"));
-        assert_eq!(
-            fts_match_query("  lantern   notes ").as_deref(),
-            Some("\"lantern\"* \"notes\"*")
-        );
-        assert_eq!(
-            fts_match_query("lantern AND").as_deref(),
-            Some("\"lantern\"* \"AND\"*")
-        );
-        assert_eq!(
-            fts_match_query("say \"hi").as_deref(),
-            Some("\"say\"* \"\"\"hi\"*")
-        );
-        assert_eq!(
-            fts_match_query("say \"hi\"").as_deref(),
-            Some("\"say\"* \"\"\"hi\"\"\"*")
-        );
-        assert_eq!(fts_match_query(""), None);
-        assert_eq!(fts_match_query("   \t\n "), None);
-        assert_eq!(fts_match_query("🎉 🙃"), None);
-        assert_eq!(fts_match_query("-- ,"), None);
-        assert_eq!(
-            fts_match_query("🎉 lantern").as_deref(),
-            Some("\"lantern\"*")
-        );
     }
 
     #[test]

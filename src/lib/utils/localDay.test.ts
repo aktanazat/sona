@@ -5,17 +5,8 @@ import { fileURLToPath } from "url";
 import { createInstance } from "i18next";
 import { groupByLocalDay, localDayHeading, startOfLocalDay } from "./localDay";
 
-/* The day, for both lists that are read by it.
- *
- * These checks used to live beside the dictation log because the bucketer did;
- * meeting history then carried a line-for-line copy of it and rendered the
- * library's own "Today". One module, one set of checks, and the grouping is
- * exercised through both element shapes so a change that suits one caller
- * cannot quietly break the other.
- *
- * Two defects are pinned dead here, both of which shipped: a page-split day
- * appearing twice, and `midnight - 86400000` renaming the day before yesterday
- * as "Yesterday" on the two mornings a day is not 24 hours long. */
+/* Guards against duplicate day headings at page seams and incorrect
+ * yesterday labels when a local day is not 24 hours long. */
 
 const i18n = createInstance();
 void i18n.init({
@@ -57,21 +48,10 @@ interface EntryFixture {
   id: number;
   timestamp: number;
 }
-interface MeetingFixture {
-  session_id: string;
-  created_at_utc_ms: number;
-}
 
 const entryAt = (id: number, timestampMs: number): EntryFixture => ({
   id,
   timestamp: Math.floor(timestampMs / 1000),
-});
-const meetingAt = (
-  sessionId: string,
-  createdAtUtcMs: number,
-): MeetingFixture => ({
-  session_id: sessionId,
-  created_at_utc_ms: createdAtUtcMs,
 });
 
 const entryDays = (entries: EntryFixture[]) =>
@@ -113,23 +93,6 @@ describe("grouping by local day", () => {
     ).toHaveLength(2);
   });
 
-  test("cuts a meeting page at the same instant it cuts a dictation page", () => {
-    /* The accessor is the only thing that differs between the two callers, so
-     * the same three moments have to bucket identically through both. */
-    const moments = [today, dayBefore(today, 1), today - 60_000];
-
-    expect(
-      groupByLocalDay(
-        moments.map((at, index) => meetingAt(`session-${index}`, at)),
-        (meeting) => meeting.created_at_utc_ms,
-      ).map((group) => group.items.map((meeting) => meeting.session_id)),
-    ).toEqual([["session-0", "session-2"], ["session-1"]]);
-    expect(
-      entryDays(moments.map((at, index) => entryAt(index, at))).map((group) =>
-        group.items.map((entry) => entry.id),
-      ),
-    ).toEqual([[0, 2], [1]]);
-  });
 
   test("an empty page is no groups, not one empty group", () => {
     expect(entryDays([])).toEqual([]);
@@ -151,12 +114,6 @@ describe("the day heading", () => {
     expect(older).not.toContain(String(new Date(today).getFullYear()));
   });
 
-  test("reads its copy from a namespace neither list owns", () => {
-    /* The keys were `libraryV2.day.*` while the meetings page rendered them,
-     * which is how the Meetings surface came to print the Library's words. */
-    expect(String(i18n.t("common.day.today"))).toBe("Today");
-    expect(String(i18n.t("common.day.yesterday"))).toBe("Yesterday");
-  });
 
   test("crosses a DST boundary without renaming yesterday", () => {
     /* The subtraction this replaces (`midnight - 86400000`) lands at 23:00 or

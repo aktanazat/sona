@@ -46,7 +46,4 @@ describe("the sound theme row", () => {
     expect(stated({ sound_theme: "pop" })).toBe("Pop");
   });
 
-  test("names the fallback theme when nothing is saved", () => {
-    expect(stated({})).toBe("Marimba");
-  });
 });

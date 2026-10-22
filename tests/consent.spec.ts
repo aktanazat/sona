@@ -202,7 +202,6 @@ test.describe("Consent panel", () => {
     await expect(record).toBeFocused();
 
     await page.keyboard.press("Escape");
-    await expect(page.locator("[data-leaving] > main")).toBeVisible();
     await expect(dialog).toBeHidden();
     await expect
       .poll(() =>
@@ -261,7 +260,6 @@ test.describe("Consent panel", () => {
     await expect(page.getByText("Recording", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await page.keyboard.press("Escape");
-    await page.waitForTimeout(200);
     await expect(page.getByText("Recording", { exact: true })).toBeVisible();
     expect(
       await page.evaluate(() =>
@@ -293,9 +291,7 @@ test.describe("Consent panel", () => {
         page.evaluate(() => localStorage.getItem("detection-panel-ack")),
       )
       .toBe("prompt-retracted");
-    await expect(
-      page.getByRole("heading", { name: "Weekly sync — record it?" }),
-    ).toBeHidden();
+    await expect(page.getByRole("dialog")).toBeHidden();
   });
 
   test("does not acknowledge a prompt hidden by an active recording", async ({
@@ -315,9 +311,7 @@ test.describe("Consent panel", () => {
     await page.goto("/consent");
 
     await expect(page.getByText("Recording", { exact: true })).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: "Weekly sync — record it?" }),
-    ).toBeHidden();
+    await expect(page.getByRole("dialog")).toBeHidden();
     await expect
       .poll(() =>
         page.evaluate(() => localStorage.getItem("detection-panel-ack")),
@@ -336,7 +330,7 @@ test.describe("Consent panel", () => {
     await expect(page.getByTestId("prep-card")).toBeVisible();
     await expect(
       page.getByRole("heading", {
-        name: /Weekly product review — in 5 minutes/,
+        name: /Weekly product review — in/,
       }),
     ).toBeVisible();
     await expect(

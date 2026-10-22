@@ -3188,12 +3188,8 @@ mod tests {
         settings.modes[2].asr.model_id = "deleted-model".to_string();
         let installed = HashSet::from(["installed-model".to_string()]);
 
-        let cleared = ModelManager::clear_uninstalled_mode_models(&mut settings.modes, &installed);
+        ModelManager::clear_uninstalled_mode_models(&mut settings.modes, &installed);
 
-        assert_eq!(
-            cleared,
-            vec![(settings.modes[2].id.clone(), "deleted-model".to_string())]
-        );
         assert!(settings.modes[0].asr.model_id.is_empty());
         assert_eq!(settings.modes[1].asr.model_id, "installed-model");
         // Empty means "inherit the global selection", so the repaired mode
@@ -3684,20 +3680,6 @@ mod tests {
         assert!(!models.contains_key("readme"));
         assert!(!models.contains_key("download.bin"));
         assert!(!models.contains_key("some-directory"));
-    }
-
-    #[test]
-    fn test_discover_custom_models_empty_dir() {
-        let temp_dir = TempDir::new().unwrap();
-        let models_dir = temp_dir.path().to_path_buf();
-
-        let mut models = HashMap::new();
-        let count_before = models.len();
-
-        ModelManager::discover_custom_transcribe_models(&models_dir, &mut models).unwrap();
-
-        // No new models should be added
-        assert_eq!(models.len(), count_before);
     }
 
     #[test]

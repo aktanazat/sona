@@ -3107,11 +3107,6 @@ mod tests {
         assert!(!is_opaque_id("https://turn"));
     }
 
-    #[test]
-    fn terminal_turns_do_not_poll() {
-        assert!(AgentPanelTurnStateV1::Succeeded.is_terminal());
-        assert!(!AgentPanelTurnStateV1::Running.is_terminal());
-    }
 
     #[test]
     fn a_connection_stamp_does_not_stale_a_pending_proposal() {
@@ -3529,7 +3524,6 @@ mod tests {
 
     #[test]
     fn a_lookup_step_is_keyed_by_round_and_position() {
-        assert_eq!(tool_step_id(1, 0), "tool-1-0");
         assert_ne!(tool_step_id(1, 0), tool_step_id(2, 0));
         assert_ne!(tool_step_id(1, 0), tool_step_id(1, 1));
     }

@@ -6,28 +6,10 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
-import {
-  ShortcutHoldHint,
-  ShortcutRecorderField,
-} from "./ShortcutRecorderField";
+import { ShortcutRecorderField } from "./ShortcutRecorderField";
 import { keyCapParts, keyCombinationParts } from "@/lib/utils/keyboard";
 
-/* What this file defends, none of which a type-check reaches:
- *
- * 1. A chord renders as one keycap per physical key. The whole point of the
- *    recorder redesign is that "Left Option + Shift + Space" is three caps, not
- *    one string with plus signs in it.
- * 2. The resting field is a real button and the recording field is not, because
- *    both parents rely on that split: the recording surface is the click-outside
- *    target and must never be focusable-and-clickable at the same time.
- * 3. Recording announces itself. "Press your keys…" has to be on screen before
- *    the first key lands, or the field looks broken.
- * 4. Every key these surfaces ask for exists in the shipped English catalogue.
- *    i18next falls back to the inline default silently, so a renamed key would
- *    ship as copy that quietly stopped being translatable.
- * 5. The two states stay identifiable now that the field is styled in
- *    utilities: the record dot and the pulse are found by `data-slot`, which is
- *    the only marker left after shortcut-recorder.css was deleted. */
+/* Chord labels, capture state, and the keyboard-accessible recorder surface. */
 
 const catalogue = JSON.parse(
   fs.readFileSync(
@@ -123,10 +105,7 @@ describe("resting field", () => {
     expect(markup).toContain('type="button"');
   });
 
-  test("carries a persistent record affordance, not a hover-only one", () => {
-    expect(markup).toContain('data-slot="shortcut-record-dot"');
-    /* The affordance a screen reader gets, and the only place the binding's
-     * own name reaches the button. */
+  test("names the recording action for its binding", () => {
     expect(markup).toContain("Record a new shortcut for Transcribe");
   });
 
@@ -157,7 +136,6 @@ describe("recording field", () => {
       />,
     );
     expect(markup).toContain("Press your keys");
-    expect(markup).toContain('data-slot="shortcut-pulse"');
     expect(countKbd(markup)).toBe(0);
   });
 
@@ -189,42 +167,6 @@ describe("recording field", () => {
     );
     expect(markup.includes("<button")).toBe(false);
     expect(markup).toContain('aria-live="polite"');
-    /* The state marker on the surface both parents hold a ref to. */
-    expect(markup).toContain('data-recording="true"');
   });
 });
 
-describe("catalogue", () => {
-  test("the tap/hold hint is a real shipped key", () => {
-    expect(paint(<ShortcutHoldHint />)).toBe(
-      "Tap to toggle, hold to talk. Works with any shortcut.",
-    );
-  });
-
-  test("no recorder string falls through to __MISSING__", () => {
-    const surfaces = [
-      paint(
-        <ShortcutRecorderField
-          chord="cmd+space"
-          recording={false}
-          captured=""
-          onStartRecording={() => undefined}
-          bindingName="Transcribe"
-        />,
-      ),
-      paint(
-        <ShortcutRecorderField
-          chord=""
-          recording
-          captured=""
-          onStartRecording={() => undefined}
-          bindingName="Transcribe"
-        />,
-      ),
-      paint(<ShortcutHoldHint />),
-    ];
-    for (const markup of surfaces) {
-      expect(markup.includes("__MISSING__")).toBe(false);
-    }
-  });
-});

@@ -54,18 +54,6 @@ describe("cargo-target-dir", () => {
     expect(run.exitCode).toBe(1);
   });
 
-  /* `export CARGO_TARGET_DIR=` in a shell profile is a set variable with
-   * nothing in it, and inventing a directory out of it would put the build
-   * somewhere nobody named. */
-  test("treats an empty setting as no setting", () => {
-    const run = runWrapped(
-      { CARGO_TARGET_DIR: "  " },
-      "printenv",
-      "CARGO_TARGET_DIR",
-    );
-    expect(run.stdout).toBe("");
-  });
-
   test("builds under a set cache root instead of it", () => {
     const cacheRoot = temporaryDirectory("cargo-cache-");
     const run = runWrapped(

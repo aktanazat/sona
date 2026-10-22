@@ -966,10 +966,6 @@ fn levinson_durbin(autocorrelation: &[f32; LPC_ORDER + 1], lpc: &mut [f32; LPC_O
 mod tests {
     use super::*;
 
-    #[test]
-    fn ten_frame_length_is_a_30_millisecond_whisper_window() {
-        assert_eq!(TEN_FRAME_SAMPLES, 480);
-    }
 
     #[test]
     fn analysis_geometry_matches_the_reference_configuration() {

@@ -247,12 +247,12 @@ mod tests {
         assert_ne!(first.id, second.id);
         assert_eq!(first.file_name, "first.wav");
         assert_eq!(first.status, AudioImportStatus::Failed);
-        assert_eq!(
+        assert!(matches!(
             first.result,
             Some(AudioImportResult::Failed {
                 code: AudioImportFailureCode::UnsupportedFormat,
-                message: "This audio format is not supported.".to_string(),
+                ..
             })
-        );
+        ));
     }
 }

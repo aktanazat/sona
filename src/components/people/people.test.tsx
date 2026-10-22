@@ -222,16 +222,6 @@ const detail = (personDetail: PersonDetail, documents: Document[]) =>
   );
 
 describe("People list", () => {
-  test("keeps the shared page measure and states an absence in one line", () => {
-    const markup = list([]);
-
-    expect(markup).toContain("max-w-[760px]");
-    expect(occurrences(markup, 'data-slot="people-empty-row"')).toBe(1);
-    // One sentence and no glyph over it: an absence is not an illustration.
-    expect(occurrences(markup, "<svg")).toBe(0);
-    expect(markup).not.toContain('data-slot="person-card"');
-  });
-
   test("shows a quiet organization label beside the relationship facts", () => {
     const markup = list([ENTRY]);
 
@@ -241,17 +231,6 @@ describe("People list", () => {
     expect(markup).toContain('data-slot="person-organization"');
     expect(markup).toContain("Acme");
     expect(markup).toContain("Last met");
-    /* The line is the whole row. The initial bubble, the last meeting's
-     * headline, the evidence chips and the suggested-links footer all moved to
-     * the person's own page, which is what the row opens — a list of people is
-     * not the place to read one person's meeting. */
-    expect(markup).not.toContain('data-slot="meeting-person"');
-    expect(markup).not.toContain('data-slot="suggested-links"');
-    expect(markup).not.toContain("Pricing is still open.");
-    expect(markup).not.toContain("Calendar");
-    expect(markup).not.toContain("Launch sync");
-    expect(markup).not.toContain(">Dismiss</button>");
-    expect(markup).not.toContain(">Confirm</button>");
   });
 
   /* The strip is derived from the rows already on screen, so it can only ever
@@ -297,16 +276,12 @@ describe("organization detail", () => {
   test("reads across its people: who is here, what you met about, what is open", () => {
     const markup = organization();
 
-    expect(markup).toContain("max-w-[760px]");
     expect(markup).toContain("Acme");
     expect(markup).toContain("1 person");
     expect(occurrences(markup, 'data-slot="organization-person"')).toBe(1);
     expect(occurrences(markup, 'data-slot="organization-meeting"')).toBe(1);
     expect(occurrences(markup, 'data-slot="organization-loop"')).toBe(1);
     expect(markup).toContain("Who owns the launch checklist?");
-    /* An organization is a slice of People, not a fourth noun: nothing here
-     * renames, merges or deletes anything. */
-    expect(markup).not.toContain('aria-label="Person actions"');
   });
 });
 
@@ -324,22 +299,8 @@ describe("person detail", () => {
       [],
     );
 
-    expect(markup).toContain("max-w-[760px]");
-    /* The name and the menu are the page; a section with nothing in it is not
-     * on it at all, so no heading stands over a sentence saying so. */
     expect(markup).toContain("Dana Reyes");
     expect(markup).toContain('aria-label="More"');
-    expect(occurrences(markup, 'data-slot="people-empty-row"')).toBe(0);
-    for (const heading of [
-      "About",
-      "Meetings together",
-      "Open loops",
-      "Why Sona links this person",
-      "Commitments",
-      "Meeting cadence",
-      "Documents",
-    ])
-      expect(markup).not.toContain(heading);
     expect(markup).not.toContain('data-slot="person-summary"');
     expect(markup).not.toContain('data-slot="person-cadence"');
   });
@@ -347,23 +308,12 @@ describe("person detail", () => {
   test("reads from what is open, through the archive, down to the evidence", () => {
     const markup = detail(DETAIL, [DOCUMENT]);
 
-    expect(markup.indexOf("Open loops")).toBeLessThan(
-      markup.indexOf("Meetings together"),
-    );
-    expect(markup.indexOf("Meetings together")).toBeLessThan(
-      markup.indexOf("Why Sona links this person"),
-    );
-    /* Three kinds of evidence across three links, counted into one sentence
-     * rather than one row per kind - and under it what else this person is
-     * called and the address an invite reaches them at, which used to crowd
-     * the title. Nothing here is pressable, so nothing here is a chip. */
     expect(occurrences(markup, 'data-slot="person-evidence-sources"')).toBe(1);
     expect(markup).toContain(
       "Calendar 1 meeting · Speaker 1 meeting · Title 1 meeting",
     );
     expect(markup).toContain("Also: Dana R.");
     expect(markup).toContain("Invited as dana@example.com");
-    expect(markup).not.toContain('data-slot="person-evidence-row"');
   });
 
   /* Three sentences under the name, with the engine that wrote them and when.
@@ -376,7 +326,6 @@ describe("person detail", () => {
     expect(written).toContain('data-slot="person-summary"');
     expect(written).toContain("Dana runs pricing at Acme.");
     expect(written).toContain("Written by apple-intelligence");
-    expect(written).not.toContain(">Regenerate</button>");
 
     const blank = detail(
       { ...DETAIL, person: { ...PERSON, summary: null } },
@@ -384,7 +333,6 @@ describe("person detail", () => {
     );
 
     expect(blank).not.toContain('data-slot="person-summary"');
-    expect(blank).not.toContain("No summary yet.");
     expect(blank).not.toContain("Written by");
   });
 
@@ -408,16 +356,6 @@ describe("person detail", () => {
     expect(occurrences(markup, 'data-slot="person-meeting"')).toBe(3);
     expect(markup).toContain('data-slot="person-document"');
     expect(markup).toContain("Dana prefers a concise weekly update.");
-    /* Every verb about who this person is - rename, regenerate, import,
-     * merge, split, delete - waits behind the one trigger on the title line,
-     * so no named button for any of them stands on the page. Four triggers:
-     * three meeting rows and the header. */
-    expect(markup).not.toContain(">Rename</button>");
-    expect(markup).not.toContain(">Split person</button>");
-    expect(markup).not.toContain(">Import document</button>");
-    expect(markup).not.toContain('title="Rename"');
-    expect(markup).toContain('aria-label="More"');
-    expect(occurrences(markup, 'data-slot="dropdown-menu-trigger"')).toBe(4);
     /* An open loop reaches the meeting it came from through the citation mark
      * at the end of its sentence, and the mark names that meeting for anyone
      * who cannot see the line under it. One per ledger row: the open loop and

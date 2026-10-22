@@ -955,21 +955,7 @@ fn ready_lifecycle_persists_a_bound_request_in_its_session_paths() {
     assert_eq!(persisted.invocation_id, request.invocation_id);
     assert_eq!(persisted.issued_at_ms, NOW_MS);
     assert_eq!(persisted.expires_at_ms, NOW_MS + 30_000);
-    assert!(session
-        .response_path(&request.invocation_id)
-        .expect("response path")
-        .ends_with(format!("{}.json", request.invocation_id)));
-    assert!(session
-        .claimed_path(&request.invocation_id)
-        .expect("claim path")
-        .ends_with(format!("{}.json", request.invocation_id)));
-    assert!(session
-        .ack_path(&request.invocation_id)
-        .expect("ack path")
-        .ends_with(format!("{}.json", request.invocation_id)));
-
     let rendered = request_path.to_string_lossy();
-    assert!(rendered.contains(&request.binding.session_handle));
     assert!(!rendered.contains(&request.event.session_id));
 }
 

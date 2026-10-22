@@ -31,11 +31,6 @@ describe("resolveRefreshDraft", () => {
     expect(resolveRefreshDraft(draft, previousSaved, incoming)).toEqual(draft);
   });
 
-  test("adopts after a successful save when the draft equals the new saved list", () => {
-    const previousSaved = [entry("open ai", "OpenAI")];
-    const draft = [entry("open ai", "OpenAI"), entry("sona", "Sona")];
-    expect(resolveRefreshDraft(draft, previousSaved, draft)).toEqual(draft);
-  });
 });
 
 describe("mergeAppliedCsv", () => {

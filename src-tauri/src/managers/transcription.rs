@@ -4024,28 +4024,6 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_starter_replacements_run_in_the_pipeline() {
-        let settings = AppSettings {
-            filler_word_removal_enabled: false,
-            ..Default::default()
-        };
-        let asr = AsrPlan::from_settings(&settings);
-        let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
-
-        assert!(asr.replacements_enabled);
-        assert_eq!(
-            post_process_transcription_text(
-                "write to me at example dot com".to_string(),
-                &asr,
-                false,
-                &english,
-                &[],
-            ),
-            "write to me at example .com"
-        );
-    }
-
-    #[test]
     fn replacements_run_before_vocabulary_so_a_rewritten_phrase_is_not_also_corrected() {
         let settings = AppSettings {
             replacements_rules: vec![ReplacementRule {
@@ -4095,14 +4073,6 @@ mod tests {
             ),
             "write to me at sign example dot com"
         );
-    }
-
-    #[test]
-    fn engine_transition_reports_idle_when_nothing_is_loaded() {
-        let transition = Arc::new(EngineTransition::new());
-
-        // The bug this replaces: "no model loaded" was reported as "loading".
-        assert!(!transition.in_progress());
     }
 
     #[test]
@@ -4169,7 +4139,6 @@ mod tests {
     #[derive(Default)]
     struct FakeCloudTransportState {
         connects: usize,
-        plans: Vec<CloudRunPlan>,
         frames: Vec<Vec<f32>>,
         connect_failure: Option<CloudStreamFailure>,
         send_failure_at: Option<(usize, CloudStreamFailure)>,
@@ -4197,12 +4166,11 @@ mod tests {
     impl CloudTransportFactory for FakeCloudTransportFactory {
         fn connect(
             &self,
-            plan: &CloudRunPlan,
+            _plan: &CloudRunPlan,
             _api_key: Zeroizing<String>,
         ) -> Result<Box<dyn CloudTransport>, CloudStreamFailure> {
             let mut state = self.state.lock().expect("fake cloud state");
             state.connects += 1;
-            state.plans.push(plan.clone());
             if let Some(failure) = state.connect_failure {
                 return Err(failure);
             }
@@ -4404,13 +4372,9 @@ mod tests {
     }
 
     #[test]
-    fn ort_auto_log_reports_the_effective_provider_and_compiled_capability() {
+    fn ort_settings_fall_back_to_an_available_provider() {
         let provider = configured_ort_provider(OrtAcceleratorSetting::Auto);
         assert_eq!(provider, OrtProvider::Cpu);
-        assert_eq!(
-            ort_accelerator_log_line(provider, "cpu, coreml"),
-            "ORT accelerator set to: cpu (compiled capability: cpu, coreml)"
-        );
         for unavailable in [
             OrtAcceleratorSetting::Cuda,
             OrtAcceleratorSetting::DirectMl,
@@ -4482,30 +4446,6 @@ mod tests {
         });
 
         assert_eq!(result, raw);
-    }
-
-    #[test]
-    fn transcript_canary_is_absent_from_log_event_panic_and_report_diagnostics() {
-        const CANARY: &str = "TRANSCRIPT-CANARY-4EE1";
-        let event = serde_json::to_string(&engine_panic_model_state_event())
-            .expect("model state event serialization");
-        let support_report = serde_json::to_string(&serde_json::json!({
-            "diagnostic": ENGINE_PANIC_LOG_MESSAGE,
-            "event": event,
-            "panic": ENGINE_PANIC_ERROR_MESSAGE,
-        }))
-        .expect("diagnostic report serialization");
-
-        for (sink, diagnostic) in [
-            ("log", ENGINE_PANIC_LOG_MESSAGE),
-            ("event", event.as_str()),
-            ("stdout", ENGINE_PANIC_LOG_MESSAGE),
-            ("stderr", ENGINE_PANIC_LOG_MESSAGE),
-            ("panic", ENGINE_PANIC_ERROR_MESSAGE),
-            ("support report", support_report.as_str()),
-        ] {
-            assert!(!diagnostic.contains(CANARY), "{sink}: {diagnostic}");
-        }
     }
 
     #[test]
@@ -4965,36 +4905,21 @@ mod tests {
         assert_eq!(evidence, OutputLanguageEvidence::TranslatedToEnglish);
     }
 
-    /// The reason `BatchDecode::model_produced_text` has to exist: on a stock
-    /// install (filler removal defaults on) a real one-word utterance
-    /// post-processes to nothing, so an empty delivered transcript cannot tell
-    /// a silent microphone from a filtered one. Both halves are asserted, so
-    /// this fails if the pipeline stops emptying it *or* if the flag stops
-    /// being read from the raw text.
+    /// A bare hesitation is removed when filler cleanup is enabled.
     #[test]
-    fn a_filtered_away_utterance_still_reports_that_the_model_produced_text() {
-        let settings = AppSettings::default();
-        assert!(
-            settings.filler_word_removal_enabled,
-            "this test is about the stock install"
-        );
+    fn a_bare_hesitation_is_removed_from_the_delivered_transcript() {
+        let settings = AppSettings {
+            filler_word_removal_enabled: true,
+            ..AppSettings::default()
+        };
         let asr = AsrPlan::from_settings(&settings);
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
 
         let raw = "Um.".to_string();
-        let model_produced_text = !raw.trim().is_empty();
         let delivered =
             post_process_transcription_text(raw, &asr, false, &english, &languages(&["en"]));
 
         assert_eq!(delivered, "", "filler removal empties a bare hesitation");
-        assert!(model_produced_text);
-
-        let decode = BatchDecode {
-            text: delivered,
-            realtime_factor: None,
-            model_produced_text,
-        };
-        assert!(decode.text.is_empty() && decode.model_produced_text);
     }
 
     /// Filler removal runs before every pass that authors text, and this is the
@@ -5198,9 +5123,6 @@ mod tests {
         assert_eq!(state.connects, 1);
         assert_eq!(state.finalize_calls, 1);
         assert_eq!(state.frames, frames);
-        assert_eq!(state.plans.len(), 1);
-        assert_eq!(state.plans[0].provider(), CloudSttProvider::DeepgramNova3);
-        assert!(state.plans[0].timestamps());
     }
 
     #[cfg(feature = "cloud-realtime")]

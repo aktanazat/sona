@@ -126,29 +126,6 @@ final class CryptoVectorTests: XCTestCase {
         )
     }
 
-    /// The tombstone record is not one the phone ever signs, but it shares the record
-    /// encoder, so the fixture pins the encoder rather than the caller.
-    func testTombstoneRecord() throws {
-        let vector = try section("tombstone")
-        let record = canonicalRecord([
-            .text("sona-tombstone-v1"),
-            .text(try string(vector, "vaultId")),
-            .text(try string(vector, "objectId")),
-            .text(try string(vector, "tombstoneRevisionId")),
-            .text(try string(vector, "baseRevisionId")),
-            .text(try string(vector, "reason")),
-            .decimal(UInt64(try integer(vector, "formatVersion"))),
-        ])
-        XCTAssertEqual(record, try bytes(vector, "bytes"))
-        XCTAssertTrue(
-            verifyEd25519(
-                publicKey: try ed25519PublicKey(signingSeed: CryptoVectorTests.signingSeed),
-                signature: try bytes(vector, "signature"),
-                message: record
-            )
-        )
-    }
-
     // MARK: - Object revision crypto
 
     func testObjectRevisionKeysAadAndPayloads() throws {

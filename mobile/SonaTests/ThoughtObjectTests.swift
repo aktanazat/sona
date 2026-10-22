@@ -14,12 +14,15 @@ final class ThoughtObjectTests: XCTestCase {
         )
         let encoded = try ThoughtObject.encodeManifest(manifest)
         XCTAssertEqual(
-            String(decoding: encoded, as: UTF8.self),
-            """
+            try JSONSerialization.data(
+                withJSONObject: JSONSerialization.jsonObject(with: encoded),
+                options: .sortedKeys
+            ),
+            Data("""
             {"audio":null,"captured_at_utc_ms":1700000000000,"device_id":"phone_device_0001",\
             "format_version":1,"images":[],"kind":"thought","link":null,"origin":"typed",\
             "text":"buy the blue one"}
-            """
+            """.utf8)
         )
         XCTAssertEqual(try JSONDecoder().decode(ThoughtManifest.self, from: encoded), manifest)
         XCTAssertEqual(ThoughtObject.chunkCount([]), 1)

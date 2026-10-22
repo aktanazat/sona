@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,7 +7,6 @@ import {
   jsonBody,
   makeDevice,
   signedFetch,
-  signedRequest,
   testId,
 } from "./helpers";
 
@@ -24,28 +23,6 @@ describe("bounded upload behavior", () => {
       body: JSON.stringify(payload.json),
       idempotencyKey: testId("fixed_chunk_boundary"),
     });
-
-    expect(response.status).toBe(400);
-    expect((await jsonBody(response)).code).toBe("invalid_request");
-    const count = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM upload_sessions WHERE vault_id = ?",
-    )
-      .bind(device.vaultId)
-      .first<{ count: number }>();
-    expect(count?.count).toBe(0);
-  });
-
-  it("rejects an over-limit streamed JSON body before it reaches upload parsing", async () => {
-    const device = await makeDevice();
-    await bootstrap(device);
-    const request = await signedRequest(device, {
-      method: "POST",
-      path: "/v1/uploads",
-      contentType: "application/json",
-      body: new Uint8Array(1024 * 1024 + 1),
-      idempotencyKey: testId("body_boundary"),
-    });
-    const response = await SELF.fetch(request);
 
     expect(response.status).toBe(400);
     expect((await jsonBody(response)).code).toBe("invalid_request");

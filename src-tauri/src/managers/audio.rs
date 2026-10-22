@@ -2049,9 +2049,8 @@ mod capture_verdict_tests {
 
     #[test]
     fn the_model_arbitrates_short_vad_silent_captures_and_not_long_ones() {
-        // The two captures this policy was written against: ~1.1 s each.
+        // A quiet utterance from the captures this policy was written against.
         assert!(model_arbitrates_vad_silence(16_800));
-        assert!(model_arbitrates_vad_silence(18_240));
 
         // Boundary: fifteen seconds is arbitrated, one sample past it is not.
         assert!(model_arbitrates_vad_silence(

@@ -871,16 +871,6 @@ mod tests {
         assert!(matches!(signal, CalendarSignal::Started { .. }));
     }
 
-    #[test]
-    fn an_absent_calendar_never_produces_an_event() {
-        assert_eq!(NoCalendar.access(), CalendarAccess::Unavailable);
-        assert_eq!(NoCalendar.next_event(NOW, lookahead_ms(), 60), None);
-        assert_eq!(
-            NoCalendar.events_between(NOW, NOW + 8 * 24 * 60 * 60_000),
-            Vec::new()
-        );
-    }
-
     /* EKParticipantStatus's raw values, as the framework defines them. Written
      * out rather than imported so the test still fails if the mapping is
      * silently re-pointed at some other integer. */
