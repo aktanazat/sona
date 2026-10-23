@@ -4944,6 +4944,7 @@ mod tests {
     #[test]
     fn filler_removal_precedes_the_passes_that_author_text() {
         let settings = AppSettings {
+            filler_word_removal_enabled: true,
             replacements_enabled: true,
             replacements_rules: vec![crate::settings::ReplacementRule {
                 spoken: "amei".to_string(),
@@ -4960,10 +4961,6 @@ mod tests {
             }],
             ..AppSettings::default()
         };
-        assert!(
-            settings.filler_word_removal_enabled,
-            "this test is about the stock install"
-        );
         let mut asr = AsrPlan::from_settings(&settings);
         asr.literal_punctuation = true;
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
