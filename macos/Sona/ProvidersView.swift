@@ -12,11 +12,13 @@ struct ProvidersView: View {
     @State private var showConsent = false
     @State private var promptDraft: PostProcessPromptDraft?
     @State private var pendingDelete: PostProcessPrompt?
+    @State private var showRemoveCleanup = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ErrorNote(store.error)
             postProcessing
+            offlineCleanup
             api
             cloudKeys
             promptLibrary
@@ -67,6 +69,14 @@ struct ProvidersView: View {
                 )
             }
         }
+        .confirmationDialog("Remove offline cleanup model?", isPresented: $showRemoveCleanup, titleVisibility: .visible) {
+            Button("Remove", role: .destructive) {
+                Task { await store.removeLocalCleanup() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Dictation will keep the original words until you download this model or choose another provider.")
+        }
     }
 
     // MARK: - Post-processing
@@ -86,13 +96,74 @@ struct ProvidersView: View {
         }
     }
 
+    private var offlineCleanup: some View {
+        PageSection("Offline cleanup") {
+            Card {
+                if let status = store.localCleanup {
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(status.name).bodyText()
+                            Text("\(status.language) · \(Model.bytes(status.sizeBytes))").metaText()
+                            if status.phase == .downloading {
+                                Text(status.progress).metaText()
+                                Meter(fraction: status.fraction)
+                                    .frame(maxWidth: 280)
+                                    .accessibilityLabel("Offline cleanup download")
+                                    .accessibilityValue("\(Int(status.fraction * 100)) percent")
+                            } else if status.phase == .ready {
+                                Text("Downloaded").metaText()
+                            }
+                        }
+                    } trailing: {
+                        HStack(spacing: 12) {
+                            if status.phase == .downloading {
+                                Button("Cancel download") { Task { await store.cancelLocalCleanupDownload() } }
+                                    .buttonStyle(.secondary)
+                            } else if status.phase == .ready {
+                                Button("Use for dictation") { Task { await store.useLocalCleanup() } }
+                                    .buttonStyle(.primary)
+                                    .disabled(!status.runtimeAvailable)
+                                Button("Remove") { showRemoveCleanup = true }
+                                    .buttonStyle(QuietButton(color: Theme.live))
+                            } else {
+                                Button(status.phase == .failed ? "Retry download" : "Download") {
+                                    Task { await store.downloadLocalCleanup() }
+                                }
+                                .buttonStyle(.secondary)
+                                .disabled(!status.runtimeAvailable)
+                            }
+                        }
+                        .disabled(store.localCleanupBusy)
+                    }
+                    if !status.runtimeAvailable {
+                        ProviderNoteRow(
+                            text: status.error ?? "Offline cleanup is missing from this Sona installation. Reinstall Sona.",
+                            tone: Theme.live
+                        )
+                    } else if let error = status.error {
+                        ProviderNoteRow(text: error, tone: Theme.live)
+                    }
+                } else {
+                    ProviderFieldRow("Offline model") {
+                        Text("Checking download…").metaText()
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - The provider
 
     private var api: some View {
-        PageSection("API (OpenAI-compatible)") {
+        PageSection("Provider") {
             Card {
                 providerRow
-                if store.isAppleProvider {
+                if store.isLocalProvider {
+                    ProviderFieldRow("Model") {
+                        Text(store.localCleanup.map { "\($0.name) · \($0.language)" } ?? store.model)
+                            .bodyText(15, Theme.inkSecondary)
+                    }
+                } else if store.isAppleProvider {
                     if store.appleIntelligenceUnavailable {
                         ProviderNoteRow(
                             text: "Apple Intelligence is not available on this device. Requires an Apple Silicon Mac running macOS Tahoe (26.0) or later with Apple Intelligence enabled in System Settings.",

@@ -794,7 +794,7 @@ final class AppModel {
             live.clearCaptureRequest()
         }
         switch onboarding.step {
-        case .permissions, .model:
+        case .permissions, .languages, .model, .practice:
             reveal()
         case .probing, .done:
             break

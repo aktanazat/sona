@@ -56,33 +56,96 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// The device-config cache shared by [`AudioRecorder::open`] and
-/// [`AudioRecorder::prewarm_config`]. Keyed by device name so a system-default
-/// change misses naturally.
-type ConfigCache = Mutex<Option<(String, cpal::SupportedStreamConfig)>>;
+#[derive(Default)]
+pub(crate) struct InputConfigCache {
+    state: Mutex<InputConfigCacheState>,
+}
 
-/// The cached config for `device_name`, if this cache holds one for it.
-///
-/// An empty name never matches: cpal reports one for devices whose name query
-/// fails, and treating those as a single cache key would hand one device's
-/// rate and format to another.
+#[derive(Default)]
+struct InputConfigCacheState {
+    generation: u64,
+    identity: Option<[u64; 6]>,
+    config: Option<(String, cpal::SupportedStreamConfig)>,
+}
+
+impl InputConfigCache {
+    pub(crate) fn invalidate(&self) {
+        let mut state = lock_recover(&self.state);
+        state.generation = state.generation.wrapping_add(1);
+        state.config = None;
+    }
+
+    #[cfg(test)]
+    fn get_or_query<E>(
+        &self,
+        device_name: &str,
+        query: impl FnOnce() -> Result<cpal::SupportedStreamConfig, E>,
+    ) -> Result<cpal::SupportedStreamConfig, E> {
+        self.get_or_query_with_identity(device_name, None, query)
+    }
+
+    fn get_or_query_with_identity<E>(
+        &self,
+        device_name: &str,
+        identity: Option<[u64; 6]>,
+        query: impl FnOnce() -> Result<cpal::SupportedStreamConfig, E>,
+    ) -> Result<cpal::SupportedStreamConfig, E> {
+        let generation = {
+            let state = lock_recover(&self.state);
+            if let Some((name, config)) = &state.config {
+                if !device_name.is_empty() && name == device_name && state.identity == identity {
+                    return Ok(config.clone());
+                }
+            }
+            state.generation
+        };
+        let config = query()?;
+        let mut state = lock_recover(&self.state);
+        if !device_name.is_empty() && state.generation == generation {
+            state.config = Some((device_name.to_owned(), config.clone()));
+            state.identity = identity;
+        }
+        Ok(config)
+    }
+}
+
+fn device_configuration_key(device: &Device) -> (String, Option<[u64; 6]>) {
+    let name = device.name().unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    {
+        let identity = crate::audio_toolkit::audio::core_audio::input_configuration_identity(&name);
+        if identity.is_none() {
+            return (String::new(), None);
+        }
+        (name, identity)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (name, None)
+    }
+}
+
+#[cfg(test)]
 fn cached_config_for(
-    cache: &ConfigCache,
+    cache: &InputConfigCache,
     device_name: &str,
 ) -> Option<cpal::SupportedStreamConfig> {
-    lock_recover(cache)
+    lock_recover(&cache.state)
+        .config
         .as_ref()
         .filter(|(name, _)| !device_name.is_empty() && name == device_name)
         .map(|(_, config)| config.clone())
 }
 
-/// Remember the config this device reported, so the next open skips the HAL
-/// property queries. Unnamed devices are not cached, for the reason above.
-fn store_config(cache: &ConfigCache, device_name: String, config: cpal::SupportedStreamConfig) {
-    if device_name.is_empty() {
-        return;
+#[cfg(test)]
+fn store_config(
+    cache: &InputConfigCache,
+    device_name: String,
+    config: cpal::SupportedStreamConfig,
+) {
+    if !device_name.is_empty() {
+        lock_recover(&cache.state).config = Some((device_name, config));
     }
-    *lock_recover(cache) = Some((device_name, config));
 }
 
 fn sample_rate_to_usize(sample_rate: u32) -> usize {
@@ -178,7 +241,7 @@ enum Cmd {
     /// Begin capturing. Carries the send timestamp so the consumer can log how
     /// long the command sat in the channel, plus a one-shot acknowledgement
     /// sent only after the first microphone samples are processed.
-    Start(VadPolicy, Instant, mpsc::Sender<()>),
+    Start(VadPolicy, Instant, mpsc::Sender<()>, bool),
     Stop(mpsc::Sender<Result<RecordedAudio, CaptureError>>),
     StartMeeting {
         plan: SourceStartPlan,
@@ -486,13 +549,7 @@ pub struct AudioRecorder {
     audio_cb: Option<AudioFrameCallback>,
     /// Which input channel to use. None = average all (original behavior).
     selected_channel: Option<usize>,
-    /// Preferred stream config cached per device name. The two HAL property
-    /// queries in `get_preferred_config` cost ~26-44ms per open (worse on
-    /// USB/Bluetooth), which lands on the keypress->capture path in on-demand
-    /// mode. Filled by the first successful open, or ahead of it by
-    /// [`prewarm_config`](Self::prewarm_config); cleared whenever an open fails
-    /// so a stale rate/format self-heals on the caller's retry.
-    config_cache: Arc<ConfigCache>,
+    config_cache: Arc<InputConfigCache>,
     /// Set by cpal when the active input stream can no longer capture.
     stream_error: Arc<AtomicBool>,
 }
@@ -507,9 +564,14 @@ impl AudioRecorder {
             level_cb: None,
             audio_cb: None,
             selected_channel: None,
-            config_cache: Arc::new(Mutex::new(None)),
+            config_cache: Arc::new(InputConfigCache::default()),
             stream_error: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub(crate) fn with_config_cache(mut self, cache: Arc<InputConfigCache>) -> Self {
+        self.config_cache = cache;
+        self
     }
 
     /// Attach a single VAD engine, reconfigured per session for the offline vs
@@ -612,13 +674,10 @@ impl AudioRecorder {
                 String,
             > {
                 let config_started = Instant::now();
-                let cached_config = cached_config_for(&config_cache, &device_name);
-                let config_was_cached = cached_config.is_some();
-                let config = match cached_config {
-                    Some(cfg) => cfg,
-                    None => AudioRecorder::get_preferred_config(&thread_device)
-                        .map_err(|e| format!("Failed to fetch preferred config: {e}"))?,
-                };
+                let (config_name, identity) = device_configuration_key(&thread_device);
+                let config = config_cache
+                    .get_or_query_with_identity(&config_name, identity, || AudioRecorder::get_preferred_config(&thread_device, identity.is_some()))
+                    .map_err(|e| format!("Failed to fetch preferred config: {e}"))?;
                 let config_elapsed = config_started.elapsed();
 
                 let sample_rate = config.sample_rate().0;
@@ -697,18 +756,12 @@ impl AudioRecorder {
                     .play()
                     .map_err(|e| format!("Failed to start microphone stream: {e}"))?;
                 log::debug!(
-                    "mic worker init: fetch_config={:?} (cached={}) build_stream={:?} play={:?}",
+                    "mic worker init: fetch_config={:?} build_stream={:?} play={:?}",
                     config_elapsed,
-                    config_was_cached,
                     build_elapsed,
                     play_started.elapsed()
                 );
 
-                // The device accepted this config; remember it so the next
-                // open skips the HAL property queries entirely.
-                if !config_was_cached {
-                    store_config(&config_cache, device_name.clone(), config);
-                }
 
                 Ok((stream, sample_rate, consumer, meeting_control))
             })();
@@ -751,7 +804,7 @@ impl AudioRecorder {
                     // A failed open may mean the cached config went stale
                     // (device re-plugged, rate/format changed in the OS).
                     // Drop it so the next attempt re-queries the device.
-                    *lock_recover(&config_cache) = None;
+                    config_cache.invalidate();
                     log::error!("{error_message}");
                     let _ = init_tx.send(Err(error_message));
                 }
@@ -783,47 +836,18 @@ impl AudioRecorder {
         }
     }
 
-    /// Resolve and cache this device's preferred stream config without opening
-    /// a stream, so the first `open()` skips the HAL property queries that
-    /// otherwise land between the keypress and the first captured sample.
-    ///
-    /// Measured on an M4 Pro: `default_input_config` + `supported_input_configs`
-    /// cost 44ms on the first call and ~26ms on later ones for an LG UltraFine
-    /// display-audio input, and CoreAudio does not cache them for us — which is
-    /// why this cache exists at all.
-    ///
-    /// These are property reads: no AudioUnit is constructed and the device is
-    /// never started, so this does not raise the OS microphone indicator.
-    /// Verified on macOS 26.6 by polling
-    /// `kAudioDevicePropertyDeviceIsRunningSomewhere` (stayed 0) and by
-    /// counting orange menu-bar pixels across the call (stayed 0).
-    ///
-    /// A config cached here is a claim about what the device reports, not that
-    /// an open succeeded with it. `open()` already clears the cache and
-    /// re-queries when a build fails, which is the same self-healing path a
-    /// re-plugged device takes.
-    pub fn prewarm_config(&self, device: Option<Device>) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn prewarm_config(
+        cache: &InputConfigCache,
+        device: Option<Device>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let device = match device {
             Some(device) => device,
             None => crate::audio_toolkit::get_cpal_host()
                 .default_input_device()
                 .ok_or_else(|| Error::new(std::io::ErrorKind::NotFound, "No input device found"))?,
         };
-        let device_name = device.name().unwrap_or_default();
-        if cached_config_for(&self.config_cache, &device_name).is_some() {
-            return Ok(());
-        }
-        let started = Instant::now();
-        let config = Self::get_preferred_config(&device)?;
-        log::debug!(
-            "prewarmed input config for {:?} in {:?}: {} Hz, {} ch, {:?}",
-            device_name,
-            started.elapsed(),
-            config.sample_rate().0,
-            config.channels(),
-            config.sample_format()
-        );
-        store_config(&self.config_cache, device_name, config);
+        let (device_name, identity) = device_configuration_key(&device);
+        cache.get_or_query_with_identity(&device_name, identity, || Self::get_preferred_config(&device, identity.is_some()))?;
         Ok(())
     }
 
@@ -837,12 +861,24 @@ impl AudioRecorder {
         &self,
         vad_policy: VadPolicy,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
+        self.start_capture(vad_policy, true)
+    }
+
+    pub(crate) fn start_practice(&self) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
+        self.start_capture(VadPolicy::Disabled, false)
+    }
+
+    fn start_capture(
+        &self,
+        vad_policy: VadPolicy,
+        forward_audio: bool,
+    ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
         let tx = self
             .cmd_tx
             .as_ref()
             .ok_or_else(|| Error::other("Recorder is not open"))?;
         let (ready_tx, ready_rx) = mpsc::channel();
-        tx.send(Cmd::Start(vad_policy, Instant::now(), ready_tx))?;
+        tx.send(Cmd::Start(vad_policy, Instant::now(), ready_tx, forward_audio))?;
         Ok(ready_rx)
     }
 
@@ -1050,24 +1086,34 @@ impl AudioRecorder {
         )
     }
 
-    pub fn preferred_input_channel_count(
+    pub(crate) fn preferred_input_channel_count(
+        cache: &InputConfigCache,
         device: &cpal::Device,
     ) -> Result<u16, Box<dyn std::error::Error>> {
-        Ok(Self::get_preferred_config(device)?.channels())
+        let (name, identity) = device_configuration_key(device);
+        Ok(cache.get_or_query_with_identity(&name, identity, || Self::get_preferred_config(device, identity.is_some()))?.channels())
     }
 
     fn get_preferred_config(
         device: &cpal::Device,
+        default_channels_confirmed: bool,
     ) -> Result<cpal::SupportedStreamConfig, Box<dyn std::error::Error>> {
-        // Use the device's native/default sample rate and let the FrameResampler
-        // in run_consumer() downsample to 16kHz. This avoids forcing hardware into
-        // a non-native rate which can cause issues on some devices (Bluetooth
-        // codecs, certain ALSA drivers, etc.).
-        let default_config = device.default_input_config()?;
-        let target_rate = default_config.sample_rate();
+        Self::select_preferred_config(device.default_input_config()?, default_channels_confirmed, || device.supported_input_configs())
+    }
 
-        // Try to find the best sample format at the device's default rate
-        let supported_configs = match device.supported_input_configs() {
+    fn select_preferred_config<I>(
+        default_config: cpal::SupportedStreamConfig,
+        default_channels_confirmed: bool,
+        supported: impl FnOnce() -> Result<I, cpal::SupportedStreamConfigsError>,
+    ) -> Result<cpal::SupportedStreamConfig, Box<dyn std::error::Error>>
+    where
+        I: Iterator<Item = cpal::SupportedStreamConfigRange>,
+    {
+        if default_channels_confirmed && default_config.sample_format() == cpal::SampleFormat::F32 {
+            return Ok(default_config);
+        }
+        let target_rate = default_config.sample_rate();
+        let supported_configs = match supported() {
             Ok(configs) => configs,
             Err(e) => {
                 log::warn!("Could not enumerate input configs ({e}), using device default");
@@ -1615,6 +1661,7 @@ fn run_consumer(inputs: ConsumerInputs) {
     let mut silence_until_speech: Option<Vec<f32>> = None;
     let mut recording = false;
     let mut vad_policy = VadPolicy::Offline;
+    let mut session_audio_cb = audio_cb.clone();
 
     // ---------- latency instrumentation ---------------------------------- //
     // First arrival exposes the play()->samples-flowing gap; the first-captured
@@ -1747,7 +1794,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                 $chunk,
                 vad_policy,
                 &vad,
-                &audio_cb,
+                &session_audio_cb,
                 &mut frame_resampler,
                 &mut processed_samples,
                 &mut silence_until_speech,
@@ -1777,7 +1824,7 @@ fn run_consumer(inputs: ConsumerInputs) {
             };
 
             match cmd {
-                Cmd::Start(policy, sent_at, ready_tx) => {
+                Cmd::Start(policy, sent_at, ready_tx, forward_audio) => {
                     if let Some(capture) = active_meeting.as_ref() {
                         // A dictation during a meeting shares the meeting's
                         // lane: the meeting keeps its stop barrier, its overrun
@@ -1810,6 +1857,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                     capture_ready_tx = Some((ready_tx, start_landed_at));
                     heard_sound = false;
                     vad_policy = policy;
+                    session_audio_cb = if forward_audio { audio_cb.clone() } else { None };
                     processed_samples.clear();
                     silence_until_speech = (policy != VadPolicy::Disabled).then(Vec::new);
                     recording = true;
@@ -1881,7 +1929,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                             frame,
                             vad_policy,
                             &vad,
-                            &audio_cb,
+                            &session_audio_cb,
                             &mut processed_samples,
                             &mut silence_until_speech,
                         )
@@ -2243,8 +2291,8 @@ mod tests {
         cached_config_for, capture_into_lane, capture_into_timed_lane, capture_lane,
         is_microphone_access_denied, is_no_input_device_error, observe_meeting_packet,
         retain_no_speech_samples, run_consumer, store_config, ActiveMeetingCapture, AudioRecorder,
-        CaptureError, CaptureProducer, Cmd, ConsumerInputs, MeetingCallbackControl, PacketSink,
-        ReadyOn, RecordedAudio, TimedCaptureState, VadConfig, VadPolicy,
+        CaptureError, CaptureProducer, Cmd, ConsumerInputs, InputConfigCache, MeetingCallbackControl,
+        PacketSink, ReadyOn, RecordedAudio, TimedCaptureState, VadConfig, VadPolicy,
         MAX_NO_SPEECH_HISTORY_SAMPLES,
     };
     use crate::audio_toolkit::vad::{VadFrame, VoiceActivityDetector};
@@ -2440,7 +2488,7 @@ mod tests {
     fn start_with_policy(cmd_tx: &mpsc::Sender<Cmd>, policy: VadPolicy) -> mpsc::Receiver<()> {
         let (ready_tx, ready_rx) = mpsc::channel();
         cmd_tx
-            .send(Cmd::Start(policy, Instant::now(), ready_tx))
+            .send(Cmd::Start(policy, Instant::now(), ready_tx, true))
             .expect("send start");
         ready_rx
     }
@@ -2786,7 +2834,7 @@ mod tests {
     /// a failed build on the same device.
     #[test]
     fn a_cached_config_is_reused_only_for_the_device_that_reported_it() {
-        let cache = Mutex::new(None);
+        let cache = InputConfigCache::default();
         store_config(&cache, "LG UltraFine".to_string(), test_config(48_000));
 
         assert_eq!(
@@ -2801,7 +2849,7 @@ mod tests {
     /// unnamed device must neither fill the cache nor read from it.
     #[test]
     fn an_unnamed_device_neither_fills_nor_reads_the_config_cache() {
-        let cache = Mutex::new(None);
+        let cache = InputConfigCache::default();
         store_config(&cache, String::new(), test_config(44_100));
         assert!(cached_config_for(&cache, "").is_none());
 
@@ -2831,6 +2879,139 @@ mod tests {
         );
         assert!(matches!(recorder.stop(), Err(CaptureError::NotCapturing)));
         assert!(!recorder.needs_reopen());
+    }
+
+    #[test]
+    fn a_float_default_does_not_enumerate_formats_again() {
+        let mut enumerations = 0;
+        let config = AudioRecorder::select_preferred_config(test_config(48_000), true, || {
+            enumerations += 1;
+            Ok(std::iter::empty::<cpal::SupportedStreamConfigRange>())
+        })
+        .expect("preferred config");
+        assert_eq!(config.sample_rate().0, 48_000);
+        assert_eq!(config.sample_format(), cpal::SampleFormat::F32);
+        assert_eq!(enumerations, 0);
+    }
+
+    #[test]
+    fn an_integer_default_still_selects_float_at_the_native_rate() {
+        let default = cpal::SupportedStreamConfig::new(
+            2, cpal::SampleRate(44_100), cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::I16,
+        );
+        let preferred = cpal::SupportedStreamConfigRange::new(
+            2, cpal::SampleRate(44_100), cpal::SampleRate(48_000),
+            cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::F32,
+        );
+        let config = AudioRecorder::select_preferred_config(default, true, || {
+            Ok(std::iter::once(preferred))
+        }).expect("float configuration");
+        assert_eq!(config.sample_rate().0, 44_100);
+        assert_eq!(config.channels(), 2);
+        assert_eq!(config.sample_format(), cpal::SampleFormat::F32);
+    }
+
+    #[test]
+    fn unconfirmed_default_channels_still_use_the_supported_channel_layout() {
+        let preferred = cpal::SupportedStreamConfigRange::new(
+            4, cpal::SampleRate(48_000), cpal::SampleRate(48_000),
+            cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::F32,
+        );
+        let config = AudioRecorder::select_preferred_config(test_config(48_000), false, || {
+            Ok(std::iter::once(preferred))
+        }).expect("full channel configuration");
+        assert_eq!(config.channels(), 4);
+    }
+
+    #[test]
+    fn configuration_preparation_does_not_hold_the_cache_during_discovery() {
+        let cache = InputConfigCache::default();
+        let selected = cache
+            .get_or_query("display", || {
+                assert!(cache.state.try_lock().is_ok(), "discovery held the configuration lock");
+                cache.invalidate();
+                Ok::<_, ()>(test_config(48_000))
+            })
+            .expect("query completes");
+        assert_eq!(selected.sample_rate().0, 48_000);
+        assert!(cached_config_for(&cache, "display").is_none());
+    }
+
+    #[test]
+    fn channel_discovery_reuses_the_prepared_format_without_a_second_query() {
+        let cache = InputConfigCache::default();
+        let mut queries = 0;
+        for _ in 0..2 {
+            let config = cache
+                .get_or_query("display", || {
+                    queries += 1;
+                    Ok::<_, ()>(test_config(48_000))
+                })
+                .expect("configuration");
+            assert_eq!(config.channels(), 1);
+        }
+        assert_eq!(queries, 1);
+    }
+
+    #[test]
+    fn a_replugged_device_does_not_reuse_the_previous_device_configuration() {
+        let cache = InputConfigCache::default();
+        cache.get_or_query_with_identity("display", Some([1, 48_000, 1, 0, 0, 32]), || {
+            Ok::<_, ()>(test_config(48_000))
+        }).expect("initial configuration");
+        let mut queries = 0;
+        cache.get_or_query_with_identity("display", Some([2, 48_000, 1, 0, 0, 32]), || {
+            queries += 1;
+            Ok::<_, ()>(test_config(48_000))
+        }).expect("replugged configuration");
+        assert_eq!(queries, 1);
+    }
+
+    #[test]
+    fn a_native_format_change_does_not_reuse_the_previous_configuration() {
+        let cache = InputConfigCache::default();
+        cache.get_or_query_with_identity("display", Some([1, 48_000, 1, 0, 0, 32]), || {
+            Ok::<_, ()>(test_config(48_000))
+        }).expect("initial configuration");
+        let changed = cache.get_or_query_with_identity("display", Some([1, 44_100, 2, 0, 0, 32]), || {
+            Ok::<_, ()>(test_config(44_100))
+        }).expect("changed configuration");
+        assert_eq!(changed.sample_rate().0, 44_100);
+    }
+
+    #[test]
+    fn a_practice_capture_keeps_audio_without_forwarding_it_to_live_dictation() {
+        let (mut producer, consumer) = capture_lane::lane(16_000 * super::LANE_SECONDS);
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let forwarded_callback = Arc::clone(&forwarded);
+        let worker = thread::spawn(move || {
+            run_consumer(ConsumerInputs {
+                in_sample_rate: 16_000,
+                vad: None,
+                lane: consumer,
+                cmd_rx,
+                level_cb: None,
+                audio_cb: Some(Arc::new(move |_| {
+                    forwarded_callback.fetch_add(1, Ordering::AcqRel);
+                })),
+                stream_running_at: Instant::now(),
+                meeting_control: Arc::new(MeetingCallbackControl::new()),
+                ready_on: ReadyOn::FirstBuffer,
+            });
+        });
+        let (ready_tx, ready_rx) = mpsc::channel();
+        cmd_tx.send(Cmd::Start(VadPolicy::Disabled, Instant::now(), ready_tx, false))
+            .expect("start practice");
+        let input = [0.25; 480];
+        capture_into_lane(&input, 1, None, &mut producer);
+        ready_rx.recv_timeout(Duration::from_secs(1)).expect("practice ready");
+        let recorded = stop_and_collect(&cmd_tx, &mut producer, &input).expect("practice samples");
+        cmd_tx.send(Cmd::Shutdown).expect("shutdown");
+        worker.join().expect("consumer");
+        assert!(!recorded.is_empty());
+        assert_eq!(recorded.first(), Some(&0.25));
+        assert_eq!(forwarded.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -4,4 +4,4 @@
 # cloudflare/sona-companion/test/**. Both fail hard under bun (Playwright rejects
 # a bare `test.describe()`, and `cloudflare:test` only resolves inside the
 # workers pool), so bun must not claim them while walking the tree.
-pathIgnorePatterns = ["**/*.spec.ts", "**/*.spec.tsx"]
+pathIgnorePatterns = ["**/*.spec.ts", "**/*.spec.tsx", "src-tauri/vendor/**", "src-tauri/target/**"]

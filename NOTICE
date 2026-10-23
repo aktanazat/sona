@@ -15,3 +15,23 @@ ten-vad is licensed under the Apache License 2.0 with additional conditions,
 including a restriction on deploying it in competition with Agora's offerings.
 The full license accompanies the upstream project, which is available at
 https://github.com/TEN-framework/ten-vad. Powered by ten-vad.
+
+Sona's optional English offline cleanup helper includes llama.cpp and ggml
+at revision 620d2225cc436ab0b001e3200e590e3b286ef9ab, licensed under
+the MIT License. Copyright (c) 2023-2026 The ggml authors.
+The upstream project is https://github.com/ggml-org/llama.cpp.
+The complete license is bundled as resources/cleanup-runtime/llama-LICENSE.
+
+The cleanup helper also includes JSON for Modern C++ version 3.12.0,
+licensed under the MIT License. Copyright (c) 2013-2025 Niels Lohmann.
+The complete license is bundled as resources/cleanup-runtime/json-LICENSE
+and is copied from the version's original license:
+https://github.com/nlohmann/json/blob/55f93686c01528224f448c19128836e7df245f72/LICENSE.MIT
+
+Sona optionally downloads the Qwen Team's Qwen2.5-1.5B-Instruct model for
+English cleanup, licensed under the Apache License 2.0. Copyright 2024
+Alibaba Cloud. The unmodified official Q4_K_M GGUF model is pinned at
+revision 91cad51170dc346986eccefdc2dd33a9da36ead9:
+https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF
+The complete license and attribution are bundled as
+resources/cleanup-runtime/model-LICENSE even before the optional download.

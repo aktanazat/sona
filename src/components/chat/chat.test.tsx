@@ -647,6 +647,8 @@ const RESOLVE: AgentPanelActionV1 = {
   },
   state: "pending",
   operation_id: null,
+  can_undo: false,
+  detail: null,
 };
 
 const offering = (
@@ -682,6 +684,7 @@ describe("a corpus change the answer offered", () => {
         ...RESOLVE,
         state: "applied",
         operation_id: "3f1a-op",
+        can_undo: true,
       }),
     });
 
@@ -714,6 +717,8 @@ describe("a corpus change the answer offered", () => {
         },
         state: "pending",
         operation_id: null,
+        can_undo: false,
+        detail: null,
       }),
     });
 

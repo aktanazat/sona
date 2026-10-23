@@ -65,6 +65,7 @@ final class AppModel: NSObject, ObservableObject {
     private var keyboardSignal: KeyboardSignal?
     private var keyboardTicker: Task<Void, Never>?
     private var keyboardRequestID: UUID?
+    private var keyboardRequestDocumentID: UUID?
     private var lastKeyboardRequestID: UUID?
     private var keyboardDocumentID: UUID?
     private var pendingURL: URL?
@@ -183,6 +184,7 @@ final class AppModel: NSObject, ObservableObject {
             dictation.endWarmSession()
             withdrawKeyboardDraft()
             keyboardRequestID = nil
+            keyboardRequestDocumentID = nil
             lastKeyboardRequestID = nil
         } else if let pendingURL { handle(pendingURL) }
         publishKeyboardState()
@@ -191,6 +193,7 @@ final class AppModel: NSObject, ObservableObject {
     private func startKeyboardDictation(requestID: UUID, documentID: UUID?) {
         guard canStartDictation, !dictation.isBusy else { return }
         keyboardRequestID = requestID
+        keyboardRequestDocumentID = documentID
         lastKeyboardRequestID = requestID
         keyboardDocumentID = documentID
         dictation.start(keyboard: true)
@@ -222,6 +225,7 @@ final class AppModel: NSObject, ObservableObject {
         case .authorizing, .finishing: phase = .finishing
         case .idle:
             keyboardRequestID = nil
+            keyboardRequestDocumentID = nil
             phase = dictation.isWarm ? .ready : (dictation.notice == nil ? .off : .failed)
         }
         do {
@@ -450,33 +454,37 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     private func collectDictation(_ capture: DictationCapture) {
-        if capture.audio != nil || !capture.text.isEmpty {
-            do {
-                try library.keep(kind: capture.isThought ? .note : .dictation,
-                                 title: String(capture.text.prefix(80)), text: capture.text,
-                                 date: capture.startedAt, audio: capture.audio)
-            } catch { library.error = error.localizedDescription }
-        }
+        var keyboardStore: KeyboardDraftStore?
+        var draftError: String?
         if keyboardRequestID != nil, !capture.isThought, capture.error == nil, !capture.text.isEmpty {
-            do {
-                keyboardDraft = try KeyboardDraftStore.shared()
-                    .save(text: capture.text, documentID: keyboardDocumentID).id
-            } catch { library.error = error.localizedDescription }
+            do { keyboardStore = try KeyboardDraftStore.shared() }
+            catch { draftError = error.localizedDescription }
         }
-        keyboardRequestID = nil
-        guard let audio = capture.audio else { return }
-        guard capture.isThought else {
-            try? FileManager.default.removeItem(at: audio.url)
-            return
-        }
-        let thought = QueuedThought(
-            origin: .voice, text: capture.text, link: nil,
-            attachments: [ThoughtAttachment(kind: .audio(durationMs: audio.durationMs),
-                file: "audio.pcm", byteLength: audio.byteLength, sha256: audio.sha256)]
+        let background = UIApplication.shared.beginBackgroundTask(withName: "Save dictation")
+        let delivery = library.deliverDictation(
+            kind: capture.isThought ? .note : .dictation,
+            text: capture.text, date: capture.startedAt, audio: capture.audio,
+            keyboardStore: keyboardStore, documentID: keyboardRequestDocumentID,
+            removeSourceAfterSaving: !capture.isThought
         )
-        AppModel.tap()
-        thoughtsKept += 1
+        if let draft = delivery.draft { keyboardDraft = draft.id }
+        if let draftError { library.error = draftError }
+        keyboardRequestID = nil
+        keyboardRequestDocumentID = nil
         Task {
+            defer {
+                if background != .invalid { UIApplication.shared.endBackgroundTask(background) }
+            }
+            _ = await delivery.saving.value
+            if let draftError { library.error = draftError }
+            guard capture.isThought, let audio = capture.audio else { return }
+            let thought = QueuedThought(
+                origin: .voice, text: capture.text, link: nil,
+                attachments: [ThoughtAttachment(kind: .audio(durationMs: audio.durationMs),
+                    file: "audio.pcm", byteLength: audio.byteLength, sha256: audio.sha256)]
+            )
+            AppModel.tap()
+            thoughtsKept += 1
             await enqueue(thought: thought, capturedAtUtcMs: Int64(capture.startedAt.timeIntervalSince1970 * 1000),
                           files: [audio.url])
         }

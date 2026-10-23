@@ -659,4 +659,33 @@ describe("the mode's rewrite provider row", () => {
     // A store written before the field existed omits it, which is inherit.
     expect(modeLlmDestination({ model_id: "" }, global).inherited).toBe(true);
   });
+
+  test.each(["", "gpt-4o-mini"])(
+    "offline cleanup resolves the backend's fixed model instead of %j",
+    (previousModel) => {
+      expect(
+        modeLlmDestination(
+          { provider_id: "sona_local", model_id: previousModel },
+          { post_process_models: { sona_local: "backend-offline-model" } },
+        ),
+      ).toEqual({
+        providerId: "sona_local",
+        modelId: "backend-offline-model",
+        inherited: false,
+      });
+    },
+  );
+
+  test("Apple Intelligence resolves its fixed model when no model was entered", () => {
+    expect(
+      modeLlmDestination(
+        { provider_id: "apple_intelligence", model_id: "" },
+        null,
+      ),
+    ).toEqual({
+      providerId: "apple_intelligence",
+      modelId: "Apple Intelligence",
+      inherited: false,
+    });
+  });
 });

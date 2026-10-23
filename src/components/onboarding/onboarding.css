@@ -1,11 +1,3 @@
-/* First-run surfaces: permissions and model choice.
- *
- * Both are one column, left-aligned, on the page surface — no panel, no card.
- * A permission is not a selectable object, so it is a flat section with a
- * hairline above it, per vercel.com/design.md; a model is one you pick, so it
- * is a row with a hover wash. Nothing on either screen is boxed: one screen
- * that asks for one thing does not need a container to say where it is. */
-
 .ob-stage {
   /* Top-aligned with an auto margin on the column, not `align-items: center`:
      the model list can outgrow the window once the disclosure is open, and a
@@ -259,6 +251,61 @@
   font-size: var(--type-secondary-size);
   font-variant-numeric: tabular-nums;
   line-height: var(--type-secondary-line);
+}
+
+.ob-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-6);
+}
+
+.ob-actions > button,
+.ob-language-picker {
+  min-block-size: var(--touch-target);
+}
+
+.ob-language-picker {
+  inline-size: 100%;
+  justify-content: space-between;
+  white-space: normal;
+}
+
+.ob-language-picker > span {
+  min-inline-size: 0;
+  text-align: start;
+}
+
+.ob-practice {
+  margin-top: var(--space-6);
+}
+
+.ob-practice-status,
+.ob-transcript > label,
+.ob-error {
+  font-size: var(--fs-label-14);
+  line-height: 21px;
+  text-wrap: pretty;
+}
+
+.ob-practice-status {
+  color: var(--color-text-secondary);
+}
+
+.ob-transcript {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.ob-transcript > label {
+  color: var(--color-text-primary);
+  font-weight: var(--fw-button);
+}
+
+.ob-error {
+  color: var(--color-danger-strong);
+  margin-top: var(--space-4);
 }
 
 @media (prefers-reduced-motion: reduce) {

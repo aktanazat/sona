@@ -394,13 +394,7 @@ test.describe("first run", () => {
   }) => {
     await openFirstRun(page, true);
 
-    // Granted, so this screen has nothing to ask and hands over to the model.
-    await expect(
-      page.getByRole("heading", {
-        name: "Pick a transcription model",
-        exact: true,
-      }),
-    ).toBeVisible();
+    await expect(page.getByRole("combobox")).toBeVisible();
 
     /* The number. Completing this step writes the audio device lists into the
      * settings store, which re-renders the shell above it; while the mount

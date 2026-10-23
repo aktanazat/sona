@@ -29,6 +29,7 @@ mod identity_adoption;
 mod input;
 mod integrations;
 mod launch_trace;
+mod local_cleanup;
 mod llm_client;
 mod managers;
 pub mod meeting;
@@ -744,6 +745,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
 
     // Add managers to Tauri's managed state
     app_handle.manage(recording_manager.clone());
+    app_handle.manage(Arc::new(commands::onboarding::OnboardingPracticeManager::default()));
     #[cfg(target_os = "macos")]
     app_handle.manage(chat_voice::VoiceManager::new(
         app_handle,
@@ -1785,6 +1787,15 @@ pub fn run(cli_args: CliArgs) {
             commands::models::get_transcription_model_status,
             commands::models::is_model_loading,
             commands::models::rescan_local_models,
+            commands::onboarding::start_onboarding_practice,
+            commands::onboarding::stop_onboarding_practice,
+            commands::onboarding::cancel_onboarding_practice,
+            commands::onboarding::complete_onboarding_practice,
+            commands::local_cleanup::get_local_cleanup_status,
+            commands::local_cleanup::download_local_cleanup,
+            commands::local_cleanup::cancel_local_cleanup_download,
+            commands::local_cleanup::remove_local_cleanup,
+            commands::local_cleanup::select_local_cleanup,
             commands::audio::update_microphone_mode,
             commands::audio::get_microphone_mode,
             commands::audio::get_windows_microphone_permission_status,

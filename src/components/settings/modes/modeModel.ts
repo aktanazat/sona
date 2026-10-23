@@ -358,19 +358,25 @@ export const INHERIT_GLOBAL_PROVIDER = "__mode_inherit_global_provider__";
  * unsaved draft: the backend cannot answer for a provider the user picked two
  * keystrokes ago, and a row that names a provider the run will not use is the
  * defect this pair was built to close.
- *
- * The rule is one fallback and nothing else — no consent, credential or
- * endpoint state — precisely so the two copies cannot drift apart.
  */
 export const modeLlmDestination = (
   llm: Pick<ModeLlmSettings, "provider_id" | "model_id">,
-  global: AppSettings | null,
+  global: Pick<
+    AppSettings,
+    "post_process_provider_id" | "post_process_models"
+  > | null,
 ): ModeLlmDestinationView => {
   /* Absent and null are the same claim — this mode named no provider. A store
    * written before the field existed omits it entirely. */
   const override = llm.provider_id ?? null;
   if (override !== null) {
-    return { providerId: override, modelId: llm.model_id, inherited: false };
+    const modelId =
+      override === "sona_local"
+        ? (global?.post_process_models?.[override] ?? "")
+        : override === "apple_intelligence" && !llm.model_id.trim()
+          ? "Apple Intelligence"
+          : llm.model_id;
+    return { providerId: override, modelId, inherited: false };
   }
   const providerId = global?.post_process_provider_id ?? "";
   return {

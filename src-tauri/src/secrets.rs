@@ -955,6 +955,7 @@ fn provider_account_for_command(
     match kind {
         SecretKind::Llm => {
             if provider_id == settings::APPLE_INTELLIGENCE_PROVIDER_ID
+                || provider_id == settings::LOCAL_CLEANUP_PROVIDER_ID
                 || settings.post_process_provider(provider_id).is_none()
             {
                 return Err(SecretCommandError::Invalid);
@@ -1766,6 +1767,15 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         }
+    }
+
+    #[test]
+    fn keyless_local_cleanup_rejects_credential_commands() {
+        let settings = settings::get_default_settings();
+        assert!(matches!(
+            provider_account_for_command(&settings, SecretKind::Llm, settings::LOCAL_CLEANUP_PROVIDER_ID),
+            Err(SecretCommandError::Invalid)
+        ));
     }
 
     /// The privacy page reloads on every settings announcement and asks for

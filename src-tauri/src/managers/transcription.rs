@@ -372,28 +372,26 @@ impl StreamRouter {
         if !self.accepting_audio.load(Ordering::Acquire) {
             return;
         }
-        if frame.len() > STREAM_PREVIEW_FRAME_SAMPLES {
-            self.disable_preview("received an oversized frame");
+        let route = self
+            .route
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(route) = route.as_ref() else {
             return;
-        }
-
-        let send_result = {
-            let route = self
-                .route
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(route) = route.as_ref() else {
-                return;
-            };
-            route.audio_tx.try_send(frame.to_vec())
         };
-        if let Err(error) = send_result {
-            match error {
-                mpsc::TrySendError::Full(_) => {
+        for chunk in frame.chunks(STREAM_PREVIEW_FRAME_SAMPLES) {
+            if !self.accepting_audio.load(Ordering::Acquire) {
+                break;
+            }
+            match route.audio_tx.try_send(chunk.to_vec()) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
                     self.disable_preview("decoder backlog reached the two-second limit");
+                    break;
                 }
-                mpsc::TrySendError::Disconnected(_) => {
+                Err(mpsc::TrySendError::Disconnected(_)) => {
                     self.disable_preview("preview worker stopped receiving audio");
+                    break;
                 }
             }
         }
@@ -4325,6 +4323,125 @@ mod tests {
         assert_eq!(cancelled_starts.load(Ordering::Acquire), 0);
     }
 
+    fn smoothed_onset_and_continuation() -> (Vec<Vec<f32>>, Vec<f32>) {
+        use crate::audio_toolkit::vad::{
+            SmoothedVad, VadFrame, VoiceActivityDetector, VAD_ONSET_FRAMES, VAD_PREFILL_FRAMES,
+            VAD_STREAMING_HANGOVER_FRAMES,
+        };
+
+        struct SignalVad;
+
+        impl VoiceActivityDetector for SignalVad {
+            fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> Result<VadFrame<'a>> {
+                Ok(if frame[0] > 0.0 {
+                    VadFrame::Speech(frame)
+                } else {
+                    VadFrame::Noise
+                })
+            }
+        }
+
+        let input: Vec<f32> = (0..18 * STREAM_PREVIEW_FRAME_SAMPLES)
+            .map(|sample| {
+                let amplitude =
+                    f32::from(u16::try_from(sample + 1).expect("fixture sample fits u16"))
+                        / 16_000.0;
+                if sample < 15 * STREAM_PREVIEW_FRAME_SAMPLES {
+                    -amplitude
+                } else {
+                    amplitude
+                }
+            })
+            .collect();
+        let mut vad = SmoothedVad::new(
+            Box::new(SignalVad),
+            VAD_PREFILL_FRAMES,
+            VAD_STREAMING_HANGOVER_FRAMES,
+            VAD_ONSET_FRAMES,
+        );
+        let mut packets = Vec::new();
+        for frame in input.chunks(STREAM_PREVIEW_FRAME_SAMPLES) {
+            if let VadFrame::Speech(pcm) = vad.push_frame(frame).expect("smoothed speech frame") {
+                packets.push(pcm.to_vec());
+            }
+        }
+        (packets, input[STREAM_PREVIEW_FRAME_SAMPLES..].to_vec())
+    }
+
+    #[test]
+    fn local_speech_onset_is_received_before_finalize_and_live_audio_continues() {
+        let (packets, expected) = smoothed_onset_and_continuation();
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].len(), 7_680);
+        let router = Arc::new(StreamRouter::new());
+        let (lanes_tx, lanes_rx) = mpsc::sync_channel(1);
+        let start_router = Arc::clone(&router);
+        router.arm_on_first_speech(move || {
+            lanes_tx
+                .send(start_router.open())
+                .expect("first speech opens local stream");
+        });
+
+        router.feed(&packets[0]);
+        let mut lanes = lanes_rx
+            .try_recv()
+            .expect("first speech started local stream");
+        let onset: Vec<f32> = lanes.audio_rx.try_iter().flatten().collect();
+        assert_eq!(onset, expected[..7_680]);
+
+        router.feed(&packets[1]);
+        let route = router.take().expect("local stream remains open");
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        route
+            .control_tx
+            .send(StreamControl::Finalize(reply_tx))
+            .expect("finalize local stream");
+        let StreamCmd::Feed(continuation) = lanes.recv().expect("live continuation") else {
+            panic!("finalize overtook live continuation");
+        };
+        assert_eq!(continuation, expected[7_680..]);
+        assert!(matches!(
+            lanes.recv().expect("finalize after live audio"),
+            StreamCmd::Finalize(_)
+        ));
+        assert!(!router.preview_degraded());
+    }
+
+    #[test]
+    fn aggregated_audio_preserves_partial_tail_and_order_before_finalize() {
+        let router = StreamRouter::new();
+        let mut lanes = router.open();
+        let aggregated: Vec<f32> = (0_u16..1_097)
+            .map(|sample| f32::from(sample) / 1_600.0)
+            .collect();
+        let continuation = vec![-0.75; 31];
+        router.feed(&aggregated);
+        router.feed(&continuation);
+        let route = router.take().expect("active stream route");
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        route
+            .control_tx
+            .send(StreamControl::Finalize(reply_tx))
+            .expect("finalize after partial tail");
+
+        let mut frames = Vec::new();
+        loop {
+            match lanes.recv().expect("audio before finalize") {
+                StreamCmd::Feed(pcm) => frames.push(pcm),
+                StreamCmd::Finalize(_) => break,
+                StreamCmd::Cancel => panic!("stream unexpectedly cancelled"),
+            }
+        }
+        assert_eq!(
+            frames.iter().map(Vec::len).collect::<Vec<_>>(),
+            [480, 480, 137, 31]
+        );
+        let received: Vec<f32> = frames.into_iter().flatten().collect();
+        let expected: Vec<f32> = aggregated.into_iter().chain(continuation).collect();
+        assert_eq!(received, expected);
+        assert!(!router.preview_degraded());
+    }
+
     #[test]
     fn preview_queue_overflow_preserves_finalize_order() {
         let router = StreamRouter::new();
@@ -4360,15 +4477,23 @@ mod tests {
     fn decoder_stall_bounds_preview_audio_memory() {
         let router = StreamRouter::new();
         let lanes = router.open();
-        let frame = vec![0.25; STREAM_PREVIEW_FRAME_SAMPLES];
+        let audio: Vec<f32> = (0..STREAM_PREVIEW_QUEUE_SAMPLES * 4)
+            .map(|sample| {
+                rustfft::num_traits::ToPrimitive::to_f32(&sample)
+                    .expect("fixture sample is exactly representable in f32")
+            })
+            .collect();
 
-        for _ in 0..(STREAM_PREVIEW_QUEUE_CAPACITY * 4) {
-            router.feed(&frame);
-        }
+        router.feed(&audio);
 
         assert!(router.preview_degraded());
-        let queued_samples: usize = lanes.audio_rx.try_iter().map(|pcm| pcm.len()).sum();
-        assert!(queued_samples <= STREAM_PREVIEW_QUEUE_SAMPLES);
+        let queued: Vec<f32> = lanes.audio_rx.try_iter().flatten().collect();
+        let capacity_samples = STREAM_PREVIEW_QUEUE_CAPACITY * STREAM_PREVIEW_FRAME_SAMPLES;
+        assert_eq!(queued, audio[..capacity_samples]);
+        assert!(queued.len() <= STREAM_PREVIEW_QUEUE_SAMPLES);
+
+        router.feed(&[0.75; STREAM_PREVIEW_FRAME_SAMPLES]);
+        assert_eq!(lanes.audio_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
     }
 
     #[test]
@@ -4944,6 +5069,7 @@ mod tests {
     #[test]
     fn filler_removal_precedes_the_passes_that_author_text() {
         let settings = AppSettings {
+            filler_word_removal_enabled: true,
             replacements_enabled: true,
             replacements_rules: vec![crate::settings::ReplacementRule {
                 spoken: "amei".to_string(),
@@ -4960,10 +5086,6 @@ mod tests {
             }],
             ..AppSettings::default()
         };
-        assert!(
-            settings.filler_word_removal_enabled,
-            "this test is about the stock install"
-        );
         let mut asr = AsrPlan::from_settings(&settings);
         asr.literal_punctuation = true;
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
@@ -5086,7 +5208,7 @@ mod tests {
 
     #[cfg(feature = "cloud-realtime")]
     #[test]
-    fn fake_cloud_transport_returns_interim_timestamped_final_and_close_with_full_pcm() {
+    fn cloud_speech_onset_and_partial_tail_keep_the_stream_live() {
         use crate::cloud_stt::{CloudEvent, CloudWord};
 
         let state = Arc::new(Mutex::new(FakeCloudTransportState {
@@ -5111,7 +5233,10 @@ mod tests {
         let factory = Arc::new(FakeCloudTransportFactory {
             state: Arc::clone(&state),
         });
-        let frames = vec![vec![0.25, -0.5], vec![0.75, -1.0]];
+        let (mut frames, mut expected) = smoothed_onset_and_continuation();
+        let tail = vec![-0.25; 137];
+        frames.push(tail.clone());
+        expected.extend(tail);
 
         let finalization = run_fake_cloud(factory, &frames);
 
@@ -5122,7 +5247,14 @@ mod tests {
         let state = state.lock().expect("fake cloud state");
         assert_eq!(state.connects, 1);
         assert_eq!(state.finalize_calls, 1);
-        assert_eq!(state.frames, frames);
+        assert!(state
+            .frames
+            .iter()
+            .all(|frame| frame.len() <= STREAM_PREVIEW_FRAME_SAMPLES));
+        assert_eq!(
+            state.frames.iter().flatten().copied().collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[cfg(feature = "cloud-realtime")]

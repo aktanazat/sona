@@ -193,11 +193,13 @@ struct MeetingLiveView: View {
         PageSection("Transcript") {
             if store.showsProvisional {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(store.provisional.enumerated()), id: \.offset) { index, segment in
-                        line(at: segment.startOffsetNs, segment.text, anchor: "live-\(index)")
+                    ForEach(store.provisional) { segment in
+                        line(
+                            at: segment.startOffsetNs, segment.text,
+                            speaker: segment.speakerLabel, anchor: "live-\(segment.segmentId)")
                     }
-                    Text("Provisional. The final transcript is written when the meeting ends.")
-                        .metaText(Theme.inkTertiary)
+                    Text("Provisional words and speaker labels")
+                        .metaText(Theme.inkSecondary)
                         .padding(.top, 8)
                 }
             } else if store.lines.isEmpty {
@@ -208,6 +210,7 @@ struct MeetingLiveView: View {
                     ForEach(store.lines, id: \.base.segmentId) { segment in
                         line(
                             at: segment.base.startOffsetNs, segment.text,
+                            speaker: store.speakerLabel(segment),
                             anchor: "stored-\(segment.base.segmentId)")
                     }
                 }
@@ -215,14 +218,19 @@ struct MeetingLiveView: View {
         }
     }
 
-    private func line(at offsetNs: Int64, _ text: String, anchor: String) -> some View {
+    private func line(at offsetNs: Int64, _ text: String, speaker: String, anchor: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 20) {
             Text(offsetNs.meetingOffsetClock)
                 .font(TypeScale.mono(12))
                 .foregroundStyle(Theme.inkTertiary)
                 .frame(width: 62, alignment: .trailing)
-            Text(text).bodyText(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(speaker)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.inkSecondary)
+                Text(text).bodyText(14)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
         .background(highlightedLine == anchor ? Theme.accentSoft : Color.clear)
@@ -232,9 +240,9 @@ struct MeetingLiveView: View {
     private func jump(to offset: Int64, using proxy: ScrollViewProxy) {
         let anchor: String
         if store.showsProvisional {
-            guard let index = store.provisional.firstIndex(where: { $0.startOffsetNs == offset })
-                ?? store.provisional.lastIndex(where: { $0.startOffsetNs <= offset }) else { return }
-            anchor = "live-\(index)"
+            guard let segment = store.provisional.first(where: { $0.startOffsetNs == offset })
+                ?? store.provisional.last(where: { $0.startOffsetNs <= offset }) else { return }
+            anchor = "live-\(segment.segmentId)"
         } else {
             guard let segment = store.lines.first(where: { $0.base.startOffsetNs == offset })
                 ?? store.lines.last(where: { $0.base.startOffsetNs <= offset }) else { return }

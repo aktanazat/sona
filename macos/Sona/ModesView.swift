@@ -271,18 +271,26 @@ struct ModeInstructionsSection: View {
                     isOn: Binding(
                         get: { mode.llm.rewriteEnabled },
                         set: { store.setCleanupEnabled($0) }))
-                ChoiceRow(
-                    title: "Cleanup level",
-                    detail: mode.llm.cleanupDetail,
-                    choices: mode.llm.cleanupChoices,
-                    label: { $0?.label ?? "Current instructions" },
-                    selection: Binding(
-                        get: { mode.llm.cleanupLevel },
-                        set: { store.chooseCleanupLevel($0) }))
+                if store.usesOfflineCleanup {
+                    ModeFieldRow(label: "Cleanup level") {
+                        Text("Light · English only").bodyText(14, Theme.inkSecondary)
+                    }
+                } else {
+                    ChoiceRow(
+                        title: "Cleanup level",
+                        detail: mode.llm.cleanupDetail,
+                        choices: mode.llm.cleanupChoices,
+                        label: { $0?.label ?? "Current instructions" },
+                        selection: Binding(
+                            get: { mode.llm.cleanupLevel },
+                            set: { store.chooseCleanupLevel($0) }))
+                }
                 ModeFieldRow(
                     label: "Your own instructions",
-                    hint: "Replaces the output style below. Your cleanup level still limits how much the wording can change.",
-                    disabled: !mode.llm.rewriteEnabled
+                    hint: store.usesOfflineCleanup
+                        ? "English light cleanup only."
+                        : "Replaces the output style below. Your cleanup level still limits how much the wording can change.",
+                    disabled: !mode.llm.rewriteEnabled || store.usesOfflineCleanup
                 ) {
                     ModeTextBox(
                         text: Binding(
@@ -290,7 +298,7 @@ struct ModeInstructionsSection: View {
                             set: { value in store.edit { $0.prompt.customPrompt = value.isEmpty ? nil : value } }),
                         prompt: "Write it the way I would: short sentences, no bullet points.",
                         lines: 4)
-                    .disabled(!mode.llm.rewriteEnabled)
+                    .disabled(!mode.llm.rewriteEnabled || store.usesOfflineCleanup)
                 }
                 if !mode.llm.rewriteEnabled {
                     ModeInlineNotice("Turn on cleanup and Sona follows these instructions after every dictation.")
@@ -412,7 +420,7 @@ struct ModeOutputSection: View {
                     choices: ModePromptPreset.allCases,
                     label: \.label,
                     selection: store.field(\.prompt.preset, .generic))
-                .disabled(!mode.llm.rewriteEnabled)
+                .disabled(!mode.llm.rewriteEnabled || store.usesOfflineCleanup)
             }
         }
     }
@@ -629,7 +637,7 @@ struct ModeRewriteBlock: View {
 
     var body: some View {
         Group {
-            ModeFieldRow(label: "Tone", disabled: !mode.llm.rewriteEnabled) {
+            ModeFieldRow(label: "Tone", disabled: !mode.llm.rewriteEnabled || store.usesOfflineCleanup) {
                 Picker("", selection: store.field(\.tone, .balanced)) {
                     ForEach(ModeTone.allCases) { tone in
                         Text(tone.label).tag(tone)
@@ -637,7 +645,7 @@ struct ModeRewriteBlock: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .disabled(!mode.llm.rewriteEnabled)
+                .disabled(!mode.llm.rewriteEnabled || store.usesOfflineCleanup)
             }
             ChoiceRow(
                 title: "AI provider",
@@ -667,9 +675,11 @@ struct ModeRewriteBlock: View {
             ModeLlmModelRow(store: store, mode: mode)
             ToggleRow(
                 title: "Spoken instructions",
-                detail: "End a dictation with \"Sona,\" and the rest of that sentence becomes an edit for the AI to apply, instead of words to type.",
+                detail: store.usesOfflineCleanup
+                    ? "Choose another provider for spoken instructions."
+                    : "End a dictation with \"Sona,\" and the rest of that sentence becomes an edit for the AI to apply, instead of words to type.",
                 isOn: store.field(\.llm.spokenInstructions, false))
-            .disabled(!mode.llm.rewriteEnabled)
+            .disabled(!mode.llm.rewriteEnabled || store.usesOfflineCleanup)
         }
     }
 }
@@ -687,7 +697,7 @@ struct ModeLlmModelRow: View {
                 Text(destination.modelId.isEmpty ? "No model selected" : destination.modelId)
                     .bodyText(14, Theme.inkSecondary)
             } else if store.explicitProviderIsFixed {
-                Text(store.explicitProvider?.label ?? "Apple Intelligence").bodyText(14)
+                Text(store.llmDestination?.modelId ?? "").bodyText(14)
             } else {
                 HStack(spacing: 8) {
                     InputField(prompt: "Model ID", text: store.field(\.llm.modelId, ""))

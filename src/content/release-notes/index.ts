@@ -14,6 +14,18 @@
  * changes. Escape any literal backtick as \` — these are template literals.
  */
 export const RELEASE_NOTE_MARKDOWN = {
+  "1.2.0": `# Sona 1.2.0
+
+Dictation keeps the opening audio when recognition is busy. Microphone readiness follows the first real sample, including a Studio Display microphone, without scanning every supported recording format.
+
+You can download an offline cleanup model for English dictation in Settings > Models on Mac, or Providers on Windows and Linux. Download progress, cancel, retry, and remove are built in. Light cleanup adds punctuation and removes fillers; it does not accept custom tones or spoken instructions. If the model changes words or numbers, or does not finish, Sona keeps the original.
+
+Long meeting notes read the whole transcript in bounded parts and reconcile later decisions and deadlines. Notes become available before optional people and relationship summaries finish. Live microphone and call-audio voices have separate provisional labels, not guessed names; unresolved or unavailable voice evidence stays visible.
+
+Optional cleanup stops at a deadline on desktop and iPhone and is cancelled with its recording. The iPhone saves a recoverable draft before optional history work.
+
+New setup starts with your language, offers compatible speech models, and waits for a real practice transcript before it finishes.
+`,
   "1.1.0": `# Sona 1.1.0
 
 Meetings learn to listen sooner and to act. Catch-up and questions answer while a meeting is still running, from a provisional transcript Sona keeps in memory until the real one is written after the stop. FaceTime, Phone, and meeting-app calls can start a recording on their own once you grant each app in Settings, with a card to stop or revoke. A recording or a Granola, Otter, or Circleback export can be imported as a meeting.

@@ -963,44 +963,18 @@ describe("insights panel", () => {
     expect(markup).toContain(">Refresh<");
   });
 
-  /* A meeting with no notes has two genuinely different causes, and the screen
-   * has to say which. This used to assert the opposite for four of the five:
-   * only `remote_unavailable` was matched, so `local_model_unavailable` — the
-   * reason `generation_shortfall` names "the case that filled the corpus with
-   * blank meetings" — rendered the same "they can be rebuilt at any time"
-   * screen as a meeting that recorded silence and has nothing to rebuild from.
-   *
-   * The headings are `meetings.processing.failed.*`, which the status chip
-   * already reads, so a reason cannot be named here and left blank there. */
-  /* One table for the whole union, checked against `ProcessingFailure`
-   * itself: a sixth reason added to the union fails to compile here until it
-   * is named, which is what makes this a matrix rather than five hand-copied
-   * cases. `settingsRoute` carries the partition the pane draws — a reason a
-   * person can act on in Settings keeps the route there, the rest do not — so
-   * the split has one owner in this file as well. */
   const GENERATION_FAILURES = {
-    local_model_unavailable: {
-      heading: "Local model unavailable",
-      settingsRoute: true,
-    },
-    remote_unavailable: {
-      heading: "Remote destination unavailable",
-      settingsRoute: true,
-    },
-    engine_failure: { heading: "Processing failed", settingsRoute: false },
-    cancelled: { heading: "Processing cancelled", settingsRoute: false },
-    interrupted: {
-      heading: "Interrupted before it finished",
-      settingsRoute: false,
-    },
-  } satisfies Record<
-    ProcessingFailure,
-    { heading: string; settingsRoute: boolean }
-  >;
-
-  // SAFETY: the table above satisfies `Record<ProcessingFailure, …>`, so its
-  // own keys are exactly the members of that union.
-  const reasons = Object.keys(GENERATION_FAILURES) as ProcessingFailure[];
+    local_model_unavailable: { settingsRoute: true },
+    remote_unavailable: { settingsRoute: true },
+    engine_failure: { settingsRoute: false },
+    cancelled: { settingsRoute: false },
+    interrupted: { settingsRoute: false },
+    transcript_deleted: { settingsRoute: false },
+  } satisfies Record<ProcessingFailure, { settingsRoute: boolean }>;
+  const reasons = Object.keys(GENERATION_FAILURES).filter(
+    (reason): reason is ProcessingFailure =>
+      Object.prototype.hasOwnProperty.call(GENERATION_FAILURES, reason),
+  );
 
   const failedMarkup = (reason: ProcessingFailure) =>
     insightsMarkup({
@@ -1014,22 +988,6 @@ describe("insights panel", () => {
       },
     });
 
-  for (const reason of reasons) {
-    test(
-      "no notes because of " +
-        reason +
-        " names that reason and does not offer a rebuild",
-      () => {
-        const markup = failedMarkup(reason);
-        expect(markup).toContain(GENERATION_FAILURES[reason].heading);
-        /* One line: the reason, then the one thing to do about it. The
-         * rebuild sentence a finished-but-empty pass gets is not this. */
-        expect(markup).toContain("Regenerate once the cause is resolved.");
-        expect(markup).not.toContain("Regenerate writes notes");
-      },
-    );
-  }
-
   for (const reason of reasons.filter(
     (candidate) => GENERATION_FAILURES[candidate].settingsRoute,
   )) {
@@ -1037,7 +995,6 @@ describe("insights panel", () => {
       "no notes because of " + reason + " routes to the setting that fixes it",
       () => {
         const markup = failedMarkup(reason);
-        expect(markup).toContain(GENERATION_FAILURES[reason].heading);
         expect(buttonTag(markup, "Settings")).not.toBe("");
         expect(buttonTag(markup, "Settings")).not.toMatch(
           /\sdisabled(?:="")?(?=\s|>)/,

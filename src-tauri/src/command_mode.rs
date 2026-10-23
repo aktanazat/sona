@@ -419,27 +419,17 @@ async fn rewrite_selection(
     });
     log_prompt_budget("Command", &rendered);
 
-    match post_process_transcription(app, run, &rendered, instruction).await {
-        Ok(rewritten) => ProcessedTranscription {
-            post_processed_text: Some(rewritten.clone()),
-            final_text: rewritten,
-            rewrite: RewriteOutcome::Applied,
-        },
-        Err(outcome) => {
-            warn!(
-                "Command rewrite produced no text ({outcome:?}); the selection was left unchanged"
-            );
-            let _ = app.emit(
-                "recording-error",
-                RecordingErrorEvent::typed(REWRITE_UNAVAILABLE_ERROR),
-            );
-            ProcessedTranscription {
-                final_text: String::new(),
-                post_processed_text: None,
-                rewrite: outcome,
-            }
-        }
+    let result = post_process_transcription(app, run, &rendered, instruction).await;
+    if let Err(outcome) = &result {
+        warn!(
+            "Command rewrite produced no text ({outcome:?}); the selection was left unchanged"
+        );
+        let _ = app.emit(
+            "recording-error",
+            RecordingErrorEvent::typed(REWRITE_UNAVAILABLE_ERROR),
+        );
     }
+    ProcessedTranscription::from_rewrite(result, String::new(), None)
 }
 
 /// Answers the spoken question through the run's rewrite provider and files

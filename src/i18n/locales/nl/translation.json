@@ -38,7 +38,6 @@
     "library": "Bibliotheek"
   },
   "onboarding": {
-    "subtitle": "Modellen draaien op deze Mac en wegen nauwkeurigheid af tegen snelheid.",
     "existingModelsTitle": "Compatibele modellen",
     "downloadModelsTitle": "Beschikbaar voor download",
     "otherModels": "Andere modellen",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Kon het model niet selecteren. Probeer het opnieuw."
+      "selectModel": "Kon het model niet selecteren. Probeer het opnieuw.",
+      "cancelDownload": "Kon de download niet annuleren. Probeer het opnieuw.",
+      "languages": "Kon je talen niet opslaan. Probeer het opnieuw."
     },
     "permissions": {
       "title": "Machtigingen vereist",
@@ -137,7 +138,44 @@
       "checking": "Rechten worden gecontroleerd",
       "recheck": "Opnieuw controleren"
     },
-    "headline": "Kies een transcriptiemodel"
+    "headline": "Kies een transcriptiemodel",
+    "continue": "Doorgaan",
+    "back": "Terug",
+    "languages": {
+      "title": "Welke talen spreek je?",
+      "selector": "Dicteertalen: {{languages}}",
+      "auto": "Automatisch detecteren",
+      "selected": "{{language}}, geselecteerd",
+      "noModels": "Geen enkel model ondersteunt deze talen. Kies andere talen."
+    },
+    "practice": {
+      "title": "Probeer te dicteren",
+      "record": "Opnemen",
+      "stop": "Stoppen",
+      "finish": "Installatie afronden",
+      "recordAgain": "Opnieuw opnemen",
+      "words": "Je woorden",
+      "recording": "Luisteren · nog {{seconds}} seconden",
+      "status": {
+        "ready": "Neem een paar woorden op in de gekozen taal.",
+        "starting": "Microfoon openen…",
+        "transcribing": "Transcriberen…",
+        "delivered": "Dictaat ontvangen",
+        "finishing": "Instellingen opslaan…",
+        "cancelling": "Annuleren…",
+        "error": "Oefening niet voltooid"
+      },
+      "errors": {
+        "permission": "Sta microfoontoegang toe in de systeeminstellingen en probeer het opnieuw.",
+        "noSpeech": "Geen spraak gehoord. Neem opnieuw op.",
+        "microphone": "Sluit een microfoon aan en probeer het opnieuw.",
+        "expired": "De tijd voor de oefening is verstreken. Neem opnieuw op.",
+        "changed": "Je model of talen zijn gewijzigd. Neem opnieuw op.",
+        "record": "Kon niet opnemen: {{error}}",
+        "cancel": "Kon de oefening niet annuleren. Probeer het opnieuw voordat je weer opneemt.",
+        "complete": "Kon de instellingen niet opslaan: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Aangepast",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Offline tekstcorrectie",
+        "description": "{{language}} · {{size}}",
+        "download": "Downloaden",
+        "downloading": "{{downloaded}} van {{total}} gedownload",
+        "cancel": "Download annuleren",
+        "retry": "Download opnieuw proberen",
+        "ready": "Klaar voor dicteren in het Engels",
+        "notDownloaded": "Niet gedownload",
+        "use": "Gebruiken voor dicteren",
+        "selected": "Geselecteerd voor dicteren",
+        "remove": "Download verwijderen",
+        "removeTitle": "Offline tekstcorrectie verwijderen?",
+        "removeDescription": "Sona laat je woorden ongewijzigd totdat je het model opnieuw downloadt of een andere provider kiest.",
+        "runtimeMissing": "Offline tekstcorrectie ontbreekt in deze Sona-installatie. Installeer Sona opnieuw.",
+        "lightOnly": "Alleen lichte tekstcorrectie in het Engels.",
+        "instructionsUnavailable": "Kies een andere provider voor gesproken instructies."
+      },
       "api": {
         "title": "API (OpenAI-compatibel)",
         "provider": {
@@ -1762,11 +1818,11 @@
       },
       "remoteIntelligence": {
         "title": "Vergaderintelligentie",
-        "label": "Vergadernotities op mijn server schrijven",
-        "consent": "Samenvattingen en antwoorden voor vergaderingen worden op je server geschreven via je privénetwerk.",
+        "label": "Cloud-AI gebruiken voor vergadernotities",
+        "consent": "Standaard lokaal. Als dit aanstaat, gaat vergadertekst naar je gekoppelde server en zijn AI-aanbieder. Audio blijft op deze Mac. Zet dit uit om nieuwe samenvattingen, registers, terugblikken en antwoorden lokaal te houden.",
         "unpaired": "Koppel Sona onder Agents aan je server om dit aan te zetten.",
         "seriesTitle": "Reeksen die op deze Mac blijven",
-        "seriesHint": "Een reeks in deze lijst wordt altijd op deze Mac geschreven, ook als vergaderintelligentie aan staat.",
+        "seriesHint": "Geselecteerde reeksen blijven op deze Mac, ook als cloud-AI aanstaat.",
         "seriesEmpty": "Nog geen terugkerende vergaderingen opgenomen.",
         "loading": "Je reeksen worden gelezen…",
         "lastMet": "Laatst op {{date}}",
@@ -2010,7 +2066,8 @@
         "remote_unavailable": "Externe bestemming niet beschikbaar",
         "engine_failure": "Verwerking mislukt",
         "cancelled": "Verwerking geannuleerd",
-        "interrupted": "Verwerking onderbroken"
+        "interrupted": "Verwerking onderbroken",
+        "transcript_deleted": "Transcript verwijderd"
       }
     },
     "start": {
@@ -2148,6 +2205,7 @@
       "recovery_required": "Deze vergadering moet worden hersteld voordat die actie kan.",
       "deletion_in_progress": "Het verwijderen is al bezig. De vergadering blijft ontoegankelijk.",
       "not_found": "Deze vergadering is niet meer beschikbaar.",
+      "transcript_deleted": "Notities kunnen niet opnieuw worden aangemaakt nadat het bijbehorende transcript is verwijderd.",
       "invalid_request": "Het vergaderverzoek was ongeldig.",
       "export_cancelled": "De export is geannuleerd. Er is geen voltooide export gemaakt.",
       "export_failed": "De export is mislukt. Er is geen voltooide export gemaakt.",

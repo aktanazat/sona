@@ -54,3 +54,4 @@ __pycache__/
 # Xcode build output for the native shell
 macos/DerivedData.noindex/
 macos/*.xcodeproj/xcuserdata/
+/.progress/

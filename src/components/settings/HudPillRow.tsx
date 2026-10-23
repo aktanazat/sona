@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { HudPillEdge } from "@/bindings";
 import { Switch } from "@/components/vg/switch";
 import {
   Select,
@@ -13,7 +14,6 @@ import { useSettings } from "@/hooks/useSettings";
 import {
   setHudPillEnabled,
   setHudPillPosition,
-  type OverlayPosition,
 } from "@/lib/powerPackApi";
 
 /* The always-visible idle pill, off by default.
@@ -31,7 +31,7 @@ export const HudPillRow: React.FC = () => {
   const { t } = useTranslation();
   const { settings, refreshSettings } = useSettings();
   const [enabled, setEnabled] = useState(false);
-  const [position, setPosition] = useState<OverlayPosition>("bottom");
+  const [position, setPosition] = useState<HudPillEdge>("bottom");
   const [pending, setPending] = useState(false);
   const enabledId = useId();
   const positionId = useId();
@@ -72,13 +72,11 @@ export const HudPillRow: React.FC = () => {
           value={position}
           disabled={pending}
           onValueChange={(value) => {
+            if (value !== "top" && value !== "bottom") return;
             const previous = position;
-            /* SAFETY: the two items below are the only values this select can
-             * emit, and they are exactly `OverlayPosition`. */
-            const next = value as OverlayPosition;
-            setPosition(next);
+            setPosition(value);
             void write(
-              () => setHudPillPosition(next),
+              () => setHudPillPosition(value),
               () => setPosition(previous),
             );
           }}

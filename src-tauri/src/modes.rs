@@ -5,6 +5,7 @@ use crate::settings::{
     OrtAcceleratorSetting, PasteMethod, PersonaSample, PostProcessEndpoint, PostProcessProvider,
     ReplacementRule, ShortcutBinding, TranscribeAcceleratorSetting, TypingTool, VocabularyEntry,
     APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID,
+    LOCAL_CLEANUP_MODEL_ID, LOCAL_CLEANUP_PROVIDER_ID,
 };
 use crate::snippets::Snippet;
 use serde::{Deserialize, Serialize};
@@ -195,22 +196,13 @@ pub struct ModeLlmDestination {
 
 impl ModeLlmSettings {
     /// Resolve the mode's rewrite destination.
-    ///
-    /// The rule is deliberately a single fallback with no predicate in it: an
-    /// override is honoured exactly as written, whether or not it can run
-    /// right now. Falling back on *failure* instead would send a mode's text
-    /// to a destination it never named — and the settings row could only
-    /// display that by re-deriving consent, credential and endpoint state, in
-    /// the other language, from the same store.
     pub fn destination(&self, settings: &AppSettings) -> ModeLlmDestination {
         match &self.provider_id {
             Some(provider_id) => ModeLlmDestination {
                 provider_id: provider_id.clone(),
-                // Apple Intelligence runs one fixed on-device model and its
-                // row offers no model field, so a mode that names it
-                // explicitly gets the fixed identifier rather than the empty
-                // id that would skip every rewrite.
-                model_id: if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID
+                model_id: if provider_id == LOCAL_CLEANUP_PROVIDER_ID {
+                    LOCAL_CLEANUP_MODEL_ID.to_string()
+                } else if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID
                     && self.model_id.trim().is_empty()
                 {
                     APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string()
@@ -221,11 +213,15 @@ impl ModeLlmSettings {
             },
             None => {
                 let provider_id = settings.post_process_provider_id.clone();
-                let model_id = settings
-                    .post_process_models
-                    .get(&provider_id)
-                    .cloned()
-                    .unwrap_or_default();
+                let model_id = if provider_id == LOCAL_CLEANUP_PROVIDER_ID {
+                    LOCAL_CLEANUP_MODEL_ID.to_string()
+                } else {
+                    settings
+                        .post_process_models
+                        .get(&provider_id)
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 ModeLlmDestination {
                     provider_id,
                     model_id,
@@ -611,6 +607,15 @@ pub fn ensure_mode_settings(settings: &mut AppSettings) -> bool {
         settings.active_mode_id = DEFAULT_MODE_ID.to_string();
         settings.modes_revision = settings.modes_revision.max(1);
         changed = true;
+    }
+
+    for mode in &mut settings.modes {
+        if mode.llm.provider_id.as_deref() == Some(LOCAL_CLEANUP_PROVIDER_ID)
+            && mode.llm.model_id != LOCAL_CLEANUP_MODEL_ID
+        {
+            mode.llm.model_id = LOCAL_CLEANUP_MODEL_ID.to_string();
+            changed = true;
+        }
     }
 
     if !settings
@@ -1933,7 +1938,7 @@ impl RunPlan {
         project_root: Option<&str>,
     ) -> Result<Self, RunPlanError> {
         // A command edits a selection rather than cleaning up dictation.
-        let cleanup_level = if rewrite_required {
+        let mut cleanup_level = if rewrite_required {
             None
         } else {
             mode.llm.cleanup_level
@@ -1943,6 +1948,11 @@ impl RunPlan {
         let mut rewrite_unavailable = false;
         let llm = if post_process_requested {
             match Self::resolve_rewrite(settings, &mode.llm) {
+                Ok(llm)
+                    if rewrite_required && llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID =>
+                {
+                    return Err(RunPlanError::InvalidPostProcessDestination);
+                }
                 Ok(llm) => Some(llm),
                 Err(error) if rewrite_required => return Err(error),
                 // Cleanup is a pass over words that already exist, so an
@@ -1968,6 +1978,12 @@ impl RunPlan {
         } else {
             None
         };
+        if llm
+            .as_ref()
+            .is_some_and(|llm| llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID)
+        {
+            cleanup_level = Some(CleanupLevel::Light);
+        }
         let asr = AsrPlan::from_mode(settings, &mode.asr);
         let requested_engine = mode.asr.requested_engine;
         let (cloud, local_fallback) = match requested_engine.cloud_provider() {
@@ -2706,6 +2722,23 @@ mod tests {
         let llm = run.prompt().llm.as_ref().expect("the override runs");
         assert_eq!(llm.provider.id, "openai");
         assert_eq!(llm.model_id, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn offline_cleanup_mode_uses_its_fixed_model_without_cloud_credentials_or_consent() {
+        let mut settings = configured_settings();
+        settings.modes[0].llm.enabled = true;
+        settings.modes[0].llm.provider_id = Some(LOCAL_CLEANUP_PROVIDER_ID.to_string());
+        for previous_model in ["", "gpt-4o-mini"] {
+            settings.modes[0].llm.model_id = previous_model.to_string();
+            let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
+                .expect("offline provider resolves without cloud setup");
+            let llm = run.prompt().llm.as_ref().expect("offline cleanup is requested");
+            assert_eq!(llm.provider.id, LOCAL_CLEANUP_PROVIDER_ID);
+            assert_eq!(llm.model_id, LOCAL_CLEANUP_MODEL_ID);
+            assert!(!llm.endpoint.is_remote());
+            assert!(run.post_process_requested());
+        }
     }
 
     /// The override survives the schema change, and a document that never

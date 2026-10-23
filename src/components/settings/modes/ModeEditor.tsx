@@ -186,6 +186,7 @@ export const ModeEditor: React.FC<ModeEditorProps> = ({
    * modes were pointed at a provider with no key while the app was pointed at
    * a local one that worked. */
   const llmDestination = modeLlmDestination(mode.llm, settings);
+  const usesOfflineCleanup = llmDestination.providerId === "sona_local";
   /* The label names the *global* provider, not the current selection: it has
    * to read the same whether or not this mode has overridden it. */
   const globalProviderId = settings?.post_process_provider_id;
@@ -336,15 +337,19 @@ export const ModeEditor: React.FC<ModeEditorProps> = ({
           /* The one thing neither the label nor the box can show: written
            * instructions replace the output style further down, rather than
            * being added to it. */
-          hint={t("modesV2.instructions.custom.hint")}
+          hint={t(
+            usesOfflineCleanup
+              ? "settings.postProcessing.offlineCleanup.lightOnly"
+              : "modesV2.instructions.custom.hint",
+          )}
           controlId="mode-instructions"
-          disabled={!mode.llm.enabled}
+          disabled={!mode.llm.enabled || usesOfflineCleanup}
         >
           <Textarea
             id="mode-instructions"
             rows={4}
             value={mode.prompt.custom_prompt ?? ""}
-            disabled={!mode.llm.enabled}
+            disabled={!mode.llm.enabled || usesOfflineCleanup}
             onChange={(event) =>
               updaters.updatePrompt(
                 "custom_prompt",
@@ -540,11 +545,11 @@ export const ModeEditor: React.FC<ModeEditorProps> = ({
            * unexportable, which is the one fact the six names cannot show. */
           hint={t("settings.modes.writing.preset.description")}
           controlId="mode-output-style"
-          disabled={!mode.llm.enabled}
+          disabled={!mode.llm.enabled || usesOfflineCleanup}
         >
           <Select
             value={mode.prompt.preset}
-            disabled={!mode.llm.enabled}
+            disabled={!mode.llm.enabled || usesOfflineCleanup}
             onValueChange={(value) => {
               const next = PROMPT_PRESETS.find(
                 (candidate) => candidate === value,

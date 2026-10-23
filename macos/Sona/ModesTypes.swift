@@ -660,9 +660,14 @@ struct ModeLlmDestination: Equatable {
     init(_ llm: ModeLlm, _ settings: ModeAppSettings?) {
         if let override = llm.providerId {
             providerId = override
-            let fixed = override == ProviderCatalog.appleIntelligenceId
-                && llm.modelId.trimmingCharacters(in: .whitespaces).isEmpty
-            modelId = fixed ? Self.appleIntelligenceModelId : llm.modelId
+            if override == ProviderCatalog.localCleanupId {
+                modelId = settings?.postProcessModels[override] ?? ""
+            } else if override == ProviderCatalog.appleIntelligenceId,
+                      llm.modelId.trimmingCharacters(in: .whitespaces).isEmpty {
+                modelId = Self.appleIntelligenceModelId
+            } else {
+                modelId = llm.modelId
+            }
             inherited = false
             return
         }

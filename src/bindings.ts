@@ -5,6 +5,94 @@
 
 
 export const commands = {
+async connectionsSnapshot() : Promise<Result<ConnectionsSnapshot, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_snapshot") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsSave(request: ConnectionSave) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_save", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsDisconnect(connectionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_disconnect", { connectionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsTest(connectionId: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_test", { connectionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsPreferencesSave(preferences: ConnectionPreferences) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_preferences_save", { preferences }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsRuleSave(rule: AutoSendRule) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_rule_save", { rule }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsRuleDelete(ruleId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_rule_delete", { ruleId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsPreviewNotes(sessionId: MeetingSessionId) : Promise<Result<ConnectionNotesPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_preview_notes", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsSendNotes(request: SendNotesRequest) : Promise<Result<SendReceipt, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_send_notes", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsUndoSend(receiptId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_undo_send", { receiptId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async connectionsEditChatAction(request: AgentPanelActionRequestV1, action: SonaChatActionV1) : Promise<Result<AgentPanelTurnStatusV1, AgentPanelCommandErrorV1>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_edit_chat_action", { request, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getUpstreamImportStatus() : Promise<Result<UpstreamImportStatus, UpstreamImportError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_upstream_import_status") };
@@ -485,9 +573,20 @@ async updateEmojiReplacementsEnabled(enabled: boolean) : Promise<Result<null, st
 }
 },
 /**
- * The only correction-learning write path. It changes one user-chosen scope
- * after an explicit history action; no history read, keypress, or background
- * event calls this helper.
+ * Adds one correction rule to a user-chosen scope after an explicit action —
+ * a history correction, or an Apply in the chat panel. No history read,
+ * keypress, or background event calls this helper.
+ *
+ * Saving the rule is the whole effect. The correction loop is not told, and
+ * not because it would filter the pair out: for a phrase rule the candidate
+ * is the narrowed delta, not the saved spoken side, so `sonar app -> sona
+ * app` arrives as `sonar -> sona` and no vocabulary check sees it. It is not
+ * told because the pair is not evidence. The loop looks for a rewrite the
+ * user has *not* turned into a rule; this one they have, so recording it
+ * would propose what they already did, and propose it again if they ever
+ * deleted the rule. The Apply path adds a second reason: that text is a term
+ * the model proposed, and [`crate::meeting::store::learning`] takes
+ * human-authored deltas only.
  */
 async addVocabularyCorrection(spoken: string, written: string, scope: VocabularyScope) : Promise<Result<VocabularyEntry, string>> {
     try {
@@ -539,6 +638,11 @@ async updateSpokenEditsEnabled(enabled: boolean) : Promise<Result<null, string>>
 async hudPillState() : Promise<HudPillState> {
     return await TAURI_INVOKE("hud_pill_state");
 },
+/**
+ * Turning the pill off or on ends a running one-hour hide as well: a pill
+ * switched on is a pill asked for now, and one switched off has nothing left
+ * to hide.
+ */
 async setHudPillEnabled(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_hud_pill_enabled", { enabled }) };
@@ -547,9 +651,34 @@ async setHudPillEnabled(enabled: boolean) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async setHudPillPosition(position: OverlayPosition) : Promise<Result<null, string>> {
+async setHudPillPosition(position: HudPillEdge) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_hud_pill_position", { position }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * "Hide for an hour" from the idle pill's menu. Answers the time the pill
+ * comes back, in milliseconds since the Unix epoch. The pill returns by
+ * itself then (see [`overlay::sync_hud_pill`]); a recording still shows the
+ * bar meanwhile, and the hour survives a restart.
+ */
+async hideHudPillForAnHour() : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("hide_hud_pill_for_an_hour") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * "Show now" in Dictation settings: ends the one-hour hide early.
+ */
+async showHudPillNow() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("show_hud_pill_now") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -681,6 +810,14 @@ async changeExternalMutationsEnabledSetting(enabled: boolean) : Promise<Result<n
     else return { status: "error", error: e  as any };
 }
 },
+async changeCountWordsPerAppSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_count_words_per_app_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeMeetingLocalEngineSetting(engine: MeetingLocalEngine) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_meeting_local_engine_setting", { engine }) };
@@ -705,9 +842,57 @@ async changeMeetingDigestEnabledSetting(enabled: boolean) : Promise<Result<null,
     else return { status: "error", error: e  as any };
 }
 },
+async changeMeetingDisclosureSetting(enabled: boolean, message: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_meeting_disclosure_setting", { enabled, message }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeMeetingScreenSnapshotsEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_meeting_screen_snapshots_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeMeetingDigestMinuteOfDaySetting(minuteOfDay: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_meeting_digest_minute_of_day_setting", { minuteOfDay }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeMeetingTranscriptionLanguageSetting(language: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_meeting_transcription_language_setting", { language }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeMeetingNotesTemplateSetting(template: MeetingNotesTemplate, customTemplateId: MeetingTemplateId | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_meeting_notes_template_setting", { template, customTemplateId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeMeetingNotesLanguageSetting(language: MeetingNotesLanguage) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_meeting_notes_language_setting", { language }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeDictationLanguagesSetting(languages: string[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_dictation_languages_setting", { languages }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -751,6 +936,19 @@ async acceptPostProcessProviderConsent(providerId: string) : Promise<Result<Post
 async changeCommandModeEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_command_mode_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Choose where a spoken question goes: the chat sheet, or the selection as
+ * one more edit. Read when a command run is frozen, so a mid-recording flip
+ * cannot change where the answer in flight lands.
+ */
+async changeCommandAnswersInChatSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_command_answers_in_chat_setting", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1253,6 +1451,14 @@ async getDefaultSettings() : Promise<Result<AppSettings, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async changeQuietSpeechEnabledSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_quiet_speech_enabled_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Reports what context capture could do right now. Read-only and
  * non-prompting: opening a settings pane must never raise a system permission
@@ -1420,6 +1626,78 @@ async isModelLoading() : Promise<Result<boolean, string>> {
 async rescanLocalModels() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("rescan_local_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async startOnboardingPractice(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_onboarding_practice", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async stopOnboardingPractice(sessionId: string) : Promise<Result<OnboardingPracticeTranscript, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_onboarding_practice", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelOnboardingPractice(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_onboarding_practice", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async completeOnboardingPractice(sessionId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("complete_onboarding_practice", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getLocalCleanupStatus() : Promise<Result<CleanupStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_local_cleanup_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async downloadLocalCleanup() : Promise<Result<CleanupStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("download_local_cleanup") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelLocalCleanupDownload() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_local_cleanup_download") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async removeLocalCleanup() : Promise<Result<CleanupStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_local_cleanup") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async selectLocalCleanup() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("select_local_cleanup") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1691,6 +1969,19 @@ async getHistoryTrend(request: DashboardTrendRequest) : Promise<Result<HistoryTr
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The Overview usage tiles: one content-free aggregate over retained
+ * history. Fails with no payload for the same reason `get_history_stats`
+ * does; the cause goes to the log.
+ */
+async getHistoryUsageStats() : Promise<Result<HistoryUsageStats, null>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_history_usage_stats") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHistoryEntries(cursor: number | null, limit: number | null) : Promise<Result<PaginatedHistory, null>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_history_entries", { cursor, limit }) };
@@ -1865,11 +2156,8 @@ async meetingConsentPanelFitDisclosure(note: boolean) : Promise<void> {
     await TAURI_INVOKE("meeting_consent_panel_fit_disclosure", { note });
 },
 /**
- * Post this recording's disclosure line into the meeting's chat.
- *
- * The line is the caller's because it comes from the i18next catalog. Answers
- * with what the disclosure is now, so the live surface can say quietly that the
- * target would not take it.
+ * Attempt only the notice frozen at recording start. Repeated requests read
+ * its durable outcome without sending again.
  */
 async meetingAnnounceDisclosure(sessionId: MeetingSessionId, line: string) : Promise<Result<MeetingSessionDisclosure, MeetingCommandError>> {
     try {
@@ -1896,6 +2184,90 @@ async meetingTrashList() : Promise<Result<MeetingTrashEntry[], MeetingCommandErr
 async meetingTrashRestore(jobId: MeetingDeletionJobId) : Promise<Result<MeetingSessionSnapshot, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_trash_restore", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete one trashed meeting for good, before its thirty days are up.
+ */
+async meetingTrashDeleteForever(jobId: MeetingDeletionJobId) : Promise<Result<null, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_trash_delete_forever", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every folder, by name, with the fence its changes carry.
+ */
+async meetingFolderList() : Promise<Result<MeetingFolderList, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingFolderCreate(request: MeetingFolderCreateRequest) : Promise<Result<MeetingFolderMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_create", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingFolderRename(request: MeetingFolderRenameRequest) : Promise<Result<MeetingFolderMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_rename", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete one folder. The meetings in it stay.
+ */
+async meetingFolderDelete(request: MeetingFolderDeleteRequest) : Promise<Result<MeetingFolderMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_delete", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingFolderAddMeeting(request: MeetingFolderMembershipRequest) : Promise<Result<MeetingFolderMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_add_meeting", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingFolderRemoveMeeting(request: MeetingFolderMembershipRequest) : Promise<Result<MeetingFolderMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_remove_meeting", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingFolderSetDefaults(request: MeetingFolderDefaultsSetRequest) : Promise<Result<MeetingFolderMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folder_set_defaults", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The folders one meeting is filed in, in folder-name order.
+ */
+async meetingFoldersForSession(sessionId: MeetingSessionId) : Promise<Result<MeetingFolderId[], MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_folders_for_session", { sessionId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2037,6 +2409,38 @@ async meetingSpeakerRename(request: MeetingSpeakerRenameRequest) : Promise<Resul
     else return { status: "error", error: e  as any };
 }
 },
+async meetingCallNameTargets(sessionId: MeetingSessionId) : Promise<Result<CallNameTargets, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_call_name_targets", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingCallNameStatus(sessionId: MeetingSessionId) : Promise<Result<CallNameStatus, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_call_name_status", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingCallNamesSet(sessionId: MeetingSessionId, targetId: string | null, automaticallyUse: boolean) : Promise<Result<CallNameStatus, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_call_names_set", { sessionId, targetId, automaticallyUse }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingCallNameDismiss(sessionId: MeetingSessionId, speakerId: SpeakerId) : Promise<Result<CallNameStatus, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_call_name_dismiss", { sessionId, speakerId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async meetingSpeakerMerge(request: MeetingSpeakerMergeRequest) : Promise<Result<MeetingMutationResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_speaker_merge", { request }) };
@@ -2102,6 +2506,18 @@ async meetingExport(request: MeetingExportRequest) : Promise<Result<MeetingExpor
 }
 },
 /**
+ * One spreadsheet containing every retained meeting, independent of the
+ * window's filters. The native shell chooses the destination file.
+ */
+async meetingExportAllCsv() : Promise<Result<string, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_export_all_csv") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Write the meeting's where-did-we-land ledger to a single self-contained
  * HTML file and answer with the path it was written to.
  */
@@ -2142,6 +2558,22 @@ async meetingTextEngineForNextMeeting() : Promise<MeetingTextEngineChoice> {
 async meetingRetentionSet(request: MeetingRetentionSetRequest) : Promise<Result<MeetingRetentionMutationResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_retention_set", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingTranscriptRetentionGet() : Promise<Result<MeetingTranscriptRetentionSnapshot, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_transcript_retention_get") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingTranscriptRetentionSet(request: MeetingRetentionSetRequest) : Promise<Result<MeetingTranscriptRetentionMutationResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_transcript_retention_set", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2219,6 +2651,19 @@ async reenhanceMeetingWithNotes(request: MeetingReenhanceRequest) : Promise<Resu
 async meetingCatchUp(sessionId: MeetingSessionId) : Promise<Result<MeetingCatchUp, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_catch_up", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Help while a meeting records: what was said in the last few minutes,
+ * questions to ask, something to say, or an answer to `question`, which goes
+ * with `ask` and only with it. Provisional and never saved.
+ */
+async meetingLiveHelp(sessionId: MeetingSessionId, kind: MeetingLiveHelpKind, question: string | null) : Promise<Result<MeetingLiveHelp, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_live_help", { sessionId, kind, question }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2322,6 +2767,54 @@ async meetingSeriesRemoteRoster() : Promise<Result<MeetingSeriesRemoteRoster, Me
     else return { status: "error", error: e  as any };
 }
 },
+async meetingSnapshotTake(sessionId: MeetingSessionId) : Promise<Result<MeetingSnapshotSummary, MeetingSnapshotError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_snapshot_take", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingSnapshotList(sessionId: MeetingSessionId) : Promise<Result<MeetingSnapshotSummary[], MeetingSnapshotError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_snapshot_list", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingSnapshotImage(sessionId: MeetingSessionId, snapshotId: MeetingSnapshotId, size: MeetingSnapshotSize) : Promise<Result<MeetingSnapshotImage, MeetingSnapshotError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_snapshot_image", { sessionId, snapshotId, size }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingSnapshotDelete(sessionId: MeetingSessionId, snapshotId: MeetingSnapshotId) : Promise<Result<null, MeetingSnapshotError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_snapshot_delete", { sessionId, snapshotId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingSnapshotStatus(sessionId: MeetingSessionId) : Promise<Result<MeetingSnapshotStatus, MeetingSnapshotError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_snapshot_status", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingSnapshotAutomaticSet(sessionId: MeetingSessionId, enabled: boolean) : Promise<Result<MeetingSnapshotStatus, MeetingSnapshotError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_snapshot_automatic_set", { sessionId, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * D28: today plus the next `days` local days of calendar, with each recurring
  * row joined to what its series remembers.
@@ -2368,6 +2861,18 @@ async personDetail(personId: PersonId) : Promise<Result<PersonDetailResult, Meet
 async organizationDetail(slug: string) : Promise<Result<OrganizationDetailResult, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("organization_detail", { slug }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every company the people carry, newest meeting first, with the counts its
+ * organization page shows.
+ */
+async companiesList() : Promise<Result<CompaniesListResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("companies_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2526,6 +3031,73 @@ async meetingFollowUpDraft(operationId: MeetingOperationId, sessionId: MeetingSe
 async meetingFollowUpMail(request: MeetingFollowUpMailRequest) : Promise<Result<MeetingFollowUpMail, MeetingCommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("meeting_follow_up_mail", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingPrepPreferencesGet() : Promise<PrepPreferences> {
+    return await TAURI_INVOKE("meeting_prep_preferences_get");
+},
+async meetingPrepPreferencesSet(preferences: PrepPreferences) : Promise<Result<PrepPreferences, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_prep_preferences_set", { preferences }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingMailContextCheck() : Promise<Result<MailContext, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_mail_context_check") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingBriefGet(eventKey: string, refresh: boolean) : Promise<Result<MeetingBrief, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_brief_get", { eventKey, refresh }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingFollowUpCompose(sessionId: MeetingSessionId, body: string) : Promise<Result<MailContext, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_follow_up_compose", { sessionId, body }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingWebResearchConnection() : Promise<Result<SecretState, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_web_research_connection") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingWebResearchKeySet(token: string) : Promise<Result<SecretState, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_web_research_key_set", { token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingWebResearchKeyRemove() : Promise<Result<SecretState, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_web_research_key_remove") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingWebResearchTest() : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_web_research_test") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2740,6 +3312,30 @@ async cloudBrowserShareCreate(request: CloudBrowserShareCreateRequest) : Promise
     else return { status: "error", error: e  as any };
 }
 },
+async cloudNoteShareCreate(request: CloudNoteShareCreateRequest) : Promise<Result<CloudBrowserShareResult, CloudSyncErrorKind>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_note_share_create", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cloudNoteShareList(request: CloudNoteShareListRequest) : Promise<Result<CloudShareSummary[], CloudSyncErrorKind>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_note_share_list", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cloudBrowserShareLink(request: CloudShareRevokeRequest) : Promise<Result<CloudBrowserShareResult, CloudSyncErrorKind>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cloud_browser_share_link", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async cloudShareRevoke(request: CloudShareRevokeRequest) : Promise<Result<CloudSyncOverview, CloudSyncErrorKind>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cloud_share_revoke", { request }) };
@@ -2919,10 +3515,13 @@ async sonaQueryEvents(afterId: string | null, limit: number | null) : Promise<Re
  * rows from a series the operator kept on this Mac are not in it, and the
  * card neither names nor counts that series. See
  * `query::pack::without_excluded_series`.
+ *
+ * With `folder_id`, only that folder's meetings are searched and one line
+ * naming the folder replaces the corpus card. Omitted or null is unscoped.
  */
-async sonaQueryPack(question: string) : Promise<Result<QueryPack, QueryError>> {
+async sonaQueryPack(question: string, folderId: MeetingFolderId | null) : Promise<Result<QueryPack, QueryError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("sona_query_pack", { question }) };
+    return { status: "ok", data: await TAURI_INVOKE("sona_query_pack", { question, folderId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3037,6 +3636,94 @@ async savedPromptRuns(target: PromptTargetRef) : Promise<Result<PromptRun[], Mee
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async meetingCustomTemplatesList() : Promise<Result<MeetingCustomTemplates, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_custom_templates_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingCustomTemplateSave(request: MeetingCustomTemplateSaveRequest) : Promise<Result<MeetingCustomTemplateSaveResult, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_custom_template_save", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async meetingCustomTemplateDelete(request: MeetingCustomTemplateDeleteRequest) : Promise<Result<MeetingCustomTemplates, MeetingCommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("meeting_custom_template_delete", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadList(query: string | null) : Promise<Result<ScratchNote[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_list", { query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadGet(id: string) : Promise<Result<ScratchNote | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_get", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadCreate(body: string) : Promise<Result<ScratchNote, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_create", { body }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadUpdateBody(id: string, body: string) : Promise<Result<ScratchNote, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_update_body", { id, body }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadSetPinned(id: string, pinned: boolean) : Promise<Result<ScratchNote, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_set_pinned", { id, pinned }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadDelete(id: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_delete", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadVersions(id: string) : Promise<Result<ScratchNoteVersion[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_versions", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async scratchpadRestoreVersion(id: string, versionId: number) : Promise<Result<ScratchNote, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scratchpad_restore_version", { id, versionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -3052,9 +3739,11 @@ audioImportRoutedEvent: AudioImportRoutedEvent,
 audioImportUpdateEvent: AudioImportUpdateEvent,
 chatVoiceEvent: ChatVoiceEvent,
 cloudSyncChanged: CloudSyncChangedEvent,
+commandModeAnswered: CommandAnsweredEvent,
 detectionPrompt: DetectionPromptEvent,
 detectionPromptRetracted: DetectionPromptRetractedEvent,
 detectionStatus: DetectionStatus,
+dictationDurationWarningEvent: DictationDurationWarningEvent,
 dictationRecordingChangedEvent: DictationRecordingChangedEvent,
 historyUpdatePayload: HistoryUpdatePayload,
 meetingRitual: MeetingRitualEvent,
@@ -3065,12 +3754,14 @@ meetingNoteChanged: MeetingNoteChangedEvent,
 meetingRemoteJobChanged: MeetingRemoteJobChangedEvent,
 meetingRemoved: MeetingRemovedEvent,
 meetingSessionChanged: MeetingSessionChangedEvent,
+meetingSnapshotChanged: MeetingSnapshotChangedEvent,
 meetingSourceHealthChanged: MeetingSourceHealthChangedEvent,
 meetingSuggestionChanged: MeetingSuggestionChangedEvent,
 meetingTranscriptChanged: MeetingTranscriptChangedEvent,
 modesChangedEvent: ModesChangedEvent,
 queryLinkRequested: QueryLinkRequestedEvent,
 recorderStateChangedEvent: RecorderStateChangedEvent,
+scratchpadChangedEvent: ScratchpadChangedEvent,
 sonaCaptureRequested: CaptureRequestedEvent,
 streamEngineEvent: StreamEngineEvent,
 streamPhaseEvent: StreamPhaseEvent,
@@ -3087,9 +3778,11 @@ audioImportRoutedEvent: "audio-import-routed-event",
 audioImportUpdateEvent: "audio-import-update-event",
 chatVoiceEvent: "chat-voice-event",
 cloudSyncChanged: "cloud-sync:changed",
+commandModeAnswered: "command-mode://answered",
 detectionPrompt: "detection-prompt",
 detectionPromptRetracted: "detection-prompt-retracted",
 detectionStatus: "detection-status",
+dictationDurationWarningEvent: "dictation-duration-warning-event",
 dictationRecordingChangedEvent: "dictation-recording-changed-event",
 historyUpdatePayload: "history-update-payload",
 meetingRitual: "meeting-ritual",
@@ -3100,12 +3793,14 @@ meetingNoteChanged: "meeting:note-changed",
 meetingRemoteJobChanged: "meeting:remote-job-changed",
 meetingRemoved: "meeting:removed",
 meetingSessionChanged: "meeting:session-changed",
+meetingSnapshotChanged: "meeting:snapshot-changed",
 meetingSourceHealthChanged: "meeting:source-health-changed",
 meetingSuggestionChanged: "meeting:suggestion-changed",
 meetingTranscriptChanged: "meeting:transcript-changed",
 modesChangedEvent: "modes-changed-event",
 queryLinkRequested: "query:link-requested",
 recorderStateChangedEvent: "recorder-state-changed-event",
+scratchpadChangedEvent: "scratchpad-changed-event",
 sonaCaptureRequested: "sona:capture-requested",
 streamEngineEvent: "stream-engine-event",
 streamPhaseEvent: "stream-phase-event",
@@ -3121,6 +3816,7 @@ upstreamImportProgressEvent: "upstream-import-progress-event"
 
 /** user-defined types **/
 
+export type AboutMe = { name: string; role: string; company: string; context: string }
 /**
  * Whether the platform's accessibility API is usable right now. Determined by
  * a non-prompting check — Sona never raises a permission dialog on its own.
@@ -3217,7 +3913,7 @@ export type AgentPanelActionRequestV1 = { turn_id: string; action_index: number 
  * card to explain. Pressing Dismiss on a pending action and Undo on an
  * applied one is therefore the same command and the same destination.
  */
-export type AgentPanelActionStateV1 = "pending" | "applied" | "dismissed"
+export type AgentPanelActionStateV1 = "pending" | "applied" | "dismissed" | "failed"
 /**
  * One card under an answer: what the assistant offered to change, whether it
  * has happened, and the receipt it produced.
@@ -3231,7 +3927,7 @@ export type AgentPanelActionV1 = {
 /**
  * Position in the turn's offer, which is how a command names one.
  */
-action_index: number; action: SonaChatActionV1; state: AgentPanelActionStateV1; operation_id: string | null }
+action_index: number; action: SonaChatActionV1; state: AgentPanelActionStateV1; operation_id: string | null; can_undo: boolean; detail: string | null }
 export type AgentPanelActorV1 = "user"
 /**
  * Apply one proposal, whole.
@@ -3284,6 +3980,10 @@ export type AgentPanelRelayStatusV1 = "disabled" | "unpaired" | "ready" | "rate_
  */
 "workspace_mismatch" | "remote_rejected" | "ownership_rejected"
 export type AgentPanelSendTurnRequestV1 = { turn_id: string; message: string; locale: string; workspace: AgentPanelWorkspaceV1;
+/**
+ * When present, corpus lookups may read only this folder's meetings.
+ */
+folder_id?: MeetingFolderId | null;
 /**
  * Evidence for this one question: quotes, ids and `sona://` links, built
  * by whoever is asking. The panel does not assemble packs, and a turn
@@ -3418,7 +4118,11 @@ mode_website_activation_rules?: ModeWebsiteActivationRule[]; modes_revision?: nu
  * request less, never more. Defaults to None on every fresh install and
  * upgrade so seeded per-mode Target policies stay dormant until opted in.
  */
-context_policy_ceiling?: ContextPolicy; push_to_talk?: boolean; audio_feedback?: boolean; audio_feedback_volume?: number; sound_theme?: SoundTheme; start_hidden?: boolean; autostart_enabled?: boolean; show_whats_new_on_update?: boolean;
+context_policy_ceiling?: ContextPolicy; push_to_talk?: boolean;
+/**
+ * Software gain and relaxed speech detection for dictation only.
+ */
+quiet_speech_enabled?: boolean; audio_feedback?: boolean; audio_feedback_volume?: number; sound_theme?: SoundTheme; start_hidden?: boolean; autostart_enabled?: boolean; show_whats_new_on_update?: boolean;
 /**
  * The app version whose What's New the user has already seen. Fresh installs
  * default to the current version (nothing is "new" to them). Existing users
@@ -3431,6 +4135,11 @@ whats_new_last_seen_version?: string; selected_model?: string; onboarding_comple
  * None means "average all channels" (original behavior).
  */
 selected_channel?: number | null; clamshell_microphone?: string | null; selected_output_device?: string | null; translate_to_english?: boolean; selected_language?: string;
+/**
+ * Ordered choices for automatic dictation detection. Empty means all
+ * languages; the first choice is primary when a short clip is ambiguous.
+ */
+dictation_languages?: string[];
 /**
  * An explicit, global choice for final English spelling. This belongs to
  * the user's writing preference rather than a mode or ASR engine.
@@ -3494,6 +4203,13 @@ context_capture_clipboard_preroll_ms?: number;
  */
 command_mode_enabled?: boolean;
 /**
+ * Where a spoken question in command mode is answered: in the chat sheet
+ * (on) or as one more edit of the selection (off). Only questions move;
+ * an edit instruction rewrites the selection either way. See
+ * crate::command_mode.
+ */
+command_answers_in_chat?: boolean;
+/**
  * Default-off local coding-agent bridge policy. It intentionally contains
  * no user text or provider payloads; those are in-memory only.
  */
@@ -3521,7 +4237,7 @@ trackers_list?: KeywordTracker[];
  * The shape generated meeting notes take when a meeting has no template
  * of its own.
  */
-meeting_notes_template?: MeetingNotesTemplate;
+meeting_notes_template?: MeetingNotesTemplate; meeting_notes_custom_template_id?: MeetingTemplateId | null; meeting_notes_language?: MeetingNotesLanguage;
 /**
  * Whether the deterministic replacement stage runs at all. The starter
  * library ships enabled, so this is the single switch that turns symbol
@@ -3553,11 +4269,18 @@ persona_samples?: PersonaSample[];
  */
 hud_pill_enabled?: boolean;
 /**
- * Which screen edge the idle pill sits on. Shares `OverlayPosition` with
- * the recording overlay because it is the same window and the same anchor
- * arithmetic.
+ * Which screen edge the idle pill docks to. Dragging the pill to another
+ * edge writes this, so it survives a restart.
  */
-hud_pill_position?: OverlayPosition;
+hud_pill_position?: HudPillEdge;
+/**
+ * "Hide for an hour" from the pill's menu: while this wall-clock time
+ * (milliseconds since the Unix epoch) is ahead, the idle pill stays off
+ * screen; a recording still shows the bar. The core clears it once the
+ * time passes and whenever the pill is turned off or on, so a stale value
+ * never outlives the hour it named.
+ */
+hud_pill_hidden_until_ms?: number | null;
 /**
  * Whether automatic meeting detection runs at all. On by default, because
  * on its own it only ever raises a prompt: no path below it starts a
@@ -3596,7 +4319,11 @@ detection_meeting_apps?: string[];
  * somebody switched on. An entry that is not also in
  * `detection_meeting_apps` grants nothing, because nothing detects it.
  */
-detection_auto_record_apps?: string[];
+detection_auto_record_apps?: string[]; meeting_prep?: PrepPreferences;
+/**
+ * Posting is opt-in, independently of the consent to record.
+ */
+meeting_disclosure_enabled?: boolean; meeting_disclosure_message?: string;
 /**
  * Whether the evening digest raises one native notification on days with
  * activity. Off on install: an unasked-for notification is the one thing a
@@ -3604,12 +4331,20 @@ detection_auto_record_apps?: string[];
  */
 meeting_digest_enabled?: boolean;
 /**
+ * Save stills of the meeting window as it changes. Off until opted in.
+ */
+meeting_screen_snapshots_enabled?: boolean;
+/**
  * Minutes past local midnight the digest is due. 1080 is 18:00, which is
  * evening for the working day this summarizes. Stored as a number rather
  * than "18:00" so there is no clock format to parse, and no invalid state
  * a settings file can express.
  */
 meeting_digest_minute_of_day?: number;
+/**
+ * Frozen into each meeting's run plan, independently of dictation.
+ */
+meeting_transcription_language?: string;
 /**
  * D14. Where meeting text is generated when the remote relay is not chosen.
  * The endpoint variant is validated as loopback and takes effect on the next
@@ -3648,7 +4383,16 @@ external_query_enabled?: boolean;
  * inert on its own — a mutation verb needs this row, and every read still
  * needs the row above.
  */
-external_mutations_enabled?: boolean }
+external_mutations_enabled?: boolean;
+/**
+ * Whether a saved dictation records which application it was delivered
+ * into, as the frontmost application's bundle identifier, for the
+ * per-app words on the Overview page. On by default: it is the same
+ * read mode activation already makes, and nothing leaves this Mac. Off,
+ * the row is saved without an application and the breakdown shows its
+ * off state.
+ */
+count_words_per_app?: boolean }
 /**
  * Window material. `Solid` paints Sona's own surfaces edge to edge; `Glass`
  * makes the window background transparent so the native vibrancy view shows
@@ -3720,9 +4464,21 @@ export type AudioImportResult = { kind: "done"; history_id: number } |
 export type AudioImportRoutedEvent = { file_name: string; destination: AudioImportDestination; link: string }
 export type AudioImportStatus = "queued" | "decoding" | "transcribing" | "done" | "cancelled" | "failed"
 export type AudioImportUpdateEvent = { job: AudioImportJob }
+export type AutoSendRule = { id: string; connection_id: string; scope: SendScope; enabled: boolean;
+/**
+ * Store commit time of this grant. Only later meetings or folder filings may send.
+ */
+created_at_utc_ms: number }
 export type AutoSubmitKey = "enter" | "ctrl_enter" | "cmd_enter"
 export type AvailableAccelerators = { transcribe: string[]; ort: string[]; gpu_devices: GpuDeviceOption[] }
 export type BindingResponse = { success: boolean; binding: ShortcutBinding | null; error: string | null }
+export type BriefContent = { highlights: BriefPoint[]; agenda: BriefPoint[] }
+export type BriefPoint = { text: string; sources: string[] }
+export type BriefSource = { id: string; label: string; text: string; meeting_id: MeetingSessionId | null;
+/**
+ * Present only for an external, unverified web result, never a meeting.
+ */
+external_url?: string | null }
 /**
  * Authorization for reading events, as the operator would recognize it.
  */
@@ -3804,6 +4560,10 @@ calendarName?: string | null;
  * link. `None` when the event carries none.
  */
 url?: string | null }
+export type CallNameStatus = { enabled: boolean; automatically_use: boolean; state: string; detail: string; target: CallNameTarget | null; roster: string[]; suggestions: CallNameSuggestion[] }
+export type CallNameSuggestion = { speaker_id: SpeakerId; display_name: string; overlap_ns: number; speech_ns: number }
+export type CallNameTarget = { id: string; label: string; bundle_id: string; provider: string }
+export type CallNameTargets = { state: string; detail: string; targets: CallNameTarget[] }
 /**
  * Which capture statistic an advice row is about.
  *
@@ -3847,12 +4607,35 @@ export type ChatScreenshot = string
 export type ChatVoiceEvent = { session_id: string; utterance_id: number; phase: VoicePhase; text: string | null; error: string | null }
 export type CitationKind = "transcript" | "manual_note" | "title"
 export type CitedArtifactText = { text: string; citations: ArtifactCitation[] }
+/**
+ * How much an AI rewrite may change the dictation. `None` skips the rewrite,
+ * not the user's separate vocabulary, punctuation, or spoken-edit settings.
+ */
+export type CleanupLevel = "none" | "light" | "medium" | "heavy"
+export type CleanupPhase = "not_downloaded" | "downloading" | "ready" | "failed"
+export type CleanupStatus = { model_id: string; name: string; language: string; license: string; size_bytes: number; downloaded_bytes: number; phase: CleanupPhase; runtime_available: boolean; error: string | null }
 export type ClipboardHandling = "dont_modify" | "copy_to_clipboard"
-export type CloudBrowserShareCreateRequest = { session_id: MeetingSessionId; expires_at_utc_ms: number }
+export type CloudBrowserShareCreateRequest = { session_id: MeetingSessionId; expires_at_utc_ms: number;
+/**
+ * Absent from older callers, which then share the notes only.
+ */
+include?: CloudBrowserShareInclude }
+/**
+ * How much of a meeting a browser link carries. Notes are the ones Sona
+ * wrote plus the person's own; the transcript, then the notes typed during
+ * the meeting, are added on top, never instead.
+ */
+export type CloudBrowserShareInclude = "notes" | "notes_and_transcript" | "everything"
 export type CloudBrowserShareResult = { share_id: string; expires_at_utc_ms: number; share_url: string; trust_disclosure: string }
 export type CloudConflictChoice = "keep_local" | "use_remote"
 export type CloudConflictResolveRequest = { session_id: MeetingSessionId; choice: CloudConflictChoice }
 export type CloudMeetingStatus = { session_id: MeetingSessionId; state: CloudObjectState; remote_revision_id: string | null; retry_at_utc_ms: number | null; share_count: number }
+export type CloudNoteShareCreateRequest = { note_id: string; expires_at_utc_ms: number }
+export type CloudNoteShareListRequest = {
+/**
+ * Omit to manage all note links, including links to deleted notes.
+ */
+note_id: string | null }
 export type CloudObjectState = "local" | "queued" | "uploading" | "committed" | "conflict" | "pending_deletion" | "deleted" | "paused" | "auth_required" | "quota" | "integrity_failure"
 export type CloudPairingAcceptRequest = { endpoint: string; offer: CloudPairingOffer }
 export type CloudPairingApproveRequest = { offer: CloudPairingOffer }
@@ -3963,6 +4746,53 @@ export type CloudSyncServiceStatus = { configured: boolean; endpoint: string | n
  * device identifiers, and sync cursors remain outside the settings store.
  */
 export type CloudSyncSettings = { enabled: boolean; paused: boolean; consent_version: number | null; endpoint: string | null }
+/**
+ * Announces a spoken question filed in the chat, so the shell can bring the
+ * chat sheet forward. The exchange is already on the panel and on disk when
+ * this is emitted, so the sheet has nothing to fetch by id.
+ */
+export type CommandAnsweredEvent = null
+export type CompaniesListResult = { schema_version: number; revision: number;
+/**
+ * Most recent meeting first; companies with no meeting yet last, by name.
+ */
+companies: CompanySummary[] }
+/**
+ * One company on the companies list: the union an organization page reads,
+ * counted instead of listed.
+ */
+export type CompanySummary = {
+/**
+ * The label as its people carry it.
+ */
+name: string;
+/**
+ * What `organization_detail` answers to.
+ */
+slug: string; people_count: number;
+/**
+ * Meetings with anybody here, each counted once.
+ */
+meetings_count: number; last_meeting_at_utc_ms: number | null;
+/**
+ * Open items with anybody here, each counted once.
+ */
+open_loops_count: number }
+export type Connection = { id: string; name: string; kind: ConnectionKind;
+/**
+ * Channel, Notion parent, or optional CRM record. Never a credential URL.
+ */
+target: string; enabled: boolean }
+export type ConnectionKind = "slack_webhook" | "slack_bot" | "notion_page" | "notion_database" | "hubspot" | "attio_person" | "attio_company" | "affinity" | "public_webhook"
+export type ConnectionNotesPreview = { title: string; notes: string }
+export type ConnectionPreferences = { email_drafts_enabled: boolean; calendar_actions_enabled: boolean }
+export type ConnectionSave = { connection: Connection;
+/**
+ * Blank retains the existing credential. Never returned to the shell.
+ */
+token: string; webhook_url: string }
+export type ConnectionScopeOption = { scope: SendScope; name: string }
+export type ConnectionsSnapshot = { connections: Connection[]; rules: AutoSendRule[]; preferences: ConnectionPreferences; receipts: SendReceipt[]; scopes: ConnectionScopeOption[] }
 /**
  * Context sources reachable on this build, for settings and diagnostics.
  */
@@ -4254,6 +5084,11 @@ runningMeetingApps: string[];
  */
 inputDeviceReportingSuspect: boolean }
 export type DiarizationStatus = "not_requested" | "model_unavailable" | "downloading" | "running" | "succeeded" | "failed"
+export type DictationDurationWarningEvent = {
+/**
+ * None clears the warning when the recording leaves its active stage.
+ */
+remaining_seconds: number | null }
 /**
  * `is_recording()` flipped, broadcast to every webview. A window that wants to
  * draw dictation's state reads the boolean once on mount and then follows this;
@@ -4451,13 +5286,59 @@ export type HistoryTrendSourceTotals = { source_kind: HistorySourceKind | null; 
 export type HistoryTrendTotals = { recordings: number; duration_ms: number; words: number; by_source: HistoryTrendSourceTotals[] }
 export type HistoryUpdatePayload = { action: "added"; entry: HistoryEntry } | { action: "updated"; entry: HistoryEntry } | { action: "deleted"; id: number } | { action: "toggled"; id: number }
 /**
+ * One application in the usage breakdown, by the bundle identifier the
+ * frontmost application reported when the row was saved. The shell turns it
+ * into a name and an icon at render time, so history never stores a
+ * localized string.
+ */
+export type HistoryUsageApp = { application_identifier: string; dictations: number; words: number }
+/**
+ * The rows the per-app list does not name: saved before the column existed,
+ * imported, replayed, saved while "Count words per app" was off, or in an
+ * application outside the top `USAGE_TOP_APPS`.
+ */
+export type HistoryUsageOther = { dictations: number; words: number }
+/**
+ * Content-free usage figures over every retained history row, for the
+ * Overview usage tiles. Each number is defined here so the screen can be
+ * checked against the database:
+ *
+ * - `words_per_minute`: words over spoken minutes across the
+ * `USAGE_WPM_WINDOW` most recent rows that have words and a measured
+ * duration under `USAGE_WPM_MAX_DURATION_MS`, rounded to a whole number;
+ * zero when no row qualifies. `words_per_minute_dictations` is how many
+ * rows that was.
+ * - `time_saved_ms`: typing every timed word at
+ * `USAGE_TYPING_WORDS_PER_MINUTE` minus the time spent speaking those
+ * words, never below zero.
+ * - `current_streak_days`: consecutive local calendar days with a dictation
+ * ending today or yesterday, since today is still open; zero otherwise.
+ * - `longest_streak_days`: the longest such run anywhere in history.
+ * - `apps`: the top `USAGE_TOP_APPS` applications by words, most first;
+ * `other` folds every remaining row.
+ */
+export type HistoryUsageStats = { dictations: number; total_words: number; total_duration_ms: number; words_per_minute: number; words_per_minute_dictations: number; time_saved_ms: number; current_streak_days: number; longest_streak_days: number; apps: HistoryUsageApp[]; other: HistoryUsageOther }
+/**
+ * Which screen edge the idle pill docks to. Its own type rather than
+ * [`OverlayPosition`]: the recording overlay lays out for the top and bottom
+ * edges only, while the pill also stands on a side edge, and widening the
+ * overlay's type would let a stored side edge reach a layout that has no
+ * place for it.
+ */
+export type HudPillEdge = "top" | "bottom" | "left" | "right"
+/**
  * Everything the idle pill needs to render itself.
  *
  * The pill runs in the overlay webview, which has no settings store of its own,
  * so it asks for this once on mount and again whenever the backend tells it the
  * mode changed.
  */
-export type HudPillState = { enabled: boolean; position: OverlayPosition;
+export type HudPillState = { enabled: boolean; position: HudPillEdge;
+/**
+ * The wall-clock time (milliseconds since the Unix epoch) the pill's
+ * one-hour hide ends, while one is running.
+ */
+hidden_until_ms: number | null;
 /**
  * Name of the mode a click would record under. `None` when no mode
  * resolves, which is also the state in which a click does nothing.
@@ -4665,6 +5546,9 @@ export type LedgerThreadState =
  */
 "dropped"
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error"
+export type MailContext = { state: MailContextState; threads: MailThread[] }
+export type MailContextState = "off" | "ready" | "empty" | "not_configured" | "permission_denied" | "unavailable"
+export type MailThread = { subject: string; sender: string; received_at: string; excerpt: string }
 export type ManualNote = { note_id: ManualNoteId; session_id: MeetingSessionId; start_offset_ns: number | null; end_offset_ns: number | null; body: string; revision: number; created_at_utc_ms: number; updated_at_utc_ms: number }
 export type ManualNoteId = string
 export type MeetingActionItem = { text: CitedArtifactText; owner_text: string | null; due_text: string | null }
@@ -4821,6 +5705,7 @@ export type MeetingAutomationRunState = "started" | "committed" | "failed"
  * `automations` belongs to this surface.
  */
 export type MeetingAutomationSeries = { series_key: string; title: string; last_met_at_utc_ms: number; meeting_count: number; automations: MeetingSeriesAutomation[] }
+export type MeetingBrief = { event_key: string; title: string; start_utc_ms: number; generated_at_utc_ms: number; content: BriefContent; sources: BriefSource[]; mail: MailContext; status: string; web_status: string }
 /**
  * A short recap of the transcript captured so far.
  */
@@ -4841,19 +5726,18 @@ provisional: boolean }
  */
 export type MeetingCatchUpState = "ready" | "no_transcript_yet" | "model_unavailable" | "failed"
 export type MeetingCitation = { kind: CitationKind; session_id: MeetingSessionId; entity_id: string; start_offset_ns: number | null; end_offset_ns?: number | null }
-export type MeetingCommandError = "consent_required" | "consent_stale" | "invalid_transition" | "stale_revision" | "capture_lease_busy" | "no_source_started" | "source_unavailable" | "storage_unavailable" | "recovery_required" | "deletion_in_progress" | "not_found" | "invalid_request" | "export_cancelled" | "export_failed" | "local_model_unavailable" | "local_evidence_unavailable" | "insufficient_enrollment_evidence" | "profile_model_incompatible" | "profile_merge_resolution_required" | "remote_unavailable" | "engine_failure" |
+export type MeetingCommandError = "consent_required" | "consent_stale" | "invalid_transition" | "stale_revision" | "capture_lease_busy" | "no_source_started" | "source_unavailable" | "storage_unavailable" | "recovery_required" | "deletion_in_progress" | "not_found" | "transcript_deleted" | "invalid_request" | "export_cancelled" | "export_failed" | "local_model_unavailable" | "local_evidence_unavailable" | "insufficient_enrollment_evidence" | "profile_model_incompatible" | "profile_merge_resolution_required" | "remote_unavailable" | "engine_failure" |
 /**
  * The file offered for import is not a recording or transcript export
  * Sona can read. Every refusal reaching the operator says this, because
  * they all have the same answer: choose a different file.
  */
 "import_unreadable"
-export type MeetingCommandKind = "preflight_create" | "preflight_refresh" | "preflight_cancel" | "start" | "pause" | "resume" | "stop" | "discard" | "recovery_finalize" | "title_set" | "speaker_rename" | "speaker_merge" | "speaker_identify" | "segment_edit" | "note_create" | "note_update" | "note_delete" | "artifacts_regenerate" | "question_ask" | "question_forget" | "export" | "delete" | "retention_set" | "remote_cancel" | "loop_resolve" | "loop_reopen" | "loop_assign" | "loop_carry" | "series_template_set" | "series_digest_set" | "series_always_record_set" | "follow_up_draft" | "series_automation_set" | "series_remote_opt_out_set" | "saved_prompt_save" | "saved_prompt_delete"
+export type MeetingCommandKind = "preflight_create" | "preflight_refresh" | "preflight_cancel" | "start" | "pause" | "resume" | "stop" | "discard" | "recovery_finalize" | "title_set" | "speaker_rename" | "speaker_merge" | "speaker_identify" | "segment_edit" | "note_create" | "note_update" | "note_delete" | "artifacts_regenerate" | "question_ask" | "question_forget" | "export" | "delete" | "retention_set" | "transcript_retention_set" | "remote_cancel" | "loop_resolve" | "loop_reopen" | "loop_assign" | "loop_carry" | "series_template_set" | "series_digest_set" | "series_always_record_set" | "follow_up_draft" | "series_automation_set" | "series_remote_opt_out_set" | "saved_prompt_save" | "saved_prompt_delete" | "folder_create" | "folder_rename" | "folder_delete" | "folder_add_meeting" | "folder_remove_meeting" | "folder_defaults_set"
 export type MeetingConsentInput = { policy_version: number; microphone_acknowledged: boolean; system_audio_acknowledged: boolean; known_missing_sources_acknowledged: SourceKind[]; degraded_start_policy: DegradedStartPolicy; destination: ProcessingDestination; remote_acknowledgement: RemoteAcknowledgement | null }
 export type MeetingConsentPanelSessionState = { snapshot: MeetingSessionSnapshot; standing_series_key: string | null;
 /**
- * What this recording's disclosure is doing. The panel supplies the words
- * for a `pending` one, because they come from the i18next catalog.
+ * The stored result of this meeting's one recording notice.
  */
 disclosure: MeetingSessionDisclosure }
 export type MeetingConsentPanelStartRequest = { prompt_id: string; operation_id: MeetingOperationId; consent: MeetingConsentInput; always_record_series: boolean;
@@ -4863,6 +5747,24 @@ export type MeetingConsentPanelStartRequest = { prompt_id: string; operation_id:
  * about that from now on.
  */
 announce_in_chat: boolean }
+export type MeetingCustomTemplate = { template_id: MeetingTemplateId; name: string;
+/**
+ * What the template is for, in the person's own words. Read by the model
+ * as framing, never shown in the notes.
+ */
+purpose: string; sections: MeetingTemplateSection[]; created_at_utc_ms: number; updated_at_utc_ms: number }
+export type MeetingCustomTemplateDeleteRequest = { template_id: MeetingTemplateId; expected_revision: number }
+export type MeetingCustomTemplateDraft = { name: string; purpose: string; sections: MeetingTemplateSection[] }
+/**
+ * Create a template (`template_id: None`) or replace one.
+ */
+export type MeetingCustomTemplateSaveRequest = { template_id: MeetingTemplateId | null; draft: MeetingCustomTemplateDraft; expected_revision: number }
+export type MeetingCustomTemplateSaveResult = { template_id: MeetingTemplateId; templates: MeetingCustomTemplates }
+/**
+ * Every custom template, sorted by name ignoring case, and the revision every
+ * write to the list is fenced on.
+ */
+export type MeetingCustomTemplates = { templates: MeetingCustomTemplate[]; revision: number }
 export type MeetingDeletionJobId = string
 export type MeetingDiarizationGenerationId = string
 export type MeetingDiarizationSnapshot = { status: DiarizationStatus; model_id: string; model_version: string; generation_id: MeetingDiarizationGenerationId | null; assigned_segment_count: number }
@@ -4873,6 +5775,46 @@ export type MeetingExportReceipt = { export_receipt_id: MeetingExportReceiptId; 
 export type MeetingExportReceiptId = string
 export type MeetingExportRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; format: MeetingExportFormat }
 export type MeetingExportResult = { receipt: OperationReceipt; export_receipt: MeetingExportReceipt }
+/**
+ * One folder as the meetings list shows it.
+ */
+export type MeetingFolder = { folder_id: MeetingFolderId; name: string;
+/**
+ * The notes template a meeting filed here is written with when neither
+ * the meeting nor its calendar series has chosen one.
+ */
+template: MeetingNotesTemplate | null;
+/**
+ * Saved meeting prompts that run on every meeting filed here once its
+ * notes are ready, in the order they were chosen.
+ */
+prompt_ids: SavedPromptId[];
+/**
+ * Meetings filed here right now. A meeting in the trash is not counted.
+ */
+meeting_count: number; created_at_utc_ms: number; updated_at_utc_ms: number }
+export type MeetingFolderCreateRequest = { operation_id: MeetingOperationId; name: string; expected_revision: number }
+/**
+ * What a folder does to the meetings filed in it: the notes template they
+ * fall back to, and the saved prompts that run on them. Both are replaced
+ * whole, because they are edited together on one sheet.
+ */
+export type MeetingFolderDefaultsSetRequest = { operation_id: MeetingOperationId; folder_id: MeetingFolderId; template: MeetingNotesTemplate | null; prompt_ids: SavedPromptId[]; expected_revision: number }
+/**
+ * Delete one folder. The meetings in it stay where they are.
+ */
+export type MeetingFolderDeleteRequest = { operation_id: MeetingOperationId; folder_id: MeetingFolderId; expected_revision: number }
+export type MeetingFolderId = string
+/**
+ * Every folder, by name, with the fence every folder write carries.
+ */
+export type MeetingFolderList = { folders: MeetingFolder[]; revision: number }
+/**
+ * File one meeting in one folder, or take it out.
+ */
+export type MeetingFolderMembershipRequest = { operation_id: MeetingOperationId; folder_id: MeetingFolderId; session_id: MeetingSessionId; expected_revision: number }
+export type MeetingFolderMutationResult = { receipt: OperationReceipt; folders: MeetingFolderList }
+export type MeetingFolderRenameRequest = { operation_id: MeetingOperationId; folder_id: MeetingFolderId; name: string; expected_revision: number }
 /**
  * A follow-up draft: the message when an engine wrote one, and always the
  * evidence it was built from.
@@ -4902,7 +5844,7 @@ decisions: string[];
  * The receipt for the draft event, so the run is as checkable as a write.
  * `effect_ids` names the engine that wrote it, or the fallback.
  */
-receipt: OperationReceipt }
+receipt: OperationReceipt; mail_context_status: string }
 /**
  * The compose window to open, and which words it will carry.
  */
@@ -5012,7 +5954,48 @@ export type MeetingListFilter = { status?: MeetingStatusFilter; window?: Meeting
 /**
  * Case-insensitive substring of the title. Blank means no constraint.
  */
-title_query?: string }
+title_query?: string;
+/**
+ * Only meetings filed in this folder. `None` means every folder and
+ * none.
+ */
+folder_id?: MeetingFolderId | null }
+/**
+ * Help for a meeting while it records. Never saved: it reads the words
+ * recognized so far, which the stored transcript replaces after the stop.
+ * `from_offset_ns` and `through_offset_ns` bound what the model read.
+ */
+export type MeetingLiveHelp = { kind: MeetingLiveHelpKind; state: MeetingLiveHelpState; items: MeetingLiveHelpItem[]; from_offset_ns: number | null; through_offset_ns: number | null; segment_count: number; provisional: boolean }
+/**
+ * One point of live help and the stretch of the call its cited lines span.
+ */
+export type MeetingLiveHelpItem = { text: string; start_offset_ns: number; end_offset_ns: number }
+/**
+ * Which help the live screen asked for while a meeting records.
+ */
+export type MeetingLiveHelpKind =
+/**
+ * What was said in the last few minutes.
+ */
+"recent" |
+/**
+ * Questions worth asking next.
+ */
+"questions" |
+/**
+ * One or two points worth saying next.
+ */
+"say" |
+/**
+ * An answer to a question typed about the call.
+ */
+"ask"
+/**
+ * Why a live-help request produced what it did. `NothingFound` is an
+ * answer, not a failure: the call has not touched the question that was
+ * asked. Only `Ask` can end there; every other kind has a floor of one point.
+ */
+export type MeetingLiveHelpState = "ready" | "no_transcript_yet" | "nothing_found" | "model_unavailable" | "failed"
 /**
  * The local engine used for meeting text. Apple Intelligence never sends
  * evidence over a network; the endpoint variant is restricted to a loopback
@@ -5166,6 +6149,11 @@ export type MeetingNoteCreateRequest = { operation_id: MeetingOperationId; sessi
 export type MeetingNoteDeleteRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; note_id: ManualNoteId; expected_note_revision: number }
 export type MeetingNoteUpdateRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; note_id: ManualNoteId; expected_note_revision: number; start_offset_ns: number | null; end_offset_ns: number | null; body: string }
 /**
+ * The language generated notes are written in. `Auto` follows the meeting:
+ * notes come out in the language most of it was spoken in.
+ */
+export type MeetingNotesLanguage = "auto" | "english"
+/**
  * Which shape the generated notes should take. The stored id is stable
  * because it is hashed into an artifact's generation key; `General` keeps the
  * original `meeting-review` id so pre-template artifacts stay addressable.
@@ -5192,15 +6180,11 @@ prior_meetings: number; last_prior_meeting: PersonBriefingLastMeeting | null; to
 export type MeetingPhase = "preflight" | "starting" | "capturing_recording" | "capturing_pausing" | "capturing_paused" | "capturing_resuming" | "stopping" | "processing" | "review_ready" | "recovery_required" | "deleting"
 export type MeetingPreflightCreateRequest = { operation_id: MeetingOperationId; expected_revision: number; title: string; origin: MeetingOrigin; suggestion_id: MeetingSuggestionId | null; calendar_event_key?: string | null; requested_sources: SourceKind[]; required_sources: SourceKind[]; accepted_known_missing_sources: SourceKind[]; degraded_start_policy: DegradedStartPolicy; destination: ProcessingDestination; remote_acknowledgement: RemoteAcknowledgement | null; microphone_device_uid: string | null; frozen_system_audio_application_bundle_ids: string[] }
 export type MeetingPreflightRefreshRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number }
-export type MeetingPrepCard = { eventKey: string; seriesKey: string; title: string; startUtcMs: number; lastMeetingId: MeetingSessionId; headline: string; mineOpenLoops: string[]; mineOpenLoopCount: number; waitingOnCount: number; participants: MeetingPrepParticipant[]; canRecordWhenStarts: boolean }
+export type MeetingPrepCard = { eventKey: string; seriesKey: string; title: string; startUtcMs: number; lastMeetingId: MeetingSessionId | null; headline: string; mineOpenLoops: string[]; mineOpenLoopCount: number; waitingOnCount: number; participants: MeetingPrepParticipant[]; canRecordWhenStarts: boolean }
 export type MeetingPrepParticipant = { name: string; meetingsCount: number; organization: string | null }
 export type MeetingProvider = "zoom" | "google_meet" | "microsoft_teams" | "webex" | "slack_huddle" | "face_time" | "configured_app"
-/**
- * One utterance recognized while the capture was still running. No segment
- * id, no speaker and no revision: those belong to the stored transcript the
- * post-stop pass writes, and this reading is thrown away when capture ends.
- */
-export type MeetingProvisionalSegment = { start_offset_ns: number; end_offset_ns: number; text: string }
+export type MeetingProvisionalSegment = { segment_id: number; track_id: SourceTrackId; source_kind: SourceKind; speaker: MeetingProvisionalSpeaker; start_offset_ns: number; end_offset_ns: number; text: string }
+export type MeetingProvisionalSpeaker = { kind: "cluster"; index: number } | { kind: "unknown" } | { kind: "uncertain" } | { kind: "unavailable" }
 /**
  * The words a running capture has recognized so far, in start order. Empty
  * for a meeting that is not capturing now: after the stop the stored
@@ -5219,7 +6203,7 @@ export type MeetingRecordingCard = { sessionId: MeetingSessionId; bundleId: stri
  * Save the notes layer and regenerate the meeting's notes from it in one
  * step, so the user cannot end up regenerating against a stale draft.
  */
-export type MeetingReenhanceRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; body: string; template: MeetingNotesTemplate; expected_note_revision: number }
+export type MeetingReenhanceRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; body: string; template: MeetingNotesTemplate; custom_template_id?: MeetingTemplateId | null; expected_note_revision: number }
 export type MeetingRemoteJobChangedEvent = MeetingEventPayload
 export type MeetingRemovalResult = { receipt: OperationReceipt; session_id: MeetingSessionId; removed: boolean }
 export type MeetingRemovedEvent = MeetingEventPayload
@@ -5227,9 +6211,14 @@ export type MeetingRetentionMutationResult = { receipt: OperationReceipt; snapsh
 export type MeetingRetentionPolicy = { kind: "forever" } | { kind: "delete_after_days"; days: number }
 export type MeetingRetentionSetRequest = { operation_id: MeetingOperationId; expected_revision: number; policy: MeetingRetentionPolicy }
 export type MeetingRetentionSnapshot = { policy: MeetingRetentionPolicy; revision: number }
-export type MeetingReviewSnapshot = { session: MeetingSessionSnapshot; tracks: MeetingTrackSnapshot[]; gaps: SourceGap[]; speakers: MeetingSpeaker[]; transcript: EffectiveTranscriptSegment[]; notes: ManualNote[]; artifacts: MeetingArtifactRevision[]; questions: MeetingAnswer[]; diarization: MeetingDiarizationSnapshot; can_export: boolean; remote_cancellation_pending: boolean }
+export type MeetingReviewSnapshot = { session: MeetingSessionSnapshot; tracks: MeetingTrackSnapshot[]; gaps: SourceGap[]; speakers: MeetingSpeaker[]; transcript: EffectiveTranscriptSegment[]; notes: ManualNote[]; artifacts: MeetingArtifactRevision[]; questions: MeetingAnswer[]; diarization: MeetingDiarizationSnapshot; can_export: boolean; remote_cancellation_pending: boolean; snapshots?: MeetingSnapshotSummary[] }
 export type MeetingRitual = { kind: "prep"; card: MeetingPrepCard } | { kind: "wrap"; card: MeetingWrapCard } | { kind: "recording"; card: MeetingRecordingCard }
-export type MeetingRitualAction = "prep_record_when_starts" | "prep_open_brief" | "prep_dismiss" | "wrap_open_notes" | "wrap_follow_up_copied" | "wrap_done" | "recording_stop" |
+export type MeetingRitualAction = "prep_record_when_starts" |
+/**
+ * Put the ready-to-record screen for this occurrence in front now. A
+ * meeting with no standing grant has no other way to record from here.
+ */
+"prep_record" | "prep_open_brief" | "prep_dismiss" | "wrap_open_notes" | "wrap_follow_up_copied" | "wrap_done" | "recording_stop" |
 /**
  * Stop, and take this application off the auto-record list. One gesture,
  * because an operator who wants the recording to end also wants the reason
@@ -5313,10 +6302,9 @@ export type MeetingSeriesMutationResult = { receipt: OperationReceipt; preferenc
  */
 export type MeetingSeriesPreferences = { series_key: string | null;
 /**
- * `None` when the series exists but has made no choice, which is the state
- * that lets artifact generation fall through to the app default.
+ * `None` when a custom template is chosen or this series has no choice.
  */
-template: MeetingNotesTemplate | null;
+template: MeetingNotesTemplate | null; custom_template_id?: MeetingTemplateId | null;
 /**
  * D28. True unless the operator has taken this series out of the evening
  * digest; a series with no row at all is included.
@@ -5372,52 +6360,73 @@ export type MeetingSeriesRemoteRow = { series_key: string; title: string; last_m
 /**
  * Choose, or unchoose, the template for one series.
  *
- * `template: None` clears the preference and hands the series back to the app
- * default. It is the same mutation as choosing, receipt and fence included,
- * because "stop remembering this" is a decision a person makes on purpose.
+ * Both template fields `None` clears the preference. A custom id takes
+ * precedence when both are supplied.
  */
-export type MeetingSeriesTemplateSetRequest = { operation_id: MeetingOperationId; series_key: string; template: MeetingNotesTemplate | null; expected_revision: number }
+export type MeetingSeriesTemplateSetRequest = { operation_id: MeetingOperationId; series_key: string; template: MeetingNotesTemplate | null; custom_template_id?: MeetingTemplateId | null; expected_revision: number }
 export type MeetingSessionChangedEvent = MeetingEventPayload
 /**
- * What one recording's disclosure — the line the consent panel offers to type
- * into the meeting's own chat box — is doing.
+ * One recording notice. Posting is durably claimed before any external input.
  */
-export type MeetingSessionDisclosure =
+export type MeetingSessionDisclosure = { kind: "not_asked" } |
 /**
- * Nobody asked this meeting to announce itself, which is the default.
+ * A decision for this meeting, not changed by a later default or retry.
  */
-{ kind: "not_asked" } |
+{ kind: "disabled" } | { kind: "pending"; line?: string; composer_app?: string | null } |
 /**
- * Asked for and not typed yet. `notetaker` is the name the room is told
- * the notes are for: the calendar account's own attendee entry, which is
- * the only place this app learns its operator's name.
- *
- * `composer_app` is the bundle id of the application whose chat box the
- * line belongs in: the app that raised the offer, or the meeting app in
- * front when a calendar offer was accepted. The one attempt goes to that
- * application's focused composer and nowhere else; `None` means no such
- * application was in front, and the attempt is refused rather than aimed
- * at whatever is focused.
- *
- * ponytail: falls back to the meeting's title when the calendar names
- * nobody, so the one sentence always has something to interpolate. The
- * upgrade path is an account name in settings, not a second phrasing.
+ * A crash here is an uncertain attempt, never permission to retry.
  */
-{ kind: "pending"; notetaker: string; composer_app?: string | null } |
-/**
- * Typed, or refused. Delivery's own receipt says which: a target that
- * cannot accept an insertion is `definitely_not_dispatched`, and that is
- * the case the live surface mentions. Typed is not sent: the line sits
- * in the composer until the person sends it.
- */
-{ kind: "attempted"; receipt: DeliveryReceipt }
+{ kind: "posting"; line: string } | { kind: "attempted"; receipt: DeliveryReceipt; line?: string; reason?: string | null }
 export type MeetingSessionId = string
 export type MeetingSessionSnapshot = { session_id: MeetingSessionId; phase: MeetingPhase; revision: number; title: string; started_at_utc_ms: number | null; elapsed_offset_ns: number | null; sources: MeetingSourceSnapshot[]; open_capture_window_started_at_ns: number | null; capture_completeness: CaptureCompleteness; storage: StorageAvailability; processing_status: ProcessingStatus;
 /**
  * The model-installation readiness captured by the current preflight.
  * Post-capture processing has its own lifecycle in `processing_status`.
  */
-preflight_local_processing?: SourceAvailability | null; retention_deadline_utc_ms: number | null; allowed_actions: AllowedMeetingAction[] }
+preflight_local_processing?: SourceAvailability | null; retention_deadline_utc_ms: number | null; transcript_purged_at_utc_ms?: number | null; allowed_actions: AllowedMeetingAction[] }
+/**
+ * Sent whenever a meeting's pictures or its automatic mode change.
+ */
+export type MeetingSnapshotChangedEvent = MeetingEventPayload
+export type MeetingSnapshotError = "screen_recording_denied" | "no_meeting_window" | "not_recording" | "limit_reached" | "not_found" | "storage_unavailable" | "unsupported" | "capture_failed"
+export type MeetingSnapshotId = string
+export type MeetingSnapshotImage = { snapshot_id: MeetingSnapshotId; size: MeetingSnapshotSize; png_base64: string }
+export type MeetingSnapshotSize = "thumbnail" | "full"
+export type MeetingSnapshotStatus = { session_id: MeetingSessionId; automatic_setting: boolean; turned_off_for_meeting: boolean; screen_recording_granted: boolean; state: MeetingSnapshotWatch; count: number; automatic_count: number; automatic_limit: number; limit: number }
+export type MeetingSnapshotSummary = { snapshot_id: MeetingSnapshotId; session_id: MeetingSessionId;
+/**
+ * Time into the recording, on the transcript's clock.
+ */
+offset_ns: number; captured_at_utc_ms: number; width: number; height: number; trigger: MeetingSnapshotTrigger; app_bundle_id: string | null }
+export type MeetingSnapshotTrigger = "manual" | "automatic"
+/**
+ * What the automatic mode is doing for one meeting right now.
+ */
+export type MeetingSnapshotWatch =
+/**
+ * The meeting is not recording.
+ */
+"idle" |
+/**
+ * Looking at the meeting window for a change.
+ */
+"watching" |
+/**
+ * No meeting window is on screen, so nothing is looked at.
+ */
+"paused" |
+/**
+ * macOS has not given Sona Screen Recording.
+ */
+"denied" |
+/**
+ * The meeting has all the automatic pictures it keeps.
+ */
+"limit_reached" |
+/**
+ * Turned off in Settings or for this meeting.
+ */
+"off"
 export type MeetingSourceHealthChangedEvent = MeetingEventPayload
 export type MeetingSourceSnapshot = { track_id: SourceTrackId | null; source_kind: SourceKind; required: boolean; availability: SourceAvailability; health: SourceHealth; format: AudioFormat | null; last_durable_offset_ns: number | null; gap_count: number }
 export type MeetingSpeaker = { speaker_id: SpeakerId; session_id: MeetingSessionId; source_kind: SourceKind; display_name: string; revision: number }
@@ -5478,6 +6487,16 @@ interaction_count: number; total_speaking_ns: number; speakers: SpeakerTalkShare
  * `None` when the floor never changed hands.
  */
 median_switch_gap_ms: number | null }
+export type MeetingTemplateId = string
+/**
+ * One heading of a custom template and what belongs under it.
+ */
+export type MeetingTemplateSection = { title: string;
+/**
+ * What the notes should say under this heading. May be empty: the title
+ * alone is often instruction enough.
+ */
+instructions: string }
 /**
  * Where the next meeting's text would be written, for a series that has not
  * been kept on this Mac. The answer a start page needs before a meeting
@@ -5511,6 +6530,12 @@ export type MeetingTimeWindow = "any" | "today" |
 export type MeetingTitleSetRequest = { operation_id: MeetingOperationId; session_id: MeetingSessionId; expected_revision: number; title: string }
 export type MeetingTrackSnapshot = { track_id: SourceTrackId; source_kind: SourceKind; format: AudioFormat | null; first_offset_ns: number | null; last_offset_ns: number | null; durable_record_count: number }
 export type MeetingTranscriptChangedEvent = MeetingEventPayload
+export type MeetingTranscriptRetentionMutationResult = { receipt: OperationReceipt; snapshot: MeetingTranscriptRetentionSnapshot }
+/**
+ * Independent of whole-meeting retention. The timestamp moves only when
+ * deletion is enabled or its horizon is shortened, preserving the seven-day notice.
+ */
+export type MeetingTranscriptRetentionSnapshot = { policy: MeetingRetentionPolicy; revision: number; changed_at_utc_ms: number; deletion_begins_at_utc_ms: number | null }
 /**
  * One deleted meeting that can still be brought back.
  *
@@ -5621,12 +6646,12 @@ always_record: boolean;
  * The notes template this series is remembered by, or `None` for the app
  * default.
  */
-template: MeetingNotesTemplate | null; digest_included: boolean }
+template: MeetingNotesTemplate | null; custom_template_id?: MeetingTemplateId | null; digest_included: boolean }
 /**
  * The user's own layer on a meeting: rough notes typed while it runs and the
  * template those notes should be shaped into.
  */
-export type MeetingUserNotes = { session_id: MeetingSessionId; body: string; template: MeetingNotesTemplate;
+export type MeetingUserNotes = { session_id: MeetingSessionId; body: string; template: MeetingNotesTemplate; custom_template_id?: MeetingTemplateId | null;
 /**
  * Bumped on every save; a save must supply the revision it is replacing.
  */
@@ -5636,7 +6661,7 @@ revision: number; updated_at_utc_ms: number }
  * notes row alone: this path never touches the session revision, because it
  * runs on an autosave timer while other edits may be in flight.
  */
-export type MeetingUserNotesSaveRequest = { session_id: MeetingSessionId; body: string; template: MeetingNotesTemplate; expected_note_revision: number }
+export type MeetingUserNotesSaveRequest = { session_id: MeetingSessionId; body: string; template: MeetingNotesTemplate; custom_template_id?: MeetingTemplateId | null; expected_note_revision: number }
 export type MeetingWrapCard = { sessionId: MeetingSessionId; title: string; headline: string; unresolvedSpeakerCount: number | null; followUpCount: number; waitingOnCount: number; waitingOnNames: string[] }
 /**
  * One exact frontmost-application identity mapped to one mode. Application
@@ -5685,6 +6710,14 @@ cloud_timestamps?: boolean }
 export type ModeDefinition = { id: string; name: string; tone: Tone; context_policy: ContextPolicy; asr: ModeAsrSettings; llm: ModeLlmSettings; prompt: ModePromptSettings; delivery: ModeDeliverySettings }
 export type ModeDeliverySettings = { paste_method: PasteMethod; clipboard_handling: ClipboardHandling; auto_submit: boolean; auto_submit_key: AutoSubmitKey; append_trailing_space: boolean; paste_delay_ms: number; paste_delay_after_ms: number; reliable_paste: boolean; typing_tool: TypingTool; external_script_path: string | null }
 export type ModeLlmSettings = { enabled: boolean;
+/**
+ * Absent means the mode keeps its existing prompt byte for byte. A level
+ * is only recorded when the user chooses one; loading or saving an older
+ * mode must not silently change its writing style. `enabled` remains the
+ * master switch, and an explicit `None` also vetoes forced dictation
+ * cleanup. Voice commands are a separate, explicitly requested rewrite.
+ */
+cleanup_level?: CleanupLevel | null;
 /**
  * The provider this mode overrides to, or `None` to inherit
  * [`AppSettings::post_process_provider_id`].
@@ -5822,6 +6855,7 @@ export type NotificationAccess = "not_determined" | "authorized" | "denied" |
  * target.
  */
 "unavailable"
+export type OnboardingPracticeTranscript = { session_id: string; text: string }
 export type OpenLoopsInboxResult = { schema_version: number; revision: number; entries: PersonOpenLoop[] }
 export type OperationActor = "user" | "system" |
 /**
@@ -6025,8 +7059,9 @@ export type PostProcessProviderConsentError = "unknown_provider" | "local_provid
  * report it as given.
  */
 "not_saved"
+export type PrepPreferences = { about_me: AboutMe; email_context_enabled: boolean; mail_compose_enabled: boolean; web_research_enabled: boolean; overnight_enabled: boolean; upcoming_alerts_enabled: boolean; notes_ready_enabled: boolean; ad_hoc_alerts_enabled: boolean; alert_minutes: number; menu_bar_enabled: boolean }
 export type ProcessingDestination = { kind: "local" } | { kind: "remote"; destination_id: string }
-export type ProcessingFailure = "local_model_unavailable" | "remote_unavailable" | "engine_failure" | "cancelled" |
+export type ProcessingFailure = "local_model_unavailable" | "remote_unavailable" | "engine_failure" | "cancelled" | "transcript_deleted" |
 /**
  * The launch that was recording or processing this meeting ended before
  * the work finished. Written by startup recovery, never by a run: it is
@@ -6338,6 +7373,7 @@ export type RecordingRetentionPeriod = "never" | "preserve_limit" |
  */
 "days_3" | "weeks_2" | "months_3"
 export type RemoteAcknowledgement = { destination_id: string; policy_version: number; acknowledged_at_utc_ms: number }
+export type RemoteUndo = { kind: "slack"; channel: string; timestamp: string } | { kind: "notion"; page_id: string } | { kind: "hubspot"; note_id: string } | { kind: "attio"; note_id: string } | { kind: "affinity"; note_id: string }
 /**
  * A deterministic spoken-phrase rewrite applied before vocabulary
  * correction. This is a distinct mechanism from the ASR vocabulary: a
@@ -6402,6 +7438,41 @@ export type SavedPromptRunRequest = { prompt_id: SavedPromptId; target: PromptTa
  * a replayed save from a stale window updates in place rather than duplicating.
  */
 export type SavedPromptSaveRequest = { operation_id: MeetingOperationId; prompt_id: SavedPromptId | null; name: string; body: string; output: PromptOutput; target: PromptTarget; expected_revision: number }
+/**
+ * One note, as the screen and every other slice read it.
+ */
+export type ScratchNote = {
+/**
+ * UUID v4, minted when the note is first saved.
+ */
+id: string;
+/**
+ * The first words of the body, or [`UNTITLED`] while the body is too
+ * short to name it. Derived on every write, never typed.
+ */
+title: string; body: string; pinned: boolean; created_at_ms: number; updated_at_ms: number }
+/**
+ * One saved state of a note. The newest is the body the note has now.
+ */
+export type ScratchNoteVersion = { id: number; note_id: string; kind: ScratchVersionKind; body: string; saved_at_ms: number }
+/**
+ * How a version came to be.
+ */
+export type ScratchVersionKind =
+/**
+ * Typed or dictated into the editor.
+ */
+"edit" |
+/**
+ * An earlier version put back.
+ */
+"restore"
+/**
+ * A note was created, rewritten, pinned, restored or deleted, by any caller.
+ * A listener re-reads the list; one that has the note open re-reads it when
+ * it holds no unsaved words of its own.
+ */
+export type ScratchpadChangedEvent = { note_id: string; deleted: boolean }
 export type SecretCommandError = "unavailable" | "locked" | "corrupt" | "invalid" | "busy" | "backend"
 export type SecretErrorKind = "unavailable" | "locked" | "corrupt" | "invalid" | "busy" | "backend"
 export type SecretKind = "llm" | "stt" | "meeting_storage"
@@ -6438,6 +7509,10 @@ uncovered_bindings: string[];
  * warning banner appears and explains why recording refused.
  */
 recorder_blocked: boolean }
+export type SendNotesRequest = { connection_id: string; session_id: MeetingSessionId; operation_id: string }
+export type SendReceipt = { id: string; connection_id: string; connection_name: string; session_id: string | null; state: SendState; detail: string; created_at_utc_ms: number; undo: RemoteUndo | null }
+export type SendScope = { kind: "all" } | { kind: "series"; id: string } | { kind: "folder"; id: string }
+export type SendState = "sending" | "sent" | "failed" | "undone"
 export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 /**
  * A user-authored text expansion. The trigger is matched on whole words after
@@ -6464,7 +7539,7 @@ export type SonaAgentStepStateV1 = "running" | "done" | "failed"
  * Mirrored by `SONA_ACTION_FIELDS` in `omp_bridge/sona_chat.py`, which checks
  * the same field sets on the way out.
  */
-export type SonaChatActionV1 = { kind: "resolve_loop"; reason: string; loop_id: MeetingLoopId } | { kind: "assign_loop"; reason: string; loop_id: MeetingLoopId; person_id: PersonId } | { kind: "set_series_template"; reason: string; series_key: string; template_id: MeetingNotesTemplate } | { kind: "add_vocabulary_term"; reason: string; term: string; replacement: string | null } | { kind: "rename_speaker"; reason: string; session_id: MeetingSessionId; speaker_id: SpeakerId; name: string }
+export type SonaChatActionV1 = { kind: "resolve_loop"; reason: string; loop_id: MeetingLoopId } | { kind: "assign_loop"; reason: string; loop_id: MeetingLoopId; person_id: PersonId } | { kind: "set_series_template"; reason: string; series_key: string; template_id: MeetingNotesTemplate } | { kind: "add_vocabulary_term"; reason: string; term: string; replacement: string | null } | { kind: "rename_speaker"; reason: string; session_id: MeetingSessionId; speaker_id: SpeakerId; name: string } | { kind: "draft_email"; reason: string; recipients: string[]; subject: string; body: string } | { kind: "post_slack"; reason: string; connection_id: string; text: string } | { kind: "create_calendar_event"; reason: string; title: string; start_utc_ms: number; end_utc_ms: number; notes: string; location: string } | { kind: "send_notes"; reason: string; connection_id: string; session_id: MeetingSessionId }
 export type SonaConfirmationClassV1 = "automatic" | "review" | "explicit"
 export type SonaSettingChangeV1 = { key: "theme"; value: Theme } | { key: "overlay_style"; value: OverlayStyle } | { key: "overlay_position"; value: OverlayPosition } | { key: "audio_feedback"; value: boolean } | { key: "audio_volume"; value: number } | { key: "mute_while_recording"; value: boolean } | { key: "audio_output_device_id"; value: string } | { key: "microphone_id"; value: string } | { key: "default_transcription_model"; value: string } | { key: "language"; value: string } | { key: "spelling_behavior"; value: EnglishSpelling } | { key: "mode_selection"; value: string } | { key: "mode_toggles"; value: Partial<{ [key in string]: boolean }> } | { key: "local_retention_period"; value: number } | { key: "start_hidden"; value: boolean } | { key: "tray_visibility"; value: boolean } | { key: "update_note_visibility"; value: boolean }
 export type SoundTheme = "marimba" | "pop" | "custom"
@@ -6526,7 +7601,7 @@ export type StreamWorkKind = "transcribing" | "polishing"
  * Typed result for the explicit, user-triggered STT credential handshake.
  * This deliberately keeps provider failures separate from native-store errors.
  */
-export type SttSecretVerificationError = "not_configured" | "consent_required" | "unavailable" | "locked" | "corrupt" | "invalid" | "busy" | "backend"
+export type SttSecretVerificationError = "not_configured" | "consent_required" | "unavailable" | "locked" | "corrupt" | "invalid" | "busy" | "backend" | "authentication" | "quota" | "network" | "protocol"
 /**
  * Where one line of the summary came from: the transcript segment a reader
  * lands on when they press that line. `line` is the zero-based index of the

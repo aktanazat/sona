@@ -38,7 +38,6 @@
     "library": "Bibliotek"
   },
   "onboarding": {
-    "subtitle": "Modellerna körs på den här datorn och avväger noggrannhet mot hastighet.",
     "existingModelsTitle": "Kompatibla modeller",
     "downloadModelsTitle": "Tillgängliga för nedladdning",
     "otherModels": "Andra modeller",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Kunde inte välja modellen. Försök igen."
+      "selectModel": "Kunde inte välja modellen. Försök igen.",
+      "cancelDownload": "Kunde inte avbryta nedladdningen. Försök igen.",
+      "languages": "Kunde inte spara dina språk. Försök igen."
     },
     "permissions": {
       "title": "Behörigheter krävs",
@@ -137,7 +138,44 @@
       "checking": "Kontrollerar behörigheter",
       "recheck": "Kontrollera igen"
     },
-    "headline": "Välj en transkriptionsmodell"
+    "headline": "Välj en transkriptionsmodell",
+    "continue": "Fortsätt",
+    "back": "Tillbaka",
+    "languages": {
+      "title": "Vilka språk talar du?",
+      "selector": "Dikteringsspråk: {{languages}}",
+      "auto": "Identifiera automatiskt",
+      "selected": "{{language}}, valt",
+      "noModels": "Inga modeller stöder dessa språk. Välj andra språk."
+    },
+    "practice": {
+      "title": "Prova att diktera",
+      "record": "Spela in",
+      "stop": "Stoppa",
+      "finish": "Slutför inställningarna",
+      "recordAgain": "Spela in igen",
+      "words": "Dina ord",
+      "recording": "Lyssnar · {{seconds}} sekunder kvar",
+      "status": {
+        "ready": "Spela in några ord på ditt valda språk.",
+        "starting": "Öppnar mikrofonen…",
+        "transcribing": "Transkriberar…",
+        "delivered": "Diktering mottagen",
+        "finishing": "Sparar inställningarna…",
+        "cancelling": "Avbryter…",
+        "error": "Provdikteringen slutfördes inte"
+      },
+      "errors": {
+        "permission": "Tillåt mikrofonåtkomst i systeminställningarna och försök igen.",
+        "noSpeech": "Inget tal hördes. Spela in igen.",
+        "microphone": "Anslut en mikrofon och försök igen.",
+        "expired": "Tiden för provdikteringen gick ut. Spela in igen.",
+        "changed": "Din modell eller dina språk har ändrats. Spela in igen.",
+        "record": "Kunde inte spela in: {{error}}",
+        "cancel": "Kunde inte avbryta provdikteringen. Försök igen innan du spelar in på nytt.",
+        "complete": "Kunde inte spara inställningarna: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Anpassad",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Textbearbetning offline",
+        "description": "{{language}} · {{size}}",
+        "download": "Ladda ner",
+        "downloading": "Laddar ner {{downloaded}} av {{total}}",
+        "cancel": "Avbryt nedladdning",
+        "retry": "Försök ladda ner igen",
+        "ready": "Redo för diktering på engelska",
+        "notDownloaded": "Inte nedladdad",
+        "use": "Använd för diktering",
+        "selected": "Vald för diktering",
+        "remove": "Ta bort den nedladdade modellen",
+        "removeTitle": "Ta bort textbearbetning offline?",
+        "removeDescription": "Sona behåller dina ord oförändrade tills du laddar ner modellen igen eller väljer en annan leverantör.",
+        "runtimeMissing": "Textbearbetning offline saknas i den här installationen av Sona. Installera om Sona.",
+        "lightOnly": "Endast lätt bearbetning av engelsk text.",
+        "instructionsUnavailable": "Välj en annan leverantör för talade instruktioner."
+      },
       "api": {
         "title": "API (OpenAI-kompatibelt)",
         "provider": {
@@ -1762,11 +1818,11 @@
       },
       "remoteIntelligence": {
         "title": "Mötesintelligens",
-        "label": "Skriv mötesanteckningar på min server",
-        "consent": "Sammanfattningar och svar för möten skrivs på din server över ditt privata nätverk.",
+        "label": "Använd moln-AI för mötesanteckningar",
+        "consent": "Lokal behandling som standard. När funktionen är på skickas mötestext till din parkopplade server och dess AI-leverantör. Ljud stannar på denna Mac. Stäng av för att hålla nya sammanfattningar, register, återblickar och svar lokala.",
         "unpaired": "Parkoppla Sona med din server under Agenter för att slå på detta.",
         "seriesTitle": "Serier som stannar på den här Macen",
-        "seriesHint": "En serie i den här listan skrivs alltid på den här Macen, även när mötesintelligens är på.",
+        "seriesHint": "Valda serier stannar på denna Mac även när moln-AI är på.",
         "seriesEmpty": "Inga återkommande möten inspelade än.",
         "loading": "Läser dina serier…",
         "lastMet": "Senast {{date}}",
@@ -2010,7 +2066,8 @@
         "remote_unavailable": "Fjärrdestinationen är inte tillgänglig",
         "engine_failure": "Bearbetningen misslyckades",
         "cancelled": "Bearbetningen avbröts",
-        "interrupted": "Bearbetningen avbröts i förtid"
+        "interrupted": "Bearbetningen avbröts i förtid",
+        "transcript_deleted": "Transkriptet har raderats"
       }
     },
     "start": {
@@ -2148,6 +2205,7 @@
       "recovery_required": "Det här mötet måste återställas före den åtgärden.",
       "deletion_in_progress": "Borttagningen pågår redan. Mötet förblir oåtkomligt.",
       "not_found": "Det här mötet är inte längre tillgängligt.",
+      "transcript_deleted": "Anteckningar kan inte återskapas efter att deras transkript har raderats.",
       "invalid_request": "Mötesförfrågan var ogiltig.",
       "export_cancelled": "Exporten avbröts. Ingen färdig export skapades.",
       "export_failed": "Exporten misslyckades. Ingen färdig export skapades.",

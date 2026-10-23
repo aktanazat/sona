@@ -35,11 +35,12 @@ use crate::tray::DICTATION_ACTIVITY_EVENT;
 
 /// The events the managers emit by string name rather than through a specta
 /// type. The typed ones are listed in [`dispatch::TYPED_EVENTS`].
-const NAMED_EVENTS: [&str; 24] = [
+const NAMED_EVENTS: [&str; 26] = [
     DICTATION_ACTIVITY_EVENT,
     HISTORY_STORAGE_EVENT,
     "handy-keys-event",
     "hide-overlay",
+    "local-cleanup-state",
     "mic-level",
     "model-deleted",
     "model-download-cancelled",
@@ -52,6 +53,7 @@ const NAMED_EVENTS: [&str; 24] = [
     "model-verification-completed",
     "model-verification-started",
     "models-updated",
+    "onboarding-practice-expired",
     "paste-error",
     "recording-error",
     "recording-ready",
@@ -243,8 +245,7 @@ fn verified_native_shell_pid(stream: &UnixStream) -> Option<u32> {
     let mut pid: libc::pid_t = 0;
     let expected_size = libc::socklen_t::try_from(std::mem::size_of_val(&pid)).ok()?;
     let mut size = expected_size;
-    // SAFETY: stream keeps the descriptor open and pid is writable storage
-    // of exactly the size passed to getsockopt for LOCAL_PEERPID.
+    // SAFETY: stream owns the open descriptor; pid is writable storage of the exact size passed for LOCAL_PEERPID.
     let status = unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),

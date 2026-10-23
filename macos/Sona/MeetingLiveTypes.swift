@@ -407,6 +407,43 @@ enum MeetingLiveStopSurface: String {
     case consentPanel = "consent_panel"
 }
 
+enum MeetingProvisionalSpeaker: Decodable, Equatable {
+    case cluster(index: UInt32)
+    case unknown
+    case uncertain
+    case unavailable
+
+    private enum Key: String, CodingKey { case kind, index }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "cluster": self = .cluster(index: try container.decode(UInt32.self, forKey: .index))
+        case "unknown": self = .unknown
+        case "uncertain": self = .uncertain
+        case "unavailable": self = .unavailable
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: container, debugDescription: "unknown provisional speaker state")
+        }
+    }
+}
+
+extension MeetingProvisionalSegment {
+    var speakerLabel: String {
+        switch speaker {
+        case let .cluster(index):
+            return "\(sourceKind.label) · Speaker \(UInt64(index) + 1)"
+        case .unknown:
+            return "\(sourceKind.label) · Speaker unknown"
+        case .uncertain:
+            return "\(sourceKind.label) · Voices unclear"
+        case .unavailable:
+            return "\(sourceKind.label) · Speaker labels unavailable"
+        }
+    }
+}
+
 // MARK: - Help during a call
 
 enum MeetingLiveHelpKind: String, Decodable {

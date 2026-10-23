@@ -1,6 +1,6 @@
 use crate::context::{ContextPacket, TargetMetadata};
 use crate::modes::{CleanupLevel, PromptPreset, RunPlan, Tone};
-use crate::settings::{PersonaSample, PERSONA_SAMPLES_MAX};
+use crate::settings::{PersonaSample, LOCAL_CLEANUP_PROVIDER_ID, PERSONA_SAMPLES_MAX};
 use serde::Serialize;
 use specta::Type;
 
@@ -46,11 +46,18 @@ pub struct PromptBudgetReceipt {
     pub context_truncated: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptOperation {
+    Dictation,
+    Instruction,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderedPrompt {
     pub system_message: String,
     pub user_message: String,
     pub budget_receipt: PromptBudgetReceipt,
+    pub(crate) operation: PromptOperation,
 }
 
 pub struct PromptRenderInput<'a> {
@@ -99,6 +106,34 @@ struct InstructionEnvelope {
 /// and context values are serialized as data in the user envelope; only shipped
 /// resources and persisted mode configuration are placed in the system message.
 pub fn render(input: PromptRenderInput<'_>) -> RenderedPrompt {
+    if input
+        .run
+        .prompt()
+        .llm
+        .as_ref()
+        .is_some_and(|llm| llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID)
+    {
+        let mut user_message = input.transcript.to_string();
+        if user_message.len() > USER_MESSAGE_BUDGET_BYTES {
+            let excess = user_message.len() - USER_MESSAGE_BUDGET_BYTES;
+            trim_text(&mut user_message, excess);
+        }
+        let user_bytes = user_message.len();
+        return RenderedPrompt {
+            system_message: crate::local_cleanup::SYSTEM_PROMPT.to_string(),
+            user_message,
+            operation: PromptOperation::Dictation,
+            budget_receipt: PromptBudgetReceipt {
+                user_budget_bytes: USER_MESSAGE_BUDGET_BYTES,
+                user_bytes,
+                transcript_bytes: user_bytes,
+                context_bytes: 0,
+                transcript_truncated: user_bytes < input.transcript.len(),
+                context_truncated: false,
+            },
+        };
+    }
+
     // Browser URLs never leave Sona for remote text processing.
     let mut target = input.target.clone();
     target.url = None;
@@ -141,6 +176,7 @@ pub fn render(input: PromptRenderInput<'_>) -> RenderedPrompt {
     RenderedPrompt {
         system_message,
         user_message,
+        operation: PromptOperation::Dictation,
         budget_receipt: PromptBudgetReceipt {
             user_budget_bytes: USER_MESSAGE_BUDGET_BYTES,
             user_bytes,
@@ -193,6 +229,7 @@ pub fn render_instruction(prompt: InstructionRenderInput<'_>) -> RenderedPrompt 
 
     RenderedPrompt {
         system_message: COMMAND.to_string(),
+        operation: PromptOperation::Instruction,
         budget_receipt: PromptBudgetReceipt {
             user_budget_bytes: USER_MESSAGE_BUDGET_BYTES,
             user_bytes: user_message.len(),
@@ -237,6 +274,13 @@ pub fn system_message(run: &RunPlan) -> String {
 
 fn render_system(run: &RunPlan) -> String {
     let prompt_plan = run.prompt();
+    if prompt_plan
+        .llm
+        .as_ref()
+        .is_some_and(|llm| llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID)
+    {
+        return crate::local_cleanup::SYSTEM_PROMPT.to_string();
+    }
     writing_style(
         prompt_plan.tone,
         prompt_plan.preset,
@@ -719,3 +763,4 @@ mod tests {
         assert_eq!(envelope["instruction"], "translate this to French");
     }
 }
+

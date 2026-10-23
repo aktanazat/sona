@@ -137,7 +137,10 @@ const RELAY_OUTPUT_RULE: &str = "\n\nReply with the JSON object only. No prose b
 /// The prompt a turn carries for the shape its caller reads.
 fn relay_prompt(system_prompt: &str, shape: ReplyShape) -> String {
     match shape {
-        ReplyShape::Json => format!("{system_prompt}{RELAY_OUTPUT_RULE}"),
+        ReplyShape::Json
+        | ReplyShape::MeetingNotes
+        | ReplyShape::MeetingLedger
+        | ReplyShape::LedgerMerge => format!("{system_prompt}{RELAY_OUTPUT_RULE}"),
         ReplyShape::Prose => system_prompt.to_string(),
     }
 }
@@ -243,7 +246,7 @@ impl MeetingTextGenerator for RelayTextGenerator {
             .ok_or(MeetingTextGenerationError::Unreachable)?;
         let prompt = relay_prompt(system_prompt, shape);
         let pack = evidence.to_string();
-        let reply_is_json = shape == ReplyShape::Json;
+        let reply_is_json = shape.is_json();
         let turn = async move {
             agent_panel::run_chat_turn(
                 &app,
@@ -414,5 +417,4 @@ mod tests {
             MeetingTextGenerationError::TimedOut
         );
     }
-
 }

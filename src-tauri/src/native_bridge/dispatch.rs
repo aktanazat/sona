@@ -1993,6 +1993,72 @@ pub(super) async fn call(
         "rescan_local_models" => {
             reply(crate::commands::models::rescan_local_models(app.state()).await)
         }
+        "start_onboarding_practice" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::onboarding::start_onboarding_practice(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "stop_onboarding_practice" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::onboarding::stop_onboarding_practice(
+                    app.state(),
+                    app.state(),
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "cancel_onboarding_practice" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::onboarding::cancel_onboarding_practice(
+                    app.state(),
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "complete_onboarding_practice" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::onboarding::complete_onboarding_practice(
+                    handle.clone(),
+                    handle.state(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
+        "get_local_cleanup_status" => {
+            reply(crate::commands::local_cleanup::get_local_cleanup_status(app.clone()).await)
+        }
+        "download_local_cleanup" => {
+            reply(crate::commands::local_cleanup::download_local_cleanup(app.clone()).await)
+        }
+        "cancel_local_cleanup_download" => {
+            reply(crate::commands::local_cleanup::cancel_local_cleanup_download(app.clone()).await)
+        }
+        "remove_local_cleanup" => {
+            reply(crate::commands::local_cleanup::remove_local_cleanup(app.clone()).await)
+        }
+        "select_local_cleanup" => {
+            reply(crate::commands::local_cleanup::select_local_cleanup(app.clone()).await)
+        }
         "update_microphone_mode" => {
             let mut args = Args::parse(params)?;
             let always_on = args.take("alwaysOn")?;
@@ -2104,7 +2170,7 @@ pub(super) async fn call(
         "get_microphone_channels" => {
             let mut args = Args::parse(params)?;
             let device_name = args.take("deviceName")?;
-            reply(crate::commands::audio::get_microphone_channels(device_name).await)
+            reply(crate::commands::audio::get_microphone_channels(app.clone(), device_name).await)
         }
         "set_selected_channel" => {
             let mut args = Args::parse(params)?;

@@ -38,7 +38,6 @@
     "library": "Thư viện"
   },
   "onboarding": {
-    "subtitle": "Các mô hình chạy trên máy Mac này và đánh đổi giữa độ chính xác và tốc độ.",
     "existingModelsTitle": "Mô hình tương thích",
     "downloadModelsTitle": "Có sẵn để tải xuống",
     "otherModels": "Mô hình khác",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Không chọn được mô hình. Hãy thử lại."
+      "selectModel": "Không chọn được mô hình. Hãy thử lại.",
+      "cancelDownload": "Không hủy được quá trình tải xuống. Hãy thử lại.",
+      "languages": "Không lưu được các ngôn ngữ của bạn. Hãy thử lại."
     },
     "permissions": {
       "title": "Cần cấp quyền",
@@ -137,7 +138,44 @@
       "checking": "Đang kiểm tra quyền",
       "recheck": "Kiểm tra lại"
     },
-    "headline": "Chọn một mô hình chuyển đổi"
+    "headline": "Chọn một mô hình chuyển đổi",
+    "continue": "Tiếp tục",
+    "back": "Quay lại",
+    "languages": {
+      "title": "Bạn nói những ngôn ngữ nào?",
+      "selector": "Ngôn ngữ nhập bằng giọng nói: {{languages}}",
+      "auto": "Tự động nhận diện",
+      "selected": "{{language}}, đã chọn",
+      "noModels": "Không có mô hình nào hỗ trợ các ngôn ngữ này. Hãy chọn ngôn ngữ khác."
+    },
+    "practice": {
+      "title": "Thử nhập bằng giọng nói",
+      "record": "Ghi âm",
+      "stop": "Dừng",
+      "finish": "Hoàn tất thiết lập",
+      "recordAgain": "Ghi âm lại",
+      "words": "Lời bạn nói",
+      "recording": "Đang nghe · Còn {{seconds}} giây",
+      "status": {
+        "ready": "Ghi âm vài từ bằng ngôn ngữ bạn đã chọn.",
+        "starting": "Đang mở micrô…",
+        "transcribing": "Đang chuyển giọng nói thành văn bản…",
+        "delivered": "Đã nhận nội dung nhập bằng giọng nói",
+        "finishing": "Đang lưu thiết lập…",
+        "cancelling": "Đang hủy…",
+        "error": "Chưa hoàn thành phần thực hành"
+      },
+      "errors": {
+        "permission": "Cho phép truy cập micrô trong cài đặt hệ thống, rồi thử lại.",
+        "noSpeech": "Không nghe thấy giọng nói. Hãy ghi âm lại.",
+        "microphone": "Kết nối micrô, rồi thử lại.",
+        "expired": "Đã hết thời gian thực hành. Hãy ghi âm lại.",
+        "changed": "Mô hình hoặc ngôn ngữ của bạn đã thay đổi. Hãy ghi âm lại.",
+        "record": "Không ghi âm được: {{error}}",
+        "cancel": "Không hủy được phần thực hành. Hãy thử hủy lại trước khi ghi âm tiếp.",
+        "complete": "Không lưu được thiết lập: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Tùy chỉnh",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Chỉnh sửa văn bản ngoại tuyến",
+        "description": "{{language}} · {{size}}",
+        "download": "Tải xuống",
+        "downloading": "Đã tải {{downloaded}} trên {{total}}",
+        "cancel": "Hủy tải xuống",
+        "retry": "Thử tải lại",
+        "ready": "Sẵn sàng nhập bằng giọng nói tiếng Anh",
+        "notDownloaded": "Chưa tải xuống",
+        "use": "Dùng để nhập bằng giọng nói",
+        "selected": "Đã chọn để nhập bằng giọng nói",
+        "remove": "Xóa bản tải xuống",
+        "removeTitle": "Xóa tính năng chỉnh sửa ngoại tuyến?",
+        "removeDescription": "Sona sẽ giữ nguyên lời bạn nói cho đến khi bạn tải lại mô hình hoặc chọn nhà cung cấp khác.",
+        "runtimeMissing": "Bản cài đặt Sona này thiếu tính năng chỉnh sửa văn bản ngoại tuyến. Hãy cài đặt lại Sona.",
+        "lightOnly": "Chỉ chỉnh sửa cơ bản cho văn bản tiếng Anh.",
+        "instructionsUnavailable": "Chọn nhà cung cấp khác để dùng chỉ dẫn bằng giọng nói."
+      },
       "api": {
         "title": "API (Tương thích OpenAI)",
         "provider": {
@@ -1755,11 +1811,11 @@
       },
       "remoteIntelligence": {
         "title": "Trí tuệ cho cuộc họp",
-        "label": "Viết ghi chú cuộc họp trên máy chủ của tôi",
-        "consent": "Bản tóm tắt và câu trả lời cho cuộc họp được viết trên máy chủ của bạn qua mạng riêng của bạn.",
+        "label": "Dùng AI đám mây cho ghi chú cuộc họp",
+        "consent": "Mặc định xử lý cục bộ. Khi bật, văn bản cuộc họp được gửi đến máy chủ đã ghép nối và nhà cung cấp AI của máy chủ đó. Âm thanh vẫn ở trên máy Mac này. Tắt để giữ các bản tóm tắt, sổ theo dõi, tổng kết và câu trả lời mới ở cục bộ.",
         "unpaired": "Ghép nối Sona với máy chủ của bạn ở mục Tác nhân để bật cái này.",
         "seriesTitle": "Chuỗi ở lại trên máy Mac này",
-        "seriesHint": "Chuỗi có trong danh sách này luôn được viết trên máy Mac này, kể cả khi trí tuệ cho cuộc họp đang bật.",
+        "seriesHint": "Các chuỗi được chọn vẫn ở trên máy Mac này ngay cả khi AI đám mây được bật.",
         "seriesEmpty": "Chưa ghi cuộc họp định kỳ nào.",
         "loading": "Đang đọc các chuỗi của bạn…",
         "lastMet": "Gặp lần cuối {{date}}",
@@ -2003,7 +2059,8 @@
         "remote_unavailable": "Đích từ xa không khả dụng",
         "engine_failure": "Xử lý thất bại",
         "cancelled": "Đã hủy xử lý",
-        "interrupted": "Quá trình xử lý bị ngắt"
+        "interrupted": "Quá trình xử lý bị ngắt",
+        "transcript_deleted": "Bản chép lời đã bị xóa"
       }
     },
     "start": {
@@ -2141,6 +2198,7 @@
       "recovery_required": "Cuộc họp này cần được phục hồi trước thao tác đó.",
       "deletion_in_progress": "Việc xóa đang diễn ra. Cuộc họp vẫn không thể truy cập.",
       "not_found": "Cuộc họp này không còn khả dụng.",
+      "transcript_deleted": "Không thể tạo lại ghi chú sau khi bản chép lời đã bị xóa.",
       "invalid_request": "Yêu cầu cuộc họp không hợp lệ.",
       "export_cancelled": "Việc xuất đã bị hủy. Không có bản xuất hoàn tất nào được tạo.",
       "export_failed": "Việc xuất thất bại. Không có bản xuất hoàn tất nào được tạo.",

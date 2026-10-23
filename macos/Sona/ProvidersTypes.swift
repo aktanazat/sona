@@ -108,6 +108,7 @@ struct Provider: Decodable, Equatable, Identifiable, Sendable {
 enum ProviderCatalog {
     /// On-device, so no key, no address, and no transfer acknowledgement.
     static let appleIntelligenceId = "apple_intelligence"
+    static let localCleanupId = "sona_local"
     /// The one provider whose address the reader owns.
     static let customId = "custom"
     /// What the picker shows before the core has answered.
@@ -143,7 +144,7 @@ enum ProviderEndpoint: Equatable, Sendable {
         }
 
         let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
-        if provider.id == ProviderCatalog.appleIntelligenceId || loopback {
+        if provider.id == ProviderCatalog.appleIntelligenceId || provider.id == ProviderCatalog.localCleanupId || loopback {
             return .local
         }
         guard scheme == "https" else { return .invalid }
@@ -159,6 +160,33 @@ enum ProviderEndpoint: Equatable, Sendable {
         guard let address = parts.string else { return .invalid }
         let origin = parts.port.map { "\(scheme)://\(host):\($0)" } ?? "\(scheme)://\(host)"
         return .remote(address: address, origin: origin)
+    }
+}
+
+struct LocalCleanupStatus: Decodable, Equatable, Sendable {
+    enum Phase: String, Decodable, Sendable {
+        case notDownloaded = "not_downloaded"
+        case downloading
+        case ready
+        case failed
+    }
+
+    let modelId: String
+    let name: String
+    let language: String
+    let license: String
+    let sizeBytes: UInt64
+    let downloadedBytes: UInt64
+    let phase: Phase
+    let runtimeAvailable: Bool
+    let error: String?
+
+    var fraction: Double {
+        sizeBytes == 0 ? 0 : min(1, Double(downloadedBytes) / Double(sizeBytes))
+    }
+
+    var progress: String {
+        "\(Model.bytes(downloadedBytes)) of \(Model.bytes(sizeBytes))"
     }
 }
 

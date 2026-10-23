@@ -53,6 +53,79 @@ pub(crate) fn is_bluetooth_device_named(name: &str) -> bool {
         })
 }
 
+pub(crate) fn input_configuration_identity(name: &str) -> Option<[u64; 6]> {
+    let mut matching = device_ids()?.into_iter().filter(|id| device_name(*id).as_deref() == Some(name));
+    let device_id = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    let mut property = AudioObjectPropertyAddress {
+        mSelector: objc2_core_audio::kAudioDevicePropertyStreamFormat,
+        mScope: objc2_core_audio::kAudioObjectPropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut format = objc2_core_audio_types::AudioStreamBasicDescription {
+        mSampleRate: 0.0,
+        mFormatID: 0,
+        mFormatFlags: 0,
+        mBytesPerPacket: 0,
+        mFramesPerPacket: 0,
+        mBytesPerFrame: 0,
+        mChannelsPerFrame: 0,
+        mBitsPerChannel: 0,
+        mReserved: 0,
+    };
+    let mut size = u32::try_from(std::mem::size_of_val(&format)).ok()?;
+    // SAFETY: the typed format buffer and its exact byte length remain live for this call.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&mut property),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut format).cast(),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let mut buffers = objc2_core_audio_types::AudioBufferList {
+        mNumberBuffers: 0,
+        mBuffers: [objc2_core_audio_types::AudioBuffer {
+            mNumberChannels: 0,
+            mDataByteSize: 0,
+            mData: std::ptr::null_mut(),
+        }],
+    };
+    property.mSelector = objc2_core_audio::kAudioDevicePropertyStreamConfiguration;
+    let mut size = u32::try_from(std::mem::size_of_val(&buffers)).ok()?;
+    // SAFETY: CoreAudio receives the actual capacity of this one-buffer list and refuses a larger list.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&mut property),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut buffers).cast(),
+        )
+    };
+    if status != 0 || buffers.mNumberBuffers != 1
+        || buffers.mBuffers[0].mNumberChannels != format.mChannelsPerFrame
+    {
+        return None;
+    }
+    Some([
+        u64::from(device_id),
+        format.mSampleRate.to_bits(),
+        u64::from(format.mChannelsPerFrame),
+        u64::from(format.mFormatID),
+        u64::from(format.mFormatFlags),
+        u64::from(format.mBitsPerChannel),
+    ])
+}
+
 /// Whether a process outside Sona is playing sound right now.
 ///
 /// macOS 14.2 and later list the processes doing audio, each with its own

@@ -35,6 +35,8 @@ final class ProvidersStore {
 
     /// Apple Intelligence answered "not on this Mac" when it was selected.
     private(set) var appleIntelligenceUnavailable = false
+    private(set) var localCleanup: LocalCleanupStatus?
+    private(set) var localCleanupBusy = false
     /// What the acknowledgement sheet could not do, shown inside the sheet.
     private(set) var consentError: String?
     /// What the prompt editor could not do, shown inside the sheet.
@@ -70,12 +72,17 @@ final class ProvidersStore {
         core.observe(CoreEvent.providersSettingsChanged) { [weak self] _ in
             self?.scheduleRefresh()
         }
+        core.observe("local-cleanup-state") { [weak self] line in
+            guard let status: LocalCleanupStatus = try? Core.payload(line) else { return }
+            self?.localCleanup = status
+        }
     }
 
     /// The first read: the settings, then the two cloud accounts, then whatever
     /// the selected provider needs.
     func start() async {
         await refresh()
+        await refreshLocalCleanup()
         await refreshCloudSecretStates()
         await syncSelectedProvider()
     }
@@ -113,6 +120,10 @@ final class ProvidersStore {
             if first { await checkAppleIntelligence() }
             return
         }
+        if provider.id == ProviderCatalog.localCleanupId {
+            await refreshLocalCleanup()
+            return
+        }
         if first { await refreshSecretState(provider.id) }
         await autoDiscoverIfNeeded()
     }
@@ -124,6 +135,7 @@ final class ProvidersStore {
     var providers: [Provider] { settings?.providers ?? [] }
     var enabled: Bool { settings?.enabled ?? false }
     var isAppleProvider: Bool { selectedProviderId == ProviderCatalog.appleIntelligenceId }
+    var isLocalProvider: Bool { selectedProviderId == ProviderCatalog.localCleanupId }
     var isCustomProvider: Bool { selectedProvider?.editableBaseUrl ?? false }
     var baseUrl: String { selectedProvider?.baseUrl ?? "" }
     var model: String { settings?.model(for: selectedProviderId) ?? "" }
@@ -168,7 +180,9 @@ final class ProvidersStore {
         currentScope.flatMap { catalogs[$0] }
     }
 
-    var allowsManualModelId: Bool { catalogEntry?.catalog.allowsManualModelId ?? true }
+    var allowsManualModelId: Bool {
+        !isAppleProvider && !isLocalProvider && (catalogEntry?.catalog.allowsManualModelId ?? true)
+    }
 
     var isDiscovering: Bool {
         currentScope.map { working.contains(Busy.catalog($0)) } ?? false
@@ -254,6 +268,7 @@ final class ProvidersStore {
     private func autoDiscoverIfNeeded() async {
         guard let provider = selectedProvider,
               provider.id != ProviderCatalog.appleIntelligenceId,
+              provider.id != ProviderCatalog.localCleanupId,
               let signature = autoDiscoverySignature(for: provider),
               signature != lastAutoDiscovery,
               !isDiscovering
@@ -310,7 +325,7 @@ final class ProvidersStore {
     /// The reader asked for the list again, so the last signature no longer
     /// stands in the way.
     func refreshModels() async {
-        guard let provider = selectedProvider, provider.id != ProviderCatalog.appleIntelligenceId else { return }
+        guard let provider = selectedProvider, !isAppleProvider, !isLocalProvider else { return }
         await refreshSecretState(provider.id)
         guard let current = selectedProvider else { return }
         lastAutoDiscovery = autoDiscoverySignature(for: current)
@@ -528,6 +543,60 @@ final class ProvidersStore {
             appleIntelligenceUnavailable = !available
         } catch {
             appleIntelligenceUnavailable = false
+            self.error = error.localizedDescription
+        }
+    }
+
+    func refreshLocalCleanup() async {
+        do {
+            localCleanup = try await core.request("get_local_cleanup_status")
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func downloadLocalCleanup() async {
+        localCleanupBusy = true
+        defer { localCleanupBusy = false }
+        do {
+            localCleanup = try await core.request("download_local_cleanup")
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func cancelLocalCleanupDownload() async {
+        localCleanupBusy = true
+        defer { localCleanupBusy = false }
+        do {
+            try await core.request("cancel_local_cleanup_download")
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func removeLocalCleanup() async {
+        localCleanupBusy = true
+        defer { localCleanupBusy = false }
+        do {
+            localCleanup = try await core.request("remove_local_cleanup")
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func useLocalCleanup() async {
+        localCleanupBusy = true
+        defer { localCleanupBusy = false }
+        do {
+            try await core.request("select_local_cleanup")
+            error = nil
+            await refresh()
+            await syncSelectedProvider()
+        } catch {
             self.error = error.localizedDescription
         }
     }

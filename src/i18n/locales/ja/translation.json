@@ -38,7 +38,6 @@
     "library": "ライブラリ"
   },
   "onboarding": {
-    "subtitle": "モデルはこの Mac 上で動作し、精度と速度がトレードオフになります。",
     "existingModelsTitle": "互換性のあるモデル",
     "downloadModelsTitle": "ダウンロード可能",
     "otherModels": "その他のモデル",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "モデルを選択できませんでした。もう一度お試しください。"
+      "selectModel": "モデルを選択できませんでした。もう一度お試しください。",
+      "cancelDownload": "ダウンロードをキャンセルできませんでした。もう一度お試しください。",
+      "languages": "言語を保存できませんでした。もう一度お試しください。"
     },
     "permissions": {
       "title": "権限が必要です",
@@ -137,7 +138,44 @@
       "checking": "権限を確認中",
       "recheck": "再確認"
     },
-    "headline": "文字起こしのモデルを選んでください"
+    "headline": "文字起こしのモデルを選んでください",
+    "continue": "次へ",
+    "back": "戻る",
+    "languages": {
+      "title": "どの言語を話しますか？",
+      "selector": "音声入力の言語：{{languages}}",
+      "auto": "自動検出",
+      "selected": "{{language}}、選択済み",
+      "noModels": "これらの言語に対応するモデルがありません。別の言語を選んでください。"
+    },
+    "practice": {
+      "title": "音声入力を試す",
+      "record": "録音",
+      "stop": "停止",
+      "finish": "設定を完了",
+      "recordAgain": "もう一度録音",
+      "words": "話した内容",
+      "recording": "聞き取り中 · 残り{{seconds}}秒",
+      "status": {
+        "ready": "選んだ言語で短い言葉を録音してください。",
+        "starting": "マイクを起動中…",
+        "transcribing": "文字起こし中…",
+        "delivered": "音声入力を受け取りました",
+        "finishing": "設定を保存中…",
+        "cancelling": "キャンセル中…",
+        "error": "練習を完了できませんでした"
+      },
+      "errors": {
+        "permission": "システム設定でマイクへのアクセスを許可してから、もう一度お試しください。",
+        "noSpeech": "音声を検出できませんでした。もう一度録音してください。",
+        "microphone": "マイクを接続してから、もう一度お試しください。",
+        "expired": "練習がタイムアウトしました。もう一度録音してください。",
+        "changed": "モデルまたは言語が変更されました。もう一度録音してください。",
+        "record": "録音できませんでした：{{error}}",
+        "cancel": "練習をキャンセルできませんでした。もう一度録音する前に、再度キャンセルしてください。",
+        "complete": "設定を保存できませんでした：{{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "カスタム",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "オフライン整文",
+        "description": "{{language}} · {{size}}",
+        "download": "ダウンロード",
+        "downloading": "{{total}}中{{downloaded}}をダウンロード済み",
+        "cancel": "ダウンロードをキャンセル",
+        "retry": "ダウンロードを再試行",
+        "ready": "英語の音声入力に使用可能",
+        "notDownloaded": "未ダウンロード",
+        "use": "音声入力に使用",
+        "selected": "音声入力用に選択済み",
+        "remove": "ダウンロードを削除",
+        "removeTitle": "オフライン整文を削除しますか？",
+        "removeDescription": "モデルを再ダウンロードするか別のプロバイダーを選ぶまで、Sona は話した言葉をそのまま残します。",
+        "runtimeMissing": "この Sona にはオフライン整文が含まれていません。Sona を再インストールしてください。",
+        "lightOnly": "英語の簡単な整文のみ。",
+        "instructionsUnavailable": "音声で指示するには、別のプロバイダーを選んでください。"
+      },
       "api": {
         "title": "API (OpenAI 互換)",
         "provider": {
@@ -1755,11 +1811,11 @@
       },
       "remoteIntelligence": {
         "title": "会議インテリジェンス",
-        "label": "会議のノートを自分のサーバーで書く",
-        "consent": "会議の要約と回答は、あなたのプライベートネットワーク経由であなたのサーバー上で書かれます。",
+        "label": "会議ノートにクラウド AI を使う",
+        "consent": "初期設定ではローカルで処理します。オンにすると、会議のテキストがペアリング済みサーバーとその AI プロバイダーに送信されます。音声はこの Mac に残ります。オフにすると、新しい要約、台帳、振り返り、回答をローカルで生成します。",
         "unpaired": "有効にするには、エージェントで Sona をサーバーとペアリングしてください。",
         "seriesTitle": "この Mac に残すシリーズ",
-        "seriesHint": "ここに並ぶシリーズは、会議インテリジェンスがオンでも常にこの Mac で書かれます。",
+        "seriesHint": "選択したシリーズは、クラウド AI がオンでもこの Mac に残ります。",
         "seriesEmpty": "繰り返しの会議はまだ記録されていません。",
         "loading": "シリーズを読み込んでいます…",
         "lastMet": "最後は {{date}}",
@@ -2003,7 +2059,8 @@
         "remote_unavailable": "リモートの送信先を利用できません",
         "engine_failure": "処理に失敗しました",
         "cancelled": "処理をキャンセルしました",
-        "interrupted": "処理が中断されました"
+        "interrupted": "処理が中断されました",
+        "transcript_deleted": "文字起こしは削除されました"
       }
     },
     "start": {
@@ -2141,6 +2198,7 @@
       "recovery_required": "その操作の前に、このミーティングは復元が必要です。",
       "deletion_in_progress": "すでに削除が進行中です。このミーティングにはアクセスできません。",
       "not_found": "このミーティングはもう利用できません。",
+      "transcript_deleted": "文字起こしを削除すると、メモを再作成できません。",
       "invalid_request": "ミーティングのリクエストが無効でした。",
       "export_cancelled": "書き出しはキャンセルされました。完了した書き出しは作成されていません。",
       "export_failed": "書き出しに失敗しました。完了した書き出しは作成されていません。",

@@ -115,6 +115,7 @@ export const ModeAdvanced: React.FC<ModeAdvancedProps> = ({
   const osType = useOsType();
   const { update, updateAsr, updateDelivery, updateLlm } = updaters;
   const llmEnabled = mode.llm.enabled;
+  const usesOfflineCleanup = llmDestination.providerId === "sona_local";
 
   const toneOptions: SegmentedOption<Tone>[] = TONES.map((tone) => ({
     value: tone,
@@ -155,7 +156,9 @@ export const ModeAdvanced: React.FC<ModeAdvancedProps> = ({
   const explicitProvider = !llmDestination.inherited
     ? providers.find((provider) => provider.id === llmDestination.providerId)
     : undefined;
-  const isFixedExplicitProvider = explicitProvider?.id === "apple_intelligence";
+  const isFixedExplicitProvider =
+    explicitProvider?.id === "apple_intelligence" ||
+    explicitProvider?.id === "sona_local";
   const explicitModelCatalog = usePostProcessModelCatalog({
     autoDiscover: false,
     baseUrl: explicitProvider?.base_url ?? "",
@@ -222,7 +225,7 @@ export const ModeAdvanced: React.FC<ModeAdvancedProps> = ({
           <ShortcutInput shortcutId={modeBindingId(mode.id, "switch")} />
 
           <SettingsField
-            disabled={!llmEnabled}
+            disabled={!llmEnabled || usesOfflineCleanup}
             label={t("settings.modes.writing.tone.label")}
           >
             <SegmentedRadioGroup
@@ -231,7 +234,7 @@ export const ModeAdvanced: React.FC<ModeAdvancedProps> = ({
               value={mode.tone}
               options={toneOptions}
               onChange={(tone) => update("tone", tone)}
-              disabled={!llmEnabled}
+              disabled={!llmEnabled || usesOfflineCleanup}
             />
           </SettingsField>
 
@@ -304,7 +307,7 @@ export const ModeAdvanced: React.FC<ModeAdvancedProps> = ({
               />
             ) : isFixedExplicitProvider ? (
               <span className="text-sm text-gray-900">
-                {explicitProvider.label}
+                {llmDestination.modelId}
               </span>
             ) : (
               <ModelField
@@ -326,17 +329,21 @@ export const ModeAdvanced: React.FC<ModeAdvancedProps> = ({
           </SettingsField>
 
           <SettingsRow
-            disabled={!llmEnabled}
+            disabled={!llmEnabled || usesOfflineCleanup}
             label={t("settings.modes.writing.spokenInstructions.label")}
             /* The cue itself, and that saying it is not the same as typing
              * it — neither is inferable from the row's name. */
-            hint={t("settings.modes.writing.spokenInstructions.description")}
+            hint={t(
+              usesOfflineCleanup
+                ? "settings.postProcessing.offlineCleanup.instructionsUnavailable"
+                : "settings.modes.writing.spokenInstructions.description",
+            )}
             controlId="mode-spoken-instructions"
           >
             <Switch
               id="mode-spoken-instructions"
               checked={mode.llm.spoken_instructions ?? false}
-              disabled={!llmEnabled}
+              disabled={!llmEnabled || usesOfflineCleanup}
               onCheckedChange={(enabled) =>
                 updateLlm("spoken_instructions", enabled)
               }

@@ -37,7 +37,7 @@ const OVERLAP_MARGIN: f32 = 0.04;
 const PROFILE_MATCH_THRESHOLD: f32 = 0.80;
 const PROFILE_MATCH_MARGIN: f32 = 0.08;
 const WESPEAKER_FEATURE_PIPELINE_REVISION: &str =
-    "log-mel-80-hamming-400-hop-160-fft-512-mean-center-v1";
+    "kaldi-fbank-80-pcm16-hamming-400-hop-160-fft-512-per-bin-cmn-v2";
 const WESPEAKER_NORMALIZATION: &str = "l2-v1";
 const NORMALIZED_EMBEDDING_NORM_SQUARED_TOLERANCE: f32 = 1e-3;
 
@@ -1228,6 +1228,9 @@ fn normalize(values: &mut [f32]) -> Option<()> {
     })
 }
 
+// The pinned model's preprocessor uses Kaldi fbank followed by a temporal mean
+// for each mel band, not one scalar mean over the entire feature matrix.
+// https://github.com/wenet-e2e/wespeaker/blob/45941e7cba2c3ea99e232d02bedf617fc71b0dad/wespeaker/bin/infer_onnx.py
 fn log_mel_features(
     samples: &[f32],
     fft: &dyn Fft<f32>,
@@ -1237,52 +1240,74 @@ fn log_mel_features(
         return Err(DiarizationError::InvalidAudio);
     }
     let frame_count = 1 + (samples.len() - FRAME_SAMPLES) / FRAME_HOP_SAMPLES;
+    let frame_samples = FRAME_SAMPLES
+        .to_f32()
+        .ok_or(DiarizationError::InferenceFailed)?;
     let mut features = Vec::with_capacity(frame_count * MEL_BINS);
     let window = hamming_window()?;
-    let mut spectrum = vec![Complex32::default(); FFT_SIZE];
+    let mut spectrum = [Complex32::default(); FFT_SIZE];
+    let mut fft_scratch = vec![Complex32::default(); fft.get_inplace_scratch_len()];
+    let mut power = [0.0_f32; FFT_SIZE / 2];
     for frame_index in 0..frame_count {
         spectrum.fill(Complex32::default());
         let start = frame_index * FRAME_HOP_SAMPLES;
-        for (sample, (windowed, coefficient)) in samples[start..start + FRAME_SAMPLES]
+        let frame = &samples[start..start + FRAME_SAMPLES];
+        let mean = frame.iter().sum::<f32>() / frame_samples;
+        // Kaldi removes each frame's DC offset, preemphasizes with 0.97 and
+        // replicates its first sample at the left edge before windowing.
+        // The model author scales normalized audio back to PCM16 magnitude.
+        let mut previous = (frame[0] - mean) * 32_768.0;
+        for ((sample, windowed), coefficient) in frame
             .iter()
-            .zip(spectrum.iter_mut().zip(window.iter()))
+            .zip(spectrum.iter_mut())
+            .zip(window.iter())
         {
-            *windowed = Complex32::new(sample * coefficient, 0.0);
+            let current = (*sample - mean) * 32_768.0;
+            *windowed = Complex32::new((current - 0.97 * previous) * coefficient, 0.0);
+            previous = current;
         }
-        fft.process(&mut spectrum);
-        let power = spectrum[..=FFT_SIZE / 2]
-            .iter()
-            .map(|value| value.norm_sqr() / 512.0)
-            .collect::<Vec<_>>();
+        fft.process_with_scratch(&mut spectrum, &mut fft_scratch);
+        for (energy, value) in power.iter_mut().zip(spectrum.iter()) {
+            *energy = value.norm_sqr();
+        }
         for filter in filters {
             let energy = filter
                 .iter()
                 .map(|(bin, weight)| power[*bin] * *weight)
                 .sum::<f32>();
-            features.push(energy.max(1e-10).ln());
+            features.push(energy.max(f32::EPSILON).ln());
         }
     }
-    let mean = features.iter().sum::<f32>()
-        / features
-            .len()
-            .to_f32()
-            .ok_or(DiarizationError::InferenceFailed)?;
-    for value in &mut features {
-        *value -= mean;
+    let mut means = [0.0_f32; MEL_BINS];
+    for frame in features.chunks_exact(MEL_BINS) {
+        for (mean, value) in means.iter_mut().zip(frame) {
+            *mean += *value;
+        }
+    }
+    let frame_count = frame_count
+        .to_f32()
+        .ok_or(DiarizationError::InferenceFailed)?;
+    for mean in &mut means {
+        *mean /= frame_count;
+    }
+    for frame in features.chunks_exact_mut(MEL_BINS) {
+        for (value, mean) in frame.iter_mut().zip(means.iter()) {
+            *value -= mean;
+        }
     }
     Ok(features)
 }
 
-fn hamming_window() -> Result<Vec<f32>, DiarizationError> {
+fn hamming_window() -> Result<[f32; FRAME_SAMPLES], DiarizationError> {
     let denominator = (FRAME_SAMPLES - 1)
         .to_f32()
         .ok_or(DiarizationError::InferenceFailed)?;
-    (0..FRAME_SAMPLES)
-        .map(|index| {
-            let index = index.to_f32().ok_or(DiarizationError::InferenceFailed)?;
-            Ok(0.54 - 0.46 * (2.0 * std::f32::consts::PI * index / denominator).cos())
-        })
-        .collect()
+    let mut window = [0.0_f32; FRAME_SAMPLES];
+    for (index, coefficient) in window.iter_mut().enumerate() {
+        let index = index.to_f32().ok_or(DiarizationError::InferenceFailed)?;
+        *coefficient = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * index / denominator).cos();
+    }
+    Ok(window)
 }
 
 fn mel_filters() -> Result<Vec<Vec<(usize, f32)>>, DiarizationError> {
@@ -1291,59 +1316,43 @@ fn mel_filters() -> Result<Vec<Vec<(usize, f32)>>, DiarizationError> {
     let denominator = (MEL_BINS + 1)
         .to_f32()
         .ok_or(DiarizationError::InferenceFailed)?;
-    let mel_points = (0..MEL_BINS + 2)
+    let mel_step = (upper_mel - lower_mel) / denominator;
+    let bin_width = SAMPLE_RATE_HZ
+        .to_f32()
+        .ok_or(DiarizationError::InferenceFailed)?
+        / FFT_SIZE
+            .to_f32()
+            .ok_or(DiarizationError::InferenceFailed)?;
+    let mut bin_mels = [0.0_f32; FFT_SIZE / 2];
+    for (index, mel) in bin_mels.iter_mut().enumerate() {
+        let index = index.to_f32().ok_or(DiarizationError::InferenceFailed)?;
+        *mel = hz_to_mel(index * bin_width);
+    }
+    (0..MEL_BINS)
         .map(|index| {
             let index = index.to_f32().ok_or(DiarizationError::InferenceFailed)?;
-            let mel = lower_mel + (upper_mel - lower_mel) * index / denominator;
-            hz_to_fft_bin(mel_to_hz(mel))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    (1..=MEL_BINS)
-        .map(|index| {
-            let lower = mel_points[index - 1];
-            let center = mel_points[index];
-            let upper = mel_points[index + 1];
-            let mut filter = Vec::new();
-            for bin in lower..center {
-                let denominator = (center - lower)
-                    .max(1)
-                    .to_f32()
-                    .ok_or(DiarizationError::InferenceFailed)?;
-                let weight = (bin - lower)
-                    .to_f32()
-                    .ok_or(DiarizationError::InferenceFailed)?
-                    / denominator;
-                filter.push((bin, weight));
-            }
-            for bin in center..=upper.min(FFT_SIZE / 2) {
-                let denominator = (upper - center)
-                    .max(1)
-                    .to_f32()
-                    .ok_or(DiarizationError::InferenceFailed)?;
-                let weight = upper
-                    .saturating_sub(bin)
-                    .to_f32()
-                    .ok_or(DiarizationError::InferenceFailed)?
-                    / denominator;
-                filter.push((bin, weight));
-            }
+            let lower = lower_mel + index * mel_step;
+            let center = lower_mel + (index + 1.0) * mel_step;
+            let upper = lower_mel + (index + 2.0) * mel_step;
+            // Kaldi evaluates the triangles in mel space at each actual FFT
+            // frequency; flooring the triangle edges to integer bins changes
+            // the filters, especially the narrow low-frequency bands.
+            let filter = bin_mels
+                .iter()
+                .enumerate()
+                .filter_map(|(bin, mel)| {
+                    let weight = ((mel - lower) / (center - lower))
+                        .min((upper - mel) / (upper - center));
+                    (weight > 0.0).then_some((bin, weight))
+                })
+                .collect();
             Ok(filter)
         })
         .collect()
 }
 
 fn hz_to_mel(hz: f32) -> f32 {
-    2595.0 * (1.0 + hz / 700.0).log10()
-}
-
-fn mel_to_hz(mel: f32) -> f32 {
-    700.0 * (10_f32.powf(mel / 2595.0) - 1.0)
-}
-
-fn hz_to_fft_bin(hz: f32) -> Result<usize, DiarizationError> {
-    ((513.0 * hz / 16_000.0).floor().clamp(0.0, 256.0))
-        .to_usize()
-        .ok_or(DiarizationError::InferenceFailed)
+    1127.0 * (1.0 + hz / 700.0).ln()
 }
 
 #[cfg(test)]
@@ -1378,6 +1387,87 @@ mod tests {
         )?;
         assert_eq!(features.len() % MEL_BINS, 0);
         assert!(features.len() <= (SAMPLE_RATE_HZ * 2 / FRAME_HOP_SAMPLES + 1) * MEL_BINS);
+        Ok(())
+    }
+
+    #[test]
+    fn wespeaker_features_match_the_published_kaldi_contract() -> Result<(), DiarizationError> {
+        let audio: Vec<f32> = (0..720)
+            .map(|index| {
+                let sample = i16::try_from((index * 37 + 19) % 257)
+                    .expect("the deterministic sample is in i16 range")
+                    - 128;
+                f32::from(sample) / 512.0 + if index < 360 { 0.25 } else { -0.125 }
+            })
+            .collect();
+        let mut planner = FftPlanner::new();
+        let features = log_mel_features(
+            &audio,
+            planner.plan_fft_forward(FFT_SIZE).as_ref(),
+            &mel_filters()?,
+        )?;
+        assert_eq!(features.len(), 3 * MEL_BINS);
+        // Independent scalar evaluation of the published Kaldi fbank equations
+        // and WeSpeaker CMN, using a direct DFT rather than this FFT pipeline.
+        // The tolerance covers f32 FFT arithmetic versus the f64 reference.
+        let reference = [
+            (0, 0, -0.677_605_6_f32),
+            (0, 1, 0.112_294_41),
+            (0, 7, -1.635_925),
+            (0, 20, -0.734_759_5),
+            (0, 40, -0.431_189_33),
+            (0, 60, 0.047_798_596),
+            (0, 79, -0.115_032_75),
+            (1, 0, 2.034_684_4),
+            (1, 1, 3.604_758_7),
+            (1, 7, 1.763_793_1),
+            (1, 20, 1.615_619_1),
+            (1, 40, 0.896_348_3),
+            (1, 60, -0.151_868_21),
+            (1, 79, 0.200_659_59),
+            (2, 0, -1.357_078_7),
+            (2, 1, -3.717_053),
+            (2, 7, -0.127_868_18),
+            (2, 20, -0.880_859_55),
+            (2, 40, -0.465_159),
+            (2, 60, 0.104_069_61),
+            (2, 79, -0.085_626_85),
+        ];
+        let max_error = reference
+            .iter()
+            .map(|(frame, band, expected)| (features[frame * MEL_BINS + band] - expected).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(max_error < 0.002, "Kaldi reference maximum absolute error: {max_error}");
+        Ok(())
+    }
+
+    #[test]
+    fn wespeaker_cmn_centers_each_band_over_time() -> Result<(), DiarizationError> {
+        let audio: Vec<f32> = (0..720)
+            .map(|index| {
+                let sample = i16::try_from((index * 37 + 19) % 257)
+                    .expect("the deterministic sample is in i16 range")
+                    - 128;
+                f32::from(sample) / 512.0
+            })
+            .collect();
+        let mut planner = FftPlanner::new();
+        let features = log_mel_features(
+            &audio,
+            planner.plan_fft_forward(FFT_SIZE).as_ref(),
+            &mel_filters()?,
+        )?;
+        assert_eq!(features.len(), 3 * MEL_BINS);
+        let largest_band_mean = (0..MEL_BINS)
+            .map(|band| {
+                features.chunks_exact(MEL_BINS).map(|frame| frame[band]).sum::<f32>().abs()
+                    / 3.0
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(
+            largest_band_mean < 0.000_01,
+            "each mel band must be centered separately: {largest_band_mean}"
+        );
         Ok(())
     }
 
@@ -1566,10 +1656,15 @@ mod tests {
         // The revision string is what the store compares before it matches a
         // stored centroid, so it has to name the pipeline this build runs.
         let pipeline = format!(
-            "log-mel-{MEL_BINS}-hamming-{FRAME_SAMPLES}-hop-{FRAME_HOP_SAMPLES}\
-             -fft-{FFT_SIZE}-mean-center-v1"
+            "kaldi-fbank-{MEL_BINS}-pcm16-hamming-{FRAME_SAMPLES}-hop-{FRAME_HOP_SAMPLES}\
+             -fft-{FFT_SIZE}-per-bin-cmn-v2"
         );
         assert_eq!(key.feature_pipeline_revision, pipeline);
+        assert_ne!(
+            key.feature_pipeline_revision,
+            "log-mel-80-hamming-400-hop-160-fft-512-mean-center-v1",
+            "legacy vectors from the incompatible feature extractor must not match"
+        );
 
         assert_eq!(key.model_id, manifest.id.as_str());
         assert_eq!(key.model_revision, manifest.revision.as_str());

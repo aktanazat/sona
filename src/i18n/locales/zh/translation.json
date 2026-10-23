@@ -38,7 +38,6 @@
     "library": "资料库"
   },
   "onboarding": {
-    "subtitle": "模型在这台 Mac 上运行，需要在准确度和速度之间取舍。",
     "existingModelsTitle": "兼容的模型",
     "downloadModelsTitle": "可供下载",
     "otherModels": "其他模型",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "无法选择模型。请重试。"
+      "selectModel": "无法选择模型。请重试。",
+      "cancelDownload": "无法取消下载。请重试。",
+      "languages": "无法保存语言设置。请重试。"
     },
     "permissions": {
       "title": "需要权限",
@@ -137,7 +138,44 @@
       "checking": "正在检查权限",
       "recheck": "重新检查"
     },
-    "headline": "选择转录模型"
+    "headline": "选择转录模型",
+    "continue": "继续",
+    "back": "返回",
+    "languages": {
+      "title": "你使用哪些语言？",
+      "selector": "语音输入语言：{{languages}}",
+      "auto": "自动检测",
+      "selected": "{{language}}，已选择",
+      "noModels": "没有支持这些语言的模型。请选择其他语言。"
+    },
+    "practice": {
+      "title": "试试语音输入",
+      "record": "录音",
+      "stop": "停止",
+      "finish": "完成设置",
+      "recordAgain": "重新录音",
+      "words": "你说的内容",
+      "recording": "正在聆听 · 剩余 {{seconds}} 秒",
+      "status": {
+        "ready": "用你选择的语言说几句话并录音。",
+        "starting": "正在开启麦克风…",
+        "transcribing": "正在转录…",
+        "delivered": "已收到语音输入",
+        "finishing": "正在保存设置…",
+        "cancelling": "正在取消…",
+        "error": "练习未完成"
+      },
+      "errors": {
+        "permission": "请在系统设置中允许麦克风访问，然后重试。",
+        "noSpeech": "未检测到语音。请重新录音。",
+        "microphone": "请连接麦克风，然后重试。",
+        "expired": "练习已超时。请重新录音。",
+        "changed": "模型或语言已更改。请重新录音。",
+        "record": "无法录音：{{error}}",
+        "cancel": "无法取消练习。请再次尝试取消，然后再录音。",
+        "complete": "无法保存设置：{{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "自定义",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "离线文本整理",
+        "description": "{{language}} · {{size}}",
+        "download": "下载",
+        "downloading": "已下载 {{downloaded}}，共 {{total}}",
+        "cancel": "取消下载",
+        "retry": "重试下载",
+        "ready": "可用于英语语音输入",
+        "notDownloaded": "未下载",
+        "use": "用于语音输入",
+        "selected": "已选用于语音输入",
+        "remove": "删除下载",
+        "removeTitle": "删除离线文本整理？",
+        "removeDescription": "在你重新下载模型或选择其他提供商之前，Sona 会保留你说的原话，不做整理。",
+        "runtimeMissing": "当前安装的 Sona 缺少离线文本整理功能。请重新安装 Sona。",
+        "lightOnly": "仅支持英语文本的简单整理。",
+        "instructionsUnavailable": "如需使用语音指令，请选择其他提供商。"
+      },
       "api": {
         "title": "API（兼容 OpenAI）",
         "provider": {
@@ -1755,11 +1811,11 @@
       },
       "remoteIntelligence": {
         "title": "会议智能",
-        "label": "在我的服务器上撰写会议笔记",
-        "consent": "会议的摘要和回答将通过你的私有网络在你的服务器上撰写。",
+        "label": "使用云端 AI 撰写会议笔记",
+        "consent": "默认在本地处理。开启后，会议文本将发送到已配对的服务器及其 AI 提供商。音频留在这台 Mac 上。关闭后，新的摘要、台账、回顾和回答将保留在本地处理。",
         "unpaired": "先在“代理”中将 Sona 与你的服务器配对，才能开启。",
         "seriesTitle": "留在这台 Mac 上的系列",
-        "seriesHint": "此处列出的系列始终在这台 Mac 上撰写，即使会议智能已开启。",
+        "seriesHint": "选中的系列始终留在这台 Mac 上，即使云端 AI 已开启。",
         "seriesEmpty": "还没有记录到重复会议。",
         "loading": "正在读取你的系列…",
         "lastMet": "上次 {{date}}",
@@ -2003,7 +2059,8 @@
         "remote_unavailable": "远程目标不可用",
         "engine_failure": "处理失败",
         "cancelled": "处理已取消",
-        "interrupted": "处理已中断"
+        "interrupted": "处理已中断",
+        "transcript_deleted": "转录文本已删除"
       }
     },
     "start": {
@@ -2141,6 +2198,7 @@
       "recovery_required": "执行该操作前，这场会议需要先恢复。",
       "deletion_in_progress": "删除已在进行中。此会议仍无法访问。",
       "not_found": "这场会议已不可用。",
+      "transcript_deleted": "删除转录文本后，无法重新生成笔记。",
       "invalid_request": "会议请求无效。",
       "export_cancelled": "导出已取消。没有生成完整的导出文件。",
       "export_failed": "导出失败。没有生成完整的导出文件。",
