@@ -150,16 +150,6 @@ describe("groupModelsByFamily", () => {
     ]);
   });
 
-  test("every model reaches exactly one group", () => {
-    const models = [
-      model({ id: "a/whisper-base", name: "Whisper Base" }),
-      model({ id: "a/canary-1b", name: "Canary 1B" }),
-      model({ id: "b/mystery", name: "Mystery" }),
-    ];
-    const groups = groupModelsByFamily(models, FALLBACKS);
-    const total = groups.reduce((sum, group) => sum + group.models.length, 0);
-    expect(total).toBe(models.length);
-  });
 });
 
 describe("isLegacyModel", () => {

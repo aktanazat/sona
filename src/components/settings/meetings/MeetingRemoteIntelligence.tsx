@@ -445,6 +445,7 @@ export const MeetingRemoteIntelligence: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { getSetting, updateSetting, isUpdating } = useSettings();
   const switchId = useId();
+  const consentId = useId();
   const [rows, setRows] = useState<MeetingSeriesRemoteRow[] | null>(null);
   const [revision, setRevision] = useState(0);
   const [saving, setSaving] = useState<string | null>(null);
@@ -521,6 +522,7 @@ export const MeetingRemoteIntelligence: React.FC = () => {
       >
         <Switch
           id={switchId}
+          aria-describedby={consentId}
           checked={enabled}
           disabled={
             !paired || isUpdating("meeting_remote_intelligence_enabled")
@@ -530,7 +532,7 @@ export const MeetingRemoteIntelligence: React.FC = () => {
           }
         />
       </SettingsRow>
-      <div className="flex flex-col gap-2 px-6 py-3">
+      <div id={consentId} className="flex flex-col gap-2 px-6 py-3">
         <Notice live={false}>
           {t("settings.meetings.remoteIntelligence.consent")}
         </Notice>

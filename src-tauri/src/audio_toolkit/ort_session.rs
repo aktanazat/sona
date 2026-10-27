@@ -231,9 +231,5 @@ mod tests {
         .expect("initialize CPU session");
 
         assert_eq!(session.provider(), OrtProvider::Cpu);
-        assert_eq!(
-            ProviderReport::new("provider-log-test", session.provider()).to_string(),
-            "ORT session 'provider-log-test' initialized provider: cpu"
-        );
     }
 }

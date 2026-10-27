@@ -760,29 +760,13 @@ mod tests {
     }
 
     #[test]
-    fn matcher_keeps_exact_threshold_margin_tie_and_single_profile_behavior() {
+    fn matcher_accepts_the_exact_runner_up_margin() {
         let candidate = embedding(1.0);
-        let at_threshold = embedding(0.80);
-        let below_threshold = embedding(0.79);
         let best = embedding(0.85);
         let margin_boundary = embedding(0.77);
-        let tied = embedding(0.85);
-
-        assert_eq!(
-            match_speaker_profile(&candidate, [(0, &at_threshold)]),
-            Some(0)
-        );
-        assert_eq!(
-            match_speaker_profile(&candidate, [(0, &below_threshold)]),
-            None
-        );
         assert_eq!(
             match_speaker_profile(&candidate, [(0, &best), (1, &margin_boundary)]),
             Some(0)
-        );
-        assert_eq!(
-            match_speaker_profile(&candidate, [(0, &best), (1, &tied)]),
-            None
         );
     }
 

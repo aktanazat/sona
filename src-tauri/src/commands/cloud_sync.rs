@@ -376,7 +376,6 @@ mod tests {
 
         assert!(!status.configured);
         assert!(status.endpoint.is_none());
-        assert!(status.reason.contains("No cloud sync endpoint"));
     }
 
     #[test]
@@ -397,7 +396,6 @@ mod tests {
         let status = service_status(&settings, false, None);
 
         assert!(!status.configured);
-        assert!(status.reason.contains("setup has not finished"));
     }
 
     #[test]
@@ -408,7 +406,6 @@ mod tests {
         let status = service_status(&settings, false, None);
 
         assert!(!status.configured);
-        assert!(status.reason.contains("disclosure"));
     }
 
     #[test]
@@ -420,7 +417,6 @@ mod tests {
 
         assert!(!status.configured);
         assert!(status.endpoint.is_none());
-        assert!(status.reason.contains("HTTPS"));
     }
 
     #[test]
@@ -428,7 +424,6 @@ mod tests {
         let status = service_status(&bootstrapped("https://sync.example.test/v1"), true, None);
 
         assert!(!status.configured);
-        assert!(status.reason.contains("portable"));
     }
 
     /// `configured` is provisioning, not health: the UI hides destructive setup

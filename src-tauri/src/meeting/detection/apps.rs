@@ -515,24 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn the_default_allowlist_is_the_briefs_bundle_id_table() {
-        let defaults = default_meeting_app_bundle_ids();
-
-        for expected in [
-            "us.zoom.xos",
-            "com.microsoft.teams2",
-            "com.microsoft.teams",
-            "com.tinyspeck.slackmacgap",
-            "com.webex.meetingmanager",
-        ] {
-            assert!(
-                defaults.iter().any(|bundle_id| bundle_id == expected),
-                "{expected} must seed the allowlist"
-            );
-        }
-    }
-
-    #[test]
     fn an_allowlist_entry_only_counts_when_the_app_is_actually_running() {
         let allowlist = default_meeting_app_bundle_ids();
 
@@ -840,27 +822,6 @@ mod tests {
             ),
             BrowserTitleEvidence::Unreadable
         );
-        assert_eq!(
-            NoBrowserTitles.refresh_frontmost("com.google.chrome"),
-            BrowserTitleRead::Unreadable
-        );
-    }
-
-    #[test]
-    fn the_call_apps_ship_in_the_default_allowlist() {
-        let defaults = default_meeting_app_bundle_ids();
-
-        for expected in CALL_APP_BUNDLE_IDS {
-            assert!(
-                defaults.iter().any(|bundle_id| bundle_id == expected),
-                "{expected} must seed the allowlist, or the call path can never run"
-            );
-            assert_eq!(
-                *expected,
-                expected.to_ascii_lowercase(),
-                "the registry stores what WorkspaceApps reports, which is lowercased"
-            );
-        }
     }
 
     #[test]

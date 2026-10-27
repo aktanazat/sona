@@ -14,23 +14,26 @@ public func appleIntelligenceStatus() -> Int32 {
     return 5
 }
 
-@_cdecl("process_text_with_system_prompt_apple")
-public func processTextWithSystemPrompt(
+@_cdecl("start_apple_intelligence_generation")
+public func startAppleIntelligenceGeneration(
+    _ requestID: UInt64,
     _ systemPrompt: UnsafePointer<CChar>,
     _ userContent: UnsafePointer<CChar>,
-    maxTokens: Int32
-) -> UnsafeMutablePointer<AppleLLMResponse> {
-    let responsePtr = ResponsePointer.allocate(capacity: 1)
-    // Initialize with safe defaults
-    responsePtr.initialize(to: AppleLLMResponse(response: nil, success: 0, error_message: nil))
-    
-    let msg = "Apple Intelligence is not available in this build (SDK requirement not met)."
-    
-    // Duplicate the string for the C caller to own
-    responsePtr.pointee.error_message = strdup(msg)
-    
-    return responsePtr
+    _ maxTokens: Int32,
+    _ responseShape: Int32,
+    _ jsonSchema: UnsafePointer<CChar>?,
+    _ completion: AppleLLMCompletion
+) {
+    let response = ResponsePointer.allocate(capacity: 1)
+    response.initialize(to: AppleLLMResponse(
+        response: nil, success: 0,
+        error_message: strdup("Apple Intelligence is not available in this build (SDK requirement not met).")
+    ))
+    completion(requestID, response)
 }
+
+@_cdecl("cancel_apple_intelligence_generation")
+public func cancelAppleIntelligenceGeneration(_ requestID: UInt64) {}
 
 @_cdecl("free_apple_llm_response")
 public func freeAppleLLMResponse(_ response: UnsafeMutablePointer<AppleLLMResponse>?) {

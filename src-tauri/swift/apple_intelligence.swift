@@ -1,4 +1,3 @@
-import Dispatch
 import Foundation
 import FoundationModels
 
@@ -8,8 +7,6 @@ private struct CleanedTranscript: Sendable {
     let cleanedText: String
 }
 
-// MARK: - Swift implementation for Apple LLM integration
-// This file is compiled via Cargo build script for Apple Silicon targets
 
 private typealias ResponsePointer = UnsafeMutablePointer<AppleLLMResponse>
 
@@ -20,19 +17,6 @@ private func duplicateCString(_ text: String) -> UnsafeMutablePointer<CChar>? {
         }
         return duplicated
     }
-}
-
-private func truncatedText(_ text: String, limit: Int) -> String {
-    guard limit > 0 else { return text }
-    let words = text.split(
-        maxSplits: .max,
-        omittingEmptySubsequences: true,
-        whereSeparator: { $0.isWhitespace || $0.isNewline }
-    )
-    if words.count <= limit {
-        return text
-    }
-    return words.prefix(limit).joined(separator: " ")
 }
 
 /// The refusal a caller can act on, keyed by the status codes in
@@ -74,81 +58,115 @@ public func appleIntelligenceStatus() -> Int32 {
     }
 }
 
-@_cdecl("process_text_with_system_prompt_apple")
-public func processTextWithSystemPrompt(
+private final class GenerationTasks: @unchecked Sendable {
+    static let shared = GenerationTasks()
+    private let lock = NSLock()
+    private var tasks: [UInt64: Task<Void, Never>] = [:]
+
+    func start(id: UInt64, operation: @escaping @Sendable () async -> Void) {
+        lock.lock()
+        tasks[id] = Task.detached(priority: .userInitiated, operation: operation)
+        lock.unlock()
+    }
+
+    func finish(id: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tasks.removeValue(forKey: id) != nil
+    }
+
+    func cancel(id: UInt64) {
+        lock.lock()
+        let task = tasks.removeValue(forKey: id)
+        lock.unlock()
+        task?.cancel()
+    }
+}
+
+private func completeGeneration(
+    id: UInt64,
+    output: String?,
+    error: String?,
+    completion: AppleLLMCompletion
+) {
+    let pointer = ResponsePointer.allocate(capacity: 1)
+    pointer.initialize(to: AppleLLMResponse(
+        response: output.flatMap(duplicateCString),
+        success: output == nil ? 0 : 1,
+        error_message: error.flatMap(duplicateCString)
+    ))
+    completion(id, pointer)
+}
+
+@_cdecl("start_apple_intelligence_generation")
+public func startAppleIntelligenceGeneration(
+    _ requestID: UInt64,
     _ systemPrompt: UnsafePointer<CChar>,
     _ userContent: UnsafePointer<CChar>,
-    maxTokens: Int32
-) -> UnsafeMutablePointer<AppleLLMResponse> {
-    let swiftSystemPrompt = String(cString: systemPrompt)
-    let swiftUserContent = String(cString: userContent)
-    let responsePtr = ResponsePointer.allocate(capacity: 1)
-    responsePtr.initialize(to: AppleLLMResponse(response: nil, success: 0, error_message: nil))
-
+    _ maxTokens: Int32,
+    _ responseShape: Int32,
+    _ jsonSchema: UnsafePointer<CChar>?,
+    _ completion: AppleLLMCompletion
+) {
+    let instructions = String(cString: systemPrompt)
+    let content = String(cString: userContent)
+    let schemaJSON = jsonSchema.map { String(cString: $0) }
     guard #available(macOS 26.0, *) else {
-        responsePtr.pointee.error_message = duplicateCString(unavailableMessage(4))
-        return responsePtr
+        completeGeneration(id: requestID, output: nil, error: unavailableMessage(4), completion: completion)
+        return
     }
-
-    // One availability read, shared with the status entry point, so the refusal
-    // names which of the reasons applies instead of flattening them.
     let status = appleIntelligenceStatus()
     guard status == 0 else {
-        responsePtr.pointee.error_message = duplicateCString(unavailableMessage(status))
-        return responsePtr
+        completeGeneration(id: requestID, output: nil, error: unavailableMessage(status), completion: completion)
+        return
     }
-    let model = SystemLanguageModel.default
-
-    let tokenLimit = max(0, Int(maxTokens))
-    let semaphore = DispatchSemaphore(value: 0)
-
-    // Thread-safe container to pass results from async task back to calling thread
-    final class ResultBox: @unchecked Sendable {
-        var response: String?
-        var error: String?
-    }
-    let box = ResultBox()
-
-    Task.detached(priority: .userInitiated) {
-        defer { semaphore.signal() }
+    GenerationTasks.shared.start(id: requestID) {
+        var output: String?
+        var failure: String?
         do {
-            let session = LanguageModelSession(
-                model: model,
-                instructions: swiftSystemPrompt
-            )
-            var output: String
-
-            do {
-                let structured = try await session.respond(
-                    to: swiftUserContent,
-                    generating: CleanedTranscript.self
+            try Task.checkCancellation()
+            let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
+            var options = GenerationOptions(maximumResponseTokens: maxTokens > 0 ? Int(maxTokens) : nil)
+            switch responseShape {
+            case Int32(APPLE_LLM_RESPONSE_MEETING_NOTES), Int32(APPLE_LLM_RESPONSE_MEETING_LEDGER):
+                options.sampling = .greedy
+                guard let schemaJSON else {
+                    throw NSError(domain: "SonaAppleGeneration", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "The meeting response format is missing."
+                    ])
+                }
+                let schema = try JSONDecoder().decode(GenerationSchema.self, from: Data(schemaJSON.utf8))
+                let response = try await session.respond(
+                    to: Prompt { content },
+                    schema: schema,
+                    options: options
                 )
-                output = structured.content.cleanedText
-            } catch {
-                let fallbackGeneration = try await session.respond(to: swiftUserContent)
-                output = fallbackGeneration.content
+                output = response.content.jsonString
+            case Int32(APPLE_LLM_RESPONSE_JSON):
+                output = try await session.respond(to: content, options: options).content
+            case Int32(APPLE_LLM_RESPONSE_TEXT):
+                do {
+                    let response = try await session.respond(to: content, generating: CleanedTranscript.self, options: options)
+                    output = response.content.cleanedText
+                } catch {
+                    try Task.checkCancellation()
+                    output = try await session.respond(to: content, options: options).content
+                }
+            default:
+                failure = "The Apple Intelligence response format is unsupported."
             }
-
-            if tokenLimit > 0 {
-                output = truncatedText(output, limit: tokenLimit)
-            }
-            box.response = output
+            try Task.checkCancellation()
         } catch {
-            box.error = error.localizedDescription
+            failure = error.localizedDescription
         }
+        guard GenerationTasks.shared.finish(id: requestID) else { return }
+        completeGeneration(id: requestID, output: output, error: failure, completion: completion)
     }
+}
 
-    semaphore.wait()
-
-    // Write to responsePtr on the calling thread after task completes
-    if let response = box.response {
-        responsePtr.pointee.response = duplicateCString(response)
-        responsePtr.pointee.success = 1
-    } else {
-        responsePtr.pointee.error_message = duplicateCString(box.error ?? "Unknown error")
-    }
-
-    return responsePtr
+@_cdecl("cancel_apple_intelligence_generation")
+public func cancelAppleIntelligenceGeneration(_ requestID: UInt64) {
+    GenerationTasks.shared.cancel(id: requestID)
 }
 
 @_cdecl("free_apple_llm_response")

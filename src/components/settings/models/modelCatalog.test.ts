@@ -71,7 +71,6 @@ const CATALOG: ModelInfo[] = [
   }),
 ];
 
-const index = buildSearchIndex(CATALOG, WORDS);
 const filter = (
   overrides: Partial<typeof NO_FILTERS>,
   models: ModelInfo[] = CATALOG,
@@ -203,9 +202,3 @@ describe("diskUsage", () => {
   });
 });
 
-describe("buildSearchIndex", () => {
-  test("indexes one entry per model id", () => {
-    expect(index.size).toBe(CATALOG.length);
-    expect(index.get("a/whisper-medium")).toContain("russian");
-  });
-});

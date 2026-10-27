@@ -38,7 +38,6 @@
     "library": "Kitaplık"
   },
   "onboarding": {
-    "subtitle": "Modeller bu Mac üzerinde çalışır ve doğruluk ile hız arasında denge kurar.",
     "existingModelsTitle": "Uyumlu Modeller",
     "downloadModelsTitle": "İndirilebilir",
     "otherModels": "Diğer modeller",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Model seçilemedi. Yeniden deneyin."
+      "selectModel": "Model seçilemedi. Yeniden deneyin.",
+      "cancelDownload": "İndirme iptal edilemedi. Yeniden deneyin.",
+      "languages": "Dilleriniz kaydedilemedi. Yeniden deneyin."
     },
     "permissions": {
       "title": "İzinler Gerekli",
@@ -137,7 +138,44 @@
       "checking": "İzinler denetleniyor",
       "recheck": "Yeniden denetle"
     },
-    "headline": "Bir transkripsiyon modeli seçin"
+    "headline": "Bir transkripsiyon modeli seçin",
+    "continue": "Devam et",
+    "back": "Geri",
+    "languages": {
+      "title": "Hangi dilleri konuşuyorsunuz?",
+      "selector": "Dikte dilleri: {{languages}}",
+      "auto": "Otomatik algıla",
+      "selected": "{{language}}, seçili",
+      "noModels": "Bu dilleri destekleyen model yok. Farklı diller seçin."
+    },
+    "practice": {
+      "title": "Dikteyi deneyin",
+      "record": "Kaydet",
+      "stop": "Durdur",
+      "finish": "Kurulumu tamamla",
+      "recordAgain": "Yeniden kaydet",
+      "words": "Sözleriniz",
+      "recording": "Dinleniyor · {{seconds}} saniye kaldı",
+      "status": {
+        "ready": "Seçtiğiniz dilde birkaç kelime kaydedin.",
+        "starting": "Mikrofon açılıyor…",
+        "transcribing": "Yazıya aktarılıyor…",
+        "delivered": "Dikte alındı",
+        "finishing": "Kurulum kaydediliyor…",
+        "cancelling": "İptal ediliyor…",
+        "error": "Dikte denemesi tamamlanmadı"
+      },
+      "errors": {
+        "permission": "Sistem ayarlarından mikrofon erişimine izin verin, ardından yeniden deneyin.",
+        "noSpeech": "Konuşma algılanmadı. Yeniden kaydedin.",
+        "microphone": "Bir mikrofon bağlayın, ardından yeniden deneyin.",
+        "expired": "Dikte denemesinin süresi doldu. Yeniden kaydedin.",
+        "changed": "Modeliniz veya dilleriniz değişti. Yeniden kaydedin.",
+        "record": "Kayıt yapılamadı: {{error}}",
+        "cancel": "Dikte denemesi iptal edilemedi. Yeniden kaydetmeden önce iptal etmeyi tekrar deneyin.",
+        "complete": "Kurulum kaydedilemedi: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Özel",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Çevrimdışı metin düzenleme",
+        "description": "{{language}} · {{size}}",
+        "download": "İndir",
+        "downloading": "{{total}} içinden {{downloaded}} indirildi",
+        "cancel": "İndirmeyi iptal et",
+        "retry": "İndirmeyi yeniden dene",
+        "ready": "İngilizce dikte için hazır",
+        "notDownloaded": "İndirilmedi",
+        "use": "Dikte için kullan",
+        "selected": "Dikte için seçildi",
+        "remove": "İndirilen modeli kaldır",
+        "removeTitle": "Çevrimdışı düzenleme modeli kaldırılsın mı?",
+        "removeDescription": "Modeli yeniden indirene veya başka bir sağlayıcı seçene kadar Sona, sözlerinizi düzenlemeden saklar.",
+        "runtimeMissing": "Bu Sona kurulumunda çevrimdışı metin düzenleme eksik. Sona'yı yeniden yükleyin.",
+        "lightOnly": "Yalnızca İngilizce metinlerde hafif düzenleme.",
+        "instructionsUnavailable": "Sesli talimatlar için başka bir sağlayıcı seçin."
+      },
       "api": {
         "title": "API (OpenAI Uyumlu)",
         "provider": {
@@ -1762,11 +1818,11 @@
       },
       "remoteIntelligence": {
         "title": "Toplantı zekâsı",
-        "label": "Toplantı notlarını kendi sunucumda yaz",
-        "consent": "Toplantı özetleri ve yanıtları, özel ağın üzerinden kendi sunucunda yazılır.",
+        "label": "Toplantı notları için bulut yapay zekâsı kullan",
+        "consent": "Varsayılan olarak yerel işlenir. Açıldığında toplantı metni eşleştirilmiş sunucuna ve onun yapay zekâ sağlayıcısına gönderilir. Ses bu Mac'te kalır. Yeni özetleri, kayıt dökümlerini, değerlendirmeleri ve yanıtları yerel tutmak için kapat.",
         "unpaired": "Bunu açmak için Ajanlar bölümünde Sona'yı sunucunla eşleştir.",
         "seriesTitle": "Bu Mac'te kalan seriler",
-        "seriesHint": "Burada listelenen bir seri, toplantı zekâsı açıkken bile hep bu Mac'te yazılır.",
+        "seriesHint": "Seçilen seriler, bulut yapay zekâsı açıkken bile bu Mac'te kalır.",
         "seriesEmpty": "Henüz kaydedilmiş yinelenen toplantı yok.",
         "loading": "Serileriniz okunuyor…",
         "lastMet": "Son görüşme {{date}}",
@@ -2010,7 +2066,8 @@
         "remote_unavailable": "Uzak hedef kullanılamıyor",
         "engine_failure": "İşleme başarısız oldu",
         "cancelled": "İşleme iptal edildi",
-        "interrupted": "İşleme yarıda kesildi"
+        "interrupted": "İşleme yarıda kesildi",
+        "transcript_deleted": "Transkript silindi"
       }
     },
     "start": {
@@ -2148,6 +2205,7 @@
       "recovery_required": "Bu eylemden önce bu toplantının kurtarılması gerekiyor.",
       "deletion_in_progress": "Silme işlemi zaten sürüyor. Toplantı erişilemez kalır.",
       "not_found": "Bu toplantı artık kullanılamıyor.",
+      "transcript_deleted": "Transkript silindikten sonra notlar yeniden oluşturulamaz.",
       "invalid_request": "Toplantı isteği geçersizdi.",
       "export_cancelled": "Dışa aktarma iptal edildi. Tamamlanmış bir dışa aktarma oluşturulmadı.",
       "export_failed": "Dışa aktarma başarısız oldu. Tamamlanmış bir dışa aktarma oluşturulmadı.",

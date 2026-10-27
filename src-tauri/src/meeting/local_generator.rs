@@ -11,7 +11,7 @@ use std::future::Future;
 #[cfg(test)]
 use std::io::{Read, Write};
 #[cfg(test)]
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -295,7 +295,7 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
         let model = self.model.clone();
         let system_prompt = system_prompt.to_string();
         let evidence = evidence.to_string();
-        let json_response = shape == ReplyShape::Json;
+        let json_response = shape.is_json();
         let response = run_async(async move {
             send_loopback_chat_completion(
                 &endpoint,
@@ -481,61 +481,35 @@ mod tests {
     }
 
     #[test]
-    fn fixture_reads_fragmented_lowercase_content_length() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("fragment listener");
-        let mut writer = TcpStream::connect(listener.local_addr().expect("fragment address"))
-            .expect("fragment writer");
-        let (stream, _) = listener.accept().expect("fragment reader");
-        let headers = b"POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 2\r\n\r\n";
-        writer.write_all(headers).expect("write lowercase headers");
-        writer.write_all(b"{").expect("write first body fragment");
-        writer.write_all(b"}").expect("write final body fragment");
-        // Cap reads even if TCP coalesces the controlled writes.
-        let mut fragments = (&stream)
-            .take(u64::try_from(headers.len()).expect("header length"))
-            .chain((&stream).take(1))
-            .chain(&stream);
-        let request = read_http_request(&mut fragments);
-        assert_eq!(request.split_once("\r\n\r\n").expect("HTTP body").1, "{}");
-    }
-
-    #[test]
-    fn fixture_framing_preserves_every_split_of_a_request() {
-        let request = b"POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 7\r\n\r\n{\"n\":1}";
-        for split in 1..request.len() {
-            let mut fragments = (&request[..split]).chain(&request[split..]);
-            assert_eq!(
-                read_http_request(&mut fragments).as_bytes(),
-                request,
-                "split at byte {split}"
-            );
-        }
-    }
-
-    #[test]
     fn sends_required_json_request_and_strips_fences() {
-        let fixture = fixture_server(vec![
-            r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.to_string(),
-        ]);
-        let generator =
-            LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
-        let answer = generator
-            .generate("system", "evidence", 42, ReplyShape::Json)
-            .expect("generation");
-        assert_eq!(answer, r#"{"headline":"done"}"#);
-        let body = request_body(&fixture.requests.recv().expect("request"));
-        assert_eq!(body.model, "fixture-model");
-        assert_eq!(body.max_tokens, 42);
-        assert_eq!(body.reasoning_effort, "none");
-        assert_eq!(
-            body.response_format
-                .as_ref()
-                .map(|format| format.kind.as_str()),
-            Some("json_object")
-        );
-        assert_eq!(body.messages[0].role, "system");
-        assert_eq!(body.messages[1].content, "evidence");
-        fixture.handle.join().expect("fixture thread");
+        for shape in [
+            ReplyShape::Json,
+            ReplyShape::MeetingNotes,
+            ReplyShape::MeetingLedger,
+        ] {
+            let fixture = fixture_server(vec![
+                r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.to_string(),
+            ]);
+            let generator =
+                LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
+            let answer = generator
+                .generate("system", "evidence", 42, shape)
+                .expect("generation");
+            assert_eq!(answer, r#"{"headline":"done"}"#);
+            let body = request_body(&fixture.requests.recv().expect("request"));
+            assert_eq!(body.model, "fixture-model");
+            assert_eq!(body.max_tokens, 42);
+            assert_eq!(body.reasoning_effort, "none");
+            assert_eq!(
+                body.response_format
+                    .as_ref()
+                    .map(|format| format.kind.as_str()),
+                Some("json_object")
+            );
+            assert_eq!(body.messages[0].role, "system");
+            assert_eq!(body.messages[1].content, "evidence");
+            fixture.handle.join().expect("fixture thread");
+        }
     }
 
     #[test]

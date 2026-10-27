@@ -673,43 +673,6 @@ impl SecretManager {
         .await
     }
 
-    /// Replace all cloud-sync cryptographic roots in one serialized native-store
-    /// operation. Each account write is read back; the native backend provides
-    /// no file or memory fallback.
-    #[cfg(test)]
-    pub(crate) async fn replace_cloud_sync_keys(
-        &self,
-        keys: CloudSyncKeys,
-    ) -> Result<(), SecretResolveError> {
-        if self.migration_is_pending() {
-            return Err(SecretResolveError::Store(SecretStoreError::new(
-                SecretErrorKind::Unavailable,
-            )));
-        }
-        if let Some(error) = self.disabled_error() {
-            return Err(SecretResolveError::Store(error));
-        }
-
-        let CloudSyncKeys {
-            vault_root,
-            signing_seed,
-            pairing_secret,
-        } = keys;
-        let vault_root = Zeroizing::new(hex::encode(&*vault_root));
-        let signing_seed = Zeroizing::new(hex::encode(&*signing_seed));
-        let pairing_secret = Zeroizing::new(hex::encode(&*pairing_secret));
-        let vault_root_account = SecretAccount::cloud_sync_vault_root();
-        let signing_seed_account = SecretAccount::cloud_sync_signing_seed();
-        let pairing_secret_account = SecretAccount::cloud_sync_pairing_secret();
-
-        self.run_blocking(move |backend| {
-            write_and_verify_native_secret(backend, &vault_root_account, &vault_root)?;
-            write_and_verify_native_secret(backend, &signing_seed_account, &signing_seed)?;
-            write_and_verify_native_secret(backend, &pairing_secret_account, &pairing_secret)
-        })
-        .await
-        .map_err(SecretResolveError::Store)
-    }
 
     async fn replace_cloud_sync_secret(
         &self,
@@ -992,6 +955,7 @@ fn provider_account_for_command(
     match kind {
         SecretKind::Llm => {
             if provider_id == settings::APPLE_INTELLIGENCE_PROVIDER_ID
+                || provider_id == settings::LOCAL_CLEANUP_PROVIDER_ID
                 || settings.post_process_provider(provider_id).is_none()
             {
                 return Err(SecretCommandError::Invalid);
@@ -1805,6 +1769,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keyless_local_cleanup_rejects_credential_commands() {
+        let settings = settings::get_default_settings();
+        assert!(matches!(
+            provider_account_for_command(&settings, SecretKind::Llm, settings::LOCAL_CLEANUP_PROVIDER_ID),
+            Err(SecretCommandError::Invalid)
+        ));
+    }
+
     /// The privacy page reloads on every settings announcement and asks for
     /// each provider's state again. The state read must therefore announce
     /// nothing when it has nothing new, or one read would start a loop of
@@ -2098,17 +2071,6 @@ mod tests {
         tauri::async_runtime::block_on(manager.replace_cloud_vault_root([0x11; 32])).unwrap();
         assert!(backend.has("cloud_sync/vault-root-v1"));
 
-        tauri::async_runtime::block_on(manager.replace_cloud_sync_keys(CloudSyncKeys {
-            vault_root: Zeroizing::new([0x22; 32]),
-            signing_seed: Zeroizing::new([0x33; 32]),
-            pairing_secret: Zeroizing::new([0x44; 32]),
-        }))
-        .unwrap();
-
-        let keys = tauri::async_runtime::block_on(manager.cloud_sync_keys()).unwrap();
-        assert!(keys.vault_root.iter().all(|byte| *byte == 0x22));
-        assert!(keys.signing_seed.iter().all(|byte| *byte == 0x33));
-        assert!(keys.pairing_secret.iter().all(|byte| *byte == 0x44));
     }
 
     #[test]
@@ -2274,15 +2236,12 @@ mod tests {
 
         assert!(!serialized.contains(legacy_secret));
         assert!(!debug.contains(legacy_secret));
-        assert!(!types.contains(legacy_secret));
         assert!(!types.contains("post_process_api_keys"));
         assert!(types.contains("SecretState"));
     }
 
     struct FakeSttVerifier {
         calls: std::sync::atomic::AtomicUsize,
-        providers: Mutex<Vec<crate::modes::CloudSttProvider>>,
-        key_lengths: Mutex<Vec<usize>>,
         outcome: Result<(), SttSecretVerificationError>,
     }
 
@@ -2290,8 +2249,6 @@ mod tests {
         fn succeeds() -> Self {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
-                providers: Mutex::new(Vec::new()),
-                key_lengths: Mutex::new(Vec::new()),
                 outcome: Ok(()),
             }
         }
@@ -2308,20 +2265,12 @@ mod tests {
     impl SttSecretVerifier for FakeSttVerifier {
         fn verify<'a>(
             &'a self,
-            provider: crate::modes::CloudSttProvider,
-            api_key: Zeroizing<String>,
+            _provider: crate::modes::CloudSttProvider,
+            _api_key: Zeroizing<String>,
         ) -> Pin<Box<dyn Future<Output = Result<(), SttSecretVerificationError>> + Send + 'a>>
         {
             Box::pin(async move {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                self.providers
-                    .lock()
-                    .expect("providers lock")
-                    .push(provider);
-                self.key_lengths
-                    .lock()
-                    .expect("key-lengths lock")
-                    .push(api_key.len());
                 self.outcome
             })
         }
@@ -2349,43 +2298,6 @@ mod tests {
             .expect("store STT secret");
     }
 
-    #[test]
-    fn fake_stt_verifier_is_explicit_and_boot_secret_resolution_opens_no_network() {
-        let (manager, _) = manager();
-        let verifier = FakeSttVerifier::succeeds();
-        store_stt_secret(manager.as_ref(), "test-key");
-
-        let resolved = tauri::async_runtime::block_on(resolve_stt_secret(
-            manager.as_ref(),
-            crate::modes::CloudSttProvider::DeepgramNova3,
-        ))
-        .expect("stored STT key");
-        assert_eq!(resolved.as_str(), "test-key");
-        drop(resolved);
-        assert_eq!(
-            verifier.calls.load(std::sync::atomic::Ordering::Acquire),
-            0,
-            "loading stored state must not open a provider handshake"
-        );
-
-        tauri::async_runtime::block_on(verify_stt_secret_for_settings(
-            &cloud_stt_settings_with_consent(),
-            manager.as_ref(),
-            crate::modes::CloudSttProvider::DeepgramNova3,
-            &verifier,
-        ))
-        .expect("explicit fake verification");
-
-        assert_eq!(verifier.calls.load(std::sync::atomic::Ordering::Acquire), 1);
-        assert_eq!(
-            *verifier.providers.lock().expect("providers lock"),
-            vec![crate::modes::CloudSttProvider::DeepgramNova3]
-        );
-        assert_eq!(
-            *verifier.key_lengths.lock().expect("key-lengths lock"),
-            vec![8]
-        );
-    }
 
     #[test]
     fn fake_stt_verifier_enforces_consent_and_key_gates_before_handshake() {

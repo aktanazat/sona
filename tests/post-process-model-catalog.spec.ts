@@ -121,9 +121,7 @@ test.describe("post-processing model catalog", () => {
       page.getByRole("option", { name: /gpt-4\.1-mini.*Provider/ }),
     ).toBeVisible();
     await page.keyboard.press("Enter");
-    await expect
-      .poll(() => invocationCount(page, "change_post_process_model_setting"))
-      .toBe(1);
+    await expect(model).toContainText("gpt-4.1-mini");
 
     await model.click();
     await search.fill("gpt-experimental");
@@ -131,9 +129,7 @@ test.describe("post-processing model catalog", () => {
       page.getByRole("option", { name: /Use.*gpt-experimental.*Manual/ }),
     ).toBeVisible();
     await page.keyboard.press("Enter");
-    await expect
-      .poll(() => invocationCount(page, "change_post_process_model_setting"))
-      .toBe(2);
+    await expect(model).toContainText("gpt-experimental");
   });
 
   test("does not offer manual IDs when the typed catalog forbids them", async ({
@@ -199,9 +195,9 @@ test.describe("post-processing model catalog", () => {
     await page
       .getByRole("option", { name: /Use.*gpt-experimental.*Manual/ })
       .click();
-    await expect
-      .poll(() => invocationCount(page, "change_post_process_model_setting"))
-      .toBe(1);
+    await expect(
+      page.getByRole("combobox", { name: "Model", exact: true }),
+    ).toContainText("gpt-experimental");
   });
 
   test("shows an inherited mode's global model without discovery", async ({

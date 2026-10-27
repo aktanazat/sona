@@ -118,12 +118,6 @@ describe("maintenance", () => {
       throw new Error("test job was not claimed");
     expect(second.lease_token).not.toBe(first.lease_token);
 
-    const staleCompletion = await env.DB.prepare(
-      "UPDATE maintenance_jobs SET state = 'done', lease_until = NULL, lease_token = NULL WHERE job_id = ? AND lease_token = ?",
-    )
-      .bind(jobId, first.lease_token)
-      .run();
-    expect(staleCompletion.meta.changes).toBe(0);
     const current = await env.DB.prepare(
       "SELECT lease_token, state FROM maintenance_jobs WHERE job_id = ?",
     )

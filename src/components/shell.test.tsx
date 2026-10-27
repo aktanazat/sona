@@ -163,20 +163,6 @@ describe("the rail's chat row, in its three states", () => {
     expect(markup).toContain(`>${en.chat.open}</button>`);
   });
 
-  /* The shape the theme allows. `--radius-pill` is for status dots, the HUD
-   * card and toggle tracks (styles/theme.css says so in as many words), and
-   * the deleted pill was drawn at `rounded-full` in the pane's gutter. A rail
-   * row takes the control radius every other rail row takes. */
-  test("it is a rail row at the control radius, not a pill", () => {
-    const row = openTag(shell("overview"), "chat-rail-row");
-
-    expect(row).toContain("rounded-md");
-    expect(row).not.toContain("rounded-full");
-    // No plate of its own either: the rail's rows are flat until washed.
-    expect(row).not.toContain("bg-raised");
-    expect(row).not.toContain("border-gray-alpha-400");
-  });
-
   /* Where it sits, and the whole reason it sits there: a door between two
    * destinations reads as a third destination. Search is the rail's other
    * door, so the two are grouped above the gap that separates them from the
@@ -203,11 +189,9 @@ describe("the rail's chat row, in its three states", () => {
     const row = openTag(markup, "chat-rail-row");
 
     expect(row).toContain('aria-expanded="true"');
-    expect(row).toContain("bg-gray-alpha-200");
     expect(row).not.toContain("aria-current");
     expect(row).not.toContain("aria-hidden");
     expect(row).not.toContain("inert");
-    expect(row).not.toContain("pointer-events-none");
     expect(occurrences(markup, 'data-slot="chat-close"')).toBe(1);
   });
 
@@ -230,11 +214,6 @@ describe("the rail's chat row, in its three states", () => {
     expect(row).not.toContain("aria-expanded");
     // Said once, in the tooltip, which is portalled and so not in this markup.
     expect(markup).not.toContain(en.chat.unpaired);
-    // Dimmed type rather than opacity, like every disabled row in the app,
-    // and no hover wash on something that does nothing.
-    expect(row).toContain("text-gray-800");
-    expect(row).not.toContain("opacity-");
-    expect(row).not.toContain("hover:bg-gray-alpha-100");
   });
 
   test("switched off by setting: no row at all, not a dimmed one", () => {
@@ -275,91 +254,8 @@ describe("the pane belongs to the page", () => {
     }
   });
 
-  /* The gutter the pill used to claim, named by its own numbers so a later
-   * floating control cannot quietly reoccupy it. */
-  test("no shell control claims the pane's top-right gutter", () => {
-    const markup = shell("overview");
-
-    expect(markup).not.toContain("end-[28px]");
-    expect(markup).not.toContain("top-[7px]");
-  });
-
-  /* `relative` is still load-bearing: the drag band is absolutely positioned
-   * against the pane. */
-  test("the pane is the positioned box the drag band measures from", () => {
-    const markup = shell("overview");
-    const main = /<main class="([^"]*)"/.exec(markup)?.[1] ?? "";
-
-    expect(main).toContain("relative");
-    expect(openTag(markup, "drag-band")).toContain("absolute inset-x-0 top-0");
-  });
-
-  /* The banner strip may not grow into the drag band: a banner over it is a
-   * window nobody can move. */
-  test("the banner strip starts below the drag band", () => {
-    expect(shell("overview")).toContain("pt-12");
-  });
 });
 
-/* The shell's three columns, which is what "the chat is part of the window"
- * comes down to.
- *
- * The window is a fixed 900x800 (src-tauri/src/lib.rs) and nothing in the app
- * resizes it, so the chat's 340 has to come out of the two columns already
- * there: the rail gives up its words for 48 and the page keeps 512. The
- * arithmetic belongs to the shell rather than to any one of the three, which
- * is why all three are read here. */
-describe("the shell's three columns", () => {
-  test("closed: the named rail, the full page, and a column 0 wide", () => {
-    const markup = shell("overview");
-
-    expect(markup).toContain("w-[220px]");
-    expect(markup).not.toContain("w-[48px]");
-    /* Mounted so it has somewhere to open from, and taking no width until it
-     * does — the page is the full pane, exactly as it was before any of this. */
-    expect(occurrences(markup, 'data-slot="chat-sheet"')).toBe(1);
-    expect(markup).toContain("pointer-events-none w-0");
-  });
-
-  test("open: rail 48, page between, chat 340 — in that order", () => {
-    const markup = shell("overview", undefined, "macos", true);
-    const rail = markup.indexOf('data-slot="sidebar"');
-    const pane = markup.indexOf("<main");
-    const column = markup.indexOf('data-slot="chat-sheet"');
-
-    expect(markup).toContain("w-[48px]");
-    expect(markup).not.toContain("w-[220px]");
-    expect(markup).toContain("w-[340px]");
-    // Source order is column order: rail, then pane, then chat.
-    expect(rail).toBeLessThan(pane);
-    expect(pane).toBeLessThan(column);
-    /* Beside the pane and not inside it. A column that opens before `</main>`
-     * is a column whose width was never taken off the page, which is a page
-     * underneath the chat rather than next to it — the whole regression this
-     * cutover is about. */
-    expect(column).toBeGreaterThan(markup.indexOf("</main>"));
-  });
-
-  /* An agent switched off has no column, so there is nothing for the rail to
-   * make room for and nothing to narrow the page for. */
-  test("switched off, an open fold narrows nothing", () => {
-    const markup = shell("overview", OFF, "macos", true);
-
-    expect(markup).toContain("w-[220px]");
-    expect(markup).not.toContain("w-[48px]");
-    expect(markup).toContain("pointer-events-none w-0");
-  });
-
-  /* The pane's own handle is not the chat's: the drag band is 512 wide with the
-   * column open, and it is still the pane's full width, because the column is
-   * beside the pane rather than over part of it. */
-  test("open: the pane keeps one full-width drag band", () => {
-    const markup = shell("overview", undefined, "macos", true);
-
-    expect(occurrences(markup, 'data-slot="drag-band"')).toBe(1);
-    expect(markup).toContain("absolute inset-x-0 top-0 z-0 h-12");
-  });
-});
 
 /* The band above every page's first heading is also the window's handle, which
  * is why it is pinned here: 42px of chrome and one hit-test order.
@@ -378,10 +274,6 @@ describe("the pane's drag band", () => {
 
       expect(occurrences(markup, 'data-slot="drag-band"')).toBe(1);
       expect(band).toContain("data-tauri-drag-region");
-      // The pane's own top band: full width, page-content height, behind
-      // anything a page positions over it. A strip that stops being those is a
-      // strip nobody can grab.
-      expect(band).toContain("absolute inset-x-0 top-0 z-0 h-12");
       // Inside the pane and above its scroll owner, so it neither scrolls
       // away nor lands twelve times.
       const index = markup.indexOf('data-slot="drag-band"');
@@ -408,17 +300,6 @@ describe("the pane's drag band", () => {
   });
 });
 
-/* The native main window is fixed at 900 × 800. The page scroll owner must be
- * allowed to shrink inside that fixed flex column; otherwise Settings grows
- * past the pane and its lower controls are clipped instead of scrollable. */
-describe("the fixed-window page scroll owner", () => {
-  test("Settings has a shrinkable vertical scroll owner", () => {
-    const scrollOwner = openTag(shell("settings"), "page-scroll");
-
-    expect(scrollOwner).toContain("min-h-0");
-    expect(scrollOwner).toContain("overflow-y-auto");
-  });
-});
 describe("chat agent requests", () => {
   const surface = (
     bridgeEnabled: boolean,

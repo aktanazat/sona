@@ -15,6 +15,8 @@ export type PostProcessProviderState = {
   selectedProvider: PostProcessProvider | undefined;
   isCustomProvider: boolean;
   isAppleProvider: boolean;
+  isOfflineProvider: boolean;
+  isFixedProvider: boolean;
   appleIntelligenceUnavailable: boolean;
   baseUrl: string;
   handleBaseUrlChange: (value: string) => void;
@@ -65,6 +67,8 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
   );
   const isKnownSelectedProvider = selectedProvider !== undefined;
   const isAppleProvider = selectedProvider?.id === APPLE_PROVIDER_ID;
+  const isOfflineProvider = selectedProvider?.id === "sona_local";
+  const isFixedProvider = isAppleProvider || isOfflineProvider;
   const [appleIntelligenceUnavailable, setAppleIntelligenceUnavailable] =
     useState(false);
   const baseUrl = selectedProvider?.base_url ?? "";
@@ -75,11 +79,11 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
   const model = settings?.post_process_models?.[selectedProviderId] ?? "";
 
   useEffect(() => {
-    if (isKnownSelectedProvider && !isAppleProvider) {
+    if (isKnownSelectedProvider && !isFixedProvider) {
       void refreshPostProcessSecretState(selectedProviderId);
     }
   }, [
-    isAppleProvider,
+    isFixedProvider,
     isKnownSelectedProvider,
     refreshPostProcessSecretState,
     selectedProviderId,
@@ -107,10 +111,10 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     secretState?.lastErrorKind ?? "none",
   ].join("\u0000");
   const modelCatalog = usePostProcessModelCatalog({
-    autoDiscover: discoveryReady && !isAppleProvider,
+    autoDiscover: discoveryReady && !isFixedProvider,
     autoDiscoveryKey: automaticDiscoveryKey,
     baseUrl,
-    enabled: isKnownSelectedProvider && !isAppleProvider,
+    enabled: isKnownSelectedProvider && !isFixedProvider,
     providerId: selectedProviderId,
     savedModelId: model,
   });
@@ -164,14 +168,14 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
    * view that carries it. */
   const discoverModelCatalog = modelCatalog.discover;
   const handleRefreshModels = useCallback(() => {
-    if (!isKnownSelectedProvider || isAppleProvider) return;
+    if (!isKnownSelectedProvider || isFixedProvider) return;
     void (async () => {
       await refreshPostProcessSecretState(selectedProviderId);
       await discoverModelCatalog();
     })();
   }, [
     discoverModelCatalog,
-    isAppleProvider,
+    isFixedProvider,
     isKnownSelectedProvider,
     refreshPostProcessSecretState,
     selectedProviderId,
@@ -188,6 +192,8 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
     selectedProvider,
     isCustomProvider: selectedProvider?.id === "custom",
     isAppleProvider,
+    isOfflineProvider,
+    isFixedProvider,
     appleIntelligenceUnavailable,
     baseUrl,
     handleBaseUrlChange,
@@ -208,7 +214,7 @@ export const usePostProcessProviderState = (): PostProcessProviderState => {
             key !== "settings.postProcessing.api.model.status.unreachable",
         )
       : modelCatalog.statusKeys,
-    allowsManualModelId: modelCatalog.allowsManualModelId,
+    allowsManualModelId: !isFixedProvider && modelCatalog.allowsManualModelId,
     isModelUpdating: isUpdating(`post_process_model:${selectedProviderId}`),
     isFetchingModels: modelCatalog.isLoading,
     remoteConsent,

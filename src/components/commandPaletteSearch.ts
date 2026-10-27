@@ -205,7 +205,7 @@ export const askSona = async (
 ): Promise<AskOutcome> => {
   if (!canAsk(question, panel)) return "refused";
   try {
-    const pack = await commands.sonaQueryPack(question);
+    const pack = await commands.sonaQueryPack(question, null);
     if (pack.status === "error") return "failed";
     const sent = await commands.agentPanelSendTurn({
       turn_id: crypto.randomUUID(),

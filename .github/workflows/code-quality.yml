@@ -53,3 +53,10 @@ jobs:
 
       - name: Run anti-slop gate
         run: bun run lint:anti-slop
+
+  native-onboarding:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run native onboarding checks
+        run: bash scripts/check-onboarding.sh

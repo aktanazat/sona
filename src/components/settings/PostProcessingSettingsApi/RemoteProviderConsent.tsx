@@ -41,7 +41,11 @@ const endpointStateForProvider = (
       endpoint.hostname === "127.0.0.1" ||
       endpoint.hostname === "::1";
 
-    if (provider.id === "apple_intelligence" || isLoopback) {
+    if (
+      provider.id === "apple_intelligence" ||
+      provider.id === "sona_local" ||
+      isLoopback
+    ) {
       return { kind: "local" };
     }
 

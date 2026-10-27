@@ -38,7 +38,6 @@
     "library": "Knihovna"
   },
   "onboarding": {
-    "subtitle": "Modely běží na tomto Macu a volí kompromis mezi přesností a rychlostí.",
     "existingModelsTitle": "Kompatibilní modely",
     "downloadModelsTitle": "Dostupné ke stažení",
     "otherModels": "Ostatní modely",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Model se nepodařilo vybrat. Zkuste to znovu."
+      "selectModel": "Model se nepodařilo vybrat. Zkuste to znovu.",
+      "cancelDownload": "Stahování se nepodařilo zrušit. Zkuste to znovu.",
+      "languages": "Vaše jazyky se nepodařilo uložit. Zkuste to znovu."
     },
     "permissions": {
       "title": "Vyžadována oprávnění",
@@ -137,7 +138,44 @@
       "checking": "Kontrola oprávnění",
       "recheck": "Zkontrolovat znovu"
     },
-    "headline": "Vyberte model přepisu"
+    "headline": "Vyberte model přepisu",
+    "continue": "Pokračovat",
+    "back": "Zpět",
+    "languages": {
+      "title": "Jakými jazyky mluvíte?",
+      "selector": "Jazyky diktování: {{languages}}",
+      "auto": "Automatické rozpoznání",
+      "selected": "{{language}}, vybráno",
+      "noModels": "Žádné modely tyto jazyky nepodporují. Vyberte jiné jazyky."
+    },
+    "practice": {
+      "title": "Vyzkoušejte diktování",
+      "record": "Nahrát",
+      "stop": "Zastavit",
+      "finish": "Dokončit nastavení",
+      "recordAgain": "Nahrát znovu",
+      "words": "Vaše slova",
+      "recording": "Poslouchání · zbývá {{seconds}} s",
+      "status": {
+        "ready": "Nahrajte několik slov ve vybraném jazyce.",
+        "starting": "Zapínání mikrofonu…",
+        "transcribing": "Přepisování…",
+        "delivered": "Diktát přijat",
+        "finishing": "Ukládání nastavení…",
+        "cancelling": "Rušení…",
+        "error": "Zkušební diktování nebylo dokončeno"
+      },
+      "errors": {
+        "permission": "Povolte přístup k mikrofonu v nastavení systému a zkuste to znovu.",
+        "noSpeech": "Nebyla zachycena žádná řeč. Nahrajte znovu.",
+        "microphone": "Připojte mikrofon a zkuste to znovu.",
+        "expired": "Časový limit zkušebního diktování vypršel. Nahrajte znovu.",
+        "changed": "Váš model nebo jazyky se změnily. Nahrajte znovu.",
+        "record": "Nahrávání se nezdařilo: {{error}}",
+        "cancel": "Zkušební diktování se nepodařilo zrušit. Než začnete znovu nahrávat, zkuste zrušení zopakovat.",
+        "complete": "Nastavení se nepodařilo uložit: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Vlastní",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Úprava textu offline",
+        "description": "{{language}} · {{size}}",
+        "download": "Stáhnout",
+        "downloading": "Stahování {{downloaded}} z {{total}}",
+        "cancel": "Zrušit stahování",
+        "retry": "Zkusit stáhnout znovu",
+        "ready": "Připraveno pro diktování v angličtině",
+        "notDownloaded": "Nestaženo",
+        "use": "Použít pro diktování",
+        "selected": "Vybráno pro diktování",
+        "remove": "Odstranit stažený model",
+        "removeTitle": "Odstranit úpravu textu offline?",
+        "removeDescription": "Sona ponechá vaše slova beze změn, dokud model znovu nestáhnete nebo nevyberete jiného poskytovatele.",
+        "runtimeMissing": "V této instalaci aplikace Sona chybí úprava textu offline. Přeinstalujte aplikaci Sona.",
+        "lightOnly": "Pouze drobné úpravy anglického textu.",
+        "instructionsUnavailable": "Pro mluvené pokyny vyberte jiného poskytovatele."
+      },
       "api": {
         "title": "API (kompatibilní s OpenAI)",
         "provider": {
@@ -1776,11 +1832,11 @@
       },
       "remoteIntelligence": {
         "title": "Inteligence schůzek",
-        "label": "Psát poznámky ze schůzek na mém serveru",
-        "consent": "Souhrny a odpovědi ke schůzkám se píší na tvém serveru přes tvou soukromou síť.",
+        "label": "Používat cloudovou AI pro poznámky ze schůzek",
+        "consent": "Ve výchozím stavu probíhá zpracování místně. Po zapnutí se text schůzky odesílá na tvůj spárovaný server a jeho poskytovateli AI. Zvuk zůstává na tomto Macu. Vypnutím zůstanou nové souhrny, přehledy závazků, rekapitulace a odpovědi místní.",
         "unpaired": "Nejdřív spáruj Sonu se svým serverem v části Agenti.",
         "seriesTitle": "Série, které zůstávají na tomto Macu",
-        "seriesHint": "Série uvedená zde se vždy píše na tomto Macu, i když je inteligence schůzek zapnutá.",
+        "seriesHint": "Vybrané série zůstávají na tomto Macu, i když je cloudová AI zapnutá.",
         "seriesEmpty": "Zatím žádné zaznamenané opakující se schůzky.",
         "loading": "Načítání tvých série…",
         "lastMet": "Naposledy {{date}}",
@@ -2024,7 +2080,8 @@
         "remote_unavailable": "Vzdálený cíl není dostupný",
         "engine_failure": "Zpracování selhalo",
         "cancelled": "Zpracování zrušeno",
-        "interrupted": "Zpracování bylo přerušeno"
+        "interrupted": "Zpracování bylo přerušeno",
+        "transcript_deleted": "Přepis smazán"
       }
     },
     "start": {
@@ -2162,6 +2219,7 @@
       "recovery_required": "Tato schůzka před touto akcí potřebuje obnovení.",
       "deletion_in_progress": "Mazání už probíhá. Schůzka zůstává nepřístupná.",
       "not_found": "Tato schůzka už není dostupná.",
+      "transcript_deleted": "Po smazání přepisu nelze poznámky znovu vytvořit.",
       "invalid_request": "Požadavek na schůzku byl neplatný.",
       "export_cancelled": "Export byl zrušen. Žádný dokončený export nevznikl.",
       "export_failed": "Export selhal. Žádný dokončený export nevznikl.",

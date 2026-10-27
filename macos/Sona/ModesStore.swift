@@ -246,8 +246,14 @@ extension CoreEvent {
         return settings?.postProcessProviders.first { $0.id == id }
     }
 
-    /// Apple Intelligence publishes no model list and takes no model ID.
-    var explicitProviderIsFixed: Bool { editing?.llm.providerId == ProviderCatalog.appleIntelligenceId }
+    var explicitProviderIsFixed: Bool {
+        editing?.llm.providerId == ProviderCatalog.appleIntelligenceId
+            || editing?.llm.providerId == ProviderCatalog.localCleanupId
+    }
+
+    var usesOfflineCleanup: Bool {
+        llmDestination?.providerId == ProviderCatalog.localCleanupId
+    }
 
     /// The ceiling clamps what a mode may ask for; the mode keeps its own
     /// setting, but only this much of it happens.
@@ -714,7 +720,7 @@ extension CoreEvent {
 
     func loadCatalogIfNeeded() {
         guard let providerId = editing?.llm.providerId,
-              providerId != ProviderCatalog.appleIntelligenceId,
+              !explicitProviderIsFixed,
               catalogProviderId != providerId,
               !catalogLoading
         else { return }
@@ -727,7 +733,7 @@ extension CoreEvent {
     /// own request goes out, rather than the first provider's models being
     /// offered under the second one's name.
     func discoverCatalog() {
-        guard let providerId = editing?.llm.providerId, !catalogLoading else { return }
+        guard let providerId = editing?.llm.providerId, !explicitProviderIsFixed, !catalogLoading else { return }
         catalogLoading = true
         catalogProviderId = providerId
         Task {

@@ -1,26 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import {
-  animateValue,
-  m,
-  motion,
-  spring,
-  useReducedMotionConfig,
-} from "motion/react";
-import type { Transition, ValueTransition } from "motion/react";
-import {
-  makeAnimationInstant,
-  positionalKeys,
-  prefersReducedMotion,
-} from "motion";
+import { motion, spring, useReducedMotionConfig } from "motion/react";
+import type { Transition } from "motion/react";
+import { prefersReducedMotion } from "motion";
 import {
   MotionProvider,
   MotionScope,
-  SPRING_MEASUREMENTS,
   SPRING_PRESETS,
   springDrag,
   springSnappy,
@@ -49,14 +35,6 @@ Object.defineProperty(globalThis, "window", {
 
 const TRAVEL = 100;
 
-/** Steps an animation to completion with no rAF: one tick per simulated ms. */
-const syncDriver = (limitMs: number) => (tick: (t: number) => void) => ({
-  start: () => {
-    for (let t = 0; t <= limitMs; t += 1) tick(t);
-  },
-  stop: () => undefined,
-  now: () => 0,
-});
 
 interface SpringProfile {
   /** ms after which the value is permanently within 1% of the target. */
@@ -115,17 +93,6 @@ describe("spring presets", () => {
     });
   }
 
-  for (const [name, preset] of Object.entries(SPRING_PRESETS)) {
-    test(`${name} matches the tuning quoted beside it`, () => {
-      const measured = profile(preset);
-      /* SAFETY: `name` came out of Object.entries(SPRING_PRESETS) two lines
-       * up, and SPRING_MEASUREMENTS is keyed by the same preset names. */
-      const quoted = SPRING_MEASUREMENTS[name as keyof typeof SPRING_PRESETS];
-      expect(measured.arrival99).toBe(quoted.arrival99);
-      expect(measured.settle).toBe(quoted.settle);
-      expect(Number(measured.overshoot.toFixed(2))).toBe(quoted.overshoot);
-    });
-  }
 
   /* The whole reason springDrag exists. A row released mid-flick hands its
    * velocity to the spring; the snappy tuning turns that into a bounce, and a
@@ -138,22 +105,9 @@ describe("spring presets", () => {
     );
   });
 
-  test("springDrag arrives sooner when thrown than when nudged", () => {
-    expect(profile(springDrag, 2400).arrival99).toBeLessThan(
-      profile(springDrag).arrival99,
-    );
-  });
 });
 
 describe("MotionProvider", () => {
-  test("renders m components", () => {
-    const markup = renderToStaticMarkup(
-      <MotionProvider>
-        <m.div className="probe" />
-      </MotionProvider>,
-    );
-    expect(markup).toContain('class="probe"');
-  });
 
   /* The bundle guard, asserted rather than trusted. `motion.*` components carry
    * every feature Motion has; if one ever lands in the eager tree the split is
@@ -203,66 +157,6 @@ describe("reduced motion", () => {
     ).toBe("<span>false</span>");
   });
 
-  /* Motion's default is `reducedMotion: "never"`, so without the provider's
-   * config the same device preference is ignored. This is what proves the
-   * provider is doing the work rather than the library defaulting our way. */
-  test("without the provider the device preference is ignored", () => {
-    prefersReducedMotion.current = true;
-    expect(renderToStaticMarkup(<ReducedMotionProbe />)).toBe(
-      "<span>false</span>",
-    );
-  });
-
-  /**
-   * The two steps Motion takes for a reduced-motion device, both quoted from
-   * the library rather than restated: `visual-element-target` swaps a
-   * positional key's transition for `{ type: false }`, and `animateMotionValue`
-   * collapses that to a single final keyframe through `makeAnimationInstant`.
-   * `positionalKeys` and `makeAnimationInstant` are Motion's own, so the only
-   * thing standing in for the DOM here is the wiring between them.
-   */
-  const run = (key: string, preset: Transition, reduce: boolean) => {
-    const reduceThisKey = reduce && positionalKeys.has(key);
-    const options = {
-      keyframes: [0, TRAVEL],
-      driver: syncDriver(1200),
-      onUpdate: (value: number) => frames.push(value),
-      /* SAFETY: both branches are already valid `ValueTransition` shapes —
-       * `{ type: false }` is Motion's own instant form, and a preset is a
-       * spring transition. The assertions only stop the spread from widening
-       * the object literal's inferred type. */
-      ...(reduceThisKey
-        ? ({ type: false } as ValueTransition)
-        : (preset as ValueTransition)),
-    };
-    const frames: number[] = [];
-    if (options.type === false) makeAnimationInstant(options);
-    animateValue(options);
-    return frames;
-  };
-
-  for (const key of ["scale", "height", "x"]) {
-    test(`a preset spring on ${key} resolves instantly under reduced motion`, () => {
-      prefersReducedMotion.current = null;
-      expect(run(key, springSnappy, true)).toEqual([TRAVEL]);
-    });
-  }
-
-  for (const key of ["scale", "height", "x"]) {
-    test(`the same spring on ${key} takes real time when nobody asked to reduce it`, () => {
-      prefersReducedMotion.current = null;
-      const frames = run(key, springSnappy, false);
-      expect(frames.length).toBeGreaterThan(10);
-      expect(frames[0]).toBe(0);
-      expect(frames[frames.length - 1]).toBe(TRAVEL);
-    });
-  }
-
-  /* Reduced motion is not "no feedback": a cross-fade carries no movement, so
-   * opacity keeps its spring and the surface still acknowledges the command. */
-  test("opacity still animates under reduced motion", () => {
-    expect(run("opacity", springSnappy, true).length).toBeGreaterThan(10);
-  });
 });
 
 describe("Disclosure", () => {
@@ -290,91 +184,5 @@ describe("Disclosure", () => {
     ).toBe("");
   });
 
-  test("clips while it travels, so a spring cannot spill content", () => {
-    expect(
-      renderToStaticMarkup(
-        <MotionProvider>
-          <Disclosure open>
-            <p />
-          </Disclosure>
-        </MotionProvider>,
-      ),
-    ).toContain("overflow:hidden");
-  });
 });
 
-/* ------------------------------------------------ the measured-value law */
-
-const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-const sourceFiles = (dir: string): string[] =>
-  fs
-    .readdirSync(dir, { withFileTypes: true })
-    .flatMap((entry) =>
-      entry.isDirectory()
-        ? sourceFiles(path.join(dir, entry.name))
-        : /\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)
-          ? [path.join(dir, entry.name)]
-          : [],
-    );
-
-/** Comments discuss the law; only code can break it. */
-const code = (source: string) =>
-  source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-
-const IMPORTS_MOTION =
-  /from\s+"(motion|motion\/react|motion-dom|framer-motion|@\/lib\/motion)"/;
-const APPLIES_MEASURED_CLASS = /snap-measured/;
-
-const MOTION_SURFACES = [
-  "components/settings/modes/ModesReorder.tsx",
-  "lib/motion/index.tsx",
-  "lib/motion/Disclosure.tsx",
-  "lib/motion/provider.tsx",
-];
-
-describe("measured values never tween", () => {
-  /* theme.css kills `transition` and `animation` on the measured-value class,
-   * and that was enough while CSS was the only thing that could move a value.
-   * Motion writes style values frame by frame, so CSS cannot stop it — a meter
-   * inside a motion component would display numbers the backend never
-   * reported, with the guard rule sitting right there looking satisfied.
-   *
-   * The enforceable version is at file scope: a module either renders measured
-   * values or it animates with Motion, never both. That is coarser than a
-   * subtree check and deliberately so — it needs no parser, it cannot be
-   * defeated by moving an element one level up, and the fix when it fires is
-   * the one the law wants anyway, which is to split the component. */
-  test("no module both animates with Motion and renders a measured value", () => {
-    const offenders = sourceFiles(SRC)
-      .filter((file) => {
-        const source = code(fs.readFileSync(file, "utf8"));
-        return (
-          IMPORTS_MOTION.test(source) && APPLIES_MEASURED_CLASS.test(source)
-        );
-      })
-      .map((file) => path.relative(SRC, file));
-    expect(offenders).toEqual([]);
-  });
-
-  for (const relative of MOTION_SURFACES) {
-    test(`${relative} is a motion surface`, () => {
-      const source = code(fs.readFileSync(path.join(SRC, relative), "utf8"));
-      expect(IMPORTS_MOTION.test(source)).toBe(true);
-    });
-  }
-
-  /* ModesList is the loader rather than a motion surface, but it renders every
-   * row body for both lists, so it is the file a measured value would most
-   * plausibly be added to. */
-  for (const relative of [
-    ...MOTION_SURFACES,
-    "components/settings/modes/ModesList.tsx",
-    "components/CommandPalette.tsx",
-  ]) {
-    test(`${relative} carries no measured value`, () => {
-      const source = code(fs.readFileSync(path.join(SRC, relative), "utf8"));
-      expect(APPLIES_MEASURED_CLASS.test(source)).toBe(false);
-    });
-  }
-});

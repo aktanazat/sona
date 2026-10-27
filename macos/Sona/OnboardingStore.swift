@@ -1,11 +1,11 @@
 import Foundation
 
-/// Which of the first run's two questions is on screen.
 enum OnboardingStep: Equatable {
-    /// The flags and the permissions are still being read.
     case probing
-    case permissions
+    case languages
     case model
+    case permissions
+    case practice
     case done
 }
 
@@ -21,6 +21,15 @@ struct OnboardingModel: Decodable, Identifiable, Equatable {
     let isDownloading: Bool
     let isRecommended: Bool
     let source: OnboardingModelSource
+    let supportedLanguages: [String]
+    let supportsLanguageDetection: Bool
+
+    func supports(_ languages: [String]) -> Bool {
+        if languages.isEmpty {
+            return supportsLanguageDetection && supportedLanguages.count > 1
+        }
+        return languages.allSatisfy { LanguageCatalog.supports(supportedLanguages, $0) }
+    }
 
     /// "620 MB", "3 GB", "3.1 GB", "12 GB": whole gigabytes from ten up, and
     /// never a trailing zero.
@@ -70,13 +79,14 @@ enum OnboardingModelWork: Equatable {
     case downloading
     case verifying
     case extracting
+    case cancelling
     /// The core is being told to make it the active model.
     case switching
 
     var isBusy: Bool {
         switch self {
         case .available, .downloadable: return false
-        case .downloading, .verifying, .extracting, .switching: return true
+        case .downloading, .verifying, .extracting, .switching, .cancelling: return true
         }
     }
 }
@@ -87,51 +97,65 @@ struct OnboardingDownloadFailure: Decodable {
     let error: String
 }
 
-/// The first run: the permissions macOS asks for, then one model on this Mac.
-///
-/// The order is the web app's, and so is what each step means. Permissions come
-/// first because a model download is long and a reader who granted nothing has
-/// an app that cannot hear or type at the end of it. The model step is what
-/// finishes onboarding: the core writes `onboarding_completed` inside
-/// `set_active_model` (src-tauri/src/commands/models.rs:122), so a first run
-/// that picked a model is over, and one that did not will come back.
-///
-/// A returning user who has lost a permission gets the permission step and
-/// nothing else: they already have a model.
+enum OnboardingPracticeState: Equatable {
+    case idle
+    case starting
+    case listening
+    case processing
+    case delivered
+    case cancelling
+    case cancellationFailed
+
+    var isBusy: Bool {
+        switch self {
+        case .starting, .listening, .processing, .cancelling, .cancellationFailed: true
+        case .idle, .delivered: false
+        }
+    }
+}
+
+private struct OnboardingPracticeTranscript: Decodable {
+    let sessionId: String
+    let text: String
+}
+
+private struct OnboardingPracticeExpired: Decodable {
+    let sessionId: String
+    let error: String
+}
+
 @MainActor
 @Observable
 final class OnboardingStore {
     private(set) var step: OnboardingStep = .probing
     private(set) var models: [OnboardingModel] = []
-    /// The model the reader chose, while it is being fetched or switched to.
+    private(set) var selectedLanguages: [String] = []
+    private(set) var savingLanguages = false
     private(set) var chosenId: String?
-    /// The last thing the core could not do, shown until the next success.
     private(set) var error: String?
-    /// The permission state this flow's first step shows. Shared rather than
-    /// rebuilt, so the banner outside the flow reads the same values.
+    private(set) var practiceState: OnboardingPracticeState = .idle
+    private(set) var finishing = false
+    var practiceText = ""
     let permissions: PermissionsStore
 
     @ObservationIgnored private let core: Core
-    /// Per model work, keyed by model id, as the core's events report it.
-    private var work: [String: OnboardingModelWork] = [:]
-    /// Download progress as a fraction, for the one model being fetched.
-    private var progress: [String: Double] = [:]
-    /// Downloads this screen cancelled: their command fails on purpose, so the
-    /// failure is not worth showing.
-    @ObservationIgnored private var cancelled: Set<String> = []
-    /// True when this Mac had already finished onboarding, so the model step
-    /// is not this session's business.
     @ObservationIgnored private var returning = false
+    @ObservationIgnored private var activeModelId = ""
+    @ObservationIgnored private var selection: UInt64 = 0
+    @ObservationIgnored private var cancellingId: String?
+    @ObservationIgnored private var practiceId: String?
+    @ObservationIgnored private var practiceLimit: Task<Void, Never>?
+    private var work: [String: OnboardingModelWork] = [:]
+    private var progress: [String: Double] = [:]
 
     init(core: Core) {
         self.core = core
         permissions = PermissionsStore(core: core)
         core.observe(CoreEvent.downloadProgress) { [weak self] line in
-            guard let self, let progress: DownloadProgress = try? Core.payload(line) else { return }
-            guard self.work[progress.modelId] != nil else { return }
+            guard let self, let progress: DownloadProgress = try? Core.payload(line),
+                  self.work[progress.modelId] != nil else { return }
             self.progress[progress.modelId] = progress.total > 0
-                ? Double(progress.downloaded) / Double(progress.total)
-                : 0
+                ? Double(progress.downloaded) / Double(progress.total) : 0
         }
         core.observe(CoreEvent.onboardingVerificationStarted) { [weak self] line in
             self?.mark(line, as: .verifying)
@@ -150,101 +174,121 @@ final class OnboardingStore {
             self.progress[id] = nil
             Task { await self.loadModels() }
         }
-        core.observe(CoreEvent.downloadFailed) { [weak self] line in
-            guard let self, let failure: OnboardingDownloadFailure = try? Core.payload(line) else { return }
-            self.clear(failure.modelId)
-            // A download this screen cancelled fails on purpose.
-            if self.cancelled.remove(failure.modelId) == nil {
+        for event in [CoreEvent.downloadFailed, CoreEvent.extractionFailed] {
+            core.observe(event) { [weak self] line in
+                guard let self, let failure: OnboardingDownloadFailure = try? Core.payload(line),
+                      self.chosenId == failure.modelId else { return }
                 self.error = failure.error
             }
         }
         core.observe(CoreEvent.downloadCancelled) { [weak self] line in
-            guard let self, let id: String = try? Core.payload(line) else { return }
-            self.cancelled.remove(id)
-            self.clear(id)
+            guard let self, let id: String = try? Core.payload(line), self.chosenId != id else { return }
+            self.work[id] = nil
+            self.progress[id] = nil
         }
         core.observe(CoreEvent.modelsUpdated) { [weak self] _ in
             guard let self else { return }
             Task { await self.loadModels() }
         }
+        core.observe("onboarding-practice-expired") { [weak self] line in
+            guard let self, let expired: OnboardingPracticeExpired = try? Core.payload(line),
+                  self.practiceId == expired.sessionId else { return }
+            self.practiceLimit?.cancel()
+            self.practiceId = nil
+            self.practiceState = .idle
+            self.error = expired.error
+        }
     }
 
-    /// Reads the onboarding flag, then the permissions, and lands on the step
-    /// this launch actually needs. Called once by the integrator after the core
-    /// is up; nothing else decides whether the flow shows.
     func start() async {
         permissions.onAllGranted = { [weak self] in self?.permissionsSettled() }
         do {
             let settings: OnboardingSettings = try await core.request("get_app_settings")
             returning = settings.onboardingCompleted
+            activeModelId = settings.selectedModel
+            selectedLanguages = settings.selectedLanguage == "auto"
+                ? settings.dictationLanguages : [settings.selectedLanguage]
             error = nil
         } catch {
-            // A first run that cannot read its own flag is treated as a first
-            // run: the worst case is a reader confirming a model they have.
-            returning = false
             self.error = error.localizedDescription
+            return
         }
         await permissions.start()
         guard step == .probing else { return }
-        if permissions.allGranted {
-            permissionsSettled()
-            return
+        if returning {
+            if permissions.allGranted {
+                finish()
+            } else {
+                step = .permissions
+                permissions.recheck()
+            }
+        } else {
+            step = .languages
         }
-        step = .permissions
-        permissions.recheck()
     }
 
-    /// The model catalog, and the arrangement the first run reads it in.
-    ///
-    /// One model on the page, every other model behind one summary. The catalog
-    /// arrives rank sorted, so the first recommended download is the editorial
-    /// pick — but a model already on this Mac beats it, because choosing that
-    /// one costs no download at all.
-    var featured: OnboardingModel? {
-        onDiskModels.first ?? rankedDownloads.first
+    var languageSummary: String {
+        selectedLanguages.isEmpty ? "Auto detect" : selectedLanguages.map(LanguageCatalog.name).joined(separator: ", ")
     }
 
-    /// Models already on this Mac, in catalog order.
+    func toggleLanguage(_ code: String) {
+        guard !savingLanguages else { return }
+        selectedLanguages = LanguageCatalog.toggling(code, in: selectedLanguages)
+    }
+
+    func useAutomaticLanguage() {
+        guard !savingLanguages else { return }
+        selectedLanguages = []
+    }
+
+    func saveLanguages() {
+        guard !savingLanguages else { return }
+        savingLanguages = true
+        error = nil
+        Task {
+            defer { savingLanguages = false }
+            do {
+                try await core.request("change_dictation_languages_setting", [
+                    "languages": JSONValue.array(selectedLanguages.map(JSONValue.string)),
+                ])
+                step = .model
+                await loadModels()
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func changeLanguages() {
+        guard !isBusy else { return }
+        error = nil
+        step = .languages
+    }
+
+    private var compatibleModels: [OnboardingModel] {
+        models.filter { $0.supports(selectedLanguages) }
+    }
+
     private var onDiskModels: [OnboardingModel] {
-        models.filter(\.isDownloaded)
+        let installed = compatibleModels.filter(\.isDownloaded)
+        return installed.filter { $0.id == activeModelId } + installed.filter { $0.id != activeModelId }
     }
 
-    /// What is worth offering as a download, recommended first. Legacy sources
-    /// are never offered: they stay runnable, and they still show up above once
-    /// they are on disk.
     private var rankedDownloads: [OnboardingModel] {
-        let downloadable = models.filter { !$0.isDownloaded && !$0.source.isLegacy }
+        let downloadable = compatibleModels.filter { !$0.isDownloaded && !$0.source.isLegacy }
         return downloadable.filter(\.isRecommended) + downloadable.filter { !$0.isRecommended }
     }
 
-    var otherOnDisk: [OnboardingModel] {
-        let pick = featured?.id
-        return onDiskModels.filter { $0.id != pick }
-    }
-
-    var otherDownloads: [OnboardingModel] {
-        let pick = featured?.id
-        return rankedDownloads.filter { $0.id != pick }
-    }
-
-    var otherCount: Int {
-        otherOnDisk.count + otherDownloads.count
-    }
-
-    /// True once the reader has chosen: every other card goes quiet.
-    var isBusy: Bool {
-        chosenId != nil
-    }
+    var featured: OnboardingModel? { onDiskModels.first ?? rankedDownloads.first }
+    var otherOnDisk: [OnboardingModel] { onDiskModels.filter { $0.id != featured?.id } }
+    var otherDownloads: [OnboardingModel] { rankedDownloads.filter { $0.id != featured?.id } }
+    var otherCount: Int { otherOnDisk.count + otherDownloads.count }
+    var isBusy: Bool { chosenId != nil || cancellingId != nil }
 
     func work(for id: String) -> OnboardingModelWork {
-        if let state = work[id] {
-            return state
-        }
-        return models.first(where: { $0.id == id })?.isDownloaded == true ? .available : .downloadable
+        work[id] ?? (models.first(where: { $0.id == id })?.isDownloaded == true ? .available : .downloadable)
     }
 
-    /// The fraction of the download that has arrived, or nil while the work has
-    /// no length to measure (verifying, unpacking, switching).
     func progress(for id: String) -> Double? {
         work(for: id) == .downloading ? progress[id] : nil
     }
@@ -253,10 +297,6 @@ final class OnboardingStore {
         do {
             let list: [OnboardingModel] = try await core.request("get_available_models")
             models = list
-            error = nil
-            // The core is the authority on what is downloading: a download
-            // resumed from a previous session has no state here yet, and one
-            // this screen believed in may have ended while it was away.
             for model in list {
                 if model.isDownloading, work[model.id] == nil {
                     work[model.id] = .downloading
@@ -269,86 +309,179 @@ final class OnboardingStore {
         }
     }
 
-    /// The one gesture on the model step: take this model. A model on disk is
-    /// made active; a model that is not is fetched first and then made active.
     func choose(_ model: OnboardingModel) {
-        guard chosenId == nil else { return }
+        guard !isBusy, model.supports(selectedLanguages) else { return }
+        selection += 1
+        let token = selection
         chosenId = model.id
-        if model.isDownloaded {
-            work[model.id] = .switching
-            Task { await activate(model.id) }
-        } else {
-            work[model.id] = .downloading
-            Task { await download(model.id) }
+        error = nil
+        work[model.id] = model.isDownloaded ? .switching : .downloading
+        Task {
+            do {
+                if !model.isDownloaded {
+                    try await core.request("download_model", ["modelId": model.id])
+                }
+                guard selection == token, chosenId == model.id else { return }
+                work[model.id] = .switching
+                try await core.request("set_active_model", ["modelId": model.id])
+                guard selection == token else { return }
+                activeModelId = model.id
+                clear(model.id)
+                error = nil
+                if permissions.allGranted {
+                    step = .practice
+                } else {
+                    step = .permissions
+                    permissions.recheck()
+                }
+            } catch {
+                guard selection == token else { return }
+                self.error = error.localizedDescription
+                clear(model.id)
+            }
         }
     }
 
     func cancel(_ id: String) {
-        cancelled.insert(id)
+        guard cancellingId == nil else { return }
+        selection += 1
+        chosenId = nil
+        cancellingId = id
+        work[id] = .cancelling
         Task {
+            defer { cancellingId = nil }
             do {
                 try await core.request("cancel_download", ["modelId": id])
                 clear(id)
                 error = nil
             } catch {
-                cancelled.remove(id)
+                work[id] = nil
                 self.error = error.localizedDescription
             }
         }
     }
 
-    /// Skips nothing and grants nothing: the reader is on the permission step
-    /// with both permissions held, which only happens for the moment between
-    /// the last grant and the next screen.
-    private func permissionsSettled() {
-        guard step == .probing || step == .permissions else { return }
+    func startPractice() {
+        guard step == .practice, !practiceState.isBusy, !finishing else { return }
+        let id = UUID().uuidString
+        practiceId = id
+        practiceText = ""
+        practiceState = .starting
+        error = nil
+        Task {
+            do {
+                try await core.request("start_onboarding_practice", ["sessionId": id])
+                guard practiceId == id, practiceState == .starting else { return }
+                practiceState = .listening
+                practiceLimit = Task {
+                    try? await Task.sleep(for: .seconds(30))
+                    guard !Task.isCancelled, practiceId == id, practiceState == .listening else { return }
+                    stopPractice()
+                }
+            } catch {
+                guard practiceId == id, practiceState == .starting else { return }
+                practiceId = nil
+                practiceState = .idle
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func stopPractice() {
+        guard let id = practiceId, practiceState == .listening else { return }
+        practiceLimit?.cancel()
+        practiceLimit = nil
+        practiceState = .processing
+        Task {
+            do {
+                let result: OnboardingPracticeTranscript = try await core.request(
+                    "stop_onboarding_practice", ["sessionId": id]
+                )
+                guard practiceId == id, practiceState == .processing, result.sessionId == id else { return }
+                practiceText = result.text
+                practiceState = .delivered
+                error = nil
+            } catch {
+                guard practiceId == id, practiceState == .processing else { return }
+                practiceId = nil
+                practiceState = .idle
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelPractice() {
+        guard let id = practiceId, practiceState != .cancelling, !finishing else { return }
+        practiceLimit?.cancel()
+        practiceLimit = nil
+        practiceState = .cancelling
+        Task {
+            do {
+                try await core.request("cancel_onboarding_practice", ["sessionId": id])
+                guard practiceId == id else { return }
+                practiceId = nil
+                practiceState = .idle
+                practiceText = ""
+                error = nil
+            } catch {
+                guard practiceId == id else { return }
+                practiceState = .cancellationFailed
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func backToModels() {
+        guard !practiceState.isBusy, !finishing else { return }
+        if let id = practiceId {
+            practiceState = .cancelling
+            Task {
+                do {
+                    try await core.request("cancel_onboarding_practice", ["sessionId": id])
+                    practiceId = nil
+                    practiceState = .idle
+                    practiceText = ""
+                    error = nil
+                    step = .model
+                    await loadModels()
+                } catch {
+                    practiceState = .cancellationFailed
+                    self.error = error.localizedDescription
+                }
+            }
+        } else {
+            step = .model
+        }
+    }
+
+    var canFinishPractice: Bool {
+        practiceState == .delivered && !practiceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !finishing
+    }
+
+    func completePractice() {
+        guard let id = practiceId, canFinishPractice else { return }
+        finishing = true
+        Task {
+            defer { finishing = false }
+            do {
+                try await core.request("complete_onboarding_practice", ["sessionId": id])
+                error = nil
+                finish()
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func permissionsSettled() {
+        guard step == .permissions, permissions.allGranted else { return }
         if returning {
             finish()
-            return
-        }
-        step = .model
-        Task { await loadModels() }
-    }
-
-    /// `download_model` returns when the bytes are on disk, verified and
-    /// unpacked — the events only narrate it — so the model is ready to be
-    /// activated the moment this resolves. One exception: the core answers a
-    /// cancelled transfer with the same success as a finished one, because
-    /// the partial file is kept for a resume. The cancellation this store
-    /// recorded decides, not the answer, or Cancel would select the model.
-    private func download(_ id: String) async {
-        do {
-            try await core.request("download_model", ["modelId": id])
-            guard cancelled.remove(id) == nil else {
-                clear(id)
-                return
-            }
-            error = nil
-            work[id] = .switching
-            await activate(id)
-        } catch {
-            if cancelled.remove(id) == nil {
-                self.error = error.localizedDescription
-            }
-            clear(id)
+        } else {
+            step = .practice
         }
     }
 
-    private func activate(_ id: String) async {
-        do {
-            try await core.request("set_active_model", ["modelId": id])
-            error = nil
-            clear(id)
-            finish()
-        } catch {
-            self.error = "Couldn't select the model. \(error.localizedDescription)"
-            clear(id)
-        }
-    }
-
-    /// Onboarding is over. Typing and the global shortcuts are started here for
-    /// the reader who granted accessibility before this launch: the grant
-    /// transition never happened, so nothing else would have started them.
     private func finish() {
         permissions.initializeInput()
         step = .done
@@ -362,8 +495,6 @@ final class OnboardingStore {
     private func clear(_ id: String) {
         work[id] = nil
         progress[id] = nil
-        if chosenId == id {
-            chosenId = nil
-        }
+        if chosenId == id { chosenId = nil }
     }
 }

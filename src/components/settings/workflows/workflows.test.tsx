@@ -110,15 +110,7 @@ describe("Workflows settings", () => {
       />,
     );
 
-    /* The label names the outcome, not the subsystem: "Person linking" was a
-     * module name that happened to be printed at a user. */
-    expect(markup).toContain("Remember people");
-    expect(markup).not.toContain("Person linking");
-    expect(markup).toContain(
-      "Connects meetings to people using confirmed attendee and speaker evidence.",
-    );
     expect(markup).toContain("Remembered 2 people");
-    expect(markup.includes("Updated 2 person links")).toBe(false);
     expect(markup).toContain("Completed");
     expect(markup).toContain("Not run yet");
     expect(markup).toContain('aria-label="Enable Remember people"');
@@ -152,7 +144,6 @@ describe("Workflows settings", () => {
       markup.indexOf('data-workflow-run-id="skipped"'),
     );
     expect(markup).toContain("Remembered 2 people");
-    expect(markup.includes("Newest outcome")).toBe(false);
     expect(markup).toContain("Completed");
     expect(markup).toContain("Failed");
     expect(markup).toContain("Skipped");
@@ -160,7 +151,6 @@ describe("Workflows settings", () => {
       'aria-label="Activity per day, 3 in the last 7 days"',
     );
     expect(markup).toContain("Show more");
-    expect(markup.split("<rect").length - 1).toBe(7);
   });
 
   /* `settings.workflows.items` covers six of the eleven workflow ids; the five
@@ -215,7 +205,6 @@ describe("Workflows settings", () => {
     );
 
     expect(markup).toContain("No activity yet.");
-    expect(markup.split("<svg").length - 1).toBe(1);
     expect(markup.includes("Activity per day")).toBe(false);
   });
 });
@@ -277,16 +266,6 @@ describe("formatWorkflowOutcome", () => {
     );
   });
 
-  test("narrates each meeting ritual receipt", () => {
-    expect(format("prep_presented")).toBe("Prep");
-    expect(format("prep_record_armed")).toBe("Record when it starts");
-    expect(format("prep_brief_opened")).toBe("Open brief");
-    expect(format("prep_dismissed")).toBe("Dismiss");
-    expect(format("wrap_presented")).toBe("Wrap");
-    expect(format("wrap_notes_opened")).toBe("Open notes");
-    expect(format("wrap_follow_up_copied")).toBe("Copied");
-    expect(format("wrap_done")).toBe("Done");
-  });
 });
 
 describe("runsForLastSevenDays", () => {

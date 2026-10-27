@@ -120,20 +120,6 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
   const processingStatus = snapshot.session.processing_status;
   const processing =
     processingStatus.kind === "pending" || processingStatus.kind === "running";
-  /* Why there are no notes, when the answer is a failure rather than a wait.
-   *
-   * This used to name exactly one reason, `remote_unavailable`, on the
-   * argument that every remote destination resolves to it today. True along
-   * that axis, and the collision was on the other one: `LocalModelUnavailable`
-   * is the reason `generation_shortfall` calls "the case that filled the
-   * corpus with blank meetings", and it rendered as "No generated notes …
-   * they can be rebuilt at any time" — the same screen as a meeting that
-   * recorded silence and has nothing to rebuild from. So the reason is read
-   * off the status instead of being matched against one value, and
-   * `processingStatusKey` already has a word for all five.
-   *
-   * `cancelled` is somebody stopping the pass, not a fault, so it names
-   * itself without the alarm the other four earn. */
   const failure =
     processingStatus.kind === "failed" ? processingStatus.reason : null;
   const hasSettingsRecovery =
@@ -244,9 +230,11 @@ export const InsightsTab: React.FC<InsightsTabProps> = ({
                 ? t("meetings.review.processingDescription")
                 : failure === null
                   ? t("meetings.review.noGeneratedNotesDescription")
-                  : causeCopy === null
-                    ? t("meetings.review.generationFailedDescription")
-                    : t(causeCopy.line)}
+                  : failure === "transcript_deleted"
+                    ? t("meetings.errors.transcript_deleted")
+                    : causeCopy === null
+                      ? t("meetings.review.generationFailedDescription")
+                      : t(causeCopy.line)}
             </span>
             {hasSettingsRecovery ? (
               <Button variant="link" size="xs" onClick={onOpenSettings}>

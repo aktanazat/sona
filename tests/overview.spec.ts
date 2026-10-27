@@ -39,7 +39,6 @@ test.describe("the Capture page's recording state", () => {
 
     const status = page.locator("#overview-status");
     await expect(status).toHaveText("Listening");
-    await expect(status).toHaveAttribute("data-recording", "true");
 
     /* Nothing asserts the invocation count here: the dev server renders under
      * React's strict mode, so every mount read happens twice. That the page

@@ -399,7 +399,9 @@ final class PrivacyStore {
             destinations.insert(mode.llm.providerId ?? settings.postProcessProviderId ?? "")
         }
         let candidates = (settings.postProcessProviders ?? []).filter { provider in
-            guard destinations.contains(provider.id), provider.id != "apple_intelligence" else { return false }
+            guard destinations.contains(provider.id),
+                  provider.id != ProviderCatalog.appleIntelligenceId,
+                  provider.id != ProviderCatalog.localCleanupId else { return false }
             guard let host = URL(string: provider.baseUrl)?.host?.lowercased() else { return true }
             return host != "localhost" && host != "127.0.0.1" && host != "::1"
         }

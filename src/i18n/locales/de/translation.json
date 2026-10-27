@@ -38,7 +38,6 @@
     "library": "Bibliothek"
   },
   "onboarding": {
-    "subtitle": "Modelle laufen auf diesem Mac und wägen Genauigkeit gegen Geschwindigkeit ab.",
     "existingModelsTitle": "Kompatible Modelle",
     "downloadModelsTitle": "Verfügbar zum Download",
     "otherModels": "Andere Modelle",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Modell konnte nicht ausgewählt werden. Versuchen Sie es erneut."
+      "selectModel": "Modell konnte nicht ausgewählt werden. Versuchen Sie es erneut.",
+      "cancelDownload": "Download konnte nicht abgebrochen werden. Versuchen Sie es erneut.",
+      "languages": "Ihre Sprachen konnten nicht gespeichert werden. Versuchen Sie es erneut."
     },
     "permissions": {
       "title": "Berechtigungen erforderlich",
@@ -137,7 +138,44 @@
       "checking": "Berechtigungen werden geprüft",
       "recheck": "Erneut prüfen"
     },
-    "headline": "Wählen Sie ein Transkriptionsmodell"
+    "headline": "Wählen Sie ein Transkriptionsmodell",
+    "continue": "Weiter",
+    "back": "Zurück",
+    "languages": {
+      "title": "Welche Sprachen sprechen Sie?",
+      "selector": "Diktatsprachen: {{languages}}",
+      "auto": "Automatisch erkennen",
+      "selected": "{{language}}, ausgewählt",
+      "noModels": "Kein Modell unterstützt diese Sprachen. Wählen Sie andere Sprachen."
+    },
+    "practice": {
+      "title": "Diktat ausprobieren",
+      "record": "Aufnehmen",
+      "stop": "Stoppen",
+      "finish": "Einrichtung abschließen",
+      "recordAgain": "Erneut aufnehmen",
+      "words": "Ihre Worte",
+      "recording": "Aufnahme läuft · noch {{seconds}} Sekunden",
+      "status": {
+        "ready": "Nehmen Sie ein paar Worte in Ihrer gewählten Sprache auf.",
+        "starting": "Mikrofon wird geöffnet…",
+        "transcribing": "Wird transkribiert…",
+        "delivered": "Diktat empfangen",
+        "finishing": "Einrichtung wird gespeichert…",
+        "cancelling": "Wird abgebrochen…",
+        "error": "Übung nicht abgeschlossen"
+      },
+      "errors": {
+        "permission": "Erlauben Sie den Mikrofonzugriff in den Systemeinstellungen und versuchen Sie es erneut.",
+        "noSpeech": "Keine Sprache erkannt. Nehmen Sie erneut auf.",
+        "microphone": "Schließen Sie ein Mikrofon an und versuchen Sie es erneut.",
+        "expired": "Zeit für die Übung abgelaufen. Nehmen Sie erneut auf.",
+        "changed": "Ihr Modell oder Ihre Sprachen wurden geändert. Nehmen Sie erneut auf.",
+        "record": "Aufnahme fehlgeschlagen: {{error}}",
+        "cancel": "Übung konnte nicht abgebrochen werden. Versuchen Sie es vor einer neuen Aufnahme erneut.",
+        "complete": "Einrichtung konnte nicht gespeichert werden: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Benutzerdefiniert",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Offline-Textkorrektur",
+        "description": "{{language}} · {{size}}",
+        "download": "Herunterladen",
+        "downloading": "{{downloaded}} von {{total}} heruntergeladen",
+        "cancel": "Download abbrechen",
+        "retry": "Download erneut versuchen",
+        "ready": "Bereit für Diktate auf Englisch",
+        "notDownloaded": "Nicht heruntergeladen",
+        "use": "Für Diktate verwenden",
+        "selected": "Für Diktate ausgewählt",
+        "remove": "Download entfernen",
+        "removeTitle": "Offline-Textkorrektur entfernen?",
+        "removeDescription": "Sona behält Ihren ursprünglichen Wortlaut bei, bis Sie das Modell erneut herunterladen oder einen anderen Anbieter wählen.",
+        "runtimeMissing": "Die Offline-Textkorrektur fehlt in dieser Sona-Installation. Installieren Sie Sona neu.",
+        "lightOnly": "Nur leichte Textkorrektur für Englisch.",
+        "instructionsUnavailable": "Wählen Sie für gesprochene Anweisungen einen anderen Anbieter."
+      },
       "api": {
         "title": "API (OpenAI-kompatibel)",
         "provider": {
@@ -1762,11 +1818,11 @@
       },
       "remoteIntelligence": {
         "title": "Meeting-Intelligenz",
-        "label": "Meeting-Notizen auf meinem Server schreiben",
-        "consent": "Zusammenfassungen und Antworten zu Meetings werden auf deinem Server über dein privates Netzwerk geschrieben.",
+        "label": "Cloud-KI für Meeting-Notizen verwenden",
+        "consent": "Standardmäßig lokal. Wenn aktiviert, geht Meeting-Text an deinen gekoppelten Server und dessen KI-Anbieter. Audio bleibt auf diesem Mac. Deaktiviere die Option, damit neue Zusammenfassungen, Protokolle, Rückblicke und Antworten lokal bleiben.",
         "unpaired": "Verbinde Sona unter Agenten mit deinem Server, um das einzuschalten.",
         "seriesTitle": "Serien, die auf diesem Mac bleiben",
-        "seriesHint": "Eine hier aufgeführte Serie wird immer auf diesem Mac geschrieben, auch wenn Meeting-Intelligenz an ist.",
+        "seriesHint": "Ausgewählte Serien bleiben auf diesem Mac, auch wenn Cloud-KI aktiviert ist.",
         "seriesEmpty": "Noch keine wiederkehrenden Meetings aufgenommen.",
         "loading": "Serien werden gelesen…",
         "lastMet": "Zuletzt am {{date}}",
@@ -2010,7 +2066,8 @@
         "remote_unavailable": "Entferntes Ziel nicht verfügbar",
         "engine_failure": "Verarbeitung fehlgeschlagen",
         "cancelled": "Verarbeitung abgebrochen",
-        "interrupted": "Verarbeitung unterbrochen"
+        "interrupted": "Verarbeitung unterbrochen",
+        "transcript_deleted": "Transkript gelöscht"
       }
     },
     "start": {
@@ -2148,6 +2205,7 @@
       "recovery_required": "Diese Besprechung muss vor dieser Aktion wiederhergestellt werden.",
       "deletion_in_progress": "Das Löschen läuft bereits. Die Besprechung bleibt unzugänglich.",
       "not_found": "Diese Besprechung ist nicht mehr verfügbar.",
+      "transcript_deleted": "Notizen können nach dem Löschen des zugehörigen Transkripts nicht neu erstellt werden.",
       "invalid_request": "Die Besprechungsanfrage war ungültig.",
       "export_cancelled": "Der Export wurde abgebrochen. Es wurde kein vollständiger Export erstellt.",
       "export_failed": "Der Export ist fehlgeschlagen. Es wurde kein vollständiger Export erstellt.",

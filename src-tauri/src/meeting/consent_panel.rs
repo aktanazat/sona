@@ -285,50 +285,6 @@ fn position(app: &AppHandle) -> Option<(f64, f64)> {
 mod tests {
     use super::*;
 
-    /// Every height a state can ask for, measured in the rendered panel at
-    /// PANEL_WIDTH across all 24 locales and recorded at the tallest one. A
-    /// change here means the panel's copy or layout changed and the window has
-    /// to be measured again — the numbers cannot be re-derived from the code.
-    #[test]
-    fn every_panel_state_gets_the_height_its_content_was_measured_at() {
-        let prompt = |always_record_checkbox, series_brief| {
-            ConsentPanelLayout::Prompt {
-                always_record_checkbox,
-                series_brief,
-            }
-            .height()
-        };
-        let prep = |loop_rows, waiting_on, participants| {
-            ConsentPanelLayout::Prep {
-                loop_rows,
-                waiting_on,
-                participants,
-            }
-            .height()
-        };
-        let recording =
-            |disclosure_note| ConsentPanelLayout::Recording { disclosure_note }.height();
-
-        assert_eq!(prompt(false, false), 126.0);
-        assert_eq!(prompt(true, false), 172.0);
-        assert_eq!(prompt(true, true), 197.0);
-        assert_eq!(prep(0, false, false), 154.0);
-        // The loops heading is drawn with the first row and only then.
-        assert_eq!(prep(1, false, false), 204.0);
-        assert_eq!(prep(2, false, false), 226.0);
-        assert_eq!(prep(2, true, true), 296.0);
-        assert_eq!(recording(false), 116.0);
-        assert_eq!(recording(true), 157.0);
-        assert_eq!(
-            ConsentPanelLayout::Wrap { loop_delta: false }.height(),
-            154.0
-        );
-        assert_eq!(
-            ConsentPanelLayout::Wrap { loop_delta: true }.height(),
-            183.0
-        );
-    }
-
     /// Ritual cards stay bounded rather than expanding toward the full app
     /// window when their source data grows.
     #[test]

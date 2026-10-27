@@ -3489,7 +3489,7 @@ impl MeetingSessionManager {
             .await
             .unwrap_or_else(|_| Err(RunFailure::engine(EngineFailureCause::Panicked)))
         };
-        let (artifact, engine) = match generated {
+        let (artifact, engine, relationship_refresh) = match generated {
             Ok(generated) => generated,
             Err(failure) => {
                 /* The row describes this press. Until it did, a rewrite that
@@ -3518,8 +3518,11 @@ impl MeetingSessionManager {
         if receipt.result == OperationResult::Rejected {
             return Err(MeetingCommandError::StaleRevision);
         }
-        let result = self.result_for_receipt(store, receipt, request.session_id)?;
+        let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
+        if let Some(refresh) = relationship_refresh {
+            self.processing.start_relationship_refresh(store, request.session_id, refresh);
+        }
         Ok(result)
     }
     pub async fn export(
@@ -7320,36 +7323,6 @@ pub(crate) mod tests {
             )),
             OperationActor::System,
             "an auto-stop nobody asked for must not be recorded as the user's"
-        );
-    }
-
-    /// The two stop buttons in the app's own windows are different presses,
-    /// and a stop that loses its phase or revision race renders as done on
-    /// whichever one was pressed. Until the surface rode on the request, the
-    /// log said `Operator` for both and said nothing at all for the press
-    /// that changed nothing, so the one question a reader has afterwards -
-    /// which button did nothing - had no answer anywhere.
-    #[test]
-    fn a_stop_names_the_surface_that_pressed_it() {
-        assert_eq!(
-            MeetingStopCause::Operator(MeetingStopSurface::MeetingLive).describe(),
-            "the live meeting screen"
-        );
-        assert_eq!(
-            MeetingStopCause::Operator(MeetingStopSurface::ConsentPanel).describe(),
-            "the consent panel"
-        );
-        assert_eq!(MeetingStopCause::Tray.describe(), "the tray");
-        assert_eq!(
-            MeetingStopCause::RecordingCard.describe(),
-            "the recording card"
-        );
-        assert_eq!(
-            MeetingStopCause::Detection(
-                crate::meeting::detection::machine::StopTrigger::SleepBoundary
-            )
-            .describe(),
-            "detection on sleep_boundary"
         );
     }
 

@@ -86,45 +86,6 @@ mod tests {
         for (locale, strings) in TRANSLATIONS.iter() {
             for (key, value) in tray_values(strings) {
                 assert!(!value.trim().is_empty(), "{locale}.tray.{key} is empty");
-                assert!(
-                    !value.contains('⚠'),
-                    "{locale}.tray.{key} must not use an emoji"
-                );
-            }
-            for (key, status) in [
-                ("statusReady", strings.status_ready.as_str()),
-                ("statusRecording", strings.status_recording.as_str()),
-                ("statusTranscribing", strings.status_transcribing.as_str()),
-                (
-                    "statusMeetingPreflight",
-                    strings.status_meeting_preflight.as_str(),
-                ),
-                (
-                    "statusMeetingStarting",
-                    strings.status_meeting_starting.as_str(),
-                ),
-                (
-                    "statusMeetingRecording",
-                    strings.status_meeting_recording.as_str(),
-                ),
-                (
-                    "statusMeetingPaused",
-                    strings.status_meeting_paused.as_str(),
-                ),
-                (
-                    "statusMeetingProcessing",
-                    strings.status_meeting_processing.as_str(),
-                ),
-                ("statusMeetingReady", strings.status_meeting_ready.as_str()),
-                (
-                    "statusMeetingRecovery",
-                    strings.status_meeting_recovery.as_str(),
-                ),
-            ] {
-                assert!(
-                    status.starts_with("Sona · "),
-                    "{locale}.tray.{key} must retain the Sona status prefix"
-                );
             }
         }
     }

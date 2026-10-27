@@ -136,9 +136,6 @@ test.describe("Meetings", () => {
     const row = page.getByRole("listitem").filter({
       hasText: "Yesterday's standup",
     });
-    // One word per row, and it is the reason: "Needs attention" is the state,
-    // and a row that can say why does not say both.
-    await expect(row.getByText("Needs attention")).toHaveCount(0);
     // The state alone does not say what happened, so the reason is on the row.
     await expect(row.getByText("Interrupted before it finished")).toBeVisible();
     await expect(

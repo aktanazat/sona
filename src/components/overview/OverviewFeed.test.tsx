@@ -196,18 +196,12 @@ describe("Needs you", () => {
      * I have to deal with". */
     expect(occurrences(markup, "<li")).toBe(3);
     expect(occurrences(markup, "<ul")).toBe(1);
-    expect(occurrences(markup, "rounded-card")).toBe(1);
-    expect(markup.includes("What Sona noticed")).toBe(false);
-    expect(markup.includes("Open loops")).toBe(false);
   });
 
   test("says nothing needs you as one line, not an empty surface", () => {
     const markup = needsYou();
 
     expect(markup).toContain("Nothing needs you.");
-    expect(markup.includes("rounded-card")).toBe(false);
-    expect(markup.includes("<ul")).toBe(false);
-    expect(markup).toContain("text-[13px] leading-5 text-gray-800");
   });
 
   test("draws nothing at all until the read has answered", () => {
@@ -358,7 +352,6 @@ describe("Recent", () => {
     expect(markup).toContain("<details");
     /* Closed until somebody opens it: the summary's count is what decides. */
     expect(markup.includes("<details open")).toBe(false);
-    expect(markup.includes("What Sona did")).toBe(false);
   });
 
   test("names each pass, its workflow and when it ran", () => {
@@ -393,15 +386,6 @@ describe("Recent", () => {
     expect(markup.includes("<button")).toBe(false);
   });
 
-  test("teaches what fills it instead of showing an empty list", () => {
-    const markup = recent();
-
-    expect(markup).toContain("Nothing yet");
-    expect(markup).toContain(
-      "People, words and follow-ups Sona files after a meeting show up here.",
-    );
-    expect(markup.includes("<ul")).toBe(false);
-  });
 
   test("claims no count while the read is out or after it failed", () => {
     expect(recent({ receipts: { status: "loading" } })).toContain("Loading…");

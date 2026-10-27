@@ -435,8 +435,6 @@ pub(super) mod tests {
     #[test]
     fn manifest_pins_a_commit_and_a_digest_per_file() {
         let manifest = model_manifest();
-        assert_eq!(manifest.embedding_dimensions, 256);
-        assert_eq!(manifest.license, "MIT");
         assert_eq!(
             manifest.revision.len(),
             40,

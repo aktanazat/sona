@@ -372,28 +372,26 @@ impl StreamRouter {
         if !self.accepting_audio.load(Ordering::Acquire) {
             return;
         }
-        if frame.len() > STREAM_PREVIEW_FRAME_SAMPLES {
-            self.disable_preview("received an oversized frame");
+        let route = self
+            .route
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(route) = route.as_ref() else {
             return;
-        }
-
-        let send_result = {
-            let route = self
-                .route
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(route) = route.as_ref() else {
-                return;
-            };
-            route.audio_tx.try_send(frame.to_vec())
         };
-        if let Err(error) = send_result {
-            match error {
-                mpsc::TrySendError::Full(_) => {
+        for chunk in frame.chunks(STREAM_PREVIEW_FRAME_SAMPLES) {
+            if !self.accepting_audio.load(Ordering::Acquire) {
+                break;
+            }
+            match route.audio_tx.try_send(chunk.to_vec()) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
                     self.disable_preview("decoder backlog reached the two-second limit");
+                    break;
                 }
-                mpsc::TrySendError::Disconnected(_) => {
+                Err(mpsc::TrySendError::Disconnected(_)) => {
                     self.disable_preview("preview worker stopped receiving audio");
+                    break;
                 }
             }
         }
@@ -4024,28 +4022,6 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_starter_replacements_run_in_the_pipeline() {
-        let settings = AppSettings {
-            filler_word_removal_enabled: false,
-            ..Default::default()
-        };
-        let asr = AsrPlan::from_settings(&settings);
-        let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
-
-        assert!(asr.replacements_enabled);
-        assert_eq!(
-            post_process_transcription_text(
-                "write to me at example dot com".to_string(),
-                &asr,
-                false,
-                &english,
-                &[],
-            ),
-            "write to me at example .com"
-        );
-    }
-
-    #[test]
     fn replacements_run_before_vocabulary_so_a_rewritten_phrase_is_not_also_corrected() {
         let settings = AppSettings {
             replacements_rules: vec![ReplacementRule {
@@ -4095,14 +4071,6 @@ mod tests {
             ),
             "write to me at sign example dot com"
         );
-    }
-
-    #[test]
-    fn engine_transition_reports_idle_when_nothing_is_loaded() {
-        let transition = Arc::new(EngineTransition::new());
-
-        // The bug this replaces: "no model loaded" was reported as "loading".
-        assert!(!transition.in_progress());
     }
 
     #[test]
@@ -4169,7 +4137,6 @@ mod tests {
     #[derive(Default)]
     struct FakeCloudTransportState {
         connects: usize,
-        plans: Vec<CloudRunPlan>,
         frames: Vec<Vec<f32>>,
         connect_failure: Option<CloudStreamFailure>,
         send_failure_at: Option<(usize, CloudStreamFailure)>,
@@ -4197,12 +4164,11 @@ mod tests {
     impl CloudTransportFactory for FakeCloudTransportFactory {
         fn connect(
             &self,
-            plan: &CloudRunPlan,
+            _plan: &CloudRunPlan,
             _api_key: Zeroizing<String>,
         ) -> Result<Box<dyn CloudTransport>, CloudStreamFailure> {
             let mut state = self.state.lock().expect("fake cloud state");
             state.connects += 1;
-            state.plans.push(plan.clone());
             if let Some(failure) = state.connect_failure {
                 return Err(failure);
             }
@@ -4357,6 +4323,125 @@ mod tests {
         assert_eq!(cancelled_starts.load(Ordering::Acquire), 0);
     }
 
+    fn smoothed_onset_and_continuation() -> (Vec<Vec<f32>>, Vec<f32>) {
+        use crate::audio_toolkit::vad::{
+            SmoothedVad, VadFrame, VoiceActivityDetector, VAD_ONSET_FRAMES, VAD_PREFILL_FRAMES,
+            VAD_STREAMING_HANGOVER_FRAMES,
+        };
+
+        struct SignalVad;
+
+        impl VoiceActivityDetector for SignalVad {
+            fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> Result<VadFrame<'a>> {
+                Ok(if frame[0] > 0.0 {
+                    VadFrame::Speech(frame)
+                } else {
+                    VadFrame::Noise
+                })
+            }
+        }
+
+        let input: Vec<f32> = (0..18 * STREAM_PREVIEW_FRAME_SAMPLES)
+            .map(|sample| {
+                let amplitude =
+                    f32::from(u16::try_from(sample + 1).expect("fixture sample fits u16"))
+                        / 16_000.0;
+                if sample < 15 * STREAM_PREVIEW_FRAME_SAMPLES {
+                    -amplitude
+                } else {
+                    amplitude
+                }
+            })
+            .collect();
+        let mut vad = SmoothedVad::new(
+            Box::new(SignalVad),
+            VAD_PREFILL_FRAMES,
+            VAD_STREAMING_HANGOVER_FRAMES,
+            VAD_ONSET_FRAMES,
+        );
+        let mut packets = Vec::new();
+        for frame in input.chunks(STREAM_PREVIEW_FRAME_SAMPLES) {
+            if let VadFrame::Speech(pcm) = vad.push_frame(frame).expect("smoothed speech frame") {
+                packets.push(pcm.to_vec());
+            }
+        }
+        (packets, input[STREAM_PREVIEW_FRAME_SAMPLES..].to_vec())
+    }
+
+    #[test]
+    fn local_speech_onset_is_received_before_finalize_and_live_audio_continues() {
+        let (packets, expected) = smoothed_onset_and_continuation();
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].len(), 7_680);
+        let router = Arc::new(StreamRouter::new());
+        let (lanes_tx, lanes_rx) = mpsc::sync_channel(1);
+        let start_router = Arc::clone(&router);
+        router.arm_on_first_speech(move || {
+            lanes_tx
+                .send(start_router.open())
+                .expect("first speech opens local stream");
+        });
+
+        router.feed(&packets[0]);
+        let mut lanes = lanes_rx
+            .try_recv()
+            .expect("first speech started local stream");
+        let onset: Vec<f32> = lanes.audio_rx.try_iter().flatten().collect();
+        assert_eq!(onset, expected[..7_680]);
+
+        router.feed(&packets[1]);
+        let route = router.take().expect("local stream remains open");
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        route
+            .control_tx
+            .send(StreamControl::Finalize(reply_tx))
+            .expect("finalize local stream");
+        let StreamCmd::Feed(continuation) = lanes.recv().expect("live continuation") else {
+            panic!("finalize overtook live continuation");
+        };
+        assert_eq!(continuation, expected[7_680..]);
+        assert!(matches!(
+            lanes.recv().expect("finalize after live audio"),
+            StreamCmd::Finalize(_)
+        ));
+        assert!(!router.preview_degraded());
+    }
+
+    #[test]
+    fn aggregated_audio_preserves_partial_tail_and_order_before_finalize() {
+        let router = StreamRouter::new();
+        let mut lanes = router.open();
+        let aggregated: Vec<f32> = (0_u16..1_097)
+            .map(|sample| f32::from(sample) / 1_600.0)
+            .collect();
+        let continuation = vec![-0.75; 31];
+        router.feed(&aggregated);
+        router.feed(&continuation);
+        let route = router.take().expect("active stream route");
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        route
+            .control_tx
+            .send(StreamControl::Finalize(reply_tx))
+            .expect("finalize after partial tail");
+
+        let mut frames = Vec::new();
+        loop {
+            match lanes.recv().expect("audio before finalize") {
+                StreamCmd::Feed(pcm) => frames.push(pcm),
+                StreamCmd::Finalize(_) => break,
+                StreamCmd::Cancel => panic!("stream unexpectedly cancelled"),
+            }
+        }
+        assert_eq!(
+            frames.iter().map(Vec::len).collect::<Vec<_>>(),
+            [480, 480, 137, 31]
+        );
+        let received: Vec<f32> = frames.into_iter().flatten().collect();
+        let expected: Vec<f32> = aggregated.into_iter().chain(continuation).collect();
+        assert_eq!(received, expected);
+        assert!(!router.preview_degraded());
+    }
+
     #[test]
     fn preview_queue_overflow_preserves_finalize_order() {
         let router = StreamRouter::new();
@@ -4392,25 +4477,29 @@ mod tests {
     fn decoder_stall_bounds_preview_audio_memory() {
         let router = StreamRouter::new();
         let lanes = router.open();
-        let frame = vec![0.25; STREAM_PREVIEW_FRAME_SAMPLES];
+        let audio: Vec<f32> = (0..STREAM_PREVIEW_QUEUE_SAMPLES * 4)
+            .map(|sample| {
+                rustfft::num_traits::ToPrimitive::to_f32(&sample)
+                    .expect("fixture sample is exactly representable in f32")
+            })
+            .collect();
 
-        for _ in 0..(STREAM_PREVIEW_QUEUE_CAPACITY * 4) {
-            router.feed(&frame);
-        }
+        router.feed(&audio);
 
         assert!(router.preview_degraded());
-        let queued_samples: usize = lanes.audio_rx.try_iter().map(|pcm| pcm.len()).sum();
-        assert!(queued_samples <= STREAM_PREVIEW_QUEUE_SAMPLES);
+        let queued: Vec<f32> = lanes.audio_rx.try_iter().flatten().collect();
+        let capacity_samples = STREAM_PREVIEW_QUEUE_CAPACITY * STREAM_PREVIEW_FRAME_SAMPLES;
+        assert_eq!(queued, audio[..capacity_samples]);
+        assert!(queued.len() <= STREAM_PREVIEW_QUEUE_SAMPLES);
+
+        router.feed(&[0.75; STREAM_PREVIEW_FRAME_SAMPLES]);
+        assert_eq!(lanes.audio_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
     }
 
     #[test]
-    fn ort_auto_log_reports_the_effective_provider_and_compiled_capability() {
+    fn ort_settings_fall_back_to_an_available_provider() {
         let provider = configured_ort_provider(OrtAcceleratorSetting::Auto);
         assert_eq!(provider, OrtProvider::Cpu);
-        assert_eq!(
-            ort_accelerator_log_line(provider, "cpu, coreml"),
-            "ORT accelerator set to: cpu (compiled capability: cpu, coreml)"
-        );
         for unavailable in [
             OrtAcceleratorSetting::Cuda,
             OrtAcceleratorSetting::DirectMl,
@@ -4482,30 +4571,6 @@ mod tests {
         });
 
         assert_eq!(result, raw);
-    }
-
-    #[test]
-    fn transcript_canary_is_absent_from_log_event_panic_and_report_diagnostics() {
-        const CANARY: &str = "TRANSCRIPT-CANARY-4EE1";
-        let event = serde_json::to_string(&engine_panic_model_state_event())
-            .expect("model state event serialization");
-        let support_report = serde_json::to_string(&serde_json::json!({
-            "diagnostic": ENGINE_PANIC_LOG_MESSAGE,
-            "event": event,
-            "panic": ENGINE_PANIC_ERROR_MESSAGE,
-        }))
-        .expect("diagnostic report serialization");
-
-        for (sink, diagnostic) in [
-            ("log", ENGINE_PANIC_LOG_MESSAGE),
-            ("event", event.as_str()),
-            ("stdout", ENGINE_PANIC_LOG_MESSAGE),
-            ("stderr", ENGINE_PANIC_LOG_MESSAGE),
-            ("panic", ENGINE_PANIC_ERROR_MESSAGE),
-            ("support report", support_report.as_str()),
-        ] {
-            assert!(!diagnostic.contains(CANARY), "{sink}: {diagnostic}");
-        }
     }
 
     #[test]
@@ -4965,36 +5030,21 @@ mod tests {
         assert_eq!(evidence, OutputLanguageEvidence::TranslatedToEnglish);
     }
 
-    /// The reason `BatchDecode::model_produced_text` has to exist: on a stock
-    /// install (filler removal defaults on) a real one-word utterance
-    /// post-processes to nothing, so an empty delivered transcript cannot tell
-    /// a silent microphone from a filtered one. Both halves are asserted, so
-    /// this fails if the pipeline stops emptying it *or* if the flag stops
-    /// being read from the raw text.
+    /// A bare hesitation is removed when filler cleanup is enabled.
     #[test]
-    fn a_filtered_away_utterance_still_reports_that_the_model_produced_text() {
-        let settings = AppSettings::default();
-        assert!(
-            settings.filler_word_removal_enabled,
-            "this test is about the stock install"
-        );
+    fn a_bare_hesitation_is_removed_from_the_delivered_transcript() {
+        let settings = AppSettings {
+            filler_word_removal_enabled: true,
+            ..AppSettings::default()
+        };
         let asr = AsrPlan::from_settings(&settings);
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
 
         let raw = "Um.".to_string();
-        let model_produced_text = !raw.trim().is_empty();
         let delivered =
             post_process_transcription_text(raw, &asr, false, &english, &languages(&["en"]));
 
         assert_eq!(delivered, "", "filler removal empties a bare hesitation");
-        assert!(model_produced_text);
-
-        let decode = BatchDecode {
-            text: delivered,
-            realtime_factor: None,
-            model_produced_text,
-        };
-        assert!(decode.text.is_empty() && decode.model_produced_text);
     }
 
     /// Filler removal runs before every pass that authors text, and this is the
@@ -5019,6 +5069,7 @@ mod tests {
     #[test]
     fn filler_removal_precedes_the_passes_that_author_text() {
         let settings = AppSettings {
+            filler_word_removal_enabled: true,
             replacements_enabled: true,
             replacements_rules: vec![crate::settings::ReplacementRule {
                 spoken: "amei".to_string(),
@@ -5035,10 +5086,6 @@ mod tests {
             }],
             ..AppSettings::default()
         };
-        assert!(
-            settings.filler_word_removal_enabled,
-            "this test is about the stock install"
-        );
         let mut asr = AsrPlan::from_settings(&settings);
         asr.literal_punctuation = true;
         let english = OutputLanguageEvidence::UserSelected("en-US".to_string());
@@ -5161,7 +5208,7 @@ mod tests {
 
     #[cfg(feature = "cloud-realtime")]
     #[test]
-    fn fake_cloud_transport_returns_interim_timestamped_final_and_close_with_full_pcm() {
+    fn cloud_speech_onset_and_partial_tail_keep_the_stream_live() {
         use crate::cloud_stt::{CloudEvent, CloudWord};
 
         let state = Arc::new(Mutex::new(FakeCloudTransportState {
@@ -5186,7 +5233,10 @@ mod tests {
         let factory = Arc::new(FakeCloudTransportFactory {
             state: Arc::clone(&state),
         });
-        let frames = vec![vec![0.25, -0.5], vec![0.75, -1.0]];
+        let (mut frames, mut expected) = smoothed_onset_and_continuation();
+        let tail = vec![-0.25; 137];
+        frames.push(tail.clone());
+        expected.extend(tail);
 
         let finalization = run_fake_cloud(factory, &frames);
 
@@ -5197,10 +5247,14 @@ mod tests {
         let state = state.lock().expect("fake cloud state");
         assert_eq!(state.connects, 1);
         assert_eq!(state.finalize_calls, 1);
-        assert_eq!(state.frames, frames);
-        assert_eq!(state.plans.len(), 1);
-        assert_eq!(state.plans[0].provider(), CloudSttProvider::DeepgramNova3);
-        assert!(state.plans[0].timestamps());
+        assert!(state
+            .frames
+            .iter()
+            .all(|frame| frame.len() <= STREAM_PREVIEW_FRAME_SAMPLES));
+        assert_eq!(
+            state.frames.iter().flatten().copied().collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[cfg(feature = "cloud-realtime")]

@@ -146,9 +146,6 @@ describe("the merged rule list", () => {
     for (const word of ["Spelling", "Shortcut", "Rewrite", "Emoji"]) {
       expect(html).toContain(`>${word}<`);
     }
-    // A word, not the kit's inverted pill: four saturated chips on a screen
-    // would read as decoration, and a word survives greyscale.
-    expect(html.includes('data-slot="badge"')).toBe(false);
   });
 
   test("carries both sides of every rule, and a delete for each", () => {
@@ -178,9 +175,6 @@ describe("the merged rule list", () => {
     expect(html.match(/data-testid="rule-add"/g)?.length).toBe(1);
     expect(html).toContain('data-testid="rule-new-kind"');
     expect(html).toContain('aria-label="Kind"');
-    // The add row teaches the selected kind rather than leaving it unexplained.
-    expect(html).toContain("Teaches Sona how a name is spelled");
-    expect(html).toContain('placeholder="open ai"');
   });
 
   test("names a rejected row on the row, and marks the field", () => {

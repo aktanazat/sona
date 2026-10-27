@@ -8,7 +8,8 @@
 //! value below can be recomputed from it at any time.
 
 use super::types::{
-    MeetingArtifactId, MeetingSessionId, MeetingTemplateId, SpeakerId, TranscriptSegmentId,
+    MeetingArtifactId, MeetingSessionId, MeetingTemplateId, SourceKind, SourceTrackId, SpeakerId,
+    TranscriptSegmentId,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -315,11 +316,21 @@ impl MeetingLiveHelp {
     }
 }
 
-/// One utterance recognized while the capture was still running. No segment
-/// id, no speaker and no revision: those belong to the stored transcript the
-/// post-stop pass writes, and this reading is thrown away when capture ends.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MeetingProvisionalSpeaker {
+    Cluster { index: u32 },
+    Unknown,
+    Uncertain,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingProvisionalSegment {
+    pub segment_id: u64,
+    pub track_id: SourceTrackId,
+    pub source_kind: SourceKind,
+    pub speaker: MeetingProvisionalSpeaker,
     pub start_offset_ns: u64,
     pub end_offset_ns: u64,
     pub text: String,

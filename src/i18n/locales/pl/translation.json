@@ -38,7 +38,6 @@
     "library": "Biblioteka"
   },
   "onboarding": {
-    "subtitle": "Modele działają na tym Macu i równoważą dokładność z szybkością.",
     "existingModelsTitle": "Zgodne modele",
     "downloadModelsTitle": "Dostępne do pobrania",
     "otherModels": "Inne modele",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Nie udało się wybrać modelu. Spróbuj ponownie."
+      "selectModel": "Nie udało się wybrać modelu. Spróbuj ponownie.",
+      "cancelDownload": "Nie udało się anulować pobierania. Spróbuj ponownie.",
+      "languages": "Nie udało się zapisać wybranych języków. Spróbuj ponownie."
     },
     "permissions": {
       "title": "Wymagane uprawnienia",
@@ -137,7 +138,44 @@
       "checking": "Sprawdzanie uprawnień",
       "recheck": "Sprawdź ponownie"
     },
-    "headline": "Wybierz model transkrypcji"
+    "headline": "Wybierz model transkrypcji",
+    "continue": "Dalej",
+    "back": "Wstecz",
+    "languages": {
+      "title": "Jakimi językami mówisz?",
+      "selector": "Języki dyktowania: {{languages}}",
+      "auto": "Wykrywaj automatycznie",
+      "selected": "{{language}}, wybrano",
+      "noModels": "Żaden model nie obsługuje tych języków. Wybierz inne języki."
+    },
+    "practice": {
+      "title": "Wypróbuj dyktowanie",
+      "record": "Nagraj",
+      "stop": "Zatrzymaj",
+      "finish": "Zakończ konfigurację",
+      "recordAgain": "Nagraj ponownie",
+      "words": "Twoje słowa",
+      "recording": "Słuchanie · pozostało {{seconds}} s",
+      "status": {
+        "ready": "Nagraj kilka słów w wybranym języku.",
+        "starting": "Uruchamianie mikrofonu…",
+        "transcribing": "Transkrypcja…",
+        "delivered": "Dyktowanie odebrane",
+        "finishing": "Zapisywanie konfiguracji…",
+        "cancelling": "Anulowanie…",
+        "error": "Próba dyktowania nie została ukończona"
+      },
+      "errors": {
+        "permission": "Zezwól na dostęp do mikrofonu w ustawieniach systemu i spróbuj ponownie.",
+        "noSpeech": "Nie wykryto mowy. Nagraj ponownie.",
+        "microphone": "Podłącz mikrofon i spróbuj ponownie.",
+        "expired": "Upłynął czas próby dyktowania. Nagraj ponownie.",
+        "changed": "Model lub języki uległy zmianie. Nagraj ponownie.",
+        "record": "Nie udało się nagrać: {{error}}",
+        "cancel": "Nie udało się anulować próby dyktowania. Spróbuj ponownie, zanim rozpoczniesz kolejne nagranie.",
+        "complete": "Nie udało się zapisać konfiguracji: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Własny",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Oczyszczanie tekstu offline",
+        "description": "{{language}} · {{size}}",
+        "download": "Pobierz",
+        "downloading": "Pobieranie {{downloaded}} z {{total}}",
+        "cancel": "Anuluj pobieranie",
+        "retry": "Ponów pobieranie",
+        "ready": "Gotowe do dyktowania po angielsku",
+        "notDownloaded": "Nie pobrano",
+        "use": "Użyj do dyktowania",
+        "selected": "Wybrano do dyktowania",
+        "remove": "Usuń pobrany model",
+        "removeTitle": "Usunąć oczyszczanie tekstu offline?",
+        "removeDescription": "Sona zachowa Twoje słowa bez zmian, dopóki nie pobierzesz modelu ponownie lub nie wybierzesz innego dostawcy.",
+        "runtimeMissing": "W tej instalacji Sona brakuje oczyszczania tekstu offline. Zainstaluj Sona ponownie.",
+        "lightOnly": "Tylko drobne poprawki w angielskim tekście.",
+        "instructionsUnavailable": "Wybierz innego dostawcę do obsługi poleceń głosowych."
+      },
       "api": {
         "title": "API (zgodne z OpenAI)",
         "provider": {
@@ -1776,11 +1832,11 @@
       },
       "remoteIntelligence": {
         "title": "Inteligencja spotkań",
-        "label": "Pisz notatki ze spotkań na moim serwerze",
-        "consent": "Podsumowania i odpowiedzi dotyczące spotkań są pisane na twoim serwerze przez twoją prywatną sieć.",
+        "label": "Używaj AI w chmurze do notatek ze spotkań",
+        "consent": "Domyślnie przetwarzanie jest lokalne. Po włączeniu tekst spotkania trafia do sparowanego serwera i jego dostawcy AI. Dźwięk zostaje na tym Macu. Wyłącz, aby nowe podsumowania, rejestry, przeglądy i odpowiedzi pozostały lokalne.",
         "unpaired": "Powiąż Sonę ze swoim serwerem w sekcji Agenci, aby to włączyć.",
         "seriesTitle": "Serie, które zostają na tym Macu",
-        "seriesHint": "Seria z tej listy jest zawsze pisana na tym Macu, nawet gdy inteligencja spotkań jest włączona.",
+        "seriesHint": "Wybrane serie zostają na tym Macu nawet przy włączonej AI w chmurze.",
         "seriesEmpty": "Nie zapisano jeszcze żadnych cyklicznych spotkań.",
         "loading": "Czytanie twoich serii…",
         "lastMet": "Ostatnio {{date}}",
@@ -2024,7 +2080,8 @@
         "remote_unavailable": "Zdalne miejsce docelowe niedostępne",
         "engine_failure": "Przetwarzanie nie powiodło się",
         "cancelled": "Przetwarzanie anulowane",
-        "interrupted": "Przetwarzanie zostało przerwane"
+        "interrupted": "Przetwarzanie zostało przerwane",
+        "transcript_deleted": "Transkrypcja usunięta"
       }
     },
     "start": {
@@ -2162,6 +2219,7 @@
       "recovery_required": "To spotkanie wymaga odzyskania przed tą akcją.",
       "deletion_in_progress": "Usuwanie już trwa. Spotkanie pozostaje niedostępne.",
       "not_found": "To spotkanie nie jest już dostępne.",
+      "transcript_deleted": "Po usunięciu transkrypcji nie można ponownie utworzyć notatek.",
       "invalid_request": "Żądanie spotkania było nieprawidłowe.",
       "export_cancelled": "Eksport został anulowany. Nie utworzono ukończonego eksportu.",
       "export_failed": "Eksport nie powiódł się. Nie utworzono ukończonego eksportu.",

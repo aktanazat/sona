@@ -5,7 +5,7 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run prepare:agent-hook && bun run build",
+    "beforeBuildCommand": "bun run prepare:cleanup-runtime && bun run prepare:agent-hook && bun run build",
     "frontendDist": "../out"
   },
   "app": {
@@ -25,7 +25,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/sona-agent-hook"],
+    "externalBin": ["binaries/sona-agent-hook", "binaries/sona-cleanup"],
     "resources": ["resources/**/*", "../LICENSE", "../NOTICE"],
     "fileAssociations": [
       {

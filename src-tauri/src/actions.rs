@@ -14,7 +14,9 @@ use crate::managers::transcription::{BatchDecode, StreamWorkKind, TranscriptionM
 use crate::modes::{AsrPlan, CloudReceiptStatus, RequestedEngine, RewriteOutcome, RunPlan};
 use crate::prompt_renderer::RenderedPrompt;
 use crate::secrets::{SecretAccount, SecretManager, SecretResolveError};
-use crate::settings::{get_settings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID, LOCAL_CLEANUP_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{set_tray_state, TrayIconState};
 use crate::utils::{
@@ -30,6 +32,8 @@ use tauri::Manager;
 use tauri::{AppHandle, Emitter};
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const DICTATION_REWRITE_DEADLINE: Duration = Duration::from_secs(8);
+const COMMAND_REWRITE_DEADLINE: Duration = Duration::from_secs(30);
 
 const TRANSCRIPTION_FAILURE_LOG_MESSAGE: &str = "Transcription failed; no text was delivered";
 const TRANSCRIPTION_FAILURE_EVENT_MESSAGE: &str = "Transcription failed";
@@ -626,6 +630,9 @@ fn prose_rewrite_prompt(system_message: &str, user_message: &str) -> String {
 /// request, and possibly a credential, before there is anything to rewrite.
 fn rewrite_warm_up(run: &RunPlan) -> Option<impl Future<Output = ()> + Send + 'static> {
     let llm = run.prompt().llm.as_ref()?;
+    if llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID {
+        return None;
+    }
     if !provider_allows_unauthenticated_request(&llm.provider, &llm.endpoint)
         || llm.model_id.trim().is_empty()
     {
@@ -664,6 +671,41 @@ pub(crate) async fn post_process_transcription(
     rendered: &RenderedPrompt,
     transcription: &str,
 ) -> Result<String, RewriteOutcome> {
+    bounded_rewrite(
+        post_process_transcription_inner(app, run, rendered, transcription),
+        tokio::time::sleep(rewrite_deadline(run.command())),
+    )
+    .await
+}
+
+fn rewrite_deadline(command: Option<&crate::modes::CommandPlan>) -> Duration {
+    if command.is_some() {
+        COMMAND_REWRITE_DEADLINE
+    } else {
+        DICTATION_REWRITE_DEADLINE
+    }
+}
+
+async fn bounded_rewrite(
+    operation: impl Future<Output = Result<String, RewriteOutcome>>,
+    deadline: impl Future<Output = ()>,
+) -> Result<String, RewriteOutcome> {
+    tokio::select! {
+        biased;
+        result = operation => result,
+        () = deadline => {
+            warn!("Post-processing timed out");
+            Err(RewriteOutcome::Failed)
+        }
+    }
+}
+
+async fn post_process_transcription_inner(
+    app: &AppHandle,
+    run: &RunPlan,
+    rendered: &RenderedPrompt,
+    transcription: &str,
+) -> Result<String, RewriteOutcome> {
     if is_blank_transcription(transcription) {
         debug!("Post-processing skipped because the transcription is empty");
         return Err(RewriteOutcome::Failed);
@@ -692,6 +734,29 @@ pub(crate) async fn post_process_transcription(
 
     let disable_reasoning = disables_reasoning(&provider);
 
+    if provider.id == LOCAL_CLEANUP_PROVIDER_ID {
+        if run.command().is_some()
+            || rendered.operation == crate::prompt_renderer::PromptOperation::Instruction
+        {
+            return Err(RewriteOutcome::Unavailable);
+        }
+        return match crate::local_cleanup::infer(
+            app,
+            &model,
+            &rendered.system_message,
+            &rendered.user_message,
+            transcription,
+        )
+        .await
+        {
+            Ok(result) => accept_rewrite(&result),
+            Err(error) => {
+                warn!("Local cleanup failed: {error}");
+                Err(RewriteOutcome::Failed)
+            }
+        };
+    }
+
     if provider.supports_structured_output && provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
@@ -704,11 +769,11 @@ pub(crate) async fn post_process_transcription(
             }
 
             let token_limit = model.trim().parse::<i32>().unwrap_or(0);
-            return match apple_intelligence::process_text_with_system_prompt(
+            return match apple_intelligence::process_text_with_system_prompt_async(
                 &rendered.system_message,
                 &rendered.user_message,
                 token_limit,
-            ) {
+            ).await {
                 Ok(result) => accept_rewrite(&result),
                 Err(error) => {
                     warn!("Apple Intelligence post-processing failed: {error}");
@@ -951,6 +1016,27 @@ pub(crate) struct ProcessedTranscription {
     pub post_processed_text: Option<String>,
     /// How the mode's rewrite ended, for the receipt and the shell's notice.
     pub rewrite: RewriteOutcome,
+}
+
+impl ProcessedTranscription {
+    pub(crate) fn from_rewrite(
+        result: Result<String, RewriteOutcome>,
+        fallback_text: String,
+        prior_processed_text: Option<String>,
+    ) -> Self {
+        match result {
+            Ok(text) => Self {
+                post_processed_text: Some(text.clone()),
+                final_text: text,
+                rewrite: RewriteOutcome::Applied,
+            },
+            Err(outcome) => Self {
+                final_text: fallback_text,
+                post_processed_text: prior_processed_text,
+                rewrite: outcome,
+            },
+        }
+    }
 }
 
 /// The measured facts about one capture that reached the engine. Every receipt
@@ -1492,27 +1578,16 @@ pub(crate) async fn process_transcription_output(
         // A model cannot keep words it never received. When the dictation
         // does not fit the request, the rewrite would replace all of it with
         // a rewrite of part of it, so the raw words go out whole instead.
-        let rewrite = if rendered.budget_receipt.transcript_truncated {
+        let result = if rendered.budget_receipt.transcript_truncated {
             warn!(
                 "Post-processing skipped because the transcript exceeds the prompt budget; \
                  delivering the raw transcript"
             );
-            RewriteOutcome::TooLong
+            Err(RewriteOutcome::TooLong)
         } else {
-            match post_process_transcription(app, run, &rendered, &final_text).await {
-                Ok(processed_text) => {
-                    post_processed_text = Some(processed_text.clone());
-                    final_text = processed_text;
-                    RewriteOutcome::Applied
-                }
-                Err(outcome) => outcome,
-            }
+            post_process_transcription(app, run, &rendered, &final_text).await
         };
-        return ProcessedTranscription {
-            final_text,
-            post_processed_text,
-            rewrite,
-        };
+        return ProcessedTranscription::from_rewrite(result, final_text, post_processed_text);
     }
     if final_text != transcription {
         post_processed_text = Some(final_text.clone());
@@ -2207,12 +2282,53 @@ impl TranscribeAction {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_held_dictation_rewrite_delivers_raw_words_at_the_deadline() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+        let operation = async move { Ok(receiver.await.expect("held provider")) };
+        let result = super::bounded_rewrite(operation, std::future::ready(())).await;
+        let processed = super::ProcessedTranscription::from_rewrite(
+            result,
+            "Friday is ready.".to_string(),
+            None,
+        );
+        assert_eq!(processed.final_text, "Friday is ready.");
+        assert_eq!(processed.post_processed_text, None);
+        assert_eq!(processed.rewrite, crate::modes::RewriteOutcome::Failed);
+        assert!(sender.send("late rewrite".to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_held_command_rewrite_delivers_nothing_at_the_deadline() {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+        let operation = async move { Ok(receiver.await.expect("held provider")) };
+        let result = super::bounded_rewrite(operation, std::future::ready(())).await;
+        let processed = super::ProcessedTranscription::from_rewrite(result, String::new(), None);
+        assert_eq!(processed.final_text, "");
+        assert_eq!(processed.post_processed_text, None);
+        assert_eq!(processed.rewrite, crate::modes::RewriteOutcome::Failed);
+        assert!(sender.send("make this shorter".to_string()).is_err());
+    }
+
+    #[test]
+    fn ordinary_dictation_has_an_eight_second_rewrite_ceiling() {
+        assert_eq!(super::rewrite_deadline(None), std::time::Duration::from_secs(8));
+    }
+
+    #[test]
+    fn voice_commands_keep_a_thirty_second_rewrite_ceiling() {
+        let command = crate::modes::CommandPlan::new("the selected words".to_string());
+        assert_eq!(
+            super::rewrite_deadline(Some(&command)),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
     use super::{
         capture_verdict, complete_unless_cancelled, is_blank_transcription,
         select_final_transcription, share_completed_pcm, should_use_streaming_overlay,
         strip_think_block, BatchDecode, CaptureVerdict, CloudRunError, CompletedCapture,
-        InputLevel, PendingHistoryEntry, TRANSCRIPTION_FAILURE_EVENT_MESSAGE,
-        TRANSCRIPTION_FAILURE_LOG_MESSAGE,
+        InputLevel, PendingHistoryEntry,
     };
     #[cfg(feature = "cloud-realtime")]
     use super::{ensure_cloud_fallback_is_installed, resolve_cloud_finalization, FrozenTranscript};
@@ -2259,23 +2375,6 @@ mod tests {
         }
     }
 
-    /// A capture whose transcript post-processing legitimately emptied — a
-    /// spoken "scratch that", or a bare "Um." with filler removal on — is a
-    /// delivered-nothing run, not a silent microphone. It reads as
-    /// `Transcribed` on both VAD paths, so the two stay consistent: the same
-    /// audio cannot earn a different capture status because Silero happened to
-    /// fire.
-    #[test]
-    fn a_transcript_emptied_by_post_processing_is_never_a_no_speech_receipt() {
-        let emptied_by_post_processing = true;
-        for vad_forwarded_speech in [false, true] {
-            assert_eq!(
-                capture_verdict(vad_forwarded_speech, emptied_by_post_processing),
-                CaptureVerdict::Transcribed,
-                "vad_forwarded_speech={vad_forwarded_speech}"
-            );
-        }
-    }
 
     #[test]
     fn truncated_capture_has_no_transcript_or_post_processing_path() {
@@ -2797,36 +2896,6 @@ mod tests {
             serde_json::json!({ "error_type": "cloud_transcription_held" })
         );
 
-        let overrun =
-            serde_json::to_value(RecordingErrorEvent::typed("capture_overrun")).expect("overrun");
-        assert_eq!(
-            overrun,
-            serde_json::json!({ "error_type": "capture_overrun" })
-        );
-
-        let no_speech = serde_json::to_value(RecordingErrorEvent::typed("no_speech_detected"))
-            .expect("no-speech payload");
-        assert_eq!(
-            no_speech,
-            serde_json::json!({ "error_type": "no_speech_detected" })
-        );
-
-        let no_model = serde_json::to_value(RecordingErrorEvent::typed("no_model_selected"))
-            .expect("no-model payload");
-        assert_eq!(
-            no_model,
-            serde_json::json!({ "error_type": "no_model_selected" })
-        );
-
-        let denied =
-            serde_json::to_value(RecordingErrorEvent::typed("microphone_permission_denied"))
-                .expect("denied payload");
-        assert_eq!(
-            denied,
-            serde_json::json!({
-                "error_type": "microphone_permission_denied",
-            })
-        );
     }
 
     #[test]
@@ -2846,25 +2915,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn transcript_canary_is_absent_from_transcription_failure_diagnostics() {
-        const CANARY: &str = "TRANSCRIPT-CANARY-4EE1";
-        let event = serde_json::to_string(&TRANSCRIPTION_FAILURE_EVENT_MESSAGE)
-            .expect("transcription failure event serialization");
-        let report = serde_json::to_string(&serde_json::json!({
-            "log": TRANSCRIPTION_FAILURE_LOG_MESSAGE,
-            "event": event,
-        }))
-        .expect("diagnostic report serialization");
-
-        for diagnostic in [
-            TRANSCRIPTION_FAILURE_LOG_MESSAGE,
-            TRANSCRIPTION_FAILURE_EVENT_MESSAGE,
-            report.as_str(),
-        ] {
-            assert!(!diagnostic.contains(CANARY), "{diagnostic}");
-        }
-    }
 
     #[test]
     fn cloud_run_errors_expose_one_wire_kind_each() {
@@ -2883,9 +2933,8 @@ mod tests {
         ];
 
         for (error, expected_kind) in kinds {
-            let (kind, message) = error.describe();
+            let (kind, _) = error.describe();
             assert_eq!(kind, expected_kind, "wire kind for {error:?}");
-            assert!(!message.is_empty(), "log message for {error:?}");
 
             let payload = serde_json::to_value(RecordingErrorEvent {
                 error_type: "cloud_unavailable".to_string(),

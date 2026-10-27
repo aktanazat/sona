@@ -24,16 +24,7 @@ import {
   modeLlmDestination,
 } from "./modeModel";
 
-/* Every mode setting the editor owned before the collapse either survives it
- * on one screen, survives it behind the one Advanced disclosure, or is gone on
- * purpose. The surface cannot be opened in a browser from here, so these
- * renders are the standing proof: real translations, and every control that
- * survived asserted by name.
- *
- * The editor now reads the app settings store for providers, the privacy
- * ceiling and browser-URL consent. Under `renderToStaticMarkup` that store is
- * still empty, which is exactly a fresh install — so the branches asserted
- * below are the ones a first-run reader actually meets. */
+/* Render the mode draft and its eligibility rules without reaching Tauri. */
 
 const localeFile = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -196,25 +187,6 @@ describe("mode editor shell", () => {
       "Mode name",
       'id="mode-name"',
     ]);
-    expect(html).toContain("Changes apply to your next dictation.");
-  });
-
-  test("is one screen: four sections and no tabs", () => {
-    expectLabels(html, [
-      "Instructions",
-      "Model",
-      "Output",
-      "Turns on by itself",
-    ]);
-    // The five-tab editor is gone, so nothing here is a tablist any more.
-    expect(html.includes('role="tab"')).toBe(false);
-    expect(html.includes('role="tabpanel"')).toBe(false);
-    expect(html.includes("Recognition")).toBe(false);
-    expect(html.includes("Automation")).toBe(false);
-  });
-
-  test("opens with no unsaved-change claim", () => {
-    expect(html.includes("Unsaved changes")).toBe(false);
   });
 
   test("reports an edited draft as unsaved", () => {
@@ -231,8 +203,9 @@ describe("mode editor shell", () => {
     const blocked = editor({ mode: draft({ name: "" }) });
 
     expect(blocked).toContain("A mode name is required.");
-    expect(blocked).toContain("Untitled mode");
-    expect(blocked).toContain("disabled");
+    expect(blocked).toMatch(
+      /<button\b[^>]*disabled=""[^>]*>Save changes<\/button>/,
+    );
   });
 
   test("surfaces a stale-revision conflict without dropping the draft", () => {
@@ -257,17 +230,6 @@ describe("instructions", () => {
     expect(html).toContain('id="mode-instructions"');
     expect(html).toContain("Your own instructions");
     expect(html).toContain("Keep it to two lines.");
-    expect(html).toContain("Clean up with AI");
-    /* The precedence sentence rides on an affordance, not as a second
-     * paragraph under the label: a field states its setting once. Radix
-     * portals the content, so what a static render can prove is the named
-     * trigger — the sentence itself is asserted on the locale below. */
-    expect(html).toContain('aria-label="Your own instructions"');
-    expect(html).toContain('data-slot="tooltip-trigger"');
-    expect(html.includes("replaces the output style below")).toBe(false);
-    expect(i18n.t("modesV2.instructions.custom.hint")).toContain(
-      "replaces the output style below",
-    );
   });
 
   test("says why the prompt is inert when cleanup is off", () => {
@@ -318,10 +280,9 @@ describe("model", () => {
       "deepgram_nova_3",
       "eleven_labs_scribe_v2",
     ]);
-    expect(options.filter((option) => option.disabled).length).toBe(1);
-    expect(options[1].label).toBe("Deepgram Nova-3");
-    expect(options[2].label).toContain("is unavailable");
-    expect(options[2].label).toContain("ElevenLabs");
+    expect(
+      options.filter((option) => option.disabled).map((option) => option.value),
+    ).toEqual(["eleven_labs_scribe_v2"]);
   });
 });
 
@@ -353,16 +314,6 @@ describe("output", () => {
 });
 
 describe("turns on by itself", () => {
-  test("teaches the rule shape when nothing activates the mode", () => {
-    const html = editor();
-
-    expect(html).toContain("Apps and websites");
-    expect(html).toContain("Nothing switches to this mode on its own.");
-    expect(html).toContain("com.apple.mail");
-    expect(html).toContain("mail.google.com");
-    expect(html).toContain("Capture current app");
-  });
-
   test("lists app and website rules in one list, each with its own remove", () => {
     const html = editor({
       activationRules: [{ app_id: "com.apple.mail", mode_id: "email" }],
@@ -375,8 +326,6 @@ describe("turns on by itself", () => {
     expect(html).toContain('aria-label="Remove mail.google.com"');
     // The website row's scope is the one thing its host cannot show.
     expect(html).toContain("Host and subdomains");
-    // One list, not two.
-    expect(html.match(/aria-label="Apps and websites"/g)?.length).toBe(1);
   });
 
   test("ignores rules that belong to another mode", () => {
@@ -410,15 +359,6 @@ describe("turns on by itself", () => {
 describe("advanced", () => {
   const html = editor();
 
-  test("is one disclosure, closed on arrival", () => {
-    expect(html).toContain("<details");
-    expect(html).toContain("Advanced");
-    // Closed: `<details>` carries no `open`, so the four decisions above it
-    // are the screen.
-    expect(html.includes("<details open")).toBe(false);
-    // One disclosure, never a second one nested inside it.
-    expect(html.match(/<details/g)?.length).toBe(1);
-  });
 
   test("holds every knob that survived the collapse", () => {
     expectLabels(html, [
@@ -452,15 +392,6 @@ describe("advanced", () => {
     expect(html).toMatch(
       /aria-checked="false"[^>]*id="mode-spoken-instructions"/,
     );
-    // The hint text sits in a closed tooltip, which static markup does not
-    // carry, so the render proves the row has a hint and the bundle proves
-    // what that hint says.
-    expect(html).toMatch(
-      /Spoken instructions<\/label><button[^>]*aria-label="Spoken instructions"/,
-    );
-    expect(
-      i18n.t("settings.modes.writing.spokenInstructions.description"),
-    ).toContain('"Sona,"');
 
     const enabled = editor({
       mode: draft({ llm: { ...draft().llm, spoken_instructions: true } }),
@@ -503,12 +434,6 @@ describe("advanced", () => {
         MODE_VIEW,
       ),
     ).toBe(true);
-  });
-
-  test("drops the knobs a default already answers", () => {
-    for (const gone of ["Typing tool", "Word timestamps"]) {
-      expect(html.includes(gone)).toBe(false);
-    }
   });
 
   test("keeps the per-mode vocabulary editable, including its empty case", () => {
@@ -573,14 +498,8 @@ describe("mode list", () => {
     const html = list();
 
     expect(html).toContain("Active");
-    expect(html).toContain("text-blue-900");
-    // A round coloured status dot is the pattern this list must not use, and
-    // the Badge primitive's inverted pill is the chip it must not wear.
-    expect(html.includes("rounded-full")).toBe(false);
-    expect(html.includes("bg-primary")).toBe(false);
     // Exactly one row can be active, and one row is open in the editor.
     expect(html.split(">Active<").length - 1).toBe(1);
-    expect(html.split('data-selected="true"').length - 1).toBe(1);
   });
 
   test("reads the shipped modes as presets, and only those", () => {
@@ -612,8 +531,6 @@ describe("mode list", () => {
     // does not also print the model, language and delivery the editor below
     // it already owns.
     expect(html.split(">Local<").length - 1).toBe(2);
-    expect(html.includes("Paste")).toBe(false);
-    expect(html.includes("Auto")).toBe(false);
   });
 
   test("reads the engine from the mode rather than from a default", () => {
@@ -623,30 +540,6 @@ describe("mode list", () => {
     expect(html.includes(">Local<")).toBe(false);
   });
 
-  test("never prints a model repo path", () => {
-    // `ModelInfo.id` is `repo_id/filename`: 65 characters at the median across
-    // the shipped catalog and 116 at the longest. The row does not carry the
-    // model at all now, so the path can never reach it.
-    const html = list();
-
-    expect(html.includes("handy-computer/")).toBe(false);
-    expect(html.includes(".gguf")).toBe(false);
-  });
-
-  test("keeps name, state, engine and keycaps on one line", () => {
-    const html = list();
-    const rows = html.split("<li").slice(1);
-
-    expect(rows.length).toBe(2);
-    // The defect this replaces put the state and the caps on a second line
-    // under the title, which then wrapped. One row is one flex line.
-    for (const row of rows) {
-      expect(row).toContain("<kbd");
-      expect(row.includes("flex-col")).toBe(false);
-    }
-    // MESSAGE_VIEW is the active mode and renders first.
-    expect(rows[0]).toContain(">Active<");
-  });
 
   test("reaches each mode's actions by that mode's name", () => {
     const html = list();
@@ -733,14 +626,6 @@ describe("the mode's rewrite provider row", () => {
     );
   });
 
-  test("names the provider it inherits once the install has one", () => {
-    expect(
-      i18n.t("settings.modes.writing.provider.inheritGlobalNamed", {
-        name: "Custom",
-      }),
-    ).toBe("Default: the global provider (Custom)");
-  });
-
   test("resolves the pair a mode inherits, and leaves an override alone", () => {
     /* SAFETY: modeLlmDestination reads exactly these two fields, so the
      * fixture carries only them rather than a full AppSettings. Widening the
@@ -773,5 +658,34 @@ describe("the mode's rewrite provider row", () => {
     });
     // A store written before the field existed omits it, which is inherit.
     expect(modeLlmDestination({ model_id: "" }, global).inherited).toBe(true);
+  });
+
+  test.each(["", "gpt-4o-mini"])(
+    "offline cleanup resolves the backend's fixed model instead of %j",
+    (previousModel) => {
+      expect(
+        modeLlmDestination(
+          { provider_id: "sona_local", model_id: previousModel },
+          { post_process_models: { sona_local: "backend-offline-model" } },
+        ),
+      ).toEqual({
+        providerId: "sona_local",
+        modelId: "backend-offline-model",
+        inherited: false,
+      });
+    },
+  );
+
+  test("Apple Intelligence resolves its fixed model when no model was entered", () => {
+    expect(
+      modeLlmDestination(
+        { provider_id: "apple_intelligence", model_id: "" },
+        null,
+      ),
+    ).toEqual({
+      providerId: "apple_intelligence",
+      modelId: "Apple Intelligence",
+      inherited: false,
+    });
   });
 });

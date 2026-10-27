@@ -91,7 +91,7 @@ export const sendSheetTurn = async ({
   let searchedCorpus = false;
   const packed = shouldPackChatTurn(workspace, gate);
   if (packed) {
-    const pack = await commands.sonaQueryPack(message);
+    const pack = await commands.sonaQueryPack(message, null);
     if (pack.status === "ok") {
       contextPack = pack.data.pack;
       searchedCorpus = pack.data.sources.length > 0;

@@ -80,6 +80,7 @@ final class PhoneDictation: ObservableObject {
     private var isThought = false
     private var audio: CapturedAudio?
     private var completion: Task<Void, Never>?
+    private let rewrite = BoundedRewrite()
     private var sessionProfile = DictationProfile.empty
     private var sessionStyle: DictationProfile.Style?
 
@@ -259,24 +260,31 @@ final class PhoneDictation: ObservableObject {
             settle(error: nil, styleNotice: NSLocalizedString("dictation.styleUnavailable", comment: ""))
             return
         }
+        let id = sessionID
+        let language = DictationPreferences.activeLanguage
+        let prompt = style.prompt
         completion = Task { [weak self] in
             guard let self else { return }
-            do {
+            let outcome = await rewrite.run {
                 struct Envelope: Encodable {
                     let transcript: String
                     let language: String
                     let target: [String: String] = [:]
                     let context: [String: String] = [:]
                 }
-                let envelope = try JSONEncoder().encode(Envelope(transcript: corrected, language: DictationPreferences.activeLanguage))
-                let session = LanguageModelSession(instructions: style.prompt + "\nReturn only the rewritten text. An empty response is valid when there are no words to keep.")
-                let response = try await session.respond(to: String(decoding: envelope, as: UTF8.self))
-                guard !Task.isCancelled else { return }
-                text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let envelope = try JSONEncoder().encode(Envelope(transcript: corrected, language: language))
+                let session = LanguageModelSession(instructions: prompt + "\nReturn only the rewritten text.")
+                return try await session.respond(to: String(decoding: envelope, as: UTF8.self)).content
+            }
+            guard !Task.isCancelled, sessionID == id else { return }
+            switch outcome {
+            case .rewritten(let output):
+                text = output
                 settle(error: nil)
-            } catch {
-                guard !Task.isCancelled else { return }
+            case .fallback:
                 settle(error: nil, styleNotice: NSLocalizedString("dictation.styleFailed", comment: ""))
+            case .cancelled:
+                break
             }
         }
     }
@@ -317,6 +325,7 @@ final class PhoneDictation: ObservableObject {
         preparation = nil
         finishDeadline?.cancel()
         finishDeadline = nil
+        rewrite.cancel()
         completion?.cancel()
         completion = nil
         recognition?.cancel()

@@ -38,7 +38,6 @@
     "library": "Library"
   },
   "onboarding": {
-    "subtitle": "Models run on this Mac and trade accuracy against speed.",
     "existingModelsTitle": "Compatible models",
     "downloadModelsTitle": "Available to download",
     "otherModels": "Other models",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Couldn't select the model. Try again."
+      "selectModel": "Couldn't select the model. Try again.",
+      "cancelDownload": "Couldn't cancel the download. Try again.",
+      "languages": "Couldn't save your languages. Try again."
     },
     "permissions": {
       "title": "Permissions required",
@@ -137,7 +138,44 @@
       "checking": "Checking permissions",
       "recheck": "Re-check"
     },
-    "headline": "Pick a transcription model"
+    "headline": "Pick a transcription model",
+    "continue": "Continue",
+    "back": "Back",
+    "languages": {
+      "title": "Which languages do you speak?",
+      "selector": "Dictation languages: {{languages}}",
+      "auto": "Auto detect",
+      "selected": "{{language}}, selected",
+      "noModels": "No models support these languages. Choose different languages."
+    },
+    "practice": {
+      "title": "Try a dictation",
+      "record": "Record",
+      "stop": "Stop",
+      "finish": "Finish setup",
+      "recordAgain": "Record again",
+      "words": "Your words",
+      "recording": "Listening · {{seconds}} seconds left",
+      "status": {
+        "ready": "Record a few words in your chosen language.",
+        "starting": "Opening microphone…",
+        "transcribing": "Transcribing…",
+        "delivered": "Dictation received",
+        "finishing": "Saving setup…",
+        "cancelling": "Cancelling…",
+        "error": "Practice not completed"
+      },
+      "errors": {
+        "permission": "Allow microphone access in system settings, then retry.",
+        "noSpeech": "No speech heard. Record again.",
+        "microphone": "Connect a microphone, then retry.",
+        "expired": "Practice timed out. Record again.",
+        "changed": "Your model or languages changed. Record again.",
+        "record": "Couldn't record: {{error}}",
+        "cancel": "Couldn't cancel practice. Retry before recording again.",
+        "complete": "Couldn't save setup: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Custom",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Offline cleanup",
+        "description": "{{language}} · {{size}}",
+        "download": "Download",
+        "downloading": "Downloading {{downloaded}} of {{total}}",
+        "cancel": "Cancel download",
+        "retry": "Retry download",
+        "ready": "Ready for English dictation",
+        "notDownloaded": "Not downloaded",
+        "use": "Use for dictation",
+        "selected": "Selected for dictation",
+        "remove": "Remove download",
+        "removeTitle": "Remove offline cleanup?",
+        "removeDescription": "Sona will keep your raw words until you download the model again or choose another provider.",
+        "runtimeMissing": "Offline cleanup is missing from this Sona installation. Reinstall Sona.",
+        "lightOnly": "English light cleanup only.",
+        "instructionsUnavailable": "Choose another provider for spoken instructions."
+      },
       "api": {
         "title": "API (OpenAI-compatible)",
         "provider": {
@@ -1762,11 +1818,11 @@
       },
       "remoteIntelligence": {
         "title": "Meeting intelligence",
-        "label": "Write meeting notes on my server",
-        "consent": "Summaries and answers for meetings are written on your server over your private network.",
+        "label": "Use cloud AI for meeting notes",
+        "consent": "Local by default. When on, meeting text goes to your paired server and its AI provider. Audio stays on this Mac. Turn off to keep new summaries, ledgers, recaps and answers local.",
         "unpaired": "Pair Sona with your server under Agents to turn this on.",
         "seriesTitle": "Series that stay on this Mac",
-        "seriesHint": "A series listed here is always written on this Mac, even while meeting intelligence is on.",
+        "seriesHint": "Selected series stay on this Mac, even when cloud AI is on.",
         "seriesEmpty": "No recurring meetings recorded yet.",
         "loading": "Reading your series…",
         "lastMet": "Last met {{date}}",
@@ -2010,7 +2066,8 @@
         "remote_unavailable": "Remote destination unavailable",
         "engine_failure": "Processing failed",
         "cancelled": "Processing cancelled",
-        "interrupted": "Interrupted before it finished"
+        "interrupted": "Interrupted before it finished",
+        "transcript_deleted": "Transcript deleted"
       }
     },
     "start": {
@@ -2148,6 +2205,7 @@
       "recovery_required": "This meeting needs recovery before that action.",
       "deletion_in_progress": "Deletion is already in progress. The meeting remains inaccessible.",
       "not_found": "This meeting is no longer available.",
+      "transcript_deleted": "Notes cannot be rebuilt after their transcript is deleted.",
       "invalid_request": "The meeting request was invalid.",
       "export_cancelled": "Export was cancelled. No completed export was created.",
       "export_failed": "Export failed. No completed export was created.",

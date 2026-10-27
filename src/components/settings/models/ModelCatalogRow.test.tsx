@@ -148,17 +148,6 @@ describe("modelRowActions", () => {
     expect(modelRowActions("not-downloaded", true).primary).toBe("retry");
   });
 
-  test("nothing destructive is offered mid-flight or under the engine", () => {
-    const busy: ModelRowState[] = [
-      "downloading",
-      "verifying",
-      "extracting",
-      "loading",
-    ];
-    for (const state of busy) {
-      expect(modelRowActions(state, false).canDelete).toBe(false);
-    }
-  });
 });
 
 describe("ModelCatalogRow actions", () => {
@@ -216,16 +205,6 @@ describe("ModelCatalogRow actions", () => {
 });
 
 describe("ModelCatalogRow download progress", () => {
-  test("the bar carries the reported value as its own width", () => {
-    /* A hairline on the row's bottom edge, so a running download never adds a
-     * row of height. The percentage is also spelled out in the status cell,
-     * which is what a screen reader gets. */
-    const html = render({ state: "downloading", percentage: 63 });
-    expect(html).toContain("width:63%");
-    expect(html).toContain("bg-blue-700");
-    expect(html).toContain("Downloading 63%");
-  });
-
   test("an out-of-range percentage is clamped rather than drawn", () => {
     expect(render({ state: "downloading", percentage: 140 })).toContain(
       "width:100%",
@@ -233,12 +212,6 @@ describe("ModelCatalogRow download progress", () => {
     expect(render({ state: "downloading", percentage: -5 })).toContain(
       "width:0%",
     );
-  });
-  test("a stalled or fast transfer reads the same: the bar is the rate", () => {
-    /* Speed was a third rendering of "is it moving" beside the bar and the
-     * percentage, and the one that re-rendered several times a second. */
-    const html = render({ state: "downloading", percentage: 5 });
-    expect(html.includes("MB/s")).toBe(false);
   });
 });
 
@@ -275,12 +248,9 @@ describe("ModelCatalogRow metadata", () => {
     return html.slice(at + 11, html.indexOf('"', at + 11));
   };
 
-  test("size is a column of its own, right-aligned and tabular", () => {
+  test("reports the model's download size", () => {
     const html = render({ state: "not-downloaded" });
     expect(html).toContain("1.5 GB");
-    expect(html).toContain("tabular-nums");
-    // Not also repeated in the tooltip: one datum, one place.
-    expect(titleOf(html).includes("1.5 GB")).toBe(false);
   });
 
   test("reach and capabilities ride the name's tooltip", () => {

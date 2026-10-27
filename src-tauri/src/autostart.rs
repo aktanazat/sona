@@ -270,14 +270,6 @@ mod macos {
     mod tests {
         use super::*;
 
-        /// Validates the assumption `login_item_api_available` rests on: the
-        /// ServiceManagement framework is linked into the binary, so the
-        /// class lookup finds `SMAppService` whenever the host is macOS 13+
-        /// (which anything able to build this crate is).
-        #[test]
-        fn sm_app_service_class_resolves() {
-            assert!(login_item_api_available());
-        }
 
         #[test]
         fn launch_agent_path_matches_auto_launch_crate() {

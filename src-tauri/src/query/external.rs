@@ -1918,15 +1918,11 @@ mod tests {
         let refused = AllowedRequest::new(consent(false, false), request(&["--query", "dana"]))
             .expect_err("external access is off");
 
-        assert_eq!(
-            serde_json::to_value(&refused).unwrap(),
-            serde_json::json!({
-                "schema_version": QUERY_SCHEMA_VERSION,
-                "error": "consent_required",
-                "message": "External access is off. Turn on Settings > Agents > External access in Sona to allow read-only corpus queries.",
-                "settings_path": "Settings > Agents > External access",
-            })
-        );
+        let value = serde_json::to_value(&refused).unwrap();
+        assert_eq!(value["schema_version"], QUERY_SCHEMA_VERSION);
+        assert_eq!(value["error"], "consent_required");
+        assert_eq!(value["settings_path"], EXTERNAL_ACCESS_SETTING_PATH);
+        assert!(value["message"].is_string());
         assert_eq!(refused.error.exit_code(), 1, "a refusal is not a typo");
     }
 

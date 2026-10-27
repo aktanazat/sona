@@ -1,15 +1,9 @@
 import SwiftUI
 
-/// The first run, as one window: what macOS has to allow, then one model on
-/// this Mac. Nothing else is on screen, because nothing else works until both
-/// are settled.
-///
-/// `onFinish` is the integrator's cue to show the app. It fires once, when the
-/// store says the flow is over: a returning user's last grant, or a first run's
-/// model becoming the active one.
 struct OnboardingView: View {
     let store: OnboardingStore
     var onFinish: () -> Void = {}
+    @State private var languageQuery = ""
 
     var body: some View {
         ZStack {
@@ -39,17 +33,36 @@ struct OnboardingView: View {
                 onFinish()
             }
         }
+        .onChange(of: store.permissions.allGranted) { _, granted in
+            if granted { store.permissionsSettled() }
+        }
+        .onDisappear {
+            if store.practiceState.isBusy {
+                store.cancelPractice()
+            }
+        }
     }
 
     @ViewBuilder
     private var step: some View {
         switch store.step {
         case .probing:
-            OnboardingWaitingLine(label: "Checking permissions")
+            if let error = store.error {
+                VStack(alignment: .leading, spacing: 12) {
+                    ErrorNote(error)
+                    Button("Try again") { Task { await store.start() } }.buttonStyle(.primary)
+                }
+            } else {
+                OnboardingWaitingLine(label: "Checking setup")
+            }
+        case .languages:
+            languages
         case .permissions:
             permissions
         case .model:
             picker
+        case .practice:
+            practice
         case .done:
             Text("You're set.").titleText()
         }
@@ -63,7 +76,7 @@ struct OnboardingView: View {
                 Text("Both granted").titleText()
             } else {
                 Text("One-time setup").titleText().padding(.bottom, 10)
-                Text("Your system asks before any app can listen or type.")
+                Text("Allow Sona to hear your voice and type your words.")
                     .bodyText(15, Theme.inkSecondary)
                     .padding(.bottom, 24)
                 ErrorNote(store.permissions.error)
@@ -82,10 +95,7 @@ struct OnboardingView: View {
                     if store.permissions.accessibility != .granted, store.permissions.accessibilitySupported {
                         OnboardingPermissionRow(
                             title: "Accessibility access",
-                            detail: """
-                            Required to type transcribed text into your applications. \
-                            The switch to turn on is “Sona”.
-                            """,
+                            detail: "Required to type transcribed text into your applications.",
                             state: store.permissions.accessibility,
                             grant: "Grant permission",
                             onGrant: { store.permissions.grantAccessibility() },
@@ -100,15 +110,20 @@ struct OnboardingView: View {
 
     private var picker: some View {
         VStack(alignment: .leading, spacing: 0) {
+            BackLink(title: "Languages", action: store.changeLanguages)
+                .disabled(store.isBusy)
             Text("Pick a transcription model").titleText().padding(.bottom, 10)
-            Text("Models run on this Mac and trade accuracy against speed.")
+            Text(store.languageSummary)
                 .bodyText(15, Theme.inkSecondary)
                 .padding(.bottom, 24)
             ErrorNote(store.error)
             if let featured = store.featured {
                 card(featured)
             } else {
-                Text("No models available").bodyText(14, Theme.inkSecondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("No compatible models available").bodyText(14, Theme.inkSecondary)
+                    Button("Reload models") { Task { await store.loadModels() } }.buttonStyle(.secondary)
+                }
             }
             if store.otherCount > 0 {
                 OnboardingOthers(count: store.otherCount) {
@@ -125,14 +140,147 @@ struct OnboardingView: View {
         }
     }
 
+    private var languages: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Dictation languages").titleText()
+            ErrorNote(store.error)
+            Card {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Auto detect any language", isOn: Binding(
+                        get: { store.selectedLanguages.isEmpty },
+                        set: { enabled in
+                            if enabled { store.useAutomaticLanguage() }
+                        }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .disabled(store.selectedLanguages.isEmpty)
+                    Text(store.languageSummary).metaText(Theme.inkSecondary)
+                    SearchField(prompt: "Search languages", text: $languageQuery)
+                }
+                .padding(16)
+                Hairline()
+                if languageMatches.isEmpty {
+                    CardLine("No languages found")
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(languageMatches) { option in
+                                Toggle(option.name, isOn: Binding(
+                                    get: { store.selectedLanguages.contains(option.code) },
+                                    set: { _ in store.toggleLanguage(option.code) }
+                                ))
+                                .toggleStyle(.checkbox)
+                                .bodyText(14)
+                                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                                .padding(.horizontal, 16)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .frame(height: 238)
+                }
+            }
+            .disabled(store.savingLanguages)
+            Button(store.savingLanguages ? "Saving…" : "Continue", action: store.saveLanguages)
+                .buttonStyle(.primary)
+                .disabled(store.savingLanguages)
+        }
+    }
+
+    private var languageMatches: [LanguageOption] {
+        let query = languageQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let options = LanguageCatalog.selectable.filter { $0.code != "auto" }
+        return query.isEmpty ? options : options.filter {
+            $0.name.lowercased().contains(query) || $0.code.lowercased().hasPrefix(query)
+        }
+    }
+
+    private var practiceStatus: String {
+        switch store.practiceState {
+        case .idle: "Ready to record"
+        case .starting: "Starting microphone…"
+        case .listening: "Listening · stops after 30 seconds"
+        case .processing: "Transcribing…"
+        case .delivered: "Words delivered"
+        case .cancelling: "Cancelling…"
+        case .cancellationFailed: "Could not cancel"
+        }
+    }
+
+    private var practice: some View {
+        @Bindable var store = store
+        return VStack(alignment: .leading, spacing: 20) {
+            BackLink(title: "Speech model", action: store.backToModels)
+                .disabled(store.practiceState.isBusy || store.finishing)
+            Text("Try dictation").titleText()
+            Text(practiceStatus)
+                .bodyText(15, store.practiceState == .listening ? Theme.live : Theme.inkSecondary)
+                .accessibilityLabel("Practice status")
+                .accessibilityValue(practiceStatus)
+            ErrorNote(store.error)
+                .accessibilityLabel(store.error ?? "")
+            if store.practiceState == .delivered {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Your words").sectionLabel()
+                    TextEditor(text: $store.practiceText)
+                        .font(TypeScale.body())
+                        .foregroundStyle(Theme.ink)
+                        .scrollContentBackground(.hidden)
+                        .padding(12)
+                        .frame(minHeight: 150, maxHeight: 240)
+                        .background(Theme.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+                        .accessibilityLabel("Practice transcript")
+                }
+            }
+            HStack(spacing: 16) {
+                switch store.practiceState {
+                case .idle:
+                    Button(store.error == nil ? "Start dictation" : "Try again", action: store.startPractice)
+                        .buttonStyle(.primary)
+                case .listening:
+                    Button("Stop dictation", action: store.stopPractice).buttonStyle(.primary)
+                    Button("Cancel", action: store.cancelPractice).buttonStyle(.quiet)
+                case .starting, .processing:
+                    ProgressView().controlSize(.small)
+                    Button("Cancel", action: store.cancelPractice).buttonStyle(.quiet)
+                case .cancelling:
+                    ProgressView().controlSize(.small)
+                case .cancellationFailed:
+                    Button("Try cancel again", action: store.cancelPractice).buttonStyle(.primary)
+                case .delivered:
+                    Button(store.finishing ? "Finishing…" : "Done", action: store.completePractice)
+                        .buttonStyle(.primary)
+                        .disabled(!store.canFinishPractice)
+                    Button("Try again", action: store.startPractice)
+                        .buttonStyle(.quiet)
+                        .disabled(store.finishing)
+                }
+            }
+        }
+        .onChange(of: practiceStatus) { _, status in
+            NSAccessibility.post(
+                element: NSApplication.shared,
+                notification: .announcementRequested,
+                userInfo: [.announcement: status, .priority: NSAccessibilityPriorityLevel.medium.rawValue]
+            )
+        }
+        .onChange(of: store.error) { _, message in
+            guard let message else { return }
+            NSAccessibility.post(
+                element: NSApplication.shared,
+                notification: .announcementRequested,
+                userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.high.rawValue]
+            )
+        }
+    }
+
     private func card(_ model: OnboardingModel) -> some View {
         OnboardingModelCard(
             model: model,
             work: store.work(for: model.id),
             progress: store.progress(for: model.id),
-            /* Every card except the one being worked on goes quiet while a
-             * model is arriving: the reader has already chosen, and the row
-             * doing the work is the only one with anything left to say. */
             dimmed: store.isBusy && store.chosenId != model.id,
             onChoose: { store.choose(model) },
             onCancel: { store.cancel(model.id) }
@@ -311,6 +459,7 @@ private struct OnboardingModelCard: View {
         case .verifying: return "Verifying…"
         case .extracting: return "Extracting…"
         case .switching: return "Switching…"
+        case .cancelling: return "Cancelling…"
         case .available, .downloadable: return nil
         }
     }

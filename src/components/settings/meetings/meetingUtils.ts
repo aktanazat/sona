@@ -96,6 +96,7 @@ const MEETING_ERROR_KEYS = {
   recovery_required: "meetings.errors.recovery_required",
   deletion_in_progress: "meetings.errors.deletion_in_progress",
   not_found: "meetings.errors.not_found",
+  transcript_deleted: "meetings.errors.transcript_deleted",
   invalid_request: "meetings.errors.invalid_request",
   export_cancelled: "meetings.errors.export_cancelled",
   export_failed: "meetings.errors.export_failed",

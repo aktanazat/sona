@@ -1,19 +1,20 @@
 # Building Sona
 
-Sona builds as a Tauri 2 desktop app with a Rust backend and a Bun-managed React frontend.
+On macOS, Sona uses the native SwiftUI app in `macos/` with a bundled Rust core. The Tauri 2 app and Bun-managed React frontend remain the desktop surface on Windows and Linux and the frontend development surface.
 
 ## Prerequisites
 
 - Current stable Rust with the platform toolchain.
 - Bun.
-- Platform libraries required by Tauri and the selected transcription runtime.
+- CMake, a C++17 compiler, and the platform libraries required by Tauri and the selected transcription runtime.
 
 ```bash
 bun install
 bun run prepare:agent-hook -- aarch64-apple-darwin
+bun run prepare:cleanup-runtime -- aarch64-apple-darwin
 ```
 
-Use your own Cargo target triple in place of `aarch64-apple-darwin`. Only `bun run tauri build` supplies the triple and stages the sidecar on its own, through `beforeBuildCommand`. Every Rust build reads `bundle.externalBin` from `tauri.conf.json` through `src-tauri/build.rs`, so on a fresh clone `bun run tauri dev`, `cargo check` and `cargo test` all fail in the build script until the sidecar has been staged once.
+Use your own Cargo target triple in place of `aarch64-apple-darwin`. `bun run tauri build` stages both helpers through `beforeBuildCommand`. Fresh Rust builds need the `sona-agent-hook` and `sona-cleanup` sidecars staged once because `src-tauri/build.rs` reads `bundle.externalBin` from `tauri.conf.json`. The cleanup build also stages the llama.cpp, JSON library, and model licenses in `resources/cleanup-runtime/`; the model itself is downloaded only when selected in the app.
 
 ## Development
 
@@ -37,11 +38,14 @@ bun run preview
 
 ## Checks
 
+keep tests for observable behavior, data integrity, privacy, public contracts and measured resource limits. remove tests that only pin wording, code layout, private bookkeeping or an answer supplied by the test itself. a meaningful failing test stays.
+
 ```bash
 bun run build
 bun run lint
 bun run lint:anti-slop
 bun run check:translations
+bun run check:onboarding
 bun test
 cd cloudflare/sona-companion && bun run typecheck && bun run test
 cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo check --all-features
@@ -54,17 +58,27 @@ beneath a `CARGO_TARGET_DIR` cache root, so a second checkout building at the
 same time cannot hand this one its artifacts. With `CARGO_TARGET_DIR` unset it
 runs the command unchanged, and plain `cargo` is equivalent.
 
-The package audit expects one executable `sona-agent-hook` sidecar and a `sona` main executable.
+The package audit expects executable `sona-agent-hook` and `sona-cleanup` sidecars and the `sona` core. The native macOS build copies and signs `sona-cleanup` beside `sona-core` inside `Contents/Helpers/SonaCore.app`.
+
+the active local meeting acceptance is `meeting::processing::real_engine_acceptance::tests::actual_apple_long_meeting_pipeline_and_regeneration`. it requires a ready apple intelligence model and uses the real imported-meeting pipeline, not a model substitute. it checks the original long conversation, then checks regenerated notes against the same decisions, owners, revised deadlines and citations. requests and results are saved under `.progress/meeting-acceptance/`; the original request and reply-token limits remain enforced at the sdk boundary. a cloud-only pass does not replace this check.
+
+the native ledger presents each literal excerpt with its original source reference and speaker. a speaker is not automatically a task owner, and the person who settles a choice never owns it: a speaker's own undertaking is a personal promise. a promise version whose deadline is not in its own cited excerpts, or whose excerpts do not exist, is dropped. when a settled choice and a promise select exactly the same excerpts, the app keeps one role: the promise when the choice names the same person, the choice otherwise. stances use the same bounded excerpt receipts as other ledger facts, and the app restores all original source references before canonical validation. the separate real-model named-assignment check is `actual_apple_named_assignment_is_not_the_speaker`; run it explicitly with `--ignored`. passing that check does not replace the complete initial and regenerated acceptance.
+
+a long meeting's ledger is read in parts and the parts are joined by the app, not re-read by the model. threads, commitments, stances and open questions keep the roles their part gave them; identical subjects with the same state and owner become one thread with every source reference. one small model request writes the headline and may name promises that are versions of the same work by the same person, a later closed thread that cancels a promise, or a later thread that answers an open question. the app accepts a cancellation or an answer only from a thread whose source comes after the promise or question. these checks do not establish real-model accuracy.
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --lib --features cloud-realtime actual_apple_long_meeting_pipeline_and_regeneration -- --nocapture --test-threads=1
+```
 
 ## Version bump
 
-1. `src-tauri/Cargo.toml` `[package] version` — the only place this app declares a version.
+1. `src-tauri/Cargo.toml` `[package] version` — authoritative for the Rust core and Tauri app.
 2. `src-tauri/Cargo.lock` — run any cargo command, then commit the changed `sona` entry.
-3. `package.json` `version`.
-4. `src/content/release-notes/index.ts` — add a `RELEASE_NOTE_MARKDOWN` entry keyed by the new version, or What's New has nothing to show.
-5. `mobile/Sona.xcodeproj/project.pbxproj` `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`, only when shipping the companion app.
+3. `package.json` `version` and `src/content/release-notes/index.ts` — match the core version and add its release notes.
+4. `macos/Sona.xcodeproj/project.pbxproj` — match `MARKETING_VERSION` and increase `CURRENT_PROJECT_VERSION` for the native app and its extension.
+5. `mobile/Sona.xcodeproj/project.pbxproj` — update `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` only when shipping the companion app.
 
-`src-tauri/tauri.conf.json` deliberately carries no `version` field. With it absent, `tauri-codegen` compiles `PackageInfo.version` from `env!("CARGO_PKG_VERSION")` (tauri-codegen 2.6.3, `src/context.rs:273-278`), so `getVersion()` in Settings > About, the What's New gate, `sona --version`, and the bundle version all read step 1 — do not add it back, or About and `--version` can disagree. `tools/sona-mcp` and `cloudflare/sona-companion` version independently. No script checks agreement; this prints one line when steps 1-4 match, and two if a version reappears in the Tauri config:
+`src-tauri/tauri.conf.json` deliberately carries no `version` field. With it absent, `tauri-codegen` compiles `PackageInfo.version` from `env!("CARGO_PKG_VERSION")`, so the core's About screen, What's New, `sona --version`, and the Tauri bundle agree. The native macOS shell and its helper bundle use the Xcode marketing version from step 4. `tools/sona-mcp` and `cloudflare/sona-companion` version independently. The following check prints one line when the core, frontend, and latest release notes agree, and two if a version reappears in the Tauri config:
 
 ```bash
 { awk -F'"' '/^version = /{print $2; exit}' src-tauri/Cargo.toml; jq -r '.version // empty' src-tauri/tauri.conf.json; jq -r .version package.json; sed -n 's/^  "\([0-9][0-9.]*\)".*/\1/p' src/content/release-notes/index.ts | sort -V | tail -1; } | sort -u
@@ -74,23 +88,23 @@ The package audit expects one executable `sona-agent-hook` sidecar and a `sona` 
 
 | Platform | Main executable                | Application identity | Private runtime directory |
 | -------- | ------------------------------ | -------------------- | ------------------------- |
-| macOS    | `Sona.app/Contents/MacOS/sona` | `com.aktanazat.sona` | Inside the app bundle     |
+| macOS    | `Sona.app/Contents/MacOS/Sona`, with `sona-core` in `Contents/Helpers/SonaCore.app` | `com.aktanazat.sona.mac`, `com.aktanazat.sona.core` | Inside the app bundle |
 | Windows  | `sona.exe`                     | `com.aktanazat.sona` | Next to the executable    |
 | Linux    | `sona`                         | `com.aktanazat.sona` | `/usr/lib/sona`           |
 
-macOS builds sign with the Apple Development identity named in `tauri.conf.json` (`Apple Development: Created via API (JWV9B89S4H)`, team `AAVB324H37`) and enable the hardened runtime. That certificate is a development identity, not a distribution one: this repository does not provide notarization, SmartScreen reputation, or signed distribution credentials. Nothing updates itself either; `commands/updates.rs` only compares the running `CARGO_PKG_VERSION` against a releases URL when the user asks.
+The native macOS app and camera extension require a development certificate and matching provisioning profile for team `AAVB324H37`, including the shared app group and System Extension capability. Keep the installed app's signing identity when replacing its complete bundle. A development signature is not notarization or a distribution identity; this repository does not provide distribution credentials or automatic updates.
 
 ## Platform notes
 
 ### macOS
 
-Sona supports macOS 10.15 and later. Local Apple Intelligence support uses the FoundationModels framework when the active toolchain provides it; otherwise the build uses the stub bridge. Set `SONA_FORCE_AI_STUB=1` to force that bridge.
+The native SwiftUI app requires macOS 15 or later. The Tauri core retains its macOS 10.15 deployment target. Its optional downloadable cleanup helper requires macOS 11 or later and runs on the CPU without an external server. The app checks helper availability before offering offline cleanup.
 
-Sona is a new TCC subject. Grant Microphone and Accessibility access again after installing it. The screen recorder also needs Screen Recording, which macOS grants in System Settings, plus Camera when the camera is enabled; camera use is declared in `Info.plist` and `Entitlements.plist`. Reset a development Accessibility grant with:
+Apple Intelligence requires macOS 26 or later and a ready system model. The build uses FoundationModels when the active toolchain supplies it; otherwise it uses the unavailable bridge. Set `SONA_FORCE_AI_STUB=1` to force that bridge.
 
-```bash
-tccutil reset Accessibility com.aktanazat.sona
-```
+For a native release, build the Rust core in release mode, then build `macos/Sona.xcodeproj` with `SONA_CORE_TARGET_DIR` pointing to that target's output directory. The bundle phase prefers `release/sona`, includes its resources and both helpers, and signs the private helper bundle. Replace `/Applications/Sona.app` as a whole bundle; do not overwrite its signed executable in place or leave another runnable Sona app registered.
+
+Use the app's permission screen for Microphone, Accessibility, Screen Recording, and Camera access as needed. An upgrade must preserve existing grants and data; do not reset permissions as part of installation.
 
 ### Windows
 

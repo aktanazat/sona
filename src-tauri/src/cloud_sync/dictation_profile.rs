@@ -55,14 +55,24 @@ fn profile_bytes(
         .map(|mode| Style {
             id: &mode.id,
             name: &mode.name,
-            prompt: crate::prompt_renderer::writing_style(
-                mode.tone,
-                mode.prompt.preset,
-                mode.prompt.custom_prompt.as_deref(),
-                &settings.persona_samples,
-                mode.asr.literal_punctuation,
-                mode.llm.cleanup_level,
-            ),
+            prompt: if mode
+                .llm
+                .provider_id
+                .as_deref()
+                .unwrap_or(&settings.post_process_provider_id)
+                == settings::LOCAL_CLEANUP_PROVIDER_ID
+            {
+                crate::local_cleanup::SYSTEM_PROMPT.to_string()
+            } else {
+                crate::prompt_renderer::writing_style(
+                    mode.tone,
+                    mode.prompt.preset,
+                    mode.prompt.custom_prompt.as_deref(),
+                    &settings.persona_samples,
+                    mode.asr.literal_punctuation,
+                    mode.llm.cleanup_level,
+                )
+            },
         })
         .collect();
     let profile = Profile {

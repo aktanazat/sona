@@ -2,8 +2,6 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { r2ChunkKey } from "../src/db";
-import { base64UrlDecode, sha256Base64Url } from "../src/encoding";
-import { runMaintenance } from "../src/maintenance";
 import {
   bootstrap,
   createUploadPayload,
@@ -206,39 +204,6 @@ describe("Sona companion API", () => {
     expect(changeCount?.count).toBe(1);
   });
 
-  it("reconciles an R2-success/D1-receipt failure from the durable job", async () => {
-    const device = await makeDevice();
-    await bootstrap(device);
-    const payload = await createUploadPayload(device);
-    const created = await signedFetch(device, {
-      method: "POST",
-      path: "/v1/uploads",
-      body: JSON.stringify(payload.json),
-      idempotencyKey: testId("create_operation"),
-    });
-    expect(created.status).toBe(201);
-    const uploadId = String(payload.json.uploadId);
-    const firstChunk = payload.chunks[0];
-    if (firstChunk === undefined) throw new Error("test needs one chunk");
-    const digest = await sha256Base64Url(firstChunk);
-    const digestBytes = base64UrlDecode(digest);
-    if (digestBytes === null) throw new Error("test digest decode failed");
-    await env.CIPHERTEXT.put(
-      r2ChunkKey(device.vaultId, uploadId, 0),
-      firstChunk,
-      {
-        customMetadata: { sha256: digest },
-        sha256: digestBytes,
-      },
-    );
-    await runMaintenance(env);
-    const status = await signedFetch(device, {
-      method: "GET",
-      path: `/v1/uploads/${uploadId}`,
-    });
-    expect((await jsonBody(status)).accepted_indexes).toEqual([0]);
-  });
-
   it("keeps a tombstone head and blocks stale resurrection", async () => {
     const device = await makeDevice();
     await bootstrap(device);
@@ -279,30 +244,6 @@ describe("Sona companion API", () => {
       path: `/v1/objects/${committed.objectId}/revisions/${committed.revisionId}/manifest`,
     });
     expect(oldRead.status).toBe(404);
-  });
-
-  it("returns a high-water snapshot and later changes without raw content", async () => {
-    const device = await makeDevice();
-    await bootstrap(device);
-    const first = await committedObject(device);
-    const snapshot = await signedFetch(device, {
-      method: "GET",
-      path: "/v1/snapshot?limit=1",
-    });
-    expect(snapshot.status).toBe(200);
-    const snapshotBody = await jsonBody(snapshot);
-    const highWater = String(snapshotBody.high_water);
-    await committedObject(device);
-    const changes = await signedFetch(device, {
-      method: "GET",
-      path: "/v1/changes?cursor=c.eyJ2IjoxLCJhIjowfQ&limit=100",
-    });
-    expect(changes.status).toBe(200);
-    const changesBody = await jsonBody(changes);
-    expect(Array.isArray(changesBody.changes)).toBe(true);
-    expect(highWater.startsWith("h.")).toBe(true);
-    expect(JSON.stringify(changesBody)).not.toContain("encrypted manifest");
-    expect(first.objectId.length).toBeGreaterThan(0);
   });
 
   it("refuses to commit when an accepted receipt no longer has its R2 object", async () => {

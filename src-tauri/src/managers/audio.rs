@@ -1,4 +1,5 @@
 use crate::audio_toolkit::{
+    audio::InputConfigCache,
     is_microphone_access_denied, is_no_input_device_error, list_input_devices,
     vad::{
         self, SmoothedVad, VAD_OFFLINE_HANGOVER_FRAMES, VAD_ONSET_FRAMES, VAD_PREFILL_FRAMES,
@@ -138,6 +139,68 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn start_practice_if_current<T>(
+    cancelled: &AtomicBool,
+    open: impl FnOnce() -> Result<(), String>,
+    start: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Practice recording was cancelled".to_string());
+    }
+    open()?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Practice recording was cancelled".to_string());
+    }
+    start()
+}
+
+#[cfg(test)]
+mod practice_start_cancellation_tests {
+    use super::start_practice_if_current;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn cancelling_before_start_never_opens_the_microphone() {
+        let cancelled = AtomicBool::new(true);
+        let microphone_open = Cell::new(false);
+        let capture_started = Cell::new(false);
+        let result = start_practice_if_current(
+            &cancelled,
+            || {
+                microphone_open.set(true);
+                Ok(())
+            },
+            || {
+                capture_started.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!microphone_open.get());
+        assert!(!capture_started.get());
+    }
+
+    #[test]
+    fn cancelling_during_device_open_never_starts_a_late_capture() {
+        let cancelled = AtomicBool::new(false);
+        let capture_started = Cell::new(false);
+        let result = start_practice_if_current(
+            &cancelled,
+            || {
+                cancelled.store(true, Ordering::Release);
+                Ok(())
+            },
+            || {
+                capture_started.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!capture_started.get());
     }
 }
 
@@ -452,6 +515,7 @@ fn create_audio_recorder(
     app_handle: &tauri::AppHandle,
     selected_channel: Option<u16>,
     stream_router: Arc<StreamRouter>,
+    config_cache: Arc<InputConfigCache>,
 ) -> Result<AudioRecorder, anyhow::Error> {
     let smoothed_vad = create_voice_detector(app_handle, VAD_OFFLINE_HANGOVER_FRAMES)?;
 
@@ -460,6 +524,7 @@ fn create_audio_recorder(
     // shared `StreamRouter` (captured directly, not via Tauri state — see its docs).
     let recorder = AudioRecorder::new()
         .map_err(|e| anyhow::anyhow!("Failed to create AudioRecorder: {}", e))?
+        .with_config_cache(config_cache)
         .with_vad(
             Box::new(smoothed_vad),
             VAD_OFFLINE_HANGOVER_FRAMES,
@@ -500,6 +565,10 @@ impl RecordingReadiness {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    pub fn wait_timeout(self, timeout: Duration) -> bool {
+        self.receiver.recv_timeout(timeout).is_ok()
+    }
 }
 
 /// Tracks exclusive microphone ownership across dictation, meetings, and native capture.
@@ -508,6 +577,7 @@ enum CaptureOwner {
     Dictation,
     Meeting,
     Native,
+    Practice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -637,6 +707,8 @@ pub struct AudioRecordingManager {
     app_handle: tauri::AppHandle,
 
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
+    config_cache: Arc<InputConfigCache>,
+    practice_generation: Arc<AtomicU64>,
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
     mute_state: Arc<Mutex<MuteState>>,
@@ -688,6 +760,8 @@ impl AudioRecordingManager {
             app_handle: app.clone(),
 
             recorder: Arc::new(Mutex::new(None)),
+            config_cache: Arc::new(InputConfigCache::default()),
+            practice_generation: Arc::new(AtomicU64::new(0)),
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
             mute_state: Arc::new(Mutex::new(MuteState::default())),
@@ -751,6 +825,38 @@ impl AudioRecordingManager {
 
     pub fn invalidate_device_cache(&self) {
         *lock_recover(&self.cached_device) = None;
+        self.config_cache.invalidate();
+    }
+
+    pub fn microphone_channels(&self, device_name: &str) -> Result<u16, String> {
+        use cpal::traits::HostTrait;
+        let cached_device = lock_recover(&self.cached_device)
+            .as_ref()
+            .filter(|(name, _)| name == device_name)
+            .map(|(_, device)| device.clone());
+        let device = if device_name.eq_ignore_ascii_case("default") {
+            crate::audio_toolkit::get_cpal_host().default_input_device()
+        } else if let Some(device) = cached_device {
+            Some(device)
+        } else {
+            let device = list_input_devices()
+                .map_err(|error| format!("Failed to list audio devices: {error}"))?
+                .into_iter()
+                .find(|device| device.name == device_name)
+                .map(|device| device.device);
+            if let Some(device) = &device {
+                *lock_recover(&self.cached_device) = Some((device_name.to_owned(), device.clone()));
+            }
+            device
+        };
+        match device {
+            Some(device) => AudioRecorder::preferred_input_channel_count(&self.config_cache, &device)
+                .map_err(|error| {
+                    self.invalidate_device_cache();
+                    format!("Failed to get microphone config: {error}")
+                }),
+            None => Ok(1),
+        }
     }
 
     /// The detection lease this manager raises for its own microphone stream.
@@ -1035,27 +1141,12 @@ impl AudioRecordingManager {
                 &self.app_handle,
                 settings.selected_channel,
                 Arc::clone(&self.stream_router),
+                Arc::clone(&self.config_cache),
             )?);
         }
         Ok(())
     }
 
-    /// Pay the first recording's one-time costs at startup instead of on the
-    /// keypress path.
-    ///
-    /// Three steps sit between a shortcut press and the first captured sample
-    /// that are only expensive once: enumerating devices to resolve a named
-    /// microphone, loading the Silero VAD session, and querying the device's
-    /// supported stream configs. Measured on an M4 Pro from Sona's own
-    /// `mic stream breakdown` lines, the first dictation of a session paid
-    /// `vad_ensure=32-38ms` and `fetch_config=26-29ms` that every later one
-    /// paid in microseconds — a ~60ms penalty falling entirely on the first
-    /// dictation, which is exactly the press that feels slowest.
-    ///
-    /// None of this opens a stream or starts the device, so it does not raise
-    /// the OS microphone indicator (see [`AudioRecorder::prewarm_config`] for
-    /// how that was verified). Always-on mode has already opened a stream by
-    /// the time this runs, so every step below is a cache hit there.
     pub fn prewarm(&self) {
         let vad_elapsed = {
             let _span = crate::launch_trace::span("vad_load");
@@ -1074,12 +1165,8 @@ impl AudioRecordingManager {
         let resolve_elapsed = resolve_started.elapsed();
 
         let config_started = Instant::now();
-        let config_result = lock_recover(&self.recorder)
-            .as_ref()
-            .map(|recorder| recorder.prewarm_config(resolution.device));
-        match config_result {
-            Some(Err(error)) => debug!("Microphone prewarm: config query failed: {error}"),
-            Some(Ok(())) | None => {}
+        if let Err(error) = AudioRecorder::prewarm_config(&self.config_cache, resolution.device) {
+            debug!("Microphone prewarm: config query failed: {error}");
         }
         debug!(
             "mic prewarm: vad_load={:?} device_resolve={:?} fetch_config={:?}",
@@ -1415,6 +1502,93 @@ impl AudioRecordingManager {
             receiver,
             generation,
         })
+    }
+
+    pub fn start_practice_recording(
+        &self,
+        cancelled: &AtomicBool,
+    ) -> Result<RecordingReadiness, String> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Practice recording was cancelled".to_string());
+        }
+        let generation = self.practice_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let state = lock_recover(&self.state);
+        if !matches!(*state, RecordingState::Idle) {
+            return Err("Another recording is active".to_string());
+        }
+        let token = self.capture_lease.try_acquire(CaptureOwner::Practice)
+            .ok_or_else(|| "Microphone is leased by an active capture".to_string())?;
+        self.close_generation.fetch_add(1, Ordering::SeqCst);
+        let result = start_practice_if_current(
+            cancelled,
+            || self.start_microphone_stream().map_err(|error| error.to_string()),
+            || {
+                if self.practice_generation.load(Ordering::Acquire) != generation {
+                    return Err("Practice recording was cancelled".to_string());
+                }
+                lock_recover(&self.recorder)
+                    .as_ref()
+                    .ok_or_else(|| "Recorder not available".to_string())?
+                    .start_practice()
+                    .map_err(|error| error.to_string())
+            },
+        );
+        match result {
+            Ok(receiver) => Ok(RecordingReadiness { receiver, generation }),
+            Err(error) => {
+                self.capture_lease.release(token);
+                if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
+                    self.stop_microphone_stream();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn stop_practice_recording(&self) -> Result<RecordingStop, String> {
+        let _state = lock_recover(&self.state);
+        if self.capture_lease.holder() != Some(CaptureOwner::Practice) {
+            return Err("No practice recording is active".to_string());
+        }
+        self.practice_generation.fetch_add(1, Ordering::AcqRel);
+        let capture = lock_recover(&self.recorder)
+            .as_ref()
+            .ok_or(CaptureError::NotCapturing)
+            .and_then(AudioRecorder::stop);
+        self.capture_lease.release_owner(CaptureOwner::Practice);
+        if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
+            self.stop_microphone_stream();
+        }
+        match capture {
+            Ok(capture) => {
+                let level = measure_input_level(&capture.samples);
+                Ok(RecordingStop::Complete {
+                    samples: capture.samples,
+                    vad_forwarded_speech: capture.vad_forwarded_speech,
+                    level,
+                })
+            }
+            Err(CaptureError::Overrun { prefix_samples, .. }) => {
+                let level = measure_input_level(&prefix_samples);
+                Ok(RecordingStop::Overrun { prefix_samples, level })
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn cancel_practice_recording(&self) {
+        self.practice_generation.fetch_add(1, Ordering::AcqRel);
+        let _state = lock_recover(&self.state);
+        if self.capture_lease.holder() != Some(CaptureOwner::Practice) {
+            return;
+        }
+        if let Some(recorder) = lock_recover(&self.recorder).as_ref() {
+            let _ = recorder.stop();
+        }
+        self.capture_lease.release_owner(CaptureOwner::Practice);
+        if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
+            self.stop_microphone_stream();
+        }
     }
 
     pub fn update_selected_device(&self) -> Result<(), anyhow::Error> {
@@ -1886,6 +2060,7 @@ mod microphone_capture_lease_tests {
         assert!(lease.owns(meeting));
         assert!(lease.try_acquire(CaptureOwner::Native).is_none());
         assert!(lease.try_acquire(CaptureOwner::Dictation).is_none());
+        assert!(lease.try_acquire(CaptureOwner::Practice).is_none());
         assert!(lease.release(meeting));
 
         let next_meeting = lease
@@ -1904,6 +2079,13 @@ mod microphone_capture_lease_tests {
             .try_acquire(CaptureOwner::Dictation)
             .expect("dictation acquires after recorder releases");
         assert!(lease.release(dictation));
+
+        let practice = lease
+            .try_acquire(CaptureOwner::Practice)
+            .expect("practice acquires after dictation releases");
+        assert!(lease.try_acquire(CaptureOwner::Dictation).is_none());
+        assert!(lease.try_acquire(CaptureOwner::Meeting).is_none());
+        assert!(lease.release(practice));
     }
 
     /// Dictation keeps no copy of its token: `set_state` hands the microphone back by owner when
@@ -2049,9 +2231,8 @@ mod capture_verdict_tests {
 
     #[test]
     fn the_model_arbitrates_short_vad_silent_captures_and_not_long_ones() {
-        // The two captures this policy was written against: ~1.1 s each.
+        // A quiet utterance from the captures this policy was written against.
         assert!(model_arbitrates_vad_silence(16_800));
-        assert!(model_arbitrates_vad_silence(18_240));
 
         // Boundary: fifteen seconds is arbitrated, one sample past it is not.
         assert!(model_arbitrates_vad_silence(

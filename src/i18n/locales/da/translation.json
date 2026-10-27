@@ -38,7 +38,6 @@
     "library": "Bibliotek"
   },
   "onboarding": {
-    "subtitle": "Modellerne kører på denne Mac og afvejer nøjagtighed mod hastighed.",
     "existingModelsTitle": "Kompatible modeller",
     "downloadModelsTitle": "Tilgængelig til download",
     "otherModels": "Andre modeller",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Kunne ikke vælge modellen. Prøv igen."
+      "selectModel": "Kunne ikke vælge modellen. Prøv igen.",
+      "cancelDownload": "Kunne ikke annullere downloaden. Prøv igen.",
+      "languages": "Kunne ikke gemme dine sprog. Prøv igen."
     },
     "permissions": {
       "title": "Tilladelser påkrævet",
@@ -137,7 +138,44 @@
       "checking": "Kontrollerer tilladelser",
       "recheck": "Kontrollér igen"
     },
-    "headline": "Vælg en transskriptionsmodel"
+    "headline": "Vælg en transskriptionsmodel",
+    "continue": "Fortsæt",
+    "back": "Tilbage",
+    "languages": {
+      "title": "Hvilke sprog taler du?",
+      "selector": "Dikteringssprog: {{languages}}",
+      "auto": "Registrer automatisk",
+      "selected": "{{language}}, valgt",
+      "noModels": "Ingen modeller understøtter disse sprog. Vælg andre sprog."
+    },
+    "practice": {
+      "title": "Prøv at diktere",
+      "record": "Optag",
+      "stop": "Stop",
+      "finish": "Afslut opsætning",
+      "recordAgain": "Optag igen",
+      "words": "Dine ord",
+      "recording": "Lytter · {{seconds}} sekunder tilbage",
+      "status": {
+        "ready": "Optag et par ord på dit valgte sprog.",
+        "starting": "Åbner mikrofonen…",
+        "transcribing": "Transskriberer…",
+        "delivered": "Diktering modtaget",
+        "finishing": "Gemmer opsætning…",
+        "cancelling": "Annullerer…",
+        "error": "Prøveoptagelsen blev ikke gennemført"
+      },
+      "errors": {
+        "permission": "Tillad adgang til mikrofonen i systemindstillingerne, og prøv igen.",
+        "noSpeech": "Ingen tale registreret. Optag igen.",
+        "microphone": "Tilslut en mikrofon, og prøv igen.",
+        "expired": "Tiden til prøveoptagelsen udløb. Optag igen.",
+        "changed": "Din model eller dine sprog er ændret. Optag igen.",
+        "record": "Kunne ikke optage: {{error}}",
+        "cancel": "Kunne ikke annullere prøveoptagelsen. Prøv igen, før du optager på ny.",
+        "complete": "Kunne ikke gemme opsætningen: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Brugerdefineret",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Tekstoprydning uden internet",
+        "description": "{{language}} · {{size}}",
+        "download": "Download",
+        "downloading": "Downloader {{downloaded}} af {{total}}",
+        "cancel": "Annuller download",
+        "retry": "Prøv at downloade igen",
+        "ready": "Klar til diktering på engelsk",
+        "notDownloaded": "Ikke downloadet",
+        "use": "Brug til diktering",
+        "selected": "Valgt til diktering",
+        "remove": "Fjern den downloadede model",
+        "removeTitle": "Fjern tekstoprydning uden internet?",
+        "removeDescription": "Sona beholder dine ord uændret, indtil du downloader modellen igen eller vælger en anden udbyder.",
+        "runtimeMissing": "Tekstoprydning uden internet mangler i denne installation af Sona. Installer Sona igen.",
+        "lightOnly": "Kun let oprydning i engelsk tekst.",
+        "instructionsUnavailable": "Vælg en anden udbyder til talte instruktioner."
+      },
       "api": {
         "title": "API (OpenAI-kompatibel)",
         "provider": {
@@ -1762,11 +1818,11 @@
       },
       "remoteIntelligence": {
         "title": "Mødeintelligens",
-        "label": "Skriv mødenoter på min server",
-        "consent": "Resuméer og svar for møder skrives på din server over dit private netværk.",
+        "label": "Brug cloud-AI til mødenoter",
+        "consent": "Lokal behandling som standard. Når funktionen er slået til, sendes mødets tekst til din parrede server og dens AI-udbyder. Lyd bliver på denne Mac. Slå fra for at holde nye resuméer, registre, opsamlinger og svar lokale.",
         "unpaired": "Par Sona med din server under Agenter for at slå dette til.",
         "seriesTitle": "Serier der bliver på denne Mac",
-        "seriesHint": "En serie på denne liste skrives altid på denne Mac, også når mødeintelligens er slået til.",
+        "seriesHint": "Valgte serier bliver på denne Mac, også når cloud-AI er slået til.",
         "seriesEmpty": "Ingen gentagne møder optaget endnu.",
         "loading": "Læser dine serier…",
         "lastMet": "Sidst mødt {{date}}",
@@ -2010,7 +2066,8 @@
         "remote_unavailable": "Fjerndestination utilgængelig",
         "engine_failure": "Behandlingen mislykkedes",
         "cancelled": "Behandlingen blev annulleret",
-        "interrupted": "Behandlingen blev afbrudt"
+        "interrupted": "Behandlingen blev afbrudt",
+        "transcript_deleted": "Transskription slettet"
       }
     },
     "start": {
@@ -2148,6 +2205,7 @@
       "recovery_required": "Dette møde skal gendannes før den handling.",
       "deletion_in_progress": "Sletningen er allerede i gang. Mødet forbliver utilgængeligt.",
       "not_found": "Dette møde er ikke længere tilgængeligt.",
+      "transcript_deleted": "Noter kan ikke gendannes, når deres transskription er slettet.",
       "invalid_request": "Mødeanmodningen var ugyldig.",
       "export_cancelled": "Eksporten blev annulleret. Der blev ikke oprettet en færdig eksport.",
       "export_failed": "Eksporten mislykkedes. Der blev ikke oprettet en færdig eksport.",

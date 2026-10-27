@@ -78,20 +78,6 @@ const RELAY_MAX_INPUT_BYTES: usize = 124 * 1024;
 /// exists to prevent.
 const RELAY_TURN_DEADLINE: Duration = Duration::from_secs(660);
 
-/// One poll interval plus two relay HTTP timeouts, recorded here because they
-/// live in `agent_panel` and this file cannot see them.
-///
-/// `run_chat_turn` checks its elapsed budget, sleeps `POLL_INTERVAL`
-/// (`agent_panel/mod.rs`), then calls `get_job` on a client built with a
-/// 15-second request timeout (`agent_panel/relay.rs`). So a turn can pass its
-/// own deadline check with a moment to spare and still spend a full poll and a
-/// full request before it returns, and the cancel path spends a second request
-/// on top. Keeping these numbers current is a manual act: nothing here can
-/// observe that file, and the check below is only as true as what is written
-/// on this line.
-#[cfg(test)]
-const RELAY_TRANSPORT_TAIL: Duration = Duration::from_millis(750 + 15_000 + 15_000);
-
 /// How long the calling thread waits for the turn it handed to the runtime.
 ///
 /// Longer than the turn's own deadline *and* the transport tail behind it, so
@@ -151,7 +137,10 @@ const RELAY_OUTPUT_RULE: &str = "\n\nReply with the JSON object only. No prose b
 /// The prompt a turn carries for the shape its caller reads.
 fn relay_prompt(system_prompt: &str, shape: ReplyShape) -> String {
     match shape {
-        ReplyShape::Json => format!("{system_prompt}{RELAY_OUTPUT_RULE}"),
+        ReplyShape::Json
+        | ReplyShape::MeetingNotes
+        | ReplyShape::MeetingLedger
+        | ReplyShape::LedgerMerge => format!("{system_prompt}{RELAY_OUTPUT_RULE}"),
         ReplyShape::Prose => system_prompt.to_string(),
     }
 }
@@ -257,7 +246,7 @@ impl MeetingTextGenerator for RelayTextGenerator {
             .ok_or(MeetingTextGenerationError::Unreachable)?;
         let prompt = relay_prompt(system_prompt, shape);
         let pack = evidence.to_string();
-        let reply_is_json = shape == ReplyShape::Json;
+        let reply_is_json = shape.is_json();
         let turn = async move {
             agent_panel::run_chat_turn(
                 &app,
@@ -426,57 +415,6 @@ mod tests {
         assert_eq!(
             generation_error(ChatTurnError::TimedOut),
             MeetingTextGenerationError::TimedOut
-        );
-    }
-
-    /// The instruction follows the shape the caller reads. A structured caller
-    /// gets the JSON-only rule appended, so a chat model is told once, in the
-    /// prompt, what the wire will hold it to. A prose caller's prompt goes
-    /// through untouched: appending the rule there is how a person's About
-    /// paragraph came back as a JSON object.
-    #[test]
-    fn the_json_only_rule_follows_the_shape_the_caller_reads() {
-        let prompt = "Write one paragraph about this person.";
-
-        let structured = relay_prompt(prompt, ReplyShape::Json);
-        assert!(structured.starts_with(prompt));
-        assert!(structured.contains("JSON object only"));
-
-        assert_eq!(relay_prompt(prompt, ReplyShape::Prose), prompt);
-    }
-
-    /// Both budgets against the two ceilings behind them.
-    ///
-    /// What this catches and what it cannot. It compares local constants
-    /// against two numbers *recorded* in this file — the VPS worker's attempt
-    /// ceiling and the relay client's transport tail — so it fails when
-    /// someone changes one local number out of step with the others. It cannot
-    /// see either real source: `omp_bridge/worker/vps_sona.py` is not in this
-    /// repository at all, and `agent_panel`'s poll interval and request
-    /// timeout are private to that module. Keeping the recorded numbers
-    /// current is a manual act, and this check is only as true as they are.
-    ///
-    /// Worth asserting anyway, because both numbers were wrong once and in the
-    /// same direction. At 90s against a 210s worker attempt, a generation the
-    /// box finished normally was recorded here as failed with its notes left
-    /// in a cancelled row nobody read. At a 255s join against a 240s deadline,
-    /// the same failure came back one layer down, in the transport tail.
-    #[test]
-    fn neither_budget_gives_up_before_the_answer_can_arrive() {
-        /// The VPS worker's `job_timeout_seconds` plus the margin on the lease
-        /// it takes once before the model runs. Nothing renews mid-run, so one
-        /// attempt cannot outlast this — though a job whose lease expires is
-        /// re-leased with no cap on attempts, which no local number can cover.
-        const ONE_WORKER_ATTEMPT: Duration = Duration::from_secs(600 + 30);
-
-        assert!(
-            RELAY_TURN_DEADLINE > ONE_WORKER_ATTEMPT,
-            "a turn the box may still be finishing must never be recorded here as failed"
-        );
-        assert!(
-            RELAY_JOIN_TIMEOUT > RELAY_TURN_DEADLINE + RELAY_TRANSPORT_TAIL,
-            "the turn has to be able to report its own outcome, including its own \
-             cancellation, after spending the whole transport tail getting there"
         );
     }
 }

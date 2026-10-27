@@ -46,12 +46,11 @@ struct AccessibilityDiagnostics: Decodable {
     let accessibility: AccessibilityAccessValue
 }
 
-/// `get_app_settings`, narrowed to the flag that decides whether the first run
-/// flow shows at all. The core sets it to true inside `set_active_model`
-/// (src-tauri/src/commands/models.rs:122); there is no command that writes it
-/// on its own.
 struct OnboardingSettings: Decodable {
     let onboardingCompleted: Bool
+    let selectedModel: String
+    let selectedLanguage: String
+    let dictationLanguages: [String]
 }
 
 /// The exact System Settings pane for one permission.

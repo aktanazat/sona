@@ -14,14 +14,17 @@ final class DeviceRecordingTests: XCTestCase {
         )
         let encoded = try DeviceRecordingObject.encodeManifest(manifest)
         XCTAssertEqual(
-            String(decoding: encoded),
-            """
+            try JSONSerialization.data(
+                withJSONObject: JSONSerialization.jsonObject(with: encoded),
+                options: .sortedKeys
+            ),
+            Data("""
             {"audio":{"byte_length":48000,"channels":1,"codec":"pcm_s16le",\
             "sample_rate_hz":16000,"sha256":"T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8"},\
             "device_id":"phone_device_0001","duration_ms":1500,"format_version":1,\
             "kind":"device_recording","recorded_at_utc_ms":1700000000000,\
             "title":"Phone recording"}
-            """
+            """.utf8)
         )
         XCTAssertEqual(
             try JSONDecoder().decode(DeviceRecordingManifest.self, from: encoded), manifest
@@ -98,11 +101,5 @@ final class DeviceRecordingTests: XCTestCase {
         )
         /* The null separator is what keeps neighbouring parts from merging. */
         XCTAssertNotEqual(stableIdempotencyKey(["ab", "c"]), stableIdempotencyKey(["a", "bc"]))
-    }
-}
-
-private extension String {
-    init(decoding bytes: Data) {
-        self = String(data: bytes, encoding: .utf8) ?? ""
     }
 }

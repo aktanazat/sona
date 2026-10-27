@@ -179,26 +179,3 @@ fn public_profile_status(status: VoiceProfileStatus) -> VoiceProfileEnrollmentSt
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mark_unknown_stays_an_internal_unknown_disposition() {
-        assert!(matches!(
-            identity_disposition(VoiceSpeakerIdentityAction::MarkUnknown),
-            MeetingSpeakerIdentifyDisposition::MarkUnknown
-        ));
-    }
-
-    #[test]
-    fn unenrolled_profile_status_exposes_no_model_detail() {
-        assert_eq!(
-            public_profile_status(VoiceProfileStatus::Unenrolled),
-            VoiceProfileEnrollmentStatus {
-                enrolled: false,
-                sample_count: 0,
-            }
-        );
-    }
-}

@@ -1,5 +1,5 @@
 use crate::audio_feedback;
-use crate::audio_toolkit::audio::{list_input_devices, list_output_devices, AudioRecorder};
+use crate::audio_toolkit::audio::{list_input_devices, list_output_devices};
 use crate::managers::audio::{AudioRecordingManager, MicrophoneMode};
 use crate::settings::{get_settings, update_settings};
 use log::warn;
@@ -338,30 +338,11 @@ pub fn is_recording(app: AppHandle) -> bool {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_microphone_channels(device_name: String) -> Result<u16, String> {
-    // cpal device enumeration and config queries can stall, so keep them off
-    // the webview/main run loop.
-    tokio::task::spawn_blocking(move || {
-        use cpal::traits::HostTrait;
-
-        let device = if device_name.eq_ignore_ascii_case("default") {
-            crate::audio_toolkit::get_cpal_host().default_input_device()
-        } else {
-            list_input_devices()
-                .map_err(|e| format!("Failed to list audio devices: {e}"))?
-                .into_iter()
-                .find(|device| device.name == device_name)
-                .map(|device| device.device)
-        };
-
-        match device {
-            Some(device) => AudioRecorder::preferred_input_channel_count(&device)
-                .map_err(|e| format!("Failed to get microphone config: {e}")),
-            None => Ok(1),
-        }
-    })
-    .await
-    .map_err(|e| format!("audio task join failed: {e}"))?
+pub async fn get_microphone_channels(app: AppHandle, device_name: String) -> Result<u16, String> {
+    let manager = app.state::<Arc<AudioRecordingManager>>().inner().clone();
+    tokio::task::spawn_blocking(move || manager.microphone_channels(&device_name))
+        .await
+        .map_err(|error| format!("audio task join failed: {error}"))?
 }
 
 #[tauri::command]

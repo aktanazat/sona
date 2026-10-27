@@ -38,7 +38,6 @@
     "library": "Biblioteca"
   },
   "onboarding": {
-    "subtitle": "Los modelos se ejecutan en este Mac y equilibran precisión y velocidad.",
     "existingModelsTitle": "Modelos compatibles",
     "downloadModelsTitle": "Disponibles para descargar",
     "otherModels": "Otros modelos",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "No se pudo seleccionar el modelo. Inténtalo de nuevo."
+      "selectModel": "No se pudo seleccionar el modelo. Inténtalo de nuevo.",
+      "cancelDownload": "No se pudo cancelar la descarga. Inténtalo de nuevo.",
+      "languages": "No se pudieron guardar tus idiomas. Inténtalo de nuevo."
     },
     "permissions": {
       "title": "Permisos requeridos",
@@ -137,7 +138,44 @@
       "checking": "Comprobando permisos",
       "recheck": "Volver a comprobar"
     },
-    "headline": "Elige un modelo de transcripción"
+    "headline": "Elige un modelo de transcripción",
+    "continue": "Continuar",
+    "back": "Atrás",
+    "languages": {
+      "title": "¿Qué idiomas hablas?",
+      "selector": "Idiomas de dictado: {{languages}}",
+      "auto": "Detectar automáticamente",
+      "selected": "{{language}}, seleccionado",
+      "noModels": "Ningún modelo admite estos idiomas. Elige otros idiomas."
+    },
+    "practice": {
+      "title": "Prueba un dictado",
+      "record": "Grabar",
+      "stop": "Detener",
+      "finish": "Finalizar configuración",
+      "recordAgain": "Volver a grabar",
+      "words": "Tus palabras",
+      "recording": "Escuchando · quedan {{seconds}} segundos",
+      "status": {
+        "ready": "Graba unas palabras en el idioma que elegiste.",
+        "starting": "Abriendo micrófono…",
+        "transcribing": "Transcribiendo…",
+        "delivered": "Dictado recibido",
+        "finishing": "Guardando configuración…",
+        "cancelling": "Cancelando…",
+        "error": "Prueba no completada"
+      },
+      "errors": {
+        "permission": "Permite el acceso al micrófono en los ajustes del sistema y vuelve a intentarlo.",
+        "noSpeech": "No se detectó voz. Vuelve a grabar.",
+        "microphone": "Conecta un micrófono y vuelve a intentarlo.",
+        "expired": "Se agotó el tiempo de la prueba. Vuelve a grabar.",
+        "changed": "Tu modelo o tus idiomas han cambiado. Vuelve a grabar.",
+        "record": "No se pudo grabar: {{error}}",
+        "cancel": "No se pudo cancelar la prueba. Vuelve a intentarlo antes de grabar de nuevo.",
+        "complete": "No se pudo guardar la configuración: {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Personalizado",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Corrección sin conexión",
+        "description": "{{language}} · {{size}}",
+        "download": "Descargar",
+        "downloading": "Descargando {{downloaded}} de {{total}}",
+        "cancel": "Cancelar descarga",
+        "retry": "Reintentar descarga",
+        "ready": "Listo para dictados en inglés",
+        "notDownloaded": "Sin descargar",
+        "use": "Usar para dictados",
+        "selected": "Seleccionado para dictados",
+        "remove": "Eliminar descarga",
+        "removeTitle": "¿Eliminar la corrección sin conexión?",
+        "removeDescription": "Sona conservará tus palabras sin modificar hasta que vuelvas a descargar el modelo o elijas otro proveedor.",
+        "runtimeMissing": "La corrección sin conexión no está disponible en esta instalación de Sona. Reinstala Sona.",
+        "lightOnly": "Solo corrección ligera en inglés.",
+        "instructionsUnavailable": "Elige otro proveedor para las instrucciones habladas."
+      },
       "api": {
         "title": "API (compatible con OpenAI)",
         "provider": {
@@ -1769,11 +1825,11 @@
       },
       "remoteIntelligence": {
         "title": "Inteligencia de reuniones",
-        "label": "Escribir las notas de reuniones en mi servidor",
-        "consent": "Los resúmenes y las respuestas de las reuniones se escriben en tu servidor a través de tu red privada.",
+        "label": "Usar IA en la nube para las notas de reuniones",
+        "consent": "Local por defecto. Al activarlo, el texto de la reunión se envía a tu servidor enlazado y a su proveedor de IA. El audio se queda en este Mac. Desactívalo para mantener locales los nuevos resúmenes, registros, repasos y respuestas.",
         "unpaired": "Vincula Sona con tu servidor en Agentes para activarlo.",
         "seriesTitle": "Series que se quedan en este Mac",
-        "seriesHint": "Una serie de esta lista siempre se escribe en este Mac, incluso con la inteligencia de reuniones activada.",
+        "seriesHint": "Las series seleccionadas se quedan en este Mac, incluso con la IA en la nube activada.",
         "seriesEmpty": "Aún no hay reuniones periódicas grabadas.",
         "loading": "Leyendo tus series…",
         "lastMet": "Última vez el {{date}}",
@@ -2017,7 +2073,8 @@
         "remote_unavailable": "Destino remoto no disponible",
         "engine_failure": "El procesamiento falló",
         "cancelled": "Procesamiento cancelado",
-        "interrupted": "El procesamiento se interrumpió"
+        "interrupted": "El procesamiento se interrumpió",
+        "transcript_deleted": "Transcripción eliminada"
       }
     },
     "start": {
@@ -2155,6 +2212,7 @@
       "recovery_required": "Esta reunión necesita recuperarse antes de esa acción.",
       "deletion_in_progress": "La eliminación ya está en curso. La reunión sigue siendo inaccesible.",
       "not_found": "Esta reunión ya no está disponible.",
+      "transcript_deleted": "Las notas no se pueden regenerar después de eliminar su transcripción.",
       "invalid_request": "La solicitud de reunión no era válida.",
       "export_cancelled": "La exportación se canceló. No se creó ninguna exportación completa.",
       "export_failed": "La exportación falló. No se creó ninguna exportación completa.",

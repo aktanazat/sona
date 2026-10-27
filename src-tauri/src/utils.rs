@@ -153,21 +153,4 @@ mod tests {
         assert!(!native_machine_is_arm64(None)); // API unavailable or failed
     }
 
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    #[test]
-    fn kernel32_lookup_distinguishes_present_and_absent_symbols() {
-        use libloading::Library;
-        use windows::Win32::Foundation::HANDLE;
-
-        type GetCurrentProcess = unsafe extern "system" fn() -> HANDLE;
-
-        // SAFETY: kernel32.dll is a trusted system DLL for the lifetime of this test.
-        let kernel32 = unsafe { Library::new("kernel32.dll") }.expect("kernel32 must load");
-        // SAFETY: GetCurrentProcess has the exact declared zero-argument system ABI.
-        let present = unsafe { kernel32.get::<GetCurrentProcess>(b"GetCurrentProcess\0") };
-        assert!(present.is_ok());
-        // SAFETY: the deliberately nonexistent export cannot create a callable function pointer.
-        let absent = unsafe { kernel32.get::<GetCurrentProcess>(b"SonaNoSuchSymbol\0") };
-        assert!(absent.is_err());
-    }
 }

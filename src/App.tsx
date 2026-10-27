@@ -1080,7 +1080,6 @@ function App() {
   };
 
   const handleModelSelected = () => {
-    // Transition to main app - user has started a download
     setOnboardingStep("done");
   };
 

@@ -1,7 +1,7 @@
 {
   "name": "sona-app",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "dev": "next dev -p 1420",
@@ -21,11 +21,13 @@
     "test:playwright": "playwright test",
     "test:playwright:ui": "playwright test --ui",
     "prepare:agent-hook": "bun scripts/prepare-agent-hook.ts",
+    "prepare:cleanup-runtime": "bun scripts/prepare-cleanup-runtime.ts",
     "test:agent-hook-package": "bun test scripts/prepare-agent-hook.test.ts",
     "test:scripts": "bun test scripts",
     "test:mcp": "cd tools/sona-mcp && bun install && bun test",
     "typecheck:mcp": "cd tools/sona-mcp && bun install && bun run typecheck",
     "check:translations": "bun scripts/check-translations.ts",
+    "check:onboarding": "bash scripts/check-onboarding.sh",
     "check:identity": "bun scripts/ci/check-identity.ts",
     "postinstall": "bun scripts/check-nix-deps.ts"
   },

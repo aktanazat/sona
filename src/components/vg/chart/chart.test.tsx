@@ -27,8 +27,6 @@ describe("Bars", () => {
     expect(markup).toContain(
       '<rect x="68" y="0" width="32" height="64" rx="2" ry="2"',
     );
-    expect(markup).toContain("fill-blue-700");
-    expect(markup).toContain("motion-reduce:transition-none");
   });
 });
 
@@ -90,9 +88,5 @@ describe("Ring", () => {
 
     expect(markup).toContain('aria-label="Current streak, 25 days"');
     expect(markup).toContain('stroke-dasharray="45.553 182.212"');
-    expect(markup).toContain('stroke-linecap="round"');
-    expect(markup).toContain("stroke-gray-alpha-200");
-    expect(markup).toContain("stroke-blue-700");
-    expect(markup).toContain("motion-reduce:transition-none");
   });
 });

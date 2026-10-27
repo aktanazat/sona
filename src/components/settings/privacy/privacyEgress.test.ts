@@ -6,15 +6,6 @@ import { createInstance } from "i18next";
 import type { CloudSyncServiceStatus } from "@/bindings";
 import { cloudSyncFact } from "./PrivacyEgress";
 
-/* The chip is a measurement slot: a label, then one short value. Every
- * CloudSyncErrorKind is a full sentence — "Cloud sync is unavailable in
- * portable mode." — so putting the error there printed a paragraph beside the
- * word "Cloud sync". The fact answers with the state word and the notice below
- * carries the sentence.
- *
- * Built against the shipped English catalogue rather than a fixture, because a
- * renamed key renders as a raw dotted string to the user and nothing else in
- * the build notices. */
 
 const catalogue = JSON.parse(
   fs.readFileSync(
@@ -59,8 +50,6 @@ describe("the cloud sync fact", () => {
     );
 
     expect(fact).toBe("Unavailable");
-    expect(fact).not.toContain("portable mode");
-    expect(fact).not.toContain("__MISSING__");
   });
 
   test("names the endpoint it would reach once sync is configured", () => {

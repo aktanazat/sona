@@ -584,8 +584,8 @@ private struct MeetingAutomationRow: View {
 // MARK: - Meeting intelligence
 
 /// Where a meeting's summaries, ledgers, recaps and answers are written, the
-/// switch that sends them to the operator's own server, and the series that
-/// never leave this Mac.
+/// opt-in that sends text through the paired server to its AI provider, and
+/// the series that never leave this Mac.
 private struct MeetingRemoteSection: View {
     let store: MeetingSettingsStore
 
@@ -651,14 +651,15 @@ private struct MeetingRemoteSection: View {
                 }
 
                 ToggleRow(
-                    title: "Write meeting notes on my server",
+                    title: "Use cloud AI for meeting notes",
                     isOn: Binding(
                         get: { store.settings.remoteIntelligenceEnabled },
                         set: { on in Task { await store.setRemoteIntelligenceEnabled(on) } }))
                 .disabled(!store.settings.isRelayPaired || store.remoteSaving)
 
                 MeetingSettingsNote(
-                    "Summaries and answers for meetings are written on your server over your private network.")
+                    "Local by default. When on, meeting text goes to your paired server and its AI provider. "
+                        + "Audio stays on this Mac. Turn off to keep new summaries, ledgers, recaps and answers local.")
                 if !store.settings.isRelayPaired {
                     MeetingSettingsNote("Pair Sona with your server under Agents to turn this on.", warning: true)
                 }
@@ -717,7 +718,7 @@ private struct MeetingRemoteSeriesRows: View {
             }
         ) {
             MeetingSettingsNote(
-                "A series listed here is always written on this Mac, even while meeting intelligence is on.")
+                "Selected series stay on this Mac, even when cloud AI is on.")
             if let roster = store.remoteRoster {
                 if roster.rows.isEmpty {
                     MeetingSettingsNote("No recurring meetings recorded yet.")

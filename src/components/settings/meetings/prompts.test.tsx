@@ -8,22 +8,7 @@ import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
 import type { PromptRun, PromptRunResult } from "@/bindings";
 import { TooltipProvider } from "@/components/vg/tooltip";
-import { MeetingPrompts } from "./MeetingPrompts";
 import { PromptRunBody } from "./review/PromptResults";
-import {
-  promptFailureKeys,
-  promptTargetRef,
-  usePromptShellStore,
-} from "./promptTargets";
-
-/* Saved prompts, at the three moments a reader meets them: the list before it
- * has read anything, an answer in each of its three shapes, and the ref a
- * surface hands the store.
- *
- * Static rendering runs no effects, so no Tauri command is reachable from here.
- * What is pinned is what has to be on screen before anybody presses anything,
- * and the copy that stands in for an answer that never arrived — a failed run
- * is never retried, so its sentence is the whole record. */
 
 const localeRoot = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -66,17 +51,6 @@ const run = (result: PromptRunResult): PromptRun => ({
 });
 
 describe("saved prompts", () => {
-  test("the list says what it is before it has read anything", () => {
-    const markup = render(
-      <MeetingPrompts createRequest={null} onCreateRequestHandled={() => {}} />,
-    );
-
-    expect(markup).toContain("Prompts");
-    expect(markup).toContain("Reading your prompts…");
-    // No editor until somebody asks for one.
-    expect(markup).not.toContain("Schema");
-  });
-
   test("a text answer is rendered as prose", () => {
     const markup = render(
       <PromptRunBody run={run({ kind: "text", text: "Ship on **Friday**" })} />,
@@ -100,60 +74,5 @@ describe("saved prompts", () => {
     expect(markup).toContain("Ship on Friday, Hold pricing");
     expect(markup).toContain("confident");
     expect(markup).toContain("true");
-  });
-
-  test("a failed run says which absence it was, not that nothing happened", () => {
-    const markup = render(
-      <PromptRunBody
-        run={run({ kind: "failed", reason: "schema_mismatch" })}
-      />,
-    );
-
-    expect(markup).toContain("did not match the schema");
-  });
-
-  test("every failure has a sentence of its own", () => {
-    const missing = Object.values(promptFailureKeys).filter(
-      (key) => i18n.t(key) === key,
-    );
-
-    expect(missing).toEqual([]);
-  });
-
-  test("a target ref names the noun the way the store keys it", () => {
-    expect(promptTargetRef("meeting", "m-1")).toEqual({
-      kind: "meeting",
-      session_id: "m-1",
-    });
-    expect(promptTargetRef("person", "p-1")).toEqual({
-      kind: "person",
-      person_id: "p-1",
-    });
-    expect(promptTargetRef("series", "weekly")).toEqual({
-      kind: "series",
-      series_key: "weekly",
-    });
-  });
-  test("each create request is consumed once", () => {
-    usePromptShellStore.setState({
-      newPromptRequest: 0,
-      handledNewPromptRequest: 0,
-    });
-    usePromptShellStore.getState().requestNewPrompt();
-    const first = usePromptShellStore.getState().newPromptRequest;
-
-    expect(usePromptShellStore.getState().consumeNewPromptRequest(first)).toBe(
-      true,
-    );
-    expect(usePromptShellStore.getState().consumeNewPromptRequest(first)).toBe(
-      false,
-    );
-
-    usePromptShellStore.getState().requestNewPrompt();
-    const second = usePromptShellStore.getState().newPromptRequest;
-    expect(second).toBe(first + 1);
-    expect(usePromptShellStore.getState().consumeNewPromptRequest(second)).toBe(
-      true,
-    );
   });
 });

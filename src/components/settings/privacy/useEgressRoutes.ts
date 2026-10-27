@@ -31,7 +31,8 @@ export const useEgressRoutes = () => {
     for (const provider of settings?.post_process_providers ?? []) {
       if (
         !enabledProviderIds.has(provider.id) ||
-        provider.id === "apple_intelligence"
+        provider.id === "apple_intelligence" ||
+        provider.id === "sona_local"
       ) {
         continue;
       }

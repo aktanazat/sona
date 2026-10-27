@@ -9,6 +9,7 @@ import { ModelField } from "./ModelField";
 import { ProviderSelect } from "./ProviderSelect";
 import { RemoteProviderConsent } from "./RemoteProviderConsent";
 import { usePostProcessProviderState } from "./usePostProcessProviderState";
+import { OfflineCleanup } from "./OfflineCleanup";
 
 const PostProcessingSettingsApiComponent: React.FC = () => {
   const { t } = useTranslation();
@@ -29,6 +30,7 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
   return (
     /* Advanced owns the disclosure; this is the flat provider form inside it. */
     <>
+      <OfflineCleanup />
       <SettingsField
         label={t("settings.postProcessing.api.provider.title")}
         controlId={`${fieldId}-provider`}
@@ -49,7 +51,7 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
             </Notice>
           </div>
         ) : null
-      ) : (
+      ) : state.isOfflineProvider ? null : (
         <>
           {state.isCustomProvider ? (
             <>
@@ -107,7 +109,7 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
         </>
       )}
 
-      {!state.isAppleProvider ? (
+      {!state.isFixedProvider ? (
         <RemoteProviderConsent
           provider={state.selectedProvider}
           consent={state.remoteConsent}
@@ -116,7 +118,7 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
         />
       ) : null}
 
-      {state.isAppleProvider ? (
+      {state.isFixedProvider ? (
         <SettingsField label={t("settings.postProcessing.api.model.title")}>
           <span className="text-sm text-gray-900">
             {state.model || state.selectedProvider?.label}

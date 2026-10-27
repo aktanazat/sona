@@ -112,14 +112,9 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
         return Err(format!("Model not downloaded: {}", model_id));
     }
 
-    let (unload_timeout, old_model, old_onboarding_completed) = update_settings(app, |settings| {
-        let previous = (
-            settings.model_unload_timeout,
-            settings.selected_model.clone(),
-            settings.onboarding_completed,
-        );
+    let (unload_timeout, old_model) = update_settings(app, |settings| {
+        let previous = (settings.model_unload_timeout, settings.selected_model.clone());
         settings.selected_model = model_id.to_string();
-        settings.onboarding_completed = true;
         previous
     })?;
 
@@ -148,7 +143,6 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
     if let Err(e) = transcription_manager.load_model(model_id) {
         update_settings(app, |settings| {
             settings.selected_model = old_model;
-            settings.onboarding_completed = old_onboarding_completed;
         })?;
         return Err(e.to_string());
     }

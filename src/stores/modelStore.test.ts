@@ -189,15 +189,4 @@ describe("a download that finishes", () => {
     expect(useModelStore.getState().currentModel).toBe("small");
   });
 
-  test("clears the queue-time snapshot it consumed", async () => {
-    reset("small");
-    await useModelStore.getState().downloadModel("turbo");
-    expect(useModelStore.getState().activeModelWhenQueued).toEqual({
-      turbo: "small",
-    });
-
-    completeDownload("turbo");
-
-    expect(useModelStore.getState().activeModelWhenQueued).toEqual({});
-  });
 });

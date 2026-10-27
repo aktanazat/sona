@@ -332,15 +332,16 @@ struct MeetingSessionSnapshot: Decodable {
     var transcriptDeleted: Bool { transcriptPurgedAtUtcMs != nil }
 }
 
-/// One utterance recognized while the capture was running: no id, no
-/// speaker, no revision. The stored transcript replaces every one of these
-/// after the stop. Not `Identifiable` on purpose: the microphone and system
-/// audio can both recognize the same words over the same interval, so nothing
-/// in the segment is an id and a list draws them by position.
-struct MeetingProvisionalSegment: Decodable {
+struct MeetingProvisionalSegment: Decodable, Identifiable, Equatable {
+    let segmentId: UInt64
+    let trackId: MeetingSourceTrackId
+    let sourceKind: MeetingSourceKind
+    let speaker: MeetingProvisionalSpeaker
     let startOffsetNs: Int64
     let endOffsetNs: Int64
     let text: String
+
+    var id: UInt64 { segmentId }
 }
 
 /// `meeting_live_transcript`: what the running capture has recognized so far,

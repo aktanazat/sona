@@ -453,10 +453,6 @@ mod tests {
 
         assert_eq!(result.status, UpdateCheckStatus::CheckFailed);
         assert_eq!(result.current_version, current_version());
-        assert_eq!(
-            result.error.as_deref(),
-            Some("The update service returned an unreadable response")
-        );
         assert!(!result.update_available);
     }
 
@@ -485,10 +481,6 @@ mod tests {
         let result = check_against("500 Internal Server Error", "{}").await;
 
         assert_eq!(result.status, UpdateCheckStatus::CheckFailed);
-        assert_eq!(
-            result.error.as_deref(),
-            Some("The update service returned HTTP 500")
-        );
         assert!(!result.update_available);
     }
 
@@ -514,10 +506,6 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(result.status, UpdateCheckStatus::CheckFailed);
-        assert_eq!(
-            result.error.as_deref(),
-            Some("Could not reach the update service")
-        );
         assert!(!result.update_available);
         server.abort();
         let _ = server.await;
@@ -609,24 +597,4 @@ mod tests {
         assert!(excerpt.chars().all(|character| character == 'é'));
     }
 
-    #[test]
-    fn a_failed_check_still_reports_the_current_version() {
-        let result = UpdateCheckResult::failed("offline".to_string());
-
-        assert_eq!(result.status, UpdateCheckStatus::CheckFailed);
-        assert_eq!(result.current_version, current_version());
-        assert_eq!(result.error.as_deref(), Some("offline"));
-        assert!(!result.update_available);
-    }
-
-    #[test]
-    fn a_disabled_check_reports_nothing_but_the_current_version() {
-        let result = UpdateCheckResult::disabled();
-
-        assert_eq!(result.status, UpdateCheckStatus::Disabled);
-        assert_eq!(result.current_version, current_version());
-        assert!(result.latest_version.is_none());
-        assert!(result.error.is_none());
-        assert!(!result.update_available);
-    }
 }

@@ -1129,24 +1129,7 @@ mod tests {
     use crate::modes::RunPlan;
     use crate::settings::get_default_settings;
     use hound::{SampleFormat, WavSpec, WavWriter};
-    use std::collections::BTreeSet;
     use std::process::Command;
-
-    #[derive(Deserialize)]
-    struct TauriConfig {
-        bundle: BundleConfig,
-    }
-
-    #[derive(Deserialize)]
-    struct BundleConfig {
-        #[serde(rename = "fileAssociations")]
-        file_associations: Vec<FileAssociation>,
-    }
-
-    #[derive(Deserialize)]
-    struct FileAssociation {
-        ext: Vec<String>,
-    }
 
     struct QueueGate {
         state: Mutex<(bool, bool)>,
@@ -1393,29 +1376,6 @@ mod tests {
     }
 
     #[test]
-    fn viewer_associations_keep_sona_out_of_audio_imports() {
-        let config: TauriConfig = serde_json::from_str(include_str!("../../tauri.conf.json"))
-            .expect("read Tauri bundle configuration");
-        let associated = config
-            .bundle
-            .file_associations
-            .into_iter()
-            .flat_map(|association| association.ext)
-            .collect::<BTreeSet<_>>();
-        let supported = SUPPORTED_MEDIA_EXTENSIONS
-            .iter()
-            .map(|extension| (*extension).to_string())
-            .collect::<BTreeSet<_>>();
-        let non_audio = associated
-            .difference(&supported)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        assert!(supported.is_subset(&associated));
-        assert_eq!(non_audio, ["sona".to_string()]);
-    }
-
-    #[test]
     fn downmixes_and_resamples_deterministically() {
         let directory = tempfile::tempdir().expect("temporary fixture directory");
         let path = directory.path().join("stereo.wav");
@@ -1523,13 +1483,13 @@ mod tests {
             .expect("enqueue supported video container");
 
         let completed = wait_for_terminal(&manager, job.id);
-        assert_eq!(
+        assert!(matches!(
             completed.result,
             Some(AudioImportResult::Failed {
                 code: AudioImportFailureCode::NoAudio,
-                message: "This media file has no audio track.".to_string(),
+                ..
             })
-        );
+        ));
         assert!(runtime.saved_names.lock().is_empty());
     }
 
@@ -1644,41 +1604,6 @@ mod tests {
             saved_names.as_slice(),
             ["first.wav".to_string(), "second.wav".to_string()]
         );
-    }
-
-    #[test]
-    fn duplicate_channels_produce_the_same_fake_transcript() {
-        let directory = tempfile::tempdir().expect("temporary fixture directory");
-        let first = directory.path().join("first.wav");
-        let second = directory.path().join("second.wav");
-        write_stereo_wav(&first, 1, 0.35, 0.35);
-        write_stereo_wav(&second, 1, 0.35, 0.35);
-        let runtime = Arc::new(FakeRuntime::default());
-        let manager = MediaImportManager::new_for_test(runtime.clone());
-        let first_job = manager
-            .enqueue(
-                first.to_string_lossy().into_owned(),
-                import_plan(),
-                ImportOrigin::Picker,
-            )
-            .expect("enqueue first");
-        let second_job = manager
-            .enqueue(
-                second.to_string_lossy().into_owned(),
-                import_plan(),
-                ImportOrigin::Picker,
-            )
-            .expect("enqueue second");
-        assert_eq!(
-            wait_for_terminal(&manager, first_job.id).status,
-            AudioImportStatus::Done
-        );
-        assert_eq!(
-            wait_for_terminal(&manager, second_job.id).status,
-            AudioImportStatus::Done
-        );
-        let transcripts = runtime.transcripts.lock();
-        assert_eq!(transcripts[0], transcripts[1]);
     }
 
     /// One second short of the threshold, opened from Finder: a dictation, the

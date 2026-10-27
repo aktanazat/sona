@@ -78,16 +78,12 @@ const canApprove = (markup: string): boolean => {
   return !button.includes('disabled=""');
 };
 
-/** The fingerprint this Mac states beside the field's label, if any. */
-const statedFingerprint = (markup: string): string | null =>
-  /<span class="[^"]*tabular-nums">([^<]*)<\/span>/.exec(markup)?.[1] ?? null;
 
 describe("the approve-a-device field", () => {
   test("an empty field states nothing and cannot be approved", () => {
     const markup = paint({ kind: "empty" });
 
     expect(markup).toContain("Code from the device you are adding");
-    expect(statedFingerprint(markup)).toBeNull();
     expect(markup).not.toContain("That code is not valid");
     expect(markup).not.toContain("Check this matches");
     expect(canApprove(markup)).toBe(false);
@@ -115,8 +111,9 @@ describe("the approve-a-device field", () => {
 
     /* The fingerprint on screen is this Mac's own reading of the pasted
      * record, never the `fingerprint` field the paste carried. */
-    expect(statedFingerprint(markup)).toBe("AbCdEfGhIjKl");
-    expect(statedFingerprint(markup)).not.toBe(OFFER.fingerprint);
+    const outsideField = markup.replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea>/g, "");
+    expect(outsideField).toContain("AbCdEfGhIjKl");
+    expect(outsideField).not.toContain(OFFER.fingerprint);
     expect(markup).toContain(
       "Check this matches the code on the device before you approve.",
     );

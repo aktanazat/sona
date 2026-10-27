@@ -38,7 +38,6 @@
     "library": "Bibliothèque"
   },
   "onboarding": {
-    "subtitle": "Les modèles s'exécutent sur ce Mac et arbitrent entre précision et vitesse.",
     "existingModelsTitle": "Modèles compatibles",
     "downloadModelsTitle": "Disponibles au téléchargement",
     "otherModels": "Autres modèles",
@@ -112,7 +111,9 @@
       }
     },
     "errors": {
-      "selectModel": "Impossible de sélectionner le modèle. Réessayez."
+      "selectModel": "Impossible de sélectionner le modèle. Réessayez.",
+      "cancelDownload": "Impossible d'annuler le téléchargement. Réessayez.",
+      "languages": "Impossible d'enregistrer vos langues. Réessayez."
     },
     "permissions": {
       "title": "Autorisations requises",
@@ -137,7 +138,44 @@
       "checking": "Vérification des autorisations",
       "recheck": "Vérifier à nouveau"
     },
-    "headline": "Choisissez un modèle de transcription"
+    "headline": "Choisissez un modèle de transcription",
+    "continue": "Continuer",
+    "back": "Retour",
+    "languages": {
+      "title": "Quelles langues parlez-vous ?",
+      "selector": "Langues de dictée : {{languages}}",
+      "auto": "Détecter automatiquement",
+      "selected": "{{language}}, sélectionné",
+      "noModels": "Aucun modèle ne prend en charge ces langues. Choisissez d'autres langues."
+    },
+    "practice": {
+      "title": "Essayez une dictée",
+      "record": "Enregistrer",
+      "stop": "Arrêter",
+      "finish": "Terminer la configuration",
+      "recordAgain": "Enregistrer à nouveau",
+      "words": "Vos mots",
+      "recording": "À l'écoute · {{seconds}} secondes restantes",
+      "status": {
+        "ready": "Enregistrez quelques mots dans la langue choisie.",
+        "starting": "Ouverture du microphone…",
+        "transcribing": "Transcription en cours…",
+        "delivered": "Dictée reçue",
+        "finishing": "Enregistrement de la configuration…",
+        "cancelling": "Annulation en cours…",
+        "error": "Essai non terminé"
+      },
+      "errors": {
+        "permission": "Autorisez l'accès au microphone dans les réglages système, puis réessayez.",
+        "noSpeech": "Aucune parole détectée. Enregistrez à nouveau.",
+        "microphone": "Branchez un microphone, puis réessayez.",
+        "expired": "Le délai de l'essai est écoulé. Enregistrez à nouveau.",
+        "changed": "Votre modèle ou vos langues ont changé. Enregistrez à nouveau.",
+        "record": "Impossible d'enregistrer : {{error}}",
+        "cancel": "Impossible d'annuler l'essai. Réessayez avant d'enregistrer à nouveau.",
+        "complete": "Impossible d'enregistrer la configuration : {{error}}"
+      }
+    }
   },
   "modelSelector": {
     "custom": "Personnalisé",
@@ -496,6 +534,24 @@
       }
     },
     "postProcessing": {
+      "offlineCleanup": {
+        "title": "Correction hors ligne",
+        "description": "{{language}} · {{size}}",
+        "download": "Télécharger",
+        "downloading": "Téléchargement : {{downloaded}} sur {{total}}",
+        "cancel": "Annuler le téléchargement",
+        "retry": "Réessayer le téléchargement",
+        "ready": "Prêt pour la dictée en anglais",
+        "notDownloaded": "Non téléchargé",
+        "use": "Utiliser pour la dictée",
+        "selected": "Sélectionné pour la dictée",
+        "remove": "Supprimer le téléchargement",
+        "removeTitle": "Supprimer la correction hors ligne ?",
+        "removeDescription": "Sona conservera vos mots sans les modifier jusqu'à ce que vous téléchargiez à nouveau le modèle ou choisissiez un autre fournisseur.",
+        "runtimeMissing": "La correction hors ligne est absente de cette installation de Sona. Réinstallez Sona.",
+        "lightOnly": "Correction légère en anglais uniquement.",
+        "instructionsUnavailable": "Choisissez un autre fournisseur pour les instructions vocales."
+      },
       "api": {
         "title": "API (Compatible OpenAI)",
         "provider": {
@@ -1769,11 +1825,11 @@
       },
       "remoteIntelligence": {
         "title": "Intelligence des réunions",
-        "label": "Écrire les notes de réunion sur mon serveur",
-        "consent": "Les résumés et les réponses des réunions sont écrits sur ton serveur via ton réseau privé.",
+        "label": "Utiliser l’IA dans le cloud pour les notes de réunion",
+        "consent": "Traitement local par défaut. Une fois activé, le texte des réunions est envoyé à ton serveur jumelé et à son fournisseur d’IA. L’audio reste sur ce Mac. Désactive cette option pour garder les nouveaux résumés, registres, récapitulatifs et réponses en local.",
         "unpaired": "Associe Sona à ton serveur dans Agents pour activer ceci.",
         "seriesTitle": "Séries qui restent sur ce Mac",
-        "seriesHint": "Une série listée ici est toujours écrite sur ce Mac, même quand l'intelligence des réunions est activée.",
+        "seriesHint": "Les séries sélectionnées restent sur ce Mac, même quand l’IA dans le cloud est activée.",
         "seriesEmpty": "Aucune réunion récurrente enregistrée pour l'instant.",
         "loading": "Lecture de tes séries…",
         "lastMet": "Dernière fois le {{date}}",
@@ -2017,7 +2073,8 @@
         "remote_unavailable": "Destination distante indisponible",
         "engine_failure": "Échec du traitement",
         "cancelled": "Traitement annulé",
-        "interrupted": "Traitement interrompu"
+        "interrupted": "Traitement interrompu",
+        "transcript_deleted": "Transcription supprimée"
       }
     },
     "start": {
@@ -2155,6 +2212,7 @@
       "recovery_required": "Cette réunion doit être récupérée avant cette action.",
       "deletion_in_progress": "La suppression est déjà en cours. La réunion reste inaccessible.",
       "not_found": "Cette réunion n'est plus disponible.",
+      "transcript_deleted": "Les notes ne peuvent pas être régénérées après la suppression de leur transcription.",
       "invalid_request": "La demande de réunion était invalide.",
       "export_cancelled": "L'exportation a été annulée. Aucune exportation terminée n'a été créée.",
       "export_failed": "L'exportation a échoué. Aucune exportation terminée n'a été créée.",
