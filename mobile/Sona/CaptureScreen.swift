@@ -12,6 +12,7 @@ struct CaptureScreen: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 72
     @State private var draft = ""
+    @FocusState private var draftFocused: Bool
     @State private var picked: [PickedImage] = []
     @State private var selection: [PhotosPickerItem] = []
     @State private var kept = false
@@ -132,6 +133,7 @@ struct CaptureScreen: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 12) {
             TextEditor(text: $draft)
+                .focused($draftFocused)
                 .font(.body)
                 .foregroundStyle(Theme.textPrimary)
                 .scrollContentBackground(.hidden)
@@ -223,6 +225,7 @@ struct CaptureScreen: View {
 
     private func keep() {
         guard model.captureTyped(draft, images: picked.map(\.captured)) else { return }
+        draftFocused = false
         draft = ""
         picked = []
     }
