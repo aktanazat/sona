@@ -399,7 +399,7 @@ struct PersonHeaderView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 if renaming {
                     PersonNameField(
                         name: detail.person.displayName,
@@ -413,7 +413,7 @@ struct PersonHeaderView: View {
             Spacer(minLength: 16)
             menu
         }
-        .padding(.bottom, 28)
+        .padding(.bottom, 20)
     }
 
     /// The organization is the one word on the line that goes somewhere: it
@@ -464,6 +464,7 @@ struct PersonHeaderView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(store.busy)
+        .accessibilityLabel("Person options")
     }
 }
 
@@ -484,8 +485,8 @@ struct PersonNameField: View {
             .foregroundStyle(Theme.ink)
             .focused($focused)
             .frame(maxWidth: 360)
-            .padding(.horizontal, 12)
-            .frame(height: 42)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
             .onAppear {
@@ -571,7 +572,7 @@ struct PersonSummaryView: View {
                             Text(note).metaText(Theme.live)
                         }
                     }
-                    .padding(20)
+                    .padding(12)
                 }
             }
         }
@@ -606,7 +607,7 @@ struct BriefingView: View {
                             .lineLimit(2)
                         }
                     }
-                    .padding(20)
+                    .padding(12)
                 }
             }
         }
@@ -681,9 +682,9 @@ struct PersonLedgerGroup: View {
     var body: some View {
         Text(heading)
             .metaText(Theme.inkSecondary)
-            .padding(.horizontal, 20)
-            .padding(.top, 14)
-            .padding(.bottom, 8)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .bottom) { Hairline() }
         ForEach(rows) { row in
@@ -792,7 +793,7 @@ struct PersonCadenceView: View {
                             }
                         }
                     }
-                    .padding(20)
+                    .padding(12)
                 }
             }
         }
@@ -879,7 +880,7 @@ struct PersonEvidenceView: View {
                             Text(line).metaText().monospacedDigit()
                         }
                     }
-                    .padding(20)
+                    .padding(12)
                 }
             }
         }

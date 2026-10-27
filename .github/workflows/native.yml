@@ -1,0 +1,41 @@
+name: Native apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    uses: ./.github/workflows/build.yml
+
+  iphone:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Build iPhone app with Watch companion and keyboard
+        run: |
+          xcodebuild -project mobile/Sona.xcodeproj -scheme Sona \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/sona-iphone" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Inspect embedded phone products
+        run: |
+          app="$RUNNER_TEMP/sona-iphone/Build/Products/Debug-iphonesimulator/Sona.app"
+          test -x "$app/Sona"
+          test -x "$app/PlugIns/SonaKeyboard.appex/SonaKeyboard"
+          test -x "$app/Watch/Sona Watch.app/Sona Watch"
+          plutil -lint "$app/Info.plist" \
+            "$app/PlugIns/SonaKeyboard.appex/Info.plist" \
+            "$app/Watch/Sona Watch.app/Info.plist"

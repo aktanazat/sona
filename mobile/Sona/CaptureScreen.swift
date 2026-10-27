@@ -9,6 +9,7 @@ struct CaptureScreen: View {
     /* Observed for the recording state behind `model.canStartDictation`. */
     @ObservedObject var recorder: PhoneRecorder
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 72
     @State private var draft = ""
     @State private var picked: [PickedImage] = []
@@ -22,39 +23,31 @@ struct CaptureScreen: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("capture.title")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                voice
-                composer
-                if !model.canStartDictation {
-                    Text("capture.stopMeeting")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                if let notice = dictation.notice {
-                    Text(notice)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.recording)
-                }
-                if !model.isPaired {
-                    Text("capture.notPaired")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.textSecondary)
-                } else if kept {
-                    Text("capture.kept")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.success)
-                        .accessibilityIdentifier("capture-kept")
-                }
+        PhonePage("tab.capture") {
+            voice
+            Divider().overlay(Theme.border)
+            composer
+            if !model.canStartDictation {
+                Text("capture.stopMeeting")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
             }
-            .padding(24)
+            if let notice = dictation.notice {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.recording)
+            }
+            if !model.isPaired {
+                Text("capture.notPaired")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            } else if kept {
+                Text("capture.kept")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.success)
+                    .accessibilityIdentifier("capture-kept")
+            }
         }
-        .scrollDismissesKeyboard(.interactively)
-        .background(Theme.background)
-        .tint(Theme.accent)
         .onChange(of: selection) { _, items in
             guard !items.isEmpty else { return }
             selection = []
@@ -63,26 +56,12 @@ struct CaptureScreen: View {
         .onChange(of: model.thoughtsKept) { _, _ in kept = true }
     }
 
-    /// The transcript as it forms, over one round control that starts and finishes.
     private var voice: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(dictation.isBusy ? dictation.text : "")
-                .font(.body)
-                .foregroundStyle(Theme.textPrimary)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading)
-                .overlay(alignment: .topLeading) {
-                    if !dictation.isBusy {
-                        Text("capture.voiceHint")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.textSecondary)
-                    } else if dictation.text.isEmpty {
-                        Text("capture.listening")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.textTertiary)
-                    }
-                }
-                .accessibilityIdentifier("capture-transcript")
-            HStack(spacing: 20) {
+        VStack(alignment: .leading, spacing: 12) {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+                : AnyLayout(HStackLayout(spacing: 16))
+            layout {
                 Button {
                     if dictation.phase == .listening {
                         dictation.finish()
@@ -115,6 +94,10 @@ struct CaptureScreen: View {
                     Text(dictation.phase == .listening ? "capture.voiceStop" : "capture.voiceStart")
                 )
                 .accessibilityIdentifier(dictation.phase == .listening ? "voice-stop" : "voice-start")
+                Text(voiceLabel)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if dictation.phase == .authorizing || dictation.phase == .finishing {
                     ProgressView()
                 }
@@ -124,21 +107,42 @@ struct CaptureScreen: View {
                         .accessibilityIdentifier("voice-cancel")
                 }
             }
+            if dictation.isBusy && !dictation.text.isEmpty {
+                Text(dictation.text)
+                    .font(.body)
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("capture-transcript")
+            }
         }
-        .padding(16)
-        .background(Theme.inset)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var voiceLabel: LocalizedStringKey {
+        switch dictation.phase {
+        case .idle: return "capture.voiceStart"
+        case .authorizing: return "dictation.authorizing"
+        case .listening: return "capture.listening"
+        case .finishing: return "dictation.finishing"
+        }
     }
 
     /// Typed text, links and photos share one draft and one Keep.
     private var composer: some View {
         VStack(alignment: .leading, spacing: 12) {
             TextEditor(text: $draft)
+                .font(.body)
+                .foregroundStyle(Theme.textPrimary)
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .frame(minHeight: 120)
-                .background(Theme.inset)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
+                .background(Theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+                        .strokeBorder(Theme.border, lineWidth: 0.5)
+                }
                 .overlay(alignment: .topLeading) {
                     if draft.isEmpty {
                         Text("capture.placeholder")
@@ -149,6 +153,7 @@ struct CaptureScreen: View {
                     }
                 }
                 .accessibilityIdentifier("capture-draft")
+                .accessibilityLabel(Text("capture.placeholder"))
             if !picked.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -177,6 +182,7 @@ struct CaptureScreen: View {
                 )
                 .accessibilityIdentifier("capture-keep")
             }
+            .font(.subheadline)
         }
     }
 
@@ -197,8 +203,9 @@ struct CaptureScreen: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.title3)
-                    .foregroundStyle(Theme.onAccent, Theme.textPrimary)
-                    .padding(4)
+                    .foregroundStyle(Theme.background, Theme.textPrimary)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel(Text("capture.removePhoto"))
         }

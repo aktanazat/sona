@@ -20,12 +20,9 @@
 /// a build after an edit to a watched input re-samples and says `-dirty` until
 /// it is committed. It costs one build-script run per such edit.
 ///
-/// Watched, and therefore covered: this crate's `src`, the frontend `../src`,
-/// the Swift bridges, and `tauri.conf.json`. The dirty check is scoped to the
-/// same set, so scope and claim agree. An uncommitted edit to a bundle input
-/// outside it, `Info.plist` or `Entitlements.plist` or `capabilities`, does not
-/// re-run this script, and a flag that would not be re-sampled must not be
-/// claimed. Add such an input to both lists together when that matters.
+/// Watched, and therefore covered: the Rust sources, Swift bridges, tray
+/// translations and Tauri context. The dirty check is scoped to the same
+/// inputs. Native app presentation has its own build identity.
 ///
 /// What it still cannot see: an edit made *during* a build. The sample is
 /// taken once, before compilation, and the 05:08 bundle compiled for nine
@@ -53,39 +50,21 @@ fn emit_build_identity() {
             }
         }
     }
-    // The dirty flag speaks for the whole bundle, so both halves of the
-    // bundle re-trigger the observation: this crate's Rust sources and the
-    // frontend that ships inside it. Watching only one would leave the flag
-    // stale for a change in the other, which is the failure this is here to
-    // stop rather than reproduce one layer down.
-    for sources in ["src", "../src"] {
-        if std::path::Path::new(sources).is_dir() {
-            println!("cargo:rerun-if-changed={sources}");
-        }
+    for sources in ["src", "swift", "tray-locales", "tauri.conf.json"] {
+        println!("cargo:rerun-if-changed={sources}");
     }
 
     let commit = git(&["rev-parse", "--short=7", "HEAD"]).filter(|sha| !sha.is_empty());
-    // Scoped to the watched sources, and untracked files count: a `mod`-declared
-    // source that was never added is compiled into the binary exactly like a
-    // modified one.
-    //
-    // One exception, and it is the difference between a useful flag and a
-    // flag that is always on. `build.yml` and `release.yml` rewrite
-    // `tauri.conf.json` in place with `jq` before the build, to point the
-    // bundler at a downloaded ONNX Runtime — so a clean CI checkout is
-    // already modified by the time this runs, and every release would ship
-    // `-dirty`. That edit is deliberate, recorded in the workflow, and
-    // changes what is bundled beside the binary rather than what the binary
-    // does. Nothing else on either workflow touches a tracked file: `out`,
-    // `.next`, `target` and the staged agent hook are all ignored, and
-    // `src-tauri/gen` is byte-stable across builds (measured).
+    // Untracked source files count too: a mod-declared file is compiled
+    // whether or not it has been added to git.
     let dirty = git(&[
         "status",
         "--porcelain",
         "--",
-        ":(top)src",
         ":(top)src-tauri/src",
         ":(top)src-tauri/swift",
+        ":(top)src-tauri/tray-locales",
+        ":(top)src-tauri/tauri.conf.json",
     ])
     .is_some_and(|status| !status.is_empty());
     let identity = match commit {
@@ -96,14 +75,10 @@ fn emit_build_identity() {
     println!("cargo:rustc-env=SONA_BUILD_COMMIT={identity}");
 }
 
-/// Keep one answer to "what version is this". `sona --version`, the update
-/// check's comparison, the tray title and Settings > About all resolve to the
-/// crate version today — About through Tauri's `getVersion()`, which falls
-/// back to `[package] version` only while `tauri.conf.json` declares none.
-/// Declaring one there silently splits the two: About would move and the
-/// update check would not, so a user could be told they are up to date while
-/// looking at a different number. Fail the build instead of shipping the
-/// disagreement.
+/// Keep the core's package identity tied to its crate version. Tauri package
+/// metadata falls back to Cargo while the context declares no version.
+/// Declaring a different version there would split the core's CLI and update
+/// comparisons from its package metadata, so stop the build instead.
 fn assert_one_version_source() {
     // `tauri_build::build()` already registers this file with cargo.
     const CONFIG: &str = "tauri.conf.json";
@@ -120,13 +95,13 @@ fn assert_one_version_source() {
     let crate_version = std::env::var("CARGO_PKG_VERSION").expect("crate version unavailable");
     assert!(
         declared == crate_version,
-        "{CONFIG} declares version {declared} but the crate is {crate_version}: Settings > \
-         About would read the first and `sona --version`, the update check and the tray the \
-         second. Remove the key or make them agree."
+        "{CONFIG} declares version {declared} but the crate is {crate_version}: the \
+         core's package metadata and CLI version would disagree. Remove the key \
+         or make them agree."
     );
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     emit_build_identity();
     assert_one_version_source();
 
@@ -138,335 +113,27 @@ fn main() {
     #[cfg(target_os = "macos")]
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 
-    generate_tray_translations();
+    generate_tray_translations()?;
 
-    // Linux ships transcribe-cpp as a shared libtranscribe + loadable ggml
-    // backend modules (the `dynamic-backends` posture in Cargo.toml). Bake an
-    // $ORIGIN-relative rpath into the `sona` binary so it finds libtranscribe
-    // next to it in the package — deb/rpm install into the app-private
-    // `/usr/lib/sona` (the dir Tauri already uses for resources; keeps
-    // Sona's libs out of the ldconfig-scanned `/usr/lib`, issue #1639) while
-    // the AppImage keeps them in `usr/lib` (linuxdeploy's layout), hence both
-    // entries. transcribe's
-    // init_backends_default() then loads the ggml modules co-located there.
-    // (Windows resolves DLLs from the exe directory, so it needs no rpath;
-    // macOS links transcribe-cpp statically via the `metal` feature.)
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/sona:$ORIGIN/../lib");
-    }
-
-    // Stage transcribe-cpp's shared runtime libraries (and the dlopen'd ggml
-    // backend modules) for the installer. Self-gates on the shared /
-    // dynamic-backends posture used by Linux and Windows; it's a no-op for the
-    // static macOS `metal` build, where there is nothing to ship.
-    stage_transcribe_runtime_libs();
-
-    // When ORT is dynamically linked (Windows CI sets ORT_LIB_LOCATION +
-    // ORT_PREFER_DYNAMIC_LINK to a baseline ONNX Runtime), ship its onnxruntime.dll
-    // next to Sona.exe so the app loads our baseline build instead of statically
-    // embedding pyke's /arch:AVX2 one (which crashes at startup on pre-Haswell CPUs).
-    stage_onnxruntime_dll();
-
-    // Must run after transcribe staging because that helper recreates transcribe-libs/.
-    stage_vc_runtime_dlls();
-
-    tauri_build::build()
+    tauri_build::build();
+    Ok(())
 }
 
-/// The `transcribe-libs/` staging directory beside this crate's manifest.
-///
-/// Three callers stage into it — the MSVC runtime DLLs, `onnxruntime.dll`, and
-/// transcribe-cpp's shared libraries — so the path lives here rather than
-/// being spelled out again at each one.
-fn transcribe_libs_path() -> std::path::PathBuf {
-    // cargo always sets CARGO_MANIFEST_DIR for a build script, and the staged
-    // libraries have to land beside the manifest for the bundler to find them.
-    // PANIC: a build that cannot locate its own crate root must stop.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    std::path::PathBuf::from(manifest_dir).join("transcribe-libs")
-}
-
-/// [`transcribe_libs_path`], created if it does not exist yet.
-fn transcribe_libs_dir() -> std::path::PathBuf {
-    let dir = transcribe_libs_path();
-    // Without this directory the installer ships with no runtime libraries.
-    // PANIC: a silently incomplete package is worse than a failed build.
-    std::fs::create_dir_all(&dir).expect("create transcribe-libs staging dir");
-    dir
-}
-
-/// Stage the MSVC runtime DLLs into `transcribe-libs/` for app-local deployment.
-///
-/// Sona's native stack links the VC++ runtime dynamically (/MD). Shipping the
-/// DLLs beside `sona.exe` covers machines with no redistributable installed and
-/// machines whose system redist is older than the CI toolset (issue #1527).
-///
-/// Driven by `SONA_VC_REDIST_DIRS`, set by CI to the redist dirs from the same
-/// Visual Studio install that compiled the native code. Copies only the runtime
-/// DLL families Sona imports and no-ops when the env var is unset.
-fn stage_vc_runtime_dlls() {
-    println!("cargo:rerun-if-env-changed=SONA_VC_REDIST_DIRS");
-
-    let Some(redist_dirs) = std::env::var_os("SONA_VC_REDIST_DIRS") else {
-        return;
-    };
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
-    }
-
-    let dest = transcribe_libs_dir();
-
-    let mut copied: Vec<String> = Vec::new();
-    for dir in std::env::split_paths(&redist_dirs) {
-        for entry in std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("SONA_VC_REDIST_DIRS: read {}: {e}", dir.display()))
-            .flatten()
-        {
-            let src = entry.path();
-            let name = src
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let lower = name.to_lowercase();
-            let wanted = lower.ends_with(".dll")
-                && (lower.starts_with("msvcp140")
-                    || lower.starts_with("vcruntime140")
-                    || lower.starts_with("vcomp140"));
-            if wanted {
-                std::fs::copy(&src, dest.join(&name))
-                    .unwrap_or_else(|e| panic!("copy {}: {e}", src.display()));
-                copied.push(lower);
-            }
-        }
-    }
-
-    // Fail the build rather than ship an installer that regresses issue #1527.
-    for required in ["msvcp140.dll", "vcruntime140.dll"] {
-        if !copied.iter().any(|n| n == required) {
-            panic!(
-                "SONA_VC_REDIST_DIRS is set but {required} was not found in it; \
-                 the app-local VC++ runtime would be incomplete and Sona would \
-                 crash on machines without a current redist (issue #1527)"
-            );
-        }
-    }
-    println!(
-        "cargo:warning=Staged {} VC++ runtime DLL(s) for app-local deployment",
-        copied.len()
-    );
-}
-
-/// Copy the dynamically-linked ONNX Runtime `onnxruntime.dll` into the
-/// `transcribe-libs/` staging dir so `tauri.windows.conf.json` bundles it beside
-/// `Sona.exe` (Windows resolves DLLs from the executable's directory).
-///
-/// No-op unless `ORT_PREFER_DYNAMIC_LINK` + `ORT_LIB_LOCATION` are set for a Windows
-/// target — i.e. the CI dynamic-link path. A plain static build (no env) skips this
-/// and keeps the embedded ORT, and non-Windows targets bundle their ORT elsewhere
-/// (see build.yml frameworks/deb.files steps), so they are ignored here.
-fn stage_onnxruntime_dll() {
-    use std::path::PathBuf;
-
-    println!("cargo:rerun-if-env-changed=ORT_LIB_LOCATION");
-    println!("cargo:rerun-if-env-changed=ORT_PREFER_DYNAMIC_LINK");
-
-    if std::env::var_os("ORT_PREFER_DYNAMIC_LINK").is_none() {
-        return;
-    }
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        return;
-    }
-    let Some(lib_location) = std::env::var_os("ORT_LIB_LOCATION") else {
-        return;
-    };
-
-    let src = PathBuf::from(&lib_location).join("onnxruntime.dll");
-    if !src.exists() {
-        panic!(
-            "ORT_PREFER_DYNAMIC_LINK is set but {} does not exist; a dynamic ORT \
-             build must supply onnxruntime.dll to bundle",
-            src.display()
-        );
-    }
-
-    // transcribe-libs/ is already created by stage_transcribe_runtime_libs() on the
-    // Windows x86_64 dynamic-backends build and bundled by tauri.windows.conf.json;
-    // create it defensively so this is self-contained.
-    let dest_dir = transcribe_libs_dir();
-    std::fs::copy(&src, dest_dir.join("onnxruntime.dll"))
-        .unwrap_or_else(|e| panic!("copy {}: {e}", src.display()));
-    println!("cargo:warning=Staged onnxruntime.dll for Windows bundling");
-}
-
-/// Stage transcribe-cpp's shared runtime libraries into `transcribe-libs/` so the
-/// installer can ship them next to the executable. One code path covers Windows
-/// (`.dll`) and Linux (versioned `.so`); the match-by-name filter below handles
-/// both naming schemes.
-///
-/// Source dirs arrive as `DEP_TRANSCRIBE_CPP_*`: the sys crate (`links =
-/// "transcribe"`) emits its install dirs and the wrapper (`links =
-/// "transcribe_cpp"`) forwards them one hop to us — the only way that metadata
-/// crosses cargo's one-hop `links` boundary. The keys exist only in a shared /
-/// dynamic-backends build; a static build (macOS `metal`) leaves them unset, so
-/// this is a no-op there. `RUNTIME_DIR` (core libs) and `MODULE_DIR` (dlopen'd
-/// ggml modules) may be the same dir — the `BTreeSet` below dedups them.
-///
-/// Where the staged dir lands: Windows bundles it beside `sona.exe` (DLLs resolve
-/// from the exe dir); Linux deb/rpm map it into the app-private `/usr/lib/sona`
-/// and the AppImage into `usr/lib`, both on the binary's rpath.
-fn stage_transcribe_runtime_libs() {
-    use std::collections::BTreeSet;
-    use std::path::PathBuf;
-
-    println!("cargo:rerun-if-env-changed=DEP_TRANSCRIBE_CPP_RUNTIME_DIR");
-    println!("cargo:rerun-if-env-changed=DEP_TRANSCRIBE_CPP_MODULE_DIR");
-
-    // Present only in a shared posture. A static build has nothing to ship.
-    let Some(runtime_dir) = std::env::var_os("DEP_TRANSCRIBE_CPP_RUNTIME_DIR") else {
-        return;
-    };
-
-    // transcribe-cpp publishes its runtime layout in up to two directories:
-    //   RUNTIME_DIR : the shared libs to load (transcribe + core ggml / ggml-base)
-    //   MODULE_DIR  : the dlopen'd ggml backend modules (the per-ISA ggml-cpu-*
-    //                 and ggml-vulkan), dynamic-backends only. Often — but not
-    //                 always — the SAME directory as RUNTIME_DIR (it is on Linux).
-    // BOTH must sit next to the executable, or init_backends_default() finds the
-    // core libs but zero loadable compute backends and registers no devices.
-    let mut dirs = BTreeSet::new();
-    dirs.insert(PathBuf::from(runtime_dir));
-    if let Some(module_dir) = std::env::var_os("DEP_TRANSCRIBE_CPP_MODULE_DIR") {
-        dirs.insert(PathBuf::from(module_dir));
-    }
-
-    // Recreate clean so a renamed or dropped ggml module can never linger in the
-    // package from a previous build.
-    let _ = std::fs::remove_dir_all(transcribe_libs_path());
-    let dest = transcribe_libs_dir();
-
-    // Collect every candidate library name first (across both dirs) so the
-    // pruning below can see each lib's whole symlink family at once.
-    let mut libs: std::collections::BTreeMap<String, PathBuf> = Default::default();
-    for dir in &dirs {
-        println!("cargo:rerun-if-changed={}", dir.display());
-        for entry in std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-            .flatten()
-        {
-            let src = entry.path();
-            let name = src.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            // Match by NAME, not extension: Linux versions its libs
-            // (libtranscribe.so.0, .so.0.2.0) and the loader needs the SONAME, so
-            // an extension-only filter would miss the versioned names entirely.
-            let is_lib = name.ends_with(".dll")
-                || name.ends_with(".dylib")
-                || name.ends_with(".so")
-                || name.contains(".so.");
-            if is_lib {
-                libs.insert(name.to_string(), src);
-            }
-        }
-    }
-
-    // A Linux install dir carries each lib as a symlink chain (for example,
-    // libfoo.so -> libfoo.so.0.2 -> libfoo.so.0.2.0), and tauri's deb/rpm
-    // bundlers flatten symlinks into real files. Staging every name would
-    // triplicate each lib and draw "not a symbolic link" warnings from ldconfig
-    // (issue #1639). Only one name per lib is needed at runtime: the shortest
-    // versioned name is the SONAME for linked core libs, while a dlopen'd ggml
-    // backend module generally has only its bare unversioned name. Stage that
-    // name; `fs::copy` dereferences the symlink so the staged file is real.
-    let mut best: std::collections::BTreeMap<&str, (&str, &PathBuf, usize)> = Default::default();
-    for (name, src) in &libs {
-        let (stem, rank) = match split_versioned_so(name) {
-            // Windows/macOS names (.dll/.dylib) are unversioned: keep as-is.
-            None => (name.as_str(), 0),
-            // Prefer the shortest versioned name (`.so.0`, `.so.0.2`, etc.),
-            // then the bare `.so`; a full version is only the fallback when the
-            // install tree did not provide its SONAME symlink.
-            Some((stem, 0)) => (stem, usize::MAX),
-            Some((stem, depth)) => (stem, depth - 1),
-        };
-        match best.get(stem) {
-            Some(&(_, _, existing)) if existing <= rank => {}
-            _ => {
-                best.insert(stem, (name, src, rank));
-            }
-        }
-    }
-
-    let mut copied = 0usize;
-    for &(name, src, _) in best.values() {
-        std::fs::copy(src, dest.join(name))
-            .unwrap_or_else(|e| panic!("copy {}: {e}", src.display()));
-        copied += 1;
-    }
-    if copied == 0 {
-        panic!(
-            "no transcribe-cpp runtime libraries found under {dirs:?}; a shared / \
-             dynamic-backends build must ship them or the app registers zero \
-             compute devices"
-        );
-    }
-    println!("cargo:warning=Staged {copied} transcribe-cpp runtime library file(s)");
-}
-
-/// Split a versioned ELF shared-library name into (stem, version depth):
-/// `libfoo.so` -> ("libfoo", 0), `libfoo.so.0` -> ("libfoo", 1),
-/// `libfoo.so.0.2.0` -> ("libfoo", 3). Returns None for names that aren't a
-/// `.so` optionally followed by dot-separated numeric components.
-fn split_versioned_so(name: &str) -> Option<(&str, usize)> {
-    let idx = name.find(".so")?;
-    let (stem, rest) = (&name[..idx], &name[idx + 3..]);
-    if rest.is_empty() {
-        return Some((stem, 0));
-    }
-    let comps: Vec<&str> = rest.strip_prefix('.')?.split('.').collect();
-    comps
-        .iter()
-        .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
-        .then_some((stem, comps.len()))
-}
-
-/// The one section of a locale bundle the tray codegen reads: the tray menu's
-/// flat map of key to translated string. Every other section is ignored, and a
-/// `tray` that is not a flat string map fails the build rather than producing a
-/// tray with blank labels.
-#[derive(serde::Deserialize)]
-struct LocaleBundle {
-    tray: Option<std::collections::BTreeMap<String, String>>,
-}
-
-/// One locale directory's tray strings, keyed by its BCP-47 directory name.
-/// `None` for a bundle that carries no `tray` section.
+/// One Rust-owned locale file's flat map of tray menu strings.
 fn read_locale_tray(
-    dir: &std::path::Path,
-) -> Option<(String, std::collections::BTreeMap<String, String>)> {
-    // `read_dir` never yields an entry without a final component, and a locale
-    // directory is named after its BCP-47 code, which is ASCII.
-    // PANIC: a non-UTF-8 name here means a corrupt checkout.
-    let lang = dir.file_name().unwrap().to_str().unwrap().to_string();
-    let json_path = dir.join("translation.json");
-
-    println!("cargo:rerun-if-changed={}", json_path.display());
-
-    // Every locale directory in the repo carries a translation.json.
-    // PANIC: an unreadable one must fail the build.
-    let content = std::fs::read_to_string(&json_path).unwrap();
-    // `bun run check:translations` gates every bundle's contents, so a file
-    // that does not parse here means that gate was bypassed.
-    // PANIC: a malformed bundle must fail the build, not ship blank labels.
-    let bundle: LocaleBundle = serde_json::from_str(&content).unwrap();
-
-    bundle.tray.map(|tray| (lang, tray))
+    path: &std::path::Path,
+) -> Result<(String, std::collections::BTreeMap<String, String>), Box<dyn std::error::Error>> {
+    // PANIC: checked-in locale filenames are UTF-8 BCP-47 codes.
+    let lang = path.file_stem().unwrap().to_str().unwrap().to_string();
+    println!("cargo:rerun-if-changed={}", path.display());
+    let content = std::fs::read_to_string(path)?;
+    let tray = serde_json::from_str(&content)?;
+    Ok((lang, tray))
 }
 
-/// Generate tray menu translations from frontend locale files.
-///
-/// Source of truth: src/i18n/locales/*/translation.json
-/// The English "tray" section defines the struct fields.
-fn generate_tray_translations() {
+/// Generate tray menu translations from tray-locales/*.json.
+/// The English locale defines the struct fields.
+fn generate_tray_translations() -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
@@ -475,39 +142,48 @@ fn generate_tray_translations() {
     // write the generated module without it.
     // PANIC: a build that cannot find its own output directory must stop.
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let locales_dir = Path::new("../src/i18n/locales");
+    let locales_dir = Path::new("tray-locales");
 
-    println!("cargo:rerun-if-changed=../src/i18n/locales");
+    println!("cargo:rerun-if-changed=tray-locales");
 
     // Collect all locale translations
     let mut translations: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-    // The locales directory is checked into the repo beside this crate.
-    // PANIC: its absence means a broken checkout, not a build to continue.
-    let locale_entries = fs::read_dir(locales_dir).unwrap();
-    for entry in locale_entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    let locale_entries = fs::read_dir(locales_dir)?;
+    for entry in locale_entries {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        if let Some((lang, tray)) = read_locale_tray(&path) {
-            translations.insert(lang, tray);
-        }
+        let (lang, tray) = read_locale_tray(&path)?;
+        translations.insert(lang, tray);
     }
 
     // English defines the schema, and without it there are no fields at all —
     // every downstream `TrayStrings` reference would fail to compile.
     // PANIC: a missing reference locale must stop the build.
     let english = translations.get("en").unwrap();
+    assert!(
+        !english.is_empty(),
+        "English tray locale must contain menu copy"
+    );
+    for (lang, tray) in &translations {
+        assert!(
+            tray.keys().eq(english.keys()),
+            "tray locale {lang} must have the same menu keys as English"
+        );
+        assert!(
+            tray.values().all(|value| !value.trim().is_empty()),
+            "tray locale {lang} must not contain blank menu copy"
+        );
+    }
     let fields: Vec<_> = english
         .keys()
         .map(|k| (camel_to_snake(k), k.clone()))
         .collect();
 
     // Generate code
-    let mut out = String::from(
-        "// Auto-generated from src/i18n/locales/*/translation.json - do not edit\n\n",
-    );
+    let mut out = String::from("// Auto-generated from tray-locales/*.json - do not edit\n\n");
 
     // Struct
     out.push_str("#[derive(Debug, Clone)]\npub struct TrayStrings {\n");
@@ -536,16 +212,14 @@ fn generate_tray_translations() {
 
     out.push_str("    m\n});\n");
 
-    // OUT_DIR is cargo's own scratch directory for this crate, and a module
-    // that cannot be written leaves the crate referencing a missing file.
-    // PANIC: the build must stop here rather than fail later and obscurely.
-    fs::write(Path::new(&out_dir).join("tray_translations.rs"), out).unwrap();
+    fs::write(Path::new(&out_dir).join("tray_translations.rs"), out)?;
 
     println!(
         "cargo:warning=Generated tray translations: {} languages, {} fields",
         translations.len(),
         fields.len()
     );
+    Ok(())
 }
 
 fn camel_to_snake(s: &str) -> String {

@@ -48,14 +48,11 @@ struct MeetingsNoticeBand: View {
             Spacer(minLength: 12)
             action()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(accent ? Theme.surface : Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .strokeBorder(accent ? Theme.live.opacity(0.4) : Theme.border, lineWidth: 1)
-        )
+        .background(Theme.inset)
+        .overlay(alignment: .bottom) { Hairline() }
     }
 }
 
@@ -75,7 +72,6 @@ struct MeetingsRetryNote: View {
                 }
             }
         }
-        .padding(.bottom, 28)
     }
 }
 
@@ -97,7 +93,7 @@ struct MeetingsTrendCard: View {
                 )
                 if let totals = store.trend?.rangeTotal {
                     CardRow {
-                        HStack(alignment: .top, spacing: 40) {
+                        HStack(alignment: .top, spacing: 16) {
                             Stat(label: "Meetings", value: "\(totals.meetings)")
                             Stat(label: "Captured", value: totals.capturedSpoken)
                             Stat(label: "Lines said", value: "\(totals.transcriptSegments)")
@@ -121,7 +117,7 @@ struct MeetingsTrendCard: View {
                 }
             }
         }
-        .padding(.bottom, 28)
+        .padding(.top, 24)
     }
 
     private var points: [MeetingTrendPoint] { store.trend?.points ?? [] }
@@ -178,24 +174,39 @@ struct MeetingsFilterCard: View {
     let store: MeetingsStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SearchField(prompt: "Search titles", text: query)
-            Card {
-                ChoiceRow(
-                    title: "State",
-                    choices: MeetingStatusFilter.allCases,
-                    label: { $0.label },
-                    selection: status
-                )
-                ChoiceRow(
-                    title: "When",
-                    choices: MeetingTimeWindow.allCases,
-                    label: { $0.label },
-                    selection: window
-                )
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                SearchField(prompt: "Search titles", text: query)
+                    .frame(minWidth: 180)
+                filters
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                SearchField(prompt: "Search titles", text: query)
+                filters
             }
         }
-        .padding(.bottom, 28)
+        .padding(.bottom, 16)
+    }
+
+    private var filters: some View {
+        HStack(spacing: 12) {
+            Picker("State", selection: status) {
+                ForEach(MeetingStatusFilter.allCases, id: \.self) { value in
+                    Text(value.label).tag(value)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            Picker("When", selection: window) {
+                ForEach(MeetingTimeWindow.allCases, id: \.self) { value in
+                    Text(value.label).tag(value)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        }
     }
 
     private var query: Binding<String> {
@@ -225,7 +236,17 @@ struct MeetingsFolderBar: View {
         PageSection("Folders") {
             Card {
                 CardRow {
-                    Text("Keep related meetings together.").bodyText(14, Theme.inkSecondary)
+                    ChatFlowRow(spacing: 6) {
+                        folderChip("All meetings", selected: store.folderId == nil) {
+                            store.choose(folder: nil)
+                        }
+                        ForEach(store.folders) { folder in
+                            folderChip("\(folder.name) · \(folder.meetingCount)", selected: store.folderId == folder.folderId) {
+                                store.choose(folder: folder.folderId)
+                            }
+                        }
+                    }
+                    .disabled(store.foldersLoading || store.folderBusy)
                 } trailing: {
                     Button("New folder") {
                         renaming = nil
@@ -239,20 +260,6 @@ struct MeetingsFolderBar: View {
                 } else if let error = store.foldersError {
                     ActionRow(title: error, button: "Try again", action: store.retryFolders)
                 } else {
-                    ChatFlowRow(spacing: 8) {
-                        folderChip("All meetings", selected: store.folderId == nil) {
-                            store.choose(folder: nil)
-                        }
-                        ForEach(store.folders) { folder in
-                            folderChip("\(folder.name) · \(folder.meetingCount)", selected: store.folderId == folder.folderId) {
-                                store.choose(folder: folder.folderId)
-                            }
-                        }
-                    }
-                    .padding(16)
-                    if store.folders.isEmpty {
-                        CardLine("No folders yet. Create one, then add meetings from their menus.")
-                    }
                     if let folder = store.chosenFolder {
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
@@ -307,12 +314,11 @@ struct MeetingsFolderBar: View {
         Button(action: action) {
             Text(title)
                 .font(TypeScale.label(13))
-                .foregroundStyle(selected ? Theme.accent : Theme.inkSecondary)
+                .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
                 .lineLimit(1)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(selected ? Theme.accentSoft : Theme.surface, in: Capsule())
-                .overlay(Capsule().strokeBorder(selected ? Theme.accent : Theme.border, lineWidth: 1))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(selected ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -541,7 +547,7 @@ struct MeetingsFeed: View {
     @State private var pendingDelete: MeetingHistorySummary?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
+        VStack(alignment: .leading, spacing: 16) {
             if store.loading, store.entries.isEmpty {
                 MeetingsSkeleton()
             } else if store.entries.isEmpty {
@@ -600,11 +606,11 @@ struct MeetingsRow: View {
 
     var body: some View {
         CardRow(action: open) {
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
                 Text(entry.date.time)
                     .font(TypeScale.mono(12))
                     .foregroundStyle(Theme.inkTertiary)
-                    .frame(width: 62, alignment: .leading)
+                    .frame(width: 52, alignment: .leading)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(entry.title).headlineText()
                     if let headline = entry.headlineText {
@@ -626,7 +632,7 @@ struct MeetingsRow: View {
                 }
             }
         } trailing: {
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 if let duration = entry.durationShort {
                     Text(duration).font(TypeScale.mono(12)).foregroundStyle(Theme.inkSecondary)
                 }
@@ -650,6 +656,7 @@ struct MeetingsRow: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
+                .accessibilityLabel("Options for \(entry.title)")
             }
         }
     }
@@ -693,7 +700,7 @@ struct MeetingsPager: View {
                     .buttonStyle(SecondaryButton(compact: true))
                     .disabled(!store.hasMore)
             }
-            .padding(.top, 28)
+            .padding(.top, 16)
         }
     }
 }

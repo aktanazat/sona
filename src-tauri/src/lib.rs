@@ -29,8 +29,8 @@ mod identity_adoption;
 mod input;
 mod integrations;
 mod launch_trace;
-mod local_cleanup;
 mod llm_client;
+mod local_cleanup;
 mod managers;
 pub mod meeting;
 #[cfg(target_os = "macos")]
@@ -60,8 +60,6 @@ mod tray_i18n;
 mod utils;
 
 pub use cli::CliArgs;
-#[cfg(debug_assertions)]
-use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, collect_events, Builder};
 
 use clap::Parser;
@@ -79,7 +77,7 @@ use meeting::types::{
 };
 use recorder::ScreenRecorderManager;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 pub use transcription_coordinator::TranscriptionCoordinator;
 
@@ -88,36 +86,11 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_log::{Builder as LogBuilder, RotationStrategy, Target, TargetKind};
 
-use crate::settings::{get_settings, AppearanceMaterial};
-
-/// The window's material, applied before the first paint so the shell never
-/// flashes the wrong one. This writes the *intent*; `apply_window_material`
-/// corrects it to Solid while the window is still hidden if the native
-/// vibrancy view could not be applied. Off macOS the intent is always Solid,
-/// since vibrancy is the only thing that backs Glass.
-fn main_window_material_init(material: AppearanceMaterial) -> String {
-    let effective = if cfg!(target_os = "macos") {
-        material
-    } else {
-        AppearanceMaterial::Solid
-    };
-    format!(
-        "document.documentElement.dataset.material = '{}';",
-        effective.as_str()
-    )
-}
+use crate::settings::get_settings;
 
 // Global atomic to store the file log level filter
 // We use u8 to store the log::LevelFilter as a number
 pub static FILE_LOG_LEVEL: AtomicU8 = AtomicU8::new(4);
-
-/// When `true`, log records are also forwarded to the webview via the
-/// `log://log` event for the debug panel's live log viewer. Gated on debug
-/// mode — the live log viewer is its only consumer and only exists in debug
-/// mode — so normal runs never broadcast log records (which can include file
-/// paths or transcribed text) onto the frontend event bus. Synced at startup
-/// and whenever debug mode is toggled (see `shortcut::change_debug_mode_setting`).
-pub static WEBVIEW_LOG_STREAMING: AtomicBool = AtomicBool::new(false);
 
 fn level_filter_from_u8(value: u8) -> log::LevelFilter {
     match value {
@@ -163,51 +136,11 @@ fn build_console_filter() -> env_filter::Filter {
     builder.build()
 }
 
-fn activate_main_window<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    main_window: &tauri::WebviewWindow<R>,
-) {
-    // The paint handoff is asynchronous; respect a minimize that won the race.
-    if main_window.is_minimized().is_ok_and(|minimized| minimized) {
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    match app.set_activation_policy(tauri::ActivationPolicy::Regular) {
-        Ok(()) => launch_trace::mark_window_promotion(),
-        Err(error) => log::error!("Failed to set activation policy to Regular: {error}"),
-    }
-    if let Err(error) = main_window.set_focus() {
-        log::error!("Failed to focus webview window: {error}");
-    }
-}
-
+/// Ask the native app that owns this core to reveal its main window.
 pub(crate) fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(main_window) = app.get_webview_window("main") {
-        if let Err(error) = main_window.unminimize() {
-            log::error!("Failed to unminimize webview window: {error}");
-        }
-        if let Err(error) = main_window.show() {
-            log::error!("Failed to show webview window: {error}");
-        } else {
-            launch_trace::mark_shell_shown();
-            if let Err(error) = app.emit(launch_trace::SHELL_VISIBLE_EVENT, ()) {
-                log::error!("Failed to report visible launch shell: {error}");
-            }
-        }
-        // During launch the webview owns the handoff: it reports a composited
-        // frame, then the listener in setup activates and focuses this window.
-        // Later reveals focus immediately because that first frame already ran.
-        if launch_trace::first_visible_frame_recorded() {
-            activate_main_window(app, &main_window);
-        }
-        return;
+    if let Err(error) = app.emit("show-main-window", ()) {
+        log::error!("Failed to ask the native app to show its window: {error}");
     }
-
-    let webview_labels = app.webview_windows().keys().cloned().collect::<Vec<_>>();
-    log::error!(
-        "Main window not found. Webview labels: {:?}",
-        webview_labels
-    );
 }
 pub(crate) fn show_meeting_destination(
     app: &AppHandle,
@@ -654,37 +587,9 @@ where
     true
 }
 
-#[allow(unused_variables)]
-fn should_force_show_permissions_window(app: &AppHandle) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        let model_manager = app.state::<Arc<ModelManager>>();
-        let has_downloaded_models = model_manager
-            .get_available_models()
-            .iter()
-            .any(|model| model.is_downloaded);
-
-        if !has_downloaded_models {
-            return false;
-        }
-
-        let status = commands::audio::get_windows_microphone_permission_status();
-        if status.supported && status.overall_access == commands::audio::PermissionAccess::Denied {
-            log::info!(
-                "Windows microphone permissions are denied; forcing main window visible for onboarding"
-            );
-            return true;
-        }
-    }
-
-    false
-}
-
 fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> anyhow::Result<()> {
-    // Note: Enigo (keyboard/mouse simulation) is NOT initialized here.
-    // The frontend is responsible for calling the `initialize_enigo` command
-    // after onboarding completes. This avoids triggering permission dialogs
-    // on macOS before the user is ready.
+    // The native app initializes input delivery only after onboarding and
+    // permission confirmation, so manager startup never prompts for it.
 
     // Initialize the managers. The audio recorder receives the streaming router
     // explicitly, so always-on microphone startup can wire live-preview frames
@@ -699,17 +604,6 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
         transcription_manager.stream_router(),
     )?);
     let history_manager = Arc::new(HistoryManager::new(app_handle)?);
-    // The configured asset scope is empty, so the webview may read exactly one
-    // directory: the recordings this app wrote. The grant happens here because
-    // only the manager knows the portable-aware data directory, which does not
-    // always match the `$APPDATA` the capability files can name. Non-recursive:
-    // recordings are flat files.
-    if let Err(error) = app_handle
-        .asset_protocol_scope()
-        .allow_directory(history_manager.recordings_dir(), false)
-    {
-        log::error!("History audio playback is unavailable: {error}");
-    }
     let media_import_manager = Arc::new(MediaImportManager::new(
         app_handle,
         transcription_manager.clone(),
@@ -745,7 +639,9 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
 
     // Add managers to Tauri's managed state
     app_handle.manage(recording_manager.clone());
-    app_handle.manage(Arc::new(commands::onboarding::OnboardingPracticeManager::default()));
+    app_handle.manage(Arc::new(
+        commands::onboarding::OnboardingPracticeManager::default(),
+    ));
     #[cfg(target_os = "macos")]
     app_handle.manage(chat_voice::VoiceManager::new(
         app_handle,
@@ -765,8 +661,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     );
     app_handle.manage(snapshot_service);
     app_handle.manage(Arc::clone(&cloud_runtime));
-    // The startup orchestrator calls this only after the launch shell's DOM
-    // paint. Recovery can now open the keyring and sweep without occupying it.
+    // Recovery runs asynchronously after the managers have been registered.
     let recovery_meetings = Arc::clone(&meeting_manager);
     let recovery_cloud = Arc::clone(&cloud_runtime);
     tauri::async_runtime::spawn(async move {
@@ -821,10 +716,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
         recording_manager.self_input_device_lease(),
     );
 
-    // Note: Shortcuts are NOT initialized here.
-    // The frontend is responsible for calling the `initialize_shortcuts` command
-    // after permissions are confirmed (on macOS) or after onboarding completes.
-    // This matches the pattern used for Enigo initialization.
+    // The native app initializes shortcuts after permissions are confirmed.
 
     // Set up signal handlers for toggling transcription. On Linux, SIGUSR1 is
     // deliberately not handled — it belongs to WebKitGTK's garbage collector
@@ -832,14 +724,6 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     #[cfg(unix)]
     signal_handle::setup_signal_handler(app_handle.clone());
 
-    // Apply macOS Accessory policy if starting hidden and tray is available.
-    // If the tray icon is disabled, keep the dock icon so the user can reopen.
-    #[cfg(target_os = "macos")]
-    {
-        if runtime.starts_hidden && runtime.tray_available {
-            let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
-        }
-    }
     // Get the current theme to set the appropriate initial icon
     let initial_theme = tray::get_current_theme(app_handle);
 
@@ -1078,38 +962,6 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     Ok(())
 }
 
-/// Create the always-hidden recording overlay window and wire its native mode
-/// menu, then show the idle pill if it is enabled.
-///
-/// Called after the main window is shown: this builds a second webview, which
-/// measured ~43 ms of main-thread time, and every consumer of the overlay
-/// (dictation shortcuts, tray, HUD commands, media import) is reachable only
-/// once the event loop is dispatching, which cannot happen before `setup`
-/// returns. So the overlay is always in place before anything can look for it,
-/// while the main window's first paint no longer queues behind it.
-fn initialize_recording_overlay(app_handle: &AppHandle) {
-    utils::create_recording_overlay(app_handle);
-    // The idle pill lives in that same window. Its mode menu is a real OS menu,
-    // so its selections arrive as menu events rather than through the webview.
-    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
-        overlay_window.on_menu_event(|window, event| {
-            let Some(mode_id) = event
-                .id()
-                .as_ref()
-                .strip_prefix(commands::hud::HUD_MODE_MENU_PREFIX)
-            else {
-                return;
-            };
-            if let Err(error) =
-                modes::set_active_mode(window.app_handle().clone(), mode_id.to_string())
-            {
-                log::warn!("HUD mode menu could not switch mode: {error}");
-            }
-        });
-    }
-    overlay::sync_hud_pill(app_handle);
-}
-
 #[tauri::command]
 #[specta::specta]
 fn show_main_window_command(app: AppHandle) -> Result<(), String> {
@@ -1141,8 +993,8 @@ fn is_headless_mode(args: &CliArgs) -> bool {
         || query::external::is_external_query(args)
 }
 
-/// macOS's plugin singleton is keyed by bundle identifier, not the data root.
-/// A portable GUI instead owns its adjacent Data directory with an OS lock.
+/// A portable core owns its adjacent Data directory instead of the
+/// bundle-wide listener used by installed CLI remote controls.
 const fn uses_bundle_single_instance(portable: bool) -> bool {
     !cfg!(target_os = "macos") || !portable
 }
@@ -1150,43 +1002,14 @@ const fn uses_bundle_single_instance(portable: bool) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StartupRuntime {
     log_level: settings::LogLevel,
-    debug_mode: bool,
-    starts_hidden: bool,
     tray_available: bool,
-    show_window_before_core: bool,
 }
 
 fn tray_is_available(settings: &settings::AppSettings, cli_args: &CliArgs) -> bool {
     settings.show_tray_icon && !cli_args.no_tray
 }
 
-/// What a close of the main window means.
-///
-/// A tray icon is the way back in, so the window hides. Without one there is no
-/// way back, and closing the window does not end the process either: the
-/// recording overlay and, on macOS, the consent panel stay alive and hidden, so
-/// wry never reports an empty window map. The process would keep holding global
-/// shortcuts with no surface left that can stop a recording, so this close ends
-/// the process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MainWindowCloseAction {
-    Hide,
-    Exit,
-}
-
-fn main_window_close_action(
-    settings: &settings::AppSettings,
-    cli_args: &CliArgs,
-) -> MainWindowCloseAction {
-    if tray_is_available(settings, cli_args) {
-        MainWindowCloseAction::Hide
-    } else {
-        MainWindowCloseAction::Exit
-    }
-}
-
 fn startup_runtime(settings: &settings::AppSettings, cli_args: &CliArgs) -> StartupRuntime {
-    let starts_hidden = settings.start_hidden || cli_args.start_hidden;
     let tray_available = tray_is_available(settings, cli_args);
 
     StartupRuntime {
@@ -1195,10 +1018,7 @@ fn startup_runtime(settings: &settings::AppSettings, cli_args: &CliArgs) -> Star
         } else {
             settings.log_level
         },
-        debug_mode: settings.debug_mode || cli_args.debug,
-        starts_hidden,
         tray_available,
-        show_window_before_core: !starts_hidden || !tray_available,
     }
 }
 
@@ -1566,22 +1386,31 @@ pub fn run(cli_args: CliArgs) {
         return;
     }
 
+    let headless_mode = is_headless_mode(&cli_args);
+    let native_socket = cli_args.native_socket.clone();
+    let remote_control_mode =
+        cli_args.toggle_transcription || cli_args.toggle_post_process || cli_args.cancel;
+    if !headless_mode && native_socket.is_none() && !remote_control_mode {
+        eprintln!(
+            "error: open the native Sona app to use the desktop interface. \
+             This helper serves --native-socket and headless or remote-control commands."
+        );
+        std::process::exit(2);
+    }
+
     let context = tauri::generate_context!();
 
     // Parse console logging directives from RUST_LOG, falling back to info-level logging
     // when the variable is unset
     let console_filter = build_console_filter();
-    let headless_mode = is_headless_mode(&cli_args);
-    // The native shell spawned this process and draws every surface itself,
-    // so the core keeps no webview and answers over the socket instead.
-    let native_socket = cli_args.native_socket.clone();
-    let native_mode = native_socket.is_some();
+    // The native app draws every surface. This process serves its socket or
+    // runs a CLI command without constructing a webview.
 
     // Claim the portable GUI runtime before the logger or any Tauri plugin
     // can write under this root. Headless CLI/MCP commands retain their
     // existing concurrent path; the upstream macOS singleton cannot do this.
     #[cfg(target_os = "macos")]
-    let portable_data_lock = if headless_mode {
+    let portable_data_lock = if headless_mode || remote_control_mode {
         None
     } else {
         match portable::claim_instance_lock() {
@@ -2068,50 +1897,11 @@ pub fn run(cli_args: CliArgs) {
             scratchpad::ScratchpadChangedEvent,
         ]);
 
-    // The export keeps `src/bindings.ts` in step for the webview. A core the
-    // native shell spawned has no webview, and runs from inside the app bundle
-    // where that path does not exist.
-    #[cfg(debug_assertions)]
-    if !native_mode {
-        const BINDINGS_PATH: &str = "../src/bindings.ts";
-        if let Err(error) = specta_builder.export(
-            Typescript::default().bigint(BigIntExportBehavior::Number),
-            BINDINGS_PATH,
-        ) {
-            panic!("Failed to export TypeScript bindings: {error}");
-        }
-        let source = match std::fs::read_to_string(BINDINGS_PATH) {
-            Ok(source) => source,
-            Err(error) => panic!("Failed to read exported TypeScript bindings: {error}"),
-        };
-        let mut normalized = source
-            .lines()
-            .map(str::trim_end)
-            .collect::<Vec<_>>()
-            .join("\n");
-        normalized.push('\n');
-        if let Err(error) = std::fs::write(BINDINGS_PATH, normalized) {
-            panic!("Failed to normalize exported TypeScript bindings: {error}");
-        }
-    }
-
     let invoke_handler = specta_builder.invoke_handler();
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .device_event_filter(tauri::DeviceEventFilter::Always)
-        // Every webview boots from an initialization script that writes the
-        // conservative `solid` material, so each document has to be told the
-        // material actually in force once it loads — otherwise a reload (or the
-        // overlay window being created long after startup) silently drops Glass.
-        .on_page_load(|webview, payload| {
-            if webview.label() == "main"
-                && payload.event() == tauri::webview::PageLoadEvent::Started
-            {
-                launch_trace::mark_webview_navigation_started();
-            }
-            shortcut::reassert_window_material(webview);
-        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             LogBuilder::new()
@@ -2120,18 +1910,9 @@ pub fn run(cli_args: CliArgs) {
                 .rotation_strategy(RotationStrategy::KeepOne)
                 .clear_targets()
                 .targets([
-                    // Console output respects RUST_LOG environment variable. In
-                    // headless mode (--transcribe-file/--list-devices/--list-models)
-                    // stdout carries only the result (JSON or plain), so send console
-                    // logs to stderr instead to keep stdout clean for CI parsing.
-                    // The native shell's core is a child process and logs the
-                    // same way.
-                    Target::new(if headless_mode || native_mode {
-                        TargetKind::Stderr
-                    } else {
-                        TargetKind::Stdout
-                    })
-                    .filter({
+                    // CLI stdout carries only its result. The native core is
+                    // a child process and sends diagnostics to stderr too.
+                    Target::new(TargetKind::Stderr).filter({
                         let console_filter = console_filter.clone();
                         move |metadata| console_filter.enabled(metadata)
                     }),
@@ -2169,15 +1950,6 @@ pub fn run(cli_args: CliArgs) {
                             metadata.level() <= level_filter_from_u8(file_level)
                         }
                     }),
-                    // Stream logs to the webview (via the `log://log` event) so the
-                    // debug panel's live log viewer can show them in real time. Only
-                    // active while debug mode is on (its sole consumer), and shares the
-                    // file log level so the "Log Level" setting controls verbosity.
-                    Target::new(TargetKind::Webview).filter(|metadata| {
-                        WEBVIEW_LOG_STREAMING.load(Ordering::Relaxed)
-                            && metadata.level()
-                                <= level_filter_from_u8(FILE_LOG_LEVEL.load(Ordering::Relaxed))
-                    }),
                 ])
                 .build(),
         );
@@ -2195,13 +1967,9 @@ pub fn run(cli_args: CliArgs) {
         ));
     }
 
-    // Single-instance forwards CLI args to an already-running Sona and exits.
-    // That would make the headless path
-    // (--transcribe-file/--list-devices/--list-models) a silent no-op whenever the
-    // app is already open, so skip it in headless mode and run a standalone
-    // instance instead. The native shell's core is owned by the shell that
-    // spawned it, so it never hands itself to another instance either.
-    if !headless_mode && !native_mode && uses_bundle_single_instance(portable::is_portable()) {
+    // The native-owned core listens for the public remote-control flags.
+    // Headless queries and transcription run independently of that listener.
+    if !headless_mode && uses_bundle_single_instance(portable::is_portable()) {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             // Windows and Linux deliver a registered protocol URL as argv, and
             // `opened_audio_files` is the variadic positional, so every
@@ -2269,12 +2037,10 @@ pub fn run(cli_args: CliArgs) {
                         // (e.g. the binary run from a shell). On macOS, relaunching the
                         // bundle from Spotlight/Finder/Dock does not start a process —
                         // it arrives as RunEvent::Reopen below — but treat this the
-                        // same way: raise the window and recreate a possibly vanished
-                        // tray icon (#1948).
-                        #[cfg(target_os = "macos")]
-                        tray::recreate_tray_icon(app);
+                        // same way: ask the native app to reveal its window.
                         show_main_window(app);
-                        "raised the window and recreated the tray icon"
+                        tray::recreate_tray_icon(app);
+                        "asked the native app to reveal its window"
                     }
                 }
             };
@@ -2293,6 +2059,11 @@ pub fn run(cli_args: CliArgs) {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(cli_args.clone())
         .setup(move |app| {
+            // A control invocation reaches setup only if the singleton plugin
+            // found no running core. Do not start a second, invisible engine.
+            if !headless_mode && native_socket.is_none() {
+                return Err("Sona is not running. Open the native Sona app first.".into());
+            }
             {
                 let _span = launch_trace::span("migrations");
                 identity_adoption::adopt_before_startup(app.handle())?;
@@ -2378,93 +2149,15 @@ pub fn run(cli_args: CliArgs) {
                 return Ok(());
             }
 
-            let paint_app = app.handle().clone();
-            app.listen(launch_trace::FIRST_DOM_PAINT_EVENT, move |event| {
-                match serde_json::from_str::<f64>(event.payload()) {
-                    Ok(epoch_ms) => launch_trace::mark_first_dom_paint(epoch_ms),
-                    Err(error) => log::warn!("Invalid first DOM paint mark: {error}"),
-                }
-                if launch_trace::shell_shown() {
-                    let _ = paint_app.emit(launch_trace::SHELL_VISIBLE_EVENT, ());
-                }
-            });
-            let activation_app = app.handle().clone();
-            app.listen(launch_trace::FIRST_VISIBLE_FRAME_EVENT, move |event| {
-                let epoch_ms = match serde_json::from_str::<f64>(event.payload()) {
-                    Ok(epoch_ms) => epoch_ms,
-                    Err(error) => {
-                        log::warn!("Invalid first visible frame mark: {error}");
-                        return;
-                    }
-                };
-                launch_trace::mark_first_visible_frame(epoch_ms);
-                if let Some(main_window) = activation_app.get_webview_window("main") {
-                    activate_main_window(&activation_app, &main_window);
-                }
-            });
-
             let settings = get_settings(app.handle());
-            // Keep the first window non-activating until the webview reports a
-            // composited frame. This prevents macOS from focusing empty chrome.
-            // The native shell's core stays here for good: the shell owns the
-            // Dock tile, and a second one would be a bug.
+            // The native app owns the Dock tile and all application windows.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             modes::refresh_clipboard_context_watcher(&settings);
 
-            // The chat panel serves both shells: a native Chat page asks it
-            // for status on its first paint, and `state()` on an unmanaged
-            // type is a panic, not an error.
+            // Native chat requests may arrive as soon as the socket is bound.
             app.manage(agent_panel::AgentPanelManager::new(app.handle()));
-
-            if !native_mode {
-                // Create main window programmatically so we can set data_directory
-                // for portable mode (redirects WebView2 cache to portable Data dir)
-                let mut win_builder = tauri::WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    tauri::WebviewUrl::App("/".into()),
-                )
-                .title("Sona")
-                .inner_size(900.0, 800.0)
-                .min_inner_size(900.0, 800.0)
-                .resizable(true)
-                .maximizable(true)
-                .minimizable(true)
-                .fullscreen(false)
-                .visible(false);
-
-                if let Some(data_dir) = portable::data_dir() {
-                    win_builder = win_builder.data_directory(data_dir.join("webview"));
-                }
-
-                #[cfg(target_os = "macos")]
-                {
-                    win_builder = win_builder
-                        .transparent(true)
-                        .title_bar_style(tauri::TitleBarStyle::Overlay)
-                        .hidden_title(true);
-                }
-
-                win_builder = win_builder
-                    .initialization_script(main_window_material_init(settings.appearance_material));
-                let _main_window = win_builder.build()?;
-                launch_trace::mark_native_window_created();
-
-                // Glass is opt-in now, so vibrancy is applied only when the setting
-                // asks for it. This also corrects the initialization script above if
-                // the native view could not be applied — still before the window is
-                // shown, so a failed apply costs a log line and nothing visible.
-                shortcut::apply_window_material(app.handle(), settings.appearance_material);
-
-                // Apply the persisted appearance theme to the native title bar before
-                // the window is shown, so it matches the in-app palette without a flash
-                // of the wrong theme. See `apply_window_theme` for what this does per
-                // platform.
-                #[cfg(any(target_os = "windows", target_os = "macos"))]
-                shortcut::apply_window_theme(app.handle(), settings.theme);
-            }
 
             let runtime = startup_runtime(&settings, &cli_args);
             let tauri_log_level: tauri_plugin_log::LogLevel = runtime.log_level.into();
@@ -2474,19 +2167,8 @@ pub fn run(cli_args: CliArgs) {
                 level_filter_code(file_log_level.to_level_filter()),
                 Ordering::Relaxed,
             );
-            // Only forward logs to the webview while debug mode is on (the live log
-            // viewer is the sole consumer and only exists in debug mode).
-            WEBVIEW_LOG_STREAMING.store(runtime.debug_mode, Ordering::Relaxed);
             let app_handle = app.handle().clone();
             app.manage(TranscriptionCoordinator::new(app_handle.clone()));
-            // Reveal the styled launch shell first. Its DOM-paint event below
-            // releases manager construction, including catalog and HF scans.
-            // The native shell draws its own launch surface, so there is no
-            // paint to wait for and startup completes here in `setup`.
-            let shell_shown_before_startup = !native_mode && runtime.show_window_before_core;
-            if shell_shown_before_startup {
-                show_main_window(&app_handle);
-            }
 
             let startup_app = app_handle.clone();
             let complete_startup = move || {
@@ -2514,7 +2196,7 @@ pub fn run(cli_args: CliArgs) {
                     dispatch_deep_link(&startup_app, address);
                 }
 
-                let opened_audio_queued = enqueue_opened_paths(
+                let _ = enqueue_opened_paths(
                     &startup_app,
                     initial_opened_audio_paths(&cli_args.opened_audio_files),
                 );
@@ -2534,9 +2216,7 @@ pub fn run(cli_args: CliArgs) {
                 // Secure Input monitor (macOS): detects stuck secure input that
                 // silently blocks keyed shortcuts and activates the Carbon fallback.
                 secure_input::init(&startup_app);
-                // The native shell draws the meter too, and hides it under
-                // `None` like the webview overlay does, so the same gate
-                // decides whether levels are worth emitting in both modes.
+                // The native recording meter uses the same level-event gate.
                 overlay::update_overlay_enabled_cache(
                     settings.overlay_style != settings::OverlayStyle::None,
                 );
@@ -2552,34 +2232,7 @@ pub fn run(cli_args: CliArgs) {
                     }
                 });
 
-                let should_force_show = should_force_show_permissions_window(&startup_app);
-                if !shell_shown_before_startup
-                    && !native_mode
-                    && (should_force_show || opened_audio_queued)
-                {
-                    show_main_window(&startup_app);
-                }
-
-                // The overlay and the consent panel are webviews; the native
-                // shell draws both itself.
-                if !native_mode {
-                    let ready_app = startup_app.clone();
-                    if let Err(error) = startup_app.run_on_main_thread(move || {
-                        initialize_recording_overlay(&ready_app);
-                        meeting::consent_panel::create(&ready_app);
-                        if let Err(error) = ready_app.emit(launch_trace::BACKEND_READY_EVENT, ()) {
-                            log::error!("Failed to release the launch shell: {error}");
-                            ready_app.exit(1);
-                        }
-                    }) {
-                        log::error!("Failed to schedule launch completion: {error}");
-                        startup_app.exit(1);
-                        return;
-                    }
-                }
-
-                // Keyring work starts only after the shell paint that triggered
-                // this callback, so an OS prompt always has an owning surface.
+                // Storage unlock stays off the main thread.
                 let unlock_history = Arc::clone(&startup_app.state::<Arc<HistoryManager>>());
                 let unlock_secrets = secret_manager.clone();
                 tauri::async_runtime::spawn(async move {
@@ -2599,8 +2252,8 @@ pub fn run(cli_args: CliArgs) {
                     // function on the read path, which is how the headless corpus
                     // verbs open the database, so a sweep inside it would make
                     // `sona --query` delete recordings while `cli.rs` promises
-                    // those verbs only read. This callback belongs to a process
-                    // that has a window, and it runs after the paint.
+                    // those verbs only read. The native app owns this recording
+                    // core, so this is the once-per-launch write path.
                     //
                     // Once per launch, deliberately. A timer would be a second
                     // source of truth about when deletion happens.
@@ -2609,60 +2262,9 @@ pub fn run(cli_args: CliArgs) {
                     }
                 });
             };
-            if native_mode {
-                complete_startup();
-            } else {
-                app_handle.once(launch_trace::FIRST_DOM_PAINT_EVENT, move |_| {
-                    complete_startup()
-                });
-            }
+            complete_startup();
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            let label = window.label();
-            match event {
-                tauri::WindowEvent::Focused(true) if label == "main" => {
-                    launch_trace::mark_window_focus();
-                }
-                tauri::WindowEvent::CloseRequested { api, .. } if label == "main" => {
-                    let settings = get_settings(window.app_handle());
-                    let cli_args = window.app_handle().state::<CliArgs>();
-                    if main_window_close_action(&settings, &cli_args) == MainWindowCloseAction::Exit
-                    {
-                        window.app_handle().exit(0);
-                        return;
-                    }
-
-                    api.prevent_close();
-                    let _ = window.hide();
-
-                    #[cfg(target_os = "macos")]
-                    if let Err(error) = window
-                        .app_handle()
-                        .set_activation_policy(tauri::ActivationPolicy::Accessory)
-                    {
-                        log::error!("Failed to set activation policy: {error}");
-                    }
-                }
-                tauri::WindowEvent::Destroyed if label == "main" => {
-                    /* The surface the chat sheet lives in is gone. Nothing is
-                     * left to read an answer, so the poll loop stops with it —
-                     * the relay job is cancelled at shutdown, not here, because
-                     * the app can outlive its window. */
-                    if let Some(panel) = window
-                        .app_handle()
-                        .try_state::<agent_panel::AgentPanelManager>()
-                    {
-                        panel.stop_polling();
-                    }
-                }
-                tauri::WindowEvent::ThemeChanged(theme) if label == "main" => {
-                    log::info!("Theme changed to: {theme:?}");
-                    utils::refresh_tray_icon(window.app_handle());
-                }
-                _ => {}
-            }
         })
         .invoke_handler(invoke_handler)
         .build(context)
@@ -2670,7 +2272,7 @@ pub fn run(cli_args: CliArgs) {
         Ok(app) => app,
         Err(error) => {
             eprintln!("error: failed to build Tauri application: {error}");
-            return;
+            std::process::exit(1);
         }
     };
     app.run(|app, event| match &event {
@@ -2692,19 +2294,7 @@ pub fn run(cli_args: CliArgs) {
         }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => {
-            // Fired when the already-running bundle is launched again from
-            // Spotlight/Finder or the Dock icon is clicked. If the settings
-            // window is hidden, the user is likely looking for a tray icon
-            // that vanished (#1948): recreate it. When the window is
-            // already visible this is just a focus request and the tray is
-            // left alone.
-            let window_visible = app
-                .get_webview_window("main")
-                .and_then(|w| w.is_visible().ok())
-                .unwrap_or(false);
-            if !window_visible {
-                tray::recreate_tray_icon(app);
-            }
+            tray::recreate_tray_icon(app);
             show_main_window(app);
         }
         // Teardown transcribe.cpp before exit
@@ -2776,76 +2366,10 @@ mod portable_lock_refusal_tests {
 
 #[cfg(test)]
 mod startup_runtime_tests {
-    use super::{main_window_close_action, startup_runtime, MainWindowCloseAction};
+    use super::startup_runtime;
     use crate::cli::CliArgs;
     use crate::settings::{get_default_settings, LogLevel};
     use clap::Parser;
-
-    #[test]
-    fn start_hidden_keeps_the_shell_hidden_while_the_tray_is_available() {
-        let settings = get_default_settings();
-        let cli_args =
-            CliArgs::try_parse_from(["sona", "--start-hidden"]).expect("parse --start-hidden");
-
-        let runtime = startup_runtime(&settings, &cli_args);
-
-        assert!(runtime.starts_hidden);
-        assert!(runtime.tray_available);
-        assert!(!runtime.show_window_before_core);
-        assert_eq!(
-            main_window_close_action(&settings, &cli_args),
-            MainWindowCloseAction::Hide
-        );
-    }
-
-    #[test]
-    fn no_tray_forces_a_visible_shell_when_start_hidden_would_hide_it() {
-        let mut settings = get_default_settings();
-        settings.start_hidden = true;
-        let cli_args = CliArgs::try_parse_from(["sona", "--no-tray"]).expect("parse --no-tray");
-
-        let runtime = startup_runtime(&settings, &cli_args);
-
-        assert!(!runtime.tray_available);
-        assert!(runtime.show_window_before_core);
-        assert_eq!(
-            main_window_close_action(&settings, &cli_args),
-            MainWindowCloseAction::Exit
-        );
-    }
-
-    /// Every route that leaves no tray icon ends the process on close, not just
-    /// the flag: `show_tray_icon` is user-togglable at runtime, and a hidden
-    /// overlay window keeps the process alive after the main window is gone.
-    #[test]
-    fn a_close_with_no_tray_to_reopen_from_ends_the_process() {
-        let cases = [(true, false), (false, false), (true, true), (false, true)].map(
-            |(show_tray_icon, no_tray)| {
-                let mut settings = get_default_settings();
-                settings.show_tray_icon = show_tray_icon;
-                let cli_args = if no_tray {
-                    CliArgs::try_parse_from(["sona", "--no-tray"]).expect("parse --no-tray")
-                } else {
-                    CliArgs::try_parse_from(["sona"]).expect("parse a bare launch")
-                };
-
-                (
-                    (show_tray_icon, no_tray),
-                    main_window_close_action(&settings, &cli_args),
-                )
-            },
-        );
-
-        assert_eq!(
-            cases,
-            [
-                ((true, false), MainWindowCloseAction::Hide),
-                ((false, false), MainWindowCloseAction::Exit),
-                ((true, true), MainWindowCloseAction::Exit),
-                ((false, true), MainWindowCloseAction::Exit),
-            ]
-        );
-    }
 
     #[test]
     fn debug_enables_trace_for_this_launch_without_persisting_debug_settings() {
@@ -2857,7 +2381,6 @@ mod startup_runtime_tests {
 
         let runtime = startup_runtime(&settings, &cli_args);
 
-        assert!(runtime.debug_mode);
         assert_eq!(runtime.log_level, LogLevel::Trace);
         assert_eq!(
             (settings.debug_mode, settings.log_level),
@@ -2930,7 +2453,7 @@ mod headless_guard_tests {
     }
 
     #[test]
-    fn treats_list_models_as_headless_before_binding_export() {
+    fn treats_list_models_as_headless_before_native_startup() {
         let args = CliArgs {
             list_models: true,
             ..Default::default()
@@ -3124,7 +2647,6 @@ mod opened_audio_tests {
             "only the file is a file"
         );
     }
-
 
     /// A cold start is the ingress with no router in front of the funnel.
     ///

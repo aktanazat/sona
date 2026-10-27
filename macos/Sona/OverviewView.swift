@@ -72,7 +72,7 @@ struct CaptureModeChipView: View {
                     Text("switching is off while a dictation is running").metaText()
                 }
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, 16)
         }
     }
 }
@@ -165,7 +165,7 @@ struct OverviewNeedsYou: View {
             // The suggestions and the update check answer on their own clock,
             // so an empty page is not yet the claim this sentence makes.
             if store.suggestions != nil, store.updateChecked {
-                Text("Nothing needs you.").metaText().padding(.bottom, 32)
+                Text("Nothing needs you.").metaText().padding(.bottom, 20)
             }
         } else {
             PageSection("Needs you") {
@@ -417,7 +417,6 @@ struct ActivityBandView: View {
             OverviewDisclosure("This week", fact: ActivityBandView.fact(trend)) {
                 ActivityBandBody(trend: trend, meetings: store.meetings, page: $page)
             }
-            .padding(.bottom, 32)
         }
     }
 
@@ -449,7 +448,7 @@ private struct ActivityBandBody: View {
         let points = Array(window.points)
         let labels = points.map { ActivityDates.narrowWeekday($0.localDate) }
 
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             ActivityPager(
                 caption: ActivityDates.range(points),
                 canGoBack: window.start > 0,
@@ -457,7 +456,7 @@ private struct ActivityBandBody: View {
                 back: { page += 1 },
                 forward: { page = max(0, page - 1) }
             )
-            HStack(alignment: .top, spacing: 24) {
+            HStack(alignment: .top, spacing: 16) {
                 ActivityMeasure("Dictations") {
                     ActivityBars(values: points.map(\.recordings), labels: labels)
                 }
@@ -474,7 +473,7 @@ private struct ActivityBandBody: View {
                 }
             }
         }
-        .padding(20)
+        .padding(12)
     }
 
     /// The meeting trend joined onto the days the dictation charts are
@@ -809,7 +808,6 @@ struct UsageStatsView: View {
             )
             .disabled(model.settings.isBusy("count_words_per_app"))
         }
-        .padding(.bottom, 32)
     }
 
     private var fact: String? {
@@ -830,7 +828,7 @@ private struct UsageTiles: View {
 
     var body: some View {
         CardRow {
-            HStack(alignment: .top, spacing: 40) {
+            HStack(alignment: .top, spacing: 16) {
                 Stat(label: "Words", value: stats.totalWords.formatted())
                 Stat(label: "Words a minute", value: stats.wordsPerMinuteDictations > 0 ? "\(stats.wordsPerMinute)" : "–")
                 Stat(label: "Time saved", value: stats.timeSaved)
@@ -851,9 +849,9 @@ private struct UsageAppsList: View {
 
     var body: some View {
         if !counting {
-            CardLine("Words aren't counted per app. Turn it on below and the next dictation starts the list.")
+            CardLine("Word counts per app are off.")
         } else if apps.isEmpty {
-            CardLine("No app recorded yet. The next dictation starts the list.")
+            CardLine("No app totals yet.")
         } else {
             ForEach(apps) { row in
                 UsageAppRowView(row: row)
@@ -909,7 +907,7 @@ struct FeedRecentView: View {
             case .loaded:
                 if entries.isEmpty {
                     CardRow {
-                        Text("People, words and follow-ups Sona files after a meeting show up here.").metaText()
+                        Text("No recent activity.").metaText()
                     }
                 } else {
                     ForEach(entries) { receipt in
@@ -981,7 +979,7 @@ struct OverviewDisclosure<Content: View>: View {
     }
 
     var body: some View {
-        Card {
+        VStack(alignment: .leading, spacing: 0) {
             CardRow(action: { open.toggle() }) {
                 HStack(spacing: 10) {
                     Image(systemName: "chevron.right")
@@ -992,7 +990,7 @@ struct OverviewDisclosure<Content: View>: View {
                 }
             } trailing: {
                 if let fact {
-                    Text(fact).metaText()
+                    Text(fact).metaText().multilineTextAlignment(.trailing)
                 }
             }
             if open {

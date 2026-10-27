@@ -10,11 +10,11 @@ struct CaptureScreen: View {
         Page {
             SecureInputBanner(store: model.secureInput)
             PermissionsNotice(store: model.onboarding.permissions)
-            hero.padding(.bottom, 32)
+            hero.padding(.bottom, 20)
             if let notice = model.notice {
                 Card {
                     CardRow {
-                        Text(notice.text).bodyText(15, Theme.inkSecondary)
+                        Text(notice.text).bodyText(14, Theme.inkSecondary)
                     } trailing: {
                         HStack(spacing: 12) {
                             if let id = notice.dictation {
@@ -33,15 +33,15 @@ struct CaptureScreen: View {
                         }
                     }
                 }
-                .padding(.bottom, 32)
+                .padding(.bottom, 20)
             }
             if let error = model.coreError {
                 Card {
                     CardRow {
-                        Text(error).bodyText(15, Theme.inkSecondary)
+                        Text(error).bodyText(14, Theme.inkSecondary)
                     }
                 }
-                .padding(.bottom, 32)
+                .padding(.bottom, 20)
             }
             OverviewView(
                 store: model.overview,
@@ -51,10 +51,9 @@ struct CaptureScreen: View {
         }
     }
 
-    /// The "Ready" card: one big word, the chord, one action.
     private var hero: some View {
         Card {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     switch model.capture {
                     case .idle:
@@ -79,7 +78,7 @@ struct CaptureScreen: View {
                         .accessibilityLabel("Change recording shortcut")
                         .help("Change recording shortcut")
                     }
-                    Text(hint).bodyText(15, Theme.inkSecondary)
+                    Text(hint).bodyText(14, Theme.inkSecondary)
                 }
                 if !model.liveText.isEmpty, model.capture != .idle {
                     Text(model.liveText)
@@ -87,7 +86,7 @@ struct CaptureScreen: View {
                         .lineLimit(3)
                         .frame(maxWidth: 640, alignment: .leading)
                 }
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     switch model.capture {
                     case .idle:
                         Button {
@@ -127,9 +126,10 @@ struct CaptureScreen: View {
                         Button("Cancel") { model.cancelCapture() }.buttonStyle(.secondary)
                     }
                 }
-                .padding(.top, 6)
+                .padding(.top, 4)
             }
-            .padding(24)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 16)
         }
     }
 

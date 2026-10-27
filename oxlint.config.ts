@@ -11,11 +11,6 @@ export default {
     ".pi/**",
     ".roo/**",
     ".windsurf/**",
-    // tauri-specta rewrites this file on every debug build, so no fix a
-    // person makes here survives; .prettierignore skips it for the same
-    // reason. Its generated catch blocks and event proxy were the only
-    // findings these rules had ever recorded, and none of them were ours.
-    "src/bindings.ts",
     "tools/oxlint/anti-slop/**",
   ],
   jsPlugins: [

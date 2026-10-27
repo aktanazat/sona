@@ -8,8 +8,8 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
 
-/** Where a Sona install puts its binary on macOS. */
-export const DEFAULT_SONA_BIN = "/Applications/Sona.app/Contents/MacOS/sona";
+export const DEFAULT_SONA_BIN =
+  "/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-core";
 
 /** How long one read may take before it is abandoned, in milliseconds.
  *

@@ -13,7 +13,7 @@ import {
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  configWithoutExternalBinaries,
+  resolveTargetTriple,
   sidecarFilename,
   stageSidecar,
 } from "./prepare-agent-hook";
@@ -38,35 +38,22 @@ function writeExecutable(path: string, contents: string): void {
 }
 
 describe("prepare-agent-hook", () => {
-  test("uses Tauri's target-suffixed sidecar name", () => {
+  test("uses the target-suffixed native hook name", () => {
     expect(sidecarFilename("aarch64-apple-darwin")).toBe(
       "sona-agent-hook-aarch64-apple-darwin",
     );
   });
 
-  test("adds the Windows executable suffix after the target triple", () => {
-    expect(sidecarFilename("x86_64-pc-windows-msvc")).toBe(
-      "sona-agent-hook-x86_64-pc-windows-msvc.exe",
+  test("accepts the explicit target after the argument separator", () => {
+    expect(resolveTargetTriple(["--", "aarch64-apple-darwin"])).toBe(
+      "aarch64-apple-darwin",
     );
   });
 
-  test("removes external binaries only for the helper Cargo build", () => {
-    const config = JSON.parse(
-      configWithoutExternalBinaries(
-        JSON.stringify({
-          bundle: {
-            externalBin: ["binaries/sona-agent-hook"],
-            resources: ["resources/**/*"],
-          },
-          build: { beforeBuildCommand: "bun run build" },
-        }),
-      ),
+  test("refuses a retired desktop target", () => {
+    expect(() => resolveTargetTriple(["x86_64-pc-windows-msvc"])).toThrow(
+      "a native macOS Cargo target triple is required",
     );
-
-    expect(config).toEqual({
-      bundle: { externalBin: [], resources: ["resources/**/*"] },
-      build: { beforeBuildCommand: "bun run build" },
-    });
   });
 
   test("fails when Cargo did not produce the hook binary", () => {
@@ -74,11 +61,7 @@ describe("prepare-agent-hook", () => {
     const destination = join(directory, "binaries", "sona-agent-hook-test");
 
     expect(() =>
-      stageSidecar(
-        join(directory, "missing-hook"),
-        destination,
-        "aarch64-apple-darwin",
-      ),
+      stageSidecar(join(directory, "missing-hook"), destination),
     ).toThrow("build output is missing");
     expect(existsSync(destination)).toBeFalse();
   });
@@ -91,16 +74,13 @@ describe("prepare-agent-hook", () => {
     mkdirSync(join(directory, "binaries"), { recursive: true });
     writeFileSync(destination, "stale hook binary");
 
-    stageSidecar(source, destination, "aarch64-apple-darwin");
+    stageSidecar(source, destination);
 
     expect(readFileSync(destination, "utf8")).toBe("current hook binary");
     expect(statSync(destination).mode & 0o111).not.toBe(0);
   });
 
-  function stageCargoTargetHelper(
-    profile: "release" | "debug",
-    tauriDebug: "false" | "true",
-  ) {
+  function stageCargoTargetHelper(profile: "release" | "debug") {
     const directory = temporaryDirectory();
     const root = join(directory, "project");
     const target = "aarch64-apple-darwin";
@@ -137,7 +117,7 @@ chmod 755 "$CARGO_TARGET_DIR/$target/$profile/sona-agent-hook"
       `import { prepareAgentHook } from ${JSON.stringify(
         new URL("./prepare-agent-hook.ts", import.meta.url).href,
       )};
-prepareAgentHook("${target}", process.argv[2]);
+prepareAgentHook("${target}", process.argv[2], "${profile}");
 `,
     );
 
@@ -147,15 +127,12 @@ prepareAgentHook("${target}", process.argv[2]);
         CARGO_TARGET_DIR: "isolated-target",
         PATH: [bin, process.env.PATH].filter(Boolean).join(delimiter),
         SONA_HOOK_PAYLOAD: payload,
-        TAURI_ENV_DEBUG: tauriDebug,
       },
       stderr: "pipe",
       stdout: "pipe",
     });
 
-    /* Whatever directory the script handed cargo is the one the Tauri bundler
-     * will read the stripped copy from, so the assertions below start from
-     * cargo's own output rather than a path this fixture guessed. */
+    // Read the root actually handed to Cargo rather than guessing the checkout hash.
     const children = existsSync(cacheRoot) ? readdirSync(cacheRoot) : [];
     expect(children).toHaveLength(1);
     const targetDirectory = join(cacheRoot, children[0] ?? "");
@@ -163,8 +140,8 @@ prepareAgentHook("${target}", process.argv[2]);
     return { payload, result, root, target, targetDirectory };
   }
 
-  test("stages a Cargo target helper for a release Tauri build", () => {
-    const fixture = stageCargoTargetHelper("release", "false");
+  test("stages the release hook for native packaging and development", () => {
+    const fixture = stageCargoTargetHelper("release");
 
     expect(fixture.result.exitCode).toBe(0);
     expect(
@@ -180,14 +157,14 @@ prepareAgentHook("${target}", process.argv[2]);
     ).toBe(fixture.payload);
     expect(
       readFileSync(
-        join(fixture.targetDirectory, "release", "agent-hook"),
+        join(fixture.targetDirectory, "release", "sona-agent-hook"),
         "utf8",
       ),
     ).toBe(fixture.payload);
   });
 
-  test("stages a Cargo target helper for a debug Tauri build", () => {
-    const fixture = stageCargoTargetHelper("debug", "true");
+  test("stages the debug hook for native packaging and development", () => {
+    const fixture = stageCargoTargetHelper("debug");
 
     expect(fixture.result.exitCode).toBe(0);
     expect(
@@ -203,7 +180,7 @@ prepareAgentHook("${target}", process.argv[2]);
     ).toBe(fixture.payload);
     expect(
       readFileSync(
-        join(fixture.targetDirectory, "debug", "agent-hook"),
+        join(fixture.targetDirectory, "debug", "sona-agent-hook"),
         "utf8",
       ),
     ).toBe(fixture.payload);

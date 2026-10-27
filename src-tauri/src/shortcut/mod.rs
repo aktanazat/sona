@@ -763,23 +763,6 @@ fn material_script(material: AppearanceMaterial) -> String {
     )
 }
 
-/// Re-applies the material to a document that has just loaded. Every window
-/// starts from an initialization script that writes the conservative `solid`,
-/// so without this a reload would silently drop Glass; and the attribute is
-/// never allowed to claim Glass that the native layer is not backing, which is
-/// why this reads the cached truth rather than the setting.
-pub fn reassert_window_material(webview: &tauri::Webview) {
-    if !MATERIAL_WINDOWS.contains(&webview.label()) {
-        return;
-    }
-    if let Err(error) = webview.eval(material_script(material_for(webview.label()))) {
-        warn!(
-            "Could not restore the {} window material: {error}",
-            webview.label()
-        );
-    }
-}
-
 /// Puts the Material setting into force and returns what is actually in force.
 ///
 /// Glass needs a native vibrancy view behind the transparent webview; that is
@@ -1038,9 +1021,6 @@ pub fn change_debug_mode_setting(app: AppHandle, enabled: bool) -> Result<(), St
     settings::update_settings(&app, |settings| {
         settings.debug_mode = enabled;
     })?;
-    // Keep webview log streaming in sync: the live log viewer only exists in
-    // debug mode, so logs are forwarded to the frontend only while it is on.
-    crate::WEBVIEW_LOG_STREAMING.store(enabled, std::sync::atomic::Ordering::Relaxed);
 
     Ok(())
 }
@@ -1638,7 +1618,6 @@ mod tests {
         assert!(handy_keys::validate_shortcut(&rebound).is_ok());
         Ok(())
     }
-
 
     /// The contract that answers it: whatever chord is holding a recording
     /// open, some member of the cancel set is the hotkey an Escape struck

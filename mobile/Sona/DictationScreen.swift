@@ -11,85 +11,94 @@ struct DictationScreen: View {
     @State private var saveError: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("dictation.title")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                Text("dictation.privacy")
+        PhonePage("tab.dictation") {
+            if model.keyboardReturn {
+                Text("keyboard.swipeBack")
                     .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
-                if model.keyboardReturn {
-                    Text("keyboard.swipeBack").font(.headline)
-                        .accessibilityIdentifier("keyboard-return-instruction")
-                }
-                if let until = dictation.warmUntil {
-                    HStack {
-                        Text("keyboard.warmUntil \(until.formatted(date: .omitted, time: .shortened))").font(.footnote)
-                        Spacer()
-                        Button("keyboard.endSession", action: dictation.endWarmSession)
-                    }
-                }
-                TextEditor(text: Binding(get: { dictation.text }, set: {
-                    dictation.text = $0
-                    model.withdrawKeyboardDraft()
-                    saveError = nil
-                }))
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .frame(minHeight: 180)
-                    .background(Theme.inset)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
-                    .disabled(dictation.isBusy)
-                    .accessibilityLabel(Text("dictation.transcript"))
-                    .accessibilityIdentifier("dictation-transcript")
-                controls
-                if !model.canStartDictation {
-                    Text("dictation.stopMeeting")
+                    .foregroundStyle(Theme.textPrimary)
+                    .accessibilityIdentifier("keyboard-return-instruction")
+            }
+            if let until = dictation.warmUntil {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("keyboard.warmUntil \(until.formatted(date: .omitted, time: .shortened))")
                         .font(.footnote)
                         .foregroundStyle(Theme.textSecondary)
+                    Button("keyboard.endSession", action: dictation.endWarmSession)
+                        .frame(minHeight: 44)
                 }
-                if let notice = dictation.notice {
-                    Text(notice)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.recording)
+            }
+            TextEditor(text: Binding(get: { dictation.text }, set: {
+                dictation.text = $0
+                model.withdrawKeyboardDraft()
+                saveError = nil
+            }))
+                .font(.body)
+                .foregroundStyle(Theme.textPrimary)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: 160)
+                .background(Theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+                        .strokeBorder(Theme.border, lineWidth: 0.5)
                 }
-                Button(action: save) {
-                    Text("dictation.useKeyboard")
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .disabled(dictation.isBusy || dictation.insertableText.isEmpty)
-                .accessibilityIdentifier("dictation-use-keyboard")
-                if model.keyboardDraft != nil {
-                    Text("dictation.saved")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.success)
-                        .accessibilityIdentifier("dictation-saved")
-                }
-                if let saveError {
-                    Text(saveError)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.recording)
-                }
-                Divider()
-                Toggle("keyboard.enable", isOn: $keyboardEnabled)
-                    .onChange(of: keyboardEnabled) { _, enabled in model.keyboardPermissionChanged(enabled) }
-                Text("keyboard.permission").font(.footnote).foregroundStyle(Theme.textSecondary)
-                PhoneDictationSettings(dictation: dictation)
-                Text("dictation.setupTitle")
-                    .font(.headline)
-                Text("dictation.setup")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
-                Text("dictation.fullAccess")
+                .disabled(dictation.isBusy)
+                .accessibilityLabel(Text("dictation.transcript"))
+                .accessibilityIdentifier("dictation-transcript")
+            controls
+            if !model.canStartDictation {
+                Text("dictation.stopMeeting")
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
             }
-            .padding(24)
+            if let notice = dictation.notice {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.recording)
+            }
+            Button(action: save) {
+                Text("dictation.useKeyboard")
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .disabled(dictation.isBusy || dictation.insertableText.isEmpty)
+            .accessibilityIdentifier("dictation-use-keyboard")
+            if model.keyboardDraft != nil {
+                Text("dictation.saved")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.success)
+                    .accessibilityIdentifier("dictation-saved")
+            }
+            if let saveError {
+                Text(saveError)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.recording)
+            }
+            Divider().overlay(Theme.border)
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("keyboard.enable", isOn: $keyboardEnabled)
+                    .frame(minHeight: 44)
+                    .onChange(of: keyboardEnabled) { _, enabled in model.keyboardPermissionChanged(enabled) }
+                Text("keyboard.permission")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            PhoneDictationSettings(dictation: dictation)
+            DisclosureGroup("dictation.setupTitle") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("dictation.setup")
+                    Text("dictation.fullAccess")
+                    Text("dictation.privacy")
+                }
+                .font(.footnote)
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.top, 8)
+            }
+            .font(.subheadline)
+            .foregroundStyle(Theme.textPrimary)
+            .frame(minHeight: 44)
         }
-        .background(Theme.background)
-        .tint(Theme.accent)
     }
 
     private var controls: some View {
@@ -99,6 +108,7 @@ struct DictationScreen: View {
                 Button(action: model.startDictation) {
                     Label("dictation.start", systemImage: "mic.fill")
                         .frame(minHeight: 44)
+                        .foregroundStyle(Theme.onAccent)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!model.canStartDictation || (model.keyboardReturn && !keyboardEnabled))
@@ -107,6 +117,7 @@ struct DictationScreen: View {
                 Button(action: dictation.finish) {
                     Label("dictation.stop", systemImage: "stop.fill")
                         .frame(minHeight: 44)
+                        .foregroundStyle(Theme.onRecording)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.recording)
@@ -145,22 +156,31 @@ private struct PhoneDictationSettings: View {
         .map(\.identifier).sorted { languageName($0).localizedStandardCompare(languageName($1)) == .orderedAscending }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             Picker("keyboard.sessionLength", selection: $minutes) {
                 ForEach([1, 5, 15, 30], id: \.self) { Text("keyboard.minutes \($0)").tag($0) }
-            }.disabled(dictation.isBusy)
-            Text("keyboard.sessionPrivacy").font(.footnote).foregroundStyle(Theme.textSecondary)
+            }
+            .frame(minHeight: 44)
+            .disabled(dictation.isBusy)
+            Text("keyboard.sessionPrivacy")
+                .font(.footnote)
+                .foregroundStyle(Theme.textSecondary)
+            Divider().overlay(Theme.border)
             Picker("dictation.language", selection: $activeLanguage) {
                 ForEach(languages, id: \.self) { Text(Self.languageName($0)).tag($0) }
             }
+            .frame(minHeight: 44)
             .disabled(dictation.isBusy)
             .onChange(of: activeLanguage) { _, value in DictationPreferences.activeLanguage = value }
             Button("dictation.chooseLanguages") { choosesLanguages = true }.frame(minHeight: 44)
             Text("dictation.oneLanguage").font(.footnote).foregroundStyle(Theme.textSecondary)
+            Divider().overlay(Theme.border)
             Picker("dictation.style", selection: $style) {
                 Text("dictation.noStyle").tag("")
                 ForEach(dictation.profile.styles) { Text($0.name).tag($0.id) }
-            }.disabled(dictation.isBusy || !PhoneDictation.stylesAvailable)
+            }
+            .frame(minHeight: 44)
+            .disabled(dictation.isBusy || !PhoneDictation.stylesAvailable)
             if !PhoneDictation.stylesAvailable {
                 Text("dictation.styleUnavailable").font(.footnote).foregroundStyle(Theme.textSecondary)
             }
@@ -168,21 +188,25 @@ private struct PhoneDictationSettings: View {
                 Text("dictation.profileEmpty").font(.footnote).foregroundStyle(Theme.textSecondary)
             } else {
                 Text("dictation.profileSynced").font(.footnote).foregroundStyle(Theme.textSecondary)
+                Divider().overlay(Theme.border)
                 DisclosureGroup("dictation.vocabulary") {
                     ForEach(dictation.profile.vocabulary, id: \.self) { word in
                         LabeledContent(word.spoken.isEmpty ? word.written : word.spoken, value: word.written)
                     }
                 }
+                .frame(minHeight: 44)
                 DisclosureGroup("dictation.replacements") {
                     ForEach(dictation.profile.replacements, id: \.self) { word in
                         LabeledContent(word.spoken, value: word.written)
                     }
                 }
+                .frame(minHeight: 44)
                 DisclosureGroup("dictation.snippets") {
                     ForEach(dictation.profile.snippets, id: \.self) { snippet in
                         LabeledContent(snippet.trigger, value: snippet.expansion)
                     }
                 }
+                .frame(minHeight: 44)
             }
         }
         .sheet(isPresented: $choosesLanguages) {
@@ -195,8 +219,14 @@ private struct PhoneDictationSettings: View {
                         activeLanguage = DictationPreferences.activeLanguage
                     }))
                     .disabled(dictation.isBusy || (languages.count == 1 && languages.contains(language)))
+                    .listRowBackground(Theme.background)
+                    .listRowSeparatorTint(Theme.border)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(Theme.background)
                 .navigationTitle("dictation.chooseLanguages")
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar { Button("library.done") { choosesLanguages = false } }
             }
         }

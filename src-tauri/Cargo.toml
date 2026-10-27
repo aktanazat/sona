@@ -38,7 +38,6 @@ serde = { version = "1", features = ["derive"] }
 [dependencies]
 once_cell = "1"
 tauri = { version = "2.11.5", features = [
-  "protocol-asset",
   "macos-private-api",
   "tray-icon",
   'image-png',
@@ -112,11 +111,8 @@ handy-keys = "0.3.4"
 ferrous-opencc = "0.2.3"
 clap = { version = "4", features = ["derive"] }
 specta = { version = "=2.0.0-rc.22", features = ["uuid"] }
-specta-typescript = "0.0.9"
-tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
-# Tilde-pinned to one minor: `tauri build` errors out unless this crate and the
-# `@tauri-apps/plugin-dialog` npm package agree on major.minor. A plain caret
-# here let cargo float to 2.7 while npm stayed on 2.6, which broke the build.
+# The command and event registry is shared with native socket dispatch.
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive"] }
 tauri-plugin-dialog = "~2.7"
 hf-hub = { git = "https://github.com/cjpais/hf-hub", branch = "cancellable-downloads", features = [
   "tokio",
@@ -313,6 +309,8 @@ tao = { git = "https://github.com/cjpais/tao", rev = "c3bee28c1d446d95f08c95c3b6
 tao-macros = { git = "https://github.com/cjpais/tao", rev = "c3bee28c1d446d95f08c95c3b6f8d4bde052b876" }
 
 [dev-dependencies]
+# Retained contract and secret-exclusion tests exercise the exported type shape.
+specta-typescript = "0.0.9"
 tempfile = "3"
 tauri = { version = "2.11.5", features = ["test"] }
 # Test-only tokio features for the local socket servers exercising the

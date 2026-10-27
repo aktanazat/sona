@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Modes, as a settings tab body: the list on the left, the editor on the
-/// right, and the two sheets that can open over them.
+/// The mode list and editor share a row when the window has room.
+/// Narrow windows keep both in the page's scroll view.
 ///
 /// Cross-feature destinations arrive as closures so this compiles and runs
 /// without the rest of the settings shell.
@@ -38,17 +38,27 @@ struct ModesView: View {
         } else if store.modes.isEmpty {
             ModeEmptyCard(store: store)
         } else {
-            HStack(alignment: .top, spacing: 24) {
-                ModesList(store: store)
-                    .frame(width: 320)
-                ModeEditorView(
-                    store: store,
-                    openVocabulary: openVocabulary,
-                    openPrivacy: openPrivacy,
-                    openProviders: openProviders)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 20) {
+                    ModesList(store: store)
+                        .frame(width: 280)
+                    editor.frame(minWidth: 420)
+                }
+                VStack(alignment: .leading, spacing: 24) {
+                    ModesList(store: store)
+                    editor
+                }
             }
         }
+    }
+
+    private var editor: some View {
+        ModeEditorView(
+            store: store,
+            openVocabulary: openVocabulary,
+            openPrivacy: openPrivacy,
+            openProviders: openProviders)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -58,7 +68,7 @@ struct ModesList: View {
     @State private var dropTarget: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Your modes").sectionLabel()
                 Spacer()

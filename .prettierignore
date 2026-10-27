@@ -4,10 +4,9 @@ bun.lock
 package-lock.json
 
 # Build outputs
-.next
-out
 target
 mobile/build
+macos/DerivedData
 *.bundle.*
 
 # Tauri
@@ -15,7 +14,6 @@ src-tauri/target
 src-tauri/gen
 
 # Generated files
-src/bindings.ts
 src-tauri/src/catalog/catalog.json
 
 # Misc

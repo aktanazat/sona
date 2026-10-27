@@ -33,7 +33,7 @@ struct MeetingLiveView: View {
                     if geometry.size.width >= 820 {
                         VStack(alignment: .leading, spacing: 0) {
                             captureHeader(session)
-                            HStack(alignment: .top, spacing: 24) {
+                            HStack(alignment: .top, spacing: 20) {
                                 ScrollView { transcript }
                                     .scrollIndicators(.never)
                                     .frame(maxWidth: .infinity)
@@ -47,7 +47,7 @@ struct MeetingLiveView: View {
                         }
                         .frame(maxWidth: Theme.contentMax, maxHeight: .infinity, alignment: .topLeading)
                         .padding(.horizontal, Theme.margin)
-                        .padding(.top, 40)
+                        .padding(.top, 24)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     } else {
                         Page {
@@ -131,7 +131,7 @@ struct MeetingLiveView: View {
             }
             menu(session)
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, 20)
     }
 
     /// Red while recording, a ring while paused, ink while the core is

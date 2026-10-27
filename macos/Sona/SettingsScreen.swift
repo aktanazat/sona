@@ -4,6 +4,7 @@ import SwiftUI
 /// own page; the ones that come as a column get the page and the title here.
 struct SettingsScreen: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Which edges have a tab hidden past them, so only those edges fade.
     @State private var overflow = StripOverflow()
 
@@ -22,18 +23,18 @@ struct SettingsScreen: View {
     private var tabs: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal) {
-                HStack(spacing: 24) {
+                HStack(spacing: 20) {
                     ForEach(SettingsPlace.allCases) { place in
                         let current = model.settingsPlace == place
                         Button {
                             model.settingsPlace = place
                         } label: {
                             Text(place.title)
-                                .font(TypeScale.label(15))
-                                .foregroundStyle(current ? Theme.ink : Theme.inkSecondary)
-                                .padding(.vertical, 14)
+                                .font(TypeScale.label(14))
+                                .foregroundStyle(model.settingsPlace == place ? Theme.ink : Theme.inkSecondary)
+                                .padding(.vertical, 10)
                                 .overlay(alignment: .bottom) {
-                                    Rectangle().fill(current ? Theme.ink : .clear).frame(height: 2)
+                                    Rectangle().fill(current ? Theme.ink : .clear).frame(height: 1)
                                 }
                                 .contentShape(Rectangle())
                         }
@@ -43,7 +44,6 @@ struct SettingsScreen: View {
                     }
                 }
                 .padding(.horizontal, Theme.margin)
-                .padding(.top, 8)
             }
             .scrollIndicators(.never)
             .onScrollGeometryChange(for: StripOverflow.self) { geometry in
@@ -57,7 +57,9 @@ struct SettingsScreen: View {
             .overlay(alignment: .bottom) { Hairline() }
             .onAppear { proxy.scrollTo(model.settingsPlace, anchor: .center) }
             .onChange(of: model.settingsPlace) { _, place in
-                withAnimation(.snappy) { proxy.scrollTo(place, anchor: .center) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                    proxy.scrollTo(place, anchor: .center)
+                }
             }
         }
     }
@@ -76,8 +78,8 @@ struct SettingsScreen: View {
             )
             .frame(width: Theme.margin)
         }
-        .animation(.easeOut(duration: 0.15), value: overflow.leading)
-        .animation(.easeOut(duration: 0.15), value: overflow.trailing)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: overflow.leading)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: overflow.trailing)
     }
 
     @ViewBuilder

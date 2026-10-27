@@ -12,27 +12,11 @@ use log::debug;
 #[cfg(not(target_os = "macos"))]
 use tauri::WebviewWindowBuilder;
 
-#[cfg(target_os = "macos")]
-use tauri::WebviewUrl;
-
-#[cfg(target_os = "macos")]
-use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelBuilder, PanelLevel, StyleMask};
-
 #[cfg(target_os = "linux")]
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 #[cfg(target_os = "linux")]
 use std::env;
-
-#[cfg(target_os = "macos")]
-tauri_panel! {
-    panel!(RecordingOverlayPanel {
-        config: {
-            can_become_key_window: false,
-            is_floating_panel: true
-        }
-    })
-}
 
 // Native overlay window sizes (logical points). One window is reused for every
 // state and resized in `show_overlay_state`; each size need only be at least as
@@ -649,49 +633,6 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 }
 
-/// Creates the recording overlay panel and keeps it hidden by default (macOS)
-#[cfg(target_os = "macos")]
-pub fn create_recording_overlay(app_handle: &AppHandle) {
-    if let Some((x, y)) = calculate_overlay_position(
-        app_handle,
-        OVERLAY_WIDTH,
-        OVERLAY_HEIGHT,
-        settings::get_settings(app_handle).overlay_position.into(),
-    ) {
-        // PanelBuilder creates a Tauri window then converts it to NSPanel.
-        // The window remains registered, so get_webview_window() still works.
-        match PanelBuilder::<_, RecordingOverlayPanel>::new(app_handle, "recording_overlay")
-            .url(WebviewUrl::App("/overlay".into()))
-            .title("Recording")
-            .position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
-            .level(PanelLevel::Status)
-            .size(tauri::Size::Logical(tauri::LogicalSize {
-                width: OVERLAY_WIDTH,
-                height: OVERLAY_HEIGHT,
-            }))
-            .has_shadow(false)
-            .transparent(true)
-            .no_activate(true)
-            .corner_radius(0.0)
-            .style_mask(StyleMask::empty().borderless().nonactivating_panel())
-            .with_window(|w| w.decorations(false).transparent(true).focusable(false))
-            .collection_behavior(
-                CollectionBehavior::new()
-                    .can_join_all_spaces()
-                    .full_screen_auxiliary(),
-            )
-            .build()
-        {
-            Ok(panel) => {
-                panel.hide();
-            }
-            Err(e) => {
-                log::error!("Failed to create recording overlay panel: {}", e);
-            }
-        }
-    }
-}
-
 fn show_overlay_state(app_handle: &AppHandle, state: &str) {
     // Whether the overlay shows at all is governed by overlay_style; position
     // only chooses Top vs Bottom placement. Checked here (off the main thread)
@@ -1225,7 +1166,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn a_burst_faster_than_a_frame_delivers_reported_readings_not_blends() {

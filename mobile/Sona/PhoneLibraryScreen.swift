@@ -21,21 +21,46 @@ struct PhoneLibraryScreen: View {
                     Text("library.dictations").tag(PhoneNote.Kind?.some(.dictation))
                     Text("library.meetings").tag(PhoneNote.Kind?.some(.meeting))
                 }
-                if let error = library.error { Text(error).foregroundStyle(Theme.recording) }
-                if importBusy { ProgressView("library.importing") }
+                .pickerStyle(.menu)
+                .frame(minHeight: 44)
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
+                if let error = library.error {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.recording)
+                        .listRowBackground(Theme.background)
+                }
+                if importBusy {
+                    ProgressView("library.importing")
+                        .listRowBackground(Theme.background)
+                }
                 if visible.isEmpty && remoteMeetings.isEmpty {
-                    ContentUnavailableView("library.empty", systemImage: "note.text", description: Text("library.emptyHint"))
+                    Text("library.empty")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(minHeight: 44)
+                        .listRowBackground(Theme.background)
+                        .listRowSeparator(.hidden)
                 }
                 ForEach(visible) { note in
                     NavigationLink {
                         PhoneNoteScreen(model: model, library: library, note: note)
                     } label: {
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(note.title.isEmpty ? NSLocalizedString("library.untitled", comment: "") : note.title)
-                                .font(.headline).lineLimit(2)
-                            Text(note.text).font(.subheadline).lineLimit(2).foregroundStyle(Theme.textSecondary)
-                            Text(note.date, style: .date).font(.caption).foregroundStyle(Theme.textSecondary)
-                        }.padding(.vertical, 4)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(2)
+                            Text(note.text)
+                                .font(.subheadline)
+                                .lineLimit(2)
+                                .foregroundStyle(Theme.textSecondary)
+                            Text(note.date, style: .date)
+                                .font(.caption)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                        .padding(.vertical, 4)
                     }
                     .swipeActions {
                         Button("library.delete", role: .destructive) {
@@ -43,6 +68,8 @@ struct PhoneLibraryScreen: View {
                         }
                     }
                 }
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
                 if filter == nil || filter == .meeting {
                     Section("library.fromMac") {
                         if model.boardState == .syncing { ProgressView("board.syncing") }
@@ -56,12 +83,20 @@ struct PhoneLibraryScreen: View {
                                 PhoneMeetingScreen(meeting: meeting)
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(meeting.session.title).font(.headline)
-                                    Text(meeting.date, style: .date).font(.caption).foregroundStyle(Theme.textSecondary)
-                                }.padding(.vertical, 4)
+                                    Text(meeting.session.title)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Text(meeting.date, style: .date)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.textTertiary)
+                                }
+                                .padding(.vertical, 4)
                             }
                         }
                     }
+                    .textCase(nil)
+                    .listRowBackground(Theme.background)
+                    .listRowSeparatorTint(Theme.border)
                 }
                 Section("library.calls") {
                     NavigationLink("calls.title") { PhoneCallsScreen(model: model, calls: model.calls) }
@@ -69,8 +104,17 @@ struct PhoneLibraryScreen: View {
                     Button("library.importCall") { importing = true }
                         .disabled(importBusy || model.recorder.isRecording)
                 }
+                .textCase(nil)
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Theme.background)
             .navigationTitle("library.title")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .searchable(text: $search)
             .task { await model.refreshBoard() }
             .refreshable { await model.refreshBoard() }
@@ -79,8 +123,15 @@ struct PhoneLibraryScreen: View {
             }
             .sheet(isPresented: $newNote) {
                 NavigationStack {
-                    TextEditor(text: $draft).padding().accessibilityLabel("library.noteText")
+                    TextEditor(text: $draft)
+                        .font(.body)
+                        .foregroundStyle(Theme.textPrimary)
+                        .scrollContentBackground(.hidden)
+                        .padding(Theme.pageInset)
+                        .background(Theme.background)
+                        .accessibilityLabel("library.noteText")
                         .navigationTitle("library.new")
+                        .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) { Button("dictation.cancel") { newNote = false } }
                             ToolbarItem(placement: .confirmationAction) {
@@ -126,14 +177,34 @@ private struct PhoneNoteScreen: View {
     @State private var saved = false
 
     var body: some View {
-        Form {
+        List {
             TextField("library.noteTitle", text: $note.title)
-            TextEditor(text: $note.text).frame(minHeight: 200).accessibilityLabel("library.noteText")
+                .font(.body.weight(.medium))
+                .foregroundStyle(Theme.textPrimary)
+                .frame(minHeight: 44)
+                .listRowBackground(Theme.background)
+            TextEditor(text: $note.text)
+                .font(.body)
+                .foregroundStyle(Theme.textPrimary)
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 200)
+                .accessibilityLabel("library.noteText")
+                .listRowBackground(Theme.background)
             Button("library.saveChanges") {
                 do { try library.update(note); saved = true } catch { library.error = error.localizedDescription }
-            }.disabled(saved)
-            if saved { Text("library.saved").foregroundStyle(Theme.textSecondary) }
-            if let error = library.error { Text(error).foregroundStyle(Theme.recording) }
+            }
+            .disabled(saved)
+            .listRowBackground(Theme.background)
+            if saved {
+                Text("library.saved")
+                    .foregroundStyle(Theme.textSecondary)
+                    .listRowBackground(Theme.background)
+            }
+            if let error = library.error {
+                Text(error)
+                    .foregroundStyle(Theme.recording)
+                    .listRowBackground(Theme.background)
+            }
             if library.audioURL(note) != nil {
                 Section("library.audio") {
                     Button(playback.playing ? "library.pause" : "library.play") {
@@ -148,11 +219,20 @@ private struct PhoneNoteScreen: View {
                     }
                     if let error = playback.error { Text(error).foregroundStyle(Theme.recording) }
                 }
+                .textCase(nil)
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
             }
             ShareLink(item: note.text) { Label("library.share", systemImage: "square.and.arrow.up") }
+                .listRowBackground(Theme.background)
             Button("library.copy") { UIPasteboard.general.string = note.text }
+                .listRowBackground(Theme.background)
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Theme.background)
         .navigationTitle("library.note")
+        .navigationBarTitleDisplayMode(.inline)
         .onChange(of: note) { _, _ in saved = false }
         .task { if let url = library.audioURL(note) { playback.load(url) } }
         .onDisappear { playback.stop() }
@@ -165,7 +245,7 @@ private struct PhoneMeetingScreen: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 Picker("meeting.content", selection: $transcript) {
                     Text("library.notes").tag(false)
                     Text("meeting.transcript").tag(true)
@@ -179,9 +259,14 @@ private struct PhoneMeetingScreen: View {
                         Text(ownNotes)
                     }
                 }
-            }.frame(maxWidth: .infinity, alignment: .leading).padding()
-                .textSelection(.enabled)
+            }
+            .font(.body)
+            .foregroundStyle(Theme.textPrimary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Theme.pageInset)
+            .textSelection(.enabled)
         }
+        .background(Theme.background)
         .navigationTitle(meeting.session.title).navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ShareLink(item: [meeting.session.title, meeting.notes, meeting.user_notes?.body ?? "", meeting.transcript]

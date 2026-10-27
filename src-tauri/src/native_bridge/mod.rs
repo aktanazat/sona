@@ -35,7 +35,7 @@ use crate::tray::DICTATION_ACTIVITY_EVENT;
 
 /// The events the managers emit by string name rather than through a specta
 /// type. The typed ones are listed in [`dispatch::TYPED_EVENTS`].
-const NAMED_EVENTS: [&str; 26] = [
+const NAMED_EVENTS: [&str; 27] = [
     DICTATION_ACTIVITY_EVENT,
     HISTORY_STORAGE_EVENT,
     "handy-keys-event",
@@ -59,6 +59,7 @@ const NAMED_EVENTS: [&str; 26] = [
     "recording-ready",
     "secure-input-changed",
     "settings-changed",
+    "show-main-window",
     "show-overlay",
     "theme-changed",
     "transcription-error",

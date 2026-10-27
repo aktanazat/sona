@@ -129,6 +129,7 @@ extension CoreEvent {
     /// A voice command question was answered into the chat; the sheet is
     /// what shows it.
     static let commandAnswered = "command-mode://answered"
+    static let showMainWindow = "show-main-window"
 }
 
 /// Everything the windows share. One instance, on the main actor, handed to
@@ -146,6 +147,7 @@ final class AppModel {
     /// The question a `sona://search` link carried, held until the palette
     /// opens and reads it.
     private var paletteSeed = ""
+    @ObservationIgnored private var pendingOpenURLs: [URL] = []
     var sheet: Sheet?
 
     /// The core answered its first request. Nothing that reads the core is
@@ -274,7 +276,7 @@ final class AppModel {
             CoreEvent.modelDeleted, CoreEvent.recordingError, CoreEvent.pasteError, CoreEvent.rewriteSkipped,
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
-            CoreEvent.commandAnswered,
+            CoreEvent.commandAnswered, CoreEvent.showMainWindow,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -395,6 +397,35 @@ final class AppModel {
     /// event, which lands in `open(_ target:)` or the meetings store.
     func open(link: String) {
         Task { await query.open(link: link) }
+    }
+
+    func open(url: URL) {
+        guard ready && !coreStopped else {
+            pendingOpenURLs.append(url)
+            return
+        }
+        if url.scheme?.lowercased() == "sona" {
+            open(link: url.absoluteString)
+            return
+        }
+        guard url.isFileURL else { return }
+        let path = url.path
+        let ext = url.pathExtension.lowercased()
+        if ext == "sona" {
+            reveal()
+            showSettings(.sync)
+            Task { await cloudSync.importBundle(at: path) }
+        } else if ImportMedia.extensions.contains(ext) {
+            imports.add(paths: [path])
+            reveal()
+            showSettings(.importing)
+        }
+    }
+
+    private func openPendingURLs() {
+        let urls = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        for url in urls { open(url: url) }
     }
 
     /// The agent hears the palette's question in the chat sheet.
@@ -551,7 +582,10 @@ final class AppModel {
         }
         coreStopped = false
         load()
-        if ready { return }
+        if ready {
+            openPendingURLs()
+            return
+        }
         ready = true
         Task { await showWhatsNew() }
         pill.onClick = { [weak self] in self?.toggleCapture() }
@@ -562,6 +596,7 @@ final class AppModel {
         track { [weak self] in self?.syncPill() }
         track { [weak self] in self?.syncConsent() }
         track { [weak self] in self?.syncNavigation() }
+        openPendingURLs()
     }
 
     /// Every store reads the core: at the first start, and again after a
@@ -903,6 +938,8 @@ final class AppModel {
             case CoreEvent.commandAnswered:
                 reveal()
                 sheet = .chat
+            case CoreEvent.showMainWindow:
+                reveal()
             default:
                 break
             }

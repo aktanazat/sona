@@ -26,16 +26,14 @@ async function main(): Promise<void> {
   const staging = join(build, "stage");
   const binaries = join(ROOT, "src-tauri", "binaries");
   const options = ["-DCMAKE_BUILD_TYPE=Release"];
-  if (target.includes("-apple-darwin")) {
-    const architecture = target.startsWith("aarch64-") ? "arm64" : "x86_64";
-    const minimumVersion = tauriConfig.bundle.macOS.minimumSystemVersion;
-    const deploymentTarget =
-      Number(minimumVersion.split(".")[0]) < 11 ? "11.0" : minimumVersion;
-    options.push(
-      `-DCMAKE_OSX_ARCHITECTURES=${architecture}`,
-      `-DCMAKE_OSX_DEPLOYMENT_TARGET=${deploymentTarget}`,
-    );
-  }
+  const architecture = target.startsWith("aarch64-") ? "arm64" : "x86_64";
+  const minimumVersion = tauriConfig.bundle.macOS.minimumSystemVersion;
+  const deploymentTarget =
+    Number(minimumVersion.split(".")[0]) < 11 ? "11.0" : minimumVersion;
+  options.push(
+    `-DCMAKE_OSX_ARCHITECTURES=${architecture}`,
+    `-DCMAKE_OSX_DEPLOYMENT_TARGET=${deploymentTarget}`,
+  );
   for (const key of [
     "CMAKE_C_COMPILER",
     "CMAKE_CXX_COMPILER",
@@ -83,19 +81,16 @@ async function main(): Promise<void> {
   ]);
   mkdirSync(destination, { recursive: true });
   mkdirSync(binaries, { recursive: true });
-  const suffix = target.includes("-windows-") ? ".exe" : "";
-  const executable = join(staging, `sona-cleanup${suffix}`);
-  const sidecar = join(binaries, `sona-cleanup-${target}${suffix}`);
-  const development = join(binaries, `sona-cleanup${suffix}`);
+  const executable = join(staging, "sona-cleanup");
+  const sidecar = join(binaries, `sona-cleanup-${target}`);
+  const development = join(binaries, "sona-cleanup");
   copyFileSync(executable, sidecar);
   copyFileSync(executable, development);
   for (const license of ["llama-LICENSE", "json-LICENSE", "model-LICENSE"]) {
     copyFileSync(join(staging, license), join(destination, license));
   }
-  if (!suffix) {
-    chmodSync(sidecar, 0o755);
-    chmodSync(development, 0o755);
-  }
+  chmodSync(sidecar, 0o755);
+  chmodSync(development, 0o755);
   console.log(`[cleanup-runtime] staged ${sidecar}`);
 }
 

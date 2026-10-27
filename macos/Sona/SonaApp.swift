@@ -53,6 +53,10 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
     private var terminationPending = false
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls { model.open(url: url) }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
         terminationPending = true

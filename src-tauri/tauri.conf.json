@@ -2,141 +2,24 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Sona",
   "identifier": "com.aktanazat.sona",
-  "build": {
-    "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run prepare:cleanup-runtime && bun run prepare:agent-hook && bun run build",
-    "frontendDist": "../out"
-  },
   "app": {
     "macOSPrivateApi": true,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' http://localhost:1420; style-src 'self' 'unsafe-inline' http://localhost:1420; img-src 'self' asset: http://asset.localhost data: blob: http://localhost:1420; font-src 'self' data: http://localhost:1420; media-src 'self' asset: http://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; worker-src 'self' blob:",
-      "assetProtocol": {
-        "enable": true,
-        "scope": {
-          "allow": [],
-          "requireLiteralLeadingDot": false
-        }
-      }
+      "csp": "default-src 'none'"
     }
   },
   "bundle": {
-    "active": true,
-    "targets": "all",
-    "externalBin": ["binaries/sona-agent-hook", "binaries/sona-cleanup"],
+    "active": false,
     "resources": ["resources/**/*", "../LICENSE", "../NOTICE"],
-    "fileAssociations": [
-      {
-        "ext": ["wav"],
-        "mimeType": "audio/wav",
-        "name": "WAV audio",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["mp3"],
-        "mimeType": "audio/mpeg",
-        "name": "MP3 audio",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["m4a"],
-        "mimeType": "audio/mp4",
-        "name": "M4A audio",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["aac"],
-        "mimeType": "audio/aac",
-        "name": "AAC audio",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["flac"],
-        "mimeType": "audio/flac",
-        "name": "FLAC audio",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["ogg"],
-        "mimeType": "audio/ogg",
-        "name": "Ogg audio",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["mov"],
-        "mimeType": "video/quicktime",
-        "name": "QuickTime video",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["mp4"],
-        "mimeType": "video/mp4",
-        "name": "MPEG-4 video",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["m4v"],
-        "mimeType": "video/x-m4v",
-        "name": "M4V video",
-        "role": "Viewer"
-      },
-      {
-        "ext": ["sona"],
-        "mimeType": "application/vnd.sona.encrypted-share",
-        "name": "Sona encrypted share",
-        "role": "Viewer"
-      }
-    ],
-    "license": "MIT",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.icns"
     ],
-    "publisher": "Aktan Azat",
-    "copyright": "(c) 2026 Aktan Azat",
-    "licenseFile": "../LICENSE",
     "macOS": {
-      "files": {},
-      "hardenedRuntime": true,
-      "minimumSystemVersion": "10.15",
-      "signingIdentity": "Apple Development: Created via API (JWV9B89S4H)",
-      "entitlements": "Entitlements.plist"
-    },
-    "linux": {
-      "deb": {
-        "depends": ["libgtk-layer-shell0", "libopenblas0"],
-        "files": {
-          "/usr/lib/sona": "transcribe-libs"
-        }
-      },
-      "rpm": {
-        "depends": [
-          "libgtk-layer-shell.so.0()(64bit)",
-          "libopenblas.so.0()(64bit)"
-        ],
-        "compression": {
-          "type": "none"
-        },
-        "files": {
-          "/usr/lib/sona": "transcribe-libs"
-        }
-      },
-      "appimage": {
-        "bundleMediaFramework": true,
-        "files": {
-          "/usr/lib": "transcribe-libs"
-        }
-      }
-    },
-    "windows": {
-      "nsis": {
-        "template": "nsis/installer.nsi"
-      }
+      "minimumSystemVersion": "15.0"
     }
   }
 }

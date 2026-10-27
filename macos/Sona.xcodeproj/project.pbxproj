@@ -37,11 +37,17 @@
 			membershipExceptions = (Info.plist, );
 			target = E00000000000000000000002 /* SonaCamera */;
 		};
+		BE0000000000000000000002 = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (Info.plist, );
+			target = E00000000000000000000001 /* Sona */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		BB0000000000000000000001 /* Sona */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (BE0000000000000000000002, );
 			path = Sona;
 			sourceTree = "<group>";
 		};
@@ -208,6 +214,8 @@
 			inputFileListPaths = (
 			);
 			inputPaths = (
+				"$(SRCROOT)/scripts/bundle-core.sh",
+				"$(SRCROOT)/scripts/inspect-package.sh",
 			);
 			name = "Bundle core";
 			outputFileListPaths = (
@@ -217,7 +225,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The core has its own bundle identity so LaunchServices does not confuse it with the shell.\n# Replacing the helper tree avoids a stale kernel signature cache after rebuilding.\nset -eu\ntarget=\"${SONA_CORE_TARGET_DIR:-$SRCROOT/../src-tauri/target}\"\nhelper=\"$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/SonaCore.app\"\nfor profile in release debug; do\n  core=\"$target/$profile/sona\"\n  if [ -x \"$core\" ]; then\n    rm -rf \"$helper\"\n    mkdir -p \"$helper/Contents/MacOS\" \"$helper/Contents/Resources\"\n    cp \"$core\" \"$helper/Contents/MacOS/sona-core\"\n    cp -R \"$target/$profile/resources\" \"$helper/Contents/Resources/resources\"\n    cleanup=\"$helper/Contents/MacOS/sona-cleanup\"\n    cp \"$SRCROOT/../src-tauri/binaries/sona-cleanup\" \"$cleanup\"\n    chmod 755 \"$cleanup\"\n    codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" \"$cleanup\"\n    cat > \"$helper/Contents/Info.plist\" <<PLIST\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleExecutable</key>\n\t<string>sona-core</string>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.aktanazat.sona.core</string>\n\t<key>CFBundleName</key>\n\t<string>Sona Core</string>\n\t<key>CFBundlePackageType</key>\n\t<string>APPL</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>$MARKETING_VERSION</string>\n\t<key>CFBundleVersion</key>\n\t<string>$CURRENT_PROJECT_VERSION</string>\n\t<key>LSMinimumSystemVersion</key>\n\t<string>$MACOSX_DEPLOYMENT_TARGET</string>\n\t<key>LSUIElement</key>\n\t<true/>\n\t<key>NSMicrophoneUsageDescription</key>\n\t<string>Sona hears you only while a recording is on.</string>\n\t<key>NSCalendarsFullAccessUsageDescription</key>\n\t<string>Read upcoming events and create calendar events you approve.</string>\n\t<key>NSCalendarsUsageDescription</key>\n\t<string>Read upcoming events and create calendar events you approve.</string>\n\t<key>NSAppleEventsUsageDescription</key>\n\t<string>Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.</string>\n</dict>\n</plist>\nPLIST\n    codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --entitlements \"$SRCROOT/../src-tauri/Entitlements.plist\" \"$helper\"\n    exit 0\n  fi\ndone\necho \"warning: no sona core under $target; the app will need SONA_CORE\"\n";
+			shellScript = "set -eu\nexec /bin/bash \"$SRCROOT/scripts/bundle-core.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -303,6 +311,7 @@
 				REGISTER_APP_GROUPS = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Sona/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Sona;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
@@ -337,6 +346,7 @@
 				REGISTER_APP_GROUPS = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Sona/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Sona;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;

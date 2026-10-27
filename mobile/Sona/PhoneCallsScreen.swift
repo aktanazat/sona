@@ -111,12 +111,16 @@ struct PhoneCallsScreen: View {
     @State private var confirm = false
 
     var body: some View {
-        Form {
+        List {
             Section {
                 Toggle("calls.enable", isOn: $enabled)
-                Text("calls.privacy").font(.footnote)
+                Text("calls.privacy")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
                 Button("calls.settings") { setup = true }
             }
+            .listRowBackground(Theme.background)
+            .listRowSeparatorTint(Theme.border)
             if enabled {
                 Section("calls.outgoing") {
                     Text("calls.instructions").font(.footnote)
@@ -127,13 +131,22 @@ struct PhoneCallsScreen: View {
                     if calls.busy { ProgressView() }
                     if let error = calls.error { Text(error).foregroundStyle(Theme.recording) }
                 }
+                .textCase(nil)
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
                 Section("calls.history") {
                     if calls.calls.isEmpty { Text("calls.empty").foregroundStyle(Theme.textSecondary) }
                     ForEach(calls.calls) { call in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(call.target).font(.headline)
-                            Text(call.date, style: .date).font(.caption)
-                            Text(LocalizedStringKey("calls.status.\(call.status)")).font(.footnote)
+                            Text(call.target)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(Theme.textPrimary)
+                            Text(call.date, style: .date)
+                                .font(.caption)
+                                .foregroundStyle(Theme.textTertiary)
+                            Text(LocalizedStringKey("calls.status.\(call.status)"))
+                                .font(.footnote)
+                                .foregroundStyle(Theme.textSecondary)
                             if ["queued", "ringing", "in-progress"].contains(call.status) {
                                 Button("calls.end", role: .destructive) { Task { await calls.end(call) } }.disabled(calls.busy)
                             } else if call.status == "completed" {
@@ -145,9 +158,16 @@ struct PhoneCallsScreen: View {
                     }
                     Button("calls.refresh") { Task { await calls.refresh() } }.disabled(calls.busy)
                 }
+                .textCase(nil)
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Theme.background)
         .navigationTitle("calls.title")
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $setup) { CallSetupScreen() }
         .confirmationDialog("calls.confirm", isPresented: $confirm, titleVisibility: .visible) {
             Button("calls.start") { consent = false; Task { await calls.start(target: target, model: model) } }
@@ -168,33 +188,41 @@ private struct CallSetupScreen: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Text("calls.setupHelp").font(.footnote)
-                TextField("calls.account", text: $accountSID).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField(configured ? "calls.keepToken" : "calls.token", text: $token).textInputAutocapitalization(.never)
-                TextField("calls.from", text: $from).keyboardType(.phonePad)
-                TextField("calls.own", text: $own).keyboardType(.phonePad)
-                Text("calls.retention").font(.footnote)
-                if let error { Text(error).foregroundStyle(Theme.recording) }
-                Button("calls.save") {
-                    do {
-                        let prior = try CallKeychain.load()
-                        let account = CallAccount(accountSID: accountSID.trimmingCharacters(in: .whitespacesAndNewlines),
-                            authToken: token.isEmpty ? (prior?.authToken ?? "") : token.trimmingCharacters(in: .whitespacesAndNewlines),
-                            fromNumber: try CallService.phoneNumber(from), ownNumber: try CallService.phoneNumber(own))
-                        _ = try CallService(account: account)
-                        try CallKeychain.save(account)
-                        dismiss()
-                    } catch { self.error = error.localizedDescription }
-                }
-                if configured {
-                    Button("calls.disconnect", role: .destructive) {
-                        do { try CallKeychain.remove(); UserDefaults.standard.set(false, forKey: PhoneCalls.enabledKey); dismiss() }
-                        catch { self.error = error.localizedDescription }
+            List {
+                Section {
+                    Text("calls.setupHelp").font(.footnote).foregroundStyle(Theme.textSecondary)
+                    TextField("calls.account", text: $accountSID).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    SecureField(configured ? "calls.keepToken" : "calls.token", text: $token).textInputAutocapitalization(.never)
+                    TextField("calls.from", text: $from).keyboardType(.phonePad)
+                    TextField("calls.own", text: $own).keyboardType(.phonePad)
+                    Text("calls.retention").font(.footnote).foregroundStyle(Theme.textSecondary)
+                    if let error { Text(error).foregroundStyle(Theme.recording) }
+                    Button("calls.save") {
+                        do {
+                            let prior = try CallKeychain.load()
+                            let account = CallAccount(accountSID: accountSID.trimmingCharacters(in: .whitespacesAndNewlines),
+                                authToken: token.isEmpty ? (prior?.authToken ?? "") : token.trimmingCharacters(in: .whitespacesAndNewlines),
+                                fromNumber: try CallService.phoneNumber(from), ownNumber: try CallService.phoneNumber(own))
+                            _ = try CallService(account: account)
+                            try CallKeychain.save(account)
+                            dismiss()
+                        } catch { self.error = error.localizedDescription }
+                    }
+                    if configured {
+                        Button("calls.disconnect", role: .destructive) {
+                            do { try CallKeychain.remove(); UserDefaults.standard.set(false, forKey: PhoneCalls.enabledKey); dismiss() }
+                            catch { self.error = error.localizedDescription }
+                        }
                     }
                 }
+                .listRowBackground(Theme.background)
+                .listRowSeparatorTint(Theme.border)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Theme.background)
             .navigationTitle("calls.settings")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("library.done") { dismiss() } }
             .task {
                 do {

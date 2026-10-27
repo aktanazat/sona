@@ -1,6 +1,6 @@
 # Sona
 
-Sona is a local-first desktop app for spoken words: dictation delivered into any app, and meeting notes recorded, transcribed, and remembered on your own Mac. It runs on macOS, with dictation also on Windows and Linux.
+Sona is a local-first Mac and iPhone app for spoken words: dictation delivered into other apps, and meeting notes recorded, transcribed, and remembered. The desktop app is native SwiftUI on macOS 15 or later. The native iPhone app includes a Watch companion and a dictation keyboard; there is no separate web desktop app or Windows/Linux release.
 
 Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-source speech-to-text app, and keeps its MIT license. See `NOTICE` for the other projects it draws on.
 
@@ -16,7 +16,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - Searchable local history with delivery receipts and retained recordings.
 - Audio-file transcription, vocabulary corrections, CSV vocabulary tools, and optional emoji replacements.
 - Streaming dictation retains queued opening audio when recognition falls behind. Microphone readiness follows the first audio sample, including a Studio Display microphone, rather than a full scan of its supported formats.
-- Context capture from the focused field on macOS, Windows, and Linux, under a global ceiling. At Off, Sona reads nothing from other apps except the text you select for a command.
+- Context capture from the focused field on your Mac, under a global ceiling. At Off, Sona reads nothing from other apps except the text you select for a command.
 
 ### Meetings
 
@@ -36,7 +36,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 
 ### Screen recording
 
-- Records a screen you pick in the macOS picker, with an optional camera picture-in-picture and microphone, to an H.264/AAC MP4 in `recordings/`. Pause, resume, stop and save, or cancel. Needs macOS 14 or later and Screen Recording access; Camera and Microphone access only when you turn those on. It does not capture system audio, and it refuses to start while a dictation or meeting holds the microphone.
+- Records a screen you pick in the macOS picker, with an optional camera picture-in-picture and microphone, to an H.264/AAC MP4 in `recordings/`. Pause, resume, stop and save, or cancel. Requires macOS 15 or later and Screen Recording access; Camera and Microphone access only when you turn those on. It does not capture system audio, and it refuses to start while a dictation or meeting holds the microphone.
 
 ### Agents
 
@@ -47,7 +47,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 
 ### Phone and watch
 
-- `mobile/` holds the iPhone and Apple Watch recorders. They pair with your Mac through the same end-to-end encrypted vault the desktop syncs through, record in-person conversations, and hand them to the Mac as meetings. On iPhone, Sona offers to record a note when a call ends; iOS gives no app access to call audio.
+- `mobile/` holds one iPhone app with an embedded Apple Watch companion and keyboard extension. They pair with your Mac through the same end-to-end encrypted vault the desktop syncs through, record in-person conversations, and hand them to the Mac as meetings. The iPhone app requires iOS 26; its Watch companion targets watchOS 10 or later. On iPhone, Sona offers to record a note when a call ends; iOS gives no app access to ordinary call audio.
 
 Local runs keep captured audio on the device. Cloud transcription sends audio only after you configure a provider key and accept that provider's transfer notice. Sona does not store provider keys in its settings file.
 
@@ -64,7 +64,7 @@ meeting sync saves an encrypted copy before uploading. if an upload is interrupt
 
 ## Install
 
-No builds are published yet; build from source (below). Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds unsigned bundles unless the repository has Apple signing secrets configured.
+Build the native apps from source using the commands below. A `vX.Y.Z` tag builds the native Mac app and attaches an explicitly unsigned Apple silicon ZIP to a draft release. That artifact includes the recording engine, but it is not a signed or notarized public distribution: Gatekeeper may block it, and the camera extension requires matching Apple signing and provisioning. iPhone archive and App Store export remain manual. See [BUILD.md](BUILD.md) for signing requirements.
 
 ## First launch and migration
 
@@ -76,87 +76,86 @@ Sona uses its own application identity and data directory. On the first launch i
 - Close the Legacy app before moving data. Running both apps can make them compete for global shortcuts.
 - New setup starts with the dictation language, offers compatible speech models, and requires a real practice transcript before setup can finish.
 
-After a successful move, remove the Legacy app using the normal method for your platform. Sona never uninstalls another app. A debug-only rollback removes Sona's copied settings and history, moves recordings and models back, and discards any changes made in Sona after migration.
+After a successful move, remove the Legacy app using the normal macOS method. Sona never uninstalls another app. A debug-only rollback removes Sona's copied settings and history, moves recordings and models back, and discards any changes made in Sona after migration.
 
 ## Command line
 
-```bash
-sona --list-models --json
-sona --list-devices
-sona --transcribe-file recording.wav --repeat 3 --json
-
-sona --toggle-transcription
-sona --toggle-post-process
-sona --cancel
-sona --start-hidden
-sona --no-tray
-sona --debug
-```
-
-On macOS, the installed binary is:
+Open `Sona.app` for the desktop interface. Its bundled Rust engine also provides the CLI; it does not launch a second desktop app:
 
 ```bash
-/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-core --toggle-transcription
+core=/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-core
+"$core" --help
+"$core" --list-models --json
+"$core" --list-devices
+"$core" --transcribe-file recording.wav --repeat 3 --json
+"$core" --meetings --last 5
+"$core" --loops --status open
+
+"$core" --toggle-transcription
+"$core" --toggle-post-process
+"$core" --cancel
 ```
+
+The last three controls require the native Mac app to be running. External corpus reads require Settings > Agents > External access; closing a loop also requires External mutations. Both grants start off. The MCP server wraps these same commands. See `skills/sona/SKILL.md` for flags, responses, and consent refusals.
 
 ## Data locations
 
-| Platform | Default application data directory                                          |
-| -------- | --------------------------------------------------------------------------- |
-| macOS    | `~/Library/Application Support/com.aktanazat.sona`                          |
-| Windows  | `%APPDATA%\com.aktanazat.sona`                                              |
-| Linux    | `$XDG_DATA_HOME/com.aktanazat.sona`, or `~/.local/share/com.aktanazat.sona` |
+The Mac engine keeps its data in `~/Library/Application Support/com.aktanazat.sona`. The native interface keeps its existing `com.aktanazat.sona.mac` identity; changing the interface does not move the engine's data.
 
-Sona stores settings in `settings_store.json`, history in `history.db`, recordings in `recordings/`, models in `models/`, and logs in `logs/sona.log`.
+Sona stores settings in `settings_store.json`, history in `history.db`, recordings in `recordings/`, models in `models/`, and logs in `logs/sona.log`. iPhone recordings and drafts stay in the app's private container until an approved transfer or paired sync.
 
-### Portable mode
+### Portable core runs
 
-Create a file named `portable` next to the Sona executable. Sona writes `Sona Portable Mode` to that file and keeps its data in the adjacent `Data/` directory. Existing portable installations with the older marker remain portable and are upgraded in place.
+For an isolated core run, create a file named `portable` next to the core executable. Sona writes `Sona Portable Mode` to that file and keeps its data in the adjacent `Data/` directory. Debug cores also need `SONA_ALLOW_PORTABLE_DEV=1`. This is not another desktop app or a public portable installer.
 
 Portable mode does not use the native credential store, so provider-backed features remain unavailable until you use a normal installation.
 
 ## Environment variables
 
-| Variable                             | Purpose                                                 |
-| ------------------------------------ | ------------------------------------------------------- |
-| `SONA_NO_GTK_LAYER_SHELL=1`          | Disable the Linux GTK layer-shell overlay.              |
-| `SONA_METAL_RESIDENCY=1`             | Restore the upstream Metal residency setting.           |
-| `SONA_DEBUG_MIC_READY_DELAY_MS`      | Add a debug microphone-ready delay.                     |
-| `SONA_FORCE_TRANSCRIPTION_FAILURE=1` | Force a debug transcription failure.                    |
-| `SONA_FORCE_AI_STUB=1`               | Build the Apple Intelligence stub.                      |
-| `SONA_VC_REDIST_DIRS`                | Set the Windows VC++ runtime staging directories in CI. |
+| Variable                             | Purpose                                                            |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `SONA_CORE`                          | Use a development core when the Debug Mac app has no bundled core. |
+| `SONA_CORE_TARGET_DIR`               | Point Xcode at this checkout's built core/helper output root.      |
+| `SONA_ALLOW_PORTABLE_DEV=1`          | Allow an isolated portable profile for a debug core.               |
+| `SONA_METAL_RESIDENCY=1`             | Restore the upstream Metal residency setting.                      |
+| `SONA_DEBUG_MIC_READY_DELAY_MS`      | Add a debug microphone-ready delay.                                |
+| `SONA_FORCE_TRANSCRIPTION_FAILURE=1` | Force a debug transcription failure.                               |
+| `SONA_FORCE_AI_STUB=1`               | Build the Apple Intelligence unavailable bridge.                   |
 
 ## Build from source
 
-Install current Rust and Bun, then run:
+On an Apple silicon Mac, install Xcode 26, current Rust, Bun, and CMake. From the repository root, build the private helpers, the Rust engine, and then the native app:
 
 ```bash
-bun install
-bun run prepare:agent-hook
-bun run prepare:cleanup-runtime
+bun install --frozen-lockfile
+unset CARGO_TARGET_DIR
+bun run prepare:agent-hook -- aarch64-apple-darwin
+bun run prepare:cleanup-runtime -- aarch64-apple-darwin
 bun run build
-cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo check --all-features
+xcodebuild -project macos/Sona.xcodeproj -scheme Sona \
+  -configuration Release -destination 'generic/platform=macOS' \
+  -derivedDataPath /private/var/tmp/sona-native-release \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+  SONA_CORE_TARGET_DIR="$PWD/src-tauri/target" \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+bash macos/scripts/inspect-package.sh app \
+  /private/var/tmp/sona-native-release/Build/Products/Release/Sona.app arm64
 ```
 
-The desktop development command is:
+This produces an unsigned development bundle. Release fails if its matching release engine, either helper, or required resources are missing. A local signed build needs the existing Apple team's credentials and profiles; do not replace your installed signed app with the unsigned output.
+
+Build the iPhone simulator app, including its Watch companion and keyboard, with:
 
 ```bash
-bun run tauri dev
+xcodebuild -project mobile/Sona.xcodeproj -scheme Sona \
+  -configuration Debug -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /private/var/tmp/sona-iphone \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 ```
 
-For Linux package builds, Sona installs private runtime libraries under `/usr/lib/sona`. The package executable is `sona`.
+[BUILD.md](BUILD.md) covers debug cores, signed Mac archives, manual iPhone export, package layout, and checks. The Rust engine and encrypted companion service remain; no Next development server or Tauri web-app build is needed.
 
 ## Troubleshooting
-
-### Linux overlay problems
-
-If the GTK layer-shell overlay conflicts with your compositor, start Sona with:
-
-```bash
-SONA_NO_GTK_LAYER_SHELL=1 sona
-```
-
-This uses a regular always-on-top window for the recording overlay.
 
 ### macOS permissions
 

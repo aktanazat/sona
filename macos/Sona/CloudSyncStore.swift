@@ -408,6 +408,11 @@ final class CloudSyncStore {
     /// belongs to no row: the section owns it.
     func importBundle() async {
         guard pending == nil, let path = CloudSyncStore.openPath() else { return }
+        await importBundle(at: path)
+    }
+
+    func importBundle(at path: String) async {
+        guard pending == nil else { return }
         await call(.importBundle) {
             let result: CloudShareImportResult = try await core.request(
                 "cloud_share_import_file",

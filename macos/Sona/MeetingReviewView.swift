@@ -16,7 +16,6 @@ struct MeetingReviewView: View {
     var body: some View {
         Page {
             BackLink(title: "Meetings") { store.closeReview() }
-                .padding(.bottom, 20)
             if let snapshot = store.snapshot {
                 MeetingReviewHeader(
                     store: store, snapshot: snapshot, delete: { confirmingDelete = true },
@@ -159,16 +158,22 @@ struct MeetingReviewHeader: View {
     @State private var copyGeneration = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 16) {
-                title
-                Spacer(minLength: 16)
-                actions
+        VStack(alignment: .leading, spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    title.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 12)
+                    actions.fixedSize(horizontal: true, vertical: false)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    title
+                    actions
+                }
             }
             Text(facts).metaText(Theme.inkSecondary)
             status
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, 20)
     }
 
     @ViewBuilder
@@ -183,7 +188,10 @@ struct MeetingReviewHeader: View {
             }
         } else {
             Button { start() } label: {
-                Text(snapshot.session.title).titleText()
+                Text(snapshot.session.title)
+                    .titleText()
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
             }
             .buttonStyle(.plain)
             .disabled(!store.editable)
@@ -194,7 +202,7 @@ struct MeetingReviewHeader: View {
     /// What is under way, the one action worth a button, and the menu that
     /// holds the rest, the agent first.
     private var actions: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if let doing = store.pending ?? (store.catchingUp ? "Catching up" : nil) {
                 Text("\(doing)…").metaText(Theme.accent)
             }
@@ -266,6 +274,7 @@ struct MeetingReviewHeader: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(store.busy)
+            .accessibilityLabel("Meeting options")
         }
     }
 
@@ -434,32 +443,33 @@ struct MeetingReviewTabs: View {
     let store: MeetingsStore
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 24) {
+        HStack(alignment: .firstTextBaseline, spacing: 20) {
             ForEach(MeetingReviewTab.allCases) { tab in
                 Button {
                     store.choose(tab: tab)
                 } label: {
-                    VStack(spacing: 8) {
+                    VStack(spacing: 6) {
                         Text(tab.title)
                             .font(TypeScale.label())
                             .foregroundStyle(store.tab == tab ? Theme.ink : Theme.inkSecondary)
                         Rectangle()
-                            .fill(store.tab == tab ? Theme.accent : .clear)
-                            .frame(height: 2)
+                            .fill(store.tab == tab ? Theme.ink : .clear)
+                            .frame(height: 1)
                     }
                     .fixedSize()
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(store.tab == tab ? .isSelected : [])
             }
             Spacer(minLength: 0)
             if store.tab == .transcript && !store.transcriptDeleted {
                 TranscriptSearchField(store: store)
             }
         }
-        .frame(height: 36, alignment: .bottom)
+        .frame(height: 32, alignment: .bottom)
         .overlay(alignment: .bottom) { Hairline() }
-        .padding(.bottom, 24)
+        .padding(.bottom, 20)
     }
 }
 
@@ -509,9 +519,9 @@ private struct TranscriptSearchField: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(width: 240, height: 28)
+        .frame(width: 216, height: 28)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 
     private var query: Binding<String> {

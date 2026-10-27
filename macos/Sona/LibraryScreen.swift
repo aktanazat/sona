@@ -8,6 +8,7 @@ import SwiftUI
 /// rest of the log its quiet.
 struct LibraryScreen: View {
     let store: LibraryStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The file-import dialog belongs to another page; the button hands over.
     var importAudio: () -> Void = {}
     /// A correction is a vocabulary rule, and Vocabulary owns that write. The
@@ -36,7 +37,9 @@ struct LibraryScreen: View {
             }
             .onChange(of: store.revealed) { _, _ in
                 guard let id = store.expanded else { return }
-                withAnimation { proxy.scrollTo(id, anchor: .center) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
             }
         }
         .task { await store.start() }
@@ -92,37 +95,35 @@ private struct LibraryHeader: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Library").titleText()
-                meta
+        VStack(alignment: .leading, spacing: 0) {
+            PageTitle("Library", subtitle: subtitle) {
+                HStack(spacing: 8) {
+                    SearchField(prompt: "Search transcripts", text: $query)
+                        .frame(width: 216)
+                    Button("Import", action: importAudio)
+                        .buttonStyle(.primary)
+                    LibraryMenu(store: store)
+                }
             }
-            Spacer(minLength: 16)
-            SearchField(prompt: "Search transcripts", text: $query)
-                .frame(width: 240)
-            Button("Import", action: importAudio)
-                .buttonStyle(.primary)
-            LibraryMenu(store: store)
+            if store.statsFailed, !searching {
+                HStack(spacing: 12) {
+                    Text("Usage statistics are unavailable.")
+                        .font(TypeScale.body(13))
+                        .foregroundStyle(Theme.live)
+                    Button("Try again") {
+                        Task { await store.refreshStats() }
+                    }
+                    .buttonStyle(.compact)
+                }
+                .padding(.bottom, 16)
+            }
         }
-        .padding(.bottom, 28)
     }
 
-    @ViewBuilder private var meta: some View {
-        if searching {
-            Text(matchLine).metaText(Theme.inkSecondary)
-        } else if store.statsFailed {
-            HStack(spacing: 12) {
-                Text("Usage statistics are unavailable.")
-                    .font(TypeScale.body(14))
-                    .foregroundStyle(Theme.live)
-                Button("Try again") {
-                    Task { await store.refreshStats() }
-                }
-                .buttonStyle(.compact)
-            }
-        } else if let summaryLine {
-            Text(summaryLine).metaText(Theme.inkSecondary)
-        }
+    private var subtitle: String {
+        if searching { return matchLine }
+        if store.statsFailed { return "" }
+        return summaryLine ?? ""
     }
 }
 
@@ -143,7 +144,7 @@ private struct LibraryMenu: View {
             Image(systemName: "ellipsis")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 28, height: 36)
+                .frame(width: 28, height: 32)
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
@@ -185,8 +186,8 @@ private struct LibraryActivity: View {
                         .fixedSize()
                     }
                     TrendBars(points: trend.points)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 18)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 12)
                 }
             }
         }
@@ -261,7 +262,7 @@ private struct LibraryFeed: View {
     let processAgain: (HistoryRow) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
+        VStack(alignment: .leading, spacing: 20) {
             switch store.phase {
             case .loading:
                 HistoryPlaceholder()
@@ -295,12 +296,12 @@ private struct LibraryFeed: View {
                 }
             }
         }
-        .padding(.bottom, 32)
+        .padding(.bottom, 24)
     }
 
     private var emptyLine: String {
         let query = store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty ? "Dictations you make appear here." : "No transcripts match “\(query)”."
+        return query.isEmpty ? "No dictations yet." : "No transcripts match “\(query)”."
     }
 }
 
@@ -314,8 +315,8 @@ private struct HistoryPlaceholder: View {
                     RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(height: 12)
                     RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(width: 48, height: 10)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
                 .overlay(alignment: .bottom) { Hairline() }
             }
         }
@@ -331,7 +332,7 @@ private struct HistoryDaySection: View {
     let processAgain: (HistoryRow) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(day.heading).metaText(Theme.inkSecondary)
             Card {
                 ForEach(day.spoken) { row in
@@ -378,8 +379,8 @@ private struct HistorySilentGroup: View {
                         .metaText()
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -464,7 +465,7 @@ private struct HistoryRowView: View {
                 .background(hovering && !expanded ? Theme.wash : .clear)
                 .onHover { hovering = $0 }
             if expanded {
-                Hairline().padding(.horizontal, 20)
+                Hairline().padding(.horizontal, 12)
                 HistoryRowDetail(
                     store: store,
                     row: row,
@@ -501,8 +502,8 @@ private struct HistoryRowView: View {
                 .foregroundStyle(Theme.inkSecondary)
                 .frame(minWidth: 44, alignment: .trailing)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -572,7 +573,7 @@ private struct HistoryRowDetail: View {
             controls
             ReceiptInspector(store: store, row: row)
         }
-        .padding(20)
+        .padding(12)
         .alert("Delete this dictation?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) { store.delete(row.id) }
             Button("Keep it", role: .cancel) {}
