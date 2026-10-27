@@ -95,7 +95,10 @@ pub(crate) fn processing_plan(
     )?;
     connection.execute(
         "UPDATE meeting_sessions SET phase='processing',successful_plan_id=?2 WHERE id=?1",
-        params![plan.session_id.uuid().to_string(),plan.plan_id.uuid().to_string()],
+        params![
+            plan.session_id.uuid().to_string(),
+            plan.plan_id.uuid().to_string()
+        ],
     )?;
     Ok(())
 }

@@ -2182,7 +2182,6 @@ mod tests {
         });
     }
 
-
     #[test]
     fn polling_retries_a_rate_limit_without_sleeping() {
         tauri::async_runtime::block_on(async {

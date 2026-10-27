@@ -847,7 +847,9 @@ impl AudioRecorder {
                 .ok_or_else(|| Error::new(std::io::ErrorKind::NotFound, "No input device found"))?,
         };
         let (device_name, identity) = device_configuration_key(&device);
-        cache.get_or_query_with_identity(&device_name, identity, || Self::get_preferred_config(&device, identity.is_some()))?;
+        cache.get_or_query_with_identity(&device_name, identity, || {
+            Self::get_preferred_config(&device, identity.is_some())
+        })?;
         Ok(())
     }
 
@@ -878,7 +880,12 @@ impl AudioRecorder {
             .as_ref()
             .ok_or_else(|| Error::other("Recorder is not open"))?;
         let (ready_tx, ready_rx) = mpsc::channel();
-        tx.send(Cmd::Start(vad_policy, Instant::now(), ready_tx, forward_audio))?;
+        tx.send(Cmd::Start(
+            vad_policy,
+            Instant::now(),
+            ready_tx,
+            forward_audio,
+        ))?;
         Ok(ready_rx)
     }
 
@@ -1091,14 +1098,22 @@ impl AudioRecorder {
         device: &cpal::Device,
     ) -> Result<u16, Box<dyn std::error::Error>> {
         let (name, identity) = device_configuration_key(device);
-        Ok(cache.get_or_query_with_identity(&name, identity, || Self::get_preferred_config(device, identity.is_some()))?.channels())
+        Ok(cache
+            .get_or_query_with_identity(&name, identity, || {
+                Self::get_preferred_config(device, identity.is_some())
+            })?
+            .channels())
     }
 
     fn get_preferred_config(
         device: &cpal::Device,
         default_channels_confirmed: bool,
     ) -> Result<cpal::SupportedStreamConfig, Box<dyn std::error::Error>> {
-        Self::select_preferred_config(device.default_input_config()?, default_channels_confirmed, || device.supported_input_configs())
+        Self::select_preferred_config(
+            device.default_input_config()?,
+            default_channels_confirmed,
+            || device.supported_input_configs(),
+        )
     }
 
     fn select_preferred_config<I>(
@@ -1857,7 +1872,11 @@ fn run_consumer(inputs: ConsumerInputs) {
                     capture_ready_tx = Some((ready_tx, start_landed_at));
                     heard_sound = false;
                     vad_policy = policy;
-                    session_audio_cb = if forward_audio { audio_cb.clone() } else { None };
+                    session_audio_cb = if forward_audio {
+                        audio_cb.clone()
+                    } else {
+                        None
+                    };
                     processed_samples.clear();
                     silence_until_speech = (policy != VadPolicy::Disabled).then(Vec::new);
                     recording = true;
@@ -2291,9 +2310,9 @@ mod tests {
         cached_config_for, capture_into_lane, capture_into_timed_lane, capture_lane,
         is_microphone_access_denied, is_no_input_device_error, observe_meeting_packet,
         retain_no_speech_samples, run_consumer, store_config, ActiveMeetingCapture, AudioRecorder,
-        CaptureError, CaptureProducer, Cmd, ConsumerInputs, InputConfigCache, MeetingCallbackControl,
-        PacketSink, ReadyOn, RecordedAudio, TimedCaptureState, VadConfig, VadPolicy,
-        MAX_NO_SPEECH_HISTORY_SAMPLES,
+        CaptureError, CaptureProducer, Cmd, ConsumerInputs, InputConfigCache,
+        MeetingCallbackControl, PacketSink, ReadyOn, RecordedAudio, TimedCaptureState, VadConfig,
+        VadPolicy, MAX_NO_SPEECH_HISTORY_SAMPLES,
     };
     use crate::audio_toolkit::vad::{VadFrame, VoiceActivityDetector};
     #[cfg(target_os = "macos")]
@@ -2897,15 +2916,22 @@ mod tests {
     #[test]
     fn an_integer_default_still_selects_float_at_the_native_rate() {
         let default = cpal::SupportedStreamConfig::new(
-            2, cpal::SampleRate(44_100), cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::I16,
+            2,
+            cpal::SampleRate(44_100),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::I16,
         );
         let preferred = cpal::SupportedStreamConfigRange::new(
-            2, cpal::SampleRate(44_100), cpal::SampleRate(48_000),
-            cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::F32,
+            2,
+            cpal::SampleRate(44_100),
+            cpal::SampleRate(48_000),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
         );
         let config = AudioRecorder::select_preferred_config(default, true, || {
             Ok(std::iter::once(preferred))
-        }).expect("float configuration");
+        })
+        .expect("float configuration");
         assert_eq!(config.sample_rate().0, 44_100);
         assert_eq!(config.channels(), 2);
         assert_eq!(config.sample_format(), cpal::SampleFormat::F32);
@@ -2914,12 +2940,16 @@ mod tests {
     #[test]
     fn unconfirmed_default_channels_still_use_the_supported_channel_layout() {
         let preferred = cpal::SupportedStreamConfigRange::new(
-            4, cpal::SampleRate(48_000), cpal::SampleRate(48_000),
-            cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::F32,
+            4,
+            cpal::SampleRate(48_000),
+            cpal::SampleRate(48_000),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
         );
         let config = AudioRecorder::select_preferred_config(test_config(48_000), false, || {
             Ok(std::iter::once(preferred))
-        }).expect("full channel configuration");
+        })
+        .expect("full channel configuration");
         assert_eq!(config.channels(), 4);
     }
 
@@ -2928,7 +2958,10 @@ mod tests {
         let cache = InputConfigCache::default();
         let selected = cache
             .get_or_query("display", || {
-                assert!(cache.state.try_lock().is_ok(), "discovery held the configuration lock");
+                assert!(
+                    cache.state.try_lock().is_ok(),
+                    "discovery held the configuration lock"
+                );
                 cache.invalidate();
                 Ok::<_, ()>(test_config(48_000))
             })
@@ -2956,26 +2989,34 @@ mod tests {
     #[test]
     fn a_replugged_device_does_not_reuse_the_previous_device_configuration() {
         let cache = InputConfigCache::default();
-        cache.get_or_query_with_identity("display", Some([1, 48_000, 1, 0, 0, 32]), || {
-            Ok::<_, ()>(test_config(48_000))
-        }).expect("initial configuration");
+        cache
+            .get_or_query_with_identity("display", Some([1, 48_000, 1, 0, 0, 32]), || {
+                Ok::<_, ()>(test_config(48_000))
+            })
+            .expect("initial configuration");
         let mut queries = 0;
-        cache.get_or_query_with_identity("display", Some([2, 48_000, 1, 0, 0, 32]), || {
-            queries += 1;
-            Ok::<_, ()>(test_config(48_000))
-        }).expect("replugged configuration");
+        cache
+            .get_or_query_with_identity("display", Some([2, 48_000, 1, 0, 0, 32]), || {
+                queries += 1;
+                Ok::<_, ()>(test_config(48_000))
+            })
+            .expect("replugged configuration");
         assert_eq!(queries, 1);
     }
 
     #[test]
     fn a_native_format_change_does_not_reuse_the_previous_configuration() {
         let cache = InputConfigCache::default();
-        cache.get_or_query_with_identity("display", Some([1, 48_000, 1, 0, 0, 32]), || {
-            Ok::<_, ()>(test_config(48_000))
-        }).expect("initial configuration");
-        let changed = cache.get_or_query_with_identity("display", Some([1, 44_100, 2, 0, 0, 32]), || {
-            Ok::<_, ()>(test_config(44_100))
-        }).expect("changed configuration");
+        cache
+            .get_or_query_with_identity("display", Some([1, 48_000, 1, 0, 0, 32]), || {
+                Ok::<_, ()>(test_config(48_000))
+            })
+            .expect("initial configuration");
+        let changed = cache
+            .get_or_query_with_identity("display", Some([1, 44_100, 2, 0, 0, 32]), || {
+                Ok::<_, ()>(test_config(44_100))
+            })
+            .expect("changed configuration");
         assert_eq!(changed.sample_rate().0, 44_100);
     }
 
@@ -3001,11 +3042,19 @@ mod tests {
             });
         });
         let (ready_tx, ready_rx) = mpsc::channel();
-        cmd_tx.send(Cmd::Start(VadPolicy::Disabled, Instant::now(), ready_tx, false))
+        cmd_tx
+            .send(Cmd::Start(
+                VadPolicy::Disabled,
+                Instant::now(),
+                ready_tx,
+                false,
+            ))
             .expect("start practice");
         let input = [0.25; 480];
         capture_into_lane(&input, 1, None, &mut producer);
-        ready_rx.recv_timeout(Duration::from_secs(1)).expect("practice ready");
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("practice ready");
         let recorded = stop_and_collect(&cmd_tx, &mut producer, &input).expect("practice samples");
         cmd_tx.send(Cmd::Shutdown).expect("shutdown");
         worker.join().expect("consumer");

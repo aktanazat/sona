@@ -4536,7 +4536,6 @@ mod tests {
             attempts[0].delivery.outcome,
             DeliveryOutcome::DispatchedButUnconfirmed
         );
-
     }
 
     #[test]

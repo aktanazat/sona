@@ -1257,10 +1257,8 @@ fn log_mel_features(
         // replicates its first sample at the left edge before windowing.
         // The model author scales normalized audio back to PCM16 magnitude.
         let mut previous = (frame[0] - mean) * 32_768.0;
-        for ((sample, windowed), coefficient) in frame
-            .iter()
-            .zip(spectrum.iter_mut())
-            .zip(window.iter())
+        for ((sample, windowed), coefficient) in
+            frame.iter().zip(spectrum.iter_mut()).zip(window.iter())
         {
             let current = (*sample - mean) * 32_768.0;
             *windowed = Complex32::new((current - 0.97 * previous) * coefficient, 0.0);
@@ -1320,9 +1318,7 @@ fn mel_filters() -> Result<Vec<Vec<(usize, f32)>>, DiarizationError> {
     let bin_width = SAMPLE_RATE_HZ
         .to_f32()
         .ok_or(DiarizationError::InferenceFailed)?
-        / FFT_SIZE
-            .to_f32()
-            .ok_or(DiarizationError::InferenceFailed)?;
+        / FFT_SIZE.to_f32().ok_or(DiarizationError::InferenceFailed)?;
     let mut bin_mels = [0.0_f32; FFT_SIZE / 2];
     for (index, mel) in bin_mels.iter_mut().enumerate() {
         let index = index.to_f32().ok_or(DiarizationError::InferenceFailed)?;
@@ -1341,8 +1337,8 @@ fn mel_filters() -> Result<Vec<Vec<(usize, f32)>>, DiarizationError> {
                 .iter()
                 .enumerate()
                 .filter_map(|(bin, mel)| {
-                    let weight = ((mel - lower) / (center - lower))
-                        .min((upper - mel) / (upper - center));
+                    let weight =
+                        ((mel - lower) / (center - lower)).min((upper - mel) / (upper - center));
                     (weight > 0.0).then_some((bin, weight))
                 })
                 .collect();
@@ -1437,7 +1433,10 @@ mod tests {
             .iter()
             .map(|(frame, band, expected)| (features[frame * MEL_BINS + band] - expected).abs())
             .fold(0.0_f32, f32::max);
-        assert!(max_error < 0.002, "Kaldi reference maximum absolute error: {max_error}");
+        assert!(
+            max_error < 0.002,
+            "Kaldi reference maximum absolute error: {max_error}"
+        );
         Ok(())
     }
 
@@ -1460,7 +1459,11 @@ mod tests {
         assert_eq!(features.len(), 3 * MEL_BINS);
         let largest_band_mean = (0..MEL_BINS)
             .map(|band| {
-                features.chunks_exact(MEL_BINS).map(|frame| frame[band]).sum::<f32>().abs()
+                features
+                    .chunks_exact(MEL_BINS)
+                    .map(|frame| frame[band])
+                    .sum::<f32>()
+                    .abs()
                     / 3.0
             })
             .fold(0.0_f32, f32::max);
@@ -1661,8 +1664,7 @@ mod tests {
         );
         assert_eq!(key.feature_pipeline_revision, pipeline);
         assert_ne!(
-            key.feature_pipeline_revision,
-            "log-mel-80-hamming-400-hop-160-fft-512-mean-center-v1",
+            key.feature_pipeline_revision, "log-mel-80-hamming-400-hop-160-fft-512-mean-center-v1",
             "legacy vectors from the incompatible feature extractor must not match"
         );
 

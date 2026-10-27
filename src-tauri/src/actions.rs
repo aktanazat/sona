@@ -773,7 +773,9 @@ async fn post_process_transcription_inner(
                 &rendered.system_message,
                 &rendered.user_message,
                 token_limit,
-            ).await {
+            )
+            .await
+            {
                 Ok(result) => accept_rewrite(&result),
                 Err(error) => {
                     warn!("Apple Intelligence post-processing failed: {error}");
@@ -2312,7 +2314,10 @@ mod tests {
 
     #[test]
     fn ordinary_dictation_has_an_eight_second_rewrite_ceiling() {
-        assert_eq!(super::rewrite_deadline(None), std::time::Duration::from_secs(8));
+        assert_eq!(
+            super::rewrite_deadline(None),
+            std::time::Duration::from_secs(8)
+        );
     }
 
     #[test]
@@ -2374,7 +2379,6 @@ mod tests {
             );
         }
     }
-
 
     #[test]
     fn truncated_capture_has_no_transcript_or_post_processing_path() {
@@ -2895,7 +2899,6 @@ mod tests {
             held,
             serde_json::json!({ "error_type": "cloud_transcription_held" })
         );
-
     }
 
     #[test]
@@ -2914,7 +2917,6 @@ mod tests {
             assert_eq!(payload, serde_json::json!({ "error_type": expected }));
         }
     }
-
 
     #[test]
     fn cloud_run_errors_expose_one_wire_kind_each() {

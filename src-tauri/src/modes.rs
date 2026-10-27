@@ -4,8 +4,8 @@ use crate::settings::{
     self, AppSettings, AutoSubmitKey, ClipboardHandling, EmojiReplacement, EnglishSpelling,
     OrtAcceleratorSetting, PasteMethod, PersonaSample, PostProcessEndpoint, PostProcessProvider,
     ReplacementRule, ShortcutBinding, TranscribeAcceleratorSetting, TypingTool, VocabularyEntry,
-    APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID,
-    LOCAL_CLEANUP_MODEL_ID, LOCAL_CLEANUP_PROVIDER_ID,
+    APPLE_INTELLIGENCE_DEFAULT_MODEL_ID, APPLE_INTELLIGENCE_PROVIDER_ID, LOCAL_CLEANUP_MODEL_ID,
+    LOCAL_CLEANUP_PROVIDER_ID,
 };
 use crate::snippets::Snippet;
 use serde::{Deserialize, Serialize};
@@ -1948,9 +1948,7 @@ impl RunPlan {
         let mut rewrite_unavailable = false;
         let llm = if post_process_requested {
             match Self::resolve_rewrite(settings, &mode.llm) {
-                Ok(llm)
-                    if rewrite_required && llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID =>
-                {
+                Ok(llm) if rewrite_required && llm.provider.id == LOCAL_CLEANUP_PROVIDER_ID => {
                     return Err(RunPlanError::InvalidPostProcessDestination);
                 }
                 Ok(llm) => Some(llm),
@@ -2733,7 +2731,11 @@ mod tests {
             settings.modes[0].llm.model_id = previous_model.to_string();
             let run = RunPlan::for_intent(&settings, &TranscriptionIntent::ActiveMode)
                 .expect("offline provider resolves without cloud setup");
-            let llm = run.prompt().llm.as_ref().expect("offline cleanup is requested");
+            let llm = run
+                .prompt()
+                .llm
+                .as_ref()
+                .expect("offline cleanup is requested");
             assert_eq!(llm.provider.id, LOCAL_CLEANUP_PROVIDER_ID);
             assert_eq!(llm.model_id, LOCAL_CLEANUP_MODEL_ID);
             assert!(!llm.endpoint.is_remote());

@@ -537,5 +537,4 @@ mod tests {
             "a call playing out loud is not the microphone being held"
         );
     }
-
 }

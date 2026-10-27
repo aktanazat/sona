@@ -763,7 +763,6 @@ mod tests {
         TranscriptionIntent::ActiveMode
     }
 
-
     #[test]
     fn push_to_talk_release_classification_covers_every_recording_state() {
         let intent = active_mode();
@@ -834,7 +833,6 @@ mod tests {
             PttAction::Passthrough
         );
     }
-
 
     #[test]
     fn legacy_binding_id_is_not_a_transcription_binding() {
@@ -1156,7 +1154,6 @@ mod tests {
             "a repeat press must not arm a release"
         );
     }
-
 
     #[test]
     fn a_release_after_a_tap_stop_is_ignored_by_the_busy_pipeline() {

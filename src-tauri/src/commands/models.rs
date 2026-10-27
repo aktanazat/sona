@@ -113,7 +113,10 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
     }
 
     let (unload_timeout, old_model) = update_settings(app, |settings| {
-        let previous = (settings.model_unload_timeout, settings.selected_model.clone());
+        let previous = (
+            settings.model_unload_timeout,
+            settings.selected_model.clone(),
+        );
         settings.selected_model = model_id.to_string();
         previous
     })?;

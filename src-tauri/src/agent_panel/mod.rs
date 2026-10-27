@@ -3107,7 +3107,6 @@ mod tests {
         assert!(!is_opaque_id("https://turn"));
     }
 
-
     #[test]
     fn a_connection_stamp_does_not_stale_a_pending_proposal() {
         let data_dir = tempfile::tempdir().expect("temporary app data");

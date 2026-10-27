@@ -399,8 +399,8 @@ describe("shared notes document", () => {
       "Design sync",
     );
     expect(document.querySelector("#markdown-content img")).toBeNull();
-    expect(
-      document.querySelector("#markdown-content p")?.textContent,
-    ).toBe("<img src=x onerror=alert(1)>");
+    expect(document.querySelector("#markdown-content p")?.textContent).toBe(
+      "<img src=x onerror=alert(1)>",
+    );
   });
 });

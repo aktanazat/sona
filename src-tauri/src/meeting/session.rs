@@ -3521,7 +3521,8 @@ impl MeetingSessionManager {
         let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         if let Some(refresh) = relationship_refresh {
-            self.processing.start_relationship_refresh(store, request.session_id, refresh);
+            self.processing
+                .start_relationship_refresh(store, request.session_id, refresh);
         }
         Ok(result)
     }

@@ -5751,8 +5751,13 @@ impl MeetingStore {
                 SELECT 1 FROM meeting_person_links
                  WHERE meeting_id = ?5 AND person_id = ?4 AND confidence = 'confirmed'
               )",
-            params![summary.text, summary.generated_at_utc_ms, summary.model_id,
-                person_id.uuid().to_string(), id(session_id)],
+            params![
+                summary.text,
+                summary.generated_at_utc_ms,
+                summary.model_id,
+                person_id.uuid().to_string(),
+                id(session_id)
+            ],
         )?;
         if written == 0 {
             return Err(StoreError::Conflict);
@@ -14423,7 +14428,12 @@ mod tests {
             evidence: Arc::clone(&captured),
         };
         crate::meeting::processing::generate_ledger(
-            &generator, &evidence, &segments, &names, session_id, || Ok(()),
+            &generator,
+            &evidence,
+            &segments,
+            &names,
+            session_id,
+            || Ok(()),
         )
         .expect("regenerated ledger");
         let prompt = captured

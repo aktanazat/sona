@@ -54,7 +54,9 @@ pub(crate) fn is_bluetooth_device_named(name: &str) -> bool {
 }
 
 pub(crate) fn input_configuration_identity(name: &str) -> Option<[u64; 6]> {
-    let mut matching = device_ids()?.into_iter().filter(|id| device_name(*id).as_deref() == Some(name));
+    let mut matching = device_ids()?
+        .into_iter()
+        .filter(|id| device_name(*id).as_deref() == Some(name));
     let device_id = matching.next()?;
     if matching.next().is_some() {
         return None;
@@ -111,7 +113,8 @@ pub(crate) fn input_configuration_identity(name: &str) -> Option<[u64; 6]> {
             NonNull::from(&mut buffers).cast(),
         )
     };
-    if status != 0 || buffers.mNumberBuffers != 1
+    if status != 0
+        || buffers.mNumberBuffers != 1
         || buffers.mBuffers[0].mNumberChannels != format.mChannelsPerFrame
     {
         return None;

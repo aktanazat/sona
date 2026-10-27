@@ -178,4 +178,3 @@ fn public_profile_status(status: VoiceProfileStatus) -> VoiceProfileEnrollmentSt
         },
     }
 }
-

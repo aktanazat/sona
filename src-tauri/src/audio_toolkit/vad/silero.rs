@@ -70,4 +70,3 @@ impl VoiceActivityDetector for SileroVad {
         self.engine.reset();
     }
 }
-

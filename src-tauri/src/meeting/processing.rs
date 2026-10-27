@@ -6024,14 +6024,13 @@ mod tests {
             .map(|minute| live_line(session_id, minute, "We moved the launch to May."))
             .collect();
         let lines: Vec<&MeetingEvidence> = transcript.iter().collect();
-        let say = |reply: &str| {
-            validate_live_help(MeetingLiveHelpKind::Say, reply, &lines)
-        };
+        let say = |reply: &str| validate_live_help(MeetingLiveHelpKind::Say, reply, &lines);
 
         assert_eq!(
             say(&serde_json::json!({ "points": [
                 { "text": "  Ask who owns the new date. ", "cites": ["L4", "L2"] }
-            ] }).to_string()),
+            ] })
+            .to_string()),
             Ok(vec![MeetingLiveHelpItem {
                 text: "Ask who owns the new date.".to_string(),
                 start_offset_ns: 60_000_000_000,
@@ -6041,7 +6040,10 @@ mod tests {
         );
         for id in ["L0", "L5", "L01", "L+1", "L", "2", "l2", "provisional-1"] {
             assert_eq!(
-                say(&serde_json::json!({ "points": [{ "text": "Say so.", "cites": [id] }] }).to_string()),
+                say(
+                    &serde_json::json!({ "points": [{ "text": "Say so.", "cites": [id] }] })
+                        .to_string()
+                ),
                 Err(LiveHelpRefusal::UnknownLine),
                 "{id} names no line in the pack"
             );
@@ -6082,7 +6084,8 @@ mod tests {
         assert!(
             say(&serde_json::json!({ "points": [
                 { "text": "a".repeat(LIVE_HELP_POINT_MAX_CHARS), "cites": ["L1", "L2", "L3"] }
-            ] }).to_string())
+            ] })
+            .to_string())
             .is_ok(),
             "the character and citation ceilings are inclusive"
         );
@@ -7366,8 +7369,7 @@ mod tests {
 
         let half_repaired =
             real.replace(PRESS_HOISTED_ACTION_ITEM, PRESS_NESTED_TEXT_STILL_HOISTED);
-        let Err(_) =
-            serde_json::from_str::<RawArtifactOutput>(json_object_of(&half_repaired))
+        let Err(_) = serde_json::from_str::<RawArtifactOutput>(json_object_of(&half_repaired))
         else {
             panic!("a key beside `text` that `RawActionItem` does not declare is refused");
         };

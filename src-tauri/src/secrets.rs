@@ -673,7 +673,6 @@ impl SecretManager {
         .await
     }
 
-
     async fn replace_cloud_sync_secret(
         &self,
         account: SecretAccount,
@@ -1773,7 +1772,11 @@ mod tests {
     fn keyless_local_cleanup_rejects_credential_commands() {
         let settings = settings::get_default_settings();
         assert!(matches!(
-            provider_account_for_command(&settings, SecretKind::Llm, settings::LOCAL_CLEANUP_PROVIDER_ID),
+            provider_account_for_command(
+                &settings,
+                SecretKind::Llm,
+                settings::LOCAL_CLEANUP_PROVIDER_ID
+            ),
             Err(SecretCommandError::Invalid)
         ));
     }
@@ -2070,7 +2073,6 @@ mod tests {
         let (manager, backend) = manager();
         tauri::async_runtime::block_on(manager.replace_cloud_vault_root([0x11; 32])).unwrap();
         assert!(backend.has("cloud_sync/vault-root-v1"));
-
     }
 
     #[test]
@@ -2297,7 +2299,6 @@ mod tests {
         tauri::async_runtime::block_on(manager.replace(account, Zeroizing::new(value.to_string())))
             .expect("store STT secret");
     }
-
 
     #[test]
     fn fake_stt_verifier_enforces_consent_and_key_gates_before_handshake() {

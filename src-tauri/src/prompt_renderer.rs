@@ -479,7 +479,6 @@ mod tests {
         })
     }
 
-
     fn run_with_samples(samples: Vec<PersonaSample>) -> RunPlan {
         let mut settings = get_default_settings();
         ensure_mode_settings(&mut settings);
@@ -512,7 +511,6 @@ mod tests {
         assert!(system.contains("Sample 1:\nShort sentences. No throat clearing."));
         assert!(system.contains("Sample 2:\nI write like I talk."));
     }
-
 
     /// A prompt written for the version that pasted the transcript into the
     /// instructions still works: the placeholder points at the envelope
@@ -763,4 +761,3 @@ mod tests {
         assert_eq!(envelope["instruction"], "translate this to French");
     }
 }
-

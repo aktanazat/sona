@@ -178,7 +178,6 @@ pub fn open_license_notices(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Check if Apple Intelligence is available on this device.
 /// Called by the frontend when the user selects Apple Intelligence provider.
 #[specta::specta]

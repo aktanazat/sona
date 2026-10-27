@@ -436,9 +436,7 @@ impl std::fmt::Display for PostProcessEndpointError {
             Self::InvalidAppleIntelligenceRoute => {
                 "Apple Intelligence must use its built-in local route"
             }
-            Self::InvalidLocalCleanupRoute => {
-                "Offline cleanup must use its built-in local route"
-            }
+            Self::InvalidLocalCleanupRoute => "Offline cleanup must use its built-in local route",
             Self::InvalidMeetingLocalRoute => {
                 "Meeting local engine requires a loopback /v1 endpoint"
             }
@@ -468,9 +466,10 @@ impl PostProcessProvider {
             // These three ship without a listable catalog: Z.AI and Bedrock
             // Mantle publish no models endpoint, and Apple Intelligence runs
             // on-device with a fixed model.
-            "zai" | "bedrock_mantle" | APPLE_INTELLIGENCE_PROVIDER_ID | LOCAL_CLEANUP_PROVIDER_ID => {
-                PostProcessCatalogSource::Unsupported
-            }
+            "zai"
+            | "bedrock_mantle"
+            | APPLE_INTELLIGENCE_PROVIDER_ID
+            | LOCAL_CLEANUP_PROVIDER_ID => PostProcessCatalogSource::Unsupported,
             other => {
                 warn!("Post-processing provider {other} has no catalog decision");
                 PostProcessCatalogSource::Unsupported
@@ -487,7 +486,10 @@ impl PostProcessProvider {
     }
 
     pub(crate) fn allows_manual_model_id(&self) -> bool {
-        !matches!(self.id.as_str(), APPLE_INTELLIGENCE_PROVIDER_ID | LOCAL_CLEANUP_PROVIDER_ID)
+        !matches!(
+            self.id.as_str(),
+            APPLE_INTELLIGENCE_PROVIDER_ID | LOCAL_CLEANUP_PROVIDER_ID
+        )
     }
 
     pub(crate) fn endpoint(&self) -> Result<PostProcessEndpoint, PostProcessEndpointError> {
@@ -3671,7 +3673,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn old_settings_leave_quiet_speech_off() {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
@@ -3799,7 +3800,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn offline_cleanup_cannot_be_redirected_to_a_network_provider() {
         let mut provider = default_post_process_providers()
@@ -3897,7 +3897,6 @@ mod tests {
         assert!(!apps.iter().any(|app| app == "com.apple.facetime"));
         assert!(!apps.iter().any(|app| app == "com.apple.mobilephone"));
     }
-
 
     #[test]
     fn defaults_expose_secret_state_without_api_key_values() {
@@ -4955,7 +4954,6 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
     }
-
 
     #[test]
     fn overlay_migration_keeps_disabled_overlay_off() {

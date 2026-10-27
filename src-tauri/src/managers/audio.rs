@@ -850,11 +850,14 @@ impl AudioRecordingManager {
             device
         };
         match device {
-            Some(device) => AudioRecorder::preferred_input_channel_count(&self.config_cache, &device)
-                .map_err(|error| {
-                    self.invalidate_device_cache();
-                    format!("Failed to get microphone config: {error}")
-                }),
+            Some(device) => {
+                AudioRecorder::preferred_input_channel_count(&self.config_cache, &device).map_err(
+                    |error| {
+                        self.invalidate_device_cache();
+                        format!("Failed to get microphone config: {error}")
+                    },
+                )
+            }
             None => Ok(1),
         }
     }
@@ -1516,12 +1519,17 @@ impl AudioRecordingManager {
         if !matches!(*state, RecordingState::Idle) {
             return Err("Another recording is active".to_string());
         }
-        let token = self.capture_lease.try_acquire(CaptureOwner::Practice)
+        let token = self
+            .capture_lease
+            .try_acquire(CaptureOwner::Practice)
             .ok_or_else(|| "Microphone is leased by an active capture".to_string())?;
         self.close_generation.fetch_add(1, Ordering::SeqCst);
         let result = start_practice_if_current(
             cancelled,
-            || self.start_microphone_stream().map_err(|error| error.to_string()),
+            || {
+                self.start_microphone_stream()
+                    .map_err(|error| error.to_string())
+            },
             || {
                 if self.practice_generation.load(Ordering::Acquire) != generation {
                     return Err("Practice recording was cancelled".to_string());
@@ -1534,7 +1542,10 @@ impl AudioRecordingManager {
             },
         );
         match result {
-            Ok(receiver) => Ok(RecordingReadiness { receiver, generation }),
+            Ok(receiver) => Ok(RecordingReadiness {
+                receiver,
+                generation,
+            }),
             Err(error) => {
                 self.capture_lease.release(token);
                 if matches!(*lock_recover(&self.mode), MicrophoneMode::OnDemand) {
@@ -1570,7 +1581,10 @@ impl AudioRecordingManager {
             }
             Err(CaptureError::Overrun { prefix_samples, .. }) => {
                 let level = measure_input_level(&prefix_samples);
-                Ok(RecordingStop::Overrun { prefix_samples, level })
+                Ok(RecordingStop::Overrun {
+                    prefix_samples,
+                    level,
+                })
             }
             Err(error) => Err(error.to_string()),
         }
