@@ -160,7 +160,7 @@ Portable mode is for isolated core runs, not a separate shipped desktop app. A `
 
 ## Checks
 
-Run the applicable checks once after integration. Keep tests for observable behavior, data integrity, privacy, public contracts, and measured resource limits. A meaningful failing test stays.
+Run the applicable checks once after integration. Keep tests for observable behavior, data integrity, privacy, public contracts, and measured resource limits. Remove tests that only pin wording, code layout, private bookkeeping, or an answer supplied by the test itself. A meaningful failing test stays.
 
 ```bash
 bun run format:check
