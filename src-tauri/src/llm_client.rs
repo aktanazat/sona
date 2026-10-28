@@ -1622,7 +1622,6 @@ mod tests {
         assert_eq!(json["thinking"]["type"], "disabled");
     }
 
-
     #[test]
     fn rejection_memo_is_keyed_by_endpoint_and_model() {
         let deepseek = provider("custom", "https://api.deepseek.com/");

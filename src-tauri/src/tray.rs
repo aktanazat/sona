@@ -1023,9 +1023,8 @@ pub fn copy_last_transcript(app: &AppHandle) {
 mod tests {
     use super::{
         bundled_idle_tray_icon, last_transcript_text, load_tray_icon_from_path,
-        load_tray_icon_or_fallback, menu_rows, open_settings,
-        show_tray_copy_failure, MeetingMenuState, MenuAction, MenuInputs, MenuRow, MenuStatus,
-        TrayIconState, TrayState,
+        load_tray_icon_or_fallback, menu_rows, open_settings, show_tray_copy_failure,
+        MeetingMenuState, MenuAction, MenuInputs, MenuRow, MenuStatus, TrayIconState, TrayState,
     };
     use crate::managers::history::HistoryEntry;
     use crate::meeting::types::{AllowedMeetingAction, MeetingPhase};
@@ -1224,7 +1223,6 @@ mod tests {
         assert_eq!(fallback.rgba(), expected.rgba());
     }
 
-
     #[test]
     fn idle_menu_has_the_requested_action_order() {
         assert_eq!(
@@ -1351,7 +1349,6 @@ mod tests {
         assert_eq!(rows[2], MenuRow::Separator);
     }
 
-
     #[test]
     fn dictation_cycle_rebuilds_once_per_visible_menu_change() {
         let script = [
@@ -1412,5 +1409,4 @@ mod tests {
             }
         }
     }
-
 }

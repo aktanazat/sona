@@ -1,6 +1,6 @@
 # Contributing to Sona
 
-Thank you for your interest in contributing to Sona! This guide will help you get started with contributing to this open source speech-to-text application.
+Thanks for helping improve Sona, a local-first Mac and iPhone app for dictation and meeting notes.
 
 ## ⚠️ Feature Freeze
 
@@ -23,9 +23,9 @@ Sona aims to be the most forkable speech-to-text app. The goal is to create both
 
 Before you begin, ensure you have the following installed:
 
-- [Rust](https://rustup.rs/) (latest stable)
-- [Bun](https://bun.sh/) package manager
-- Platform-specific build tools (see [BUILD.md](BUILD.md))
+- [Rust](https://rustup.rs/) (current stable)
+- [Bun](https://bun.sh/) and CMake for the Mac recording engine
+- Xcode 26 and the macOS, iOS, and watchOS SDKs (see [BUILD.md](BUILD.md))
 
 ### Setting Up Your Development Environment
 
@@ -34,8 +34,8 @@ Before you begin, ensure you have the following installed:
 2. **Clone your fork**:
 
    ```bash
-   git clone git@github.com:YOUR_USERNAME/Handy.git
-   cd Handy
+   git clone git@github.com:YOUR_USERNAME/sona.git
+   cd sona
    ```
 
 3. **Add upstream remote**:
@@ -44,49 +44,22 @@ Before you begin, ensure you have the following installed:
    git remote add upstream git@github.com:aktanazat/sona.git
    ```
 
-4. **Install dependencies**:
+4. **Install script dependencies**:
 
    ```bash
-   bun install
+   bun install --frozen-lockfile
    ```
 
-5. **Download required models**:
-
-   ```bash
-   mkdir -p src-tauri/resources/models
-   curl -o src-tauri/resources/models/silero_vad_v4.onnx https://blob.handy.computer/silero_vad_v4.onnx
-   ```
-
-6. **Run in development mode**:
-   ```bash
-   bun run tauri dev
-   # On macOS if you encounter cmake errors:
-   CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri dev
-   ```
-
-For detailed platform-specific setup instructions, see [BUILD.md](BUILD.md).
+5. **Build the app you are changing**: Follow [BUILD.md](BUILD.md) for the native Mac app, its Rust engine and helpers, or the iPhone simulator app. Model resources needed at startup are checked in; speech models are downloaded through Sona when selected.
 
 ### Understanding the Codebase
 
-Sona follows a clean architecture pattern:
+- `macos/Sona/` contains the native SwiftUI Mac interface. It launches the Rust engine as a private helper and communicates over a local socket.
+- `src-tauri/src/` contains recording, transcription, meeting, sync, command-line, and native-bridge code. Tauri remains an engine dependency; it no longer supplies a web desktop interface.
+- `mobile/Sona/` contains the iPhone app. Its Watch companion and dictation keyboard are embedded in the phone package.
+- `cloudflare/sona-companion/` provides the paired sync service.
 
-**Backend (Rust - `src-tauri/src/`):**
-
-- `lib.rs` - Main application entry point with Tauri setup
-- `managers/` - Core business logic (audio, model, transcription)
-- `audio_toolkit/` - Low-level audio processing (recording, VAD)
-- `commands/` - Tauri command handlers for frontend communication
-- `shortcut.rs` - Global keyboard shortcut handling
-- `settings.rs` - Application settings management
-
-**Frontend (React/TypeScript - `src/`):**
-
-- `App.tsx` - Main application component
-- `components/` - React UI components
-- `hooks/` - Reusable React hooks
-- `lib/types.ts` - Shared TypeScript types
-
-For more details, see the Architecture section in [README.md](README.md) or [AGENTS.md](AGENTS.md).
+See [BUILD.md](BUILD.md) for the current build and check commands.
 
 ## 🐛 Reporting Bugs
 
@@ -94,8 +67,7 @@ For more details, see the Architecture section in [README.md](README.md) or [AGE
 
 1. **Search existing issues** at [github.com/aktanazat/sona/issues](https://github.com/aktanazat/sona/issues)
 2. **Check discussions** at [github.com/aktanazat/sona/discussions](https://github.com/aktanazat/sona/discussions)
-3. **Try the latest release** to see if the issue has been fixed
-4. **Enable debug mode** (`Cmd/Ctrl+Shift+D`) to gather diagnostic information
+3. **Check current source** to see whether the issue has already been fixed
 
 ### Submitting a Bug Report
 
@@ -103,10 +75,9 @@ When creating a bug report, please include:
 
 **System Information:**
 
-- App version (found in settings or about section)
-- Operating System (e.g., macOS 14.1, Windows 11, Ubuntu 22.04)
-- CPU (e.g., Apple M2, Intel i7-12700K, AMD Ryzen 7 5800X)
-- GPU (e.g., Apple M2 GPU, NVIDIA RTX 4080, Intel UHD Graphics)
+- App version and build, from the app's About screen
+- Mac or iPhone model and operating-system version
+- Audio input or output device, if the report concerns recording or playback
 
 **Bug Details:**
 
@@ -173,33 +144,22 @@ Community feedback is essential to keeping Sona the best it can be for everyone.
    ```
 
 2. **Make your changes**:
-   - Write clean, maintainable code
-   - Follow existing code style and patterns
-   - Add comments for complex logic
-   - Keep commits focused and atomic
+   - Follow the existing code style and keep commits focused
+   - Explain only constraints the code cannot make clear
 
-3. **Test thoroughly**:
-   - Test on your target platform(s)
-   - Verify existing functionality still works
-   - Test edge cases and error conditions
-   - Use debug mode to verify audio/transcription behavior
+3. **Test the affected app**:
+   - Build the native Mac or iPhone target you changed
+   - Exercise the changed path and its relevant consent or error state
+   - Run the applicable checks in [BUILD.md](BUILD.md)
 
 4. **Commit your changes**:
 
    ```bash
    git add .
-   git commit -m "feat: add your feature description"
-   # or
-   git commit -m "fix: describe the bug fix"
+   git commit -m "macos: describe the change"
    ```
 
-   Use conventional commit messages:
-   - `feat:` for new features
-   - `fix:` for bug fixes
-   - `docs:` for documentation changes
-   - `refactor:` for code refactoring
-   - `test:` for test additions/changes
-   - `chore:` for maintenance tasks
+   Use a short scope and an imperative title, such as `macos:`, `mobile:`, `core:`, or `docs:`. Explain why in the body when the title is not enough.
 
 5. **Keep your fork updated**:
 
@@ -244,49 +204,37 @@ In your PR description, please include:
 
 - Follow standard Rust formatting (`bun run format:backend`)
 - Run `bun run lint:backend` (`cargo clippy`) and address warnings
-- Use descriptive variable and function names
-- Add doc comments for public APIs
-- Handle errors explicitly (avoid unwrap in production code)
+- Keep errors explicit and public contracts stable
 
-**TypeScript/React:**
+**SwiftUI:**
 
-- Use TypeScript strictly, avoid `any` types
-- Follow React hooks best practices
-- Use functional components
-- Keep components small and focused
-- Use Tailwind CSS for styling
+- Use native controls and the existing Mac or phone theme
+- Keep recording, permission, and consent actions directly reachable
+- Check both light and dark appearance and larger text sizes
+
+**TypeScript scripts and services:**
+
+- Keep types strict and run the relevant script or service checks
 
 **General:**
 
 - Write self-documenting code
-- Add comments for non-obvious logic
+- Comment only when an external constraint is not clear from the code
 - Keep functions small and single-purpose
 - Prioritize readability over cleverness
 
 ### Testing Your Changes
 
-**Manual Testing:**
+Build and run the changed native app using [BUILD.md](BUILD.md). Check the affected flow on an isolated simulator or Mac profile. For recording work, test the actual device and consent path when you have access; a successful simulator build does not prove microphone, Watch transfer, or pairing behavior.
 
-- Run the app in development mode: `bun run tauri dev`
-- Test your changes with debug mode enabled
-- Verify on multiple platforms if possible
-- Test with different audio devices
-- Try various transcription scenarios
-
-**Building for Production:**
-
-```bash
-bun run tauri build
-```
-
-Test the production build to ensure it works as expected.
+For a Mac package, prepare the engine and both private helpers before building the Xcode app. Inspect the resulting bundle with `macos/scripts/inspect-package.sh`. An unsigned development bundle is not a signed release and should not replace an installed signed app.
 
 ## 📝 Documentation Contributions
 
 Documentation improvements are highly valued! You can contribute by:
 
 - Improving README.md, BUILD.md, or this CONTRIBUTING.md
-- Adding code comments and doc comments
+- Keeping public API documentation current
 - Creating tutorials or guides
 - Improving error messages
 - Updating the project website content

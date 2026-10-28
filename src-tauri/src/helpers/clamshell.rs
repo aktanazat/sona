@@ -60,4 +60,3 @@ pub fn is_clamshell() -> Result<bool, String> {
 pub fn is_laptop() -> Result<bool, String> {
     Ok(false)
 }
-

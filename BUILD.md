@@ -1,118 +1,211 @@
 # Building Sona
 
-Sona builds as a Tauri 2 desktop app with a Rust backend and a Bun-managed React frontend.
+Sona has one native Mac app in `macos/` and one native iPhone app in `mobile/`. The iPhone app embeds its Watch companion and dictation keyboard. The Rust code in `src-tauri/` is the Mac recording, transcription, meeting, sync, and command-line engine; it is not a second desktop app. There is no web desktop development server or Windows/Linux release path.
 
-## Prerequisites
+## Requirements
 
-- Current stable Rust with the platform toolchain.
-- Bun.
-- Platform libraries required by Tauri and the selected transcription runtime.
+- macOS 15 or later for the native Mac app.
+- Xcode 26 with the macOS, iOS 26, and watchOS SDKs. Select it with `xcode-select` before building. The iPhone app requires iOS 26; its embedded Watch companion targets watchOS 10 or later.
+- Current stable Rust, Bun, CMake, and Xcode's C/C++ tools.
+- An Apple silicon Mac for the commands and CI artifacts below. CI does not produce an Intel or universal Mac bundle.
+- `ffmpeg` for the Rust media-import tests, not for launching the app.
 
 ```bash
-bun install
+brew install cmake ffmpeg
+bun install --frozen-lockfile
+```
+
+Run the commands below from the repository root. Model resources needed at startup are checked in. Speech models and the optional cleanup model are downloaded through the app when selected.
+
+Apple Intelligence needs macOS 26 or later, supported hardware, and a ready system model. It is not required to compile the rest of Sona. `SONA_FORCE_AI_STUB=1` selects the unavailable Apple Intelligence bridge for development.
+
+## Build the Mac app
+
+Build both private helpers before the Rust engine, then build the native Xcode app. These commands use this checkout's default Cargo output directory and make an unsigned development bundle:
+
+```bash
+unset CARGO_TARGET_DIR
 bun run prepare:agent-hook -- aarch64-apple-darwin
-```
-
-Use your own Cargo target triple in place of `aarch64-apple-darwin`. Only `bun run tauri build` supplies the triple and stages the sidecar on its own, through `beforeBuildCommand`. Every Rust build reads `bundle.externalBin` from `tauri.conf.json` through `src-tauri/build.rs`, so on a fresh clone `bun run tauri dev`, `cargo check` and `cargo test` all fail in the build script until the sidecar has been staged once.
-
-## Development
-
-```bash
-bun run tauri dev
-```
-
-If the macOS CMake policy setting is required by a local toolchain:
-
-```bash
-CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri dev
-```
-
-The frontend-only commands are:
-
-```bash
-bun run dev
+bun run prepare:cleanup-runtime -- aarch64-apple-darwin
 bun run build
-bun run preview
+xcodebuild -project macos/Sona.xcodeproj -scheme Sona \
+  -configuration Release -destination 'generic/platform=macOS' \
+  -derivedDataPath /private/var/tmp/sona-native-release \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+  SONA_CORE_TARGET_DIR="$PWD/src-tauri/target" \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+bash macos/scripts/inspect-package.sh app \
+  /private/var/tmp/sona-native-release/Build/Products/Release/Sona.app arm64
 ```
+
+`bun run build` compiles `src-tauri/target/release/sona`. The agent-hook preparation command compiles the matching release helper under `src-tauri/target/aarch64-apple-darwin/release/`. The cleanup preparation command builds and stages its CPU runtime under `src-tauri/target/cleanup-runtime/aarch64-apple-darwin/stage/` and copies its dependency/model licenses into `src-tauri/resources/cleanup-runtime/`. Both preparation commands also maintain the sidecar staging files in `src-tauri/binaries/`.
+
+The Xcode bundle phase copies those built artifacts, not an arbitrary binary from another configuration. Release refuses a missing core, either helper, or required resources. It never substitutes a debug core. The inspection command checks the app, camera extension, helper identities, architecture, matching versions, bundled notices, model metadata, and the real helpers' safe command-line responses. It does not record audio, open the app, or establish signing/notarization.
+
+An unsigned bundle is not a public release. Gatekeeper can block it, and the camera extension needs matching Apple signing and provisioning. Do not replace an installed signed app with this development artifact.
+
+### Debug builds
+
+Use the matching debug core and agent hook:
+
+```bash
+unset CARGO_TARGET_DIR
+bun run prepare:agent-hook -- aarch64-apple-darwin --debug
+bun run prepare:cleanup-runtime -- aarch64-apple-darwin
+bun run build:debug
+xcodebuild -project macos/Sona.xcodeproj -scheme Sona \
+  -configuration Debug -destination 'generic/platform=macOS' \
+  -derivedDataPath /private/var/tmp/sona-native-debug \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+  SONA_CORE_TARGET_DIR="$PWD/src-tauri/target" \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+```
+
+Cleanup remains release-optimized in both configurations. A Debug Xcode build with no debug core removes any previous bundled helper and warns that the app needs the runtime `SONA_CORE` override. That override is used only when no bundled core is present. It does not let a Release build omit the engine. A present core with missing helpers or resources fails in either configuration.
+
+### Cargo caches and other checkouts
+
+The root build/test commands use `scripts/cargo-target-dir.ts`. If `CARGO_TARGET_DIR` is set, it is a cache root; the script resolves a private child for this checkout. Helper preparation uses that same resolver. Set Xcode's `SONA_CORE_TARGET_DIR` to that resolved child, not the shared cache root. Leaving `CARGO_TARGET_DIR` unset, as above, uses `src-tauri/target` and avoids ambiguity.
+
+## Signing and distribution
+
+The existing native identities must stay together:
+
+| Product                  | Bundle identifier                       |
+| ------------------------ | --------------------------------------- |
+| Mac app                  | `com.aktanazat.sona.mac`                |
+| Private core helper      | `com.aktanazat.sona.core`               |
+| Camera extension         | `com.aktanazat.sona.mac.camera`         |
+| iPhone app               | `com.aktanazat.sona.mobile`             |
+| Embedded Watch companion | `com.aktanazat.sona.mobile.watchkitapp` |
+| Embedded keyboard        | `com.aktanazat.sona.mobile.keyboard`    |
+
+The Mac project uses automatic development signing for team `AAVB324H37`. The app and camera extension share app group `AAVB324H37.com.aktanazat.sona.camera`; the app also needs the System Extension install capability. A local signed build requires that team's development certificate/private key and matching profiles. The bundle phase signs both private executables and `SonaCore.app` with Xcode's selected identity; Xcode signs the camera extension and outer app. No ad-hoc identity is substituted when signing is enabled.
+
+After preparing the release engine and helpers, a signed development archive can be made on a Mac with those credentials:
+
+```bash
+xcodebuild -project macos/Sona.xcodeproj -scheme Sona \
+  -configuration Release -destination 'generic/platform=macOS' \
+  -archivePath /private/var/tmp/sona-native-signed/Sona.xcarchive \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+  SONA_CORE_TARGET_DIR="$PWD/src-tauri/target" \
+  -allowProvisioningUpdates archive
+bash macos/scripts/inspect-package.sh app \
+  /private/var/tmp/sona-native-signed/Sona.xcarchive/Products/Applications/Sona.app arm64
+codesign --verify --deep --strict \
+  /private/var/tmp/sona-native-signed/Sona.xcarchive/Products/Applications/Sona.app
+```
+
+A development signature is not a Developer ID distribution signature or notarization. Public Mac distribution additionally requires a Developer ID Application certificate/private key, compatible app and camera-extension provisioning profiles, and notarization access. Export the archive through Xcode Organizer with the intended distribution credentials, notarize the exported app, staple its ticket, and check both `codesign --verify --deep --strict` and `spctl --assess --type execute` on that exported bundle before publishing it. Those credentials are not configured in this repository's Actions secrets, so the tag workflow does not claim to perform that export.
+
+When upgrading a signed installation, replace `/Applications/Sona.app` as a complete bundle with the same registered identities and team. Do not overwrite its executable in place, reset permission grants, change its data directory, or register a second runnable copy as part of an upgrade. A signing-team change needs its own migration decision.
+
+### CI and tag drafts
+
+`.github/workflows/native.yml` builds the native Mac Release bundle and the iPhone simulator app on pushes to `main`, pull requests, and manual runs. The Mac job uses the reusable `build.yml`: it builds both helpers and the release engine, builds the native Xcode app, inspects the complete payload, and stores `Sona-macos-arm64-unsigned.zip`. The phone job checks that the Watch app and keyboard are embedded. Simulator output is not an installable `.ipa`.
+
+Pushing a `vX.Y.Z` tag runs `release.yml`. It uses that same Mac build, requires the tag, core version, and native app version to agree, then attaches the explicitly unsigned ZIP to a draft GitHub release. It refuses to modify an already-published release. A successful draft job proves the unsigned package was built and inspected, not that it passed Gatekeeper or can be distributed as signed software. Review and signed distribution remain separate.
+
+There are no Tauri web-app, browser UI, Windows, Linux, or Nix package release jobs.
+
+## Build the iPhone app
+
+The `Sona` scheme builds the phone app, its embedded Watch companion, and its keyboard. With Xcode 26 and the simulator SDKs installed:
+
+```bash
+xcodebuild -project mobile/Sona.xcodeproj -scheme Sona \
+  -configuration Debug -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /private/var/tmp/sona-iphone \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+```
+
+Physical-device builds and App Store exports need an Apple account authorized for team `AAVB324H37`, signing certificates/private keys, and profiles for the phone, Watch app, and keyboard with their existing capabilities. They are manual; no phone distribution secrets or automated upload are configured here.
+
+The existing archive command creates a Release archive and exports a signed `.ipa` with `mobile/ExportOptions.plist`. It allows Xcode to update provisioning and does not upload the result:
+
+```bash
+bash mobile/scripts/archive.sh /private/var/tmp/sona-iphone-release
+```
+
+Pairing and encrypted sync still need the companion service in `cloudflare/sona-companion/`. A successful simulator build does not prove real microphone, keyboard full-access, Watch transfer, pairing, or device signing behavior.
+
+## Package layout and CLI
+
+```text
+Sona.app/Contents/
+  MacOS/Sona
+  Helpers/SonaCore.app/Contents/
+    Info.plist
+    MacOS/sona-core
+    MacOS/sona-agent-hook
+    MacOS/sona-cleanup
+    Resources/resources/
+    Resources/_up_/LICENSE
+    Resources/_up_/NOTICE
+  Library/SystemExtensions/com.aktanazat.sona.mac.camera.systemextension/
+```
+
+Open `Sona.app` for the desktop interface. The native app launches `sona-core --native-socket` and owns the child process. The engine's Tauri configuration remains for Rust resource/context generation, not for a web frontend or a separate desktop bundle.
+
+The installed command-line engine is:
+
+```bash
+/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-core --help
+```
+
+Its headless transcription and corpus commands remain available. External corpus reads require Settings > Agents > External access. `--loop-resolve` also requires External mutations. Both grants start off. The MCP server in `tools/sona-mcp/` wraps that same CLI; see `skills/sona/SKILL.md` for the command contract.
+
+Portable mode is for isolated core runs, not a separate shipped desktop app. A `portable` marker beside the core executable with `Sona Portable Mode` keeps its data in adjacent `Data/`; debug cores also require `SONA_ALLOW_PORTABLE_DEV=1`. Native credential storage is disabled there. Never use the installed app or the default user profile as a disposable verification environment.
 
 ## Checks
 
-keep tests for observable behavior, data integrity, privacy, public contracts and measured resource limits. remove tests that only pin wording, code layout, private bookkeeping or an answer supplied by the test itself. a meaningful failing test stays.
+Run the applicable checks once after integration. Keep tests for observable behavior, data integrity, privacy, public contracts, and measured resource limits. Remove tests that only pin wording, code layout, private bookkeeping, or an answer supplied by the test itself. A meaningful failing test stays.
 
 ```bash
-bun run build
-bun run lint
+bun run format:check
+bun run check:identity
 bun run lint:anti-slop
-bun run check:translations
-bun test
-cd cloudflare/sona-companion && bun run typecheck && bun run test
-cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo check --all-features
-cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo test --lib
-cd src-tauri && bun ../scripts/cargo-target-dir.ts cargo test --bin sona-agent-hook
+bun run test:scripts
+bun run typecheck:mcp
+bun run test:mcp
+bun run check:onboarding
+bun scripts/cargo-target-dir.ts cargo check --manifest-path src-tauri/Cargo.toml --all-features
+bun run test:backend
+bun scripts/cargo-target-dir.ts cargo test --manifest-path src-tauri/Cargo.toml --bin sona-agent-hook
+ast-grep scan -c tools/ast-grep/anti-slop/sgconfig.yml
 ```
 
-`scripts/cargo-target-dir.ts` gives this checkout its own target directory
-beneath a `CARGO_TARGET_DIR` cache root, so a second checkout building at the
-same time cannot hand this one its artifacts. With `CARGO_TARGET_DIR` unset it
-runs the command unchanged, and plain `cargo` is equivalent.
+For the companion service, run its checks from `cloudflare/sona-companion/`:
 
-The package audit expects one executable `sona-agent-hook` sidecar and a `sona` main executable.
+```bash
+bun install --frozen-lockfile
+bun run typecheck
+bun run test
+```
+
+The native builds and package inspection above are separate from the test suites. Verify recording, socket requests, consent, permissions, pairing, sync, and the native screens in an isolated profile/device before shipping. Inspect matching before/after screens in light and dark appearances; build output is not visual proof.
+
+### Real meeting acceptance
+
+The active local meeting acceptance is `meeting::processing::real_engine_acceptance::tests::actual_apple_long_meeting_pipeline_and_regeneration`. It requires a ready Apple Intelligence model and uses the real imported-meeting pipeline, not a model substitute. It checks the original long conversation, then checks regenerated notes against the same decisions, owners, revised deadlines, and citations. Requests and results are saved under `.progress/meeting-acceptance/`; the original request and reply-token limits remain enforced at the SDK boundary. A cloud-only pass does not replace this check.
+
+The native ledger presents each literal excerpt with its original source reference and speaker. A speaker is not automatically a task owner, and the person who settles a choice never owns it: a speaker's own undertaking is a personal promise. A promise version whose deadline is not in its own cited excerpts, or whose excerpts do not exist, is dropped. When a settled choice and a promise select exactly the same excerpts, the app keeps one role: the promise when the choice names the same person, the choice otherwise. Stances use the same bounded excerpt receipts as other ledger facts, and the app restores all original source references before canonical validation. The separate real-model named-assignment check is `actual_apple_named_assignment_is_not_the_speaker`; run it explicitly with `--ignored`. Passing that check does not replace the complete initial and regenerated acceptance.
+
+A long meeting's ledger is read in parts and the parts are joined by the app, not re-read by the model. Threads, commitments, stances, and open questions keep the roles their part gave them; identical subjects with the same state and owner become one thread with every source reference. One small model request writes the headline and may name promises that are versions of the same work by the same person, a later closed thread that cancels a promise, or a later thread that answers an open question. The app accepts a cancellation or an answer only from a thread whose source comes after the promise or question. These checks do not establish real-model accuracy.
+
+```bash
+bun scripts/cargo-target-dir.ts cargo test --manifest-path src-tauri/Cargo.toml --lib --features cloud-realtime actual_apple_long_meeting_pipeline_and_regeneration -- --nocapture --test-threads=1
+```
 
 ## Version bump
 
-1. `src-tauri/Cargo.toml` `[package] version` — the only place this app declares a version.
-2. `src-tauri/Cargo.lock` — run any cargo command, then commit the changed `sona` entry.
-3. `package.json` `version`.
-4. `src/content/release-notes/index.ts` — add a `RELEASE_NOTE_MARKDOWN` entry keyed by the new version, or What's New has nothing to show.
-5. `mobile/Sona.xcodeproj/project.pbxproj` `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`, only when shipping the companion app.
+1. Update `[package] version` in `src-tauri/Cargo.toml` and the `sona` entry in `src-tauri/Cargo.lock`.
+2. Match root `package.json` to that core version.
+3. Match `MARKETING_VERSION` in the native Mac project and increase `CURRENT_PROJECT_VERSION` for the app and camera extension. The core helper takes those values from Xcode.
+4. Update the iPhone, Watch, and keyboard versions/build numbers together in the mobile project when shipping the phone app.
 
-`src-tauri/tauri.conf.json` deliberately carries no `version` field. With it absent, `tauri-codegen` compiles `PackageInfo.version` from `env!("CARGO_PKG_VERSION")` (tauri-codegen 2.6.3, `src/context.rs:273-278`), so `getVersion()` in Settings > About, the What's New gate, `sona --version`, and the bundle version all read step 1 — do not add it back, or About and `--version` can disagree. `tools/sona-mcp` and `cloudflare/sona-companion` version independently. No script checks agreement; this prints one line when steps 1-4 match, and two if a version reappears in the Tauri config:
-
-```bash
-{ awk -F'"' '/^version = /{print $2; exit}' src-tauri/Cargo.toml; jq -r '.version // empty' src-tauri/tauri.conf.json; jq -r .version package.json; sed -n 's/^  "\([0-9][0-9.]*\)".*/\1/p' src/content/release-notes/index.ts | sort -V | tail -1; } | sort -u
-```
-
-## Package layout
-
-| Platform | Main executable                | Application identity | Private runtime directory |
-| -------- | ------------------------------ | -------------------- | ------------------------- |
-| macOS    | `Sona.app/Contents/MacOS/sona` | `com.aktanazat.sona` | Inside the app bundle     |
-| Windows  | `sona.exe`                     | `com.aktanazat.sona` | Next to the executable    |
-| Linux    | `sona`                         | `com.aktanazat.sona` | `/usr/lib/sona`           |
-
-macOS builds sign with the Apple Development identity named in `tauri.conf.json` (`Apple Development: Created via API (JWV9B89S4H)`, team `AAVB324H37`) and enable the hardened runtime. That certificate is a development identity, not a distribution one: this repository does not provide notarization, SmartScreen reputation, or signed distribution credentials. Nothing updates itself either; `commands/updates.rs` only compares the running `CARGO_PKG_VERSION` against a releases URL when the user asks.
-
-## Platform notes
-
-### macOS
-
-Sona supports macOS 10.15 and later. Local Apple Intelligence support uses the FoundationModels framework when the active toolchain provides it; otherwise the build uses the stub bridge. Set `SONA_FORCE_AI_STUB=1` to force that bridge.
-
-Sona is a new TCC subject. Grant Microphone and Accessibility access again after installing it. The screen recorder also needs Screen Recording, which macOS grants in System Settings, plus Camera when the camera is enabled; camera use is declared in `Info.plist` and `Entitlements.plist`. Reset a development Accessibility grant with:
-
-```bash
-tccutil reset Accessibility com.aktanazat.sona
-```
-
-### Windows
-
-The NSIS installer uses the Sona product name and installs under the selected Sona directory. CI sets `SONA_VC_REDIST_DIRS` when it stages the app-local VC++ runtime.
-
-### Linux
-
-The deb and rpm packages install Sona's private native libraries in `/usr/lib/sona`; the executable's rpath points there. The AppImage continues to use its own `usr/lib` layout.
-
-If a Wayland compositor has trouble with the recording overlay, run:
-
-```bash
-SONA_NO_GTK_LAYER_SHELL=1 sona
-```
-
-## Portable installations
-
-Place a `portable` marker beside the executable. Sona recognizes `Sona Portable Mode`, writes that marker for new portable installs, and keeps data under the adjacent `Data/` directory. It accepts the older marker only to preserve an in-place upgrade.
-
-Portable mode intentionally disables native credential storage. Cloud and provider-key features stay unavailable there.
+`src-tauri/tauri.conf.json` has no separate version field. Rust derives its package version from Cargo. The native release inspection rejects a version mismatch rather than relabeling an old core. The MCP and companion-service packages version independently.
 
 ## Migrating from the Legacy app
 

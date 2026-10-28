@@ -74,6 +74,35 @@ pub(crate) fn reviewable_meeting(
     id
 }
 
+pub(crate) fn processing_plan(
+    store: &MeetingStore,
+    plan: &MeetingRunPlan,
+) -> Result<(), StoreError> {
+    let connection = store.connection()?;
+    connection.execute(
+        "INSERT INTO meeting_run_plans (
+            plan_id,session_id,attempt_number,schema_version,consent_id,
+            canonical_plan_json,created_at_utc_ms
+         ) VALUES (?1,?2,?3,?4,?5,?6,1)",
+        params![
+            plan.plan_id.uuid().to_string(),
+            plan.session_id.uuid().to_string(),
+            plan.attempt_number,
+            plan.schema_version,
+            plan.consent_id.uuid().to_string(),
+            encode_json(plan)?,
+        ],
+    )?;
+    connection.execute(
+        "UPDATE meeting_sessions SET phase='processing',successful_plan_id=?2 WHERE id=?1",
+        params![
+            plan.session_id.uuid().to_string(),
+            plan.plan_id.uuid().to_string()
+        ],
+    )?;
+    Ok(())
+}
+
 /// Give an existing rule a fixed grant time for consent boundary fixtures.
 pub(crate) fn seed_connection_grant_time(
     store: &MeetingStore,

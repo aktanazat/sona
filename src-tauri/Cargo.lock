@@ -2906,12 +2906,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-range"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5923,6 +5917,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+ "sha2-asm",
 ]
 
 [[package]]
@@ -5934,6 +5929,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest 0.11.3",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -6037,7 +6041,7 @@ dependencies = [
 
 [[package]]
 name = "sona"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6065,6 +6069,7 @@ dependencies = [
  "iana-time-zone",
  "ignore",
  "image",
+ "indexmap 2.14.0",
  "isolang",
  "keyring",
  "libc",
@@ -6077,6 +6082,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-application-services",
  "objc2-core-audio",
+ "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-event-kit",
@@ -6096,6 +6102,7 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "rustfft",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6656,7 +6663,6 @@ dependencies = [
  "gtk",
  "heck 0.5.0",
  "http",
- "http-range",
  "image",
  "jni",
  "libc",
@@ -7048,7 +7054,6 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
- "specta-typescript",
  "tauri",
  "tauri-specta-macros",
  "thiserror 2.0.20",

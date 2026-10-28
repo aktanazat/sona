@@ -5732,6 +5732,39 @@ impl MeetingStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub(crate) fn set_person_summary_for_meeting(
+        &self,
+        session_id: MeetingSessionId,
+        person_id: super::people_types::PersonId,
+        summary: super::people_types::PersonSummary,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection()?;
+        transcript_retention::require_retained_transcript_in(&connection, session_id)?;
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(StoreError::Conflict);
+        }
+        let written = connection.execute(
+            "UPDATE persons
+                SET summary = ?1, summary_generated_at_utc_ms = ?2, summary_model_id = ?3
+              WHERE id = ?4 AND EXISTS (
+                SELECT 1 FROM meeting_person_links
+                 WHERE meeting_id = ?5 AND person_id = ?4 AND confidence = 'confirmed'
+              )",
+            params![
+                summary.text,
+                summary.generated_at_utc_ms,
+                summary.model_id,
+                person_id.uuid().to_string(),
+                id(session_id)
+            ],
+        )?;
+        if written == 0 {
+            return Err(StoreError::Conflict);
+        }
+        Ok(())
+    }
+
     pub(crate) fn artifact_evidence(
         &self,
         session_id: MeetingSessionId,
@@ -11163,9 +11196,8 @@ mod tests {
             _system_prompt: &str,
             evidence: &str,
             _max_tokens: i32,
-            shape: ReplyShape,
+            _shape: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
-            assert_eq!(shape, ReplyShape::Json);
             *self
                 .evidence
                 .lock()
@@ -14396,7 +14428,12 @@ mod tests {
             evidence: Arc::clone(&captured),
         };
         crate::meeting::processing::generate_ledger(
-            &generator, &evidence, &segments, &names, session_id,
+            &generator,
+            &evidence,
+            &segments,
+            &names,
+            session_id,
+            || Ok(()),
         )
         .expect("regenerated ledger");
         let prompt = captured

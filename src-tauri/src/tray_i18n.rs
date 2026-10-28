@@ -1,14 +1,14 @@
 //! Tray menu internationalization
 //!
 //! Everything is auto-generated at compile time by build.rs from the
-//! frontend locale files (src/i18n/locales/*/translation.json).
+//! Rust-owned tray-locales/*.json files.
 //!
-//! The English translation.json is the single source of truth:
-//! - TrayStrings struct fields are derived from the English "tray" keys
-//! - All languages are auto-discovered from the locales directory
+//! The English en.json is the single source of truth:
+//! - TrayStrings struct fields are derived from its keys
+//! - All languages are auto-discovered from the tray-locales directory
 //!
 //! To add a new tray menu item:
-//! 1. Add the key to en/translation.json under "tray"
+//! 1. Add the key to tray-locales/en.json
 //! 2. Add translations to other locale files
 //! 3. Update tray.rs to use the new field (e.g., strings.new_field)
 
@@ -46,7 +46,7 @@ pub fn get_tray_translations(locale: Option<String>) -> TrayStrings {
         _ => language,
     };
 
-    // PANIC: build.rs always generates the required English entry from en/translation.json.
+    // PANIC: build.rs always generates the required English entry from tray-locales/en.json.
     exact_match
         .or_else(|| TRANSLATIONS.get(fallback))
         .or_else(|| TRANSLATIONS.get("en"))

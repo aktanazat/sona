@@ -31,17 +31,15 @@ export function resolveCargoTargetDirectory(
   if (!configured) {
     return undefined;
   }
-  /* Against the checkout, not the caller: `tauri build` runs its
-   * `beforeBuildCommand` from the repo root and cargo from `src-tauri`, and a
-   * relative cache root has to mean one directory across both. */
+  // Root build commands and helper preparation run Cargo from different working
+  // directories. Resolve the cache once from the checkout root so they agree.
   const cacheRoot = resolve(root, configured);
   /* Readable first and unique second: two worktrees are often both called
    * `wt`, and only the absolute path tells them apart. */
   const digest = createHash("sha256").update(root).digest("hex").slice(0, 12);
   const directoryName = `${basename(root)}-${digest}`;
-  /* Idempotent, because these commands nest: `tauri build` runs
-   * `beforeBuildCommand`, which comes back through this script with the
-   * derived value already in the environment. */
+  // A caller can pass an already-resolved checkout root to a nested helper.
+  // Keep that resolution idempotent rather than hashing the path again.
   return basename(cacheRoot) === directoryName
     ? cacheRoot
     : join(cacheRoot, directoryName);

@@ -33,21 +33,19 @@ private struct ScratchNoteListPage: View {
     var body: some View {
         @Bindable var store = store
         Page {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Scratchpad").titleText()
-                    Text("Notes you dictate or type. They stay on this Mac, encrypted.")
-                        .bodyText(15, Theme.inkSecondary)
+            PageTitle(
+                "Scratchpad",
+                subtitle: "Notes you dictate or type. They stay on this Mac, encrypted."
+            ) {
+                HStack(spacing: 8) {
+                    SearchField(prompt: "Search notes", text: $store.query)
+                        .frame(width: 216)
+                    Button("New note") {
+                        Task { await store.newNote() }
+                    }
+                    .buttonStyle(.primary)
                 }
-                Spacer(minLength: 16)
-                SearchField(prompt: "Search notes", text: $store.query)
-                    .frame(width: 240)
-                Button("New note") {
-                    Task { await store.newNote() }
-                }
-                .buttonStyle(.primary)
             }
-            .padding(.bottom, 28)
             ErrorNote(store.error)
             Card { rows }
         }
@@ -71,7 +69,7 @@ private struct ScratchNoteListPage: View {
                 if searching {
                     CardLine("No notes match “\(store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines))”.")
                 } else {
-                    CardLine("No notes yet. Start one with New note, then dictate into it or type.")
+                    CardLine("No notes yet.")
                 }
             } else {
                 ForEach(store.notes) { note in
@@ -161,28 +159,17 @@ private struct ScratchNoteEditorPage: View {
             BackLink(title: "Scratchpad") {
                 Task { await store.close() }
             }
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(store.saved?.title ?? "New note")
-                        .titleText()
-                        .lineLimit(2)
-                    Text(status).metaText(Theme.inkSecondary)
-                }
-                Spacer(minLength: 16)
+            PageTitle(store.saved?.title ?? "New note", subtitle: status) {
                 ScratchNoteActions(
                     store: store,
                     share: shareAction,
                     showHistory: { showingHistory = true },
                     confirmDelete: { confirmingDelete = true })
             }
-            .padding(.bottom, 20)
             ErrorNote(store.error)
             Card {
                 ScratchNoteEditor(text: bodyText, focused: $editorFocused)
             }
-            Text("While the cursor is in this note, dictation lands there.")
-                .metaText()
-                .padding(.top, 12)
         }
         .onAppear { editorFocused = true }
         .onChange(of: store.focusRequest) { _, _ in
@@ -273,8 +260,8 @@ private struct ScratchNoteEditor: View {
                         .accessibilityLabel("Note")
                 }
             }
-            .padding(.horizontal, 15)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
     }
 }
 

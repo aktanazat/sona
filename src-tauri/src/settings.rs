@@ -20,6 +20,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
 pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
+pub const LOCAL_CLEANUP_PROVIDER_ID: &str = "sona_local";
+pub const LOCAL_CLEANUP_MODEL_ID: &str = "qwen2.5-1.5b-instruct-q4_k_m";
 
 /// Serializes every compound access to the `settings` store value. The store
 /// plugin locks individual operations, but callers that read, change, and write
@@ -417,6 +419,7 @@ pub(crate) enum PostProcessEndpointError {
     UnsupportedScheme,
     RemoteHttp,
     InvalidAppleIntelligenceRoute,
+    InvalidLocalCleanupRoute,
     InvalidMeetingLocalRoute,
 }
 
@@ -433,6 +436,7 @@ impl std::fmt::Display for PostProcessEndpointError {
             Self::InvalidAppleIntelligenceRoute => {
                 "Apple Intelligence must use its built-in local route"
             }
+            Self::InvalidLocalCleanupRoute => "Offline cleanup must use its built-in local route",
             Self::InvalidMeetingLocalRoute => {
                 "Meeting local engine requires a loopback /v1 endpoint"
             }
@@ -462,9 +466,10 @@ impl PostProcessProvider {
             // These three ship without a listable catalog: Z.AI and Bedrock
             // Mantle publish no models endpoint, and Apple Intelligence runs
             // on-device with a fixed model.
-            "zai" | "bedrock_mantle" | APPLE_INTELLIGENCE_PROVIDER_ID => {
-                PostProcessCatalogSource::Unsupported
-            }
+            "zai"
+            | "bedrock_mantle"
+            | APPLE_INTELLIGENCE_PROVIDER_ID
+            | LOCAL_CLEANUP_PROVIDER_ID => PostProcessCatalogSource::Unsupported,
             other => {
                 warn!("Post-processing provider {other} has no catalog decision");
                 PostProcessCatalogSource::Unsupported
@@ -481,7 +486,10 @@ impl PostProcessProvider {
     }
 
     pub(crate) fn allows_manual_model_id(&self) -> bool {
-        self.id != APPLE_INTELLIGENCE_PROVIDER_ID
+        !matches!(
+            self.id.as_str(),
+            APPLE_INTELLIGENCE_PROVIDER_ID | LOCAL_CLEANUP_PROVIDER_ID
+        )
     }
 
     pub(crate) fn endpoint(&self) -> Result<PostProcessEndpoint, PostProcessEndpointError> {
@@ -505,6 +513,16 @@ impl PostProcessProvider {
             return Ok(PostProcessEndpoint {
                 base_url: "apple-intelligence://local".to_string(),
                 origin: "apple-intelligence://local".to_string(),
+                remote: false,
+            });
+        }
+        if self.id == LOCAL_CLEANUP_PROVIDER_ID {
+            if self.base_url.trim().trim_end_matches('/') != "sona-local://local" {
+                return Err(PostProcessEndpointError::InvalidLocalCleanupRoute);
+            }
+            return Ok(PostProcessEndpoint {
+                base_url: "sona-local://local".to_string(),
+                origin: "sona-local://local".to_string(),
                 remote: false,
             });
         }
@@ -1807,6 +1825,13 @@ fn default_post_process_provider_id() -> String {
 fn default_post_process_providers() -> Vec<PostProcessProvider> {
     let mut providers = vec![
         PostProcessProvider {
+            id: LOCAL_CLEANUP_PROVIDER_ID.to_string(),
+            label: "Offline cleanup (English)".to_string(),
+            base_url: "sona-local://local".to_string(),
+            allow_base_url_edit: false,
+            supports_structured_output: false,
+        },
+        PostProcessProvider {
             id: "openai".to_string(),
             label: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -1904,6 +1929,9 @@ fn default_cloud_stt_providers() -> Vec<CloudSttProviderSettings> {
 }
 
 fn default_model_for_provider(provider_id: &str) -> String {
+    if provider_id == LOCAL_CLEANUP_PROVIDER_ID {
+        return LOCAL_CLEANUP_MODEL_ID.to_string();
+    }
     if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID {
         return APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string();
     }
@@ -1996,7 +2024,9 @@ fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
         let default_model = default_model_for_provider(&provider.id);
         match settings.post_process_models.get_mut(&provider.id) {
             Some(existing) => {
-                if existing.is_empty() && !default_model.is_empty() {
+                if (provider.id == LOCAL_CLEANUP_PROVIDER_ID && *existing != default_model)
+                    || (existing.is_empty() && !default_model.is_empty())
+                {
                     *existing = default_model.clone();
                     changed = true;
                 }
@@ -3643,7 +3673,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn old_settings_leave_quiet_speech_off() {
         let settings: AppSettings = serde_json::from_value(serde_json::json!({
@@ -3771,6 +3800,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn offline_cleanup_cannot_be_redirected_to_a_network_provider() {
+        let mut provider = default_post_process_providers()
+            .into_iter()
+            .find(|provider| provider.id == LOCAL_CLEANUP_PROVIDER_ID)
+            .expect("offline provider is available");
+        assert!(!provider.endpoint().expect("built-in route").is_remote());
+        assert!(!provider.allows_manual_model_id());
+        provider.base_url = "https://example.com/v1".to_string();
+        assert_eq!(
+            provider.endpoint(),
+            Err(PostProcessEndpointError::InvalidLocalCleanupRoute)
+        );
+    }
 
     #[test]
     fn stored_openai_post_process_provider_remains_openai() {
@@ -3854,7 +3897,6 @@ mod tests {
         assert!(!apps.iter().any(|app| app == "com.apple.facetime"));
         assert!(!apps.iter().any(|app| app == "com.apple.mobilephone"));
     }
-
 
     #[test]
     fn defaults_expose_secret_state_without_api_key_values() {
@@ -4912,7 +4954,6 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
     }
-
 
     #[test]
     fn overlay_migration_keeps_disabled_overlay_off() {

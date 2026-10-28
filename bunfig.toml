@@ -1,7 +1,4 @@
 [test]
-# Runner ownership: `bun test` owns `*.test.ts(x)` (src/**, scripts/**).
-# `*.spec.ts` belongs to a foreign runner - Playwright for tests/**, vitest for
-# cloudflare/sona-companion/test/**. Both fail hard under bun (Playwright rejects
-# a bare `test.describe()`, and `cloudflare:test` only resolves inside the
-# workers pool), so bun must not claim them while walking the tree.
-pathIgnorePatterns = ["**/*.spec.ts", "**/*.spec.tsx"]
+# Bun owns *.test.ts in scripts and tools. The companion service's *.spec.ts
+# files run in its Cloudflare workers pool, where cloudflare:test resolves.
+pathIgnorePatterns = ["**/*.spec.ts", "**/*.spec.tsx", "src-tauri/vendor/**", "src-tauri/target/**"]

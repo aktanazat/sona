@@ -28,7 +28,8 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 codex mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 ```
 
-The server resolves Sona at `/Applications/Sona.app/Contents/MacOS/sona`.
+The server uses the native app's bundled engine at
+`/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-core`.
 Point `SONA_BIN` somewhere else for a dev build:
 
 ```bash

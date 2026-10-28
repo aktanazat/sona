@@ -596,5 +596,4 @@ mod tests {
         assert!(excerpt.len() <= MAX_NOTES_BYTES);
         assert!(excerpt.chars().all(|character| character == 'é'));
     }
-
 }

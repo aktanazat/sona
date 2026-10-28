@@ -711,6 +711,7 @@ fn messy_two_party_with_model_or_skips_without_a_local_server() {
         &fixture.segments,
         &fixture.speaker_names,
         session_id,
+        || Ok(()),
     );
     let answers = recording
         .answers

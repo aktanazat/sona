@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.aktanazat.sona.mac</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>sona</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Audio and video</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.microsoft.waveform-audio</string>
+                <string>public.mp3</string>
+                <string>com.apple.m4a-audio</string>
+                <string>public.aac-audio</string>
+                <string>org.xiph.flac</string>
+                <string>org.xiph.ogg-audio</string>
+                <string>com.apple.quicktime-movie</string>
+                <string>public.mpeg-4</string>
+                <string>com.apple.m4v-video</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Sona encrypted share</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.aktanazat.sona.encrypted-share</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.aktanazat.sona.encrypted-share</string>
+            <key>UTTypeDescription</key>
+            <string>Sona encrypted share</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>sona</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/vnd.sona.encrypted-share</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

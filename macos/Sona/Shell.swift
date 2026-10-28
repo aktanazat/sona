@@ -30,7 +30,8 @@ struct Shell: View {
             }
         }
         .background(Theme.page.ignoresSafeArea())
-        .frame(minWidth: 1040, minHeight: 700)
+        .tint(Theme.accent)
+        .frame(minWidth: 900, minHeight: 640)
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
             case .chat:
@@ -269,7 +270,6 @@ struct MeetingsPlace: View {
             if let message = meetings.listError {
                 MeetingsRetryNote(message: message) { meetings.retry() }
             }
-            MeetingsTrendCard(store: meetings)
             MeetingsFolderBar(store: meetings) { folder in
                 model.chat.scope(to: folder)
                 model.sheet = .chat
@@ -277,6 +277,7 @@ struct MeetingsPlace: View {
             MeetingsFilterCard(store: meetings)
             MeetingsFeed(store: meetings)
             MeetingsPager(store: meetings)
+            MeetingsTrendCard(store: meetings)
         }
         .sheet(isPresented: Binding(get: { meetings.trashOpen }, set: { if !$0 { meetings.closeTrash() } })) {
             MeetingsTrashSheet(store: meetings)
@@ -287,15 +288,13 @@ struct MeetingsPlace: View {
     /// What Sona has recorded in total, once the trend says.
     private var subtitle: String {
         guard let allTime = model.meetings.trend?.allTime, allTime.meetings > 0 else {
-            return "Record a meeting on this Mac."
+            return ""
         }
         let meetings = allTime.meetings == 1 ? "1 meeting" : "\(allTime.meetings) meetings"
         return "\(meetings) recorded · \(allTime.capturedSpoken) captured"
     }
 }
 
-/// Wordmark, search, chat, the four places, settings. The traffic lights sit
-/// above the wordmark, so the column starts below them.
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
 
@@ -303,13 +302,16 @@ struct Sidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Image("Mark")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 16, height: 16)
                 Text("Sona")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundStyle(Theme.ink)
-            .padding(.leading, 12)
-            .padding(.top, 52)
-            .padding(.bottom, 28)
+            .padding(.leading, 8)
+            .padding(.top, 18)
+            .padding(.bottom, 16)
 
             SidebarItem(icon: "magnifyingglass", title: "Search", shortcut: "⌘ K", selected: false) {
                 model.paletteShown = true
@@ -321,7 +323,7 @@ struct Sidebar: View {
                 model.sheet = .chat
             }
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 12)
 
             ForEach(Place.allCases) { place in
                 SidebarItem(
@@ -335,16 +337,18 @@ struct Sidebar: View {
                     model.go(place)
                 }
             }
+            Spacer()
             SidebarItem(icon: "gearshape", title: "Settings", shortcut: nil, selected: model.showingSettings) {
                 model.showSettings(model.settingsPlace)
             }
-            Spacer()
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 8)
+        .padding(.bottom, 10)
         .frame(width: Theme.sidebarWidth)
         .frame(maxHeight: .infinity)
+        .background(Theme.rail.ignoresSafeArea())
         .overlay(alignment: .trailing) {
-            Rectangle().fill(Theme.border).frame(width: 1)
+            Rectangle().fill(Theme.hairline).frame(width: 1)
         }
     }
 }
@@ -361,13 +365,13 @@ private struct SidebarItem: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .regular))
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(Theme.inkSecondary)
-                    .frame(width: 18)
+                    .frame(width: 16)
                 Text(title)
-                    .font(TypeScale.body(16))
+                    .font(TypeScale.body(14))
                     .foregroundStyle(Theme.ink)
                 if live {
                     Circle().fill(Theme.live).frame(width: 7, height: 7)
@@ -384,15 +388,16 @@ private struct SidebarItem: View {
                     Text(shortcut).metaText()
                 }
             }
-            .padding(.horizontal, 12)
-            .frame(height: 44)
+            .padding(.horizontal, 8)
+            .frame(height: 32)
             .background(
                 selected ? Theme.selection : (hovering ? Theme.wash : .clear),
-                in: RoundedRectangle(cornerRadius: 12)
+                in: RoundedRectangle(cornerRadius: Theme.radiusControl)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityValue(live ? "In progress" : "")
         .onHover { hovering = $0 }

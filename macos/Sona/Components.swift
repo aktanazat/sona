@@ -7,9 +7,6 @@ struct Hairline: View {
     }
 }
 
-/// A content card: white surface, one hairline outline, 14-point corners, flat.
-/// Rows inside draw their own divider along the bottom; the last one lands on
-/// the outline and disappears into it.
 struct Card<Content: View>: View {
     let content: Content
 
@@ -22,9 +19,9 @@ struct Card<Content: View>: View {
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
+        .background(Theme.page)
+        .overlay(alignment: .top) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline() }
     }
 }
 
@@ -52,16 +49,20 @@ struct CardRow<Leading: View, Trailing: View>: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 20) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             leading
-            Spacer(minLength: 16)
+            Spacer(minLength: 12)
             trailing
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(action != nil && hovering ? Theme.wash : .clear)
         .overlay(alignment: .bottom) { Hairline() }
+        .overlay {
+            RoundedRectangle(cornerRadius: Theme.radiusControl)
+                .strokeBorder(focused ? Theme.accent : .clear, lineWidth: 2)
+        }
         .contentShape(Rectangle())
         .onTapGesture { action?() }
         .onHover { hovering = $0 }
@@ -101,40 +102,41 @@ struct CardLine: View {
         Text(text)
             .metaText()
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .bottom) { Hairline() }
     }
 }
 
-/// The primary button: ink fill, page text, 10-point corners. Compact is the
-/// panel size, the same 30 points as a compact secondary beside it.
 struct PrimaryButton: ButtonStyle {
     var compact = false
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 15))
+            .font(TypeScale.label(compact ? 13 : 14))
             .foregroundStyle(Theme.onInvert)
-            .padding(.horizontal, compact ? 12 : 16)
-            .frame(height: compact ? 30 : 36)
+            .padding(.horizontal, compact ? 10 : 12)
+            .frame(height: compact ? 28 : 32)
             .background(Theme.invert.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .opacity(isEnabled ? 1 : 0.45)
     }
 }
 
-/// The secondary button: white surface, hairline outline, ink text.
 struct SecondaryButton: ButtonStyle {
     var compact = false
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 15))
+            .font(TypeScale.label(compact ? 13 : 14))
             .foregroundStyle(Theme.ink)
-            .padding(.horizontal, compact ? 12 : 16)
-            .frame(height: compact ? 30 : 36)
+            .padding(.horizontal, compact ? 10 : 12)
+            .frame(height: compact ? 28 : 32)
             .background(configuration.isPressed ? Theme.selection : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+            .opacity(isEnabled ? 1 : 0.45)
     }
 }
 
@@ -143,11 +145,13 @@ struct SecondaryButton: ButtonStyle {
 struct QuietButton: ButtonStyle {
     var color: Color = Theme.inkSecondary
     var compact = false
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 15))
+            .font(TypeScale.label(compact ? 13 : 14))
             .foregroundStyle(configuration.isPressed ? Theme.ink : color)
+            .opacity(isEnabled ? 1 : 0.45)
             .contentShape(Rectangle())
     }
 }
@@ -175,11 +179,11 @@ struct KeyCap: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.body(13))
+            .font(TypeScale.body(12))
             .foregroundStyle(Theme.inkSecondary)
             .fixedSize()
-            .padding(.horizontal, 7)
-            .frame(height: 24)
+            .padding(.horizontal, 5)
+            .frame(height: 20)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusKey).strokeBorder(Theme.border, lineWidth: 1))
     }
@@ -225,25 +229,26 @@ struct Shortcut: View {
     }
 }
 
-/// The search field: white, outlined, a magnifier on the left.
 struct SearchField: View {
     let prompt: String
     @Binding var text: String
+    @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(Theme.inkTertiary)
             TextField(prompt, text: $text, prompt: Text(prompt).foregroundStyle(Theme.inkTertiary))
                 .textFieldStyle(.plain)
                 .font(TypeScale.body())
                 .foregroundStyle(Theme.ink)
+                .focused($focused)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 40)
+        .padding(.horizontal, 10)
+        .frame(height: 32)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 }
 
@@ -251,20 +256,21 @@ struct SearchField: View {
 struct InputField: View {
     let prompt: String
     @Binding var text: String
+    @FocusState private var focused: Bool
 
     var body: some View {
         TextField(prompt, text: $text, prompt: Text(prompt).foregroundStyle(Theme.inkTertiary))
             .textFieldStyle(.plain)
             .font(TypeScale.body())
             .foregroundStyle(Theme.ink)
-            .padding(.horizontal, 12)
-            .frame(height: 36)
+            .focused($focused)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 }
 
-/// A measurement that never animates: a bronze bar on a hairline track.
 struct Meter: View {
     let fraction: Double
 
@@ -295,7 +301,6 @@ struct LiveDot: View {
     }
 }
 
-/// A small bronze tag: "2 open", "On".
 struct Chip: View {
     let text: String
 
@@ -306,10 +311,10 @@ struct Chip: View {
     var body: some View {
         Text(text)
             .font(TypeScale.label(12))
-            .foregroundStyle(Theme.accent)
-            .padding(.horizontal, 8)
-            .frame(height: 22)
-            .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 6))
+            .foregroundStyle(Theme.inkSecondary)
+            .padding(.horizontal, 6)
+            .frame(height: 20)
+            .background(Theme.selection, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
     }
 }
 
@@ -326,15 +331,30 @@ struct PageTitle<Action: View>: View {
     }
 
     var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title).titleText()
-                Text(subtitle).bodyText(15, Theme.inkSecondary)
+        VStack(alignment: .leading, spacing: 6) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    heading.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: 12)
+                    action.fixedSize(horizontal: true, vertical: false)
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    heading
+                    action
+                }
             }
-            Spacer()
-            action
+            if !subtitle.isEmpty {
+                Text(subtitle).metaText(Theme.inkSecondary)
+            }
         }
-        .padding(.bottom, 28)
+        .padding(.bottom, 20)
+    }
+
+    private var heading: some View {
+        Text(title)
+            .titleText()
+            .lineLimit(2)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -344,7 +364,6 @@ extension PageTitle where Action == EmptyView {
     }
 }
 
-/// A labelled block: "Activity", then a card.
 struct PageSection<Content: View>: View {
     let label: String
     let content: Content
@@ -355,15 +374,14 @@ struct PageSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(label).sectionLabel()
             content
         }
-        .padding(.bottom, 32)
+        .padding(.bottom, 24)
     }
 }
 
-/// A page: scrolls, keeps the old margins, caps the measure.
 struct Page<Content: View>: View {
     let content: Content
 
@@ -378,11 +396,11 @@ struct Page<Content: View>: View {
             }
             .frame(maxWidth: Theme.contentMax, alignment: .leading)
             .padding(.horizontal, Theme.margin)
-            .padding(.top, 40)
-            .padding(.bottom, 64)
+            .padding(.top, 24)
+            .padding(.bottom, 40)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .scrollIndicators(.never)
+        .scrollIndicators(.automatic)
     }
 }
 
@@ -399,11 +417,10 @@ struct BackLink: View {
             }
         }
         .buttonStyle(.quiet)
-        .padding(.bottom, 20)
+        .padding(.bottom, 12)
     }
 }
 
-/// A row with a bronze switch on the right.
 struct ToggleRow: View {
     let title: String
     var detail: String? = nil
@@ -434,11 +451,11 @@ struct Stat: View {
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(label).metaText(Theme.inkSecondary)
-            Text(value).font(TypeScale.stat).foregroundStyle(Theme.ink).tracking(-0.4)
+            Text(value).font(TypeScale.stat).foregroundStyle(Theme.ink).monospacedDigit()
         }
-        .padding(20)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

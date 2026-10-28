@@ -536,7 +536,13 @@ final class MeetingLiveStore {
         guard let snapshot = await read(sessionId) else { return }
         if whileShown, live?.session.sessionId != sessionId { return }
         live = snapshot
-        provisional = snapshot.session.phase.isActive ? await readProvisional(sessionId) : []
+        if snapshot.session.phase.isActive {
+            let words = await readProvisional(sessionId)
+            guard live?.session.sessionId == sessionId, live?.session.phase.isActive == true else { return }
+            provisional = words
+        } else {
+            provisional = []
+        }
         if notesSessionId != sessionId {
             await loadLiveNotes(sessionId)
         }
@@ -554,7 +560,10 @@ final class MeetingLiveStore {
     private func readProvisional(_ sessionId: MeetingSessionId) async -> [MeetingProvisionalSegment] {
         let transcript: MeetingProvisionalTranscript? = try? await core.request(
             "meeting_live_transcript", MeetingRequest.session(sessionId))
-        return transcript?.segments ?? provisional
+        guard let transcript, transcript.sessionId == sessionId,
+              live?.session.sessionId == sessionId,
+              transcript.segments.count >= provisional.count else { return provisional }
+        return transcript.segments
     }
 
     /// The gate, for a preflight the core created on this screen's behalf.
@@ -1440,6 +1449,16 @@ final class MeetingLiveStore {
     /// transcript: the stored one is empty until the meeting stops.
     var showsProvisional: Bool {
         lines.isEmpty && !provisional.isEmpty
+    }
+
+    func speakerLabel(_ segment: TranscriptEffectiveSegment) -> String {
+        switch segment.speakerAssignment {
+        case .overlap: return "Overlapping voices"
+        case .unknown: return "Unknown speaker"
+        case .localSpeaker, .systemSpeaker:
+            return live?.speakers.first { $0.speakerId == segment.assignedSpeakerId }?.displayName
+                ?? "Unknown speaker"
+        }
     }
 
     /// A read of `session` landed, or a surface let a session go: carry the

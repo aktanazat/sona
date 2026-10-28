@@ -47,17 +47,17 @@ describe("summarize", () => {
     ]);
   });
 
-  test("records the same path on Windows and on the Linux runner", () => {
+  test("normalizes diagnostic paths to forward slashes", () => {
     expect(
       summarize([
         {
-          filename: "src\\components\\Sidebar.tsx",
+          filename: "scripts\\prepare-agent-hook.ts",
           code: "anti-slop(no-runtime-typeof)",
           severity: "error",
         },
       ]),
     ).toEqual([
-      entry("src/components/Sidebar.tsx", "anti-slop(no-runtime-typeof)", 1),
+      entry("scripts/prepare-agent-hook.ts", "anti-slop(no-runtime-typeof)", 1),
     ]);
   });
 });

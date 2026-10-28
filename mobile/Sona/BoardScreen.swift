@@ -1,48 +1,50 @@
 import SwiftUI
 import UIKit
 
-/// The catalogue: every thought the sorter has filed, in its cluster's colour, and the
-/// ones still waiting at the top.
 struct BoardScreen: View {
     @ObservedObject var model: AppModel
     @State private var open: BoardTile?
     @State private var showsPairing = false
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 12, alignment: .top),
-        GridItem(.flexible(), spacing: 12, alignment: .top),
-    ]
-
     var body: some View {
         NavigationStack {
-            ScrollView {
+            List {
                 let sections = model.board?.sections() ?? []
                 if sections.isEmpty {
                     empty
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Theme.background)
                 } else {
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                        ForEach(sections) { section in
-                            Section {
-                                ForEach(section.tiles) { tile in
-                                    Button { open = tile } label: {
-                                        BoardTileView(
-                                            model: model, tile: tile, hue: section.cluster?.hue
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel(Text("a11y.thought"))
-                                    .accessibilityIdentifier("tile-\(tile.id)")
+                    ForEach(sections) { section in
+                        Section {
+                            ForEach(section.tiles) { tile in
+                                Button { open = tile } label: {
+                                    BoardTileView(model: model, tile: tile)
                                 }
-                            } header: {
-                                header(section)
+                                .buttonStyle(.plain)
+                                .accessibilityElement(children: .combine)
+                                .accessibilityHint(Text("a11y.thought"))
+                                .accessibilityIdentifier("tile-\(tile.id)")
+                                .listRowBackground(Theme.background)
+                                .listRowSeparatorTint(Theme.border)
+                                .listRowInsets(
+                                    EdgeInsets(top: 8, leading: Theme.pageInset, bottom: 8, trailing: Theme.pageInset)
+                                )
                             }
+                        } header: {
+                            header(section)
                         }
+                        .textCase(nil)
                     }
-                    .padding(16)
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .background(Theme.background)
             .navigationTitle("tab.board")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(Theme.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .refreshable { await model.refreshBoard() }
             .safeAreaInset(edge: .bottom) { status }
             .sheet(item: $open) { tile in
@@ -61,22 +63,25 @@ struct BoardScreen: View {
             if let cluster = section.cluster {
                 Circle()
                     .fill(Theme.cluster(hue: cluster.hue))
-                    .frame(width: 8, height: 8)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
                 Text(cluster.name)
             } else {
                 Text("board.unsorted")
             }
+            Spacer()
             Text(verbatim: "\(section.tiles.count)")
+                .monospacedDigit()
                 .foregroundStyle(Theme.textTertiary)
         }
-        .font(.subheadline.weight(.semibold))
+        .font(.subheadline.weight(.medium))
         .foregroundStyle(Theme.textSecondary)
-        .padding(.top, 8)
+        .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
     }
 
     private var empty: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(model.isPaired ? "board.empty" : "board.notPaired")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
@@ -87,11 +92,9 @@ struct BoardScreen: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(24)
         .accessibilityIdentifier("board-empty")
     }
 
-    /// One floating line, only while there is something to say about the vault.
     @ViewBuilder
     private var status: some View {
         switch model.boardState {
@@ -101,62 +104,64 @@ struct BoardScreen: View {
             Text(model.boardState == .syncing ? "board.syncing" : "board.offline")
                 .font(.footnote)
                 .foregroundStyle(Theme.textSecondary)
-                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Theme.pageInset)
                 .padding(.vertical, 10)
-                .glassEffect()
-                .padding(.bottom, 8)
+                .background(Theme.surface)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(Theme.border).frame(height: 0.5)
+                }
                 .accessibilityIdentifier("board-status")
         }
     }
 }
 
-/// One card: image first, then the words, then what kind of thought it was.
 private struct BoardTileView: View {
     @ObservedObject var model: AppModel
     let tile: BoardTile
-    let hue: Int?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        HStack(alignment: .top, spacing: 12) {
             if let image = tile.thought.images.first {
                 AttachmentImage(
                     model: model, objectId: tile.id, head: tile.head, image: image, maxSide: 600
                 )
-                .aspectRatio(aspect(image), contentMode: .fit)
+                .frame(width: 64, height: 64)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
-            }
-            (tile.title.map { Text(verbatim: $0) } ?? fallbackTitle)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(3)
-            if let summary = tile.card?.summary, !summary.isEmpty {
-                Text(summary)
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
-                    .lineLimit(4)
-            }
-            HStack(spacing: 6) {
-                Image(systemName: glyph)
-                if tile.thought.images.count > 1 {
-                    Text(verbatim: "\(tile.thought.images.count)")
+                .overlay {
+                    RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+                        .strokeBorder(Theme.border, lineWidth: 0.5)
                 }
-                Spacer()
-                if tile.card?.pinned == true {
-                    Image(systemName: "pin.fill")
-                        .accessibilityLabel(Text("board.pinned"))
-                }
+                .accessibilityHidden(true)
             }
-            .font(.caption)
-            .foregroundStyle(Theme.textTertiary)
+            VStack(alignment: .leading, spacing: 5) {
+                (tile.title.map { Text(verbatim: $0) } ?? fallbackTitle)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(3)
+                if let summary = tile.card?.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: glyph)
+                    if tile.thought.images.count > 1 {
+                        Text(verbatim: "\(tile.thought.images.count)")
+                    }
+                    Spacer()
+                    if tile.card?.pinned == true {
+                        Image(systemName: "pin.fill")
+                            .accessibilityLabel(Text("board.pinned"))
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(Theme.textTertiary)
+            }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(hue.map { Theme.cluster(hue: $0).opacity(0.12) } ?? Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                .strokeBorder(Theme.border, lineWidth: 1)
-        )
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var fallbackTitle: Text {
@@ -259,10 +264,11 @@ private struct ThoughtDetailScreen: View {
                                     ForEach(card.tags, id: \.self) { tag in
                                         Text(tag)
                                             .font(.caption)
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 5)
+                                            .foregroundStyle(Theme.textSecondary)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
                                             .background(Theme.inset)
-                                            .clipShape(Capsule())
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
                                     }
                                 }
                             }
@@ -302,7 +308,7 @@ private struct ThoughtDetailScreen: View {
                     .font(.caption)
                     .foregroundStyle(Theme.textTertiary)
                 }
-                .padding(24)
+                .padding(Theme.pageInset)
             }
             .background(Theme.background)
             .navigationBarTitleDisplayMode(.inline)

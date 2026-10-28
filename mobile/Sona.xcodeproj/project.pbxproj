@@ -84,6 +84,9 @@
 		CC0000000000000000000041 /* PhoneParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000041 /* PhoneParityTests.swift */; };
 		CA0000000000000000000042 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000042 /* Assets.xcassets */; };
 		CB0000000000000000000043 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000043 /* Assets.xcassets */; };
+		CA0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
+		CC0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
+		CC0000000000000000000045 /* DictationDeliveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000045 /* DictationDeliveryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -185,6 +188,8 @@
 		BB0000000000000000000041 /* PhoneParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneParityTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000042 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB0000000000000000000043 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		BB0000000000000000000044 /* BoundedRewrite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedRewrite.swift; sourceTree = "<group>"; };
+		BB0000000000000000000045 /* DictationDeliveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationDeliveryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -282,6 +287,7 @@
 				BB0000000000000000000039 /* DictationProfile.swift */,
 				BB000000000000000000003A /* PhoneMeeting.swift */,
 				BB000000000000000000003B /* CallService.swift */,
+				BB0000000000000000000044 /* BoundedRewrite.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -334,6 +340,7 @@
 				BB000000000000000000001E /* CallOfferTests.swift */,
 				BB0000000000000000000027 /* KeyboardDraftTests.swift */,
 				BB0000000000000000000041 /* PhoneParityTests.swift */,
+				BB0000000000000000000045 /* DictationDeliveryTests.swift */,
 				AA0000000000000000000008 /* Fixtures */,
 			);
 			path = SonaTests;
@@ -551,6 +558,7 @@
 				CA000000000000000000003E /* PhoneCalendar.swift in Sources */,
 				CA000000000000000000003F /* SonaIntents.swift in Sources */,
 				CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */,
+				CA0000000000000000000044 /* BoundedRewrite.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -595,6 +603,8 @@
 				CC000000000000000000003B /* CallService.swift in Sources */,
 				CC000000000000000000003C /* PhoneLibrary.swift in Sources */,
 				CC0000000000000000000041 /* PhoneParityTests.swift in Sources */,
+				CC0000000000000000000044 /* BoundedRewrite.swift in Sources */,
+				CC0000000000000000000045 /* DictationDeliveryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

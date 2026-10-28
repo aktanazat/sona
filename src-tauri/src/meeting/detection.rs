@@ -4306,5 +4306,4 @@ mod tests {
         assert!(state.end_tracked(MeetingSessionId::new()).is_none());
         assert!(state.tracked.is_some());
     }
-
 }

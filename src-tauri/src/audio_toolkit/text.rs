@@ -1393,7 +1393,6 @@ mod tests {
         assert_eq!(apply_text_replacements("", &starter_rules()), "");
     }
 
-
     #[test]
     fn normalization_preserves_a_paragraph_break() {
         assert_eq!(
@@ -1560,7 +1559,6 @@ mod tests {
         );
         assert_eq!(normalize_transcription_output(&filtered), "это работает");
     }
-
 
     #[test]
     fn test_filter_combined() {

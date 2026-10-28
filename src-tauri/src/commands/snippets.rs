@@ -233,5 +233,4 @@ mod tests {
         assert_eq!(restored.snippets, settings.snippets);
         assert!(!restored.snippets_enabled);
     }
-
 }

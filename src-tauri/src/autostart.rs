@@ -270,7 +270,6 @@ mod macos {
     mod tests {
         use super::*;
 
-
         #[test]
         fn launch_agent_path_matches_auto_launch_crate() {
             let path = plugin_launch_agent_path(Path::new("/Users/someone"), "Sona");

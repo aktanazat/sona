@@ -152,5 +152,4 @@ mod tests {
         assert!(!native_machine_is_arm64(Some(0x014c))); // I386
         assert!(!native_machine_is_arm64(None)); // API unavailable or failed
     }
-
 }

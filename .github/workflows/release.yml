@@ -1,279 +1,86 @@
-name: "Release"
-
-# Tag-driven release. Pushing `vX.Y.Z` builds the three shipped platforms and
-# attaches every bundle to one DRAFT GitHub release, so a human publishes it.
-#
-# Platform preparation mirrors .github/workflows/build.yml, which carries the
-# full reasoning for each native dependency. Keep the two in sync when a
-# toolchain requirement changes.
+name: Native Mac draft release
 
 on:
   push:
     tags:
-      - "v*"
+      - v*
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-26"
-            target: "aarch64-apple-darwin"
-            args: "--target aarch64-apple-darwin"
-          - platform: "windows-latest"
-            target: "x86_64-pc-windows-msvc"
-            args: ""
-          - platform: "ubuntu-22.04"
-            target: "x86_64-unknown-linux-gnu"
-            args: "--bundles deb,appimage"
-
-    runs-on: ${{ matrix.platform }}
-
-    env:
-      # Signing and notarization are opt-in. With the Apple secrets set,
-      # APPLE_SIGNING_IDENTITY overrides `signingIdentity` in tauri.conf.json,
-      # which names this project's own Apple Development certificate; there is no
-      # ad-hoc fallback, so a fork without those secrets must point
-      # `signingIdentity` at a certificate it holds.
-      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
-      HAS_APPLE_NOTARIZATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
-
+  version:
+    runs-on: macos-26
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Enable long paths (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Read release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
-            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
-          git config --system core.longpaths true
-
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Resolve app version from tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          echo "APP_VERSION=${TAG#v}" >> "$GITHUB_ENV"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
-          key: release-${{ matrix.platform }}-${{ matrix.target }}
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libopenblas-dev libx11-dev libxtst-dev libxrandr-dev libgtk-layer-shell0 libgtk-layer-shell-dev
-
-      - name: Install Vulkan SDK (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-1.3.290-jammy.list https://packages.lunarg.com/vulkan/1.3.290/lunarg-vulkan-1.3.290-jammy.list
-          sudo apt update
-          sudo apt install vulkan-sdk -y
-          sudo apt-get install -y mesa-vulkan-drivers
-
-      - name: Install Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
-        uses: humbletim/install-vulkan-sdk@v1.2
-        with:
-          version: 1.4.309.0
-          cache: true
-
-      # ggml-vulkan's CMake requires a findable SPIRV-Headers config package,
-      # which the CI Vulkan SDK layout does not provide.
-      - name: Install SPIRV-Headers (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          vcpkg install spirv-headers:x64-windows
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install spirv-headers failed" }
-          $prefix = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -replace '\\','/'
-          $combined = if ($env:CMAKE_PREFIX_PATH) { "$prefix;$env:CMAKE_PREFIX_PATH" } else { $prefix }
-          Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$combined"
-
-      # Both platforms link a baseline ONNX Runtime dynamically instead of the
-      # AVX2-baseline build that pyke downloads, which crashes on older CPUs.
-      - name: Install ONNX Runtime (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          ORT_VERSION="1.24.2"
-          curl -L -o ort.tgz "https://blob.handy.computer/onnxruntime-linux-x86_64-${ORT_VERSION}.tgz"
-          tar xzf ort.tgz
-          ORT_DIR="$(pwd)/onnxruntime-linux-x86_64-${ORT_VERSION}"
-          echo "ORT_LIB_LOCATION=$ORT_DIR/lib" >> "$GITHUB_ENV"
-          echo "ORT_PREFER_DYNAMIC_LINK=1" >> "$GITHUB_ENV"
-          # The deb bundler copies real files, so flatten the SONAME symlinks.
-          for f in "$ORT_DIR"/lib/libonnxruntime.so*; do
-            if [ -L "$f" ]; then
-              cp -L "$f" "$f.real" && mv "$f.real" "$f"
-            fi
-          done
-          jq --arg so1 "$ORT_DIR/lib/libonnxruntime.so.1" \
-            '.bundle.linux.deb.files["/usr/lib/sona/libonnxruntime.so.1"] = $so1' \
-            src-tauri/tauri.conf.json > tmp.json && mv tmp.json src-tauri/tauri.conf.json
-
-      - name: Install ONNX Runtime (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ORT_VERSION = "1.24.2"
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/onnxruntime-win-x64-$ORT_VERSION.zip"
-          Invoke-WebRequest -Uri $url -OutFile ort.zip
-          Expand-Archive -Path ort.zip -DestinationPath ort-dist -Force
-          $ortLib = (Resolve-Path "ort-dist/onnxruntime-win-x64-$ORT_VERSION/lib").Path
-          Add-Content -Path $env:GITHUB_ENV -Value "ORT_LIB_LOCATION=$ortLib"
-          Add-Content -Path $env:GITHUB_ENV -Value "ORT_PREFER_DYNAMIC_LINK=1"
-
-      # Ships the VC++ runtime app-local so Sona starts without a system redist.
-      - name: Locate VC++ runtime redist (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsRoot = & $vswhere -latest -products * -property installationPath
-          if (-not $vsRoot) { throw "vswhere found no Visual Studio installation" }
-          $versionFile = Join-Path $vsRoot "VC\Auxiliary\Build\Microsoft.VCRedistVersion.default.txt"
-          $redistVersion = (Get-Content $versionFile).Trim()
-          $archDir = Join-Path $vsRoot "VC\Redist\MSVC\$redistVersion\x64"
-          if (-not (Test-Path $archDir)) { throw "VC++ redist arch dir not found: $archDir" }
-          $crt = Get-ChildItem $archDir -Directory -Filter "Microsoft.VC*.CRT" |
-            Sort-Object Name | Select-Object -Last 1
-          if (-not $crt -or -not (Test-Path (Join-Path $crt.FullName "msvcp140.dll"))) {
-            throw "VC++ CRT redist dir not found or incomplete under: $archDir"
-          }
-          $omp = Get-ChildItem $archDir -Directory -Filter "Microsoft.VC*.OpenMP" |
-            Sort-Object Name | Select-Object -Last 1
-          if (-not $omp -or -not (Test-Path (Join-Path $omp.FullName "vcomp140.dll"))) {
-            throw "VC++ OpenMP redist dir not found or incomplete under: $archDir"
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "SONA_VC_REDIST_DIRS=$($crt.FullName);$($omp.FullName)"
-
-      - name: Install frontend dependencies
-        run: bun install
-
-      - name: Prepare bundled agent hook
-        run: bun run prepare:agent-hook -- ${{ matrix.target }}
-
-      # transcribe-cpp ships as a shared library plus loadable ggml backends on
-      # Linux. Compile first so linuxdeploy can resolve libtranscribe.so while
-      # it builds the AppImage; tauri-action reuses this compile incrementally.
-      - name: Pre-build and locate transcribe-cpp backend libs (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bun run build
-          (cd src-tauri && cargo build --release)
-          LIBDIR="$(find src-tauri/target/release/build \
-            -type f -name transcribe-link.json -path '*transcribe-cpp-sys*/out/lib/*' \
-            -printf '%T@ %h\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
-          if [ -z "${LIBDIR:-}" ] || [ ! -d "$LIBDIR" ]; then
-            echo "ERROR: could not locate transcribe-cpp-sys install lib dir" >&2
+          version="${RELEASE_TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Release tags must have the form vX.Y.Z.' >&2
             exit 1
           fi
-          LIBDIR="$(cd "$LIBDIR" && pwd)"
-          echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          # linuxdeploy resolves NEEDED libs through ldd and hard-fails on a
-          # miss, so publish them to the host linker cache as well.
-          sudo cp -vL "$LIBDIR"/libtranscribe.so* "$LIBDIR"/libggml*.so* /usr/local/lib/ 2>/dev/null || true
-          sudo ldconfig
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
-      # Tauri's mirrored linuxdeploy predates LINUXDEPLOY_EXCLUDED_LIBRARIES.
-      - name: Install linuxdeploy with library exclusion support
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tools_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
-          mkdir -p "$tools_dir"
-          curl -L --fail --show-error --retry 3 \
-            -o "$tools_dir/linuxdeploy-x86_64.AppImage" \
-            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
-          chmod +x "$tools_dir/linuxdeploy-x86_64.AppImage"
-          "$tools_dir/linuxdeploy-x86_64.AppImage" --appimage-extract-and-run --version
+  mac:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      release-version: ${{ needs.version.outputs.version }}
 
-      - name: Stage Apple signing credentials
-        if: runner.os == 'macOS' && env.HAS_APPLE_SIGNING == 'true'
-        shell: bash
-        env:
-          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          {
-            echo "APPLE_CERTIFICATE<<SONA_SECRET_EOF"
-            echo "$CERTIFICATE"
-            echo "SONA_SECRET_EOF"
-            echo "APPLE_CERTIFICATE_PASSWORD<<SONA_SECRET_EOF"
-            echo "$CERTIFICATE_PASSWORD"
-            echo "SONA_SECRET_EOF"
-            echo "APPLE_SIGNING_IDENTITY<<SONA_SECRET_EOF"
-            echo "$SIGNING_IDENTITY"
-            echo "SONA_SECRET_EOF"
-          } >> "$GITHUB_ENV"
-
-      - name: Stage Apple notarization credentials
-        if: runner.os == 'macOS' && env.HAS_APPLE_SIGNING == 'true' && env.HAS_APPLE_NOTARIZATION == 'true'
-        shell: bash
-        env:
-          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
-          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          {
-            echo "APPLE_ID<<SONA_SECRET_EOF"
-            echo "$NOTARY_APPLE_ID"
-            echo "SONA_SECRET_EOF"
-            echo "APPLE_PASSWORD<<SONA_SECRET_EOF"
-            echo "$NOTARY_PASSWORD"
-            echo "SONA_SECRET_EOF"
-            echo "APPLE_TEAM_ID<<SONA_SECRET_EOF"
-            echo "$NOTARY_TEAM_ID"
-            echo "SONA_SECRET_EOF"
-          } >> "$GITHUB_ENV"
-
-      - name: Build bundles and upload to draft release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The host graphics stack must provide these at runtime.
-          LINUXDEPLOY_EXCLUDED_LIBRARIES: ${{ runner.os == 'Linux' && 'libvulkan.so*;libwayland-client.so*' || '' }}
-          # linuxdeploy forwards this as the AppImage's X-AppImage-Version.
-          LINUXDEPLOY_OUTPUT_VERSION: ${{ runner.os == 'Linux' && env.APP_VERSION || '' }}
+  draft:
+    needs: [version, mac]
+    runs-on: macos-26
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Sona ${{ env.APP_VERSION }}"
-          releaseBody: "Bundles for macOS (Apple silicon), Windows, and Linux are attached below."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          name: sona-macos-arm64-unsigned
+          path: artifact
+      - name: Attach unsigned Mac build to a draft
+        uses: actions/github-script@v9
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const name = 'Sona-macos-arm64-unsigned.zip';
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo });
+            let release = releases.find(item => item.tag_name === tag);
+            if (release && !release.draft) {
+              throw new Error('Refusing to change an already-published release.');
+            }
+            const body = 'Unsigned Apple silicon development build of the native macOS app, including its recording engine and private helpers. Requires macOS 15 or later.\n\nThis is not a Developer ID-signed or notarized distribution. Gatekeeper may block it, and the camera extension requires matching Apple signing and provisioning. Do not treat it as an install-ready release.\n\niPhone archive and App Store export remain manual; no iPhone build is attached.';
+            if (!release) {
+              ({ data: release } = await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: `Sona ${process.env.RELEASE_VERSION} — unsigned Mac build`,
+                body, draft: true, prerelease: false,
+              }));
+            } else {
+              await github.rest.repos.updateRelease({
+                owner, repo, release_id: release.id, body,
+                name: `Sona ${process.env.RELEASE_VERSION} — unsigned Mac build`,
+              });
+            }
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner, repo, release_id: release.id,
+            });
+            const previous = assets.find(item => item.name === name);
+            if (previous) {
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: previous.id });
+            }
+            await github.rest.repos.uploadReleaseAsset({
+              owner, repo, release_id: release.id, name,
+              data: fs.readFileSync(`artifact/${name}`),
+            });

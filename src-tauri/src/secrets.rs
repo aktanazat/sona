@@ -673,7 +673,6 @@ impl SecretManager {
         .await
     }
 
-
     async fn replace_cloud_sync_secret(
         &self,
         account: SecretAccount,
@@ -955,6 +954,7 @@ fn provider_account_for_command(
     match kind {
         SecretKind::Llm => {
             if provider_id == settings::APPLE_INTELLIGENCE_PROVIDER_ID
+                || provider_id == settings::LOCAL_CLEANUP_PROVIDER_ID
                 || settings.post_process_provider(provider_id).is_none()
             {
                 return Err(SecretCommandError::Invalid);
@@ -1768,6 +1768,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keyless_local_cleanup_rejects_credential_commands() {
+        let settings = settings::get_default_settings();
+        assert!(matches!(
+            provider_account_for_command(
+                &settings,
+                SecretKind::Llm,
+                settings::LOCAL_CLEANUP_PROVIDER_ID
+            ),
+            Err(SecretCommandError::Invalid)
+        ));
+    }
+
     /// The privacy page reloads on every settings announcement and asks for
     /// each provider's state again. The state read must therefore announce
     /// nothing when it has nothing new, or one read would start a loop of
@@ -2060,7 +2073,6 @@ mod tests {
         let (manager, backend) = manager();
         tauri::async_runtime::block_on(manager.replace_cloud_vault_root([0x11; 32])).unwrap();
         assert!(backend.has("cloud_sync/vault-root-v1"));
-
     }
 
     #[test]
@@ -2287,7 +2299,6 @@ mod tests {
         tauri::async_runtime::block_on(manager.replace(account, Zeroizing::new(value.to_string())))
             .expect("store STT secret");
     }
-
 
     #[test]
     fn fake_stt_verifier_enforces_consent_and_key_gates_before_handshake() {

@@ -5,17 +5,14 @@
     "scripts/ci/check-identity.ts",
     "scripts/ci/identity-allowlist.json",
     "src-tauri/Cargo.lock",
-    "bun.lock",
-    ".nix/bun.nix"
+    "bun.lock"
   ],
   "allowedPaths": [
     "src-tauri/catalog/catalog.json",
     "src-tauri/src/shortcut/handy_keys.rs",
-    "src/components/settings/HandyKeysShortcutInput.tsx",
     "src-tauri/src/identity_adoption.rs",
     "src-tauri/src/upstream_import.rs",
-    "src-tauri/src/autostart.rs",
-    "src-tauri/nsis/installer.nsi"
+    "src-tauri/src/autostart.rs"
   ],
   "allowedLinePatterns": [
     "handy-computer",

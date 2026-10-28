@@ -3489,7 +3489,7 @@ impl MeetingSessionManager {
             .await
             .unwrap_or_else(|_| Err(RunFailure::engine(EngineFailureCause::Panicked)))
         };
-        let (artifact, engine) = match generated {
+        let (artifact, engine, relationship_refresh) = match generated {
             Ok(generated) => generated,
             Err(failure) => {
                 /* The row describes this press. Until it did, a rewrite that
@@ -3518,8 +3518,12 @@ impl MeetingSessionManager {
         if receipt.result == OperationResult::Rejected {
             return Err(MeetingCommandError::StaleRevision);
         }
-        let result = self.result_for_receipt(store, receipt, request.session_id)?;
+        let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
+        if let Some(refresh) = relationship_refresh {
+            self.processing
+                .start_relationship_refresh(store, request.session_id, refresh);
+        }
         Ok(result)
     }
     pub async fn export(

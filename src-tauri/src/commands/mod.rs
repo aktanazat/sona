@@ -8,11 +8,13 @@ pub mod followup;
 pub mod history;
 pub mod hud;
 pub mod learning;
+pub mod local_cleanup;
 pub mod loops;
 pub mod media_import;
 pub mod meeting;
 pub mod meeting_snapshots;
 pub mod models;
+pub mod onboarding;
 pub mod people;
 pub mod persona;
 pub mod prompts;
@@ -175,7 +177,6 @@ pub fn open_license_notices(app: AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 /// Check if Apple Intelligence is available on this device.
 /// Called by the frontend when the user selects Apple Intelligence provider.

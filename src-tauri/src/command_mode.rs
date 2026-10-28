@@ -419,27 +419,15 @@ async fn rewrite_selection(
     });
     log_prompt_budget("Command", &rendered);
 
-    match post_process_transcription(app, run, &rendered, instruction).await {
-        Ok(rewritten) => ProcessedTranscription {
-            post_processed_text: Some(rewritten.clone()),
-            final_text: rewritten,
-            rewrite: RewriteOutcome::Applied,
-        },
-        Err(outcome) => {
-            warn!(
-                "Command rewrite produced no text ({outcome:?}); the selection was left unchanged"
-            );
-            let _ = app.emit(
-                "recording-error",
-                RecordingErrorEvent::typed(REWRITE_UNAVAILABLE_ERROR),
-            );
-            ProcessedTranscription {
-                final_text: String::new(),
-                post_processed_text: None,
-                rewrite: outcome,
-            }
-        }
+    let result = post_process_transcription(app, run, &rendered, instruction).await;
+    if let Err(outcome) = &result {
+        warn!("Command rewrite produced no text ({outcome:?}); the selection was left unchanged");
+        let _ = app.emit(
+            "recording-error",
+            RecordingErrorEvent::typed(REWRITE_UNAVAILABLE_ERROR),
+        );
     }
+    ProcessedTranscription::from_rewrite(result, String::new(), None)
 }
 
 /// Answers the spoken question through the run's rewrite provider and files
@@ -607,7 +595,6 @@ mod tests {
         );
     }
 
-
     /// The mode layer rejects a missing explicit operand before any ambient
     /// context capture. This module maps that rejection to the typed event.
     #[test]
@@ -639,7 +626,6 @@ mod tests {
             None
         );
     }
-
 
     /// The wording decides before any model is asked, so the cases here are
     /// the contract: a question phrased politely is still a question, an edit

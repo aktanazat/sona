@@ -295,7 +295,7 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
         let model = self.model.clone();
         let system_prompt = system_prompt.to_string();
         let evidence = evidence.to_string();
-        let json_response = shape == ReplyShape::Json;
+        let json_response = shape.is_json();
         let response = run_async(async move {
             send_loopback_chat_completion(
                 &endpoint,
@@ -482,28 +482,34 @@ mod tests {
 
     #[test]
     fn sends_required_json_request_and_strips_fences() {
-        let fixture = fixture_server(vec![
-            r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.to_string(),
-        ]);
-        let generator =
-            LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
-        let answer = generator
-            .generate("system", "evidence", 42, ReplyShape::Json)
-            .expect("generation");
-        assert_eq!(answer, r#"{"headline":"done"}"#);
-        let body = request_body(&fixture.requests.recv().expect("request"));
-        assert_eq!(body.model, "fixture-model");
-        assert_eq!(body.max_tokens, 42);
-        assert_eq!(body.reasoning_effort, "none");
-        assert_eq!(
-            body.response_format
-                .as_ref()
-                .map(|format| format.kind.as_str()),
-            Some("json_object")
-        );
-        assert_eq!(body.messages[0].role, "system");
-        assert_eq!(body.messages[1].content, "evidence");
-        fixture.handle.join().expect("fixture thread");
+        for shape in [
+            ReplyShape::Json,
+            ReplyShape::MeetingNotes,
+            ReplyShape::MeetingLedger,
+        ] {
+            let fixture = fixture_server(vec![
+                r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.to_string(),
+            ]);
+            let generator =
+                LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
+            let answer = generator
+                .generate("system", "evidence", 42, shape)
+                .expect("generation");
+            assert_eq!(answer, r#"{"headline":"done"}"#);
+            let body = request_body(&fixture.requests.recv().expect("request"));
+            assert_eq!(body.model, "fixture-model");
+            assert_eq!(body.max_tokens, 42);
+            assert_eq!(body.reasoning_effort, "none");
+            assert_eq!(
+                body.response_format
+                    .as_ref()
+                    .map(|format| format.kind.as_str()),
+                Some("json_object")
+            );
+            assert_eq!(body.messages[0].role, "system");
+            assert_eq!(body.messages[1].content, "evidence");
+            fixture.handle.join().expect("fixture thread");
+        }
     }
 
     #[test]

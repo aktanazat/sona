@@ -1103,7 +1103,6 @@ e.g. 28:1 28:0 means pressing on the Enter button on a standard US keyboard.
         );
     }
 
-
     #[cfg(target_os = "linux")]
     #[test]
     fn generates_symbolic_ydotool_arguments_for_all_paste_methods() {

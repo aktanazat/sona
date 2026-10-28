@@ -83,6 +83,7 @@ final class CloudSyncStore {
     @ObservationIgnored private var candidateRead = 0
     /// Drops the answer to a reload a newer reload replaced.
     @ObservationIgnored private var refreshTicket = 0
+    @ObservationIgnored private var openedBundlePaths: [String] = []
 
     init(core: Core) {
         self.core = core
@@ -408,13 +409,48 @@ final class CloudSyncStore {
     /// belongs to no row: the section owns it.
     func importBundle() async {
         guard pending == nil, let path = CloudSyncStore.openPath() else { return }
+        await importBundle(at: path)
+    }
+
+    func importBundle(at path: String) async {
+        guard pending == nil else { return }
         await call(.importBundle) {
-            let result: CloudShareImportResult = try await core.request(
-                "cloud_share_import_file",
-                CloudSyncRequest(request: CloudShareImportBody(path: path)))
-            importedSessionId = result.sessionId
-            await refresh()
+            try await importFile(at: path)
         }
+    }
+
+    func enqueueOpenedBundle(at path: String) {
+        openedBundlePaths.append(path)
+        if pending == nil && openedBundlePaths.count == 1 {
+            Task { await importOpenedBundles() }
+        }
+    }
+
+    private func importOpenedBundles() async {
+        guard pending == nil, !openedBundlePaths.isEmpty else { return }
+        await call(.importBundle) {
+            var failures: [String] = []
+            var next = 0
+            while next < openedBundlePaths.count {
+                let path = openedBundlePaths[next]
+                next += 1
+                do {
+                    try await importFile(at: path)
+                } catch {
+                    failures.append("\(URL(fileURLWithPath: path).lastPathComponent): \(reason(error))")
+                }
+            }
+            openedBundlePaths.removeAll(keepingCapacity: true)
+            if !failures.isEmpty { commandError = failures.joined(separator: "\n") }
+        }
+    }
+
+    private func importFile(at path: String) async throws {
+        let result: CloudShareImportResult = try await core.request(
+            "cloud_share_import_file",
+            CloudSyncRequest(request: CloudShareImportBody(path: path)))
+        importedSessionId = result.sessionId
+        await refresh()
     }
 
     func createBrowserShare(_ sessionId: String) async {
@@ -500,6 +536,9 @@ final class CloudSyncStore {
             commandError = reason(failure)
         }
         pending = nil
+        if !openedBundlePaths.isEmpty {
+            Task { await importOpenedBundles() }
+        }
     }
 
     /// The core's own reason for refusing: the command's typed error where it

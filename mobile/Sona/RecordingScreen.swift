@@ -11,35 +11,63 @@ struct RecordingScreen: View {
     @AppStorage(PhoneCalendar.enabledKey) private var calendarEnabled = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 60
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .largeTitle) private var timerSize: CGFloat = 44
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 96
     @State private var showsPairing = false
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                elapsed.padding(.top, 24)
-                control
-                status
-                VStack(alignment: .leading, spacing: 12) {
-                    TextField("meeting.title", text: $model.meetingTitle).font(.headline)
-                        .accessibilityIdentifier("meeting-title")
-                    Text("meeting.ownNotes").font(.headline)
-                    TextEditor(text: $model.meetingNotes)
-                        .frame(minHeight: 140).scrollContentBackground(.hidden)
-                        .padding(8).background(Theme.inset)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius))
-                        .accessibilityLabel(Text("meeting.ownNotes"))
-                        .accessibilityIdentifier("meeting-own-notes")
-                    Text("meeting.notesHelp").font(.footnote).foregroundStyle(Theme.textSecondary)
-                    Divider()
-                    upcoming
+        PhonePage("tab.recording") {
+            let layout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 16))
+                : AnyLayout(HStackLayout(spacing: 20))
+            layout {
+                VStack(alignment: .leading, spacing: 4) {
+                    elapsed
+                    status
                 }
-                pairingLine.padding(.bottom, 8)
-            }.padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                control
+            }
+            Divider().overlay(Theme.border)
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("meeting.title", text: $model.meetingTitle)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 44)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+                            .strokeBorder(Theme.border, lineWidth: 0.5)
+                    }
+                    .accessibilityIdentifier("meeting-title")
+                Text("meeting.ownNotes")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                TextEditor(text: $model.meetingNotes)
+                    .font(.body)
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(minHeight: 120)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+                            .strokeBorder(Theme.border, lineWidth: 0.5)
+                    }
+                    .accessibilityLabel(Text("meeting.ownNotes"))
+                    .accessibilityIdentifier("meeting-own-notes")
+                Text("meeting.notesHelp")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Divider().overlay(Theme.border)
+            upcoming
+            pairingLine
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background)
         .sheet(isPresented: $showsPairing) {
             PairingScreen(model: model)
         }
@@ -51,14 +79,17 @@ struct RecordingScreen: View {
     }
 
     private var upcoming: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             Toggle("calendar.enable", isOn: $calendarEnabled)
+                .frame(minHeight: 44)
                 .onChange(of: calendarEnabled) { _, enabled in
                     Task { await calendar.refresh(requestAccess: enabled) }
                 }
             Text("calendar.privacy").font(.footnote).foregroundStyle(Theme.textSecondary)
             if calendarEnabled {
-                Text("calendar.upcoming").font(.headline)
+                Text("calendar.upcoming")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
                 if calendar.loading { ProgressView() }
                 else if let error = calendar.error {
                     Text(error).font(.footnote).foregroundStyle(Theme.recording)
@@ -76,10 +107,18 @@ struct RecordingScreen: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(event.title ?? NSLocalizedString("meeting.untitled", comment: ""))
+                                    .font(.body.weight(.medium))
+                                    .foregroundStyle(Theme.textPrimary)
                                 Text(event.startDate.formatted(date: .abbreviated, time: .shortened))
                                     .font(.footnote).foregroundStyle(Theme.textSecondary)
-                            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        }.disabled(recorder.isRecording || model.startingRecording)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .padding(.vertical, 6)
+                        }
+                        .disabled(recorder.isRecording || model.startingRecording)
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(Theme.border).frame(height: 0.5)
+                        }
                     }
                 }
             }
@@ -90,8 +129,9 @@ struct RecordingScreen: View {
         Text(elapsedText)
             .font(.system(size: timerSize, weight: .light))
             .monospacedDigit()
-            .foregroundStyle(recorder.isRecording ? Theme.recording : Theme.textPrimary)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: recorder.isRecording)
+            .foregroundStyle(Theme.textPrimary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.65)
             .accessibilityLabel(Text("a11y.elapsed"))
             .accessibilityValue(elapsedText)
     }
@@ -130,20 +170,29 @@ struct RecordingScreen: View {
 
     private var status: some View {
         Text(statusKey)
-            .font(.footnote)
+            .font(.subheadline)
             .foregroundStyle(recorder.isRecording ? Theme.recording : Theme.textSecondary)
             .accessibilityIdentifier("status")
     }
 
-    /// The one other thing on the screen. Unpaired it is the way in; paired it states
-    /// the fact and still opens the sheet, because the call-offer switch lives there.
     private var pairingLine: some View {
         Button { showsPairing = true } label: {
-            Text(model.isPaired ? "pairing.line.paired" : "pairing.line.notPaired")
-                .font(.caption)
-                .foregroundStyle(model.isPaired ? Theme.textTertiary : Theme.accent)
+            HStack(spacing: 8) {
+                Image(systemName: "link")
+                    .accessibilityHidden(true)
+                Text(model.isPaired ? "pairing.line.paired" : "pairing.line.notPaired")
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .accessibilityHidden(true)
+            }
+            .font(.footnote)
+            .foregroundStyle(model.isPaired ? Theme.textSecondary : Theme.accent)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         }
         .accessibilityLabel(Text("a11y.pair"))
+        .accessibilityValue(Text(model.isPaired ? "pairing.line.paired" : "pairing.line.notPaired"))
         .accessibilityIdentifier("pairing-line")
     }
 

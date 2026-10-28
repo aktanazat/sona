@@ -1740,7 +1740,6 @@ mod tests {
         Ok(root)
     }
 
-
     fn enabled_settings(project_hash: String) -> AgentBridgeSettings {
         AgentBridgeSettings {
             master_enabled: true,
@@ -2276,7 +2275,6 @@ mod tests {
         fs::remove_dir_all(root)?;
         Ok(())
     }
-
 
     #[test]
     fn cancelling_reply_preview_prevents_confirmation_and_delivery() -> Result<(), Box<dyn Error>> {

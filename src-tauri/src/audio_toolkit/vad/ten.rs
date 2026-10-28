@@ -966,7 +966,6 @@ fn levinson_durbin(autocorrelation: &[f32; LPC_ORDER + 1], lpc: &mut [f32; LPC_O
 mod tests {
     use super::*;
 
-
     #[test]
     fn analysis_geometry_matches_the_reference_configuration() {
         assert_eq!(HOP, 256);

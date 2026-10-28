@@ -1,7 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "meeting-consent",
-  "description": "Minimal capabilities for the meeting consent panel",
-  "windows": ["meeting-consent"],
-  "permissions": ["core:default"]
-}

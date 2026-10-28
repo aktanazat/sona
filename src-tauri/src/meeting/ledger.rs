@@ -47,7 +47,7 @@ const LABEL_MATCH_CHARS: usize = 22;
 /// Where a thread ended up. Upstream's nine-state vocabulary, unchanged: the
 /// states a reader can check a receipt against are the states a model is
 /// allowed to pick from.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerThreadState {
     /// A choice was made and said out loud.
@@ -112,7 +112,7 @@ impl LedgerThreadState {
 
 /// How firmly a commitment was made, read off the language used: "I'll do X"
 /// is firm, "we should probably" is not.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerFirmness {
     Firm,
