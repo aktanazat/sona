@@ -60,6 +60,9 @@ Local runs keep captured audio on the device. Cloud transcription sends audio on
 - the iphone app adds keyboard recording sessions, shortcuts, language choices, saved meeting notes, and playback. sync requires a paired companion service. optional recorded outgoing calls require a configured calling service; ordinary iphone call audio is not accessible.
 - Optional dictation cleanup has a deadline on both desktop and iPhone and stops when a recording is cancelled. The iPhone saves a recoverable draft before optional history work, so slow history cannot hold the text or its audio hostage.
 
+opening several .sona meeting files from finder now imports each one in order.
+if a file fails, sona names it and continues with the others.
+
 meeting sync saves an encrypted copy before uploading. if an upload is interrupted, sona uses that saved copy to try again.
 
 ## Install

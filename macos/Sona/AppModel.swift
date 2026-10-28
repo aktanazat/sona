@@ -414,7 +414,7 @@ final class AppModel {
         if ext == "sona" {
             reveal()
             showSettings(.sync)
-            Task { await cloudSync.importBundle(at: path) }
+            cloudSync.enqueueOpenedBundle(at: path)
         } else if ImportMedia.extensions.contains(ext) {
             imports.add(paths: [path])
             reveal()
