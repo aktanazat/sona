@@ -3570,9 +3570,10 @@ impl FarEnd {
         self.spans.push((start_ns, end_ns, spoken_words(text)));
     }
 
-    /// True when at least 70% of the line's words were in what the far end
-    /// said over the same stretch. A chunk where the operator talked over the
-    /// far end keeps his words and so falls below the bar.
+    /// True when every word of the line, in order, was in what the far end
+    /// said over the same stretch. One word the far end never said keeps the
+    /// line: "we should not send it" over "we should send it" is the operator
+    /// correcting them, and dropping it would reverse the meeting's meaning.
     fn echoes(&self, start_ns: u64, end_ns: u64, text: &str) -> bool {
         let words = spoken_words(text);
         if words.is_empty() {
@@ -3580,17 +3581,14 @@ impl FarEnd {
         }
         let from = start_ns.saturating_sub(Self::SLACK_NS);
         let to = end_ns.saturating_add(Self::SLACK_NS);
-        let nearby: std::collections::HashSet<&str> = self
+        let mut nearby: Vec<&(u64, u64, Vec<String>)> = self
             .spans
             .iter()
             .filter(|(start, end, _)| *start < to && *end > from)
-            .flat_map(|(_, _, words)| words.iter().map(String::as_str))
             .collect();
-        let matched = words
-            .iter()
-            .filter(|word| nearby.contains(word.as_str()))
-            .count();
-        matched * 10 >= words.len() * 7
+        nearby.sort_by_key(|(start, _, _)| *start);
+        let mut heard = nearby.iter().flat_map(|(_, _, words)| words.iter());
+        words.iter().all(|word| heard.any(|said| said == word))
     }
 }
 
@@ -5404,6 +5402,38 @@ mod tests {
             16 * SECOND_NS,
             "petroleum? no way, I washed it twice this morning honestly"
         ));
+    }
+
+    #[test]
+    fn a_correction_spoken_over_the_far_end_stays_in_the_transcript() {
+        let mut far_end = FarEnd::default();
+        far_end.heard(
+            10 * SECOND_NS,
+            14 * SECOND_NS,
+            "We should send the final report today.",
+        );
+        far_end.heard(
+            20 * SECOND_NS,
+            24 * SECOND_NS,
+            "Send it today, not tomorrow.",
+        );
+
+        assert!(
+            !far_end.echoes(
+                10 * SECOND_NS,
+                14 * SECOND_NS,
+                "we should not send the final report today"
+            ),
+            "one added word is the operator objecting"
+        );
+        assert!(
+            !far_end.echoes(
+                20 * SECOND_NS,
+                24 * SECOND_NS,
+                "not today, send it tomorrow"
+            ),
+            "the far end's words in another order say something else"
+        );
     }
 
     struct EnergyVad;
