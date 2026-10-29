@@ -1381,7 +1381,12 @@ impl HistoryManager {
         }
         // After the announcement, so a listener already holds the row when the
         // sweep reports what it took from it.
-        self.cleanup_old_entries()?;
+        if let Err(error) = self.cleanup_old_entries() {
+            warn!(
+                "Retention sweep after saving entry {} failed: {error:#}",
+                entry.id
+            );
+        }
         // The one place dictation history is established as having moved, and so
         // the one place the local learning loops are woken. The call is
         // day-bucketed on the other side, so this is cheap per dictation.
