@@ -13,35 +13,35 @@ struct ChatModelPicker: View {
 
     var body: some View {
         Button { presented.toggle() } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if let model = store.selectedModel {
                     ModelProviderMark(provider: model.provider)
-                        .frame(width: 18, height: 18)
+                        .frame(width: 14, height: 14)
                 }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(store.selectedModel?.name ?? "Sona agent")
-                        .headlineText()
-                        .lineLimit(1)
-                    Text(effortCaption)
-                        .metaText(Theme.inkSecondary)
-                        .lineLimit(1)
-                }
+                Text(store.selectedModel?.name ?? "Sona agent")
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                Text(effortCaption)
+                    .font(TypeScale.body(12))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.inkTertiary)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(hovering ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .frame(maxWidth: 260)
+            .padding(.horizontal, 8)
+            .frame(height: 28)
+            .background(hovering ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.quiet)
         .onHover { hovering = $0 }
         .disabled(store.modelPickerDisabled)
         .help("Choose a model and thinking effort")
         .accessibilityLabel("Model: \(store.selectedModel?.name ?? "Server default"). \(effortCaption)")
-        .popover(isPresented: $presented, arrowEdge: .bottom) {
+        .popover(isPresented: $presented, arrowEdge: .top) {
             picker
                 .onExitCommand { presented = false }
                 .task {

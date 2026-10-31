@@ -529,11 +529,6 @@ private extension MeetingSessionSnapshot {
 
 // MARK: - The consent panel
 
-/// The floating panel, which is the card: one surface at the panel radius,
-/// 340 wide as the Tauri window was, with exactly one card's rows on it.
-/// `ConsentPanel.tsx` decides which in one order — a recording ritual, then
-/// the session it is recording, then an offer, then prep, then wrap — and
-/// the store computes it, so this view only draws what it is handed.
 struct MeetingConsentPanelView: View {
     let store: MeetingLiveStore
 
@@ -545,75 +540,88 @@ struct MeetingConsentPanelView: View {
     /// read. Unwired, the copy button is not drawn at all.
     var followUp: ((MeetingSessionId) async throws -> String)?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The surface's inset, which also makes its corner concentric with the
+    /// corner of a button in it.
+    private static let inset: CGFloat = 12
+    private static let radius = Theme.radiusControl + inset
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            switch store.card {
-            case let .prompt(prompt):
-                DetectionPromptView(store: store, prompt: prompt)
-            case let .active(state):
-                MeetingConsentActiveCard(store: store, state: state)
-            case let .recording(event, card):
-                RitualRecordingView(store: store, event: event, card: card)
-            case let .prep(event, card):
-                RitualPrepView(store: store, event: event, card: card, onOpenBrief: onOpenBrief)
-            case let .wrap(event, card):
-                RitualWrapView(
-                    store: store, event: event, card: card,
-                    onOpenNotes: onOpenNotes, followUp: followUp)
-            case .none:
-                EmptyView()
+        ZStack(alignment: .topLeading) {
+            if let card = store.card {
+                VStack(alignment: .leading, spacing: 8) {
+                    content(card)
+                    if let error = store.error {
+                        Text(error)
+                            .bodyText(12, Theme.live)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(Self.inset)
+                .frame(width: 320, alignment: .leading)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+                        .strokeBorder(Theme.border, lineWidth: 1))
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                .id(card.id)
+                .transition(arrival)
             }
-            ErrorNote(store.error)
         }
-        .padding(16)
-        .frame(width: 340)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Theme.border, lineWidth: 1))
-        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .animation(.easeInOut(duration: 0.2), value: store.card?.id)
+    }
+
+    @ViewBuilder private func content(_ card: MeetingConsentCard) -> some View {
+        switch card {
+        case let .prompt(prompt):
+            DetectionPromptView(store: store, prompt: prompt)
+        case let .active(state):
+            MeetingConsentActiveCard(store: store, state: state)
+        case let .recording(event, recording):
+            RitualRecordingView(store: store, event: event, card: recording)
+        case let .prep(event, prep):
+            RitualPrepView(store: store, event: event, card: prep, onOpenBrief: onOpenBrief)
+        case let .wrap(event, wrap):
+            RitualWrapView(
+                store: store, event: event, card: wrap,
+                onOpenNotes: onOpenNotes, followUp: followUp)
+        }
+    }
+
+    private var arrival: AnyTransition {
+        let entering: AnyTransition =
+            reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4))
+        return .asymmetric(insertion: entering, removal: .opacity)
     }
 }
 
-/// The offer itself: what would be recorded, the two standing answers, and the
-/// two presses. `showIntroduction` is the first offer on this Mac, which is
-/// the only time the panel explains itself.
+/// The offer: what would be recorded, the standing answers that go with
+/// the press, and the two presses. The notice box is drawn only while the
+/// recording notice is on in Settings, because only then can it be ticked;
+/// its line says where the notice goes, which is what decides the tick.
 struct DetectionPromptView: View {
     let store: MeetingLiveStore
     let prompt: DetectionPromptEvent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(prompt.prompt.consentTitle).headlineText()
-            Text(
-                prompt.showIntroduction
-                    ? "Sona records on this Mac and keeps you in control."
-                    : "Audio stays on this Mac. Nothing joins the call."
-            )
-            .bodyText(13, Theme.inkSecondary)
-            if let brief = store.seriesBrief {
-                Text(brief).bodyText(13, Theme.inkSecondary)
-            }
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                if prompt.prompt.isCalendar {
-                    Toggle(
-                        "Always record this meeting",
-                        isOn: Binding(
-                            get: { store.alwaysRecordSeries(prompt) },
-                            set: { store.setAlwaysRecordSeries($0, for: prompt) }))
-                }
-                Toggle(
-                    "Post a recording notice",
-                    isOn: Binding(
-                        get: { store.announceInChat(prompt) },
-                        set: { store.setAnnounceInChat($0, for: prompt) }))
-                .disabled(store.settings?.meetingDisclosureEnabled != true)
-                if store.announceInChat(prompt) {
-                    Text("Sent only to an identified empty meeting chat. Otherwise, copy it yourself.")
-                        .metaText(Theme.inkTertiary)
-                        .padding(.leading, 20)
+                Text(prompt.prompt.consentTitle)
+                    .headlineText()
+                    .lineLimit(3)
+                Text(
+                    prompt.showIntroduction
+                        ? "Sona records on this Mac and keeps you in control."
+                        : "Audio stays on this Mac. Nothing joins the call."
+                )
+                .metaText(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                if let brief = store.seriesBrief {
+                    Text(brief).bodyText(13, Theme.inkSecondary).lineLimit(2)
                 }
             }
-            .toggleStyle(.checkbox)
-            .font(TypeScale.body(13))
+            choices
             HStack(spacing: 8) {
                 Spacer()
                 Button("Ignore") { store.answer(prompt, accepted: false) }
@@ -623,6 +631,37 @@ struct DetectionPromptView: View {
                     .buttonStyle(PrimaryButton(compact: true))
                     .disabled(store.pending != nil)
             }
+        }
+    }
+
+    /// The standing answers. Only a calendar offer can record its series
+    /// from now on.
+    @ViewBuilder private var choices: some View {
+        let noticeEnabled = store.settings?.meetingDisclosureEnabled == true
+        if prompt.prompt.isCalendar || noticeEnabled {
+            VStack(alignment: .leading, spacing: 4) {
+                if prompt.prompt.isCalendar {
+                    Toggle(
+                        "Always record this meeting",
+                        isOn: Binding(
+                            get: { store.alwaysRecordSeries(prompt) },
+                            set: { store.setAlwaysRecordSeries($0, for: prompt) }))
+                }
+                if noticeEnabled {
+                    Toggle(
+                        "Post a recording notice",
+                        isOn: Binding(
+                            get: { store.announceInChat(prompt) },
+                            set: { store.setAnnounceInChat($0, for: prompt) }))
+                    if store.announceInChat(prompt) {
+                        Text("Sent only to an identified empty meeting chat. Otherwise, copy it yourself.")
+                            .metaText()
+                            .padding(.leading, 20)
+                    }
+                }
+            }
+            .toggleStyle(.checkbox)
+            .font(TypeScale.body(13))
         }
     }
 }
@@ -661,7 +700,7 @@ struct MeetingConsentActiveCard: View {
             Text(state.snapshot.title)
                 .font(TypeScale.label(13))
                 .foregroundStyle(Theme.inkSecondary)
-                .lineLimit(1)
+                .lineLimit(2)
             MeetingDisclosureStatus(store: store, disclosure: state.disclosure)
         }
     }

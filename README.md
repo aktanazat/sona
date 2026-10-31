@@ -18,6 +18,8 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - Streaming dictation retains queued opening audio when recognition falls behind. Microphone readiness follows the first audio sample, including a Studio Display microphone, rather than a full scan of its supported formats.
 - Context capture from the focused field on your Mac, under a global ceiling. At Off, Sona reads nothing from other apps except the text you select for a command.
 
+- A compact recording pill stays the same size while listening, processing, and reporting delivery. A checkmark means macOS confirmed the paste; an arrow means the input was sent but could not be confirmed.
+
 ### Meetings
 
 - Records the microphone and system audio of a meeting after a consent step, with no bot joining the call. Detects meetings from the calendar, from the meeting app you are in, from a call tab in Safari, Chrome, Edge, Firefox, or Arc, and from FaceTime and Phone calls. Presence is not participation: an open but untouched meeting app never prompts, and the status line says why. Calls in apps you grant can record automatically.

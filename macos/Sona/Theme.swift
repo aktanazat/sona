@@ -35,8 +35,6 @@ enum Theme {
     /// The recording window is dark in either appearance, as a heads-up
     /// display over whatever is on screen.
     static let hud = Color(nsColor: NSColor(hex: 0x2F3030, alpha: 1))
-    static let hudBar = Color(nsColor: NSColor(hex: 0x262727, alpha: 1))
-    static let hudKey = Color(nsColor: NSColor(hex: 0x4A4B4B, alpha: 1))
     static let hudInk = Color(nsColor: NSColor(hex: 0xF2F2F2, alpha: 1))
     static let hudInkSecondary = Color(nsColor: NSColor(hex: 0xA6A7A7, alpha: 1))
     static let hudLive = Color(nsColor: NSColor(hex: 0xFF6961, alpha: 1))

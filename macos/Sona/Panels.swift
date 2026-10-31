@@ -1,84 +1,131 @@
 import SwiftUI
+import QuartzCore
+import Observation
 
-/// The pill that floats above other windows. Idle, the name of the mode the
-/// next recording goes under: a press starts it, a right-click picks the
-/// mode or puts the pill away for an hour, and a drag carries it to another
-/// edge of the screen. On a side edge it stands upright. While you talk, the
-/// recording window: the sound on top (eleven bars, the last quarter second
-/// of the microphone, newest on the right, flat while nothing is being
-/// heard), or the words as the model hears them under the live overlay
-/// style; under it how long the recording has run, or the minute-left
-/// warning when the dictation is about to reach its limit, and the Stop and
-/// Cancel buttons. While the words are worked on, the phase in one word.
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Group {
-            switch model.capture {
-            case .idle:
-                idle
-            case .recording:
-                window {
-                    if model.settings.settings.overlayStyle == .live {
-                        liveWords
-                    } else {
-                        bars
-                    }
-                } actions: {
-                    HStack(spacing: 12) {
-                        hint("Stop", keys: nil) {
-                            model.stopCapture()
-                        }
-                        cancel
-                    }
-                }
-            case let .working(kind):
-                window {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(Theme.hudInk)
-                        Text(Self.phaseLabel(kind))
-                            .font(.system(size: 13))
-                    }
-                    .frame(maxWidth: .infinity)
-                } actions: {
-                    hint("Cancel", keys: nil) {
-                        model.cancelCapture()
-                    }
-                }
+        VStack(spacing: 8) {
+            if model.settings.settings.overlayPosition == .top {
+                capsule
+            }
+            if showsLiveWords {
+                liveWords
+                    .transition(.opacity.animation(.easeInOut(duration: reduceMotion ? 0.1 : 0.2)))
+            }
+            if model.settings.settings.overlayPosition != .top {
+                capsule
             }
         }
         .padding(8)
     }
 
-    /// The idle pill is not a `Button`: the panel it lives in tells a click
-    /// from a drag, and hands only a whole click through.
+    private var phase: String {
+        if let feedback = model.pillFeedback { return feedback.label }
+        switch model.capture {
+        case .idle: return "idle"
+        case .recording: return "recording"
+        case let .working(kind): return kind
+        }
+    }
+
+    private var showsLiveWords: Bool {
+        guard model.settings.settings.overlayStyle == .live else { return false }
+        if case .recording = model.capture { return true }
+        return false
+    }
+
+    private var capsule: some View {
+        Group {
+            if model.capture == .idle, model.pillFeedback == nil {
+                idle
+            } else {
+                ZStack {
+                    activeContent
+                        .id(phase)
+                        .transition(.opacity)
+                }
+                .frame(width: 176, height: 36)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: phase)
+                .background(Theme.hud, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
+            }
+        }
+        .foregroundStyle(Theme.hudInk)
+        .environment(\.colorScheme, .dark)
+    }
+
+    @ViewBuilder private var activeContent: some View {
+        if let feedback = model.pillFeedback {
+            HStack(spacing: 8) {
+                Image(systemName: feedback.symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(feedback.label)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            HStack(spacing: 6) {
+                control("Cancel", symbol: "xmark") { model.cancelCapture() }
+                switch model.capture {
+                case .recording:
+                    RecordingWaveform(meter: model.meter)
+                        .frame(width: 55, height: 18)
+                    status
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(minWidth: 32)
+                    control("Stop recording", symbol: "stop.fill") { model.stopCapture() }
+                case let .working(kind):
+                    HStack(spacing: 8) {
+                        if reduceMotion {
+                            Image(systemName: "ellipsis")
+                        } else {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(Theme.hudInk)
+                        }
+                        Text(Self.phaseLabel(kind))
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.trailing, 12)
+                case .idle:
+                    EmptyView()
+                }
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private var idle: some View {
         Group {
             if model.settings.settings.hudPillPosition.isVertical {
                 VStack(spacing: 6) {
                     micMark
                     UprightText(model.pillMode ?? "Dictate")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxHeight: 76)
                 }
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 12)
             } else {
                 HStack(spacing: 6) {
                     micMark
                     Text(model.pillMode ?? "Dictate")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11, weight: .medium))
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+                .frame(height: 28)
+                .frame(maxWidth: 112)
             }
         }
-        .foregroundStyle(Theme.hudInk)
         .background(Theme.hud, in: Capsule())
-        .overlay(Capsule().strokeBorder(.white.opacity(0.1), lineWidth: 1))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
         .contentShape(Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
@@ -105,138 +152,73 @@ struct HUDPill: View {
 
     private var micMark: some View {
         Image(systemName: "mic.fill")
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 10, weight: .medium))
     }
 
-    /// The sound, between two dotted lines that stand for the quiet on
-    /// either side of it.
-    private var bars: some View {
-        HStack(spacing: 6) {
-            dots
-            HStack(spacing: 3) {
-                ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
-                    Capsule()
-                        .fill(Theme.hudInk)
-                        .frame(width: 3, height: 3 + 25 * level)
-                }
-            }
-            .accessibilityLabel("Recording")
-            dots
-        }
-        .frame(height: 28)
-    }
-
-    private var dots: some View {
-        Line()
-            .stroke(Theme.hudInkSecondary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [0.1, 4]))
-            .frame(height: 1.5)
-    }
-
-    /// The words so far, under the live style. The frame is fixed so the
-    /// window does not grow with every word; before any arrive it says so.
     private var liveWords: some View {
         Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
             .font(.system(size: 13))
             .foregroundStyle(model.liveText.isEmpty ? Theme.hudInkSecondary : Theme.hudInk)
             .lineLimit(2)
             .truncationMode(.head)
-            .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+            .frame(width: 212, height: 36, alignment: .leading)
+            .padding(12)
+            .background(Theme.hud, in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.12), lineWidth: 1))
     }
 
-    /// The last minute of a dictation, said once the core has counted it, or
-    /// how long the recording has run. Not the mode: a mode shortcut or an
-    /// app rule can record under another mode than the one the pill names.
     @ViewBuilder private var status: some View {
         if let seconds = model.pillWarningSeconds {
-            Text(seconds == 60 ? "1 minute left" : "\(seconds) seconds left")
+            Text("\(seconds)s")
                 .foregroundStyle(Theme.hudLive)
+                .accessibilityLabel("\(seconds) seconds left")
         } else if case let .recording(since) = model.capture {
             TimelineView(.periodic(from: since, by: 1)) { context in
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Theme.hudLive)
-                        .frame(width: 6, height: 6)
-                    Text(context.date.timeIntervalSince(since).clock)
-                        .monospacedDigit()
-                }
+                Text(context.date.timeIntervalSince(since).clock)
+                    .monospacedDigit()
             }
             .foregroundStyle(Theme.hudInkSecondary)
         }
     }
 
-    /// Only while recording: the core lets go of the cancel key the moment
-    /// a recording stops.
-    private var cancel: some View {
-        hint("Cancel", keys: model.settings.binding("cancel")?.currentBinding) {
-            model.cancelCapture()
-        }
-    }
-
-    /// "Cancel esc": a button in the window's bar, with the keys that do the
-    /// same from anywhere.
-    private func hint(_ title: String, keys: String?, action: @escaping () -> Void) -> some View {
+    private func control(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Text(title)
-                if let keys {
-                    HStack(spacing: 3) {
-                        ForEach(Array(Shortcut(BindingCopy.chord(keys)).keys.enumerated()), id: \.offset) { _, key in
-                            Text(key)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Theme.hudInk)
-                                .padding(.horizontal, 4)
-                                .frame(minWidth: 18, minHeight: 18)
-                                .background(Theme.hudKey, in: RoundedRectangle(cornerRadius: 4))
-                        }
-                    }
-                }
-            }
-            .foregroundStyle(Theme.hudInkSecondary)
-            .contentShape(Rectangle())
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.hudInkSecondary)
+                .frame(width: 26, height: 26)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .help(title)
         .accessibilityLabel(title)
     }
 
-    private func window(@ViewBuilder content: () -> some View, @ViewBuilder actions: () -> some View) -> some View {
-        VStack(spacing: 0) {
-            content()
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity)
-            HStack(spacing: 12) {
-                status.lineLimit(1)
-                Spacer(minLength: 8)
-                actions()
-            }
-            .font(.system(size: 11))
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-            .background(Theme.hudBar)
-        }
-        .frame(width: 320)
-        .background(Theme.hud)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.1), lineWidth: 1))
-        .environment(\.colorScheme, .dark)
-    }
-
-    /// The core's work kinds, said for the pill.
     private static func phaseLabel(_ kind: String) -> String {
         switch kind {
-        case "transcribing": "Transcribing…"
-        case "polishing": "Polishing…"
-        default: kind.capitalized + "…"
+        case "transcribing": "Transcribing"
+        case "polishing": "Polishing"
+        default: "Working"
         }
     }
 }
 
-private struct Line: Shape {
-    func path(in rect: CGRect) -> Path {
-        Path { path in
-            path.move(to: CGPoint(x: rect.minX, y: rect.midY))
-            path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+private struct RecordingWaveform: View {
+    let meter: LevelMeter
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<LevelMeter.width, id: \.self) { index in
+                Capsule()
+                    .fill(Theme.hudInk)
+                    .frame(width: 3, height: 18)
+                    .scaleEffect(y: max(0.15, meter.history[index]), anchor: .center)
+            }
         }
+        .animation(reduceMotion ? nil : .linear(duration: 0.08), value: meter.history)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Listening")
     }
 }
 
@@ -359,6 +341,7 @@ private enum PillDrag {
 /// here swaps the view, and the panel moves only when it is shown after
 /// being hidden, when its placement changes, when the view's size does, or
 /// when it is dragged to another edge.
+@Observable
 @MainActor
 final class FloatingPanel {
     private let panel: DockablePanel
@@ -372,6 +355,8 @@ final class FloatingPanel {
     /// The edge strips, made the first time a drag begins.
     private var targets: NSPanel?
     private var targetsHost: NSHostingView<EdgeTargets>?
+    private var shown = false
+    private var visibilityRevision = 0
     /// While on, a left press on the panel is the panel's: a release without
     /// travel is a click, and travel is a drag to another edge. Off, presses
     /// reach the views as they always did.
@@ -383,6 +368,28 @@ final class FloatingPanel {
     /// A press must travel this far to be a drag rather than a click.
     private static let dragSlop: CGFloat = 4
     private static let escape: UInt16 = 53
+
+    private var contentAlignment: Alignment {
+        guard let placement else { return .center }
+        switch placement {
+        case let .edge(edge): return edge.alignment
+        case .topTrailing: return .topTrailing
+        }
+    }
+
+    private struct Surface<Content: View>: View {
+        let content: Content
+        weak var panel: FloatingPanel?
+
+        var body: some View {
+            content
+                .fixedSize()
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak panel = panel] size in
+                    panel?.fit(size)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: panel?.contentAlignment ?? .center)
+        }
+    }
 
     init(_ content: some View) {
         let panel = DockablePanel(
@@ -402,12 +409,7 @@ final class FloatingPanel {
         panel.contentView = host
         self.panel = panel
         self.host = host
-        host.rootView = AnyView(
-            content
-                .fixedSize()
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { [weak self] size in
-                    self?.fit(size)
-                })
+        host.rootView = AnyView(Surface(content: content, panel: self))
         panel.intercept = { [weak self] event in self?.intercept(event) ?? false }
     }
 
@@ -415,29 +417,65 @@ final class FloatingPanel {
     /// panel already up at the same placement stays exactly where it is,
     /// unless `anew` asks for it to be floated again all the same.
     func show(at placement: PanelPlacement, anew: Bool = false) {
-        guard anew || !panel.isVisible || placement != self.placement else { return }
+        let appearing = !panel.isVisible
+        guard anew || !shown || placement != self.placement else { return }
         if drag != nil { cancelDrag() }
+        shown = true
+        visibilityRevision += 1
+        panel.ignoresMouseEvents = false
         self.placement = placement
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
             anchor = Self.anchor(for: placement, on: screen.visibleFrame)
         }
-        panel.setFrame(frame(host.fittingSize, at: placement), display: false)
-        panel.orderFrontRegardless()
+        let target = frame(host.fittingSize, at: placement)
+        if appearing {
+            panel.setFrame(target, display: false)
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+        } else {
+            move(to: target)
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.fadeDuration
+            panel.animator().alphaValue = 1
+        }
     }
 
     func hide() {
+        guard shown else { return }
         if drag != nil { cancelDrag() }
-        panel.orderOut(nil)
+        shown = false
+        visibilityRevision += 1
+        let revision = visibilityRevision
+        panel.ignoresMouseEvents = true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.fadeDuration
+            panel.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.shown, self.visibilityRevision == revision else { return }
+                self.panel.orderOut(nil)
+            }
+        }
     }
 
-    /// The view's size changed, which is the only time this is called. The
-    /// panel takes the new size around the same anchor, in one move, even
-    /// when AppKit already grew it from the hosting view's intrinsic size.
     private func fit(_ size: CGSize) {
-        guard let placement, panel.isVisible else { return }
+        guard let placement, shown else { return }
         if case .dragging = drag { return }
-        let target = frame(size, at: placement)
-        if target != panel.frame { panel.setFrame(target, display: true) }
+        move(to: frame(size, at: placement))
+    }
+
+    private static var fadeDuration: TimeInterval {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.1 : 0.18
+    }
+
+    private func move(to target: NSRect) {
+        guard target != panel.frame else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(target, display: true)
+        }
     }
 
     private static func anchor(for placement: PanelPlacement, on visible: NSRect) -> NSPoint {
@@ -555,7 +593,7 @@ final class FloatingPanel {
     private func cancelDrag() {
         let frame = if case let .dragging(frame, _, _) = drag { frame } else { panel.frame }
         endDrag()
-        panel.setFrame(frame, display: true)
+        move(to: frame)
     }
 
     /// The drag is over, whichever way. Ordering the panel out is what gives

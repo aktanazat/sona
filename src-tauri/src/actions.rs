@@ -2,7 +2,7 @@
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
-use crate::delivery::{self, DeliveryOutcome, DeliveryReceipt};
+use crate::delivery::{self, DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
 use crate::managers::audio::{AudioRecordingManager, InputLevel, RecordingStop};
 use crate::managers::history::{CaptureStatus, HistoryManager, NewRunReceipt};
 use crate::managers::model::ModelManager;
@@ -70,6 +70,31 @@ impl RecordingErrorEvent {
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct PasteErrorEvent {
     history_id: Option<i64>,
+}
+
+pub(crate) const DICTATION_DELIVERY_EVENT: &str = "dictation-delivery";
+
+/// `dictation-delivery`: where the words ended up once delivery returned,
+/// with no text and no history id. `pasted` is a write the operating system
+/// confirmed; `sent` is a paste or keystrokes Sona issued that nothing can
+/// acknowledge, which includes a backend that failed partway through.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum DictationDeliveryEvent {
+    Pasted,
+    Sent,
+}
+
+impl DictationDeliveryEvent {
+    /// Secure Event Input drops synthetic keys before an application sees them.
+    fn for_outcome(outcome: DeliveryOutcome) -> Option<Self> {
+        match outcome {
+            DeliveryOutcome::Delivered => Some(Self::Pasted),
+            DeliveryOutcome::DispatchedButUnconfirmed => Some(Self::Sent),
+            DeliveryOutcome::DispatchedUnderSecureInput
+            | DeliveryOutcome::DefinitelyNotDispatched => None,
+        }
+    }
 }
 
 /// `rewrite-skipped`: the mode asked for a rewrite and the words went out as
@@ -2202,8 +2227,14 @@ impl TranscribeAction {
                                             final_text,
                                             &delivery_settings,
                                         );
-                                        if receipt.outcome
-                                            == DeliveryOutcome::DefinitelyNotDispatched
+                                        if let Some(event) =
+                                            DictationDeliveryEvent::for_outcome(receipt.outcome)
+                                        {
+                                            let _ = ah_clone.emit(DICTATION_DELIVERY_EVENT, event);
+                                        }
+                                        if receipt.method != DeliveryMethod::None
+                                            && receipt.outcome
+                                                == DeliveryOutcome::DefinitelyNotDispatched
                                         {
                                             let _ = ah_clone.emit(
                                                 "paste-error",

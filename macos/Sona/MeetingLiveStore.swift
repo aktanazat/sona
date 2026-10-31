@@ -733,11 +733,11 @@ final class MeetingLiveStore {
                         alwaysRecordSeries: self.alwaysRecordSeries(prompt),
                         announceInChat: self.announceInChat(prompt)))
                 guard self.receive(result.receipt) else { return }
-                self.prompts.removeAll { $0.promptId == prompt.promptId }
-                self.choices = nil
                 if result.snapshot.phase == .capturingRecording {
                     await self.loadActive()
                 }
+                self.prompts.removeAll { $0.promptId == prompt.promptId }
+                self.choices = nil
             }
         }
     }

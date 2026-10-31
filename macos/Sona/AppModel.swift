@@ -118,6 +118,35 @@ struct DictationDurationWarningEvent: Decodable {
     let remainingSeconds: Int?
 }
 
+enum DictationDeliveryOutcome: String, Decodable {
+    case pasted, sent
+}
+
+struct DictationDeliveryEvent: Decodable {
+    let outcome: DictationDeliveryOutcome
+}
+
+enum PillFeedback: Equatable {
+    case delivered(DictationDeliveryOutcome)
+    case failed
+
+    var label: String {
+        switch self {
+        case .delivered(.pasted): "Pasted"
+        case .delivered(.sent): "Sent"
+        case .failed: "Couldn't paste"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .delivered(.pasted): "checkmark"
+        case .delivered(.sent): "arrow.up.right"
+        case .failed: "exclamationmark"
+        }
+    }
+}
+
 extension CoreEvent {
     static let recordingError = "recording-error"
     static let pasteError = "paste-error"
@@ -131,6 +160,7 @@ extension CoreEvent {
     /// what shows it.
     static let commandAnswered = "command-mode://answered"
     static let showMainWindow = "show-main-window"
+    static let dictationDelivery = "dictation-delivery"
 }
 
 /// Everything the windows share. One instance, on the main actor, handed to
@@ -188,6 +218,7 @@ final class AppModel {
     /// has said so; nil the rest of the time. The pill shows it, on its own
     /// if it has to.
     private(set) var pillWarningSeconds: Int?
+    private(set) var pillFeedback: PillFeedback?
     /// Bumped when the pill's hour away is over, so the pill is placed again.
     private var pillReturned = 0
 
@@ -232,6 +263,7 @@ final class AppModel {
     @ObservationIgnored private var pillReturnAt: Int64?
     /// The ended hide this shell last asked the core to clear.
     @ObservationIgnored private var pillClearedAt: Int64?
+    @ObservationIgnored private var feedbackDismissal: Task<Void, Never>?
     /// Presents the main window, as the scene's `openWindow` does. Only a
     /// view reaches that action, and the window stays closed at launch, so
     /// the menu bar mark hands it over when it first appears. Observed, so a
@@ -277,7 +309,7 @@ final class AppModel {
             CoreEvent.modelDeleted, CoreEvent.recordingError, CoreEvent.pasteError, CoreEvent.rewriteSkipped,
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
-            CoreEvent.commandAnswered, CoreEvent.showMainWindow,
+            CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -499,6 +531,7 @@ final class AppModel {
 
     func cancelCapture() {
         call { try await self.core.request("cancel_operation") }
+        clearPillFeedback()
     }
 
     func dismissNotice() {
@@ -508,10 +541,42 @@ final class AppModel {
     private func setCapture(_ state: CaptureState) {
         capture = state
         if case .recording = state {
+            clearPillFeedback()
             meter.start()
         } else {
             meter.stop()
         }
+        if case .idle = state {
+            dismissPillFeedbackAfterDelay()
+        }
+    }
+
+    private func showPillFeedback(_ feedback: PillFeedback) {
+        guard settings.settings.overlayStyle != .none else { return }
+        if case .recording = capture { return }
+        feedbackDismissal?.cancel()
+        feedbackDismissal = nil
+        pillFeedback = feedback
+        if case .idle = capture {
+            dismissPillFeedbackAfterDelay()
+        }
+    }
+
+    private func dismissPillFeedbackAfterDelay() {
+        guard let feedback = pillFeedback else { return }
+        feedbackDismissal?.cancel()
+        feedbackDismissal = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(feedback == .failed ? 2200 : 900))
+            guard !Task.isCancelled else { return }
+            self?.pillFeedback = nil
+            self?.feedbackDismissal = nil
+        }
+    }
+
+    private func clearPillFeedback() {
+        feedbackDismissal?.cancel()
+        feedbackDismissal = nil
+        pillFeedback = nil
     }
 
     // MARK: Models
@@ -632,6 +697,7 @@ final class AppModel {
     private func coreClosed() {
         coreStopped = true
         liveText = ""
+        clearPillFeedback()
         setCapture(.idle)
     }
 
@@ -711,25 +777,23 @@ final class AppModel {
 
     // MARK: Floating panels
 
-    /// While recording, the sound at the overlay's edge unless the overlay is
-    /// off; idle, the mode pill at its own edge when it is on and not put
-    /// away for the hour. One panel, moved between the two. No pill while
-    /// the core is stopped: it would offer a recording nothing can make. The
-    /// last minute of a dictation shows whatever the overlay style, and even
-    /// during the hour away: a dictation about to end is worth one line. The
-    /// pill draws its own state; a change of it floats the panel afresh on
-    /// the screen the pointer is on, as each dictation always has, and a
-    /// settings read leaves it in place. Only the idle pill can be dragged
-    /// to another edge: the recording one stands where the overlay does.
     private func syncPill() {
         let record = settings.settings
-        let anew = capture != pillCapture
+        if record.overlayStyle == .none, pillFeedback != nil {
+            clearPillFeedback()
+        }
+        let anew: Bool
+        switch (pillCapture, capture) {
+        case (.recording, .recording): anew = false
+        case (_, .recording): anew = true
+        default: anew = false
+        }
         pillCapture = capture
         _ = pillReturned
         pill.dockable = false
         if coreStopped {
             pill.hide()
-        } else if capture != .idle {
+        } else if capture != .idle || pillFeedback != nil {
             if record.overlayStyle == .none, pillWarningSeconds == nil {
                 pill.hide()
             } else {
@@ -926,6 +990,7 @@ final class AppModel {
                         ? "The words could not be pasted into the app in front. Focus a text field and try again."
                         : "The words could not be pasted into the app in front. They are kept in the Library.",
                     dictation: event.historyId)
+                showPillFeedback(.failed)
             case CoreEvent.rewriteSkipped:
                 let event: RewriteSkippedEvent = try Core.payload(line)
                 if let text = event.outcome.skippedText {
@@ -941,6 +1006,9 @@ final class AppModel {
                 sheet = .chat
             case CoreEvent.showMainWindow:
                 reveal()
+            case CoreEvent.dictationDelivery:
+                let event: DictationDeliveryEvent = try Core.payload(line)
+                showPillFeedback(.delivered(event.outcome))
             default:
                 break
             }

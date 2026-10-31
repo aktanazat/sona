@@ -125,6 +125,7 @@ struct PrimaryButton: ButtonStyle {
             .frame(height: compact ? 26 : 30)
             .background(Theme.accentFill.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -140,6 +141,7 @@ struct SecondaryButton: ButtonStyle {
             .frame(height: compact ? 26 : 30)
             .background(configuration.isPressed ? Theme.selection : Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -156,6 +158,7 @@ struct QuietButton: ButtonStyle {
             .foregroundStyle(configuration.isPressed ? Theme.ink : color)
             .opacity(isEnabled ? 1 : 0.45)
             .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -188,6 +191,8 @@ struct CircleButton: ButtonStyle {
             .contentShape(Circle())
             .onHover { hovering = $0 }
             .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 

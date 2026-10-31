@@ -789,7 +789,6 @@ struct DetectionPromptEvent: Decodable, Identifiable {
     /// The English copy, exactly as the notification shows it.
     let notificationTitle: String
     let delivery: DetectionPromptDelivery
-    /// Rendered only after the panel acknowledged its first delivery.
     let showIntroduction: Bool
     /// What this prompt's series remembers about announcing itself.
     let announceInChat: Bool
