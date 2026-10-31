@@ -7,9 +7,9 @@ import SwiftUI
 /// recording window: the sound on top (eleven bars, the last quarter second
 /// of the microphone, newest on the right, flat while nothing is being
 /// heard), or the words as the model hears them under the live overlay
-/// style; under it the mode, or the minute-left warning when the dictation
-/// is about to reach its limit, and the Stop and Cancel buttons with their
-/// keys. While the words are worked on, the phase in one word.
+/// style; under it how long the recording has run, or the minute-left
+/// warning when the dictation is about to reach its limit, and the Stop and
+/// Cancel buttons. While the words are worked on, the phase in one word.
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
 
@@ -27,8 +27,7 @@ struct HUDPill: View {
                     }
                 } actions: {
                     HStack(spacing: 12) {
-                        hint("Stop", keys: model.settings.settings.pushToTalk
-                            ? nil : model.settings.binding("transcribe")?.currentBinding) {
+                        hint("Stop", keys: nil) {
                             model.stopCapture()
                         }
                         cancel
@@ -45,7 +44,9 @@ struct HUDPill: View {
                     }
                     .frame(maxWidth: .infinity)
                 } actions: {
-                    cancel
+                    hint("Cancel", keys: nil) {
+                        model.cancelCapture()
+                    }
                 }
             }
         }
@@ -142,36 +143,44 @@ struct HUDPill: View {
             .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
     }
 
-    /// The mode the words go under, or the last minute of a dictation, said
-    /// once the core has counted it.
+    /// The last minute of a dictation, said once the core has counted it, or
+    /// how long the recording has run. Not the mode: a mode shortcut or an
+    /// app rule can record under another mode than the one the pill names.
     @ViewBuilder private var status: some View {
         if let seconds = model.pillWarningSeconds {
             Text(seconds == 60 ? "1 minute left" : "\(seconds) seconds left")
                 .foregroundStyle(Theme.hudLive)
-        } else {
-            HStack(spacing: 6) {
-                micMark
-                Text(model.pillMode ?? "Dictate")
+        } else if case let .recording(since) = model.capture {
+            TimelineView(.periodic(from: since, by: 1)) { context in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Theme.hudLive)
+                        .frame(width: 6, height: 6)
+                    Text(context.date.timeIntervalSince(since).clock)
+                        .monospacedDigit()
+                }
             }
             .foregroundStyle(Theme.hudInkSecondary)
         }
     }
 
+    /// Only while recording: the core lets go of the cancel key the moment
+    /// a recording stops.
     private var cancel: some View {
         hint("Cancel", keys: model.settings.binding("cancel")?.currentBinding) {
             model.cancelCapture()
         }
     }
 
-    /// "Stop ⌥ Space": a button in the window's bar, with the keys that do
-    /// the same from anywhere.
+    /// "Cancel esc": a button in the window's bar, with the keys that do the
+    /// same from anywhere.
     private func hint(_ title: String, keys: String?, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Text(title)
                 if let keys {
                     HStack(spacing: 3) {
-                        ForEach(Array(Shortcut(keys).keys.enumerated()), id: \.offset) { _, key in
+                        ForEach(Array(Shortcut(BindingCopy.chord(keys)).keys.enumerated()), id: \.offset) { _, key in
                             Text(key)
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(Theme.hudInk)
