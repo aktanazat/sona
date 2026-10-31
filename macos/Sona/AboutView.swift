@@ -139,8 +139,8 @@ private struct AboutVersionRow: View {
             HStack(spacing: 12) {
                 if let version = store.displayVersion {
                     Text("v\(version)")
-                        .font(TypeScale.mono(14))
-                        .foregroundStyle(Theme.ink)
+                        .font(TypeScale.mono(13))
+                        .foregroundStyle(Theme.inkSecondary)
                         .textSelection(.enabled)
                 } else {
                     // No value exists, so the slot dims. Red is for faults.

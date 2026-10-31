@@ -42,15 +42,17 @@ struct Model: Identifiable, Hashable {
 
     let id: String
     let name: String
-    /// What the catalog says, then the size: "Fast, accurate live preview · 620 MB".
-    let meta: String
+    /// What the catalog says: "Fast, accurate live preview".
+    let detail: String
+    /// "620 MB".
+    let size: String
     var status: Status
 
     init(_ info: ModelInfo, current: String) {
         id = info.id
         name = info.name
-        let size = Self.bytes(info.sizeMb * 1_000_000)
-        meta = info.description.isEmpty ? size : "\(info.description) · \(size)"
+        size = Self.bytes(info.sizeMb * 1_000_000)
+        detail = info.description
         if info.isDownloading {
             let fraction = info.sizeMb == 0 ? 0 : Double(info.partialSize) / Double(info.sizeMb * 1_000_000)
             status = .downloading(fraction: min(fraction, 1), downloaded: "\(Self.bytes(info.partialSize)) of \(size)")

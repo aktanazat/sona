@@ -26,9 +26,9 @@ struct VocabularyView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VocabularyHeading(
+            PageTitle(
                 "Vocabulary",
-                fact: "Words Sona kept getting wrong until you told it how they are spelled, and every other rule it applies to a finished transcript."
+                subtitle: "Words Sona kept getting wrong until you told it how they are spelled, and every other rule it applies to a finished transcript."
             )
             ErrorNote(store.error)
             if store.error != nil, let retry = store.retry {
@@ -113,7 +113,7 @@ struct VocabularyView: View {
             )
         }
         .disabled(store.busy)
-        .padding(.bottom, 32)
+        .padding(.bottom, 28)
     }
 
     // MARK: The merged rule list
@@ -121,9 +121,10 @@ struct VocabularyView: View {
     private var rulesSection: some View {
         let rules = store.rules
         let problems = store.problems
-        return VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Text("Text rules").sectionLabel()
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("Import CSV") { store.importCsv() }
                     .buttonStyle(.compact)
@@ -135,8 +136,8 @@ struct VocabularyView: View {
                     .buttonStyle(.compact)
                     .disabled(store.busy)
             }
+            addBar
             Card {
-                addRow
                 if store.loading {
                     VocabularyBand {
                         Text("Loading text rules").metaText()
@@ -147,11 +148,12 @@ struct VocabularyView: View {
                             .metaText()
                     }
                 } else {
-                    VocabularyBand {
+                    VocabularyBand(inset: 8, vertical: 8) {
                         VocabularyRuleGrid(
+                            left: Text("You say").metaText().padding(.leading, 8),
+                            arrow: false,
+                            right: Text("Sona writes").metaText().padding(.leading, 8),
                             kind: Text("Kind").metaText(),
-                            left: Text("You say").metaText(),
-                            right: Text("Sona writes").metaText(),
                             trailing: EmptyView()
                         )
                     }
@@ -176,46 +178,68 @@ struct VocabularyView: View {
                 }
             }
         }
-        .padding(.bottom, 32)
+        .padding(.bottom, 28)
     }
 
-    private var addRow: some View {
+    /// One input for a new rule: the kind, what is said, what is written, and
+    /// the key that adds it.
+    private var addBar: some View {
         let problem = store.addProblem(kind: newKind, left: newLeft, right: newRight)
         let duplicate = problem != nil && !newLeft.isEmpty && !newRight.isEmpty
-        return VocabularyBand {
-            VocabularyRuleGrid(
-                kind: Picker("", selection: $newKind) {
+        let adding = focus == .addLeft || focus == .addRight
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Picker("", selection: $newKind) {
                     ForEach(VocabularyRuleKind.allCases, id: \.self) { kind in
                         Text(kind.title).tag(kind)
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .disabled(store.busy),
-                left: VocabularyInput(
+                .fixedSize()
+                .disabled(store.busy)
+                VocabularyInput(
                     prompt: newKind.spokenExample,
                     text: $newLeft,
                     key: .addLeft,
                     focus: $focus,
                     invalid: duplicate,
+                    fillsOnFocus: false,
                     onSubmit: addRule
                 )
-                .disabled(store.busy),
-                right: VocabularyInput(
+                .disabled(store.busy)
+                KeyCap("→").accessibilityHidden(true)
+                VocabularyInput(
                     prompt: newKind.writtenExample,
                     text: $newRight,
                     key: .addRight,
                     focus: $focus,
                     invalid: false,
+                    fillsOnFocus: false,
                     onSubmit: addRule
                 )
-                .disabled(store.busy),
-                trailing: Button("Add", action: addRule)
-                    .buttonStyle(.compact)
-                    .disabled(!store.canAdd(kind: newKind, left: newLeft, right: newRight))
+                .disabled(store.busy)
+                Button(action: addRule) {
+                    HStack(spacing: 6) {
+                        Text("Add")
+                        KeyCap("↩")
+                    }
+                }
+                .buttonStyle(.quiet)
+                .accessibilityLabel("Add")
+                .disabled(!store.canAdd(kind: newKind, left: newLeft, right: newRight))
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .frame(minHeight: 44)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(adding ? Theme.accent : Theme.border, lineWidth: 1)
             )
             Text(problem ?? newKind.hint)
                 .metaText(problem == nil ? Theme.inkTertiary : Theme.live)
+                .padding(.horizontal, 4)
         }
     }
 
@@ -231,9 +255,10 @@ struct VocabularyView: View {
     // MARK: Writing samples
 
     private var samplesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Writing samples").sectionLabel()
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 if !store.samplesLoading, !store.samples.isEmpty {
                     // The cap is the reason this count is worth printing: it is
@@ -323,87 +348,82 @@ struct VocabularyView: View {
     }
 }
 
-/// The head of the tab: its name and one line of plain fact.
-private struct VocabularyHeading: View {
-    let title: String
-    let fact: String
-
-    init(_ title: String, fact: String) {
-        self.title = title
-        self.fact = fact
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).headlineText()
-            Text(fact).bodyText(15, Theme.inkSecondary)
-        }
-        .padding(.bottom, 20)
-    }
-}
-
-/// A band inside a card: the card's own padding and the hairline under it, for
-/// rows that hold more than one line.
+/// A band inside a card: the card's row padding and an inset hairline under
+/// it, for rows that hold more than one line.
 private struct VocabularyBand<Content: View>: View {
+    var inset: CGFloat = 16
+    var vertical: CGFloat = 12
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             content
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, inset)
+        .padding(.vertical, vertical)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
-/// One grid template for the column names, the add row and every rule, so the
-/// kind, the two fields and the trailing controls line up down the list. The
-/// trailing column is fixed because its switch comes and goes with the kind.
-private struct VocabularyRuleGrid<Kind: View, Left: View, Right: View, Trailing: View>: View {
-    let kind: Kind
+/// One grid template for the column names and every rule, so what is said,
+/// what is written, the kind and the trailing controls line up down the list.
+/// The trailing column is fixed because its switch comes and goes with the
+/// kind.
+private struct VocabularyRuleGrid<Left: View, Right: View, Kind: View, Trailing: View>: View {
     let left: Left
+    let arrow: Bool
     let right: Right
+    let kind: Kind
     let trailing: Trailing
 
     var body: some View {
-        HStack(spacing: 10) {
-            kind.frame(width: 104, alignment: .leading)
+        HStack(spacing: 8) {
             left.frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if arrow { KeyCap("→") }
+            }
+            .frame(width: 22)
+            .accessibilityHidden(true)
             right.frame(maxWidth: .infinity, alignment: .leading)
+            kind.frame(width: 96, alignment: .leading)
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 trailing
             }
-            .frame(width: 132, alignment: .trailing)
+            .frame(width: 72, alignment: .trailing)
         }
     }
 }
 
 /// Literal text the person typed for the machine: a trigger, a replacement, a
-/// spoken phrase. Set a step down from prose so a long list stays scannable.
+/// spoken phrase. Plain until it holds the keyboard, so the list reads as
+/// text.
 private struct VocabularyInput: View {
     let prompt: String
     @Binding var text: String
     let key: VocabularyFocus
     @FocusState.Binding var focus: VocabularyFocus?
     var invalid = false
+    var fillsOnFocus = true
     let onSubmit: () -> Void
 
     var body: some View {
         TextField(prompt, text: $text, prompt: Text(prompt).foregroundStyle(Theme.inkTertiary))
             .textFieldStyle(.plain)
-            .font(TypeScale.body(13))
+            .font(TypeScale.body(14))
             .foregroundStyle(Theme.ink)
             .focused($focus, equals: key)
             .onSubmit(onSubmit)
-            .padding(.horizontal, 10)
-            .frame(height: 32)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .padding(.horizontal, 8)
+            .frame(height: 28)
+            .background(
+                fillsOnFocus && focus == key ? Theme.inset : .clear,
+                in: RoundedRectangle(cornerRadius: Theme.radiusControl)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
-                    .strokeBorder(invalid ? Theme.live : Theme.border, lineWidth: 1)
+                    .strokeBorder(invalid ? Theme.live : .clear, lineWidth: 1)
             )
     }
 }
@@ -421,9 +441,8 @@ private struct VocabularyRuleRow: View {
     let onRemove: () -> Void
 
     var body: some View {
-        VocabularyBand {
+        VocabularyBand(inset: 8, vertical: 6) {
             VocabularyRuleGrid(
-                kind: Text(rule.kind.title).metaText(Theme.inkSecondary),
                 left: VocabularyInput(
                     prompt: rule.kind.spokenExample,
                     text: Binding(get: { rule.left }, set: { onEdit(.left, $0) }),
@@ -433,6 +452,7 @@ private struct VocabularyRuleRow: View {
                     onSubmit: onCommit
                 )
                 .disabled(busy),
+                arrow: true,
                 right: VocabularyInput(
                     prompt: rule.kind.writtenExample,
                     text: Binding(get: { rule.right }, set: { onEdit(.right, $0) }),
@@ -441,6 +461,7 @@ private struct VocabularyRuleRow: View {
                     onSubmit: onCommit
                 )
                 .disabled(busy),
+                kind: Text(rule.kind.title).metaText(Theme.inkSecondary),
                 trailing: HStack(spacing: 8) {
                     if let enabled = rule.enabled {
                         Toggle(rule.left.isEmpty ? "New \(rule.kind.title) rule" : rule.left, isOn: Binding(get: { enabled }, set: onToggle))
@@ -454,7 +475,7 @@ private struct VocabularyRuleRow: View {
                         onRemove()
                     } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.system(size: 12, weight: .regular))
                     }
                     .buttonStyle(.quiet)
                     .disabled(busy)
@@ -462,7 +483,7 @@ private struct VocabularyRuleRow: View {
                 }
             )
             if let problem {
-                Text(problem).metaText(Theme.live)
+                Text(problem).metaText(Theme.live).padding(.leading, 8)
             }
         }
     }
@@ -509,7 +530,7 @@ private struct VocabularySampleRow: View {
                     onRemove()
                 } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .regular))
                 }
                 .buttonStyle(.quiet)
                 .disabled(busy)
@@ -633,7 +654,7 @@ private struct VocabularyImportSheet: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .overlay(alignment: .bottom) { Hairline() }
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 14) }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(review.preview.entries.enumerated()), id: \.offset) { _, entry in
@@ -647,7 +668,7 @@ private struct VocabularyImportSheet: View {
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
-                        .overlay(alignment: .bottom) { Hairline() }
+                        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 14) }
                     }
                 }
             }

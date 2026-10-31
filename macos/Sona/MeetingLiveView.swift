@@ -33,13 +33,26 @@ struct MeetingLiveView: View {
                     if geometry.size.width >= 820 {
                         VStack(alignment: .leading, spacing: 0) {
                             captureHeader(session)
-                            HStack(alignment: .top, spacing: 20) {
-                                ScrollView { transcript }
-                                    .scrollIndicators(.never)
-                                    .frame(maxWidth: .infinity)
+                            HStack(alignment: .top, spacing: 24) {
+                                // A jump's highlight reaches 8pt past the words,
+                                // and a scroll view clips at its own edge.
                                 ScrollView {
-                                    ownNotes
-                                    help(proxy)
+                                    transcript
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 8)
+                                }
+                                .scrollIndicators(.never)
+                                .padding(.horizontal, -8)
+                                .frame(maxWidth: .infinity)
+                                Rectangle()
+                                    .fill(Theme.hairline)
+                                    .frame(width: 1)
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        ownNotes
+                                        help(proxy)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .scrollIndicators(.never)
                                 .frame(width: 320)
@@ -47,8 +60,8 @@ struct MeetingLiveView: View {
                         }
                         .frame(maxWidth: Theme.contentMax, maxHeight: .infinity, alignment: .topLeading)
                         .padding(.horizontal, Theme.margin)
-                        .padding(.top, 24)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.top, 12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     } else {
                         Page {
                             captureHeader(session)
@@ -102,8 +115,11 @@ struct MeetingLiveView: View {
 
     @ViewBuilder
     private func header(_ session: MeetingSessionSnapshot) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(session.title).titleText().lineLimit(1)
+        HStack(alignment: .center, spacing: 12) {
+            Text(session.title)
+                .titleText()
+                .lineLimit(1)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 16)
             // The clock is the state while a capture is running, so the phase
             // word only appears when the state is not what the clock implies:
@@ -114,7 +130,7 @@ struct MeetingLiveView: View {
             // The store keeps the capture's clock; this counts on from it
             // every second while the capture runs, and stands still while
             // it is paused.
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 LiveDot(state: dot(session))
                 if let clock = store.clocks[session.sessionId] {
                     MeetingClockText(clock: clock, size: 13, color: Theme.ink)
@@ -131,6 +147,7 @@ struct MeetingLiveView: View {
             }
             menu(session)
         }
+        .frame(minHeight: 30)
         .padding(.bottom, 20)
     }
 
@@ -162,12 +179,12 @@ struct MeetingLiveView: View {
                 .disabled(!session.allows(.discard) || store.pending != nil)
         } label: {
             Image(systemName: "ellipsis")
-                .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 28, height: 28)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.circle)
         .menuIndicator(.hidden)
         .fixedSize()
+        .help("More")
         .accessibilityLabel("More")
     }
 
@@ -176,10 +193,18 @@ struct MeetingLiveView: View {
     @ViewBuilder
     private var warnings: some View {
         if !store.warnings.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            Card {
                 ForEach(Array(store.warnings.enumerated()), id: \.offset) { _, warning in
-                    Text(warning.text)
-                        .bodyText(14, warning.urgent ? Theme.live : Theme.inkSecondary)
+                    CardRow {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 13))
+                                .foregroundStyle(warning.urgent ? Theme.live : Theme.inkSecondary)
+                                .accessibilityHidden(true)
+                            Text(warning.text)
+                                .bodyText(14, warning.urgent ? Theme.live : Theme.ink)
+                        }
+                    }
                 }
             }
             .padding(.bottom, 24)
@@ -196,7 +221,8 @@ struct MeetingLiveView: View {
                     ForEach(store.provisional) { segment in
                         line(
                             at: segment.startOffsetNs, segment.text,
-                            speaker: segment.speakerLabel, anchor: "live-\(segment.segmentId)")
+                            speaker: segment.speakerLabel, ink: ink(segment),
+                            anchor: "live-\(segment.segmentId)")
                     }
                     Text("Provisional words and speaker labels")
                         .metaText(Theme.inkSecondary)
@@ -210,7 +236,7 @@ struct MeetingLiveView: View {
                     ForEach(store.lines, id: \.base.segmentId) { segment in
                         line(
                             at: segment.base.startOffsetNs, segment.text,
-                            speaker: store.speakerLabel(segment),
+                            speaker: store.speakerLabel(segment), ink: ink(segment),
                             anchor: "stored-\(segment.base.segmentId)")
                     }
                 }
@@ -218,23 +244,49 @@ struct MeetingLiveView: View {
         }
     }
 
-    private func line(at offsetNs: Int64, _ text: String, speaker: String, anchor: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 20) {
-            Text(offsetNs.meetingOffsetClock)
-                .font(TypeScale.mono(12))
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 62, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 3) {
+    /// The voice in its color with the clock across from it, then the words.
+    private func line(
+        at offsetNs: Int64, _ text: String, speaker: String, ink: Color, anchor: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(speaker)
-                    .font(TypeScale.label(13))
-                    .foregroundStyle(Theme.inkSecondary)
-                Text(text).bodyText(14)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ink)
+                Spacer(minLength: 12)
+                Text(offsetNs.meetingOffsetClock)
+                    .font(TypeScale.body(12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkTertiary)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(text).bodyText(14)
         }
+        .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(highlightedLine == anchor ? Theme.accentSoft : Color.clear)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            highlightedLine == anchor ? Theme.accentSoft : .clear,
+            in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .padding(.horizontal, -8)
         .id(anchor)
+    }
+
+    private func ink(_ segment: TranscriptEffectiveSegment) -> Color {
+        switch segment.speakerAssignment {
+        case .localSpeaker, .systemSpeaker:
+            SpeakerInk.color(at: store.live?.speakers.firstIndex { $0.speakerId == segment.assignedSpeakerId })
+        case .unknown, .overlap:
+            SpeakerInk.color(at: nil)
+        }
+    }
+
+    /// The running pass numbers its speakers per source, so the source is
+    /// part of the color: the first voice on each source is a different one.
+    private func ink(_ segment: MeetingProvisionalSegment) -> Color {
+        guard case let .cluster(index) = segment.speaker,
+              let source = MeetingSourceKind.allCases.firstIndex(of: segment.sourceKind)
+        else { return SpeakerInk.color(at: nil) }
+        return SpeakerInk.color(at: Int(index) * MeetingSourceKind.allCases.count + source)
     }
 
     private func jump(to offset: Int64, using proxy: ScrollViewProxy) {
@@ -347,7 +399,7 @@ struct MeetingLiveView: View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(kind.label).bodyText(14)
+                    Text(kind.label).headlineText()
                     Spacer()
                     Button("Dismiss") { store.dismissLiveHelp() }.buttonStyle(.quiet)
                 }
@@ -361,15 +413,17 @@ struct MeetingLiveView: View {
                     }
                 } else if let error = store.helpError {
                     ErrorNote(error)
-                    Button("Try again") { store.retryLiveHelp() }.buttonStyle(.secondary)
+                    Button("Try again") { store.retryLiveHelp() }.buttonStyle(.compact)
                 } else if let answer = store.liveHelp {
                     if let label = answer.state.label {
                         Text(label).bodyText(13, Theme.inkSecondary)
-                        Button("Try again") { store.retryLiveHelp() }.buttonStyle(.secondary)
+                        Button("Try again") { store.retryLiveHelp() }.buttonStyle(.compact)
                     } else {
                         ForEach(Array(answer.items.enumerated()), id: \.offset) { _, item in
-                            VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
                                 Text(item.text).bodyText(14).textSelection(.enabled)
+                                Spacer(minLength: 8)
                                 Button(item.startOffsetNs.meetingOffsetClock) {
                                     jump(to: item.startOffsetNs, using: proxy)
                                 }
@@ -389,7 +443,7 @@ struct MeetingLiveView: View {
                     }
                 }
             }
-            .padding(14)
+            .padding(16)
         }
     }
 
@@ -400,7 +454,7 @@ struct MeetingLiveView: View {
     /// the words; a refusal is read here, over the draft, not behind it.
     private var note: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Note for this moment").headlineText()
+            Text("Note for this moment").titleText().accessibilityAddTraits(.isHeader)
             InputField(
                 prompt: "Write a note for this moment",
                 text: Binding(get: { store.noteBody }, set: { store.setNote($0) }))
@@ -418,7 +472,7 @@ struct MeetingLiveView: View {
                         || store.pending != nil)
             }
         }
-        .padding(28)
+        .padding(24)
         .frame(width: 420)
         .background(Theme.page)
         .onChange(of: store.pending) { _, pending in
@@ -515,6 +569,7 @@ struct MeetingConsentPanelView: View {
         .frame(width: 340)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
     }
 }
 
@@ -673,6 +728,7 @@ private struct PanelMore<Items: View>: View {
                 .frame(width: 26, height: 30)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("More")
@@ -702,17 +758,21 @@ struct RitualPrepView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Prep").metaText(Theme.accent)
-            Text("\(card.title) — in \(minutes) \(minutes == 1 ? "minute" : "minutes")").bodyText(14)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(card.title) — in \(minutes) \(minutes == 1 ? "minute" : "minutes")")
+                    .headlineText()
+                Spacer(minLength: 8)
+                Text("Prep").metaText()
+            }
             if !card.headline.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(card.lastMeetingId == nil ? "Context:" : "Last time:").metaText()
                     Text(card.headline).bodyText(13, Theme.inkSecondary)
                 }
             }
             if card.mineOpenLoopCount > 0 {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("My open loops (\(card.mineOpenLoopCount))").metaText()
                     ForEach(Array(card.mineOpenLoops.prefix(2).enumerated()), id: \.offset) {
                         _, loop in
@@ -724,7 +784,7 @@ struct RitualPrepView: View {
                 Text("Waiting on (\(card.waitingOnCount))").metaText()
             }
             if !card.participants.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Participants:").metaText()
                     ForEach(Array(card.participants.enumerated()), id: \.offset) { _, person in
                         Text(person.line).bodyText(13, Theme.inkSecondary)
@@ -773,7 +833,7 @@ struct RitualPrepView: View {
         case let .ready(points) where points.isEmpty:
             Text("The brief has nothing to add yet.").metaText()
         case let .ready(points):
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("From the brief:").metaText()
                 ForEach(Array(points.prefix(2).enumerated()), id: \.offset) { _, point in
                     Text(point.text).bodyText(13, Theme.inkSecondary).lineLimit(2)
@@ -824,9 +884,12 @@ struct RitualWrapView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Wrap").metaText(Theme.accent)
-            Text("\(card.title) — saved").bodyText(14)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(card.title) — saved").headlineText()
+                Spacer(minLength: 8)
+                Text("Wrap").metaText()
+            }
             if !card.headline.isEmpty {
                 Text(card.headline).bodyText(13, Theme.inkSecondary)
             }

@@ -4,11 +4,12 @@ import SwiftUI
 /// next recording goes under: a press starts it, a right-click picks the
 /// mode or puts the pill away for an hour, and a drag carries it to another
 /// edge of the screen. On a side edge it stands upright. While you talk, the
-/// sound: eleven bars, the last quarter second of the microphone, newest on
-/// the right, flat while nothing is being heard, and the minute-left warning
-/// when the dictation is about to reach its limit. With the live overlay
-/// style, the words as the model hears them sit beside the bars. While the
-/// words are worked on, the phase in one word.
+/// recording window: the sound on top (eleven bars, the last quarter second
+/// of the microphone, newest on the right, flat while nothing is being
+/// heard), or the words as the model hears them under the live overlay
+/// style; under it how long the recording has run, or the minute-left
+/// warning when the dictation is about to reach its limit, and the Stop and
+/// Cancel buttons. While the words are worked on, the phase in one word.
 struct HUDPill: View {
     @Environment(AppModel.self) private var model
 
@@ -18,19 +19,34 @@ struct HUDPill: View {
             case .idle:
                 idle
             case .recording:
-                pill {
-                    bars
-                    warning
-                    liveWords
+                window {
+                    if model.settings.settings.overlayStyle == .live {
+                        liveWords
+                    } else {
+                        bars
+                    }
+                } actions: {
+                    HStack(spacing: 12) {
+                        hint("Stop", keys: nil) {
+                            model.stopCapture()
+                        }
+                        cancel
+                    }
                 }
             case let .working(kind):
-                pill {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .tint(Theme.onInvert)
-                    Text(Self.phaseLabel(kind))
-                        .font(.system(size: 11, weight: .medium))
-                    liveWords
+                window {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Theme.hudInk)
+                        Text(Self.phaseLabel(kind))
+                            .font(.system(size: 13))
+                    }
+                    .frame(maxWidth: .infinity)
+                } actions: {
+                    hint("Cancel", keys: nil) {
+                        model.cancelCapture()
+                    }
                 }
             }
         }
@@ -45,23 +61,24 @@ struct HUDPill: View {
                 VStack(spacing: 6) {
                     micMark
                     UprightText(model.pillMode ?? "Dictate")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 11, weight: .semibold))
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 7)
                 .padding(.vertical, 12)
             } else {
                 HStack(spacing: 6) {
                     micMark
                     Text(model.pillMode ?? "Dictate")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .padding(.vertical, 7)
             }
         }
-        .foregroundStyle(Theme.onInvert)
-        .background(Theme.invert, in: Capsule())
+        .foregroundStyle(Theme.hudInk)
+        .background(Theme.hud, in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.1), lineWidth: 1))
         .contentShape(Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
@@ -87,50 +104,121 @@ struct HUDPill: View {
     }
 
     private var micMark: some View {
-        Image(systemName: "mic")
+        Image(systemName: "mic.fill")
             .font(.system(size: 10, weight: .semibold))
     }
 
+    /// The sound, between two dotted lines that stand for the quiet on
+    /// either side of it.
     private var bars: some View {
-        HStack(spacing: 3) {
-            ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Theme.onInvert)
-                    .frame(width: 2, height: 2 + 12 * level)
+        HStack(spacing: 6) {
+            dots
+            HStack(spacing: 3) {
+                ForEach(Array(model.meter.history.enumerated()), id: \.offset) { _, level in
+                    Capsule()
+                        .fill(Theme.hudInk)
+                        .frame(width: 3, height: 3 + 25 * level)
+                }
             }
+            .accessibilityLabel("Recording")
+            dots
         }
-        .frame(height: 14)
-        .accessibilityLabel("Recording")
+        .frame(height: 28)
     }
 
-    /// The last minute of a dictation, said once the core has counted it.
-    @ViewBuilder private var warning: some View {
-        if let seconds = model.pillWarningSeconds {
-            Text(seconds == 60 ? "1 minute left" : "\(seconds) seconds left")
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(1)
-        }
+    private var dots: some View {
+        Line()
+            .stroke(Theme.hudInkSecondary.opacity(0.6), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [0.1, 4]))
+            .frame(height: 1.5)
     }
 
     /// The words so far, under the live style. The frame is fixed so the
-    /// pill does not grow with every word; before any arrive it says so.
-    @ViewBuilder private var liveWords: some View {
-        if model.settings.settings.overlayStyle == .live {
-            Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
-                .font(.system(size: 12))
-                .opacity(model.liveText.isEmpty ? 0.6 : 1)
-                .lineLimit(2)
-                .truncationMode(.head)
-                .frame(width: 360, alignment: .leading)
+    /// window does not grow with every word; before any arrive it says so.
+    private var liveWords: some View {
+        Text(model.liveText.isEmpty ? "Listening…" : model.liveText)
+            .font(.system(size: 13))
+            .foregroundStyle(model.liveText.isEmpty ? Theme.hudInkSecondary : Theme.hudInk)
+            .lineLimit(2)
+            .truncationMode(.head)
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+    }
+
+    /// The last minute of a dictation, said once the core has counted it, or
+    /// how long the recording has run. Not the mode: a mode shortcut or an
+    /// app rule can record under another mode than the one the pill names.
+    @ViewBuilder private var status: some View {
+        if let seconds = model.pillWarningSeconds {
+            Text(seconds == 60 ? "1 minute left" : "\(seconds) seconds left")
+                .foregroundStyle(Theme.hudLive)
+        } else if case let .recording(since) = model.capture {
+            TimelineView(.periodic(from: since, by: 1)) { context in
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Theme.hudLive)
+                        .frame(width: 6, height: 6)
+                    Text(context.date.timeIntervalSince(since).clock)
+                        .monospacedDigit()
+                }
+            }
+            .foregroundStyle(Theme.hudInkSecondary)
         }
     }
 
-    private func pill(@ViewBuilder content: () -> some View) -> some View {
-        HStack(spacing: 10, content: content)
-            .foregroundStyle(Theme.onInvert)
+    /// Only while recording: the core lets go of the cancel key the moment
+    /// a recording stops.
+    private var cancel: some View {
+        hint("Cancel", keys: model.settings.binding("cancel")?.currentBinding) {
+            model.cancelCapture()
+        }
+    }
+
+    /// "Cancel esc": a button in the window's bar, with the keys that do the
+    /// same from anywhere.
+    private func hint(_ title: String, keys: String?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title)
+                if let keys {
+                    HStack(spacing: 3) {
+                        ForEach(Array(Shortcut(BindingCopy.chord(keys)).keys.enumerated()), id: \.offset) { _, key in
+                            Text(key)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.hudInk)
+                                .padding(.horizontal, 4)
+                                .frame(minWidth: 18, minHeight: 18)
+                                .background(Theme.hudKey, in: RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                }
+            }
+            .foregroundStyle(Theme.hudInkSecondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private func window(@ViewBuilder content: () -> some View, @ViewBuilder actions: () -> some View) -> some View {
+        VStack(spacing: 0) {
+            content()
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity)
+            HStack(spacing: 12) {
+                status.lineLimit(1)
+                Spacer(minLength: 8)
+                actions()
+            }
+            .font(.system(size: 11))
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Theme.invert, in: Capsule())
+            .frame(height: 32)
+            .background(Theme.hudBar)
+        }
+        .frame(width: 320)
+        .background(Theme.hud)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.1), lineWidth: 1))
+        .environment(\.colorScheme, .dark)
     }
 
     /// The core's work kinds, said for the pill.
@@ -139,6 +227,15 @@ struct HUDPill: View {
         case "transcribing": "Transcribing…"
         case "polishing": "Polishing…"
         default: kind.capitalized + "…"
+        }
+    }
+}
+
+private struct Line: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.move(to: CGPoint(x: rect.minX, y: rect.midY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
         }
     }
 }
@@ -592,11 +689,11 @@ struct CommandPalette: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.system(size: 15, weight: .regular))
                         .foregroundStyle(Theme.inkTertiary)
                     TextField("", text: $query, prompt: Text("Search or ask").foregroundStyle(Theme.inkTertiary))
                         .textFieldStyle(.plain)
-                        .font(TypeScale.body(16))
+                        .font(TypeScale.body(17))
                         .foregroundStyle(Theme.ink)
                         .focused($focused)
                         .onSubmit { runSelected() }
@@ -605,18 +702,19 @@ struct CommandPalette: View {
                     if case .pending = lookup {
                         ProgressView().controlSize(.small)
                     }
-                    KeyCap("esc")
                 }
-                .padding(.horizontal, 18)
-                .frame(height: 52)
+                .padding(.horizontal, 20)
+                .frame(height: 56)
                 Hairline()
                 ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: 2) {
                             ForEach(sections, id: \.label) { section in
                                 Text(section.label)
-                                    .sectionLabel()
-                                    .padding(.horizontal, 18)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Theme.inkTertiary)
+                                    .accessibilityAddTraits(.isHeader)
+                                    .padding(.horizontal, 20)
                                     .padding(.top, 12)
                                     .padding(.bottom, 4)
                                 ForEach(section.rows) { row in
@@ -642,12 +740,14 @@ struct CommandPalette: View {
                         }
                     }
                 }
+                Hairline()
+                keys
             }
             .frame(width: 600)
             .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Theme.border, lineWidth: 1))
-            .shadow(color: .black.opacity(0.18), radius: 24, y: 12)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.border, lineWidth: 1))
+            .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
             .padding(.top, 96)
             .onAppear {
                 focused = true
@@ -732,8 +832,26 @@ struct CommandPalette: View {
                 Button(retry, action: action).buttonStyle(.compact)
             }
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+
+    /// The keys the palette answers to, as the footer of the panel.
+    private var keys: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            KeyCap("↑")
+            KeyCap("↓")
+            Text("Select").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            KeyCap("↩")
+            Text("Open").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            KeyCap("esc")
+            Text("Close").metaText(Theme.inkSecondary)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 40)
+        .background(Theme.inset)
+        .accessibilityElement(children: .combine)
     }
 
     private func move(_ delta: Int) {
@@ -841,15 +959,21 @@ private struct PaletteRowView: View {
     let row: PaletteRow
     let selected: Bool
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 20)
+                    .accessibilityHidden(true)
                 switch row {
                 case let .action(action):
                     Text(action.title).bodyText()
                 case let .hit(hit):
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(hit.title).bodyText().lineLimit(1)
                         HStack(spacing: 6) {
                             Text(hit.when.relativeDay)
@@ -861,19 +985,51 @@ private struct PaletteRowView: View {
                         .metaText()
                     }
                 case .more:
-                    Text("Show more results").bodyText(15, Theme.inkSecondary)
+                    Text("Show more results").bodyText(14, Theme.inkSecondary)
                 case let .ask(question):
                     Text("Ask Sona: \(question)").bodyText()
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .frame(minHeight: 40)
-            .background(selected ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal, 6)
+            .frame(minHeight: 38)
+            .background(fill, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .padding(.horizontal, 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+
+    private var fill: Color {
+        if selected { return Theme.selection }
+        return hovering ? Theme.wash : .clear
+    }
+
+    private var icon: String {
+        switch row {
+        case let .action(action):
+            switch action.id {
+            case "go-settings": "gearshape"
+            case "toggle-recording": "mic"
+            case "record-meeting": "video"
+            case "record-screen": "rectangle.dashed.badge.record"
+            case "open-chat": "bubble.left"
+            case "import-audio": "square.and.arrow.down"
+            default: Place.allCases.first { "go-\($0.rawValue)" == action.id }?.icon ?? "arrow.right"
+            }
+        case let .hit(hit):
+            switch hit.kind {
+            case .meeting: "video"
+            case .dictation: "waveform"
+            case .person: "person"
+            case .series: "calendar"
+            case .loop: "arrow.triangle.2.circlepath"
+            case .receipt: "doc.text"
+            }
+        case .more: "ellipsis"
+        case .ask: "bubble.left"
+        }
     }
 }

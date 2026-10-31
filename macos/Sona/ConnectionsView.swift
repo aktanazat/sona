@@ -19,14 +19,14 @@ struct ConnectionsView: View {
                     ForEach(store.connections) { connection in
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(connection.name).font(TypeScale.label(15))
+                                Text(connection.name).bodyText()
                                 Text("\(connection.kind.title) · \(connection.enabled ? "On" : "Off")").metaText()
                             }
                         } trailing: {
-                            HStack(spacing: 14) {
-                                Button("Edit") { editing = connection }.buttonStyle(.quiet)
-                                Button("Test") { Task { await store.test(connection) } }.buttonStyle(.quiet).disabled(!connection.enabled)
-                                Button("Disconnect") { disconnecting = connection }.buttonStyle(.quiet)
+                            HStack(spacing: 8) {
+                                Button("Edit") { editing = connection }.buttonStyle(.compact)
+                                Button("Test") { Task { await store.test(connection) } }.buttonStyle(.compact).disabled(!connection.enabled)
+                                Button("Disconnect") { disconnecting = connection }.buttonStyle(.quiet).padding(.leading, 6)
                             }
                         }
                     }
@@ -42,7 +42,7 @@ struct ConnectionsView: View {
                         ForEach(snapshot.rules) { rule in
                             CardRow {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(snapshot.connections.first(where: { $0.id == rule.connectionId })?.name ?? "Disconnected service").font(TypeScale.label(15))
+                                    Text(snapshot.connections.first(where: { $0.id == rule.connectionId })?.name ?? "Disconnected service").bodyText()
                                     Text(snapshot.scopes.first(where: { $0.scope == rule.scope })?.name ?? "Unavailable folder or series").metaText()
                                 }
                             } trailing: {
@@ -58,23 +58,23 @@ struct ConnectionsView: View {
                     if let preferences = store.snapshot?.preferences {
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Email drafts").font(TypeScale.label(15))
+                                Text("Email drafts").bodyText()
                                 Text("Approval opens an editable draft in Mail. Sona never sends it.").metaText()
                             }
                         } trailing: {
                             Toggle("Email drafts", isOn: Binding(get: { preferences.emailDraftsEnabled }, set: { value in
                                 Task { await store.preferences(email: value, calendar: preferences.calendarActionsEnabled) }
-                            })).labelsHidden().toggleStyle(.switch)
+                            })).labelsHidden().toggleStyle(.switch).tint(Theme.accent)
                         }
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Calendar events").font(TypeScale.label(15))
+                                Text("Calendar events").bodyText()
                                 Text("Approval creates an event in your default calendar. No invitations are sent.").metaText()
                             }
                         } trailing: {
                             Toggle("Calendar events", isOn: Binding(get: { preferences.calendarActionsEnabled }, set: { value in
                                 Task { await store.preferences(email: preferences.emailDraftsEnabled, calendar: value) }
-                            })).labelsHidden().toggleStyle(.switch)
+                            })).labelsHidden().toggleStyle(.switch).tint(Theme.accent)
                         }
                     } else { CardLine("Read connections to change these permissions.") }
                 }
@@ -86,8 +86,8 @@ struct ConnectionsView: View {
                         ForEach(snapshot.receipts) { receipt in
                             CardRow {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(receipt.connectionName).font(TypeScale.label(15))
-                                    Text(receipt.detail).bodyText(13, Theme.inkSecondary)
+                                    Text(receipt.connectionName).bodyText()
+                                    Text(receipt.detail).metaText(Theme.inkSecondary)
                                     Text(receipt.date, style: .date).metaText()
                                 }
                             } trailing: {

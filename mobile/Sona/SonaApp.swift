@@ -41,34 +41,3 @@ struct SonaApp: App {
         }
     }
 }
-
-struct PhonePage<Content: View>: View {
-    private let title: LocalizedStringKey
-    private let content: Content
-
-    init(_ title: LocalizedStringKey, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    content
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Theme.pageInset)
-                .padding(.vertical, 16)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .background(Theme.background)
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.background, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-        }
-        .tint(Theme.accent)
-        .buttonBorderShape(.roundedRectangle(radius: Theme.controlRadius))
-    }
-}

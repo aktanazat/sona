@@ -45,22 +45,32 @@ struct ChatView: View {
     // MARK: - Head
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
-            }
-            .buttonStyle(.quiet)
-            .help("Close chat")
-
+        ZStack {
             ChatModelPicker(store: store, openSettings: openSettings)
 
-            Spacer(minLength: 8)
+            HStack(spacing: 8) {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.circle)
+                .help("Close chat")
+                .accessibilityLabel("Close chat")
 
-            menu
+                Spacer(minLength: 8)
+
+                Button { store.newChat() } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.circle)
+                .disabled(store.busy || store.running)
+                .help("New chat")
+                .accessibilityLabel("New chat")
+
+                menu
+            }
         }
         .padding(.horizontal, 16)
-        .frame(height: 48)
-        .background(Theme.surface)
+        .frame(height: 52)
     }
 
     private var menu: some View {
@@ -80,13 +90,20 @@ struct ChatView: View {
             .pickerStyle(.inline)
             .disabled(store.running)
         } label: {
-            Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold))
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 28, height: 28)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.ink)
         .menuIndicator(.hidden)
         .fixedSize()
-        .foregroundStyle(Theme.inkSecondary)
+        .foregroundStyle(Theme.ink)
+        .background(Theme.surface, in: Circle())
+        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1).allowsHitTesting(false))
+        .contentShape(Circle())
         .help("Chat with the Sona agent")
+        .accessibilityLabel("Chat options")
     }
 
     /// The conversations the core remembers, newest first. A checkmark marks
@@ -204,7 +221,7 @@ struct ChatView: View {
             CardRow(action: openRequests) {
                 HStack(spacing: 10) {
                     Image(systemName: "tray.full")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(Theme.inkSecondary)
                     Text("Replies waiting for you").bodyText(14)
                 }
@@ -241,8 +258,11 @@ struct ChatView: View {
                 Image(nsImage: screenshot.image)
                     .resizable()
                     .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.radiusControl)
+                            .strokeBorder(Theme.border, lineWidth: 1))
                     .frame(maxWidth: .infinity, maxHeight: 150)
-                    .overlay(Rectangle().strokeBorder(Theme.border, lineWidth: 1))
                     .accessibilityLabel("Screenshot to share with your next question")
                 Text("Sent to your selected model when you press Send. Add it again for follow-up questions.")
                     .metaText(Theme.inkSecondary)
@@ -441,10 +461,10 @@ private struct ChatProposalCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(Theme.ink)
                 .frame(width: 30, height: 30)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
 
             VStack(alignment: .leading, spacing: 3) {
                 /* Wraps rather than truncates: this sentence is the whole of
@@ -484,9 +504,9 @@ private struct ChatProposalCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusPanel)
+            RoundedRectangle(cornerRadius: Theme.radiusCard)
                 .strokeBorder(Theme.border, lineWidth: 1))
     }
 }
@@ -548,16 +568,16 @@ private struct ChatActionCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusPanel)
+            RoundedRectangle(cornerRadius: Theme.radiusCard)
                 .strokeBorder(Theme.border, lineWidth: 1))
         .sheet(isPresented: $reviewing) { ChatActionReview(store: store, card: action) }
     }
 }
 
-/// The composer, pinned under the thread as Halcyon's is: the questions an
-/// empty chat offers, then the field in its well with the attach and voice
+/// The composer, pinned under the thread: the questions an empty chat
+/// offers, then the field in its rounded well with the attach and voice
 /// controls tucked inside it, and the one round button beside it, which is
 /// Send until a question is on its way and Stop from then until the turn is
 /// over.
@@ -568,6 +588,7 @@ private struct ChatComposer: View {
     /// open promises the other pages already read.
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var fieldFocused = false
 
     var body: some View {
         let offered = suggestions
@@ -620,8 +641,7 @@ private struct ChatComposer: View {
             ZStack(alignment: .topLeading) {
                 if store.draft.isEmpty {
                     Text(store.workspace.prompt)
-                        .font(TypeScale.body(14))
-                        .foregroundStyle(Theme.inkTertiary)
+                        .bodyText(14, Theme.inkTertiary)
                         .padding(.top, 4)
                         .allowsHitTesting(false)
                 }
@@ -630,7 +650,8 @@ private struct ChatComposer: View {
                     label: store.workspace.prompt,
                     isEnabled: store.phase != .loading && store.phase != .disabled && !store.savingModel,
                     send: { store.send() },
-                    escape: onClose)
+                    escape: onClose,
+                    focusChanged: { fieldFocused = $0 })
             }
             if store.workspace == .sonaChat {
                 Menu {
@@ -642,6 +663,7 @@ private struct ChatComposer: View {
                         .frame(width: 24, height: 24)
                 }
                 .menuStyle(.borderlessButton)
+                .tint(Theme.inkSecondary)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .foregroundStyle(Theme.inkSecondary)
@@ -659,16 +681,16 @@ private struct ChatComposer: View {
         }
         .padding(.leading, 14)
         .padding(.trailing, store.workspace == .sonaChat ? 8 : 14)
-        .padding(.vertical, 7)
+        .padding(.vertical, 8)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .strokeBorder(Theme.border, lineWidth: 1))
+                .strokeBorder(fieldFocused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 }
 
-/// Send and Stop: one 32-point circle beside the well, filled with ink while
-/// it can be pressed, as Halcyon's send is.
+/// Send and Stop: one 32-point circle beside the well, filled with the
+/// accent while it can be pressed.
 private struct ChatRoundButton: View {
     let symbol: String
     let help: String
@@ -678,10 +700,10 @@ private struct ChatRoundButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(isEnabled ? Theme.onInvert : Theme.inkDisabled)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isEnabled ? Theme.onAccent : Theme.inkDisabled)
                 .frame(width: 32, height: 32)
-                .background(isEnabled ? Theme.invert : Theme.selection, in: Circle())
+                .background(isEnabled ? Theme.accentFill : Theme.control, in: Circle())
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
@@ -734,6 +756,8 @@ private struct ChatComposerField: NSViewRepresentable {
     let isEnabled: Bool
     let send: () -> Void
     let escape: () -> Void
+    /// Whether the caret is in the field, for the well's outline.
+    let focusChanged: (Bool) -> Void
 
     /// Where React's composer stopped growing, which is about six lines.
     private static let maxHeight: CGFloat = 120
@@ -742,7 +766,8 @@ private struct ChatComposerField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
-        let view = NSTextView()
+        let view = ChatComposerTextView()
+        view.focusChanged = focusChanged
         view.delegate = context.coordinator
         view.isRichText = false
         view.allowsUndo = true
@@ -781,10 +806,11 @@ private struct ChatComposerField: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let view = scroll.documentView as? NSTextView else { return }
+        guard let view = scroll.documentView as? ChatComposerTextView else { return }
         context.coordinator.text = $text
         context.coordinator.send = send
         context.coordinator.escape = escape
+        view.focusChanged = focusChanged
         if view.string != text {
             view.string = text
         }
@@ -815,6 +841,30 @@ private struct ChatComposerField: NSViewRepresentable {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font])
         return ceil(bounds.height) + inset * 2
+    }
+}
+
+/// The composer's text view, reporting when it takes and gives up the caret.
+private final class ChatComposerTextView: NSTextView {
+    var focusChanged: (Bool) -> Void = { _ in }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { report(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { report(false) }
+        return resigned
+    }
+
+    /// The caret is first given from inside `updateNSView`, where SwiftUI
+    /// state may not change, so the report waits for the next turn.
+    private func report(_ focused: Bool) {
+        let focusChanged = focusChanged
+        DispatchQueue.main.async { focusChanged(focused) }
     }
 }
 

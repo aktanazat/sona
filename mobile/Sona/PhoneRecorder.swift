@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import Combine
 import Foundation
@@ -20,6 +21,36 @@ enum RecorderNotice {
     }
 }
 
+/// Recent input loudness, newest last, read from buffers the capture taps already hold.
+@MainActor
+final class InputLevelMeter: ObservableObject {
+    static let count = 64
+    @Published private(set) var levels = [Float](repeating: 0, count: count)
+    private var lastPush: ContinuousClock.Instant?
+
+    func push(_ level: Float) {
+        let now = ContinuousClock.now
+        if let lastPush, now - lastPush < .milliseconds(66) { return }
+        lastPush = now
+        levels.removeFirst()
+        levels.append(level)
+    }
+
+    func reset() {
+        lastPush = nil
+        guard levels.contains(where: { $0 > 0 }) else { return }
+        levels = [Float](repeating: 0, count: Self.count)
+    }
+
+    nonisolated static func level(of buffer: AVAudioPCMBuffer) -> Float {
+        guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
+        var rms: Float = 0
+        vDSP_rmsqv(samples, 1, &rms, vDSP_Length(buffer.frameLength))
+        guard rms > 0 else { return 0 }
+        return min(max((20 * log10(rms) + 50) / 50, 0), 1)
+    }
+}
+
 /// The phone's microphone capture.
 ///
 /// Nothing here starts without `start()` being called from a tap, and every capture is
@@ -31,6 +62,7 @@ final class PhoneRecorder: ObservableObject {
     @Published private(set) var elapsed: TimeInterval = 0
     /// Set when the system, not the operator, decided the outcome.
     @Published var notice: RecorderNotice?
+    let meter = InputLevelMeter()
 
     private let engine = AVAudioEngine()
     private var resampler: PCMResampler?
@@ -81,8 +113,14 @@ final class PhoneRecorder: ObservableObject {
         self.resampler = resampler
         /* The tap runs on a render thread and is the only writer until `stop()` removes
          * it, which is also what drains the last callback before `finish()` reads. */
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+        let meter = self.meter
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
             try? resampler.append(buffer)
+            let level = InputLevelMeter.level(of: buffer)
+            Task { @MainActor in
+                guard self?.isRecording == true else { return }
+                meter.push(level)
+            }
         }
         engine.prepare()
         try engine.start()
@@ -107,6 +145,7 @@ final class PhoneRecorder: ObservableObject {
         ticker?.cancel()
         ticker = nil
         isRecording = false
+        meter.reset()
         self.resampler = nil
         self.startedAt = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: [])

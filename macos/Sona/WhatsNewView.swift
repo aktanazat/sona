@@ -112,37 +112,36 @@ struct WhatsNewView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
-                .font(TypeScale.headline)
-                .foregroundStyle(Theme.ink)
-                .padding(.horizontal, 28)
-                .padding(.top, 28)
+                .heroText()
+                .accessibilityAddTraits(.isHeader)
+                .padding(.horizontal, 32)
+                .padding(.top, 32)
                 .padding(.bottom, 20)
 
             ErrorNote(store.error)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 32)
 
             // A note is as long as its release was, so the body scrolls and
             // the title stays put.
             ScrollView {
                 ReleaseNotesBody(markdown: store.note?.markdown ?? "")
-                    .padding(.horizontal, 28)
+                    .padding(.horizontal, 32)
                     .padding(.bottom, 24)
             }
             .scrollIndicators(.automatic)
             .frame(maxHeight: 460)
 
-            Hairline()
-
-            HStack {
-                Spacer()
-                Button("Close") { close() }
-                    .buttonStyle(.primary)
-                    .keyboardShortcut(.cancelAction)
+            Button { close() } label: {
+                Text("Close").frame(maxWidth: .infinity)
             }
-            .padding(20)
+            .buttonStyle(.primary)
+            .keyboardShortcut(.cancelAction)
+            .padding(.horizontal, 32)
+            .padding(.top, 8)
+            .padding(.bottom, 32)
         }
         .frame(width: 620)
-        .background(Theme.page)
+        .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
     }
 
@@ -338,7 +337,7 @@ enum ReleaseNotesParser {
 enum ReleaseNotesInline {
     static let safeSchemes = ["http", "https", "mailto"]
 
-    static func attributed(_ text: String, size: CGFloat = 15) -> AttributedString {
+    static func attributed(_ text: String, size: CGFloat = 14) -> AttributedString {
         var attributed: AttributedString
         do {
             attributed = try AttributedString(
@@ -374,13 +373,13 @@ struct ReleaseNotesBody: View {
             ForEach(ReleaseNotesParser.blocks(from: markdown)) { block in
                 switch block {
                 case let .heading(level, text):
-                    Text(ReleaseNotesInline.attributed(text, size: level == 1 ? 17 : 15))
-                        .font(level == 1 ? TypeScale.headline : TypeScale.label())
+                    Text(ReleaseNotesInline.attributed(text, size: level == 1 ? 15 : 13))
+                        .font(level == 1 ? TypeScale.title : .system(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.ink)
                         .padding(.top, level == 1 ? 0 : 6)
                 case let .paragraph(text):
                     Text(ReleaseNotesInline.attributed(text))
-                        .bodyText(15, Theme.inkSecondary)
+                        .bodyText(14, Theme.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 case let .bullets(items):
                     VStack(alignment: .leading, spacing: 6) {
@@ -398,7 +397,7 @@ struct ReleaseNotesBody: View {
                     HStack(alignment: .top, spacing: 12) {
                         Rectangle().fill(Theme.border).frame(width: 2)
                         Text(ReleaseNotesInline.attributed(text))
-                            .bodyText(15, Theme.inkSecondary)
+                            .bodyText(14, Theme.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 case let .code(text):
@@ -431,10 +430,10 @@ private struct ReleaseNotesListItem: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Text(marker)
-                .bodyText(15, Theme.inkTertiary)
+                .bodyText(14, Theme.inkTertiary)
                 .frame(minWidth: 14, alignment: .leading)
             Text(ReleaseNotesInline.attributed(text))
-                .bodyText(15, Theme.inkSecondary)
+                .bodyText(14, Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

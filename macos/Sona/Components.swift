@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One pixel of divider, edge to edge.
+/// One pixel of divider.
 struct Hairline: View {
     var body: some View {
         Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -18,10 +18,14 @@ struct Card<Content: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
+        // Each row draws its own separator underneath; pulling the stack up
+        // one point lets the clip take the last row's, so a card never ends
+        // on a line.
+        .padding(.bottom, -1)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.page)
-        .overlay(alignment: .top) { Hairline() }
-        .overlay(alignment: .bottom) { Hairline() }
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
     }
 }
 
@@ -54,11 +58,11 @@ struct CardRow<Leading: View, Trailing: View>: View {
             Spacer(minLength: 12)
             trailing
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(action != nil && hovering ? Theme.wash : .clear)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
         .overlay {
             RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .strokeBorder(focused ? Theme.accent : .clear, lineWidth: 2)
@@ -102,10 +106,10 @@ struct CardLine: View {
         Text(text)
             .metaText()
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline() }
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -115,11 +119,11 @@ struct PrimaryButton: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 14))
-            .foregroundStyle(Theme.onInvert)
-            .padding(.horizontal, compact ? 10 : 12)
-            .frame(height: compact ? 28 : 32)
-            .background(Theme.invert.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .font(TypeScale.label(13))
+            .foregroundStyle(Theme.onAccent)
+            .padding(.horizontal, compact ? 10 : 14)
+            .frame(height: compact ? 26 : 30)
+            .background(Theme.accentFill.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
     }
 }
@@ -130,12 +134,11 @@ struct SecondaryButton: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 14))
+            .font(TypeScale.label(13))
             .foregroundStyle(Theme.ink)
-            .padding(.horizontal, compact ? 10 : 12)
-            .frame(height: compact ? 28 : 32)
-            .background(configuration.isPressed ? Theme.selection : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+            .padding(.horizontal, compact ? 10 : 14)
+            .frame(height: compact ? 26 : 30)
+            .background(configuration.isPressed ? Theme.selection : Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
     }
 }
@@ -149,7 +152,7 @@ struct QuietButton: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 14))
+            .font(TypeScale.label(13))
             .foregroundStyle(configuration.isPressed ? Theme.ink : color)
             .opacity(isEnabled ? 1 : 0.45)
             .contentShape(Rectangle())
@@ -169,6 +172,29 @@ extension ButtonStyle where Self == QuietButton {
     static var quiet: QuietButton { QuietButton() }
 }
 
+/// A round icon button for a page's header: back, add, search, share, more.
+struct CircleButton: ButtonStyle {
+    var size: CGFloat = 28
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Theme.ink)
+            .frame(width: size, height: size)
+            .background(configuration.isPressed || hovering ? Theme.selection : Theme.surface, in: Circle())
+            .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
+            .contentShape(Circle())
+            .onHover { hovering = $0 }
+            .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+extension ButtonStyle where Self == CircleButton {
+    static var circle: CircleButton { CircleButton() }
+}
+
 /// A key cap: "⌥", "Space".
 struct KeyCap: View {
     let text: String
@@ -179,13 +205,12 @@ struct KeyCap: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.body(12))
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.inkSecondary)
             .fixedSize()
-            .padding(.horizontal, 5)
-            .frame(height: 20)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusKey).strokeBorder(Theme.border, lineWidth: 1))
+            .padding(.horizontal, 6)
+            .frame(minWidth: 22, minHeight: 22)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
     }
 }
 
@@ -246,9 +271,9 @@ struct SearchField: View {
                 .focused($focused)
         }
         .padding(.horizontal, 10)
-        .frame(height: 32)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(height: 30)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 }
 
@@ -264,7 +289,7 @@ struct InputField: View {
             .font(TypeScale.body())
             .foregroundStyle(Theme.ink)
             .focused($focused)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .frame(height: 32)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
@@ -310,11 +335,11 @@ struct Chip: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.label(12))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Theme.inkSecondary)
             .padding(.horizontal, 6)
-            .frame(height: 20)
-            .background(Theme.selection, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+            .frame(height: 18)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
     }
 }
 
@@ -331,15 +356,16 @@ struct PageTitle<Action: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .center, spacing: 12) {
                     heading.fixedSize(horizontal: true, vertical: false)
                     Spacer(minLength: 12)
                     action.fixedSize(horizontal: true, vertical: false)
                 }
+                .frame(minHeight: 30)
                 VStack(alignment: .leading, spacing: 12) {
-                    heading
+                    heading.frame(minHeight: 30)
                     action
                 }
             }
@@ -374,11 +400,12 @@ struct PageSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(label).sectionLabel()
+                .accessibilityAddTraits(.isHeader)
             content
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, 28)
     }
 }
 
@@ -396,9 +423,9 @@ struct Page<Content: View>: View {
             }
             .frame(maxWidth: Theme.contentMax, alignment: .leading)
             .padding(.horizontal, Theme.margin)
-            .padding(.top, 24)
+            .padding(.top, 12)
             .padding(.bottom, 40)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.automatic)
     }
@@ -411,8 +438,13 @@ struct BackLink: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.surface, in: Circle())
+                    .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
                 Text(title)
             }
         }
@@ -431,7 +463,7 @@ struct ToggleRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).bodyText()
                 if let detail {
-                    Text(detail).metaText()
+                    Text(detail).metaText(Theme.inkSecondary)
                 }
             }
         } trailing: {
@@ -451,12 +483,13 @@ struct Stat: View {
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label).metaText(Theme.inkSecondary)
+        VStack(alignment: .leading, spacing: 4) {
             Text(value).font(TypeScale.stat).foregroundStyle(Theme.ink).monospacedDigit()
+            Text(label).metaText(Theme.inkSecondary)
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 }
 

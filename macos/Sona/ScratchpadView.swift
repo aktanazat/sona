@@ -40,41 +40,53 @@ private struct ScratchNoteListPage: View {
                 HStack(spacing: 8) {
                     SearchField(prompt: "Search notes", text: $store.query)
                         .frame(width: 216)
-                    Button("New note") {
+                    Button {
                         Task { await store.newNote() }
+                    } label: {
+                        Image(systemName: "plus")
                     }
-                    .buttonStyle(.primary)
+                    .buttonStyle(.circle)
+                    .help("New note")
+                    .accessibilityLabel("New note")
                 }
             }
             ErrorNote(store.error)
-            Card { rows }
+            rows
         }
     }
 
     @ViewBuilder private var rows: some View {
         switch store.phase {
         case .loading:
-            CardLine("Reading your notes…")
+            Card { CardLine("Reading your notes…") }
         case let .failed(message):
-            CardRow {
-                Text(message).bodyText(15, Theme.inkSecondary)
-            } trailing: {
-                Button("Try again") {
-                    Task { await store.start() }
+            Card {
+                CardRow {
+                    Text(message).bodyText(14, Theme.inkSecondary)
+                } trailing: {
+                    Button("Try again") {
+                        Task { await store.start() }
+                    }
+                    .buttonStyle(.compact)
                 }
-                .buttonStyle(.compact)
             }
         case .ready:
             if store.notes.isEmpty {
-                if searching {
-                    CardLine("No notes match “\(store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines))”.")
-                } else {
-                    CardLine("No notes yet.")
+                Card {
+                    if searching {
+                        CardLine("No notes match “\(store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines))”.")
+                    } else {
+                        CardLine("No notes yet.")
+                    }
                 }
             } else {
-                ForEach(store.notes) { note in
-                    ScratchNoteRow(note: note) {
-                        Task { await store.open(note) }
+                VStack(spacing: 8) {
+                    ForEach(store.notes) { note in
+                        Card {
+                            ScratchNoteRow(note: note) {
+                                Task { await store.open(note) }
+                            }
+                        }
                     }
                 }
             }
@@ -108,6 +120,7 @@ private struct ScratchNoteRow: View {
                 }
                 Text(FeedClock.ago(note.updatedAtMs))
                     .metaText()
+                    .monospacedDigit()
                     .fixedSize()
             }
         }
@@ -156,20 +169,28 @@ private struct ScratchNoteEditorPage: View {
 
     var body: some View {
         Page {
-            BackLink(title: "Scratchpad") {
-                Task { await store.close() }
-            }
-            PageTitle(store.saved?.title ?? "New note", subtitle: status) {
+            HStack(alignment: .top, spacing: 8) {
+                BackLink(title: "Scratchpad") {
+                    Task { await store.close() }
+                }
+                Spacer(minLength: 12)
                 ScratchNoteActions(
                     store: store,
                     share: shareAction,
                     showHistory: { showingHistory = true },
                     confirmDelete: { confirmingDelete = true })
             }
-            ErrorNote(store.error)
-            Card {
-                ScratchNoteEditor(text: bodyText, focused: $editorFocused)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(store.saved?.title ?? "New note")
+                    .heroText()
+                    .lineLimit(2)
+                    .accessibilityAddTraits(.isHeader)
+                Text(status).metaText(Theme.inkSecondary)
             }
+            .padding(.top, 8)
+            .padding(.bottom, 20)
+            ErrorNote(store.error)
+            ScratchNoteEditor(text: bodyText, focused: $editorFocused)
         }
         .onAppear { editorFocused = true }
         .onChange(of: store.focusRequest) { _, _ in
@@ -209,18 +230,34 @@ struct ScratchNoteActions: View {
     var body: some View {
         HStack(spacing: 8) {
             if let saved = store.saved {
-                Button(saved.pinned ? "Unpin" : "Pin") {
+                Button {
                     Task { await store.togglePin() }
+                } label: {
+                    Image(systemName: saved.pinned ? "pin.slash" : "pin")
                 }
-                .buttonStyle(.compact)
-                Button("Version history", action: showHistory)
-                    .buttonStyle(.compact)
+                .buttonStyle(.circle)
+                .help(saved.pinned ? "Unpin" : "Pin")
+                .accessibilityLabel(saved.pinned ? "Unpin" : "Pin")
+                Button(action: showHistory) {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.circle)
+                .help("Version history")
+                .accessibilityLabel("Version history")
                 if let share {
-                    Button("Share link…", action: share)
-                        .buttonStyle(.compact)
+                    Button(action: share) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.circle)
+                    .help("Share link…")
+                    .accessibilityLabel("Share link…")
                 }
-                Button("Delete", action: confirmDelete)
-                    .buttonStyle(QuietButton(color: Theme.live, compact: true))
+                Button(action: confirmDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.circle)
+                .help("Delete")
+                .accessibilityLabel("Delete")
             }
         }
     }
@@ -260,8 +297,7 @@ private struct ScratchNoteEditor: View {
                         .accessibilityLabel("Note")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
+            .padding(.horizontal, -5)
     }
 }
 
@@ -276,13 +312,18 @@ private struct ScratchVersionHistorySheet: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Version history").headlineText()
+                    Text("Version history").titleText().accessibilityAddTraits(.isHeader)
                     Text("The last 50 saves of this note. Restoring one keeps the words it replaces as the version before it.")
-                        .metaText()
+                        .metaText(Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
-                Button("Done") { dismiss() }
-                    .buttonStyle(.compact)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.circle)
+                .help("Done")
+                .accessibilityLabel("Done")
             }
             ErrorNote(store.versionsError)
             ScrollView {
@@ -329,7 +370,7 @@ private struct ScratchVersionRow: View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(when).bodyText(15)
+                    Text(when).bodyText(14)
                     if current {
                         Chip("Current")
                     }

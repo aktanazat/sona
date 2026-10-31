@@ -100,8 +100,12 @@ private struct LibraryHeader: View {
                 HStack(spacing: 8) {
                     SearchField(prompt: "Search transcripts", text: $query)
                         .frame(width: 216)
-                    Button("Import", action: importAudio)
-                        .buttonStyle(.primary)
+                    Button(action: importAudio) {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.circle)
+                    .help("Import")
+                    .accessibilityLabel("Import")
                     LibraryMenu(store: store)
                 }
             }
@@ -142,14 +146,19 @@ private struct LibraryMenu: View {
             Button("Open recordings folder") { store.openRecordingsFolder() }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 28, height: 32)
-                .contentShape(Rectangle())
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.ink)
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
+        .frame(width: 28, height: 28)
+        .background(Theme.surface, in: Circle())
+        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
+        .help("More")
         .accessibilityLabel("More")
     }
 }
@@ -165,29 +174,30 @@ private struct LibraryActivity: View {
         if let trend = store.trend, !trend.points.isEmpty {
             PageSection("Activity") {
                 Card {
-                    CardRow {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(totals(trend)).bodyText()
-                            Text(streak(trend)).metaText()
-                        }
-                    } trailing: {
-                        Picker(
-                            "",
-                            selection: Binding(
-                                get: { store.trendRange },
-                                set: { store.trendRange = $0 })
-                        ) {
-                            ForEach(TrendRange.allCases, id: \.self) { range in
-                                Text(range.label).tag(range)
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(totals(trend)).bodyText()
+                                Text(streak(trend)).metaText()
                             }
+                            Spacer(minLength: 12)
+                            Picker(
+                                "",
+                                selection: Binding(
+                                    get: { store.trendRange },
+                                    set: { store.trendRange = $0 })
+                            ) {
+                                ForEach(TrendRange.allCases, id: \.self) { range in
+                                    Text(range.label).tag(range)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .fixedSize()
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .fixedSize()
+                        TrendBars(points: trend.points)
                     }
-                    TrendBars(points: trend.points)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 12)
+                    .padding(16)
                 }
             }
         }
@@ -262,7 +272,7 @@ private struct LibraryFeed: View {
     let processAgain: (HistoryRow) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 24) {
             switch store.phase {
             case .loading:
                 HistoryPlaceholder()
@@ -296,7 +306,7 @@ private struct LibraryFeed: View {
                 }
             }
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, 28)
     }
 
     private var emptyLine: String {
@@ -309,22 +319,22 @@ private struct LibraryFeed: View {
 /// with blanks in it is noisier than the bars.
 private struct HistoryPlaceholder: View {
     var body: some View {
-        Card {
+        VStack(spacing: 8) {
             ForEach(0..<5, id: \.self) { _ in
-                HStack(spacing: 16) {
-                    RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(height: 12)
-                    RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(width: 48, height: 10)
+                Card {
+                    HStack(spacing: 16) {
+                        RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(height: 12)
+                        RoundedRectangle(cornerRadius: 3).fill(Theme.selection).frame(width: 48, height: 10)
+                    }
+                    .padding(16)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .overlay(alignment: .bottom) { Hairline() }
             }
         }
     }
 }
 
-/// One day: a heading over one card of rows, with the day's empty recordings
-/// behind a single line at the end of it.
+/// One day: a heading over the day's rows, each on its own card, with the
+/// day's empty recordings behind a single card at the end.
 private struct HistoryDaySection: View {
     let store: LibraryStore
     let day: HistoryDay
@@ -333,17 +343,22 @@ private struct HistoryDaySection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(day.heading).metaText(Theme.inkSecondary)
-            Card {
-                ForEach(day.spoken) { row in
+            Text(day.heading)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.inkTertiary)
+                .accessibilityAddTraits(.isHeader)
+            ForEach(day.spoken) { row in
+                Card {
                     HistoryRowView(
                         store: store,
                         row: row,
                         correct: correct,
                         processAgain: processAgain)
-                        .id(row.id)
                 }
-                if !day.silent.isEmpty {
+                .id(row.id)
+            }
+            if !day.silent.isEmpty {
+                Card {
                     HistorySilentGroup(
                         store: store,
                         rows: day.silent,
@@ -365,6 +380,7 @@ private struct HistorySilentGroup: View {
     let processAgain: (HistoryRow) -> Void
 
     @State private var open = false
+    @State private var hovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -375,16 +391,18 @@ private struct HistorySilentGroup: View {
                     Image(systemName: open ? "chevron.down" : "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.inkTertiary)
+                        .frame(width: 12)
                     Text(rows.count == 1 ? "1 empty recording" : "\(rows.count) empty recordings")
                         .metaText()
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .overlay(alignment: .bottom) { Hairline() }
+            .background(hovering ? Theme.wash : .clear)
+            .onHover { hovering = $0 }
             if open {
                 ForEach(rows) { row in
                     HistoryRowView(
@@ -392,6 +410,7 @@ private struct HistorySilentGroup: View {
                         row: row,
                         correct: correct,
                         processAgain: processAgain)
+                        .overlay(alignment: .top) { Hairline().padding(.horizontal, 16) }
                 }
             }
         }
@@ -465,7 +484,7 @@ private struct HistoryRowView: View {
                 .background(hovering && !expanded ? Theme.wash : .clear)
                 .onHover { hovering = $0 }
             if expanded {
-                Hairline().padding(.horizontal, 12)
+                Hairline().padding(.horizontal, 16)
                 HistoryRowDetail(
                     store: store,
                     row: row,
@@ -476,7 +495,6 @@ private struct HistoryRowView: View {
                     processAgain: processAgain)
             }
         }
-        .overlay(alignment: .bottom) { Hairline() }
         .task(id: row.id) { await store.loadReceipts(for: row.id) }
     }
 
@@ -493,17 +511,17 @@ private struct HistoryRowView: View {
             }
             if let words {
                 Text(LibraryCount.words(words))
-                    .font(TypeScale.mono(13))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .frame(minWidth: 62, alignment: .trailing)
+                    .font(TypeScale.body(12).monospacedDigit())
+                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(minWidth: 64, alignment: .trailing)
             }
             Text(row.item.date.time)
-                .font(TypeScale.mono(13))
-                .foregroundStyle(Theme.inkSecondary)
-                .frame(minWidth: 44, alignment: .trailing)
+                .font(TypeScale.body(12).monospacedDigit())
+                .foregroundStyle(Theme.inkTertiary)
+                .frame(minWidth: 48, alignment: .trailing)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -573,7 +591,7 @@ private struct HistoryRowDetail: View {
             controls
             ReceiptInspector(store: store, row: row)
         }
-        .padding(12)
+        .padding(16)
         .alert("Delete this dictation?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) { store.delete(row.id) }
             Button("Keep it", role: .cancel) {}
@@ -610,14 +628,18 @@ private struct HistoryRowDetail: View {
                     .disabled(busy)
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .frame(width: 26, height: 30)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
+            .tint(Theme.inkSecondary)
             .menuIndicator(.hidden)
             .fixedSize()
+            .frame(width: 26, height: 26)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .help("More")
             .accessibilityLabel("More")
             Spacer(minLength: 0)
         }
@@ -649,10 +671,10 @@ private struct PlaybackBar: View {
         HStack(spacing: 12) {
             Button { store.togglePlayback(for: id) } label: {
                 Image(systemName: active && store.playing ? "pause.fill" : "play.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(loading ? Theme.inkDisabled : Theme.ink)
-                    .frame(width: 26, height: 26)
-                    .background(Theme.inset, in: Circle())
+                    .frame(width: 28, height: 28)
+                    .background(Theme.control, in: Circle())
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -661,9 +683,15 @@ private struct PlaybackBar: View {
             PlaybackScrubber(fraction: fraction, total: total) { store.seek($0) }
 
             Text("\(LibraryClock.short(active ? store.position : 0)) / \(LibraryClock.short(total))")
-                .font(TypeScale.mono(13))
+                .font(TypeScale.body(12).monospacedDigit())
                 .foregroundStyle(Theme.inkSecondary)
         }
+        .padding(.leading, 6)
+        .padding(.trailing, 16)
+        .padding(.vertical, 6)
+        .background(Theme.inset, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
         .frame(maxWidth: 420, alignment: .leading)
     }
 }
@@ -731,7 +759,7 @@ private struct ReceiptInspector: View {
             // they came from. Naming the id says which row.
             if let parentId = row.parentId {
                 Text("from #\(parentId)")
-                    .font(TypeScale.mono(13))
+                    .font(TypeScale.body(12).monospacedDigit())
                     .foregroundStyle(Theme.inkTertiary)
             }
             switch store.receipts[row.id] {
@@ -758,19 +786,19 @@ private struct ReceiptCard: View {
     let receipt: HistoryRunReceipt
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(spacing: 0) {
                 ForEach(Array(pairs.enumerated()), id: \.element.id) { index, pair in
                     HStack(alignment: .firstTextBaseline, spacing: 16) {
-                        Text(pair.label).metaText()
+                        Text(pair.label).bodyText(13, Theme.inkSecondary)
                         Spacer(minLength: 12)
                         Text(pair.value)
-                            .font(TypeScale.mono(13))
+                            .font(TypeScale.body(13).monospacedDigit())
                             .foregroundStyle(pair.tone)
                             .multilineTextAlignment(.trailing)
                             .textSelection(.enabled)
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 8)
                     .overlay(alignment: .top) {
                         if index > 0 { Hairline() }
                     }
@@ -791,7 +819,6 @@ private struct ReceiptCard: View {
                         value: $0.delivery.outcome.label)
                 })
         }
-        .padding(.top, 2)
     }
 
     /// The receipt's key and value pairs, in the order the inspector prints
@@ -887,8 +914,10 @@ private struct ReceiptTable: View {
     let rows: [ReceiptTableRow]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).metaText(Theme.inkSecondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.inkTertiary)
             if rows.isEmpty, let empty {
                 Text(empty).metaText()
             } else {
@@ -899,7 +928,7 @@ private struct ReceiptTable: View {
                         Text(columns.1).metaText(Theme.inkTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 8)
                     ForEach(rows) { row in
                         HStack(alignment: .firstTextBaseline, spacing: 16) {
                             Text(row.header)
@@ -907,11 +936,11 @@ private struct ReceiptTable: View {
                                 .foregroundStyle(Theme.inkSecondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             Text(row.value)
-                                .font(TypeScale.mono(13))
+                                .font(TypeScale.body(13))
                                 .foregroundStyle(Theme.ink)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 8)
                         .overlay(alignment: .top) { Hairline() }
                     }
                 }

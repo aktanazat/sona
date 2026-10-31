@@ -144,7 +144,7 @@ private struct WordCorrectionRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 10) {
                     Text("Word correction threshold")
-                        .bodyText(15, store.promptedModel ? Theme.inkDisabled : Theme.ink)
+                        .bodyText(14, store.promptedModel ? Theme.inkDisabled : Theme.ink)
                     Text(store.promptedModel ? "Not applied" : String(format: "%.2f", value))
                         .metaText(Theme.inkSecondary)
                 }

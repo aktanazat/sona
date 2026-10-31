@@ -177,59 +177,122 @@ private struct KeyboardView: View {
     let newLine: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                SonaMark()
+                    .frame(width: 26, height: 15)
+                    .foregroundStyle(Theme.textPrimary)
+                    .accessibilityHidden(true)
+                Text("keyboard.title")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if state.hasFullAccess {
+                    control
+                }
+            }
+            .frame(minHeight: 44)
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("keyboard.title").font(.headline)
+                VStack(alignment: .leading, spacing: 8) {
                     if !state.hasFullAccess {
-                        Text("keyboard.needsFullAccess").font(.footnote)
+                        Text("keyboard.needsFullAccess").font(.footnote).foregroundStyle(Theme.textSecondary)
                         Link("keyboard.openApp", destination: DictationLink.url).frame(minHeight: 44)
+                    } else if let draft = state.draft {
+                        Text(draft.text).font(.body).lineLimit(1...3)
+                        Text("keyboard.otherField").font(.footnote).foregroundStyle(Theme.textSecondary)
+                        HStack(spacing: 8) {
+                            Button("keyboard.insert", action: insert)
+                                .buttonStyle(.borderedProminent)
+                                .foregroundStyle(.white)
+                            Button("keyboard.discard", action: discard)
+                                .buttonStyle(.bordered)
+                                .tint(Theme.textSecondary)
+                        }
+                        .buttonBorderShape(.capsule)
+                        .frame(minHeight: 44)
+                    } else if let notice = state.session.message ?? state.notice {
+                        Text(notice).font(.footnote).foregroundStyle(Theme.textSecondary)
+                            .accessibilityIdentifier("keyboard-status")
                     } else {
-                        if state.warm, state.session.phase == .listening {
-                            Button(action: stop) {
-                                Label("keyboard.stop", systemImage: "stop.fill").frame(maxWidth: .infinity, minHeight: 44)
-                            }.buttonStyle(.borderedProminent).tint(Theme.recording)
-                            .accessibilityIdentifier("keyboard-stop")
-                        } else if state.warm, state.session.phase == .finishing || state.waiting {
-                            HStack { ProgressView(); Text("dictation.finishing") }.frame(minHeight: 44)
-                        } else if state.warm {
-                            Button(action: microphone) {
-                                Label("dictation.start", systemImage: "mic.fill").frame(maxWidth: .infinity, minHeight: 44)
-                            }.buttonStyle(.borderedProminent).accessibilityIdentifier("keyboard-mic")
-                        } else {
-                            Link(destination: state.startURL) {
-                                Label("dictation.start", systemImage: "mic.fill").frame(maxWidth: .infinity, minHeight: 44)
-                            }.buttonStyle(.borderedProminent).accessibilityIdentifier("keyboard-open-sona")
-                        }
-                        if let draft = state.draft {
-                            Text(draft.text).font(.body).lineLimit(1...3)
-                            Text("keyboard.otherField").font(.footnote)
-                            HStack {
-                                Button("keyboard.insert", action: insert).frame(minHeight: 44)
-                                Button("keyboard.discard", action: discard).frame(minHeight: 44)
-                            }
-                        } else if let notice = state.session.message ?? state.notice {
-                            Text(notice).font(.footnote).accessibilityIdentifier("keyboard-status")
-                        } else {
-                            Text(state.warm ? "keyboard.ready" : "keyboard.cold").font(.footnote)
-                        }
+                        Text(state.warm ? "keyboard.ready" : "keyboard.cold").font(.footnote)
+                            .foregroundStyle(Theme.textSecondary)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.scrollBounceBehavior(.basedOnSize)
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 Button(action: nextKeyboard) {
-                    Label("keyboard.next", systemImage: "globe").labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    Label("keyboard.next", systemImage: "globe").labelStyle(.iconOnly).frame(minWidth: 52, minHeight: 44)
                 }
-                Button("keyboard.space", action: space).frame(maxWidth: .infinity, minHeight: 44)
+                Button(action: space) {
+                    Text("keyboard.space").frame(maxWidth: .infinity, minHeight: 44)
+                }
                 Button(action: delete) {
-                    Label("keyboard.delete", systemImage: "delete.left").labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    Label("keyboard.delete", systemImage: "delete.left").labelStyle(.iconOnly).frame(minWidth: 52, minHeight: 44)
                 }
                 Button(action: newLine) {
-                    Label("keyboard.return", systemImage: "return").labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    Label("keyboard.return", systemImage: "return").labelStyle(.iconOnly).frame(minWidth: 52, minHeight: 44)
                 }
-            }.buttonStyle(.bordered)
+            }.buttonStyle(KeyStyle())
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .foregroundStyle(Theme.textPrimary).background(Theme.inset).tint(Theme.accent)
+    }
+
+    @ViewBuilder
+    private var control: some View {
+        if state.warm, state.session.phase == .listening {
+            Button(action: stop) {
+                RecordPill(glyph: .stop, title: "keyboard.stop", height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("keyboard-stop")
+        } else if state.warm, state.session.phase == .finishing || state.waiting {
+            RecordPill(glyph: .busy, title: "dictation.finishing", height: 40)
+                .disabled(true)
+        } else if state.warm {
+            Button(action: microphone) {
+                RecordPill(glyph: .record, title: "dictation.start", height: 40)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("keyboard-mic")
+        } else {
+            Link(destination: state.startURL) {
+                RecordPill(glyph: .record, title: "dictation.start", height: 40)
+            }
+            .accessibilityIdentifier("keyboard-open-sona")
+        }
+    }
+}
+
+private struct KeyStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                configuration.isPressed ? Theme.border : Theme.surface,
+                in: RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
+            )
+    }
+}
+
+/// Sona's mark, traced from the app icon in its 1024-point space.
+private struct SonaMark: View {
+    var body: some View {
+        Canvas { context, size in
+            let scale = min(size.width / 678, size.height / 383)
+            let transform = CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: -173, y: -320)
+            let dot = Path(ellipseIn: CGRect(x: 173, y: 458, width: 108, height: 108))
+            var wave = Path()
+            wave.move(to: CGPoint(x: 404, y: 512))
+            wave.addCurve(to: CGPoint(x: 481, y: 374), control1: CGPoint(x: 420, y: 440), control2: CGPoint(x: 450, y: 374))
+            wave.addCurve(to: CGPoint(x: 620, y: 649), control1: CGPoint(x: 530, y: 374), control2: CGPoint(x: 570, y: 649))
+            wave.addCurve(to: CGPoint(x: 760, y: 472), control1: CGPoint(x: 680, y: 649), control2: CGPoint(x: 720, y: 472))
+            wave.addLine(to: CGPoint(x: 797, y: 472))
+            context.fill(dot.applying(transform), with: .foreground)
+            context.stroke(
+                wave.applying(transform),
+                with: .foreground,
+                style: StrokeStyle(lineWidth: 108 * scale, lineCap: .round, lineJoin: .round)
+            )
+        }
     }
 }
