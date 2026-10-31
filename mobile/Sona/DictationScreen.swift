@@ -22,6 +22,13 @@ struct DictationScreen: View {
                         .font(.subheadline)
                         .foregroundStyle(Theme.textPrimary)
                         .accessibilityIdentifier("keyboard-return-instruction")
+                    if !keyboardEnabled {
+                        Text("keyboard.permission")
+                            .font(.footnote)
+                            .foregroundStyle(Theme.textSecondary)
+                        Button("dictation.settings") { showsSettings = true }
+                            .font(.subheadline)
+                    }
                 }
                 LevelWaveform(meter: dictation.meter, height: 48)
                     .padding(.vertical, 8)
