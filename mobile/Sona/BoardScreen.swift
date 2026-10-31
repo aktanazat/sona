@@ -12,8 +12,7 @@ struct BoardScreen: View {
                 let sections = model.board?.sections() ?? []
                 if sections.isEmpty {
                     empty
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Theme.background)
+                        .listRowBackground(Color.clear)
                 } else {
                     ForEach(sections) { section in
                         Section {
@@ -25,11 +24,7 @@ struct BoardScreen: View {
                                 .accessibilityElement(children: .combine)
                                 .accessibilityHint(Text("a11y.thought"))
                                 .accessibilityIdentifier("tile-\(tile.id)")
-                                .listRowBackground(Theme.background)
-                                .listRowSeparatorTint(Theme.border)
-                                .listRowInsets(
-                                    EdgeInsets(top: 8, leading: Theme.pageInset, bottom: 8, trailing: Theme.pageInset)
-                                )
+                                .listRowBackground(Theme.surface)
                             }
                         } header: {
                             header(section)
@@ -38,13 +33,11 @@ struct BoardScreen: View {
                     }
                 }
             }
-            .listStyle(.plain)
+            .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
             .navigationTitle("tab.board")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.background, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
             .refreshable { await model.refreshBoard() }
             .safeAreaInset(edge: .bottom) { status }
             .sheet(item: $open) { tile in
@@ -63,7 +56,7 @@ struct BoardScreen: View {
             if let cluster = section.cluster {
                 Circle()
                     .fill(Theme.cluster(hue: cluster.hue))
-                    .frame(width: 6, height: 6)
+                    .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
                 Text(cluster.name)
             } else {
@@ -74,24 +67,26 @@ struct BoardScreen: View {
                 .monospacedDigit()
                 .foregroundStyle(Theme.textTertiary)
         }
-        .font(.subheadline.weight(.medium))
+        .font(.subheadline.weight(.semibold))
         .foregroundStyle(Theme.textSecondary)
-        .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
     }
 
     private var empty: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(spacing: 16) {
             Text(model.isPaired ? "board.empty" : "board.notPaired")
-                .font(.subheadline)
+                .font(.body)
                 .foregroundStyle(Theme.textSecondary)
+                .multilineTextAlignment(.center)
             if !model.isPaired {
                 Button("pairing.line.hint") { showsPairing = true }
-                    .frame(minHeight: 44)
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.large)
                     .accessibilityIdentifier("board-pair")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 240)
         .accessibilityIdentifier("board-empty")
     }
 
@@ -104,13 +99,10 @@ struct BoardScreen: View {
             Text(model.boardState == .syncing ? "board.syncing" : "board.offline")
                 .font(.footnote)
                 .foregroundStyle(Theme.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Theme.pageInset)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Theme.surface)
-                .overlay(alignment: .top) {
-                    Rectangle().fill(Theme.border).frame(height: 0.5)
-                }
+                .glassEffect(.regular, in: Capsule())
+                .padding(.bottom, 8)
                 .accessibilityIdentifier("board-status")
         }
     }
@@ -126,17 +118,13 @@ private struct BoardTileView: View {
                 AttachmentImage(
                     model: model, objectId: tile.id, head: tile.head, image: image, maxSide: 600
                 )
-                .frame(width: 64, height: 64)
+                .frame(width: 56, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-                        .strokeBorder(Theme.border, lineWidth: 0.5)
-                }
                 .accessibilityHidden(true)
             }
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 (tile.title.map { Text(verbatim: $0) } ?? fallbackTitle)
-                    .font(.body.weight(.medium))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(3)
                 if let summary = tile.card?.summary, !summary.isEmpty {
@@ -156,10 +144,12 @@ private struct BoardTileView: View {
                             .accessibilityLabel(Text("board.pinned"))
                     }
                 }
-                .font(.caption)
+                .font(.footnote)
                 .foregroundStyle(Theme.textTertiary)
+                .padding(.top, 2)
             }
         }
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
     }
@@ -242,36 +232,29 @@ private struct ThoughtDetailScreen: View {
                             )
                     }
                     if let card = tile.card {
-                        Text(card.title)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(Theme.cluster(hue: card.cluster.hue))
-                                .frame(width: 8, height: 8)
-                            Text(card.cluster.name)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(card.title)
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(Theme.textPrimary)
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(Theme.cluster(hue: card.cluster.hue))
+                                    .frame(width: 8, height: 8)
+                                    .accessibilityHidden(true)
+                                Text(card.cluster.name)
+                            }
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.textSecondary)
                         }
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.textSecondary)
                         if !card.summary.isEmpty {
                             Text(card.summary)
-                                .font(.subheadline)
+                                .font(.body)
                                 .foregroundStyle(Theme.textSecondary)
                         }
                         if !card.tags.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(card.tags, id: \.self) { tag in
-                                        Text(tag)
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.textSecondary)
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 4)
-                                            .background(Theme.inset)
-                                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                                    }
-                                }
-                            }
+                            Text(card.tags.joined(separator: " · "))
+                                .font(.footnote)
+                                .foregroundStyle(Theme.textTertiary)
                         }
                     }
                     if !tile.thought.text.isEmpty {
@@ -305,21 +288,27 @@ private struct ThoughtDetailScreen: View {
                                 .formatted(date: .abbreviated, time: .shortened)
                         )
                     )
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundStyle(Theme.textTertiary)
                 }
-                .padding(Theme.pageInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Theme.pageInset)
+                .padding(.vertical, 8)
             }
             .background(Theme.background)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("board.done") { dismiss() }
+                    Button { dismiss() } label: {
+                        Label("board.done", systemImage: "xmark")
+                    }
                 }
                 ToolbarItem(placement: .destructiveAction) {
-                    Button("board.delete", role: .destructive) { confirmsDelete = true }
-                        .disabled(deleting)
-                        .accessibilityIdentifier("thought-delete")
+                    Button(role: .destructive) { confirmsDelete = true } label: {
+                        Label("board.delete", systemImage: "trash")
+                    }
+                    .disabled(deleting)
+                    .accessibilityIdentifier("thought-delete")
                 }
             }
             .confirmationDialog(

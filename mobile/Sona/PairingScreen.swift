@@ -8,57 +8,50 @@ struct PairingScreen: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("pair.title")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                vault
+        NavigationStack {
+            Form {
+                Section {
+                    field("pair.address", text: $model.endpointDraft, identifier: "endpoint")
+                        .keyboardType(.URL)
+                    field("pair.vaultId", text: $model.vaultIdDraft, identifier: "vault-id")
+                } footer: {
+                    Text("pair.where")
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .listRowBackground(Theme.surface)
                 if let offer = model.pairingOffer {
                     code(offer)
                 }
-                actions
-                calls
-                if let message = model.pairingMessage {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.textSecondary)
-                        .accessibilityIdentifier("pair-message")
+                Section {
+                    actions
+                } footer: {
+                    if let message = model.pairingMessage {
+                        Text(message)
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.top, 4)
+                            .accessibilityIdentifier("pair-message")
+                    }
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+                Section {
+                    calls
+                }
+                .listRowBackground(Theme.surface)
+            }
+            .scrollContentBackground(.hidden)
+            .background(Theme.background)
+            .navigationTitle("pair.title")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: {
+                        Label("pair.close", systemImage: "xmark")
+                    }
                 }
             }
-            .padding(Theme.pageInset)
         }
-        .background(Theme.background)
-        .safeAreaInset(edge: .bottom) {
-            Button { dismiss() } label: {
-                Text("pair.close")
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(maxWidth: .infinity)
-                    .frame(minHeight: 44)
-            }
-            .background(Theme.background)
-        }
-    }
-
-    private var vault: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(spacing: 0) {
-                field("pair.address", text: $model.endpointDraft, identifier: "endpoint")
-                    .keyboardType(.URL)
-                Divider().overlay(Theme.border)
-                field("pair.vaultId", text: $model.vaultIdDraft, identifier: "vault-id")
-            }
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-                    .strokeBorder(Theme.border, lineWidth: 0.5)
-            }
-            Text("pair.where")
-                .font(.footnote)
-                .foregroundStyle(Theme.textSecondary)
-        }
+        .tint(Theme.accent)
     }
 
     private func field(
@@ -69,17 +62,13 @@ struct PairingScreen: View {
             .autocorrectionDisabled()
             .font(.body)
             .foregroundStyle(Theme.textPrimary)
-            .padding(.horizontal, 12)
             .frame(minHeight: 44)
             .accessibilityLabel(Text(prompt))
             .accessibilityIdentifier(identifier)
     }
 
     private func code(_ offer: PairingOffer) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("pair.show")
-                .font(.footnote)
-                .foregroundStyle(Theme.textSecondary)
+        Section {
             if let image = qrImage(offer.json) {
                 /* Bounded, not `.infinity`: a full-width code pushes the button that
                  * finishes pairing off a phone screen. */
@@ -87,30 +76,25 @@ struct PairingScreen: View {
                     .interpolation(.none)
                     .resizable()
                     .frame(width: 180, height: 180)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
                     .accessibilityLabel(Text("a11y.qr"))
             }
-            HStack {
-                Text("pair.fingerprint")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
-                Spacer()
+            LabeledContent("pair.fingerprint") {
                 Text(offer.fingerprint)
                     .font(.footnote.monospaced())
                     .foregroundStyle(Theme.textPrimary)
             }
-            Button { UIPasteboard.general.string = offer.json } label: {
-                Text("pair.copy")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-            }
-            .frame(minHeight: 44)
-            .accessibilityIdentifier("copy-code")
+            .foregroundStyle(Theme.textPrimary)
+            Button("pair.copy") { UIPasteboard.general.string = offer.json }
+                .accessibilityIdentifier("copy-code")
+        } header: {
+            Text("pair.show")
+                .font(.footnote)
+                .foregroundStyle(Theme.textSecondary)
+                .textCase(nil)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 16)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.border).frame(height: 0.5)
-        }
+        .listRowBackground(Theme.surface)
     }
 
     /// One switch, because the offer is either wanted or it is not.
@@ -122,7 +106,7 @@ struct PairingScreen: View {
                     .foregroundStyle(Theme.textPrimary)
                 Text("call.toggle.detail")
                     .font(.footnote)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSecondary)
             }
         }
         .tint(Theme.accent)
@@ -135,23 +119,24 @@ struct PairingScreen: View {
                 Task { await model.createPairingCode() }
             } label: {
                 Text("pair.create")
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .foregroundStyle(Theme.onAccent)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 36)
             }
             .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.roundedRectangle(radius: Theme.controlRadius))
             .accessibilityIdentifier("create-pairing-code")
             Button {
                 Task { await model.finishPairing() }
             } label: {
                 Text("pair.finish")
-                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 36)
             }
             .buttonStyle(.bordered)
-            .buttonBorderShape(.roundedRectangle(radius: Theme.controlRadius))
             .disabled(model.pairingOffer == nil)
             .accessibilityIdentifier("finish-pairing")
         }
+        .buttonBorderShape(.capsule)
+        .controlSize(.large)
     }
 
     private func qrImage(_ text: String) -> UIImage? {

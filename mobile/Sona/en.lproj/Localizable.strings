@@ -105,6 +105,7 @@
 "dictation.useKeyboard" = "Use in keyboard";
 "dictation.saved" = "Ready. In your other app, switch to the Sona keyboard and tap Insert.";
 "dictation.setupTitle" = "Set up the keyboard";
+"dictation.settings" = "Dictation settings";
 "dictation.setup" = "Settings, General, Keyboard, Keyboards, Add New Keyboard: choose Sona Dictation and turn on Allow Full Access. Switch to it with the globe key.";
 "dictation.fullAccess" = "Full Access lets the keyboard ask Sona to dictate and insert the result. The keyboard sends nothing to a server. Text expires after ten minutes or once inserted. Password fields use the system keyboard.";
 "dictation.speechOff" = "Speech recognition is off in Settings.";
