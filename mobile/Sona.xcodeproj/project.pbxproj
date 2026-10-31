@@ -83,6 +83,7 @@
 		CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000040 /* PhoneCallsScreen.swift */; };
 		CC0000000000000000000041 /* PhoneParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000041 /* PhoneParityTests.swift */; };
 		CA0000000000000000000042 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000042 /* Assets.xcassets */; };
+		CA0000000000000000000046 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000046 /* PrivacyInfo.xcprivacy */; };
 		CB0000000000000000000043 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000043 /* Assets.xcassets */; };
 		CA0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
 		CC0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
@@ -190,6 +191,7 @@
 		BB0000000000000000000043 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB0000000000000000000044 /* BoundedRewrite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedRewrite.swift; sourceTree = "<group>"; };
 		BB0000000000000000000045 /* DictationDeliveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationDeliveryTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000046 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -314,6 +316,7 @@
 				BB000000000000000000003F /* SonaIntents.swift */,
 				BB0000000000000000000040 /* PhoneCallsScreen.swift */,
 				BB0000000000000000000042 /* Assets.xcassets */,
+				BB0000000000000000000046 /* PrivacyInfo.xcprivacy */,
 			);
 			path = Sona;
 			sourceTree = "<group>";
@@ -491,6 +494,7 @@
 			files = (
 				CA0000000000000000000017 /* Localizable.strings in Resources */,
 				CA0000000000000000000042 /* Assets.xcassets in Resources */,
+				CA0000000000000000000046 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
