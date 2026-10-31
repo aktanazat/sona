@@ -20,15 +20,16 @@ struct MeetingStartGateView: View {
     var body: some View {
         Page {
             if let session = store.gate {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 0) {
                     BackLink(title: "Back") { store.cancel() }
                     Text(
                         store.gateBlocked || !store.canStart
                             ? "Recording did not start" : "Ready to record"
                     )
                     .titleText()
+                    .accessibilityAddTraits(.isHeader)
                 }
-                .padding(.bottom, 28)
+                .padding(.bottom, 24)
 
                 if let facts = store.options?.preview {
                     MeetingStartPreviewCard(
@@ -36,28 +37,27 @@ struct MeetingStartGateView: View {
                         armed: store.options?.sources ?? [],
                         notesTemplate: store.notesTemplateChoice,
                         expanded: true)
-                        .padding(.bottom, 32)
+                        .padding(.bottom, 28)
                 }
 
                 PageSection("What this will record") {
                     MeetingSourceListView(readings: store.readings(session))
-                }
-
-                ForEach(store.blockedSources, id: \.sourceKind) { source in
-                    if let remedy = MeetingSourceRemedy(source) {
-                        HStack(spacing: 12) {
-                            Text(remedy.sentence).bodyText(14, Theme.inkSecondary)
-                            Spacer(minLength: 0)
-                            Button(remedy.action) { NSWorkspace.shared.open(remedy.url) }
-                                .buttonStyle(.compact)
+                    let remedies = store.blockedSources.compactMap { MeetingSourceRemedy($0) }
+                    if !remedies.isEmpty {
+                        Card {
+                            ForEach(Array(remedies.enumerated()), id: \.offset) { _, remedy in
+                                CardRow {
+                                    Text(remedy.sentence).bodyText(14, Theme.inkSecondary)
+                                } trailing: {
+                                    Button(remedy.action) { NSWorkspace.shared.open(remedy.url) }
+                                        .buttonStyle(.compact)
+                                }
+                            }
                         }
-                        .padding(.bottom, 12)
                     }
-                }
-                if store.gateBlocked {
-                    Text("After changing a setting, press Refresh.")
-                        .metaText()
-                        .padding(.bottom, 16)
+                    if store.gateBlocked {
+                        Text("After changing a setting, press Refresh.").metaText()
+                    }
                 }
 
                 if session.storage != .available {
@@ -159,8 +159,8 @@ struct MeetingSourceRemedy {
 
 // MARK: - One word per source
 
-/// What each lane is doing, flat on a hairline. Rows, not tiles: two cards
-/// side by side implied a comparison that does not exist.
+/// What each lane is doing, one row each. Rows, not tiles: two cards side by
+/// side implied a comparison that does not exist.
 struct MeetingSourceListView: View {
     let readings: [MeetingSourceReading]
 
@@ -169,9 +169,9 @@ struct MeetingSourceListView: View {
             ForEach(Array(readings.enumerated()), id: \.offset) { _, reading in
                 CardRow {
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Text(reading.name).bodyText(14)
-                            if reading.required { Chip("Required") }
+                        Text(reading.name).bodyText(14)
+                        if reading.required {
+                            Text("Required").metaText()
                         }
                         if reading.missingAudio {
                             Text("Some of this audio is missing.")
@@ -180,7 +180,7 @@ struct MeetingSourceListView: View {
                     }
                 } trailing: {
                     Text(reading.word)
-                        .metaText(reading.urgent ? Theme.live : Theme.inkSecondary)
+                        .bodyText(13, reading.urgent ? Theme.live : Theme.inkSecondary)
                 }
             }
         }
@@ -203,10 +203,13 @@ struct MeetingStartPreviewCard: View {
     /// True when the template came from the series rather than the app.
     var templateFromSeries = false
     var expanded = false
-    /// The two presses a list row offers. Unwired, neither is drawn.
+    /// The presses a list row offers. Unwired, none is drawn.
     var onRecord: (() -> Void)?
     var onSkip: (() -> Void)?
+    var onBrief: (() -> Void)?
     var notify: String?
+    /// What a repeating series already answered for itself.
+    var repeats: [String] = []
 
     @State private var open = false
     @State private var showAll = false
@@ -216,7 +219,7 @@ struct MeetingStartPreviewCard: View {
         Card {
             CardRow(action: { open.toggle() }) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(facts.heading).bodyText(15)
+                    Text(facts.heading).headlineText()
                     if let line = summary {
                         Text(line).metaText()
                     }
@@ -226,8 +229,11 @@ struct MeetingStartPreviewCard: View {
                     if let onSkip {
                         Button("Skip", action: onSkip).buttonStyle(.quiet)
                     }
+                    if let onBrief {
+                        Button("Open brief", action: onBrief).buttonStyle(.quiet)
+                    }
                     if let onRecord {
-                        Button("Record…", action: onRecord).buttonStyle(.secondary)
+                        Button("Record…", action: onRecord).buttonStyle(.compact)
                     }
                     Image(systemName: open || expanded ? "chevron.up" : "chevron.down")
                         .foregroundStyle(Theme.inkTertiary)
@@ -238,7 +244,7 @@ struct MeetingStartPreviewCard: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                         CardRow {
-                            Text(row.0).metaText()
+                            Text(row.0).bodyText(13, Theme.inkSecondary)
                         } trailing: {
                             Text(row.1).bodyText(13).multilineTextAlignment(.trailing)
                         }
@@ -248,11 +254,11 @@ struct MeetingStartPreviewCard: View {
                     }
                     if let url = facts.url, !url.isEmpty {
                         CardRow {
-                            Text("Link").metaText()
+                            Text("Link").bodyText(13, Theme.inkSecondary)
                         } trailing: {
                             VStack(alignment: .trailing, spacing: 2) {
                                 Button(url) { open(url) }
-                                    .buttonStyle(.quiet)
+                                    .buttonStyle(QuietButton(color: Theme.accent))
                                 if linkFailed {
                                     Text("Sona could not open that link.")
                                         .metaText(Theme.live)
@@ -262,7 +268,7 @@ struct MeetingStartPreviewCard: View {
                     }
                     if let description = facts.description, !description.isEmpty {
                         CardRow {
-                            Text("Description").metaText()
+                            Text("Description").bodyText(13, Theme.inkSecondary)
                         } trailing: {
                             VStack(alignment: .trailing, spacing: 4) {
                                 Text(description)
@@ -274,6 +280,19 @@ struct MeetingStartPreviewCard: View {
                                         .buttonStyle(.quiet)
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            if !repeats.isEmpty {
+                CardRow {
+                    Text("Repeats").bodyText(13, Theme.inkSecondary)
+                } trailing: {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        ForEach(repeats, id: \.self) { line in
+                            Text(line)
+                                .bodyText(13, Theme.inkSecondary)
+                                .multilineTextAlignment(.trailing)
                         }
                     }
                 }
@@ -331,7 +350,7 @@ struct MeetingStartPreviewCard: View {
     /// rest are a number, because a list of blanks is not a list.
     private var participants: some View {
         CardRow {
-            Text("Participants").metaText()
+            Text("Participants").bodyText(13, Theme.inkSecondary)
         } trailing: {
             VStack(alignment: .trailing, spacing: 2) {
                 ForEach(tallies, id: \.0) { tally in
@@ -378,7 +397,7 @@ struct MeetingSuggestionsView: View {
     var body: some View {
         if !store.offered.isEmpty {
             PageSection("Meeting detected") {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
                     ForEach(store.offered) { suggestion in
                         MeetingStartPreviewCard(
                             facts: MeetingStartFacts(suggestion: suggestion),
@@ -404,8 +423,11 @@ struct MeetingStartCountdownView: View {
         if let countdown = store.countdown {
             PageSection("Starting soon") {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 8) {
-                        Chip("Starts in \(max(0, countdown.secondsToStart))s")
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("Starts in \(max(0, countdown.secondsToStart))s")
+                            .font(TypeScale.body(13))
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.ink)
                         if let brief = store.seriesBrief {
                             Text(brief).metaText()
                         }
@@ -478,7 +500,7 @@ struct MeetingRecoveryView: View {
                                     .buttonStyle(.quiet)
                                     .disabled(store.pending != nil)
                                 Button("Finish") { store.finalizeRecovery(entry) }
-                                    .buttonStyle(.secondary)
+                                    .buttonStyle(.compact)
                                     .disabled(store.pending != nil)
                             }
                         }
@@ -541,10 +563,10 @@ struct UpcomingView: View {
                 Text("Nothing scheduled for the next 7 days.")
                     .bodyText(14, Theme.inkSecondary)
             } else {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 24) {
                     ForEach(store.upcomingDays) { day in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(day.heading).sectionLabel()
+                            MeetingsGroupHeading(text: day.heading)
                             ForEach(day.rows) { row in
                                 UpcomingRowView(store: store, row: row)
                             }
@@ -563,7 +585,7 @@ struct UpcomingView: View {
     }
 }
 
-/// One calendar row: the facts, the press, and what the series already
+/// One calendar row: the facts, the presses, and what the series already
 /// answered for itself.
 struct UpcomingRowView: View {
     @Environment(AppModel.self) private var model
@@ -571,35 +593,23 @@ struct UpcomingRowView: View {
     let row: UpcomingRow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            MeetingStartPreviewCard(
-                facts: MeetingStartFacts(row: row),
-                armed: MeetingSourceKind.allCases,
-                notesTemplate: row.series?.templateChoice ?? store.notesTemplateChoice,
-                templateFromSeries: row.series?.templateChoice != nil,
-                onRecord: { store.start(row) })
-            Button("Open brief") { model.openBrief(row.eventKey) }
-                .buttonStyle(.secondary)
-            if let series = row.series {
-                Card {
-                    CardRow {
-                        Text("Repeats").metaText()
-                    } trailing: {
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text("Always record this series: \(series.alwaysRecord ? "On" : "Off")")
-                                .metaText()
-                            Text("Notes template: " + model.meetingSettings.templates.label(
-                                for: series.templateChoice, builtIn: { $0.label }, none: "App default"))
-                                .metaText()
-                            Text(
-                                "Include in the evening digest: "
-                                    + (series.digestIncluded ? "On" : "Off")
-                            )
-                            .metaText()
-                        }
-                    }
-                }
-            }
-        }
+        MeetingStartPreviewCard(
+            facts: MeetingStartFacts(row: row),
+            armed: MeetingSourceKind.allCases,
+            notesTemplate: row.series?.templateChoice ?? store.notesTemplateChoice,
+            templateFromSeries: row.series?.templateChoice != nil,
+            onRecord: { store.start(row) },
+            onBrief: { model.openBrief(row.eventKey) },
+            repeats: repeats)
+    }
+
+    private var repeats: [String] {
+        guard let series = row.series else { return [] }
+        return [
+            "Always record this series: \(series.alwaysRecord ? "On" : "Off")",
+            "Notes template: " + model.meetingSettings.templates.label(
+                for: series.templateChoice, builtIn: { $0.label }, none: "App default"),
+            "Include in the evening digest: " + (series.digestIncluded ? "On" : "Off"),
+        ]
     }
 }

@@ -1,85 +1,12 @@
 import SwiftUI
 
-/// Settings: a tab strip across the top, one tab below. Each tab is a slice's
-/// own page; the ones that come as a column get the page and the title here.
+/// Settings: the page the sidebar chose. Each page is a slice's own; the
+/// ones that come as a column get the page and the title here.
 struct SettingsScreen: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Which edges have a tab hidden past them, so only those edges fade.
-    @State private var overflow = StripOverflow()
 
     var body: some View {
-        VStack(spacing: 0) {
-            tabs
-            tab
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    /// Fifteen tabs outrun a narrow window. The strip scrolls, the chosen
-    /// tab is brought into view whenever it changes (a "Meeting settings"
-    /// button elsewhere chooses one too), and a fade at an edge says a tab
-    /// is hidden past it.
-    private var tabs: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal) {
-                HStack(spacing: 20) {
-                    ForEach(SettingsPlace.allCases) { place in
-                        let current = model.settingsPlace == place
-                        Button {
-                            model.settingsPlace = place
-                        } label: {
-                            Text(place.title)
-                                .font(TypeScale.label(14))
-                                .foregroundStyle(model.settingsPlace == place ? Theme.ink : Theme.inkSecondary)
-                                .padding(.vertical, 10)
-                                .overlay(alignment: .bottom) {
-                                    Rectangle().fill(current ? Theme.ink : .clear).frame(height: 1)
-                                }
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(current ? .isSelected : [])
-                        .id(place)
-                    }
-                }
-                .padding(.horizontal, Theme.margin)
-            }
-            .scrollIndicators(.never)
-            .onScrollGeometryChange(for: StripOverflow.self) { geometry in
-                let offset = geometry.contentOffset.x
-                let end = geometry.contentSize.width - geometry.containerSize.width
-                return StripOverflow(leading: offset > 1, trailing: offset < end - 1)
-            } action: { _, edges in
-                overflow = edges
-            }
-            .mask { edgeFade }
-            .overlay(alignment: .bottom) { Hairline() }
-            .onAppear { proxy.scrollTo(model.settingsPlace, anchor: .center) }
-            .onChange(of: model.settingsPlace) { _, place in
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                    proxy.scrollTo(place, anchor: .center)
-                }
-            }
-        }
-    }
-
-    private var edgeFade: some View {
-        HStack(spacing: 0) {
-            LinearGradient(
-                colors: [.black.opacity(overflow.leading ? 0 : 1), .black],
-                startPoint: .leading, endPoint: .trailing
-            )
-            .frame(width: Theme.margin)
-            Rectangle()
-            LinearGradient(
-                colors: [.black, .black.opacity(overflow.trailing ? 0 : 1)],
-                startPoint: .leading, endPoint: .trailing
-            )
-            .frame(width: Theme.margin)
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: overflow.leading)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: overflow.trailing)
+        tab.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -128,7 +55,11 @@ struct SettingsScreen: View {
             }
         case .agents:
             Page {
-                PageTitle("Agents", subtitle: "Coding agents on this Mac may read meetings you share with them, over a local socket, never the network.")
+                PageTitle("Agents", subtitle: "Coding agents on this Mac may read meetings you share with them, over a local socket, never the network.") {
+                    Button(model.agents.loading ? "Refreshing…" : "Refresh") { model.agents.refreshAll() }
+                        .buttonStyle(.compact)
+                        .disabled(model.agents.loading)
+                }
                 AgentBridgeView(store: model.agents)
                 AgentPairingView(store: model.pairing)
             }
@@ -152,30 +83,5 @@ struct SettingsScreen: View {
                 AnyView(SettingsCaptureRows(store: model.settings))
             }
         }
-    }
-}
-
-/// The tab strip's overflow: whether a tab is hidden past each edge.
-private struct StripOverflow: Equatable {
-    var leading = false
-    var trailing = false
-}
-
-/// The head of a settings tab: the tab's name and one line of plain fact.
-struct SettingsIntro: View {
-    let title: String
-    let fact: String
-
-    init(_ title: String, fact: String) {
-        self.title = title
-        self.fact = fact
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).headlineText()
-            Text(fact).bodyText(15, Theme.inkSecondary)
-        }
-        .padding(.bottom, 20)
     }
 }

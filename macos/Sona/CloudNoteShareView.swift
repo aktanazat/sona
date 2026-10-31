@@ -17,19 +17,35 @@ struct CloudNoteShareView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text(note == nil ? "Note links" : "Share this note").headlineText()
+            HStack(alignment: .center, spacing: 12) {
+                Text(note == nil ? "Note links" : "Share this note")
+                    .titleText()
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(.quiet)
-                    .keyboardShortcut(.cancelAction)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.circle)
+                .keyboardShortcut(.cancelAction)
+                .help("Done")
+                .accessibilityLabel("Done")
             }
             if let note {
-                Text(note.title).bodyText(15)
-                Text("Anyone with the link can read this copy. Later edits do not change it.")
-                    .metaText(Theme.inkSecondary)
-                DatePicker("Expires", selection: $expiry, in: Date.now...Date.now.addingTimeInterval(30 * 24 * 60 * 60))
-                    .datePickerStyle(.field)
-                    .disabled(busy)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(note.title).headlineText()
+                    Text("Anyone with the link can read this copy. Later edits do not change it.")
+                        .metaText(Theme.inkSecondary)
+                }
+                Card {
+                    CardRow {
+                        Text("Expires").bodyText()
+                    } trailing: {
+                        DatePicker("Expires", selection: $expiry, in: Date.now...Date.now.addingTimeInterval(30 * 24 * 60 * 60))
+                            .labelsHidden()
+                            .datePickerStyle(.field)
+                            .disabled(busy)
+                    }
+                }
                 HStack {
                     Spacer()
                     Button(busy ? "Working…" : "Create link") { Task { await create() } }
@@ -42,16 +58,29 @@ struct CloudNoteShareView: View {
             ErrorNote(error)
             if let link {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(link.shareUrl).font(TypeScale.mono(12)).textSelection(.enabled)
+                    HStack(spacing: 8) {
+                        Text(link.shareUrl)
+                            .font(TypeScale.mono(12))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 8)
+                        Button(copiedShareId == link.shareId ? "Link copied" : "Copy link") {
+                            CloudSyncClipboard.copy(link.shareUrl)
+                            copiedShareId = link.shareId
+                        }
+                        .buttonStyle(.compact)
+                    }
+                    .padding(.leading, 14)
+                    .padding(.trailing, 6)
+                    .frame(height: 38)
+                    .background(Theme.inset, in: Capsule())
                     Text(link.trustDisclosure).metaText()
-                    Button(copiedShareId == link.shareId ? "Link copied" : "Copy link") {
-                        CloudSyncClipboard.copy(link.shareUrl)
-                        copiedShareId = link.shareId
-                    }.buttonStyle(.secondary)
                 }
             }
-            HStack {
-                Text("Shared copies").bodyText(14)
+            HStack(alignment: .firstTextBaseline) {
+                Text("Shared copies").sectionLabel().accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("Refresh") { Task { await load() } }.buttonStyle(.quiet)
                     .disabled(busy || loading)
@@ -62,28 +91,30 @@ struct CloudNoteShareView: View {
                 Text("No links yet.").metaText()
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    Card {
                         ForEach(shares) { share in
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            CardRow {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(share.state.word).bodyText(14, share.state.tone)
                                     Text(share.detail).metaText()
                                 }
-                                Spacer()
+                            } trailing: {
                                 if share.state.revocable {
-                                    Button(copiedShareId == share.shareId ? "Copied" : "Copy link") {
-                                        Task { await copy(share) }
+                                    HStack(spacing: 12) {
+                                        Button(copiedShareId == share.shareId ? "Copied" : "Copy link") {
+                                            Task { await copy(share) }
+                                        }
+                                        .buttonStyle(.quiet)
+                                        .disabled(busy || Double(share.expiresAtUtcMs) <= Date.now.timeIntervalSince1970 * 1_000)
+                                        Button("Revoke") { revoking = share }
+                                            .buttonStyle(.compact).disabled(busy)
                                     }
-                                    .buttonStyle(.quiet)
-                                    .disabled(busy || Double(share.expiresAtUtcMs) <= Date.now.timeIntervalSince1970 * 1_000)
-                                    Button("Revoke") { revoking = share }
-                                        .buttonStyle(.secondary).disabled(busy)
                                 }
                             }
-                            Divider().overlay(Theme.hairline)
                         }
                     }
                 }
+                .scrollIndicators(.never)
                 .frame(maxHeight: 240)
             }
             if model.cloudSync.overview?.paused == true {

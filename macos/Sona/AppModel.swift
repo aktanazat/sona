@@ -11,7 +11,7 @@ enum Place: Int, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .capture: "Capture"
+        case .capture: "Home"
         case .library: "Library"
         case .meetings: "Meetings"
         case .people: "People"
@@ -21,16 +21,17 @@ enum Place: Int, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .capture: "mic"
-        case .library: "books.vertical"
-        case .meetings: "video"
-        case .people: "person.2"
-        case .scratchpad: "note.text"
+        case .capture: "house.fill"
+        case .library: "books.vertical.fill"
+        case .meetings: "video.fill"
+        case .people: "person.2.fill"
+        case .scratchpad: "square.and.pencil"
         }
     }
 }
 
-/// The tabs across the top of Settings, in the order the strip shows them.
+/// Settings' pages. Modes, vocabulary and models have their own rows in the
+/// sidebar; the rest sit under Settings there.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
     case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug

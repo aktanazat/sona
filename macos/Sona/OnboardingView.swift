@@ -6,20 +6,22 @@ struct OnboardingView: View {
     @State private var languageQuery = ""
 
     var body: some View {
-        ZStack {
-            Theme.page
+        GeometryReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     OnboardingBrand()
                     step
                 }
-                .frame(maxWidth: 460, alignment: .leading)
-                .padding(.horizontal, Theme.margin)
-                .padding(.vertical, 64)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(36)
+                .frame(width: 480, alignment: .leading)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusDialog))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.border, lineWidth: 1))
+                .padding(.vertical, 48)
+                .frame(maxWidth: .infinity, minHeight: proxy.size.height)
             }
             .scrollIndicators(.never)
         }
+        .background(Theme.page)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             // A returning user with everything granted can be past the flow
@@ -50,7 +52,7 @@ struct OnboardingView: View {
             if let error = store.error {
                 VStack(alignment: .leading, spacing: 12) {
                     ErrorNote(error)
-                    Button("Try again") { Task { await store.start() } }.buttonStyle(.primary)
+                    Button("Try again") { Task { await store.start() } }.buttonStyle(.wide)
                 }
             } else {
                 OnboardingWaitingLine(label: "Checking setup")
@@ -64,7 +66,7 @@ struct OnboardingView: View {
         case .practice:
             practice
         case .done:
-            Text("You're set.").titleText()
+            Text("You're set.").heroText()
         }
     }
 
@@ -73,16 +75,15 @@ struct OnboardingView: View {
             if store.permissions.checking {
                 OnboardingWaitingLine(label: "Checking permissions")
             } else if store.permissions.allGranted {
-                Text("Both granted").titleText()
+                Text("Both granted").heroText()
             } else {
-                Text("One-time setup").titleText().padding(.bottom, 10)
-                Text("Allow Sona to hear your voice and type your words.")
-                    .bodyText(15, Theme.inkSecondary)
-                    .padding(.bottom, 24)
+                OnboardingHeading(title: "One-time setup", line: "Allow Sona to hear your voice and type your words.")
                 ErrorNote(store.permissions.error)
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 0) {
                     if store.permissions.microphone != .granted {
                         OnboardingPermissionRow(
+                            separated: false,
+                            icon: "mic",
                             title: "Microphone access",
                             detail: "Required to hear your voice for transcription.",
                             state: store.permissions.microphone,
@@ -94,6 +95,8 @@ struct OnboardingView: View {
                     }
                     if store.permissions.accessibility != .granted, store.permissions.accessibilitySupported {
                         OnboardingPermissionRow(
+                            separated: store.permissions.microphone != .granted,
+                            icon: "accessibility",
                             title: "Accessibility access",
                             detail: "Required to type transcribed text into your applications.",
                             state: store.permissions.accessibility,
@@ -112,10 +115,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 0) {
             BackLink(title: "Languages", action: store.changeLanguages)
                 .disabled(store.isBusy)
-            Text("Pick a transcription model").titleText().padding(.bottom, 10)
-            Text(store.languageSummary)
-                .bodyText(15, Theme.inkSecondary)
-                .padding(.bottom, 24)
+            OnboardingHeading(title: "Pick a transcription model", line: store.languageSummary)
             ErrorNote(store.error)
             if let featured = store.featured {
                 card(featured)
@@ -141,49 +141,51 @@ struct OnboardingView: View {
     }
 
     private var languages: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Dictation languages").titleText()
+        VStack(alignment: .leading, spacing: 0) {
+            OnboardingHeading(title: "Dictation languages", line: store.languageSummary)
             ErrorNote(store.error)
-            Card {
-                VStack(alignment: .leading, spacing: 12) {
-                    Toggle("Auto detect any language", isOn: Binding(
-                        get: { store.selectedLanguages.isEmpty },
-                        set: { enabled in
-                            if enabled { store.useAutomaticLanguage() }
-                        }
-                    ))
-                    .toggleStyle(.checkbox)
-                    .disabled(store.selectedLanguages.isEmpty)
-                    Text(store.languageSummary).metaText(Theme.inkSecondary)
-                    SearchField(prompt: "Search languages", text: $languageQuery)
-                }
-                .padding(16)
-                Hairline()
-                if languageMatches.isEmpty {
-                    CardLine("No languages found")
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(languageMatches) { option in
-                                Toggle(option.name, isOn: Binding(
-                                    get: { store.selectedLanguages.contains(option.code) },
-                                    set: { _ in store.toggleLanguage(option.code) }
-                                ))
-                                .toggleStyle(.checkbox)
-                                .bodyText(14)
-                                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-                                .padding(.horizontal, 16)
-                            }
-                        }
-                        .padding(.vertical, 8)
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Auto detect any language", isOn: Binding(
+                    get: { store.selectedLanguages.isEmpty },
+                    set: { enabled in
+                        if enabled { store.useAutomaticLanguage() }
                     }
-                    .frame(height: 238)
+                ))
+                .toggleStyle(.checkbox)
+                .disabled(store.selectedLanguages.isEmpty)
+                SearchField(prompt: "Search languages", text: $languageQuery)
+                Group {
+                    if languageMatches.isEmpty {
+                        Text("No languages found")
+                            .metaText()
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(languageMatches) { option in
+                                    Toggle(option.name, isOn: Binding(
+                                        get: { store.selectedLanguages.contains(option.code) },
+                                        set: { _ in store.toggleLanguage(option.code) }
+                                    ))
+                                    .toggleStyle(.checkbox)
+                                    .bodyText(14)
+                                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                                }
+                            }
+                            .padding(.vertical, 6)
+                        }
+                        .frame(height: 238)
+                    }
                 }
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             }
             .disabled(store.savingLanguages)
             Button(store.savingLanguages ? "Saving…" : "Continue", action: store.saveLanguages)
-                .buttonStyle(.primary)
+                .buttonStyle(.wide)
                 .disabled(store.savingLanguages)
+                .padding(.top, 28)
         }
     }
 
@@ -209,14 +211,15 @@ struct OnboardingView: View {
 
     private var practice: some View {
         @Bindable var store = store
-        return VStack(alignment: .leading, spacing: 20) {
+        return VStack(alignment: .leading, spacing: 0) {
             BackLink(title: "Speech model", action: store.backToModels)
                 .disabled(store.practiceState.isBusy || store.finishing)
-            Text("Try dictation").titleText()
+            Text("Try dictation").heroText().padding(.bottom, 10)
             Text(practiceStatus)
-                .bodyText(15, store.practiceState == .listening ? Theme.live : Theme.inkSecondary)
+                .bodyText(14, store.practiceState == .listening ? Theme.live : Theme.inkSecondary)
                 .accessibilityLabel("Practice status")
                 .accessibilityValue(practiceStatus)
+                .padding(.bottom, 24)
             ErrorNote(store.error)
                 .accessibilityLabel(store.error ?? "")
             if store.practiceState == .delivered {
@@ -228,19 +231,18 @@ struct OnboardingView: View {
                         .scrollContentBackground(.hidden)
                         .padding(12)
                         .frame(minHeight: 150, maxHeight: 240)
-                        .background(Theme.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
-                        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+                        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                         .accessibilityLabel("Practice transcript")
                 }
+                .padding(.bottom, 24)
             }
-            HStack(spacing: 16) {
+            VStack(spacing: 12) {
                 switch store.practiceState {
                 case .idle:
                     Button(store.error == nil ? "Start dictation" : "Try again", action: store.startPractice)
-                        .buttonStyle(.primary)
+                        .buttonStyle(.wide)
                 case .listening:
-                    Button("Stop dictation", action: store.stopPractice).buttonStyle(.primary)
+                    Button("Stop dictation", action: store.stopPractice).buttonStyle(.wide)
                     Button("Cancel", action: store.cancelPractice).buttonStyle(.quiet)
                 case .starting, .processing:
                     ProgressView().controlSize(.small)
@@ -248,16 +250,17 @@ struct OnboardingView: View {
                 case .cancelling:
                     ProgressView().controlSize(.small)
                 case .cancellationFailed:
-                    Button("Try cancel again", action: store.cancelPractice).buttonStyle(.primary)
+                    Button("Try cancel again", action: store.cancelPractice).buttonStyle(.wide)
                 case .delivered:
                     Button(store.finishing ? "Finishing…" : "Done", action: store.completePractice)
-                        .buttonStyle(.primary)
+                        .buttonStyle(.wide)
                         .disabled(!store.canFinishPractice)
                     Button("Try again", action: store.startPractice)
                         .buttonStyle(.quiet)
                         .disabled(store.finishing)
                 }
             }
+            .frame(maxWidth: .infinity)
         }
         .onChange(of: practiceStatus) { _, status in
             NSAccessibility.post(
@@ -337,11 +340,44 @@ struct PermissionsNotice: View {
 private struct OnboardingBrand: View {
     var body: some View {
         Text("Sona")
-            .font(TypeScale.label(14))
-            .foregroundStyle(Theme.inkSecondary)
-            .tracking(1.2)
-            .padding(.bottom, 40)
+            .font(TypeScale.label(13))
+            .foregroundStyle(Theme.inkTertiary)
+            .padding(.bottom, 28)
     }
+}
+
+/// A step's big title and the one gray line under it.
+private struct OnboardingHeading: View {
+    let title: String
+    let line: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).heroText().accessibilityAddTraits(.isHeader)
+            Text(line).bodyText(14, Theme.inkSecondary)
+        }
+        .padding(.bottom, 24)
+    }
+}
+
+/// The one wide blue button that moves a step forward.
+private struct WideButton: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(Theme.onAccent)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            .background(Theme.accentFill.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+private extension ButtonStyle where Self == WideButton {
+    static var wide: WideButton { WideButton() }
 }
 
 /// Work with no length to measure: a word and a spinner, never a bar drawn at
@@ -364,6 +400,8 @@ private struct OnboardingWaitingLine: View {
 /// dialog never appears again, so the exact pane and a re-check that restarts
 /// the poll are the only two ways out.
 private struct OnboardingPermissionRow: View {
+    let separated: Bool
+    let icon: String
     let title: String
     let detail: String
     let state: PermissionState
@@ -373,30 +411,41 @@ private struct OnboardingPermissionRow: View {
     let onRecheck: () -> Void
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 10) {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(title).headlineText()
                     if state == .waiting {
                         Text("Waiting…").metaText()
                     }
                 }
-                Text(detail).bodyText(14, Theme.inkSecondary)
-                HStack(spacing: 10) {
-                    if state == .waiting {
+                Text(detail).bodyText(13, Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if state == .waiting {
+                    HStack(spacing: 10) {
                         Button("Open System Settings", action: onOpenSettings)
-                            .buttonStyle(.secondary)
+                            .buttonStyle(.compact)
                         Button("Re-check", action: onRecheck)
                             .buttonStyle(.quiet)
-                    } else {
-                        Button(grant, action: onGrant)
-                            .buttonStyle(.primary)
                     }
+                    .padding(.top, 8)
                 }
-                .padding(.top, 2)
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer(minLength: 12)
+            if state != .waiting {
+                Button(grant, action: onGrant)
+                    .buttonStyle(PrimaryButton(compact: true))
+            }
+        }
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) {
+            if separated { Hairline() }
         }
     }
 }
@@ -412,43 +461,42 @@ private struct OnboardingModelCard: View {
     let onCancel: () -> Void
 
     var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(model.name).headlineText()
-                    Spacer(minLength: 12)
-                    if work == .downloadable {
-                        Text(model.sizeText).metaText()
-                    }
-                }
-                Text(model.description).bodyText(14, Theme.inkSecondary)
-                if let label = workLabel {
-                    VStack(alignment: .leading, spacing: 8) {
-                        /* A bar only where there is something to measure: a
-                         * download knows its own length, and verifying,
-                         * unpacking and loading do not. */
-                        if let progress {
-                            Meter(fraction: progress)
-                        }
-                        HStack(spacing: 10) {
-                            Text(label).metaText(Theme.inkSecondary)
-                            if work == .downloading {
-                                Button("Cancel", action: onCancel).buttonStyle(.quiet)
-                            }
-                        }
-                    }
-                    .padding(.top, 4)
-                } else if !dimmed {
-                    Button(work == .available ? "Use this model" : "Download · \(model.sizeText)", action: onChoose)
-                        .buttonStyle(.primary)
-                        .padding(.top, 6)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(model.name).headlineText()
+                Spacer(minLength: 12)
+                if work == .downloadable {
+                    Text(model.sizeText).metaText().monospacedDigit()
                 }
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(model.description).bodyText(13, Theme.inkSecondary)
+            if let label = workLabel {
+                VStack(alignment: .leading, spacing: 8) {
+                    /* A bar only where there is something to measure: a
+                     * download knows its own length, and verifying,
+                     * unpacking and loading do not. */
+                    if let progress {
+                        Meter(fraction: progress)
+                    }
+                    HStack(spacing: 10) {
+                        Text(label).metaText(Theme.inkSecondary).monospacedDigit()
+                        if work == .downloading {
+                            Button("Cancel", action: onCancel).buttonStyle(.quiet)
+                        }
+                    }
+                }
+                .padding(.top, 6)
+            } else if !dimmed {
+                Button(work == .available ? "Use this model" : "Download · \(model.sizeText)", action: onChoose)
+                    .buttonStyle(.wide)
+                    .padding(.top, 10)
+            }
         }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         .opacity(dimmed ? 0.5 : 1)
-        .padding(.bottom, 12)
+        .padding(.bottom, 8)
     }
 
     private var workLabel: String? {
@@ -490,7 +538,7 @@ private struct OnboardingOthers<Content: View>: View {
                 }
             }
         }
-        .padding(.top, 20)
+        .padding(.top, 16)
     }
 }
 
@@ -498,6 +546,6 @@ private struct OnboardingGroupLabel: View {
     let label: String
 
     var body: some View {
-        Text(label).sectionLabel().padding(.bottom, 10)
+        Text(label).sectionLabel().padding(.top, 4).padding(.bottom, 8)
     }
 }

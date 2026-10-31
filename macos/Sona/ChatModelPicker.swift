@@ -7,36 +7,37 @@ struct ChatModelPicker: View {
     @State private var search = ""
     @State private var provider = ""
     @State private var hoveredModel: String?
+    @State private var hovering = false
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button { presented.toggle() } label: {
-            HStack(spacing: 9) {
+            HStack(spacing: 8) {
                 if let model = store.selectedModel {
                     ModelProviderMark(provider: model.provider)
-                        .frame(width: 21, height: 21)
+                        .frame(width: 18, height: 18)
                 }
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(store.selectedModel?.name ?? "Sona agent")
-                        .font(TypeScale.label(14))
-                        .foregroundStyle(Theme.ink)
+                        .headlineText()
                         .lineLimit(1)
                     Text(effortCaption)
-                        .font(TypeScale.body(11))
-                        .foregroundStyle(Theme.inkSecondary)
+                        .metaText(Theme.inkSecondary)
                         .lineLimit(1)
                 }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.inkTertiary)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(RoundedRectangle(cornerRadius: 8))
-            .frame(width: 280, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(hovering ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .frame(maxWidth: 260)
         }
         .buttonStyle(.quiet)
+        .onHover { hovering = $0 }
         .disabled(store.modelPickerDisabled)
         .help("Choose a model and thinking effort")
         .accessibilityLabel("Model: \(store.selectedModel?.name ?? "Server default"). \(effortCaption)")
@@ -67,15 +68,7 @@ struct ChatModelPicker: View {
         VStack(spacing: 0) {
             VStack(spacing: 10) {
                 providerPicker
-                TextField("Find a model", text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .font(TypeScale.body(13))
-                    .frame(height: 26)
-                    .accessibilityLabel("Find a model")
-                    .focused($searchFocused)
-                    .onSubmit {
-                        if let model = filteredModels.first { store.selectModel(model) }
-                    }
+                searchField
             }
             .padding(12)
             modelList.frame(height: 176)
@@ -85,6 +78,27 @@ struct ChatModelPicker: View {
         .frame(width: 360)
         .background(Theme.surface)
         .tint(Theme.accent)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(Theme.inkTertiary)
+                .accessibilityHidden(true)
+            TextField("Find a model", text: $search, prompt: Text("Find a model").foregroundStyle(Theme.inkTertiary))
+                .textFieldStyle(.plain)
+                .bodyText(13)
+                .accessibilityLabel("Find a model")
+                .focused($searchFocused)
+                .onSubmit {
+                    if let model = filteredModels.first { store.selectModel(model) }
+                }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(Theme.inset, in: Capsule())
+        .overlay(Capsule().strokeBorder(searchFocused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 
     private var providerPicker: some View {
@@ -105,8 +119,8 @@ struct ChatModelPicker: View {
                         .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
                         .frame(maxWidth: .infinity)
                         .frame(height: 28)
-                        .background(selected ? Theme.surface : Color.clear, in: RoundedRectangle(cornerRadius: 6))
-                        .contentShape(RoundedRectangle(cornerRadius: 6))
+                        .background(selected ? Theme.surface : Color.clear, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusKey))
                         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: selected)
                     }
                     .buttonStyle(.quiet)
@@ -117,7 +131,7 @@ struct ChatModelPicker: View {
         }
         .padding(3)
         .frame(height: 34)
-        .background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
     }
 
     private var filteredModels: [AgentModel] {
@@ -136,7 +150,7 @@ struct ChatModelPicker: View {
         if let error = store.modelError {
             VStack(spacing: 12) {
                 Text(error)
-                    .font(TypeScale.body(13)).foregroundStyle(Theme.inkSecondary)
+                    .bodyText(13, Theme.inkSecondary)
                     .multilineTextAlignment(.center)
                 if store.modelCatalog == nil {
                     Button("Open connection settings") {
@@ -152,7 +166,7 @@ struct ChatModelPicker: View {
             VStack(spacing: 12) {
                 if store.loadingModels {
                     ProgressView().controlSize(.small)
-                    Text("Loading models…").font(TypeScale.body(13))
+                    Text("Loading models…").bodyText(13, Theme.inkSecondary)
                 } else {
                     Button("Open connection settings") {
                         presented = false
@@ -165,16 +179,16 @@ struct ChatModelPicker: View {
         } else {
             let matches = filteredModels
             ScrollView {
-                VStack(spacing: 0) {
+                VStack(spacing: 2) {
                     ForEach(matches) { model in modelRow(model) }
                     if matches.isEmpty {
                         Text("No models match your search.")
-                            .font(TypeScale.body(13)).foregroundStyle(Theme.inkSecondary)
+                            .bodyText(13, Theme.inkSecondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 20)
                     }
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 8)
             }
             .id(provider)
             .scrollIndicators(.visible)
@@ -187,20 +201,19 @@ struct ChatModelPicker: View {
         return Button { store.selectModel(model) } label: {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(model.name).font(TypeScale.label(13)).lineLimit(1)
+                    Text(model.name).bodyText(13).lineLimit(1)
                     if let version {
-                        Text(version).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary)
+                        Text(version).metaText()
                     }
                 }
                 Spacer(minLength: 4)
                 selectedMark.opacity(selected ? 1 : 0)
             }
-            .foregroundStyle(selected ? Theme.accent : Theme.ink)
             .padding(.horizontal, 10)
             .frame(height: 44)
-            .background(selected ? Theme.accentSoft : hoveredModel == model.id ? Theme.wash : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .background(selected ? Theme.selection : hoveredModel == model.id ? Theme.wash : Color.clear,
+                        in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.quiet)
         .disabled(store.modelPickerDisabled)
@@ -250,6 +263,7 @@ struct ChatModelPicker: View {
                         .font(TypeScale.body(12))
                 }
                 .menuStyle(.borderlessButton)
+                .tint(Theme.inkSecondary)
                 .fixedSize()
                 .disabled(store.modelPickerDisabled)
                 .accessibilityLabel("Thinking effort")
@@ -273,9 +287,8 @@ struct ChatModelPicker: View {
         .frame(height: 44)
     }
 
-
     private var selectedMark: some View {
-        Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold))
+        Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.accent)
             .accessibilityHidden(true)
     }

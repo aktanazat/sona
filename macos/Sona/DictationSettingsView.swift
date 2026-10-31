@@ -1,11 +1,7 @@
 import SwiftUI
 
-/// What happens to a dictation between the microphone and the text.
-///
-/// The rows run in the order a dictation does: the chords that start and stop
-/// one, how the words are written, what is on screen while it runs, and how
-/// long the model stays in memory. The history rows belong to another slice
-/// and arrive through `dataRows`, in the place they hold on the web page.
+/// What happens to a dictation between the microphone and the text. The
+/// capture rows belong to another slice and arrive through `dataRows`.
 struct DictationSettingsView<DataRows: View>: View {
     let store: SettingsStore
     /// The door to the mode editor, which another slice owns.
@@ -19,12 +15,15 @@ struct DictationSettingsView<DataRows: View>: View {
             }
             ErrorNote(store.error)
             if let notice = store.notice {
-                CardRow {
-                    Text(notice).bodyText(14, Theme.live)
-                } trailing: {
-                    Button("Dismiss") { store.clearNotice() }
-                        .buttonStyle(.quiet)
+                Card {
+                    CardRow {
+                        Text(notice).bodyText(14, Theme.live)
+                    } trailing: {
+                        Button("Dismiss") { store.clearNotice() }
+                            .buttonStyle(.quiet)
+                    }
                 }
+                .padding(.bottom, 20)
             }
             PageSection("Recording") {
                 Card {
@@ -37,129 +36,140 @@ struct DictationSettingsView<DataRows: View>: View {
                         )
                     )
                     .disabled(store.isBusy("quiet_speech_enabled"))
+                    /// Only on a device with more than one channel: on most
+                    /// machines there is no row here at all.
+                    if store.channelCount > 1 {
+                        AudioChannelRow(store: store)
+                    }
+                    ToggleRow(
+                        title: "Mute other audio while dictating",
+                        detail: "Turns the Mac's sound off while you record, when something is playing, and back on when you stop. Sound you muted yourself stays muted.",
+                        isOn: Binding(
+                            get: { store.settings.muteWhileRecording },
+                            set: { value in Task { await store.setMuteWhileRecording(value) } }
+                        )
+                    )
+                    .disabled(store.isBusy("mute_while_recording"))
+                    dataRows()
                     CardLine("Dictations can last up to 20 minutes. Sona warns you with one minute left, then stops and transcribes what you said.")
                 }
             }
-            Card {
-                /// The cancel chord exists only when a tap-to-start binding
-                /// can leave a recording running with nothing holding it.
-                if !store.settings.pushToTalk {
-                    ShortcutCaptureRow(store: store, id: "cancel")
-                }
-                ToggleRow(
-                    title: "Voice command mode",
-                    detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",
-                    isOn: Binding(
-                        get: { store.settings.commandModeEnabled },
-                        set: { value in Task { await store.setCommandMode(value) } }
-                    )
-                )
-                if store.settings.commandModeEnabled {
-                    ShortcutCaptureRow(store: store, id: "command")
+            PageSection("Shortcuts and commands") {
+                Card {
+                    /// The cancel chord exists only when a tap-to-start binding
+                    /// can leave a recording running with nothing holding it.
+                    if !store.settings.pushToTalk {
+                        ShortcutCaptureRow(store: store, id: "cancel")
+                    }
                     ToggleRow(
-                        title: "Show answers in chat",
-                        detail: "A question opens the chat with its answer. Nothing is typed over your text. Off, every command edits the selection.",
+                        title: "Voice command mode",
+                        detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",
                         isOn: Binding(
-                            get: { store.settings.commandAnswersInChat },
-                            set: { value in Task { await store.setCommandAnswersInChat(value) } }
+                            get: { store.settings.commandModeEnabled },
+                            set: { value in Task { await store.setCommandMode(value) } }
                         )
                     )
-                }
-                ToggleRow(
-                    title: "Learn from corrections in other apps",
-                    detail: "Locally watches the last dictated passage for up to one minute in supported text fields. Repeated corrections become suggestions for you to review in Learning.",
-                    isOn: Binding(
-                        get: { store.settings.learnDestinationCorrections },
-                        set: { value in Task { await store.setLearnDestinationCorrections(value) } }
-                    )
-                )
-                projectFolderRow
-                /// The microphone end of the same path, and only on a device
-                /// with more than one channel — on most machines there is no
-                /// row here at all.
-                if store.channelCount > 1 {
-                    AudioChannelRow(store: store)
-                }
-                ChoiceRow(
-                    title: "English spelling",
-                    choices: DictationSpelling.allCases,
-                    label: \.label,
-                    selection: Binding(
-                        get: { store.settings.englishSpelling },
-                        set: { value in Task { await store.setSpelling(value) } }
-                    )
-                )
-                if store.supportsTranslation {
-                    ToggleRow(
-                        title: "Translate to English",
-                        isOn: Binding(
-                            get: { store.settings.translateToEnglish },
-                            set: { value in Task { await store.setTranslateToEnglish(value) } }
+                    if store.settings.commandModeEnabled {
+                        ShortcutCaptureRow(store: store, id: "command")
+                        ToggleRow(
+                            title: "Show answers in chat",
+                            detail: "A question opens the chat with its answer. Nothing is typed over your text. Off, every command edits the selection.",
+                            isOn: Binding(
+                                get: { store.settings.commandAnswersInChat },
+                                set: { value in Task { await store.setCommandAnswersInChat(value) } }
+                            )
                         )
-                    )
+                    }
                 }
-                /// Not a setting but a door: the editor for the styles a
-                /// dictation is written through.
-                ActionRow(title: "Dictation styles", button: "Edit", action: onOpenModes)
-                ChoiceRow(
-                    title: "Overlay",
-                    detail: "None hides it, Minimal shows a compact pill, Live shows the transcription as it is written.",
-                    choices: OverlayStyle.allCases,
-                    label: \.label,
-                    selection: Binding(
-                        get: { store.settings.overlayStyle },
-                        set: { value in Task { await store.setOverlayStyle(value) } }
-                    )
-                )
-                /// Beside the recording overlay, because both are what Sona
-                /// puts on screen outside its own window.
-                HudPillRow(store: store)
-                ToggleRow(
-                    title: "Mute other audio while dictating",
-                    detail: "Turns the Mac's sound off while you record, when something is playing, and back on when you stop. Sound you muted yourself stays muted.",
-                    isOn: Binding(
-                        get: { store.settings.muteWhileRecording },
-                        set: { value in Task { await store.setMuteWhileRecording(value) } }
-                    )
-                )
-                .disabled(store.isBusy("mute_while_recording"))
-                ChoiceRow(
-                    title: "Unload model",
-                    choices: unloadChoices,
-                    label: \.label,
-                    selection: Binding(
-                        get: { store.settings.modelUnloadTimeout },
-                        set: { value in Task { await store.setUnloadTimeout(value) } }
-                    )
-                )
-                dataRows()
-                ToggleRow(
-                    title: "Experimental features",
-                    isOn: Binding(
-                        get: { store.settings.experimentalEnabled },
-                        set: { value in Task { await store.setExperimental(value) } }
-                    )
-                )
-                if store.settings.experimentalEnabled {
+            }
+            PageSection("Writing") {
+                Card {
+                    /// Not a setting but a door: the editor for the styles a
+                    /// dictation is written through.
+                    ActionRow(title: "Dictation styles", button: "Edit", action: onOpenModes)
                     ChoiceRow(
-                        title: "Keyboard implementation",
-                        detail: "Which layer listens for the shortcuts.",
-                        choices: KeyboardImplementation.allCases,
+                        title: "English spelling",
+                        choices: DictationSpelling.allCases,
                         label: \.label,
                         selection: Binding(
-                            get: { store.settings.keyboardImplementation },
-                            set: { value in Task { await store.setKeyboardImplementation(value) } }
+                            get: { store.settings.englishSpelling },
+                            set: { value in Task { await store.setSpelling(value) } }
                         )
                     )
-                    AcceleratorRows(store: store)
+                    if store.supportsTranslation {
+                        ToggleRow(
+                            title: "Translate to English",
+                            isOn: Binding(
+                                get: { store.settings.translateToEnglish },
+                                set: { value in Task { await store.setTranslateToEnglish(value) } }
+                            )
+                        )
+                    }
                     ToggleRow(
-                        title: "Keep the microphone open between dictations",
-                        detail: "Keeps the microphone open for 30 seconds after you stop, so back-to-back dictations start faster. Bluetooth audio quality can drop while it is open.",
+                        title: "Learn from corrections in other apps",
+                        detail: "Locally watches the last dictated passage for up to one minute in supported text fields. Repeated corrections become suggestions for you to review in Learning.",
                         isOn: Binding(
-                            get: { store.settings.lazyStreamClose },
-                            set: { value in Task { await store.setLazyStreamClose(value) } }
+                            get: { store.settings.learnDestinationCorrections },
+                            set: { value in Task { await store.setLearnDestinationCorrections(value) } }
                         )
                     )
+                    projectFolderRow
+                }
+            }
+            PageSection("On screen") {
+                Card {
+                    ChoiceRow(
+                        title: "Overlay",
+                        detail: "None hides it, Minimal shows a compact pill, Live shows the transcription as it is written.",
+                        choices: OverlayStyle.allCases,
+                        label: \.label,
+                        selection: Binding(
+                            get: { store.settings.overlayStyle },
+                            set: { value in Task { await store.setOverlayStyle(value) } }
+                        )
+                    )
+                    HudPillRow(store: store)
+                }
+            }
+            PageSection("Advanced") {
+                Card {
+                    ChoiceRow(
+                        title: "Unload model",
+                        choices: unloadChoices,
+                        label: \.label,
+                        selection: Binding(
+                            get: { store.settings.modelUnloadTimeout },
+                            set: { value in Task { await store.setUnloadTimeout(value) } }
+                        )
+                    )
+                    ToggleRow(
+                        title: "Experimental features",
+                        isOn: Binding(
+                            get: { store.settings.experimentalEnabled },
+                            set: { value in Task { await store.setExperimental(value) } }
+                        )
+                    )
+                    if store.settings.experimentalEnabled {
+                        ChoiceRow(
+                            title: "Keyboard implementation",
+                            detail: "Which layer listens for the shortcuts.",
+                            choices: KeyboardImplementation.allCases,
+                            label: \.label,
+                            selection: Binding(
+                                get: { store.settings.keyboardImplementation },
+                                set: { value in Task { await store.setKeyboardImplementation(value) } }
+                            )
+                        )
+                        AcceleratorRows(store: store)
+                        ToggleRow(
+                            title: "Keep the microphone open between dictations",
+                            detail: "Keeps the microphone open for 30 seconds after you stop, so back-to-back dictations start faster. Bluetooth audio quality can drop while it is open.",
+                            isOn: Binding(
+                                get: { store.settings.lazyStreamClose },
+                                set: { value in Task { await store.setLazyStreamClose(value) } }
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -168,15 +178,15 @@ struct DictationSettingsView<DataRows: View>: View {
     private var projectFolderRow: some View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Project vocabulary").font(TypeScale.label(14)).foregroundStyle(Theme.ink)
+                Text("Project vocabulary").bodyText()
                 Text("Filenames and identifiers can be sent to your cleanup model. Requires Full context in Privacy and your dictation style. Ignored and hidden files stay out.")
-                    .bodyText(13, Theme.inkSecondary)
+                    .metaText()
                 if let root = store.settings.dictationProjectRoot {
                     Text(URL(fileURLWithPath: root).lastPathComponent)
                         .font(TypeScale.mono(12)).foregroundStyle(Theme.inkSecondary)
                         .help(root)
                 } else {
-                    Text("No folder selected").bodyText(13, Theme.inkTertiary)
+                    Text("No folder selected").metaText()
                 }
             }
         } trailing: {

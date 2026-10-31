@@ -13,46 +13,43 @@ struct MeetingsNoticeBand: View {
     let store: MeetingsStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             if let notice = store.notice {
-                band(notice, accent: false) {
+                band(notice, Theme.ink) {
                     Button("OK") { store.dismissNotice() }
-                        .buttonStyle(QuietButton())
+                        .buttonStyle(.quiet)
                 }
             }
             if let error = store.error {
-                band(error, accent: true) {
+                band(error, Theme.live) {
                     Button("Dismiss") { store.dismissError() }
-                        .buttonStyle(QuietButton())
+                        .buttonStyle(.quiet)
                 }
             }
             if store.savedLedgerPath != nil {
-                band("The ledger is written.", accent: false) {
+                band("The ledger is written.", Theme.ink) {
                     HStack(spacing: 12) {
                         Button("Show in Finder") { store.openSavedLedger() }
-                            .buttonStyle(SecondaryButton(compact: true))
+                            .buttonStyle(.compact)
                         Button("Dismiss") { store.dismissSavedLedger() }
-                            .buttonStyle(QuietButton())
+                            .buttonStyle(.quiet)
                     }
                 }
             }
         }
-        .padding(.bottom, store.notice == nil && store.error == nil && store.savedLedgerPath == nil ? 0 : 20)
+        .padding(.bottom, store.notice == nil && store.error == nil && store.savedLedgerPath == nil ? 0 : 16)
     }
 
     private func band<Action: View>(
-        _ text: String, accent: Bool, @ViewBuilder action: () -> Action
+        _ text: String, _ color: Color, @ViewBuilder action: () -> Action
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(text).bodyText(14, accent ? Theme.live : Theme.ink)
-            Spacer(minLength: 12)
-            action()
+        Card {
+            CardRow {
+                Text(text).bodyText(14, color)
+            } trailing: {
+                action()
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.inset)
-        .overlay(alignment: .bottom) { Hairline() }
     }
 }
 
@@ -65,10 +62,10 @@ struct MeetingsRetryNote: View {
         PageSection("Meetings") {
             Card {
                 CardRow {
-                    Text(message).bodyText(15, Theme.live)
+                    Text(message).bodyText(14, Theme.live)
                 } trailing: {
                     Button("Try again", action: retry)
-                        .buttonStyle(SecondaryButton(compact: true))
+                        .buttonStyle(.compact)
                 }
             }
         }
@@ -84,37 +81,55 @@ struct MeetingsTrendCard: View {
     var body: some View {
         PageSection("What Sona heard") {
             Card {
-                ChoiceRow(
-                    title: "Window",
-                    detail: store.trend?.span,
-                    choices: MeetingTrendRange.allCases,
-                    label: { $0.label },
-                    selection: range
-                )
-                if let totals = store.trend?.rangeTotal {
-                    CardRow {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Menu {
+                            Picker("Window", selection: range) {
+                                ForEach(MeetingTrendRange.allCases, id: \.self) { value in
+                                    Text(value.label).tag(value)
+                                }
+                            }
+                            .pickerStyle(.inline)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(store.trendRange.label)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .font(TypeScale.label(13))
+                            .foregroundStyle(Theme.inkSecondary)
+                            .contentShape(Rectangle())
+                        }
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .accessibilityLabel("Window")
+                        .accessibilityValue(store.trendRange.label)
+                        Spacer(minLength: 12)
+                        if let span = store.trend?.span {
+                            Text(span).metaText()
+                        }
+                    }
+                    if let totals = store.trend?.rangeTotal {
                         HStack(alignment: .top, spacing: 16) {
                             Stat(label: "Meetings", value: "\(totals.meetings)")
                             Stat(label: "Captured", value: totals.capturedSpoken)
                             Stat(label: "Lines said", value: "\(totals.transcriptSegments)")
                             Stat(label: "Action items", value: "\(totals.generatedActionItems)")
                         }
-                    }
-                    if !points.isEmpty {
-                        CardRow {
+                        if !points.isEmpty {
                             MeetingsTrendBars(points: points)
+                                .padding(.top, 8)
                         }
-                    }
-                } else if store.trend != nil {
-                    CardRow {
+                    } else if store.trend != nil {
                         Text("Sona cannot reach its meeting storage, so there is no trend to show.")
                             .bodyText(14, Theme.inkSecondary)
-                    }
-                } else {
-                    CardRow {
+                    } else {
                         Text("Reading the trend…").bodyText(14, Theme.inkTertiary)
                     }
                 }
+                .padding(16)
             }
         }
         .padding(.top, 24)
@@ -137,7 +152,7 @@ struct MeetingsTrendBars: View {
             HStack(alignment: .bottom, spacing: 3) {
                 ForEach(points) { point in
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(point.meetings > 0 ? Theme.accent : Theme.selection)
+                        .fill(point.meetings > 0 ? Theme.inkSecondary : Theme.selection)
                         .frame(height: max(2, 56 * fraction(point)))
                         .help("\(point.localDate): \(label(point))")
                 }
@@ -175,7 +190,7 @@ struct MeetingsFilterCard: View {
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 SearchField(prompt: "Search titles", text: query)
                     .frame(minWidth: 180)
                 filters
@@ -185,28 +200,40 @@ struct MeetingsFilterCard: View {
                 filters
             }
         }
-        .padding(.bottom, 16)
+        .padding(.bottom, 24)
     }
 
     private var filters: some View {
-        HStack(spacing: 12) {
-            Picker("State", selection: status) {
-                ForEach(MeetingStatusFilter.allCases, id: \.self) { value in
-                    Text(value.label).tag(value)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
-            Picker("When", selection: window) {
-                ForEach(MeetingTimeWindow.allCases, id: \.self) { value in
-                    Text(value.label).tag(value)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
+        HStack(spacing: 8) {
+            menu("State", selection: status, values: MeetingStatusFilter.allCases, label: \.label)
+            menu("When", selection: window, values: MeetingTimeWindow.allCases, label: \.label)
         }
+    }
+
+    private func menu<Value: Hashable>(
+        _ title: String, selection: Binding<Value>, values: [Value], label: @escaping (Value) -> String
+    ) -> some View {
+        Menu {
+            Picker(title, selection: selection) {
+                ForEach(values, id: \.self) { value in
+                    Text(label(value)).tag(value)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 6) {
+                Text(label(selection.wrappedValue))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.inkSecondary)
+            }
+        }
+        .menuStyle(.button)
+        .buttonStyle(.compact)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(title)
+        .accessibilityValue(label(selection.wrappedValue))
     }
 
     private var query: Binding<String> {
@@ -233,44 +260,46 @@ struct MeetingsFolderBar: View {
     @State private var deleting: MeetingFolder?
 
     var body: some View {
-        PageSection("Folders") {
-            Card {
-                CardRow {
-                    ChatFlowRow(spacing: 6) {
-                        folderChip("All meetings", selected: store.folderId == nil) {
-                            store.choose(folder: nil)
-                        }
-                        ForEach(store.folders) { folder in
-                            folderChip("\(folder.name) · \(folder.meetingCount)", selected: store.folderId == folder.folderId) {
-                                store.choose(folder: folder.folderId)
-                            }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ChatFlowRow(spacing: 8) {
+                    folderChip("All meetings", selected: store.folderId == nil) {
+                        store.choose(folder: nil)
+                    }
+                    ForEach(store.folders) { folder in
+                        folderChip("\(folder.name) · \(folder.meetingCount)", selected: store.folderId == folder.folderId) {
+                            store.choose(folder: folder.folderId)
                         }
                     }
-                    .disabled(store.foldersLoading || store.folderBusy)
-                } trailing: {
-                    Button("New folder") {
-                        renaming = nil
-                        naming = true
-                    }
-                    .buttonStyle(.compact)
-                    .disabled(store.foldersLoading || store.folderBusy)
                 }
-                if store.foldersLoading {
-                    CardLine("Reading folders…")
-                } else if let error = store.foldersError {
+                .disabled(store.foldersLoading || store.folderBusy)
+                Spacer(minLength: 12)
+                Button("New folder") {
+                    renaming = nil
+                    naming = true
+                }
+                .buttonStyle(.compact)
+                .disabled(store.foldersLoading || store.folderBusy)
+            }
+            if store.foldersLoading {
+                Text("Reading folders…").metaText()
+            } else if let error = store.foldersError {
+                Card {
                     ActionRow(title: error, button: "Try again", action: store.retryFolders)
-                } else {
-                    if let folder = store.chosenFolder {
+                }
+            } else {
+                if let folder = store.chosenFolder {
+                    Card {
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(folder.name).headlineText()
                                 Text(folder.countLabel).metaText()
                             }
                         } trailing: {
-                            HStack(spacing: 12) {
+                            HStack(spacing: 8) {
                                 Button("Ask about these meetings") { ask(folder) }
                                     .buttonStyle(.compact)
-                                Menu("Folder options") {
+                                Menu {
                                     Button("Rename") {
                                         renaming = folder
                                         naming = true
@@ -278,19 +307,26 @@ struct MeetingsFolderBar: View {
                                     Button("Template and prompts") { defaults = folder }
                                     Divider()
                                     Button("Delete folder", role: .destructive) { deleting = folder }
+                                } label: {
+                                    Image(systemName: "ellipsis")
                                 }
-                                .menuStyle(.borderlessButton)
+                                .menuStyle(.button)
+                                .buttonStyle(.circle)
+                                .menuIndicator(.hidden)
                                 .fixedSize()
+                                .help("Folder options")
+                                .accessibilityLabel("Folder options")
                                 .disabled(store.folderBusy)
                             }
                         }
                     }
-                    if let error = store.folderError {
-                        CardLine(error)
-                    }
+                }
+                if let error = store.folderError {
+                    Text(error).metaText(Theme.live)
                 }
             }
         }
+        .padding(.bottom, 16)
         .sheet(isPresented: $naming) {
             MeetingFolderNameSheet(store: store, folder: renaming)
         }
@@ -316,9 +352,11 @@ struct MeetingsFolderBar: View {
                 .font(TypeScale.label(13))
                 .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
                 .lineLimit(1)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(selected ? Theme.selection : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(selected ? Theme.selection : Color.clear, in: Capsule())
+                .overlay(Capsule().strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -340,7 +378,7 @@ private struct MeetingFolderNameSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(folder == nil ? "New folder" : "Rename folder").headlineText()
+            Text(folder == nil ? "New folder" : "Rename folder").titleText().accessibilityAddTraits(.isHeader)
             InputField(prompt: "Folder name", text: $name)
                 .accessibilityLabel("Folder name")
             Text("Use 1–80 characters and a name no other folder has.").metaText()
@@ -392,7 +430,7 @@ private struct MeetingFolderDefaultsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Template and prompts").headlineText()
+            Text("Template and prompts").titleText().accessibilityAddTraits(.isHeader)
             Text("For meetings in “\(folder.name)”. A meeting or calendar series can choose a different template.")
                 .metaText()
             Card {
@@ -481,7 +519,7 @@ struct MeetingFilingSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Add to folder").headlineText()
+                    Text("Add to folder").titleText().accessibilityAddTraits(.isHeader)
                     Text(store.filing?.title ?? "").metaText()
                 }
                 Spacer()
@@ -547,29 +585,28 @@ struct MeetingsFeed: View {
     @State private var pendingDelete: MeetingHistorySummary?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 24) {
             if store.loading, store.entries.isEmpty {
                 MeetingsSkeleton()
             } else if store.entries.isEmpty {
                 Card {
                     CardRow {
-                        Text(store.emptyLine).bodyText(15, Theme.inkSecondary)
+                        Text(store.emptyLine).bodyText(14, Theme.inkSecondary)
                     }
                 }
             } else {
                 ForEach(store.groups) { group in
-                    PageSection(group.heading) {
-                        Card {
-                            ForEach(group.items) { entry in
-                                MeetingsRow(
-                                    entry: entry,
-                                    open: { store.open(entry.sessionId) },
-                                    export: { store.export(entry.sessionId, format: $0) },
-                                    ledger: { store.exportLedger(entry.sessionId) },
-                                    file: { store.openFiling(entry.sessionId, title: entry.title) },
-                                    delete: { pendingDelete = entry }
-                                )
-                            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        MeetingsGroupHeading(text: group.heading)
+                        ForEach(group.items) { entry in
+                            MeetingsRow(
+                                entry: entry,
+                                open: { store.open(entry.sessionId) },
+                                export: { store.export(entry.sessionId, format: $0) },
+                                ledger: { store.exportLedger(entry.sessionId) },
+                                file: { store.openFiling(entry.sessionId, title: entry.title) },
+                                delete: { pendingDelete = entry }
+                            )
                         }
                     }
                 }
@@ -594,8 +631,22 @@ struct MeetingsFeed: View {
     }
 }
 
-/// One meeting: when it started, what it was, what Sona heard, and how long
-/// it ran. The menu carries filing, exports, and deletion.
+/// The day a run of meetings falls on, over their cards: "Today".
+struct MeetingsGroupHeading: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Theme.inkSecondary)
+            .accessibilityAddTraits(.isHeader)
+            .padding(.leading, 4)
+    }
+}
+
+/// One meeting as its own card: what it was and when it started, what Sona
+/// heard, and the facts under that. The menu carries filing, exports, and
+/// deletion.
 struct MeetingsRow: View {
     let entry: MeetingHistorySummary
     let open: () -> Void
@@ -605,79 +656,94 @@ struct MeetingsRow: View {
     let delete: () -> Void
 
     var body: some View {
-        CardRow(action: open) {
-            HStack(alignment: .top, spacing: 12) {
-                Text(entry.date.time)
-                    .font(TypeScale.mono(12))
-                    .foregroundStyle(Theme.inkTertiary)
-                    .frame(width: 52, alignment: .leading)
+        Card {
+            CardRow(action: open) {
                 VStack(alignment: .leading, spacing: 4) {
+                    let facts = self.facts
                     Text(entry.title).headlineText()
                     if let headline = entry.headlineText {
-                        Text(headline).metaText(Theme.inkSecondary).lineLimit(2)
+                        Text(headline).bodyText(14, Theme.inkSecondary).lineLimit(2)
                     }
-                    HStack(spacing: 10) {
-                        if let attention = entry.attention {
-                            Text(attention.text)
-                                .font(TypeScale.label(12))
-                                .foregroundStyle(attention.urgent ? Theme.live : Theme.accent)
+                    if entry.attention != nil || !facts.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            if let attention = entry.attention {
+                                Text(attention.text)
+                                    .font(TypeScale.label(12))
+                                    .foregroundStyle(attention.urgent ? Theme.live : Theme.ink)
+                            }
+                            if !facts.isEmpty {
+                                Text(facts).metaText().lineLimit(1)
+                            }
                         }
-                        if entry.captureCompleteness == .partial {
-                            Text("Partial recording").metaText()
-                        }
-                        if let sources = entry.sources, !sources.isEmpty {
-                            Text(sources.map(\.label).joined(separator: " + ")).metaText()
-                        }
+                        .padding(.top, 2)
                     }
                 }
-            }
-        } trailing: {
-            HStack(spacing: 10) {
-                if let duration = entry.durationShort {
-                    Text(duration).font(TypeScale.mono(12)).foregroundStyle(Theme.inkSecondary)
-                }
-                Menu {
-                    Button("Add to folder…", action: file)
-                    Divider()
-                    Button("Export as Markdown") { export(.markdown) }
-                    Button("Export as JSON") { export(.json) }
-                    if entry.hasLedger {
-                        Button("Save the ledger as HTML", action: ledger)
+            } trailing: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(entry.date.time)
+                        .font(TypeScale.body(13))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                    Menu {
+                        Button("Add to folder…", action: file)
+                        Divider()
+                        Button("Export as Markdown") { export(.markdown) }
+                        Button("Export as JSON") { export(.json) }
+                        if entry.hasLedger {
+                            Button("Save the ledger as HTML", action: ledger)
+                        }
+                        Divider()
+                        Button("Delete", role: .destructive, action: delete)
+                    } label: {
+                        Text(Image(systemName: "ellipsis"))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.inkSecondary)
+                            .frame(width: 24, height: 20)
+                            .contentShape(Rectangle())
                     }
-                    Divider()
-                    Button("Delete", role: .destructive, action: delete)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .frame(width: 28, height: 24)
-                        .contentShape(Rectangle())
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .accessibilityLabel("Options for \(entry.title)")
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel("Options for \(entry.title)")
             }
         }
+    }
+
+    /// The plain facts in one gray line: a partial capture, the length, the
+    /// sources, and who spoke.
+    private var facts: String {
+        var parts: [String] = []
+        if entry.captureCompleteness == .partial { parts.append("Partial recording") }
+        if let duration = entry.durationShort { parts.append(duration) }
+        if let sources = entry.sources, !sources.isEmpty {
+            parts.append(sources.map(\.label).joined(separator: " + "))
+        }
+        if let speakers = entry.speakerLabels, !speakers.isEmpty {
+            parts.append(speakers.joined(separator: ", "))
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
 /// While the first page reads: the shape of the rows, no invented content.
 struct MeetingsSkeleton: View {
     var body: some View {
-        PageSection("Loading") {
-            Card {
-                ForEach(0..<4, id: \.self) { _ in
-                    CardRow {
-                        VStack(alignment: .leading, spacing: 8) {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Theme.selection)
-                                .frame(width: 220, height: 14)
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Theme.selection.opacity(0.6))
-                                .frame(width: 320, height: 11)
-                        }
+        VStack(alignment: .leading, spacing: 8) {
+            MeetingsGroupHeading(text: "Loading")
+            ForEach(0..<4, id: \.self) { _ in
+                Card {
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.selection)
+                            .frame(width: 220, height: 14)
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.selection.opacity(0.6))
+                            .frame(width: 320, height: 11)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
             }
         }
@@ -693,11 +759,11 @@ struct MeetingsPager: View {
         if store.page > 1 || store.hasMore {
             HStack(spacing: 12) {
                 Button("Newer") { store.previousPage() }
-                    .buttonStyle(SecondaryButton(compact: true))
+                    .buttonStyle(.compact)
                     .disabled(store.page == 1)
-                Text("Page \(store.page)").metaText()
+                Text("Page \(store.page)").metaText().monospacedDigit()
                 Button("Older") { store.nextPage() }
-                    .buttonStyle(SecondaryButton(compact: true))
+                    .buttonStyle(.compact)
                     .disabled(!store.hasMore)
             }
             .padding(.top, 16)
@@ -716,8 +782,8 @@ struct MeetingsTrashSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Deleted meetings").font(TypeScale.headline).foregroundStyle(Theme.ink)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Deleted meetings").titleText().accessibilityAddTraits(.isHeader)
                     Text("Sona keeps a deleted meeting for 30 days, then removes it for good.")
                         .metaText(Theme.inkSecondary)
                 }
@@ -726,16 +792,15 @@ struct MeetingsTrashSheet: View {
                     .buttonStyle(.secondary)
             }
             .padding(24)
-            Hairline()
             if let error = store.error {
                 ErrorNote(error).padding(.horizontal, 24)
             }
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                Card {
                     if store.trashLoading, store.trash.isEmpty {
-                        row { Text("Reading the trash…").bodyText(14, Theme.inkTertiary) }
+                        CardRow { Text("Reading the trash…").bodyText(14, Theme.inkTertiary) }
                     } else if store.trash.isEmpty {
-                        row { Text("Nothing deleted.").bodyText(14, Theme.inkSecondary) }
+                        CardRow { Text("Nothing deleted.").bodyText(14, Theme.inkSecondary) }
                     } else {
                         ForEach(store.trash) { entry in
                             CardRow {
@@ -746,7 +811,7 @@ struct MeetingsTrashSheet: View {
                             } trailing: {
                                 HStack(spacing: 12) {
                                     Button("Restore") { store.restore(entry) }
-                                        .buttonStyle(SecondaryButton(compact: true))
+                                        .buttonStyle(.compact)
                                     Button("Delete forever", role: .destructive) { deleting = entry }
                                         .buttonStyle(QuietButton(color: Theme.live))
                                 }
@@ -755,6 +820,8 @@ struct MeetingsTrashSheet: View {
                         }
                     }
                 }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
             }
         }
         .frame(width: 640, height: 420)
@@ -770,12 +837,5 @@ struct MeetingsTrashSheet: View {
         } message: { entry in
             Text("“\(entry.title)” will be removed now. You cannot restore it after this.")
         }
-    }
-
-    private func row<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack { content() }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

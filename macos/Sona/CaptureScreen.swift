@@ -1,84 +1,88 @@
 import SwiftUI
 
-/// The first page: what the microphone is doing, the chord that drives it,
-/// the words as they land, and under that the overview: the mode, what needs
-/// a decision, what is coming, this week's numbers, what happened lately.
+/// Home: what the microphone is doing, the chord that drives it, the words
+/// as they land and the mode they run through, and under that the overview:
+/// the numbers, what needs a decision, what is coming, what happened lately.
 struct CaptureScreen: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         Page {
-            SecureInputBanner(store: model.secureInput)
-            PermissionsNotice(store: model.onboarding.permissions)
-            hero.padding(.bottom, 20)
-            if let notice = model.notice {
-                Card {
-                    CardRow {
-                        Text(notice.text).bodyText(14, Theme.inkSecondary)
-                    } trailing: {
-                        HStack(spacing: 12) {
-                            if let id = notice.dictation {
-                                Button("Open in Library") {
-                                    model.dismissNotice()
-                                    model.openDictation(id)
+            PageTitle("Home", subtitle: "")
+            VStack(alignment: .leading, spacing: 12) {
+                SecureInputBanner(store: model.secureInput)
+                PermissionsNotice(store: model.onboarding.permissions)
+                hero
+                if let notice = model.notice {
+                    Card {
+                        CardRow {
+                            Text(notice.text).bodyText(14, Theme.inkSecondary)
+                        } trailing: {
+                            HStack(spacing: 12) {
+                                if let id = notice.dictation {
+                                    Button("Open in Library") {
+                                        model.dismissNotice()
+                                        model.openDictation(id)
+                                    }
+                                    .buttonStyle(.compact)
                                 }
-                                .buttonStyle(.compact)
+                                Button(action: model.dismissNotice) {
+                                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(Theme.inkTertiary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Dismiss")
                             }
-                            Button(action: model.dismissNotice) {
-                                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(Theme.inkTertiary)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Dismiss")
                         }
                     }
                 }
-                .padding(.bottom, 20)
-            }
-            if let error = model.coreError {
-                Card {
-                    CardRow {
-                        Text(error).bodyText(14, Theme.inkSecondary)
+                if let error = model.coreError {
+                    Card {
+                        CardRow {
+                            Text(error).bodyText(14, Theme.inkSecondary)
+                        }
                     }
                 }
-                .padding(.bottom, 20)
             }
+            .padding(.bottom, 16)
             OverviewView(
                 store: model.overview,
                 openMeeting: model.openMeeting,
-                openModes: { model.showSettings(.modes) },
+                openRunLog: { model.showSettings(.workflows) },
                 series: seriesActions)
         }
     }
 
     private var hero: some View {
         Card {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    switch model.capture {
-                    case .idle:
-                        Text("Ready").heroText()
-                    case let .recording(since):
-                        TimelineView(.periodic(from: since, by: 1)) { context in
-                            Text("Recording \(context.date.timeIntervalSince(since).clock)")
-                                .heroText()
-                                .monospacedDigit()
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        switch model.capture {
+                        case .idle:
+                            Text("Ready").heroText()
+                        case let .recording(since):
+                            TimelineView(.periodic(from: since, by: 1)) { context in
+                                Text("Recording \(context.date.timeIntervalSince(since).clock)")
+                                    .heroText()
+                                    .monospacedDigit()
+                            }
+                            Circle().fill(Theme.live).frame(width: 10, height: 10)
+                        case let .working(kind):
+                            Text(kind.capitalized).heroText()
                         }
-                        Circle().fill(Theme.live).frame(width: 10, height: 10)
-                    case let .working(kind):
-                        Text(kind.capitalized).heroText()
                     }
-                }
-                HStack(spacing: 8) {
-                    if let chord = model.settings.binding("transcribe")?.currentBinding {
-                        Button { model.showSettings(.essentials) } label: {
-                            Shortcut(chord)
+                    HStack(spacing: 8) {
+                        if let chord = model.settings.binding("transcribe")?.currentBinding {
+                            Button { model.showSettings(.essentials) } label: {
+                                Shortcut(chord)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Change recording shortcut")
+                            .help("Change recording shortcut")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Change recording shortcut")
-                        .help("Change recording shortcut")
+                        Text(hint).bodyText(14, Theme.inkSecondary)
                     }
-                    Text(hint).bodyText(14, Theme.inkSecondary)
                 }
                 if !model.liveText.isEmpty, model.capture != .idle {
                     Text(model.liveText)
@@ -126,10 +130,11 @@ struct CaptureScreen: View {
                         Button("Cancel") { model.cancelCapture() }.buttonStyle(.secondary)
                     }
                 }
-                .padding(.top, 4)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 16)
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
+            CaptureModeChipView(store: model.overview, openModes: { model.showSettings(.modes) })
         }
     }
 

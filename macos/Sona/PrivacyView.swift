@@ -135,10 +135,7 @@ struct PrivacyView: View {
     private var egressSection: some View {
         PageSection("What leaves this Mac") {
             Card {
-                CardRow {
-                    Text("Nothing leaves this Mac except on the routes listed here, and provider keys stay in the system credential store, never in Sona's settings.")
-                        .bodyText(14, Theme.inkSecondary)
-                }
+                CardLine("Nothing leaves this Mac except on the routes listed here, and provider keys stay in the system credential store, never in Sona's settings.")
                 if store.cleanupRoute == .failed {
                     PrivacyFailureRow(
                         "AI cleanup setup could not be checked.",
@@ -171,10 +168,7 @@ struct PrivacyView: View {
                 // it is the one sentence in the app that itemises what leaves
                 // the machine — so while a cloud route exists it is read.
                 if case .providers = store.transcriptionRoute {
-                    CardRow {
-                        Text("For a cloud-enabled mode, Sona sends the recorded audio, the selected language, and the words that mode lists directly to the provider. What Sona reads from your other apps, and your keys, stay on this Mac.")
-                            .bodyText(14, Theme.inkSecondary)
-                    }
+                    CardLine("For a cloud-enabled mode, Sona sends the recorded audio, the selected language, and the words that mode lists directly to the provider. What Sona reads from your other apps, and your keys, stay on this Mac.")
                 }
                 if store.cloudSyncFailed {
                     PrivacyFailureRow(
@@ -225,9 +219,7 @@ struct PrivacyView: View {
                         }
                     }
                 } else {
-                    CardRow {
-                        Text("Reading how history is stored…").bodyText(14, Theme.inkSecondary)
-                    }
+                    CardLine("Reading how history is stored…")
                 }
             }
         }
@@ -240,10 +232,7 @@ struct PrivacyView: View {
         if let status = store.upstream, status.available {
             PageSection("Import from legacy app") {
                 Card {
-                    CardRow {
-                        Text("The source is left unchanged, and model files are not imported.")
-                            .bodyText(14, Theme.inkSecondary)
-                    }
+                    CardLine("The source is left unchanged, and model files are not imported.")
                     PrivacyCheckRow(
                         title: "Settings",
                         detail: nil,
@@ -445,8 +434,8 @@ private struct PrivacyFact: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.body(14))
-            .foregroundStyle(live ? Theme.live : Theme.ink)
+            .font(TypeScale.body(13))
+            .foregroundStyle(live ? Theme.live : Theme.inkSecondary)
             .textSelection(.enabled)
     }
 }
@@ -501,7 +490,7 @@ private struct PrivacyCheckRow: View {
     var body: some View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).bodyText(15, enabled ? Theme.ink : Theme.inkDisabled)
+                Text(title).bodyText(14, enabled ? Theme.ink : Theme.inkDisabled)
                 if let detail {
                     Text(detail).metaText()
                 }

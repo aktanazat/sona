@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// A question of your own, on the right in a bubble: the well it was typed
-/// in, filled a shade deeper, as Halcyon's thread draws it.
+/// A question of your own, on the right in a bubble in the soft accent.
 struct ChatQuestion: View {
     let message: String
 
@@ -13,19 +12,17 @@ struct ChatQuestion: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(Theme.selection, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .padding(.vertical, 10)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("You asked: \(message)")
     }
 }
 
-/// An answer is prose on the surface, not a card and not a bubble: it is the
-/// thing the sheet exists to show, and putting a container around it would
-/// make it look like an aside to something else. Only the addresses inside it
-/// are chrome, because only they are pressable. The answer that lands while
-/// the chat is open types itself out; history is simply there.
+/// An answer, on the left in a bubble on the surface. Only the addresses
+/// inside it are chrome, because only they are pressable. The answer that
+/// lands while the chat is open types itself out; history is simply there.
 struct ChatAnswer: View, Equatable {
     let message: String
     /// When this answer landed, for the one that arrived while the chat was
@@ -34,17 +31,24 @@ struct ChatAnswer: View, Equatable {
     let store: ChatStore
 
     var body: some View {
-        ChatRevealText(text: prose, landed: landed)
-            .font(TypeScale.body(14))
-            .foregroundStyle(Theme.ink)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .environment(
-                \.openURL,
-                OpenURLAction { url in
-                    store.openLink(url.absoluteString)
-                    return .handled
-                })
+        HStack(spacing: 0) {
+            ChatRevealText(text: prose, landed: landed)
+                .bodyText(14)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusCard)
+                        .strokeBorder(Theme.border, lineWidth: 1))
+            Spacer(minLength: 32)
+        }
+        .environment(
+            \.openURL,
+            OpenURLAction { url in
+                store.openLink(url.absoluteString)
+                return .handled
+            })
     }
 
     /// The addresses are links in the run of text rather than buttons beside

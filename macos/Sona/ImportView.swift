@@ -50,6 +50,7 @@ struct ImportView: View {
             store.add(paths: urls.map(\.path))
             return true
         } isTargeted: { dragging = $0 }
+        .padding(.bottom, 28)
     }
 
     @ViewBuilder
@@ -130,6 +131,7 @@ struct ImportView: View {
                     }
                 }
             }
+            .padding(.bottom, 16)
         }
     }
 }

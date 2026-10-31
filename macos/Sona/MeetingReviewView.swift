@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// One recorded meeting, read three ways: the words, what Sona made of them,
@@ -15,19 +16,21 @@ struct MeetingReviewView: View {
 
     var body: some View {
         Page {
-            BackLink(title: "Meetings") { store.closeReview() }
             if let snapshot = store.snapshot {
                 MeetingReviewHeader(
                     store: store, snapshot: snapshot, delete: { confirmingDelete = true },
                     openMeetingSettings: openMeetingSettings, askAgent: askAgent)
                 MeetingReviewTabs(store: store)
                 pane(snapshot)
-            } else if let failure = store.reviewFailure {
-                unread(failure)
-            } else if store.reviewLoading {
-                Text("Reading the meeting…").bodyText(15, Theme.inkSecondary)
             } else {
-                Text("That meeting is no longer here.").bodyText(15, Theme.inkSecondary)
+                BackLink(title: "Meetings") { store.closeReview() }
+                if let failure = store.reviewFailure {
+                    unread(failure)
+                } else if store.reviewLoading {
+                    Text("Reading the meeting…").bodyText(14, Theme.inkSecondary)
+                } else {
+                    Text("That meeting is no longer here.").bodyText(14, Theme.inkSecondary)
+                }
             }
         }
         .overlay(alignment: .bottom) { toast }
@@ -110,7 +113,7 @@ private struct MeetingReviewToast: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 14) {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(notice)
                 .font(TypeScale.body(13))
                 .foregroundStyle(Theme.ink)
@@ -124,10 +127,10 @@ private struct MeetingReviewToast: View {
                 .buttonStyle(QuietButton(color: Theme.accent, compact: true))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
         .onHover { hovering = $0 }
         .task(id: hovering ? nil : notice) {
@@ -160,42 +163,50 @@ struct MeetingReviewHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    title.fixedSize(horizontal: true, vertical: false)
+                HStack(alignment: .top, spacing: 12) {
+                    back
                     Spacer(minLength: 12)
-                    actions.fixedSize(horizontal: true, vertical: false)
+                    actions
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(height: 28)
                 }
-                VStack(alignment: .leading, spacing: 12) {
-                    title
+                VStack(alignment: .leading, spacing: 0) {
+                    back
                     actions
                 }
             }
+            title
             Text(facts).metaText(Theme.inkSecondary)
             status
         }
-        .padding(.bottom, 20)
+        .padding(.bottom, 24)
+    }
+
+    private var back: some View {
+        BackLink(title: "Meetings") { store.closeReview() }
     }
 
     @ViewBuilder
     private var title: some View {
         if editing {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 InputField(prompt: "Meeting title", text: $draft)
                     .frame(maxWidth: 420)
                     .onSubmit(commit)
-                Button("Save", action: commit).buttonStyle(SecondaryButton(compact: true))
-                Button("Cancel") { editing = false }.buttonStyle(QuietButton())
+                Button("Save", action: commit).buttonStyle(.compact)
+                Button("Cancel") { editing = false }.buttonStyle(.quiet)
             }
         } else {
             Button { start() } label: {
                 Text(snapshot.session.title)
-                    .titleText()
+                    .heroText()
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
             }
             .buttonStyle(.plain)
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Edit the title" : "")
+            .accessibilityAddTraits(.isHeader)
         }
     }
 
@@ -204,7 +215,7 @@ struct MeetingReviewHeader: View {
     private var actions: some View {
         HStack(spacing: 8) {
             if let doing = store.pending ?? (store.catchingUp ? "Catching up" : nil) {
-                Text("\(doing)…").metaText(Theme.accent)
+                Text("\(doing)…").metaText(Theme.inkSecondary)
             }
             if let copied {
                 Text(copied).metaText(Theme.inkSecondary)
@@ -216,10 +227,13 @@ struct MeetingReviewHeader: View {
             }
             if store.hasLedger {
                 Button("Follow up") { store.openFollowUp() }
-                    .buttonStyle(SecondaryButton(compact: true))
+                    .buttonStyle(.compact)
             }
             if store.canExport {
                 MeetingSendToMenu(sessionId: snapshot.session.sessionId)
+                    .menuStyle(.button)
+                    .buttonStyle(.compact)
+                    .fixedSize()
             }
             Menu {
                 Button("Add to folder…") {
@@ -265,15 +279,13 @@ struct MeetingReviewHeader: View {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .frame(width: 30, height: 26)
-                    .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.circle)
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(store.busy)
+            .help("Meeting options")
             .accessibilityLabel("Meeting options")
         }
     }
@@ -436,40 +448,33 @@ struct MeetingReviewHeader: View {
     }
 }
 
-/// The three readings, with the one in front of the reader underlined, and
-/// the transcript's search at the end of the row. The row keeps one height
-/// on every tab, so switching never moves the page.
+/// The three readings as one segmented control, and the transcript's search
+/// at the end of the row. The row keeps one height on every tab, so
+/// switching never moves the page.
 struct MeetingReviewTabs: View {
     let store: MeetingsStore
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 20) {
-            ForEach(MeetingReviewTab.allCases) { tab in
-                Button {
-                    store.choose(tab: tab)
-                } label: {
-                    VStack(spacing: 6) {
-                        Text(tab.title)
-                            .font(TypeScale.label())
-                            .foregroundStyle(store.tab == tab ? Theme.ink : Theme.inkSecondary)
-                        Rectangle()
-                            .fill(store.tab == tab ? Theme.ink : .clear)
-                            .frame(height: 1)
-                    }
-                    .fixedSize()
-                    .contentShape(Rectangle())
+        HStack(spacing: 12) {
+            Picker("Meeting view", selection: tab) {
+                ForEach(MeetingReviewTab.allCases) { tab in
+                    Text(tab.title).tag(tab)
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(store.tab == tab ? .isSelected : [])
             }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .fixedSize()
             Spacer(minLength: 0)
             if store.tab == .transcript && !store.transcriptDeleted {
                 TranscriptSearchField(store: store)
             }
         }
-        .frame(height: 32, alignment: .bottom)
-        .overlay(alignment: .bottom) { Hairline() }
-        .padding(.bottom, 20)
+        .frame(height: 32)
+        .padding(.bottom, 24)
+    }
+
+    private var tab: Binding<MeetingReviewTab> {
+        Binding(get: { store.tab }, set: { store.choose(tab: $0) })
     }
 }
 
@@ -484,7 +489,7 @@ private struct TranscriptSearchField: View {
         HStack(spacing: 6) {
             Button { focused = true } label: {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(Theme.inkTertiary)
             }
             .buttonStyle(.plain)
@@ -519,9 +524,9 @@ private struct TranscriptSearchField: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(width: 216, height: 28)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(width: 216, height: 30)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 
     private var query: Binding<String> {
@@ -580,11 +585,9 @@ struct TranscriptPane: View {
 
     private var turns: some View {
         ScrollViewReader { proxy in
-            Card {
+            VStack(alignment: .leading, spacing: 16) {
                 if store.turns.isEmpty {
-                    CardRow {
-                        Text(emptyLine).bodyText(14, Theme.inkSecondary)
-                    }
+                    Text(emptyLine).bodyText(14, Theme.inkSecondary)
                 } else {
                     ForEach(store.turns) { turn in
                         TranscriptTurnRow(
@@ -601,6 +604,7 @@ struct TranscriptPane: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .onChange(of: store.jump) { _, jump in
                 guard let jump, store.canJumpTo(jump.segmentId) else { return }
                 withAnimation(reduceMotion ? nil : .default) {
@@ -648,9 +652,9 @@ struct TranscriptPane: View {
     }
 }
 
-/// One voice, one stretch: the clock, the name, and the words. The name opens
-/// what can be done about the voice; a press on a line opens it for
-/// correction.
+/// One voice, one stretch: the name in the voice's color with the clock
+/// across from it, then the words. The name opens what can be done about the
+/// voice; a press on a line opens it for correction.
 struct TranscriptTurnRow: View {
     let store: MeetingsStore
     let turn: TranscriptTurn
@@ -659,20 +663,20 @@ struct TranscriptTurnRow: View {
     let rename: (MeetingSpeaker) -> Void
 
     var body: some View {
-        CardRow {
-            HStack(alignment: .top, spacing: 16) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                voice
+                Spacer(minLength: 12)
                 Text(turn.time)
-                    .font(TypeScale.mono(12))
+                    .font(TypeScale.body(12))
+                    .monospacedDigit()
                     .foregroundStyle(Theme.inkTertiary)
-                    .frame(width: 62, alignment: .leading)
-                VStack(alignment: .leading, spacing: 6) {
-                    voice
-                    ForEach(turn.segments) { segment in
-                        line(segment)
-                    }
-                }
+            }
+            ForEach(turn.segments) { segment in
+                line(segment)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The name, and behind it the two corrections a voice takes: a new
@@ -680,8 +684,8 @@ struct TranscriptTurnRow: View {
     @ViewBuilder
     private var voice: some View {
         let label = Text(store.speakerName(turn.speakerId))
-            .font(TypeScale.label(13))
-            .foregroundStyle(Theme.accent)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(SpeakerInk.color(at: speakers.firstIndex { $0.speakerId == turn.speakerId }))
         if let speaker = speakers.first(where: { $0.speakerId == turn.speakerId }) {
             Menu {
                 if store.editable {
@@ -697,7 +701,8 @@ struct TranscriptTurnRow: View {
             } label: {
                 label
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize()
             .accessibilityHint(store.editable ? "Rename this voice or merge it with another" : "")
@@ -717,7 +722,7 @@ struct TranscriptTurnRow: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(TranscriptHighlight.mark(segment.text, query: store.transcriptQuery))
-                        .bodyText(15, segment.removed ? Theme.inkDisabled : Theme.ink)
+                        .bodyText(14, segment.removed ? Theme.inkDisabled : Theme.ink)
                         .strikethrough(segment.removed, color: Theme.inkDisabled)
                     if segment.edited {
                         Text("corrected").font(TypeScale.body(11)).foregroundStyle(Theme.inkTertiary)
@@ -730,6 +735,31 @@ struct TranscriptTurnRow: View {
             .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
         }
+    }
+}
+
+/// A voice's color in a transcript, by its place among the meeting's
+/// speakers, so a name keeps one color from line to line. A line no voice is
+/// sure of stays gray.
+enum SpeakerInk {
+    private static let palette: [Color] = [
+        NSColor.systemBlue, .systemOrange, .systemGreen, .systemPink, .systemTeal, .systemYellow,
+    ].map { hue in
+        Color(nsColor: NSColor(name: nil) { appearance in
+            guard appearance.bestMatch(from: [.aqua, .darkAqua]) != .darkAqua else { return hue }
+            // The system hues fall under 2:1 contrast on the light page; at
+            // half brightness every one clears 4.5:1.
+            var shade = hue
+            appearance.performAsCurrentDrawingAppearance {
+                shade = hue.blended(withFraction: 0.5, of: .black) ?? hue
+            }
+            return shade
+        })
+    }
+
+    static func color(at index: Int?) -> Color {
+        guard let index else { return Theme.inkSecondary }
+        return palette[index % palette.count]
     }
 }
 
@@ -832,7 +862,7 @@ struct MeetingPeopleBand: View {
                                 Text(row.displayName).bodyText()
                                 Text(line(row)).metaText()
                                 if let loop = row.topOpenLoop {
-                                    Text("Still open: \(loop.text)").metaText(Theme.accent)
+                                    Text("Still open: \(loop.text)").metaText(Theme.inkSecondary)
                                 }
                             }
                         } trailing: {
@@ -867,14 +897,14 @@ struct MeetingAnalyticsStrip: View {
     var body: some View {
         if let talk = store.talk {
             Card {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .firstTextBaseline, spacing: 32) {
-                        figure(talk.longestMonologueNs.meetingTalkDuration, "Longest run")
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 16) {
+                        Stat(label: "Longest run", value: talk.longestMonologueNs.meetingTalkDuration)
                         if let patience = store.patience {
-                            figure(patience, "Patience")
+                            Stat(label: "Patience", value: patience)
                         }
                         if let handovers = store.handovers {
-                            figure("\(handovers)", "Handovers in \(talk.turnCount) turns")
+                            Stat(label: "Handovers in \(talk.turnCount) turns", value: "\(handovers)")
                         }
                     }
                     let shares = store.talkShares
@@ -886,10 +916,9 @@ struct MeetingAnalyticsStrip: View {
                         }
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(alignment: .bottom) { Hairline() }
+                .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
                 ForEach(store.trackers) { tracker in
                     CardRow {
                         HStack(spacing: 10) {
@@ -906,21 +935,8 @@ struct MeetingAnalyticsStrip: View {
                     }
                 }
             }
-            .padding(.bottom, 32)
+            .padding(.bottom, 28)
         }
-    }
-
-    /// A number over its name: 17 points, never wrapped.
-    private func figure(_ value: String, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(value)
-                .font(TypeScale.headline)
-                .monospacedDigit()
-                .foregroundStyle(Theme.ink)
-            Text(label).metaText()
-        }
-        .lineLimit(1)
-        .fixedSize()
     }
 
     /// One voice on one line: the name, a thin bar of its share, the share,
@@ -966,49 +982,57 @@ struct ArtifactPane: View {
                 }
                 summary(content, artifact: artifact)
                 if !content.outline.isEmpty { outline(content) }
-                if !content.decisions.isEmpty { decisions(content) }
+                if !content.decisions.isEmpty { cited("Decisions", content.decisions) }
                 if !content.actionItems.isEmpty { actionItems(content, artifact: artifact) }
                 if !content.keyQuestions.isEmpty { cited("Questions worth answering", content.keyQuestions) }
                 if !content.risks.isEmpty { cited("Risks", content.risks) }
                 followUp(content)
             }
+            .padding(.bottom, 28)
             .task { await templates.loadIfNeeded() }
         }
     }
 
+    /// A heading of the notes, and what it heads.
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).titleText().accessibilityAddTraits(.isHeader)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func bullet<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
+            content()
+        }
+    }
+
     private func summary(_ content: MeetingGeneratedArtifacts, artifact: MeetingArtifactRevision) -> some View {
-        PageSection("Summary") {
-            Card {
-                if let lines = content.summary.tracedLines(content.summaryTrace) {
-                    ForEach(lines) { line in
-                        CardRow(action: line.segmentId.flatMap(store.citationAction)) {
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                if let offset = line.startOffsetNs {
-                                    Text(offset.meetingOffsetClock)
-                                        .font(TypeScale.mono(12))
-                                        .foregroundStyle(Theme.inkTertiary)
-                                        .frame(width: 52, alignment: .leading)
-                                }
-                                Text(line.text).bodyText()
-                            }
-                        }
-                    }
-                } else {
-                    CardRow {
-                        Text(content.summary.text).bodyText()
+        section("Summary") {
+            if let lines = content.summary.tracedLines(content.summaryTrace) {
+                ForEach(lines) { line in
+                    CitedLine(
+                        action: line.segmentId.flatMap(store.citationAction),
+                        clock: line.startOffsetNs?.meetingOffsetClock
+                    ) {
+                        Text(line.text).bodyText()
                     }
                 }
-                CardRow {
-                    Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(templateWords(artifact)) v\(artifact.templateVersion)")
-                        .metaText()
-                } trailing: {
-                    if store.canRegenerate {
-                        Button("Write it again") { store.regenerate() }
-                            .buttonStyle(QuietButton())
-                            .disabled(store.busy)
-                    }
+            } else {
+                Text(content.summary.text).bodyText()
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(templateWords(artifact)) v\(artifact.templateVersion)")
+                    .metaText()
+                if store.canRegenerate {
+                    Button("Write it again") { store.regenerate() }
+                        .buttonStyle(.quiet)
+                        .disabled(store.busy)
                 }
             }
+            .padding(.top, 4)
         }
     }
 
@@ -1020,102 +1044,81 @@ struct ArtifactPane: View {
     }
 
     private func outline(_ content: MeetingGeneratedArtifacts) -> some View {
-        PageSection("What was covered") {
-            Card {
-                ForEach(Array(content.outline.enumerated()), id: \.offset) { _, topic in
-                    CardRow(action: jump(topic.title)) {
-                        VStack(alignment: .leading, spacing: 4) {
+        section("What was covered") {
+            ForEach(Array(content.outline.enumerated()), id: \.offset) { _, topic in
+                CitedLine(
+                    action: jump(topic.title),
+                    clock: topic.title.citations.first?.startOffsetNs.meetingOffsetClock
+                ) {
+                    bullet {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(topic.title.text).bodyText()
                             if let detail = topic.detail {
-                                Text(detail.text).metaText(Theme.inkSecondary)
+                                Text(detail.text).bodyText(13, Theme.inkSecondary)
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    private func decisions(_ content: MeetingGeneratedArtifacts) -> some View {
-        cited("Decisions", content.decisions)
     }
 
     private func actionItems(
         _ content: MeetingGeneratedArtifacts, artifact: MeetingArtifactRevision
     ) -> some View {
-        PageSection("Action items") {
-            Card {
-                ForEach(Array(content.actionItems.enumerated()), id: \.offset) { index, item in
-                    CardRow {
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Button {
-                                store.toggleActionItem(
-                                    artifact.artifactId, index,
-                                    done: !store.isDone(artifact.artifactId, index))
-                            } label: {
-                                Image(systemName: store.isDone(artifact.artifactId, index)
-                                    ? "checkmark.square.fill" : "square")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(store.isDone(artifact.artifactId, index)
-                                        ? Theme.accent : Theme.inkTertiary)
-                            }
-                            .buttonStyle(.plain)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.text.text)
-                                    .bodyText(15, store.isDone(artifact.artifactId, index)
-                                        ? Theme.inkTertiary : Theme.ink)
-                                    .strikethrough(store.isDone(artifact.artifactId, index),
-                                                   color: Theme.inkTertiary)
-                                if let owner = ownerLine(item) {
-                                    Text(owner).metaText()
-                                }
-                            }
-                        }
-                    } trailing: {
-                        if let citation = item.text.citations.first {
-                            Button(citation.startOffsetNs.meetingOffsetClock) {
-                                store.jumpTo(citation.segmentId)
-                            }
-                            .buttonStyle(QuietButton())
-                            .disabled(!store.canJumpTo(citation.segmentId))
+        section("Action items") {
+            ForEach(Array(content.actionItems.enumerated()), id: \.offset) { index, item in
+                let done = store.isDone(artifact.artifactId, index)
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Button {
+                        store.toggleActionItem(artifact.artifactId, index, done: !done)
+                    } label: {
+                        Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 15))
+                            .foregroundStyle(done ? Theme.accent : Theme.inkTertiary)
+                    }
+                    .buttonStyle(.plain)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.text.text)
+                            .bodyText(14, done ? Theme.inkTertiary : Theme.ink)
+                            .strikethrough(done, color: Theme.inkTertiary)
+                        if let owner = ownerLine(item) {
+                            Text(owner).metaText()
                         }
                     }
+                    Spacer(minLength: 12)
+                    if let citation = item.text.citations.first {
+                        Button(citation.startOffsetNs.meetingOffsetClock) {
+                            store.jumpTo(citation.segmentId)
+                        }
+                        .buttonStyle(.quiet)
+                        .disabled(!store.canJumpTo(citation.segmentId))
+                    }
                 }
+                .padding(.vertical, 4)
             }
         }
     }
 
     private func cited(_ label: String, _ lines: [ArtifactCitedText]) -> some View {
-        PageSection(label) {
-            Card {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    CardRow(action: jump(line)) {
-                        Text(line.text).bodyText()
-                    } trailing: {
-                        if let citation = line.citations.first {
-                            Text(citation.startOffsetNs.meetingOffsetClock)
-                                .font(TypeScale.mono(12))
-                                .foregroundStyle(Theme.inkTertiary)
-                        }
-                    }
+        section(label) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                CitedLine(action: jump(line), clock: line.citations.first?.startOffsetNs.meetingOffsetClock) {
+                    bullet { Text(line.text).bodyText() }
                 }
             }
         }
     }
 
     private func followUp(_ content: MeetingGeneratedArtifacts) -> some View {
-        PageSection("Follow up") {
-            Card {
-                CardRow {
-                    Text(content.followUpDraft.text.isEmpty
-                        ? "The model wrote no follow-up for this meeting."
-                        : content.followUpDraft.text)
-                        .bodyText()
-                } trailing: {
-                    Button("Draft follow-up") { store.openFollowUp() }
-                        .buttonStyle(SecondaryButton(compact: true))
-                }
-            }
+        section("Follow up") {
+            Text(content.followUpDraft.text.isEmpty
+                ? "The model wrote no follow-up for this meeting."
+                : content.followUpDraft.text)
+                .bodyText(14, content.followUpDraft.text.isEmpty ? Theme.inkSecondary : Theme.ink)
+            Button("Draft follow-up") { store.openFollowUp() }
+                .buttonStyle(.compact)
+                .padding(.top, 4)
         }
     }
 
@@ -1126,6 +1129,54 @@ struct ArtifactPane: View {
 
     private func jump(_ line: ArtifactCitedText) -> (() -> Void)? {
         line.citations.first.flatMap { store.citationAction($0.segmentId) }
+    }
+}
+
+/// A line of the notes that leads to the words it came from: the whole line
+/// is the press, washed under the pointer, with its clock at the end.
+private struct CitedLine<Content: View>: View {
+    let action: (() -> Void)?
+    let clock: String?
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        if let action {
+            Button(action: action) { row }
+                .buttonStyle(CitedLineStyle())
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            content
+            Spacer(minLength: 12)
+            if let clock {
+                Text(clock)
+                    .font(TypeScale.body(12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkTertiary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+/// The wash spills past the line's text, so the text stays in line with the
+/// heading above it.
+private struct CitedLineStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 8)
+            .background(
+                configuration.isPressed || hovering ? Theme.wash : .clear,
+                in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .padding(.horizontal, -8)
     }
 }
 
@@ -1171,7 +1222,7 @@ struct MeetingQuestionsCard: View {
                                     Text(text).bodyText(14, Theme.inkSecondary)
                                 }
                                 HStack(spacing: 10) {
-                                    Text(answer.state.label).metaText(Theme.accent)
+                                    Text(answer.state.label).metaText(Theme.inkSecondary)
                                     if answer.provisional {
                                         Text("provisional").metaText()
                                     }
@@ -1238,7 +1289,8 @@ struct MeetingNotesCard: View {
             CardRow(action: store.editable ? { start(note) } : nil) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(note.startOffsetNs?.meetingOffsetClock ?? note.createdAtUtcMs.meetingDate.time)
-                        .font(TypeScale.mono(12))
+                        .font(TypeScale.body(12))
+                        .monospacedDigit()
                         .foregroundStyle(Theme.inkTertiary)
                         .frame(width: 52, alignment: .leading)
                     Text(note.body).bodyText()
@@ -1300,6 +1352,7 @@ struct MeetingUserNotesCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("Your own notes").sectionLabel()
+                .accessibilityAddTraits(.isHeader)
             if let saved = store.notesSavedLine {
                 Text(saved).metaText()
             }
@@ -1310,11 +1363,19 @@ struct MeetingUserNotesCard: View {
                 templates: templates,
                 selection: template
             ) {
-                Text(templateLabel)
-                    .font(TypeScale.label(13))
-                    .foregroundStyle(Theme.inkSecondary)
+                HStack(spacing: 4) {
+                    Text(templateLabel)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .accessibilityHidden(true)
+                }
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
             .fixedSize()
             .disabled(store.userNotes == nil || store.enhancing || store.busy)
             if store.canRegenerate, !store.notesBody.isEmpty {
@@ -1415,7 +1476,7 @@ struct LedgerPane: View {
                 Card {
                     CardRow {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(missing).bodyText(15, Theme.inkSecondary)
+                            Text(missing).bodyText(14, Theme.inkSecondary)
                             if snapshot.ledgerFailure != nil {
                                 Text("The notes above were written; only this second pass was not.")
                                     .metaText(Theme.inkSecondary)
@@ -1485,7 +1546,8 @@ struct LedgerPane: View {
                         }
                     } trailing: {
                         Text(stance.atMs.meetingMsClock)
-                            .font(TypeScale.mono(12))
+                            .font(TypeScale.body(12))
+                            .monospacedDigit()
                             .foregroundStyle(Theme.inkTertiary)
                     }
                 }
@@ -1520,7 +1582,8 @@ struct LedgerThreadRow: View {
             }
         } trailing: {
             Text(thread.receipt.tMs.meetingMsClock)
-                .font(TypeScale.mono(12))
+                .font(TypeScale.body(12))
+                .monospacedDigit()
                 .foregroundStyle(Theme.inkTertiary)
         }
     }
@@ -1533,8 +1596,7 @@ struct LedgerThreadRow: View {
 
     private var color: Color {
         switch thread.state.outcome {
-        case .landed: Theme.accent
-        case .open: Theme.ink
+        case .landed, .open: Theme.ink
         case .dropped: Theme.inkTertiary
         }
     }
@@ -1576,18 +1638,18 @@ struct LoopRowView: View {
                 Button {
                     store.change(row, row.status == .open ? .resolve(dropped: false) : .reopen)
                 } label: {
-                    Image(systemName: row.status == .done ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 14, weight: .medium))
+                    Image(systemName: row.status == .done ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 15))
                         .foregroundStyle(row.status == .done ? Theme.accent : Theme.inkTertiary)
                 }
                 .buttonStyle(.plain)
                 .disabled(store.loopsBusy)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.text)
-                        .bodyText(15, row.status == .open ? Theme.ink : Theme.inkTertiary)
+                        .bodyText(14, row.status == .open ? Theme.ink : Theme.inkTertiary)
                         .strikethrough(row.status == .done, color: Theme.inkTertiary)
                     HStack(spacing: 10) {
-                        Text(row.status.label).metaText(row.status == .open ? Theme.accent : Theme.inkTertiary)
+                        Text(row.status.label).metaText(row.status == .open ? Theme.ink : Theme.inkTertiary)
                         Text(row.direction.label).metaText()
                         if let owner = row.owner {
                             Text(owner).metaText()
@@ -1644,6 +1706,7 @@ struct LoopRowView: View {
                 .foregroundStyle(Theme.inkSecondary)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(store.loopsBusy)
@@ -1690,7 +1753,7 @@ struct FollowUpSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Follow up").font(TypeScale.headline).foregroundStyle(Theme.ink)
+                    Text("Follow up").titleText().accessibilityAddTraits(.isHeader)
                     if let draft = store.followUp {
                         Text(draft.source.label).metaText(Theme.inkSecondary)
                         Text(draft.mailContextStatus).metaText(Theme.inkSecondary)
@@ -1739,7 +1802,7 @@ struct CatchUpSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Caught up").font(TypeScale.headline).foregroundStyle(Theme.ink)
+                    Text("Caught up").titleText().accessibilityAddTraits(.isHeader)
                     if let catchUp = store.catchUp {
                         Text(line(catchUp)).metaText(Theme.inkSecondary)
                     }
@@ -1754,12 +1817,12 @@ struct CatchUpSheet: View {
                     if let catchUp = store.catchUp, !catchUp.bullets.isEmpty {
                         ForEach(Array(catchUp.bullets.enumerated()), id: \.offset) { _, bullet in
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                Text("·").bodyText(15, Theme.accent)
+                                Text("•").bodyText(14, Theme.inkSecondary)
                                 Text(bullet).bodyText()
                             }
                         }
                     } else if let catchUp = store.catchUp {
-                        Text(catchUp.state.label).bodyText(15, Theme.inkSecondary)
+                        Text(catchUp.state.label).bodyText(14, Theme.inkSecondary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

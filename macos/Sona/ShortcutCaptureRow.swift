@@ -32,20 +32,27 @@ struct ShortcutCaptureRow: View {
     var body: some View {
         if let record = store.binding(id) {
             CardRow {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(BindingCopy.title(record))
-                        .bodyText(15, Theme.ink)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(BindingCopy.title(record)).bodyText()
                     if let detail = BindingCopy.detail(record) {
-                        Text(detail).metaText(Theme.inkTertiary)
+                        Text(detail).metaText(Theme.inkSecondary)
                     }
                 }
             } trailing: {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     if record.changed, !capture.recording {
-                        Button("Reset") {
+                        Button {
                             Task { await store.resetBinding(id) }
+                        } label: {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 12, weight: .regular))
+                                .foregroundStyle(Theme.inkSecondary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.quiet)
+                        .buttonStyle(.plain)
+                        .help("Reset")
+                        .accessibilityLabel("Reset")
                         .disabled(disabled || store.isBusy("binding_\(id)"))
                     }
                     field(record)
@@ -55,15 +62,13 @@ struct ShortcutCaptureRow: View {
             /// The core dropped a binding this build still shows a row for.
             /// Saying so beats an empty control that records into nothing.
             CardRow {
-                Text(BindingCopy.title(placeholder))
-                    .bodyText(15, Theme.ink)
+                Text(BindingCopy.title(placeholder)).bodyText()
             } trailing: {
                 Text("Shortcut not found").metaText(Theme.live)
             }
         } else {
             CardRow {
-                Text(BindingCopy.title(placeholder))
-                    .bodyText(15, Theme.ink)
+                Text(BindingCopy.title(placeholder)).bodyText()
             } trailing: {
                 Text("Loading shortcuts…").metaText(Theme.inkTertiary)
             }
@@ -95,14 +100,14 @@ struct ShortcutCaptureRow: View {
                     Shortcut(BindingCopy.chord(record.currentBinding))
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 32)
-            .frame(minWidth: 132)
-            .background(capture.recording ? Theme.accentSoft : Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .padding(.horizontal, capture.recording ? 10 : 0)
+            .frame(minHeight: 28)
+            .background(capture.recording ? Theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
-                    .strokeBorder(capture.recording ? Theme.accent : Theme.border, lineWidth: 1)
+                    .strokeBorder(capture.recording ? Theme.accent : .clear, lineWidth: 1)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(disabled || capture.recording || store.isBusy("binding_\(id)"))
