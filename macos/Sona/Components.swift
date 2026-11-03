@@ -8,13 +8,33 @@ struct Hairline: View {
 }
 
 struct Card<Content: View>: View {
+    let material: AppearanceMaterial
     let content: Content
 
-    init(@ViewBuilder content: () -> Content) {
+    init(material: AppearanceMaterial = .solid, @ViewBuilder content: () -> Content) {
+        self.material = material
         self.content = content()
     }
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusCard)
+        if material == .glass {
+            if #available(macOS 26.0, *) {
+                cardContent.glassEffect(.regular, in: shape)
+            } else {
+                cardContent
+                    .background(.regularMaterial, in: shape)
+                    .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+            }
+        } else {
+            cardContent
+                .background(Theme.surface)
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
@@ -23,9 +43,6 @@ struct Card<Content: View>: View {
         // on a line.
         .padding(.bottom, -1)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
     }
 }
 

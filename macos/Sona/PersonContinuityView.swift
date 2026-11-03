@@ -9,13 +9,16 @@ struct PersonContinuityView<Profile: View>: View {
     @ViewBuilder let profile: () -> Profile
 
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var memory: PersonMemoryStore?
+    @State private var work: PersonWorkStore?
     @State private var mode: Mode = .history
     @State private var comparisonDate = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
 
     private enum Mode: String, CaseIterable, Identifiable {
         case history = "History"
         case catchUp = "Before we talk"
+        case work = "Work"
         case changes = "What changed"
         case subjects = "Subjects"
         case profile = "Profile"
@@ -29,14 +32,13 @@ struct PersonContinuityView<Profile: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            ViewThatFits(in: .horizontal) {
-                modePicker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
-                modePicker.pickerStyle(.menu)
-            }
-            .accessibilityLabel("Person view")
-            .help("Switch views with Control–Option–1 through Control–Option–5")
+            modeNavigation
+                .accessibilityLabel("Person view")
+                .help("Switch views with Control–Option–1 through Control–Option–6")
             if mode == .profile {
                 profile()
+            } else if mode == .work {
+                workContent
             } else if let memory {
                 if let error = memory.error {
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -63,9 +65,10 @@ struct PersonContinuityView<Profile: View>: View {
             Group {
                 Button("History") { mode = .history }.keyboardShortcut("1", modifiers: [.control, .option])
                 Button("Before we talk") { mode = .catchUp }.keyboardShortcut("2", modifiers: [.control, .option])
-                Button("What changed") { mode = .changes }.keyboardShortcut("3", modifiers: [.control, .option])
-                Button("Subjects") { mode = .subjects }.keyboardShortcut("4", modifiers: [.control, .option])
-                Button("Profile") { mode = .profile }.keyboardShortcut("5", modifiers: [.control, .option])
+                Button("Work") { mode = .work }.keyboardShortcut("3", modifiers: [.control, .option])
+                Button("What changed") { mode = .changes }.keyboardShortcut("4", modifiers: [.control, .option])
+                Button("Subjects") { mode = .subjects }.keyboardShortcut("5", modifiers: [.control, .option])
+                Button("Profile") { mode = .profile }.keyboardShortcut("6", modifiers: [.control, .option])
             }
             .hidden()
             .accessibilityHidden(true)
@@ -75,7 +78,46 @@ struct PersonContinuityView<Profile: View>: View {
             self.memory = memory
             await memory.load(personId)
         }
-        .onDisappear { memory?.stop() }
+        .task(id: LoadKey(personId: personId, revision: revision)) {
+            let work = self.work ?? PersonWorkStore(core: core)
+            self.work = work
+            await work.load(personId)
+        }
+        .onDisappear {
+            memory?.stop()
+            work?.stop()
+        }
+    }
+
+    @ViewBuilder
+    private var modeNavigation: some View {
+        if model.about.material == .glass {
+            if #available(macOS 26.0, *) {
+                modeControls
+                    .controlSize(.large)
+                    .padding(8)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Theme.radiusControl + 8, style: .continuous))
+            } else {
+                modeControls
+                    .controlSize(.large)
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.radiusControl + 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Theme.radiusControl + 8, style: .continuous)
+                            .strokeBorder(Theme.border, lineWidth: 1)
+                            .allowsHitTesting(false)
+                    }
+            }
+        } else {
+            modeControls
+        }
+    }
+
+    private var modeControls: some View {
+        ViewThatFits(in: .horizontal) {
+            modePicker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
+            modePicker.pickerStyle(.menu)
+        }
     }
 
     private var modePicker: some View {
@@ -83,6 +125,7 @@ struct PersonContinuityView<Profile: View>: View {
             ForEach(Mode.allCases) { mode in Text(mode.rawValue).tag(mode) }
         }
         .labelsHidden()
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: mode)
     }
 
     @ViewBuilder
@@ -92,6 +135,8 @@ struct PersonContinuityView<Profile: View>: View {
             history(snapshot, memory: memory)
         case .catchUp:
             catchUp(snapshot)
+        case .work:
+            workContent
         case .changes:
             changes(snapshot, memory: memory)
         case .subjects:
@@ -264,6 +309,137 @@ struct PersonContinuityView<Profile: View>: View {
                 }
                 Hairline()
             }
+        }
+    }
+
+    @ViewBuilder
+    private var workContent: some View {
+        if let work {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Spacer()
+                    Button { work.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.quiet)
+                        .help("Refresh work")
+                        .accessibilityLabel("Refresh work")
+                        .disabled(work.loading)
+                }
+                if let error = work.error {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(error).bodyText(14, Theme.inkSecondary)
+                        Button("Retry") { work.refresh() }.buttonStyle(.compact)
+                    }
+                } else if let snapshot = work.snapshot, snapshot.personId == personId {
+                    switch snapshot.identityStatus {
+                    case .unavailable:
+                        Text("This person is no longer available.").bodyText(14, Theme.inkSecondary)
+                    case .merged:
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text("This person was merged.").bodyText(14, Theme.inkSecondary)
+                            if let id = snapshot.canonicalPersonId {
+                                Button("Open current person") { model.openPerson(id) }.buttonStyle(.compact)
+                            }
+                        }
+                    case .available:
+                        selectedTasks(snapshot.tasks)
+                        linkedWorkConversations(snapshot.conversations)
+                    }
+                } else {
+                    ProgressView("Reading work…").controlSize(.small)
+                        .frame(minHeight: 100, alignment: .topLeading)
+                }
+            }
+        } else {
+            ProgressView("Reading work…").controlSize(.small)
+                .frame(minHeight: 100, alignment: .topLeading)
+        }
+    }
+
+    private func selectedTasks(_ rows: [PersonWorkTask]) -> some View {
+        PageSection("Tasks you selected") {
+            if rows.isEmpty {
+                Text("No tasks selected for this person.").bodyText(14, Theme.inkSecondary)
+            } else {
+                Card {
+                    ForEach(rows) { row in
+                        CardRow(action: { model.openProject(row.project.id) }) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(row.task.title).bodyText(14)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("\(row.project.title) · \(row.project.status.label)")
+                                    .metaText(Theme.inkSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if let milestone = row.milestone {
+                                    Text("\(milestone.title) · \(milestone.status.label)")
+                                        .metaText(Theme.inkSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Text("Private task · \(row.task.status.label)").metaText(Theme.inkSecondary)
+                                if let due = row.task.dueAtMs {
+                                    Text(PlanningFormat.date(due)).metaText(Theme.inkSecondary)
+                                }
+                            }
+                        } trailing: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.inkTertiary)
+                                .accessibilityHidden(true)
+                        }
+                        .accessibilityLabel("\(row.task.title), \(row.task.status.label), private task selected by you. Open project \(row.project.title)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func linkedWorkConversations(_ rows: [PersonWorkConversation]) -> some View {
+        PageSection("Confirmed conversation context") {
+            if rows.isEmpty {
+                Text("No confirmed conversations linked to projects.").bodyText(14, Theme.inkSecondary)
+            } else {
+                Card {
+                    ForEach(rows) { row in
+                        CardRow {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button { openWorkConversation(row) } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(row.meetingTitle).bodyText(14, Theme.accent)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        let moment = row.meetingStartedAtMs.map {
+                                            PeopleFormat.moment(PeopleFormat.date($0))
+                                        }
+                                        let detail = [moment, row.timestamp].compactMap { $0 }.joined(separator: " · ")
+                                        if !detail.isEmpty {
+                                            Text(detail).metaText(Theme.inkSecondary).monospacedDigit()
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.quiet)
+                                .accessibilityLabel("Open conversation \(row.meetingTitle)\(row.timestamp.map { " at \($0)" } ?? "")")
+                                if row.targetKind != .project {
+                                    Text(row.targetTitle).metaText(Theme.inkSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                Button { model.openProject(row.project.id) } label: {
+                                    Text("\(row.project.title) · \(row.project.status.label)")
+                                        .bodyText(13, Theme.accent)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .buttonStyle(.quiet)
+                                .accessibilityLabel("Open project \(row.project.title)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func openWorkConversation(_ row: PersonWorkConversation) {
+        if let atMs = row.atMs, let offset = UInt64(exactly: atMs), let openContribution {
+            openContribution(row.meetingId, offset)
+        } else {
+            openMeeting(row.meetingId)
         }
     }
 

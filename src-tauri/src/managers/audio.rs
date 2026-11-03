@@ -600,6 +600,7 @@ impl MicrophoneCaptureLease {
     }
 
     fn try_acquire(&self, owner: CaptureOwner) -> Option<CaptureLeaseToken> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let mut held = lock_recover(&self.token);
         if held.is_some() {
             return None;

@@ -49,3 +49,8 @@ public func freeAppleLLMResponse(_ response: UnsafeMutablePointer<AppleLLMRespon
     
     response.deallocate()
 }
+
+@_cdecl("sona_quiet_review_environment")
+public func sonaQuietReviewEnvironment() -> Int32 {
+    return 3
+}

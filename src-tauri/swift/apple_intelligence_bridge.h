@@ -28,6 +28,8 @@ typedef void (*AppleLLMCompletion)(uint64_t request_id, AppleLLMResponse* respon
 #define APPLE_LLM_RESPONSE_MEETING_LEDGER 3
 void start_apple_intelligence_generation(uint64_t request_id, const char* system_prompt, const char* user_content, int max_tokens, int response_shape, const char* json_schema, AppleLLMCompletion completion);
 void cancel_apple_intelligence_generation(uint64_t request_id);
+void sona_quiet_review_interrupt(void);
+int sona_quiet_review_environment(void);
 
 // Free memory allocated by the Apple LLM response
 void free_apple_llm_response(AppleLLMResponse* response);

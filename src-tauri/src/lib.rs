@@ -41,6 +41,7 @@ mod native_bridge;
 mod net_policy;
 mod overlay;
 mod paste_tx;
+mod planning;
 pub mod portable;
 mod prompt_renderer;
 pub mod query;
@@ -1924,6 +1925,28 @@ pub fn run(cli_args: CliArgs) {
             scratchpad::links::scratchpad_unlink,
             scratchpad::synthesis::scratchpad_synthesize,
             scratchpad::evidence::scratchpad_source_evidence,
+            planning::planning_projects,
+            planning::planning_project,
+            planning::planning_create_project,
+            planning::planning_create_milestone,
+            planning::planning_create_task,
+            planning::planning_update_project,
+            planning::planning_update_milestone,
+            planning::planning_update_task,
+            planning::planning_link_source,
+            planning::planning_calendar,
+            planning::planning_prepare,
+            planning::planning_revise,
+            planning::planning_accept,
+            planning::person::planning_person_work,
+            planning::suggestions::planning_suggestions,
+            planning::suggestions::planning_generate_suggestions,
+            planning::suggestions::planning_decline_suggestion,
+            planning::suggestions::planning_accept_suggestion,
+            planning::quiet::planning_quiet_review_set,
+            planning::quiet::planning_quiet_review_grants,
+            planning::quiet::planning_quiet_review_run,
+            planning::quiet::planning_quiet_review_cancel,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -1964,6 +1987,7 @@ pub fn run(cli_args: CliArgs) {
             tray::TrayCopyFailedEvent,
             query::QueryLinkRequestedEvent,
             scratchpad::ScratchpadChangedEvent,
+            planning::PlanningChangedEvent,
         ]);
 
     let invoke_handler = specta_builder.invoke_handler();
@@ -2217,6 +2241,9 @@ pub fn run(cli_args: CliArgs) {
                 });
                 return Ok(());
             }
+
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            planning::quiet::initialize();
 
             let settings = get_settings(app.handle());
             // The native app owns the Dock tile and all application windows.

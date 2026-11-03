@@ -1,5 +1,7 @@
 mod apple_json;
 
+pub(crate) use apple_json::root_schema as json_response_schema;
+
 mod complete_reading;
 
 use super::analytics::{
@@ -432,6 +434,18 @@ pub trait MeetingTextGenerator: Send + Sync {
         max_tokens: i32,
         shape: ReplyShape,
     ) -> Result<String, MeetingTextGenerationError>;
+
+    /// Use native constrained generation when supported. Other engines keep
+    /// the strict JSON prompt-and-parser path without constructing a schema.
+    fn generate_json(
+        &self,
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        _schema: fn() -> &'static schemars::schema::RootSchema,
+    ) -> Result<String, MeetingTextGenerationError> {
+        self.generate(system_prompt, evidence, max_tokens, ReplyShape::Json)
+    }
 }
 
 struct AppleIntelligenceGenerator;
@@ -495,6 +509,107 @@ impl MeetingTextGenerator for AppleIntelligenceGenerator {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             let _ = (system_prompt, evidence, max_tokens, shape);
+            Err(MeetingTextGenerationError::Failed)
+        }
+    }
+
+    fn generate_json(
+        &self,
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        schema: fn() -> &'static schemars::schema::RootSchema,
+    ) -> Result<String, MeetingTextGenerationError> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let reply_tokens = i32::try_from(ON_DEVICE_REPLY_TOKENS)
+                .map_err(|_| MeetingTextGenerationError::Failed)?;
+            apple_json::generate_json(
+                system_prompt,
+                evidence,
+                max_tokens.min(reply_tokens),
+                schema(),
+            )
+            .map_err(|_| MeetingTextGenerationError::Failed)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            let _ = (system_prompt, evidence, max_tokens, schema);
+            Err(MeetingTextGenerationError::Failed)
+        }
+    }
+}
+
+struct QuietReviewGenerator {
+    cancellation: Arc<crate::planning::quiet::Cancellation>,
+}
+
+pub(crate) fn quiet_review_generator(
+    cancellation: Arc<crate::planning::quiet::Cancellation>,
+) -> Option<Arc<dyn MeetingTextGenerator>> {
+    AppleIntelligenceGenerator
+        .is_available()
+        .then(|| Arc::new(QuietReviewGenerator { cancellation }) as Arc<dyn MeetingTextGenerator>)
+}
+
+impl MeetingTextGenerator for QuietReviewGenerator {
+    fn is_available(&self) -> bool {
+        !self.cancellation.is_cancelled() && AppleIntelligenceGenerator.is_available()
+    }
+
+    fn model_id(&self) -> &'static str {
+        AppleIntelligenceGenerator.model_id()
+    }
+
+    fn model_version(&self) -> Cow<'static, str> {
+        AppleIntelligenceGenerator.model_version()
+    }
+
+    fn max_input_bytes(&self) -> usize {
+        AppleIntelligenceGenerator.max_input_bytes()
+    }
+
+    fn context_window_bytes(&self) -> Option<usize> {
+        AppleIntelligenceGenerator.context_window_bytes()
+    }
+
+    fn reserved_output_tokens(&self, requested: i32) -> usize {
+        AppleIntelligenceGenerator.reserved_output_tokens(requested)
+    }
+
+    fn generate(
+        &self,
+        _system_prompt: &str,
+        _evidence: &str,
+        _max_tokens: i32,
+        _shape: ReplyShape,
+    ) -> Result<String, MeetingTextGenerationError> {
+        Err(MeetingTextGenerationError::Failed)
+    }
+
+    fn generate_json(
+        &self,
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        schema: fn() -> &'static schemars::schema::RootSchema,
+    ) -> Result<String, MeetingTextGenerationError> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let reply_tokens = i32::try_from(ON_DEVICE_REPLY_TOKENS)
+                .map_err(|_| MeetingTextGenerationError::Failed)?;
+            apple_json::generate_json_cancellable(
+                system_prompt,
+                evidence,
+                max_tokens.min(reply_tokens),
+                schema(),
+                Some(&self.cancellation),
+            )
+            .map_err(|_| MeetingTextGenerationError::Failed)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            let _ = (system_prompt, evidence, max_tokens, schema);
             Err(MeetingTextGenerationError::Failed)
         }
     }
@@ -928,6 +1043,7 @@ impl MeetingProcessingService {
     }
 
     pub fn set_capture_active(&self, active: bool) {
+        let _activity = active.then(crate::planning::quiet::foreground_activity);
         self.capture_active.store(active, Ordering::Release);
     }
 
@@ -978,18 +1094,21 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         origin: ProcessingOrigin,
     ) {
+        let activity = crate::planning::quiet::foreground_activity();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.jobs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id, Arc::clone(&cancelled));
         if self.app.is_none() {
+            let _activity = activity;
             self.run(store, session_id, Arc::clone(&cancelled), origin);
             self.retire_job(session_id, &cancelled);
             return;
         }
         let service = Arc::clone(self);
         thread::spawn(move || {
+            let _activity = activity;
             service.run(store, session_id, Arc::clone(&cancelled), origin);
             service.retire_job(session_id, &cancelled);
         });
@@ -1034,6 +1153,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         refresh: RelationshipRefresh,
     ) {
+        let activity = crate::planning::quiet::foreground_activity();
         let cancelled = Arc::new(AtomicBool::new(false));
         {
             let mut jobs = self
@@ -1050,6 +1170,7 @@ impl MeetingProcessingService {
         let spawned = thread::Builder::new()
             .name("meeting-people".to_string())
             .spawn(move || {
+                let _activity = activity;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     service.refresh_relationship_summaries(
                         &store,

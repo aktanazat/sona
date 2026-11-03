@@ -471,6 +471,13 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         self.lock_state().status()
     }
 
+    pub(crate) fn has_active_model_work(&self) -> bool {
+        self.lock_state()
+            .turn
+            .as_ref()
+            .is_some_and(|active| !active.state.is_terminal())
+    }
+
     fn configured_relay_status(&self) -> AgentPanelRelayStatusV1 {
         configured_relay_status(&self.app)
     }
@@ -753,6 +760,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     where
         R: NativeAgentPanelRuntime,
     {
+        let _activity = crate::planning::quiet::foreground_activity();
         if !is_opaque_id(&request.turn_id)
             || (request.workspace != AgentPanelWorkspaceV1::SonaChat
                 && request.screenshot.is_some())
@@ -2587,6 +2595,7 @@ pub(crate) async fn run_chat_turn(
     deadline: Duration,
     reply_is_json: bool,
 ) -> Result<String, ChatTurnError> {
+    let _activity = crate::planning::quiet::foreground_activity();
     let nonce_cache = app.try_state::<AgentPanelManager>().map_or_else(
         || Arc::new(ResponseNonceCache::default()),
         |manager| manager.nonce_cache.clone(),

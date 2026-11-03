@@ -2,13 +2,16 @@ import SwiftUI
 
 struct CaptureScreen: View {
     @Environment(AppModel.self) private var model
+    @State private var showRecordingPermission = false
 
     var body: some View {
         Page {
             PageTitle("Home", subtitle: "")
             VStack(alignment: .leading, spacing: 12) {
                 SecureInputBanner(store: model.secureInput)
-                PermissionsNotice(store: model.onboarding.permissions)
+                if showRecordingPermission {
+                    PermissionsNotice(store: model.onboarding.permissions)
+                }
                 hero
                 if let notice = model.notice {
                     Card {
@@ -48,6 +51,20 @@ struct CaptureScreen: View {
                 openMeeting: model.openMeeting,
                 openRunLog: { model.showSettings(.workflows) },
                 series: seriesActions)
+        }
+        .onChange(of: model.onboarding.permissions.microphone) { _, _ in
+            hidePermissionNoticeIfReady()
+        }
+        .onChange(of: model.onboarding.permissions.accessibility) { _, _ in
+            hidePermissionNoticeIfReady()
+        }
+    }
+
+    private func hidePermissionNoticeIfReady() {
+        let permissions = model.onboarding.permissions
+        if permissions.microphone == .granted
+            && (permissions.accessibility == .granted || permissions.accessibility == .unsupported) {
+            showRecordingPermission = false
         }
     }
 
@@ -92,7 +109,13 @@ struct CaptureScreen: View {
                     switch model.capture {
                     case .idle:
                         Button {
-                            model.startCapture()
+                            let permissions = model.onboarding.permissions
+                            if permissions.microphone == .needed || permissions.microphone == .waiting
+                                || permissions.accessibility == .needed || permissions.accessibility == .waiting {
+                                showRecordingPermission = true
+                            } else {
+                                model.startCapture()
+                            }
                         } label: {
                             Label("Start recording", systemImage: "mic")
                         }

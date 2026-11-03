@@ -1460,6 +1460,7 @@ impl CloudSyncRuntime {
         &self,
         request: CloudShareImportRequest,
     ) -> Result<CloudShareImportResult, CloudRuntimeError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let path = Path::new(&request.path);
         if !path
             .extension()

@@ -1,5 +1,9 @@
+use schemars::gen::SchemaSettings;
+use schemars::schema::{RootSchema, SchemaObject};
+use schemars::visit::{self, Visitor};
 use schemars::{gen::SchemaGenerator, schema::Schema, JsonSchema};
 use serde::{Serialize, Serializer};
+use serde_json::Value;
 use std::fmt;
 
 pub(super) struct CitationLabel(usize);
@@ -47,8 +51,80 @@ impl JsonSchema for QuoteLabel {
     }
 }
 
+struct PropertyOrder;
+impl Visitor for PropertyOrder {
+    fn visit_schema_object(&mut self, schema: &mut SchemaObject) {
+        visit::visit_schema_object(self, schema);
+        if let Some(object) = &schema.object {
+            let order = object
+                .properties
+                .keys()
+                .map(|key| Value::String(key.clone()))
+                .collect();
+            schema
+                .extensions
+                .insert("x-order".to_string(), Value::Array(order));
+        }
+    }
+}
+
+pub(crate) fn root_schema<T: JsonSchema>() -> RootSchema {
+    let settings = SchemaSettings::draft07().with(|settings| {
+        settings.option_add_null_type = false;
+        settings.definitions_path = "#/$defs/".to_string();
+        settings.meta_schema = None;
+    });
+    let mut root = settings.into_generator().into_root_schema_for::<T>();
+    for (name, definition) in &mut root.definitions {
+        if let Schema::Object(schema) = definition {
+            schema.metadata().title = Some(name.clone());
+            if name == "RawLedgerReceipt" {
+                if let Some(object) = schema.object.as_mut() {
+                    for key in ["citations", "speaker"] {
+                        object.properties.remove(key);
+                        object.required.remove(key);
+                    }
+                }
+            }
+            if matches!(
+                name.as_str(),
+                "LedgerThreadState"
+                    | "LedgerFirmness"
+                    | "NativeResolvedState"
+                    | "NativeDiscussionState"
+                    | "NativeUnresolvedState"
+            ) {
+                let values = schema
+                    .subschemas
+                    .as_ref()
+                    .and_then(|subschemas| subschemas.one_of.as_ref())
+                    .and_then(|variants| {
+                        variants
+                            .iter()
+                            .map(|variant| match variant {
+                                Schema::Object(variant) => variant
+                                    .enum_values
+                                    .as_ref()
+                                    .filter(|values| values.len() == 1 && values[0].is_string())
+                                    .map(|values| values[0].clone()),
+                                Schema::Bool(_) => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    });
+                if let Some(values) = values {
+                    schema.enum_values = Some(values);
+                    schema.instance_type = Some(schemars::schema::InstanceType::String.into());
+                    schema.subschemas = None;
+                }
+            }
+        }
+    }
+    PropertyOrder.visit_root_schema(&mut root);
+    root
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(super) use scoped::generate;
+pub(super) use scoped::{generate, generate_json, generate_json_cancellable};
 
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 mod scoped {
@@ -57,12 +133,8 @@ mod scoped {
         RawLedgerThread, RawOutlineTopic, ReplyShape, MAX_SUMMARY_LINES,
     };
     use super::*;
-    use schemars::gen::SchemaSettings;
-    use schemars::schema::{RootSchema, SchemaObject};
-    use schemars::visit::{self, Visitor};
     use serde::ser::{SerializeMap, SerializeSeq};
     use serde::{de::DeserializeOwned, Deserialize};
-    use serde_json::Value;
     use std::sync::LazyLock;
 
     static NOTES_FACTUAL: LazyLock<RootSchema> = LazyLock::new(root_schema::<NativeFactualReply>);
@@ -837,78 +909,6 @@ mod scoped {
             }
             rows.end()
         }
-    }
-
-    struct PropertyOrder;
-    impl Visitor for PropertyOrder {
-        fn visit_schema_object(&mut self, schema: &mut SchemaObject) {
-            visit::visit_schema_object(self, schema);
-            if let Some(object) = &schema.object {
-                let order = object
-                    .properties
-                    .keys()
-                    .map(|key| Value::String(key.clone()))
-                    .collect();
-                schema
-                    .extensions
-                    .insert("x-order".to_string(), Value::Array(order));
-            }
-        }
-    }
-
-    fn root_schema<T: JsonSchema>() -> RootSchema {
-        let settings = SchemaSettings::draft07().with(|settings| {
-            settings.option_add_null_type = false;
-            settings.definitions_path = "#/$defs/".to_string();
-            settings.meta_schema = None;
-        });
-        let mut root = settings.into_generator().into_root_schema_for::<T>();
-        for (name, definition) in &mut root.definitions {
-            if let Schema::Object(schema) = definition {
-                schema.metadata().title = Some(name.clone());
-                if name == "RawLedgerReceipt" {
-                    if let Some(object) = schema.object.as_mut() {
-                        for key in ["citations", "speaker"] {
-                            object.properties.remove(key);
-                            object.required.remove(key);
-                        }
-                    }
-                }
-                if matches!(
-                    name.as_str(),
-                    "LedgerThreadState"
-                        | "LedgerFirmness"
-                        | "NativeResolvedState"
-                        | "NativeDiscussionState"
-                        | "NativeUnresolvedState"
-                ) {
-                    let values = schema
-                        .subschemas
-                        .as_ref()
-                        .and_then(|subschemas| subschemas.one_of.as_ref())
-                        .and_then(|variants| {
-                            variants
-                                .iter()
-                                .map(|variant| match variant {
-                                    Schema::Object(variant) => variant
-                                        .enum_values
-                                        .as_ref()
-                                        .filter(|values| values.len() == 1 && values[0].is_string())
-                                        .map(|values| values[0].clone()),
-                                    Schema::Bool(_) => None,
-                                })
-                                .collect::<Option<Vec<_>>>()
-                        });
-                    if let Some(values) = values {
-                        schema.enum_values = Some(values);
-                        schema.instance_type = Some(schemars::schema::InstanceType::String.into());
-                        schema.subschemas = None;
-                    }
-                }
-            }
-        }
-        PropertyOrder.visit_root_schema(&mut root);
-        root
     }
 
     #[derive(Serialize)]
@@ -2119,6 +2119,61 @@ mod scoped {
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
         Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(in crate::meeting::processing) fn generate_json(
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        root: &RootSchema,
+    ) -> Result<String, String> {
+        generate_json_cancellable(system_prompt, evidence, max_tokens, root, None)
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(in crate::meeting::processing) fn generate_json_cancellable(
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        root: &RootSchema,
+        cancellation: Option<&crate::planning::quiet::Cancellation>,
+    ) -> Result<String, String> {
+        use crate::apple_intelligence::{
+            process_with_response_shape, process_with_response_shape_cancellable, ResponseShape,
+        };
+
+        #[derive(Serialize)]
+        struct ResponseSchema<'a> {
+            #[serde(flatten)]
+            schema: &'a SchemaObject,
+            #[serde(rename = "$defs")]
+            definitions: &'a schemars::Map<String, Schema>,
+        }
+
+        let schema = serde_json::to_string(&ResponseSchema {
+            schema: &root.schema,
+            definitions: &root.definitions,
+        })
+        .map_err(|error| error.to_string())?;
+        if let Some(cancellation) = cancellation {
+            process_with_response_shape_cancellable(
+                system_prompt,
+                evidence,
+                max_tokens,
+                ResponseShape::Json,
+                Some(&schema),
+                cancellation,
+            )
+        } else {
+            process_with_response_shape(
+                system_prompt,
+                evidence,
+                max_tokens,
+                ResponseShape::Json,
+                Some(&schema),
+            )
+        }
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

@@ -23,6 +23,8 @@ final class ChatStore {
     /// What the reader is typing. Held here so that opening another
     /// conversation can drop it.
     var draft = ""
+    let planner: PlannerAgentStore
+    private(set) var isPlanning = false
     private(set) var folderScope: MeetingFolder?
     /// Which brain the next turn goes to.
     var workspace: AgentPanelWorkspace = .sonaChat {
@@ -43,7 +45,7 @@ final class ChatStore {
     private(set) var stoppingVoice = false
     var voiceActive: Bool { voice != nil }
     var canStartVoice: Bool {
-        !stoppingVoice && !busy && !running && !savingModel && screenshot == nil
+        !isPlanning && !stoppingVoice && !busy && !running && !savingModel && screenshot == nil
             && phase == .ready && workspace == .sonaChat
     }
     /// A send, stop, apply, undo or history read is in flight. A count, not
@@ -72,36 +74,63 @@ final class ChatStore {
     /// built can end it here, before there is a turn to cancel.
     @ObservationIgnored private var sendTask: Task<Bool, Never>?
     @ObservationIgnored private var voiceStartTask: Task<Void, Never>?
+    @ObservationIgnored private var voiceStopTask: Task<Bool, Never>?
+    @ObservationIgnored private var closingVoiceId: String?
     @ObservationIgnored private var screenshotPicker: ChatScreenshotPicker?
     @ObservationIgnored private var screenshotTask: Task<Void, Never>?
     @ObservationIgnored private var submittedScreenshot: (turnId: String, image: ChatScreenshotDraft)?
 
     init(core: Core) {
         self.core = core
+        planner = PlannerAgentStore(core: core)
         for name in [
             CoreEvent.agentPanelStatusChanged,
             CoreEvent.agentPanelTurnChanged,
             CoreEvent.agentPanelProposalChanged,
         ] {
             core.observe(name) { [weak self] _ in
-                Task { await self?.read() }
+                guard let self, !self.isPlanning else { return }
+                Task { await self.read() }
             }
         }
         core.observe(CoreEvent.chatSettingsChanged) { [weak self] _ in
             Task { await self?.readSettings() }
         }
         core.observe(CoreEvent.chatVoice) { [weak self] line in
-            guard let self else { return }
+            guard let self, self.voice != nil else { return }
             do { self.receiveVoice(try Core.payload(line)) }
             catch { self.stopVoice(); self.report(error) }
         }
     }
 
     func start() async {
+        guard !isPlanning, !Task.isCancelled else { return }
         await readSettings()
+        guard !isPlanning, !Task.isCancelled else { return }
         await read()
+        guard !isPlanning, !Task.isCancelled else { return }
         await loadHistory()
+        guard !isPlanning, !Task.isCancelled else { return }
         await loadModels()
+    }
+
+    func openPlanner(goal: String? = nil) {
+        isPlanning = true
+        stopVoice()
+        cancelScreenshotSelection()
+        planner.activate(goal: goal)
+    }
+
+    func openAsk(draft seed: String? = nil) {
+        stopVoice()
+        leavePlanner(workspace: .sonaChat)
+        if let seed { draft = seed }
+    }
+
+    func leavePlanner(workspace: AgentPanelWorkspace) {
+        planner.deactivate()
+        isPlanning = false
+        self.workspace = workspace
     }
 
     // MARK: - What the views read
@@ -122,7 +151,7 @@ final class ChatStore {
 
     /// The field and the send button are shut while a command is in flight,
     /// before the first status has arrived, and while the agent is off.
-    var composerDisabled: Bool { busy || savingModel || phase == .loading || phase == .disabled }
+    var composerDisabled: Bool { isPlanning || busy || savingModel || phase == .loading || phase == .disabled }
 
     var canSend: Bool {
         !composerDisabled && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -495,21 +524,35 @@ final class ChatStore {
     }
 
     private func endVoice() {
-        guard let current = voice else { return }
+        guard !stoppingVoice, let id = voice?.id ?? closingVoiceId else { return }
         voice = nil
+        closingVoiceId = id
         sendTask?.cancel()
         stoppingVoice = true
         let start = voiceStartTask
-        Task {
+        voiceStopTask = Task {
             // A close during microphone setup must also close a late start.
             await start?.value
             defer { stoppingVoice = false }
-            do { try await core.request("chat_voice_stop", ["sessionId": current.id]) }
-            catch { report(error) }
+            do {
+                try await core.request("chat_voice_stop", ["sessionId": id])
+                closingVoiceId = nil
+                return true
+            } catch {
+                report(error)
+                return false
+            }
         }
     }
 
+    func stopVoiceAndWait() async -> Bool {
+        if voiceActive { stopVoice() }
+        else { endVoice() }
+        return await voiceStopTask?.value ?? true
+    }
+
     func editDraft(_ text: String) {
+        if isPlanning { leavePlanner(workspace: .sonaChat) }
         if voiceActive { stopVoice() }
         draft = text
     }
@@ -535,7 +578,7 @@ final class ChatStore {
     }
 
     private func sendPendingVoice() {
-        guard !composerDisabled, !running, !sending, !stopping,
+        guard !isPlanning, !composerDisabled, !running, !sending, !stopping,
               let current = voice, let message = current.pendingTranscript else { return }
         guard message.utf8.count <= Self.maxMessageBytes else {
             endVoice()

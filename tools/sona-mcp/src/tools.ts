@@ -103,6 +103,12 @@ const MEETING_ID = {
     "The meeting's uuid, as it appears in a sona://meeting/<id> link or in the id field of a sona_search or sona_meetings row.",
 } as const;
 
+const PROJECT_ID = {
+  type: "string",
+  description:
+    "The exact saved project uuid returned by sona_projects. Project titles are not ids.",
+} as const;
+
 
 const PERSON_ID = {
   type: "string",
@@ -331,6 +337,31 @@ export const TOOLS: readonly ToolDefinition[] = [
       "--upcoming",
       ...optional("--limit", count(input, "limit")),
     ],
+  },
+  {
+    name: "sona_projects",
+    title: "List Sona personal projects",
+    description:
+      "List saved local personal projects, most recently updated first, with their saved titles, states, revisions, task counts and next saved task or milestone due date. Returns at most 100 rows. Read has_more and complete before claiming the list is complete. Requires Sona's existing external-access grant; no project is changed.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: LIMIT },
+      additionalProperties: false,
+    },
+    argv: (input) => ["--projects", ...optional("--limit", count(input, "limit"))],
+  },
+  {
+    name: "sona_project",
+    title: "Read a Sona personal project",
+    description:
+      "Read one saved personal project with its description, milestones, tasks, states, revisions and exact source references. Owner and source availability are resolved live by the native planner. Unavailable sources have available:false, no title and no link. Nullable due dates are saved values, not inferred deadlines. Owners are explicit personal-plan assignments, not team membership. Requires external access; no writes, notifications or provider calls.",
+    inputSchema: {
+      type: "object",
+      properties: { project_id: PROJECT_ID },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--project", text(input, "project_id", true)],
   },
   {
     name: "sona_notes",

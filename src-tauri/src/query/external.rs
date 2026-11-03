@@ -56,6 +56,7 @@ use crate::meeting::types::{
 };
 use crate::meeting::upcoming::{upcoming_window, UPCOMING_DEFAULT_DAYS};
 use crate::meeting::upcoming_types::MeetingUpcomingRow;
+use crate::planning::{self, EvidenceSourceKind, EvidenceTargetKind, ProjectStatus, TaskStatus};
 use crate::scratchpad::links::{ScratchConnection, ScratchSource};
 use crate::scratchpad::passages::ScratchPassage;
 use crate::scratchpad::{self, ScratchNote, ScratchNoteMemory, ScratchNoteVersion};
@@ -308,6 +309,12 @@ pub enum ExternalRequest {
     Upcoming {
         limit: usize,
     },
+    Projects {
+        limit: usize,
+    },
+    Project {
+        id: Uuid,
+    },
     Notes {
         limit: usize,
     },
@@ -347,6 +354,8 @@ impl ExternalRequest {
             | Self::PersonMemory { .. }
             | Self::Events { .. }
             | Self::Upcoming { .. }
+            | Self::Projects { .. }
+            | Self::Project { .. }
             | Self::Notes { .. }
             | Self::Note { .. }
             | Self::NoteContext { .. }
@@ -398,6 +407,8 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.person_changes.is_some()
         || args.events
         || args.upcoming
+        || args.projects
+        || args.project.is_some()
         || args.loop_resolve.is_some()
         || args.notes
         || args.note.is_some()
@@ -439,6 +450,7 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         || args.people.is_some()
         || args.events
         || args.upcoming
+        || args.projects
         || args.notes
         || args.note_context.is_some();
     [
@@ -481,7 +493,7 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         (
             args.limit.is_some(),
             pages,
-            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --notes or --note-context.",
+            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --projects, --notes or --note-context.",
         ),
         (
             args.from_version.is_some(),
@@ -607,6 +619,15 @@ impl ExternalRequest {
         if args.upcoming {
             return Ok(Self::Upcoming { limit });
         }
+        if args.projects {
+            return Ok(Self::Projects { limit });
+        }
+        if let Some(id) = args.project.as_deref() {
+            return Ok(Self::Project {
+                id: Uuid::parse_str(id.trim())
+                    .map_err(|_| ExternalError::invalid(format!("{id:?} is not a project id.")))?,
+            });
+        }
         if args.notes {
             return Ok(Self::Notes { limit });
         }
@@ -648,7 +669,7 @@ impl ExternalRequest {
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --events, --upcoming, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --events, --upcoming, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
         ))
     }
 }
@@ -905,6 +926,92 @@ pub struct ExternalReceipt {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ExternalProjectRow {
+    pub id: String,
+    pub title: String,
+    pub status: ProjectStatus,
+    pub revision: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub open_task_count: i64,
+    pub completed_task_count: i64,
+    pub next_due_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalProjectsPage {
+    pub schema_version: u32,
+    pub entries: Vec<ExternalProjectRow>,
+    pub has_more: bool,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalProject {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: ProjectStatus,
+    pub revision: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalMilestone {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub due_at_ms: Option<i64>,
+    pub status: TaskStatus,
+    pub revision: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalPlanningTask {
+    pub id: String,
+    pub project_id: String,
+    pub milestone_id: Option<String>,
+    pub title: String,
+    pub details: Option<String>,
+    pub due_at_ms: Option<i64>,
+    pub owner_person_id: Option<String>,
+    pub owner_is_self: bool,
+    pub owner_available: bool,
+    pub owner_link: Option<String>,
+    pub status: TaskStatus,
+    pub revision: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalPlanningEvidence {
+    pub id: String,
+    pub target_kind: EvidenceTargetKind,
+    pub target_id: String,
+    pub source_kind: EvidenceSourceKind,
+    pub source_id: String,
+    pub at_ms: Option<i64>,
+    pub revision: i64,
+    pub created_at_ms: i64,
+    pub available: bool,
+    pub title: Option<String>,
+    pub link: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalProjectDetail {
+    pub schema_version: u32,
+    pub project: ExternalProject,
+    pub milestones: Vec<ExternalMilestone>,
+    pub tasks: Vec<ExternalPlanningTask>,
+    pub evidence: Vec<ExternalPlanningEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct ExternalNoteRow {
     pub id: String,
     pub title: String,
@@ -1075,6 +1182,8 @@ pub enum ExternalResponse {
     PersonMemory(Box<ExternalPersonMemory>),
     Events(QueryEventsPage),
     Upcoming(ExternalUpcomingPage),
+    Projects(ExternalProjectsPage),
+    Project(ExternalProjectDetail),
     LoopResolve(ExternalReceipt),
     Notes(ExternalNotesPage),
     Note(ExternalNoteDetail),
@@ -1121,6 +1230,8 @@ pub async fn answer(
     history: &Arc<HistoryManager>,
     calendar: &dyn CalendarSource,
 ) -> Result<ExternalResponse, ExternalError> {
+    use tauri::Manager;
+
     if matches!(
         allowed.request(),
         ExternalRequest::Notes { .. }
@@ -1128,6 +1239,8 @@ pub async fn answer(
             | ExternalRequest::NoteVersions { .. }
             | ExternalRequest::PersonMemory { .. }
             | ExternalRequest::NoteContext { .. }
+            | ExternalRequest::Projects { .. }
+            | ExternalRequest::Project { .. }
             | ExternalRequest::NoteDiff { .. }
             | ExternalRequest::Stats
     ) {
@@ -1217,6 +1330,21 @@ pub async fn answer(
         ExternalRequest::Upcoming { limit } => Ok(ExternalResponse::Upcoming(
             upcoming_page(meetings, calendar, *limit).await?,
         )),
+        ExternalRequest::Projects { limit } => {
+            let projects = planning::planning_projects(app.state::<Arc<HistoryManager>>())
+                .map_err(|message| project_read_error(history, message))?;
+            Ok(ExternalResponse::Projects(projects_page(projects, *limit)))
+        }
+        ExternalRequest::Project { id } => {
+            let detail = planning::planning_project(
+                app.state::<Arc<HistoryManager>>(),
+                app.state::<Arc<MeetingSessionManager>>(),
+                id.to_string(),
+            )
+            .await
+            .map_err(|message| project_read_error(history, message))?;
+            Ok(ExternalResponse::Project(project_detail(detail)))
+        }
         ExternalRequest::LoopResolve { loop_id } => Ok(ExternalResponse::LoopResolve(
             resolve_loop(meetings, loop_id).await?,
         )),
@@ -1915,6 +2043,125 @@ fn note_read_error(history: &HistoryManager, message: String) -> ExternalError {
     )
 }
 
+fn project_read_error(history: &HistoryManager, message: String) -> ExternalError {
+    let code = match message.as_str() {
+        "This item no longer exists." => ExternalErrorCode::NotFound,
+        "Conversations are still unlocking." => ExternalErrorCode::Unavailable,
+        _ if !history.storage_is_ready() => ExternalErrorCode::Unavailable,
+        _ => ExternalErrorCode::Failed,
+    };
+    ExternalError::new(code, message)
+}
+
+fn projects_page(projects: Vec<planning::ProjectSummary>, limit: usize) -> ExternalProjectsPage {
+    let limit = limit.min(MAX_LIMIT);
+    let has_more = projects.len() > limit;
+    ExternalProjectsPage {
+        schema_version: QUERY_SCHEMA_VERSION,
+        entries: projects
+            .into_iter()
+            .take(limit)
+            .map(|summary| ExternalProjectRow {
+                id: summary.project.id,
+                title: summary.project.title,
+                status: summary.project.status,
+                revision: summary.project.revision,
+                created_at_ms: summary.project.created_at_ms,
+                updated_at_ms: summary.project.updated_at_ms,
+                open_task_count: summary.open_task_count,
+                completed_task_count: summary.completed_task_count,
+                next_due_at_ms: summary.next_due_at_ms,
+            })
+            .collect(),
+        has_more,
+        complete: !has_more,
+    }
+}
+
+fn project_detail(detail: planning::ProjectDetail) -> ExternalProjectDetail {
+    ExternalProjectDetail {
+        schema_version: QUERY_SCHEMA_VERSION,
+        project: ExternalProject {
+            id: detail.project.id,
+            title: detail.project.title,
+            description: detail.project.description,
+            status: detail.project.status,
+            revision: detail.project.revision,
+            created_at_ms: detail.project.created_at_ms,
+            updated_at_ms: detail.project.updated_at_ms,
+        },
+        milestones: detail
+            .milestones
+            .into_iter()
+            .map(|milestone| ExternalMilestone {
+                id: milestone.id,
+                project_id: milestone.project_id,
+                title: milestone.title,
+                due_at_ms: milestone.due_at_ms,
+                status: milestone.status,
+                revision: milestone.revision,
+                created_at_ms: milestone.created_at_ms,
+                updated_at_ms: milestone.updated_at_ms,
+            })
+            .collect(),
+        tasks: detail
+            .tasks
+            .into_iter()
+            .map(|task| ExternalPlanningTask {
+                owner_link: if task.owner_available {
+                    task.owner_person_id
+                        .as_ref()
+                        .map(|id| format!("sona://person/{id}"))
+                } else {
+                    None
+                },
+                id: task.id,
+                project_id: task.project_id,
+                milestone_id: task.milestone_id,
+                title: task.title,
+                details: task.details,
+                due_at_ms: task.due_at_ms,
+                owner_person_id: task.owner_person_id,
+                owner_is_self: task.owner_is_self,
+                owner_available: task.owner_available,
+                status: task.status,
+                revision: task.revision,
+                created_at_ms: task.created_at_ms,
+                updated_at_ms: task.updated_at_ms,
+            })
+            .collect(),
+        evidence: detail.evidence.into_iter().map(project_evidence).collect(),
+    }
+}
+
+fn project_evidence(evidence: planning::EvidenceLink) -> ExternalPlanningEvidence {
+    let link = evidence.available.then(|| {
+        let kind = match evidence.source_kind {
+            EvidenceSourceKind::Meeting => "meeting",
+            EvidenceSourceKind::Note => "note",
+            EvidenceSourceKind::Loop => "loop",
+        };
+        let mut link = format!("sona://{kind}/{}", evidence.source_id);
+        if let (EvidenceSourceKind::Meeting, Some(at_ms)) = (evidence.source_kind, evidence.at_ms) {
+            let _ = write!(link, "?atMs={at_ms}");
+        }
+        link
+    });
+    ExternalPlanningEvidence {
+        id: evidence.id,
+        target_kind: evidence.target_kind,
+        target_id: evidence.target_id,
+        source_kind: evidence.source_kind,
+        source_id: evidence.source_id,
+        at_ms: evidence.at_ms,
+        revision: evidence.revision,
+        created_at_ms: evidence.created_at_ms,
+        available: evidence.available,
+        title: evidence.title,
+        link,
+    }
+}
+
 fn notes_page(history: &HistoryManager, limit: usize) -> Result<ExternalNotesPage, ExternalError> {
     let mut notes = scratchpad::search_notes(history, "", None, limit + 1)
         .map_err(|message| note_read_error(history, message))?;
@@ -2542,6 +2789,128 @@ fn text_response(response: &ExternalResponse) -> String {
                 } else { "this caller cannot read the calendar; an empty result does not mean a free week.\n" });
             }
             page_footer(&mut text, page.has_more);
+        }
+        ExternalResponse::Projects(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{} [{}]\nid: {}\nrevision: {}\ncreated: {}\nupdated: {}\nopen tasks: {}\ncompleted tasks: {}",
+                    row.title,
+                    label(&row.status),
+                    row.id,
+                    row.revision,
+                    local_time(row.created_at_ms),
+                    local_time(row.updated_at_ms),
+                    row.open_task_count,
+                    row.completed_task_count
+                );
+                if let Some(due) = row.next_due_at_ms {
+                    let _ = writeln!(
+                        text,
+                        "next saved task or milestone due: {}",
+                        local_time(due)
+                    );
+                }
+                text.push('\n');
+            }
+            if page.entries.is_empty() {
+                text.push_str("no saved projects.\n");
+            }
+            if !page.complete {
+                text.push_str("more saved projects exist; --limit returns at most 100. this list is incomplete.\n");
+            }
+        }
+        ExternalResponse::Project(detail) => {
+            let project = &detail.project;
+            let _ = writeln!(
+                text,
+                "{} [{}]\nid: {}\nrevision: {}\ncreated: {}\nupdated: {}\n",
+                project.title,
+                label(&project.status),
+                project.id,
+                project.revision,
+                local_time(project.created_at_ms),
+                local_time(project.updated_at_ms)
+            );
+            if let Some(description) = &project.description {
+                let _ = writeln!(text, "{description}\n");
+            }
+            for milestone in &detail.milestones {
+                let _ = writeln!(
+                    text,
+                    "milestone: {} [{}]\nid: {}\nproject: {}\nrevision: {}\ncreated: {}\nupdated: {}",
+                    milestone.title,
+                    label(&milestone.status),
+                    milestone.id,
+                    milestone.project_id,
+                    milestone.revision,
+                    local_time(milestone.created_at_ms),
+                    local_time(milestone.updated_at_ms)
+                );
+                if let Some(due) = milestone.due_at_ms {
+                    let _ = writeln!(text, "saved due date: {}", local_time(due));
+                }
+                text.push('\n');
+            }
+            for task in &detail.tasks {
+                let _ = writeln!(
+                    text,
+                    "task: {} [{}]\nid: {}\nproject: {}\nrevision: {}\ncreated: {}\nupdated: {}",
+                    task.title,
+                    label(&task.status),
+                    task.id,
+                    task.project_id,
+                    task.revision,
+                    local_time(task.created_at_ms),
+                    local_time(task.updated_at_ms)
+                );
+                if let Some(milestone) = &task.milestone_id {
+                    let _ = writeln!(text, "milestone: {milestone}");
+                }
+                if task.owner_is_self {
+                    text.push_str("owner: self\n");
+                } else if !task.owner_available {
+                    text.push_str("owner: unavailable\n");
+                } else if let Some(link) = &task.owner_link {
+                    let _ = writeln!(text, "owner: {link}");
+                } else {
+                    text.push_str("owner: unassigned\n");
+                }
+                if let Some(due) = task.due_at_ms {
+                    let _ = writeln!(text, "saved due date: {}", local_time(due));
+                }
+                if let Some(details) = &task.details {
+                    let _ = writeln!(text, "{details}");
+                }
+                text.push('\n');
+            }
+            for evidence in &detail.evidence {
+                let _ = writeln!(
+                    text,
+                    "reference: {}\ntarget: {} {}\nrevision: {}\ncreated: {}\nsource: {} {}",
+                    evidence.id,
+                    label(&evidence.target_kind),
+                    evidence.target_id,
+                    evidence.revision,
+                    local_time(evidence.created_at_ms),
+                    label(&evidence.source_kind),
+                    evidence.source_id
+                );
+                if let Some(at_ms) = evidence.at_ms {
+                    let _ = writeln!(text, "source offset: {at_ms} ms");
+                }
+                if evidence.available {
+                    if let Some(title) = &evidence.title {
+                        let _ = writeln!(text, "{title}");
+                    }
+                    if let Some(link) = &evidence.link {
+                        let _ = writeln!(text, "{link}");
+                    }
+                } else {
+                    text.push_str("source unavailable\n");
+                }
+                text.push('\n');
+            }
         }
         ExternalResponse::LoopResolve(answer) => {
             let _ = writeln!(

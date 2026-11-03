@@ -510,12 +510,34 @@ pub struct MeetingSessionManager {
     recovery_launch: Uuid,
     processing: Arc<MeetingProcessingService>,
     keep_awake: Mutex<MeetingKeepAwake>,
+    capture_active: Arc<AtomicBool>,
     actor: Mutex<ActorState>,
 }
 
 struct ActorState {
     active: Option<ActiveCapture>,
     tray_session_id: Option<MeetingSessionId>,
+}
+
+struct CaptureLease {
+    active: Arc<AtomicBool>,
+}
+
+impl CaptureLease {
+    fn acquire(active: &Arc<AtomicBool>) -> Result<Self, MeetingCommandError> {
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| MeetingCommandError::CaptureLeaseBusy)?;
+        Ok(Self {
+            active: Arc::clone(active),
+        })
+    }
+}
+
+impl Drop for CaptureLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
 }
 
 struct ActiveCapture {
@@ -526,6 +548,8 @@ struct ActiveCapture {
     /// ends a capture — stop, discard, delete — already does.
     live: LiveTranscriptWorker,
     call_names: Option<super::call_speakers::CallNameSampler>,
+    // Released last so idle cannot precede source and live-worker teardown.
+    _capture_lease: CaptureLease,
 }
 
 struct ActiveSource {
@@ -582,6 +606,7 @@ impl MeetingSessionManager {
             recovery_launch: Uuid::new_v4(),
             processing,
             keep_awake: Mutex::new(MeetingKeepAwake::new()),
+            capture_active: Arc::new(AtomicBool::new(false)),
             actor: Mutex::new(ActorState {
                 active: None,
                 tray_session_id: None,
@@ -1649,6 +1674,7 @@ impl MeetingSessionManager {
         request: MeetingStartRequest,
         provenance: MeetingConsentProvenance,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let store = self.store().await?;
         if let Some(receipt) = store
             .operation_receipt(request.operation_id)
@@ -1657,9 +1683,7 @@ impl MeetingSessionManager {
             return self.result_for_receipt(store, receipt, request.session_id);
         }
         let mut actor = self.actor_lock();
-        if actor.active.is_some() {
-            return Err(MeetingCommandError::CaptureLeaseBusy);
-        }
+        let capture_lease = CaptureLease::acquire(&self.capture_active)?;
         let preflight = store
             .preflight_snapshot(request.session_id)
             .map_err(map_store_error)?;
@@ -1866,6 +1890,7 @@ impl MeetingSessionManager {
                 Arc::clone(&store),
                 request.session_id,
             ),
+            _capture_lease: capture_lease,
         });
         actor.tray_session_id = None;
         drop(actor);
@@ -2301,6 +2326,7 @@ impl MeetingSessionManager {
         request: ImportRecordingRequest,
         notes: Option<&str>,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let media = validate_media_path(&request.path).map_err(|error| {
             log::warn!("Meeting import refused {}: {error}", request.path.display());
             MeetingCommandError::ImportUnreadable
@@ -2365,6 +2391,7 @@ impl MeetingSessionManager {
         &self,
         path: PathBuf,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let parsed = read_transcript_export(&path).map_err(|error| {
             log::warn!(
                 "Meeting transcript import refused {}: {}",
@@ -4099,6 +4126,7 @@ impl MeetingSessionManager {
         &self,
         bundle: super::cloud_bundle::CloudMeetingBundleV1,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let store = self.cloud_store().await?;
         let session_id = bundle.import_into_store(&store).map_err(map_store_error)?;
         let snapshot = store
@@ -4108,9 +4136,9 @@ impl MeetingSessionManager {
         Ok(snapshot)
     }
 
-    /// Reports whether the lifecycle actor currently owns a live capture lease.
+    /// Reports capture ownership through startup, pause and teardown without locking the actor.
     pub(crate) fn is_capture_active(&self) -> bool {
-        self.actor_lock().active.is_some()
+        self.capture_active.load(Ordering::Acquire)
     }
 
     /// Mount the encrypted meeting store, or hand back the mount that already
@@ -5054,6 +5082,35 @@ pub(crate) mod tests {
             lane: Arc::new(Mutex::new(None)),
         }));
         (directory, manager, starts, aborts)
+    }
+
+    #[test]
+    fn capture_status_reads_ownership_while_the_lifecycle_actor_is_locked() {
+        let (_directory, manager) = manager_with(Arc::new(NoCaptureSources));
+        let manager = Arc::new(manager);
+        let actor = manager.actor_lock();
+        let lease = CaptureLease::acquire(&manager.capture_active).expect("startup owns capture");
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = Arc::clone(&manager);
+        let worker = thread::spawn(move || send.send(reader.is_capture_active()));
+        let status = receive.recv_timeout(Duration::from_secs(1));
+        drop(actor);
+        worker
+            .join()
+            .expect("capture reader completed")
+            .expect("report capture");
+        assert_eq!(
+            status,
+            Ok(true),
+            "a planner callback cannot wait on the actor"
+        );
+        assert!(matches!(
+            CaptureLease::acquire(&manager.capture_active),
+            Err(MeetingCommandError::CaptureLeaseBusy)
+        ));
+        drop(lease);
+        assert!(!manager.is_capture_active());
+        assert!(CaptureLease::acquire(&manager.capture_active).is_ok());
     }
     fn review_ready_session(manager: &MeetingSessionManager) -> MeetingSessionSnapshot {
         tauri::async_runtime::block_on(async {

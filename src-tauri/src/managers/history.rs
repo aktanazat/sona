@@ -262,6 +262,9 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::scratchpad::synthesis::MIGRATION),
     M::up(crate::scratchpad::subjects::MIGRATION),
     M::up(crate::scratchpad::phone_import::MIGRATION),
+    M::up(crate::planning::MIGRATION),
+    M::up(crate::planning::QUIET_REVIEW_MIGRATION),
+    M::up(crate::planning::MEETING_NOTE_LINK_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;

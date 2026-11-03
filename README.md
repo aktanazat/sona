@@ -52,6 +52,15 @@ voiceprints and correction rules stay on the mac. a paired iphone can read an en
 
 when the original conversation is deleted or its transcript expires, its saved evidence is removed too. the note stays.
 
+### Projects and calendar
+
+- Projects are private plans on this Mac. Milestones and tasks can have dates. Selecting a person for a task records your choice; it does not invite or notify them.
+- Link a saved meeting, note or commitment to a project, milestone or task without copying the original. A person's Work view separates tasks you selected from confirmed conversation context.
+- The calendar shows dated work alongside available meetings. When conversations cannot be read, it still shows dated work and says what is missing.
+- In Chat > Plan, type or dictate a goal and optionally select saved sources. Prepare a local draft, review its sources, edit the plan and press Create project to save it. Existing meeting commitments stay linked work, not duplicate tasks.
+- review links checks only the sources you select. its suggestions remain possible connections until you link or dismiss them; linking adds evidence, not a task assignment or status change. nighttime review stays off until you select sources for a project and turn it on. if sona stays open and the mac is awake and idle for 10 minutes, macos can schedule a review between 22:00 and 06:00 local time, though it may delay or skip it. it uses apple intelligence on this mac and saves only possible links for your review.
+- The CLI and MCP tools can read saved projects after you turn on Settings > Agents > External access. They cannot edit projects.
+
 ### Screen recording
 
 - Records a screen you pick in the macOS picker, with an optional camera picture-in-picture and microphone, to an H.264/AAC MP4 in `recordings/`. Pause, resume, stop and save, or cancel. Requires macOS 15 or later and Screen Recording access; Camera and Microphone access only when you turn those on. It does not capture system audio, and it refuses to start while a dictation or meeting holds the microphone.

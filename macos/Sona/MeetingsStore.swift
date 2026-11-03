@@ -343,6 +343,7 @@ final class MeetingsStore {
     private(set) var transcriptQuery = ""
     private(set) var searchHits: [MeetingSearchHit]?
     private(set) var jump: SegmentJump?
+    private(set) var focusedNoteId: MeetingNoteId?
     private(set) var originalWording = false
     private(set) var newNote = ""
 
@@ -938,7 +939,12 @@ final class MeetingsStore {
 
     // MARK: - Opening one meeting
 
-    func open(_ sessionId: MeetingSessionId, atMilliseconds: UInt64? = nil, segmentId: TranscriptSegmentId? = nil) {
+    func open(
+        _ sessionId: MeetingSessionId,
+        atMilliseconds: UInt64? = nil,
+        segmentId: TranscriptSegmentId? = nil,
+        noteId: MeetingNoteId? = nil
+    ) {
         leaveOpenMeeting()
         openSessionId = sessionId
         snapshot = nil
@@ -949,8 +955,9 @@ final class MeetingsStore {
         loopsKey = nil
         people = []
         receipt = nil
-        chosenTab = nil
-        tab = .transcript
+        chosenTab = noteId == nil ? nil : .review
+        tab = noteId == nil ? .transcript : .review
+        focusedNoteId = noteId
         transcriptQuery = ""
         searchHits = nil
         jump = nil
@@ -981,6 +988,7 @@ final class MeetingsStore {
         snapshot = nil
         reviewFailure = nil
         reviewLoading = false
+        focusedNoteId = nil
         followUpOpen = false
     }
 

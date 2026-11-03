@@ -7,6 +7,7 @@ struct PersonPortrait: View {
     let revision: UInt64
 
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var photo: PersonPhotoStore.Photo?
     @State private var reload: UInt64 = 0
 
@@ -14,6 +15,7 @@ struct PersonPortrait: View {
         Group {
             if let image = photo?.image {
                 Image(nsImage: image).resizable().interpolation(.high).scaledToFill()
+                    .transition(.opacity)
             } else if photo?.failure != nil {
                 Image(systemName: "photo").foregroundStyle(Theme.inkSecondary)
             } else if photo == nil {
@@ -46,7 +48,9 @@ struct PersonPortrait: View {
             photo = nil
             let loaded = await model.personPhotos.load(personId)
             guard !Task.isCancelled else { return }
-            photo = loaded
+            withAnimation(reduceMotion || loaded.image == nil ? nil : .easeOut(duration: 0.18)) {
+                photo = loaded
+            }
         }
     }
 

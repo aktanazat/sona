@@ -704,6 +704,7 @@ pub struct MediaImportActivityGuard {
     active_media_imports: Arc<AtomicU64>,
     last_activity: Arc<AtomicU64>,
     idle_wakeup: Arc<IdleWakeup>,
+    _quiet_activity: crate::planning::quiet::ForegroundActivity,
 }
 
 impl Drop for MediaImportActivityGuard {
@@ -720,6 +721,7 @@ struct BatchUseGuard {
     active_batch_uses: Arc<AtomicU64>,
     last_activity: Arc<AtomicU64>,
     idle_wakeup: Arc<IdleWakeup>,
+    _quiet_activity: crate::planning::quiet::ForegroundActivity,
 }
 
 impl Drop for BatchUseGuard {
@@ -1181,6 +1183,7 @@ impl TranscriptionManager {
     /// Begin a bounded file-import lifecycle without granting it a separate
     /// engine. The returned guard is held by MediaImportManager's one worker.
     pub fn begin_media_import(&self) -> MediaImportActivityGuard {
+        let quiet_activity = crate::planning::quiet::foreground_activity();
         self.active_media_imports.fetch_add(1, Ordering::AcqRel);
         self.touch_activity();
         self.signal_idle_watcher();
@@ -1188,10 +1191,12 @@ impl TranscriptionManager {
             active_media_imports: Arc::clone(&self.active_media_imports),
             last_activity: Arc::clone(&self.last_activity),
             idle_wakeup: Arc::clone(&self.idle_wakeup),
+            _quiet_activity: quiet_activity,
         }
     }
 
     fn begin_batch_use(&self) -> BatchUseGuard {
+        let quiet_activity = crate::planning::quiet::foreground_activity();
         self.active_batch_uses.fetch_add(1, Ordering::AcqRel);
         self.touch_activity();
         self.signal_idle_watcher();
@@ -1199,6 +1204,7 @@ impl TranscriptionManager {
             active_batch_uses: Arc::clone(&self.active_batch_uses),
             last_activity: Arc::clone(&self.last_activity),
             idle_wakeup: Arc::clone(&self.idle_wakeup),
+            _quiet_activity: quiet_activity,
         }
     }
 
@@ -1345,6 +1351,7 @@ impl TranscriptionManager {
         selected_gpu_device: Option<&str>,
         ort_accelerator: OrtAcceleratorSetting,
     ) -> Result<()> {
+        let _activity = crate::planning::quiet::foreground_activity();
         // Every load path funnels through here, so this is the one place that
         // has to mark the engine as loading. Nested inside a caller's scope
         // (see `initiate_model_load`) it just adds depth.
@@ -1826,6 +1833,7 @@ impl TranscriptionManager {
         key_source: CloudKeySource,
         result_tx: mpsc::SyncSender<CloudStreamFinalization>,
     ) {
+        let _activity = crate::planning::quiet::foreground_activity();
         let _worker = StreamWorkerGuard {
             worker_id,
             active_stream_worker: Arc::clone(&self.active_stream_worker),
@@ -1848,6 +1856,7 @@ impl TranscriptionManager {
     }
 
     fn run_stream_worker(&self, mut lanes: StreamLanes, worker_id: u64, asr: AsrPlan) {
+        let _activity = crate::planning::quiet::foreground_activity();
         let _worker = StreamWorkerGuard {
             worker_id,
             active_stream_worker: Arc::clone(&self.active_stream_worker),

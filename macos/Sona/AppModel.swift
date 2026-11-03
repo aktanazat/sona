@@ -5,7 +5,7 @@ import SwiftUI
 
 /// The places in the sidebar, in the order it shows them.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad
+    case capture, library, meetings, people, scratchpad, projects, calendar
 
     var id: Int { rawValue }
 
@@ -16,6 +16,8 @@ enum Place: Int, CaseIterable, Identifiable {
         case .meetings: "Meetings"
         case .people: "People"
         case .scratchpad: "Notes"
+        case .projects: "Projects"
+        case .calendar: "Calendar"
         }
     }
 
@@ -26,6 +28,8 @@ enum Place: Int, CaseIterable, Identifiable {
         case .meetings: "video.fill"
         case .people: "person.2.fill"
         case .scratchpad: "square.and.pencil"
+        case .projects: "folder"
+        case .calendar: "calendar"
         }
     }
 }
@@ -243,6 +247,7 @@ final class AppModel {
     let personPhotos: PersonPhotoStore
     let people: PeopleStore
     let scratchpad: ScratchpadStore
+    let projects: ProjectsStore
     let modes: ModesStore
     let providers: ProvidersStore
     let vocabulary: VocabularyStore
@@ -264,6 +269,14 @@ final class AppModel {
     @ObservationIgnored let core = Core()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
     @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel())
+    @ObservationIgnored private lazy var quietReviewScheduler = QuietReviewScheduler(store: projects) { [weak self] in
+        guard let self, ready, !coreStopped, !coreRestarting, onboarding.step == .done,
+              capture == .idle, !live.starting, live.pending == nil, live.live == nil, live.active == nil,
+              !recorder.hasCapture, !recorder.selectionPending, sheet != .recorder,
+              meetingSettings.settingsRead, meetingSettings.settings.localEngine == .appleIntelligence,
+              case .appleIntelligence(blocker: nil)? = meetingSettings.engineStatus else { return false }
+        return true
+    }
     /// What the pill showed when it was last placed.
     @ObservationIgnored private var pillCapture = CaptureState.idle
     /// The wait for the end of the pill's hour away, and the time it ends.
@@ -292,6 +305,7 @@ final class AppModel {
         personPhotos = photos
         people = PeopleStore(core: core, photos: photos)
         scratchpad = ScratchpadStore(core: core)
+        projects = ProjectsStore(core: core)
         modes = ModesStore(core: core)
         providers = ProvidersStore(core: core)
         vocabulary = VocabularyStore(core: core)
@@ -434,6 +448,47 @@ final class AppModel {
     func openPerson(_ id: String) {
         people.openPerson(id)
         go(.people)
+    }
+
+    var plannerPeople: [PlanningPersonChoice] {
+        (people.entries ?? [])
+            .map { PlanningPersonChoice(id: $0.person.id, name: $0.person.displayName) }
+            .sorted {
+                let order = $0.name.localizedStandardCompare($1.name)
+                return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+            }
+    }
+
+    func openProject(_ id: String) {
+        projects.open(id)
+        go(.projects)
+    }
+
+    func openPlanningEvidence(_ evidence: PlanningEvidenceLink) {
+        guard evidence.available else { return }
+        switch evidence.sourceKind {
+        case .meeting:
+            meetings.open(
+                evidence.sourceId,
+                atMilliseconds: evidence.atMs.flatMap(UInt64.init(exactly:)),
+                noteId: evidence.meetingNoteId
+            )
+            go(.meetings)
+        case .note:
+            open(link: "sona://note/\(evidence.sourceId)")
+        case .loop:
+            open(link: "sona://loop/\(evidence.sourceId)")
+        }
+    }
+
+    func discussProject(_ project: PlanningProject) {
+        chat.openAsk(draft: "About project “\(project.title)”: ")
+        sheet = .chat
+    }
+
+    func planWithSona() {
+        chat.openPlanner()
+        sheet = .chat
     }
 
     /// A `sona://` link: the core resolves it and answers with a navigation
@@ -618,7 +673,7 @@ final class AppModel {
     func rescanModels() {
         call {
             try await self.core.request("rescan_local_models")
-            try await self.loadModels()
+            await self.loadModels()
         }
     }
 
@@ -678,6 +733,7 @@ final class AppModel {
         track { [weak self] in self?.syncPill() }
         track { [weak self] in self?.syncConsent() }
         track { [weak self] in self?.syncNavigation() }
+        track { [weak self] in self?.quietReviewScheduler.update() }
         openPendingURLs()
     }
 
@@ -691,6 +747,7 @@ final class AppModel {
         Task { await live.start() }
         Task { await meetings.start() }
         Task { await meetingSettings.start() }
+        Task { await projects.start() }
         Task { await people.start() }
         Task { await vocabulary.start() }
         Task { await prompts.start() }
@@ -729,6 +786,14 @@ final class AppModel {
         }
     }
 
+    func pauseQuietReview() {
+        quietReviewScheduler.setPaused(true)
+    }
+
+    func resumeQuietReview() {
+        quietReviewScheduler.setPaused(false)
+    }
+
     private func showWhatsNew() async {
         await debug.whatsNew.start()
         if debug.whatsNew.shouldShowOnLaunch, sheet == nil {
@@ -750,7 +815,7 @@ final class AppModel {
 
     /// Re-runs `apply` every time something it read changes.
     private func track(_ apply: @escaping @MainActor () -> Void) {
-        withObservationTracking(apply) {
+        withObservationTracking(apply) { [weak self] in
             Task { @MainActor [weak self] in self?.track(apply) }
         }
     }

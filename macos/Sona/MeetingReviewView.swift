@@ -16,45 +16,54 @@ struct MeetingReviewView: View {
     @State private var confirmingDelete = false
 
     var body: some View {
-        Page {
-            if let snapshot = store.snapshot {
-                MeetingReviewHeader(
-                    store: store, snapshot: snapshot, delete: { confirmingDelete = true },
-                    openMeetingSettings: openMeetingSettings, askAgent: askAgent)
-                ConversationContextView(
-                    sessionId: snapshot.session.sessionId, editable: store.editable,
-                    partialRecording: snapshot.session.captureCompleteness == .partial)
-                ConversationPlaceCard(core: model.core, store: store,
-                    sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                ConversationBookmarksView(core: model.core, store: store,
-                    sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                ConversationAudioBar(audio: store.audio)
-                MeetingReviewTabs(store: store)
-                pane(snapshot)
-            } else {
-                BackLink(title: "Meetings") { store.closeReview() }
-                if let failure = store.reviewFailure {
-                    unread(failure)
-                } else if store.reviewLoading {
-                    Text("Reading the meeting…").bodyText(14, Theme.inkSecondary)
+        ScrollViewReader { proxy in
+            Page {
+                if let snapshot = store.snapshot {
+                    MeetingReviewHeader(
+                        store: store, snapshot: snapshot, delete: { confirmingDelete = true },
+                        openMeetingSettings: openMeetingSettings, askAgent: askAgent)
+                    ConversationContextView(
+                        sessionId: snapshot.session.sessionId, editable: store.editable,
+                        partialRecording: snapshot.session.captureCompleteness == .partial)
+                    ConversationPlaceCard(core: model.core, store: store,
+                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    ConversationBookmarksView(core: model.core, store: store,
+                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    ConversationAudioBar(audio: store.audio)
+                    MeetingReviewTabs(store: store)
+                    pane(snapshot)
                 } else {
-                    Text("That meeting is no longer here.").bodyText(14, Theme.inkSecondary)
+                    BackLink(title: "Meetings") { store.closeReview() }
+                    if let failure = store.reviewFailure {
+                        unread(failure)
+                    } else if store.reviewLoading {
+                        Text("Reading the meeting…").bodyText(14, Theme.inkSecondary)
+                    } else {
+                        Text("That meeting is no longer here.").bodyText(14, Theme.inkSecondary)
+                    }
+                }
+            }
+            .overlay(alignment: .bottom) { toast }
+            .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
+            .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
+            .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
+                MeetingFilingSheet(store: store)
+            }
+            .alert("Delete this meeting?", isPresented: $confirmingDelete) {
+                Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
+                Button("Keep it", role: .cancel) {}
+            } message: {
+                Text("It goes to the trash for 30 days, then Sona removes it for good.")
+            }
+            .onDisappear { store.audio.stop() }
+            .onChange(of: store.snapshot?.session.sessionId) { _, _ in
+                guard let noteId = store.focusedNoteId,
+                      store.snapshot?.notes.contains(where: { $0.noteId == noteId }) == true else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
+                    proxy.scrollTo("meeting-note:\(noteId)", anchor: .center)
                 }
             }
         }
-        .overlay(alignment: .bottom) { toast }
-        .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
-        .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
-        .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
-            MeetingFilingSheet(store: store)
-        }
-        .alert("Delete this meeting?", isPresented: $confirmingDelete) {
-            Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
-            Button("Keep it", role: .cancel) {}
-        } message: {
-            Text("It goes to the trash for 30 days, then Sona removes it for good.")
-        }
-        .onDisappear { store.audio.stop() }
     }
 
     /// What just worked floats at the foot of the window and leaves by
@@ -1320,7 +1329,7 @@ struct MeetingNotesCard: View {
         PageSection("Notes in the moment") {
             Card {
                 ForEach(snapshot.notes) { note in
-                    row(note)
+                    row(note).id("meeting-note:\(note.noteId)")
                 }
                 CardRow {
                     InputField(prompt: "Add a note", text: newNote)

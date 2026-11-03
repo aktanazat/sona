@@ -15,6 +15,7 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::note_evidence::{NoteEvidenceError, NoteEvidenceInput};
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
+use crate::recorder::ScreenRecorderManager;
 use rusqlite::params;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -89,9 +90,17 @@ pub enum ScratchReviewAuthorship {
     ExplicitNote,
 }
 
-pub(super) fn require_idle(app: &AppHandle) -> Result<(), String> {
+// Planner approval calls this while holding the meeting and history databases,
+// so capture checks must not acquire the meeting lifecycle actor.
+pub(crate) fn require_idle(app: &AppHandle) -> Result<(), String> {
     let audio = app.state::<Arc<AudioRecordingManager>>();
-    if audio.is_recording() || audio.capture_lease_is_active() {
+    let meetings = app.state::<Arc<MeetingSessionManager>>();
+    let screen = app.state::<Arc<ScreenRecorderManager>>();
+    if audio.is_recording()
+        || audio.capture_lease_is_active()
+        || meetings.is_capture_active()
+        || screen.is_capture_active()
+    {
         return Err("Memory review is paused while recording.".to_string());
     }
     Ok(())

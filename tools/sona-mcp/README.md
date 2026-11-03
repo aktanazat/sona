@@ -49,6 +49,8 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 | `sona_person_catch_up` | `person_id`, `since_utc_ms?`            | `sona --person-catch-up <id> [--since-utc-ms …]`                        |
 | `sona_person_changes`  | `person_id`, `since_utc_ms`             | `sona --person-changes <id> --since-utc-ms …`                            |
 | `sona_upcoming`      | `limit?`                                 | `sona --upcoming [--limit …]`                                           |
+| `sona_projects`      | `limit?`                                 | `sona --projects [--limit …]`                                           |
+| `sona_project`       | `project_id`                             | `sona --project <uuid>`                                                |
 | `sona_notes`         | `limit?`                                 | `sona --notes [--limit …]`                                              |
 | `sona_note`          | `note_id`                                | `sona --note <id>`                                                      |
 | `sona_note_context`  | `query`, `limit?`                         | `sona --note-context <text> [--limit …]`                                 |
@@ -88,6 +90,8 @@ sona --person-catch-up <returned-person-uuid> --format text
 sona --person-changes <returned-person-uuid> --since-utc-ms <utc-milliseconds>
 sona --note-context "release plan" --limit 3 --format text
 sona --transcript <meeting-uuid> --format text
+sona --projects --limit 10 --format text
+sona --project <returned-project-uuid> --format text
 ```
 
 `sona_note_context` uses the same local note-search page as the CLI, with current
@@ -109,6 +113,31 @@ single replacement hunks with original line endings, not minimal edit scripts.
 Diffs also include `from_source` and `to_source`: saved version ids, save times,
 version kinds and version-scoped note links.
 
+Project reads use the native planner's saved records. `sona_projects` returns
+the most recently updated projects first, defaulting to 25 rows and capped at
+100. Rows include saved titles, states, revisions, task counts and the next
+saved task or milestone due date. Descriptions are not included in the list.
+`has_more:true` and `complete:false` mean other saved projects were omitted.
+The list has no continuation cursor.
+
+Pass a returned project id to `sona_project` for its saved description,
+milestones, tasks and evidence references. States, revisions, dates and text
+are preserved. A missing due date remains `null`; no deadline, team membership
+or notification is inferred. Detail reads are not paged and reject `--limit`.
+Each task includes live `owner_available` and the resolved `owner_person_id`;
+a merged person resolves to the surviving id, while an unavailable owner has
+no person link. These are explicit personal-plan assignments, not a team roster.
+
+Evidence retains the saved target, source id, recording offset and revision.
+The native planner resolves source availability for every detail read.
+Available references carry their current title and an exact meeting, note or
+loop link. Meeting passage links include `?atMs=` with the saved offset.
+Unavailable references have `available:false`, `title:null` and `link:null`;
+the saved reference remains, but no former source content is exported.
+These reads require the existing external-access grant and expose no planner
+write. They do not add notes or plans to the remote panel's default context,
+call a provider or send notifications.
+
 Statistics count all retained records. Each dataset has `status:available` with
 totals or `status:unavailable` with an error and no totals. `sources` gives the
 counting method and up to 25 sample record links per dataset, with its own
@@ -129,9 +158,10 @@ permission for an agent to send those records to another provider.
 ## What comes back
 
 One JSON object per call, as one text block. Every payload carries a
-`schema_version`. Rows from `sona_upcoming` are the exception: calendar
-occurrences have no `sona://` address. Other rows carry an address the app can
-open: `sona://meeting/<uuid>`, `sona://loop/<id>`, `sona://person/<uuid>`,
+`schema_version`. Calendar occurrences from `sona_upcoming` have no `sona://`
+address. Project rows carry ids for `sona_project`, not a new app route.
+Meeting, loop, person, dictation and note rows carry addresses the app can open:
+`sona://meeting/<uuid>`, `sona://loop/<id>`, `sona://person/<uuid>`,
 `sona://dictation/<id>`, `sona://note/<uuid>`.
 
 An empty array is two different answers, so the three reads that can hide a

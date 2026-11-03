@@ -29,19 +29,21 @@ struct ChatView: View {
         let opening = isOpening
         VStack(spacing: 0) {
             header
-            Hairline().opacity(!opening && edges.above ? 1 : 0)
-            if opening {
-                openingHead
+            if store.isPlanning {
+                Hairline()
+                PlannerAgentView(chat: store, onClose: onClose)
             } else {
-                scrollback
-            }
-            /* The composer keeps one place in this stack whichever way the
-             * sheet is laid out, so the field, its text and its caret are the
-             * same field before and after the first question. */
-            footer(opening)
-            if opening {
-                openingFoot
-                Spacer(minLength: 0).frame(maxHeight: 64)
+                Hairline().opacity(!opening && edges.above ? 1 : 0)
+                if opening {
+                    openingHead
+                } else {
+                    scrollback
+                }
+                footer(opening)
+                if opening {
+                    openingFoot
+                    Spacer(minLength: 0).frame(maxHeight: 64)
+                }
             }
         }
         .frame(width: 560, height: 620)
@@ -49,9 +51,13 @@ struct ChatView: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: opening)
         .onExitCommand(perform: onClose)
-        .task { await store.start() }
+        .task(id: store.isPlanning) {
+            if store.isPlanning { store.planner.activate() }
+            else { await store.start() }
+        }
         .onDisappear {
             store.stopVoice()
+            store.planner.deactivate()
             store.cancelScreenshotSelection()
         }
     }
@@ -76,28 +82,31 @@ struct ChatView: View {
                 .foregroundStyle(Theme.ink)
                 .accessibilityHidden(true)
 
-            Picker("Who answers", selection: workspace) {
-                ForEach(AgentPanelWorkspace.allCases) { scope in
-                    Text(scope.title).tag(scope)
+            Picker("Mode", selection: workspace) {
+                ForEach(ChatSheetMode.allCases) { scope in
+                    Text(scope.rawValue).tag(scope)
                 }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
             .fixedSize()
-            .disabled(store.running)
+            .disabled(store.planner.phase == .accepting || (!store.isPlanning && store.running))
 
             Spacer(minLength: 12)
 
             HStack(spacing: 4) {
-                history
+                if !store.isPlanning { history }
 
-                Button { store.newChat() } label: {
+                Button {
+                    if store.isPlanning { store.planner.reset() }
+                    else { store.newChat() }
+                } label: {
                     Image(systemName: "square.and.pencil")
                 }
                 .buttonStyle(ChatGlyphButton())
-                .disabled(store.busy || store.running)
-                .help("New chat")
-                .accessibilityLabel("New chat")
+                .disabled(store.isPlanning ? store.planner.busy : store.busy || store.running)
+                .help(store.isPlanning ? "New plan" : "New chat")
+                .accessibilityLabel(store.isPlanning ? "New plan" : "New chat")
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -297,13 +306,28 @@ struct ChatView: View {
 
     // MARK: - Bindings
 
-    private var workspace: Binding<AgentPanelWorkspace> {
-        Binding(get: { store.workspace }, set: { store.workspace = $0 })
+    private var workspace: Binding<ChatSheetMode> {
+        Binding(get: {
+            store.isPlanning ? .plan : store.workspace == .sonaChat ? .ask : .configure
+        }, set: { mode in
+            switch mode {
+            case .plan: store.openPlanner()
+            case .ask: store.leavePlanner(workspace: .sonaChat)
+            case .configure: store.leavePlanner(workspace: .sonaConfig)
+            }
+        })
     }
 
     private var conversation: Binding<String> {
         Binding(get: { store.conversationId ?? "" }, set: { store.open($0) })
     }
+}
+
+private enum ChatSheetMode: String, CaseIterable, Identifiable {
+    case ask = "Ask"
+    case configure = "Configure"
+    case plan = "Plan"
+    var id: String { rawValue }
 }
 
 /// Replies other agents are waiting on, as one row that opens them.

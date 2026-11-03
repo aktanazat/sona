@@ -261,6 +261,7 @@ impl ScreenRecorderManager {
         &self,
         request: RecorderStartRequest,
     ) -> Result<RecorderSnapshot, RecorderCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         self.apply_native_failure();
         let selecting = {
             let mut state = lock_recover(&self.state);
@@ -359,6 +360,7 @@ impl ScreenRecorderManager {
     }
 
     pub fn start(&self) -> Result<RecorderSnapshot, RecorderCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         self.apply_native_failure();
         if lock_recover(&self.state).phase != RecorderPhase::Previewing {
             return Err(RecorderCommandError::InvalidState);
@@ -444,6 +446,7 @@ impl ScreenRecorderManager {
     }
 
     pub fn resume(&self) -> Result<RecorderSnapshot, RecorderCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         self.apply_native_failure();
         let result = {
             let mut state = lock_recover(&self.state);
@@ -575,6 +578,18 @@ impl ScreenRecorderManager {
         let mut state = lock_recover(&self.state);
         self.refresh_native_metrics(&mut state);
         self.snapshot_locked(&state)
+    }
+
+    pub(crate) fn is_capture_active(&self) -> bool {
+        matches!(
+            lock_recover(&self.state).phase,
+            RecorderPhase::SelectingSource
+                | RecorderPhase::Previewing
+                | RecorderPhase::Starting
+                | RecorderPhase::Recording
+                | RecorderPhase::Paused
+                | RecorderPhase::Finalizing
+        )
     }
 
     fn start_heartbeat(self: &Arc<Self>) {

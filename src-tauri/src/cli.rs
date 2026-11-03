@@ -25,7 +25,7 @@ use std::path::PathBuf;
 #[command(group(ArgGroup::new("read").args([
     "query", "meetings", "meeting", "transcript", "loops", "people", "events",
     "upcoming", "loop_resolve", "notes", "note", "note_versions", "note_diff", "stats",
-    "person_catch_up", "person_changes", "note_context",
+    "person_catch_up", "person_changes", "note_context", "projects", "project",
 ])))]
 #[command(group(ArgGroup::new("loop_side").args(["mine", "waiting"])))]
 pub struct CliArgs {
@@ -200,6 +200,14 @@ pub struct CliArgs {
     /// Resume --events after an event id or --loops after a loop cursor.
     #[arg(long, value_name = "CURSOR", requires = "read")]
     pub after: Option<String>,
+
+    /// List saved personal projects, most recently updated first.
+    #[arg(long)]
+    pub projects: bool,
+
+    /// Read one saved personal project with live owner and source availability.
+    #[arg(long, value_name = "UUID")]
+    pub project: Option<String>,
 
     /// List notes, most recently updated first.
     #[arg(long)]

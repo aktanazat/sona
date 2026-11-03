@@ -1,5 +1,7 @@
 import Foundation
 import FoundationModels
+import AppKit
+import CoreGraphics
 
 @available(macOS 26.0, *)
 @Generable
@@ -98,6 +100,22 @@ private func completeGeneration(
     completion(id, pointer)
 }
 
+@available(macOS 26.0, *)
+private func generateJSON(
+    session: LanguageModelSession,
+    content: String,
+    schemaJSON: String,
+    options: GenerationOptions
+) async throws -> String {
+    let schema = try JSONDecoder().decode(GenerationSchema.self, from: Data(schemaJSON.utf8))
+    let response = try await session.respond(
+        to: Prompt { content },
+        schema: schema,
+        options: options
+    )
+    return response.content.jsonString
+}
+
 @_cdecl("start_apple_intelligence_generation")
 public func startAppleIntelligenceGeneration(
     _ requestID: UInt64,
@@ -135,15 +153,24 @@ public func startAppleIntelligenceGeneration(
                         NSLocalizedDescriptionKey: "The meeting response format is missing."
                     ])
                 }
-                let schema = try JSONDecoder().decode(GenerationSchema.self, from: Data(schemaJSON.utf8))
-                let response = try await session.respond(
-                    to: Prompt { content },
-                    schema: schema,
+                output = try await generateJSON(
+                    session: session,
+                    content: content,
+                    schemaJSON: schemaJSON,
                     options: options
                 )
-                output = response.content.jsonString
             case Int32(APPLE_LLM_RESPONSE_JSON):
-                output = try await session.respond(to: content, options: options).content
+                if let schemaJSON {
+                    options.sampling = .greedy
+                    output = try await generateJSON(
+                        session: session,
+                        content: content,
+                        schemaJSON: schemaJSON,
+                        options: options
+                    )
+                } else {
+                    output = try await session.respond(to: content, options: options).content
+                }
             case Int32(APPLE_LLM_RESPONSE_TEXT):
                 do {
                     let response = try await session.respond(to: content, generating: CleanedTranscript.self, options: options)
@@ -182,4 +209,76 @@ public func freeAppleLLMResponse(_ response: UnsafeMutablePointer<AppleLLMRespon
     }
 
     response.deallocate()
+}
+
+private final class QuietReviewEnvironment: @unchecked Sendable {
+    static let shared = QuietReviewEnvironment()
+    private let lock = NSLock()
+    private var sleeping = false
+    private var sessionActive = false
+    private var workspaceObservers: [NSObjectProtocol] = []
+
+    private init() {
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
+            sessionActive = session[kCGSessionOnConsoleKey as String] as? Bool == true
+                && session[kCGSessionLoginDoneKey as String] as? Bool == true
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(workspace.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.suspend(sleeping: true)
+        })
+        workspaceObservers.append(workspace.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+            self.lock.lock()
+            self.sleeping = false
+            self.sessionActive = session?[kCGSessionOnConsoleKey as String] as? Bool == true
+                && session?[kCGSessionLoginDoneKey as String] as? Bool == true
+            self.lock.unlock()
+        })
+        workspaceObservers.append(workspace.addObserver(
+            forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.suspend(sleeping: false)
+        })
+        workspaceObservers.append(workspace.addObserver(
+            forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            self.sessionActive = true
+            self.lock.unlock()
+        })
+    }
+
+    private func suspend(sleeping: Bool) {
+        lock.lock()
+        self.sleeping = self.sleeping || sleeping
+        sessionActive = false
+        lock.unlock()
+        sona_quiet_review_interrupt()
+    }
+
+    func status() -> Int32 {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+              session[kCGSessionOnConsoleKey as String] as? Bool == true,
+              session[kCGSessionLoginDoneKey as String] as? Bool == true else { return 1 }
+        lock.lock()
+        let available = !sleeping && sessionActive
+        lock.unlock()
+        guard available else { return 1 }
+        guard let anyInput = CGEventType(rawValue: UInt32.max) else { return 3 }
+        let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
+        guard idle.isFinite, idle >= 600 else { return 2 }
+        return 0
+    }
+}
+
+@_cdecl("sona_quiet_review_environment")
+public func sonaQuietReviewEnvironment() -> Int32 {
+    return QuietReviewEnvironment.shared.status()
 }

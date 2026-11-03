@@ -6965,6 +6965,17 @@ impl MeetingStore {
         self.connection.lock().map_err(|_| StoreError::Unavailable)
     }
 
+    pub(crate) fn with_planning_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = read(&transaction)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     fn ensure_session_directory(
         &self,
         session_id: MeetingSessionId,
@@ -8446,7 +8457,7 @@ fn speakers_for_session(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-fn effective_segments_for_session(
+pub(crate) fn effective_segments_for_session(
     connection: &Connection,
     session_id: MeetingSessionId,
 ) -> Result<Vec<EffectiveTranscriptSegment>, StoreError> {

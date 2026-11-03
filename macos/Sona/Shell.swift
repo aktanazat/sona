@@ -131,6 +131,22 @@ struct Shell: View {
                     .sheet(item: $sharedNote) { note in
                         CloudNoteShareView(note: note)
                     }
+            case .projects:
+                ProjectsView(
+                    store: model.projects,
+                    people: model.plannerPeople,
+                    peopleUnavailable: model.people.entries == nil || model.people.listFailed,
+                    material: model.about.material,
+                    openEvidence: model.openPlanningEvidence,
+                    openPerson: model.openPerson,
+                    discussProject: model.discussProject,
+                    planWithSona: model.planWithSona)
+            case .calendar:
+                PlannerCalendarView(
+                    store: model.projects,
+                    material: model.about.material,
+                    openProject: model.openProject,
+                    openMeeting: model.openMeeting)
             }
         }
     }

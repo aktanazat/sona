@@ -726,6 +726,7 @@ struct CommandPalette: View {
     ]
 
     var body: some View {
+        let panelShape = RoundedRectangle(cornerRadius: Theme.radiusDialog)
         ZStack(alignment: .top) {
             Color.black.opacity(0.18)
                 .ignoresSafeArea()
@@ -788,14 +789,33 @@ struct CommandPalette: View {
                 keys
             }
             .frame(width: 600)
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusDialog).strokeBorder(Theme.border, lineWidth: 1))
-            .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
+            .background {
+                if model.about.material == .glass {
+                    panelShape.fill(Theme.surface)
+                }
+            }
+            .clipShape(panelShape)
+            .padding(model.about.material == .glass ? 6 : 0)
+            .background {
+                if model.about.material == .solid {
+                    panelShape
+                        .fill(Theme.surface)
+                        .overlay(panelShape.strokeBorder(Theme.border, lineWidth: 1))
+                        .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
+                } else if #available(macOS 26.0, *) {
+                    Color.clear
+                        .glassEffect(.regular, in: panelShape)
+                } else {
+                    panelShape
+                        .fill(.regularMaterial)
+                        .overlay(panelShape.strokeBorder(Theme.border, lineWidth: 1))
+                        .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
+                }
+            }
             .padding(.top, 96)
             .onAppear {
-                focused = true
                 query = model.takePaletteSeed()
+                DispatchQueue.main.async { focused = true }
             }
             .onExitCommand { model.paletteShown = false }
             .onChange(of: query) { _, text in

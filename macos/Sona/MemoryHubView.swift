@@ -42,6 +42,28 @@ struct MemoryHubView: View {
                     }
                 }
             }
+            if let projects = model.projects.projects, !projects.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Projects").sectionLabel()
+                        Spacer()
+                        Button("Calendar") { model.go(.calendar) }.buttonStyle(.quiet)
+                        Button("All projects") { model.go(.projects) }.buttonStyle(.quiet)
+                    }
+                    Card {
+                        ForEach(projects.prefix(3)) { summary in
+                            CardRow(action: { model.openProject(summary.id) }) {
+                                Text(summary.project.title).bodyText(14)
+                            } trailing: {
+                                if summary.openTaskCount + summary.completedTaskCount > 0 {
+                                    Text("\(summary.completedTaskCount) done · \(summary.openTaskCount) open")
+                                        .metaText().monospacedDigit()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Conversations and notes").sectionLabel()
