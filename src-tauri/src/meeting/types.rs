@@ -421,6 +421,7 @@ pub enum MeetingCommandError {
     InsufficientEnrollmentEvidence,
     ProfileModelIncompatible,
     ProfileMergeResolutionRequired,
+    TranscriptCorrectionConflict,
     RemoteUnavailable,
     EngineFailure,
     /// The file offered for import is not a recording or transcript export
@@ -1442,6 +1443,10 @@ pub struct MeetingNavigationPayload {
     pub destination: MeetingNavigationDestination,
     pub session_id: Option<MeetingSessionId>,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_milliseconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]

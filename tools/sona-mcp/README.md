@@ -1,13 +1,12 @@
 # sona-mcp
 
-An MCP server over Sona's meeting corpus. Eight tools, stdio transport, no
-state: each call spawns the installed Sona binary with one of its headless
-flags and hands the JSON back.
+An MCP server over Sona's local corpus. Each call spawns the installed Sona
+binary with its existing headless flags and returns the JSON. The server keeps
+no corpus state and does not send source material to a provider.
 
 Everything it can reach is behind consent rows that are off on install.
-**Settings > Agents > External access** gates every request: seven are
-read-only, and `sona_loop_resolve` reads its loop revision before it writes.
-That one writing tool also needs **Settings > Agents > External mutations**.
+**Settings > Agents > External access** gates every request.
+`sona_loop_resolve` also needs **Settings > Agents > External mutations**.
 With either row off it returns `consent_required` naming the missing setting.
 Nothing else on this surface writes.
 
@@ -39,25 +38,93 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 
 ## Tools
 
-| Tool                | Arguments                              | Runs                                                                    |
-| ------------------- | -------------------------------------- | ----------------------------------------------------------------------- |
-| `sona_search`       | `query`, `scope?`, `limit?`            | `sona --query … [--scope …] [--limit …]`                                |
-| `sona_meetings`     | `last?` \| (`from` + `to`)             | `sona --meetings [--last …] [--from … --to …]`                          |
-| `sona_meeting`      | `meeting_id`                           | `sona --meeting <id>`                                                   |
-| `sona_transcript`   | `meeting_id`                           | `sona --transcript <id>`                                                |
-| `sona_action_items` | `status?`, `side?`, `after?`, `limit?` | `sona --loops [--status …] [--mine\|--waiting] [--after …] [--limit …]` |
-| `sona_people`       | `name`, `limit?`                       | `sona --people <name> [--limit …]`                                      |
-| `sona_upcoming`     | `limit?`                               | `sona --upcoming [--limit …]`                                           |
-| `sona_loop_resolve` | `loop_id`                              | `sona --loop-resolve <loop_id>` — **writes**                            |
+| Tool                 | Arguments                                | Runs                                                                    |
+| -------------------- | ---------------------------------------- | ----------------------------------------------------------------------- |
+| `sona_search`        | `query`, `scope?`, `limit?`              | `sona --query … [--scope …] [--limit …]`                                |
+| `sona_meetings`      | `last?` \| (`from` + `to`)               | `sona --meetings [--last …] [--from … --to …]`                          |
+| `sona_meeting`       | `meeting_id`                             | `sona --meeting <id>`                                                   |
+| `sona_transcript`    | `meeting_id`                             | `sona --transcript <id>`                                                |
+| `sona_action_items`  | `status?`, `side?`, `after?`, `limit?`   | `sona --loops [--status …] [--mine\|--waiting] [--after …] [--limit …]` |
+| `sona_people`        | `name`, `limit?`                         | `sona --people <name> [--limit …]`                                      |
+| `sona_person_catch_up` | `person_id`, `since_utc_ms?`            | `sona --person-catch-up <id> [--since-utc-ms …]`                        |
+| `sona_person_changes`  | `person_id`, `since_utc_ms`             | `sona --person-changes <id> --since-utc-ms …`                            |
+| `sona_upcoming`      | `limit?`                                 | `sona --upcoming [--limit …]`                                           |
+| `sona_notes`         | `limit?`                                 | `sona --notes [--limit …]`                                              |
+| `sona_note`          | `note_id`                                | `sona --note <id>`                                                      |
+| `sona_note_context`  | `query`, `limit?`                         | `sona --note-context <text> [--limit …]`                                 |
+| `sona_note_versions` | `note_id`                                | `sona --note-versions <id>`                                             |
+| `sona_note_diff`     | `note_id`, `from_version`, `to_version?` | `sona --note-diff <id> --from-version … [--to-version …]`               |
+| `sona_stats`         | none                                     | `sona --stats`                                                          |
+| `sona_events`        | `after?`, `limit?`                       | `sona --events [--after …] [--limit …]`                                 |
+| `sona_loop_resolve`  | `loop_id`                                | `sona --loop-resolve <loop_id>` — **writes**                            |
 
-`scope` is one of `all`, `meetings`, `dictations`, `people`, `loops`. `status`
+`scope` is one of `all`, `meetings`, `dictations`, `people`, `loops`, `notes`. `status`
 is `open` or `done`. `side` is `mine` (what you owe) or `waiting` (what
 somebody else owes you). Pass an action-items `next_cursor` as `after` with
 the same filters; `has_more` is true only when that cursor is present.
 
-Sona's `--events` flag — the receipt and workflow-run stream — is deliberately
-CLI-only. It pages by receipt id, which is a cursor an agent has no use for
-between calls on a server that keeps no state.
+Find the person with `sona_people`, then use that returned id for catch-up or
+changes. Both return the native person-memory `snapshot`, with a `view` of
+`catch_up` or `changes` and the person's `link`. The snapshot is not a generated
+answer. `catch_up` selects ids into its conversations, contributions, notes,
+commitments and changes. `limitations` names missing or incomplete evidence.
+These person snapshots are not paged; `limit` is not accepted for them.
+
+Changes contain `earlier` and `later` source records, text and AI-interpretation
+labels. Cite both links. A difference in wording is not proof of a changed
+decision or a contradiction. An empty comparison means no comparable retained
+evidence differs, not proof nothing changed. `since_utc_ms` is an exact UTC
+millisecond boundary, not a local date.
+
+Transcript lines keep the existing `text` field as the effective reading and
+add `raw_text`, nullable `corrected_text`, segment and transcript revision ids,
+nullable `edit_revision` and a meeting `link`. Captured words are not overwritten.
+Removed lines remain excluded. Person contributions also keep captured and
+corrected wording separate, with surrounding speech when available.
+
+```bash
+sona --people "Fenil"
+sona --person-catch-up <returned-person-uuid> --format text
+sona --person-changes <returned-person-uuid> --since-utc-ms <utc-milliseconds>
+sona --note-context "release plan" --limit 3 --format text
+sona --transcript <meeting-uuid> --format text
+```
+
+`sona_note_context` uses the same local note-search page as the CLI, with current
+note bodies, matching text and resolved source references. It returns at most
+the requested number of notes and does not expand related-note bodies outside
+that page. Check `has_more` and `reason` before treating the result as complete.
+Both context and single-note reads preserve saved passage references,
+`interpretation` labels and explained connections. `interpretation:true` marks
+AI interpretation, not a transcript quote. A passage reference identifies the
+chosen raw or corrected wording and recording moment; it does not export a
+second copy of meeting text. Connection reasons describe explicit links or
+shared source records, not a guessed relationship.
+
+Note reads include source links and related notes. Deleted or unavailable
+sources have `available:false`, a generic title and no exported link or source
+snapshot. Note versions are saved states, not a keystroke log: autosaves within
+ten minutes can merge, and at most 50 versions are retained. Diffs are exact
+single replacement hunks with original line endings, not minimal edit scripts.
+Diffs also include `from_source` and `to_source`: saved version ids, save times,
+version kinds and version-scoped note links.
+
+Statistics count all retained records. Each dataset has `status:available` with
+totals or `status:unavailable` with an error and no totals. `sources` gives the
+counting method and up to 25 sample record links per dataset, with its own
+availability and `has_more`. These links are samples, not an enumeration or the
+population used for totals. Counts and samples are separate reads, not a shared
+transaction. `complete:false` means a count or sample was unavailable;
+unavailable data is never zero. See
+[`skills/sona/SKILL.md`](../../skills/sona/SKILL.md) for field definitions.
+
+These tools do not edit, restore, link or synthesize notes. Those remain native
+app actions and do not gain a route around external-write or source-transfer
+consent. For human CLI output, append `--format text`; MCP keeps default JSON.
+MCP publishes `readOnlyHint:true` for every read and `false` for loop resolution.
+The server passes private source data to its approved client. Neither Sona nor
+this server calls a model provider for these reads. External access is not
+permission for an agent to send those records to another provider.
 
 ## What comes back
 
@@ -65,7 +132,7 @@ One JSON object per call, as one text block. Every payload carries a
 `schema_version`. Rows from `sona_upcoming` are the exception: calendar
 occurrences have no `sona://` address. Other rows carry an address the app can
 open: `sona://meeting/<uuid>`, `sona://loop/<id>`, `sona://person/<uuid>`,
-`sona://dictation/<id>`.
+`sona://dictation/<id>`, `sona://note/<uuid>`.
 
 An empty array is two different answers, so the three reads that can hide a
 degraded source carry `reason` beside their rows. `null` means every source
@@ -104,9 +171,8 @@ for a caller that reads structured error data:
 ## Tests
 
 ```bash
-bun test          # argv mapping, refusal passthrough, and the server on an
-                  # in-memory transport — all against a stub binary
-bunx tsc --noEmit # the only check that sees a dead import
+bun test          # input boundaries, CLI failures, and MCP error handling
+bunx tsc --noEmit # type checking
 ```
 
 Both run from the repo root as `bun run test:mcp` and `bun run typecheck:mcp`,

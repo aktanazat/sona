@@ -255,6 +255,13 @@ pub(crate) static MIGRATIONS: &[M] = &[
             DELETE FROM scratch_note_versions WHERE note_id = old.id;
         END;",
     ),
+    M::up(crate::scratchpad::links::MIGRATION),
+    M::up(crate::scratchpad::links::MEETING_REFERENCES_MIGRATION),
+    M::up(crate::scratchpad::RECENT_MIGRATION),
+    M::up(crate::scratchpad::passages::MIGRATION),
+    M::up(crate::scratchpad::synthesis::MIGRATION),
+    M::up(crate::scratchpad::subjects::MIGRATION),
+    M::up(crate::scratchpad::phone_import::MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -887,7 +894,7 @@ impl HistoryManager {
     /// together still cost one credential-store round trip. What the guard
     /// buys is that a search in the app, where startup already resolved the
     /// key, pays one state lock and no migration check.
-    async fn ensure_storage_unlocked(&self) {
+    pub(crate) async fn ensure_storage_unlocked(&self) {
         if !self.storage.needs_resolution() {
             return;
         }

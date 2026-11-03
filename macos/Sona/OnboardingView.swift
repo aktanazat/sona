@@ -11,6 +11,15 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     OnboardingBrand()
                     step
+                    if [.languages, .model, .permissions].contains(store.step) {
+                        Button(store.finishing ? "Opening…" : "Use notes without recording") {
+                            store.continueWithoutRecording()
+                        }
+                        .buttonStyle(.quiet)
+                        .disabled(store.isBusy || store.finishing)
+                        .padding(.top, 24)
+                        ErrorNote(store.error)
+                    }
                 }
                 .padding(36)
                 .frame(width: 480, alignment: .leading)

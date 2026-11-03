@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 /// them. Which one opens first depends on what the core has written: a ledger
 /// wins, then notes, then the words themselves.
 enum MeetingReviewTab: String, CaseIterable, Identifiable {
+    case review
     case transcript
     case insights
     case ledger
@@ -17,6 +18,7 @@ enum MeetingReviewTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .review: "Review"
         case .transcript: "Transcript"
         case .insights: "Insights"
         case .ledger: "Ledger"
@@ -341,6 +343,7 @@ final class MeetingsStore {
     private(set) var transcriptQuery = ""
     private(set) var searchHits: [MeetingSearchHit]?
     private(set) var jump: SegmentJump?
+    private(set) var originalWording = false
     private(set) var newNote = ""
 
     // MARK: What a person typed
@@ -367,6 +370,7 @@ final class MeetingsStore {
     private(set) var notice: String?
 
     private let core: Core
+    let audio: ConversationAudioPlayback
     @ObservationIgnored private var listTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var transcriptTask: Task<Void, Never>?
@@ -388,6 +392,7 @@ final class MeetingsStore {
 
     init(core: Core) {
         self.core = core
+        audio = ConversationAudioPlayback(core: core)
 
         // A meeting that ends, or one whose phase moves, changes the list and
         // the page in front of a reader.
@@ -422,7 +427,7 @@ final class MeetingsStore {
                 self.closeReview()
             case .session:
                 if let sessionId = payload.sessionId {
-                    self.open(sessionId)
+                    self.open(sessionId, atMilliseconds: payload.atMilliseconds, segmentId: payload.segmentId)
                 }
             case .preflight:
                 break
@@ -933,7 +938,7 @@ final class MeetingsStore {
 
     // MARK: - Opening one meeting
 
-    func open(_ sessionId: MeetingSessionId) {
+    func open(_ sessionId: MeetingSessionId, atMilliseconds: UInt64? = nil, segmentId: TranscriptSegmentId? = nil) {
         leaveOpenMeeting()
         openSessionId = sessionId
         snapshot = nil
@@ -949,6 +954,7 @@ final class MeetingsStore {
         transcriptQuery = ""
         searchHits = nil
         jump = nil
+        originalWording = false
         newNote = ""
         userNotes = nil
         notesBody = ""
@@ -960,6 +966,9 @@ final class MeetingsStore {
         openTask = Task { [weak self] in
             guard let self else { return }
             await refreshSnapshot()
+            if isOpen(sessionId), !Task.isCancelled, atMilliseconds != nil || segmentId != nil {
+                openSource(atMilliseconds: atMilliseconds, segmentId: segmentId)
+            }
             await loadUserNotes()
             await loadPeople()
             if isOpen(sessionId) { reviewLoading = false }
@@ -983,6 +992,7 @@ final class MeetingsStore {
         openTask?.cancel()
         notesTask?.cancel()
         transcriptTask?.cancel()
+        audio.stop()
         eventTask?.cancel()
         guard notesState == .unsaved, let draft = pendingDraft else { return }
         Task { await persist(draft) }
@@ -1009,6 +1019,7 @@ final class MeetingsStore {
             guard isOpen(sessionId) else { return }
             snapshot = next
             if next.session.transcriptDeleted {
+                audio.stop()
                 transcriptTask?.cancel()
                 transcriptQuery = ""
                 searchHits = nil
@@ -1057,7 +1068,9 @@ final class MeetingsStore {
             tab = chosenTab
             return
         }
-        if snapshot.currentLedger != nil {
+        if snapshot.session.phase == .reviewReady {
+            tab = .review
+        } else if snapshot.currentLedger != nil {
             tab = .ledger
         } else if !snapshot.artifacts.isEmpty || !snapshot.notes.isEmpty {
             tab = .insights
@@ -1104,7 +1117,7 @@ final class MeetingsStore {
         for segment in snapshot.transcript {
             let keep = needle.isEmpty
                 || hits.contains(segment.base.segmentId)
-                || segment.text.lowercased().contains(needle)
+                || displayedText(segment).lowercased().contains(needle)
             guard keep else {
                 close()
                 continue
@@ -1216,6 +1229,116 @@ final class MeetingsStore {
     func citationAction(_ segmentId: TranscriptSegmentId) -> (() -> Void)? {
         guard canJumpTo(segmentId) else { return nil }
         return { [weak self] in self?.jumpTo(segmentId) }
+    }
+
+    func chooseOriginalWording(_ original: Bool) {
+        originalWording = original
+    }
+
+    func displayedText(_ segment: TranscriptEffectiveSegment) -> String {
+        originalWording ? segment.base.text : segment.text
+    }
+
+    func canPlay(_ segmentId: TranscriptSegmentId) -> Bool {
+        guard !transcriptDeleted,
+              let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed })
+        else { return false }
+        return snapshot?.tracks.contains {
+            $0.trackId == segment.base.trackId && $0.durableRecordCount > 0
+                && ($0.firstOffsetNs ?? Int64.max) < segment.base.endOffsetNs
+                && ($0.lastOffsetNs ?? 0) > segment.base.startOffsetNs
+        } == true
+    }
+
+    func playContribution(_ segmentId: TranscriptSegmentId) {
+        guard let sessionId = openSessionId, canPlay(segmentId) else { return }
+        audio.play(sessionId: sessionId, segmentId: segmentId)
+    }
+
+    func playContribution(sessionId: String, segmentId: String) {
+        audio.play(sessionId: sessionId, segmentId: segmentId)
+    }
+
+    private func segment(at offset: UInt64, uniqueOnly: Bool = false) -> TranscriptEffectiveSegment? {
+        let moment = Int64(clamping: offset)
+        var result: TranscriptEffectiveSegment?
+        for segment in snapshot?.transcript ?? [] where !segment.removed
+            && ((segment.base.startOffsetNs <= moment && segment.base.endOffsetNs > moment)
+                || (offset.isMultiple(of: 1_000_000) && segment.base.startOffsetNs > moment
+                    && segment.base.startOffsetNs / 1_000_000 == moment / 1_000_000)) {
+            if !uniqueOnly { return segment }
+            if result != nil { return nil }
+            result = segment
+        }
+        return result
+    }
+
+    private func openSource(atMilliseconds: UInt64?, segmentId: TranscriptSegmentId?) {
+        let conversion = atMilliseconds?.multipliedReportingOverflow(by: 1_000_000)
+        guard conversion?.overflow != true else {
+            notice = "Source timestamp is unavailable."
+            return
+        }
+        if let segmentId {
+            guard let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed }),
+                  segment.base.startOffsetNs >= 0, segment.base.endOffsetNs > segment.base.startOffsetNs
+            else {
+                notice = "Source words and recording are unavailable."
+                return
+            }
+            let start = UInt64(segment.base.startOffsetNs)
+            let requested = conversion?.partialValue ?? start
+            let moment = requested / 1_000_000 == start / 1_000_000 ? max(requested, start) : requested
+            guard moment >= start, moment < UInt64(segment.base.endOffsetNs) else {
+                notice = "Source timestamp does not match these words."
+                return
+            }
+            jumpTo(segmentId)
+            guard canPlay(segmentId), let sessionId = openSessionId else {
+                notice = "Recording is not retained."
+                return
+            }
+            audio.play(sessionId: sessionId, segmentId: segmentId,
+                startOffsetNs: moment > 4_000_000_000 ? moment - 4_000_000_000 : 0)
+        } else if let offset = conversion?.partialValue, let segment = segment(at: offset) {
+            if canPlay(segment.base.segmentId) { playAtOffset(offset) }
+            else {
+                jumpTo(segment.base.segmentId)
+                notice = "Recording is not retained."
+            }
+        } else {
+            notice = "Source words and recording are unavailable."
+        }
+    }
+
+    func canPlayBookmark(_ offset: UInt64) -> Bool {
+        guard !transcriptDeleted else { return false }
+        let moment = Int64(clamping: offset)
+        return snapshot?.tracks.contains {
+            $0.durableRecordCount > 0
+                && ($0.firstOffsetNs ?? .max) <= moment
+                && ($0.lastOffsetNs ?? 0) > moment
+        } == true
+    }
+
+    func playBookmark(_ offset: UInt64) {
+        guard let sessionId = openSessionId, canPlayBookmark(offset) else { return }
+        audio.playBookmark(sessionId: sessionId, offset: offset)
+    }
+
+    func canPlayAtOffset(_ offset: UInt64) -> Bool {
+        segment(at: offset).map { canPlay($0.base.segmentId) } ?? false
+    }
+
+    func playAtOffset(_ offset: UInt64) {
+        guard let sessionId = openSessionId, let segment = segment(at: offset),
+              canPlay(segment.base.segmentId) else { return }
+        jumpTo(segment.base.segmentId)
+        if self.segment(at: offset, uniqueOnly: true) == nil {
+            notice = "Speakers overlap at this moment."
+        }
+        let contextStart = offset > 4_000_000_000 ? offset - 4_000_000_000 : 0
+        audio.play(sessionId: sessionId, segmentId: segment.base.segmentId, startOffsetNs: contextStart)
     }
 
     // MARK: - Editing what the core wrote

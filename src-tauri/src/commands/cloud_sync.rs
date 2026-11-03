@@ -8,13 +8,66 @@ use crate::cloud_sync::types::{
     CloudSyncRecoveryRequest,
 };
 use crate::cloud_sync::{CloudSyncErrorKind, CloudSyncRuntime};
+use crate::cloud_sync::{PhoneThoughtAttachment, PhoneThoughtSource};
 use crate::meeting::types::MeetingSessionId;
 use crate::settings::{is_loopback_host, CloudSyncSettings};
+use base64::Engine;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+
+#[tauri::command]
+#[specta::specta]
+pub async fn phone_thought_source_get(
+    runtime: State<'_, Arc<CloudSyncRuntime>>,
+    note_id: String,
+    object_id: String,
+    revision_id: String,
+) -> Result<Option<PhoneThoughtSource>, CloudSyncErrorKind> {
+    let source = runtime
+        .phone_thought_source(&object_id, &revision_id)
+        .await
+        .map_err(|error| error.kind())?;
+    Ok(source.filter(|source| source.reference.note_id == note_id))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn phone_thought_photo_get(
+    runtime: State<'_, Arc<CloudSyncRuntime>>,
+    note_id: String,
+    object_id: String,
+    revision_id: String,
+    index: u32,
+) -> Result<String, String> {
+    let source = runtime
+        .phone_thought_source(&object_id, &revision_id)
+        .await
+        .map_err(|error| format!("{:?}", error.kind()))?
+        .filter(|source| source.reference.note_id == note_id)
+        .ok_or_else(|| "This original is no longer available.".to_owned())?;
+    let photo = source
+        .manifest
+        .images
+        .get(index as usize)
+        .ok_or_else(|| "This photo is not available.".to_owned())?;
+    if photo.byte_length > 16 * 1024 * 1024 {
+        return Err(
+            "This photo is too large to preview here. The original remains saved.".to_owned(),
+        );
+    }
+    let bytes = runtime
+        .phone_thought_attachment(
+            &object_id,
+            &revision_id,
+            PhoneThoughtAttachment::Image { index },
+        )
+        .await
+        .map_err(|error| format!("{:?}", error.kind()))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
 
 #[tauri::command]
 #[specta::specta]

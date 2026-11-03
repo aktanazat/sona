@@ -15,7 +15,7 @@ enum Place: Int, CaseIterable, Identifiable {
         case .library: "Library"
         case .meetings: "Meetings"
         case .people: "People"
-        case .scratchpad: "Scratchpad"
+        case .scratchpad: "Notes"
         }
     }
 
@@ -147,6 +147,11 @@ enum PillFeedback: Equatable {
     }
 }
 
+struct PillPresentation: Equatable {
+    let capture: CaptureState
+    let feedback: PillFeedback?
+}
+
 extension CoreEvent {
     static let recordingError = "recording-error"
     static let pasteError = "paste-error"
@@ -219,6 +224,8 @@ final class AppModel {
     /// if it has to.
     private(set) var pillWarningSeconds: Int?
     private(set) var pillFeedback: PillFeedback?
+    // The panel fades after capture ends; its content changes only on the next show.
+    private(set) var pillPresentation = PillPresentation(capture: .idle, feedback: nil)
     /// Bumped when the pill's hour away is over, so the pill is placed again.
     private var pillReturned = 0
 
@@ -233,6 +240,7 @@ final class AppModel {
     let live: MeetingLiveStore
     let meetingSettings: MeetingSettingsStore
     let prep: MeetingPrepStore
+    let personPhotos: PersonPhotoStore
     let people: PeopleStore
     let scratchpad: ScratchpadStore
     let modes: ModesStore
@@ -280,7 +288,9 @@ final class AppModel {
         live = MeetingLiveStore(core: core)
         meetingSettings = MeetingSettingsStore(core: core)
         prep = MeetingPrepStore(core: core)
-        people = PeopleStore(core: core)
+        let photos = PersonPhotoStore(core: core)
+        personPhotos = photos
+        people = PeopleStore(core: core, photos: photos)
         scratchpad = ScratchpadStore(core: core)
         modes = ModesStore(core: core)
         providers = ProvidersStore(core: core)
@@ -480,6 +490,12 @@ final class AppModel {
             go(.people)
         case let .dictation(historyId):
             openDictation(historyId)
+        case let .note(id, versionId):
+            Task { await scratchpad.open(id: id, versionId: versionId) }
+            go(.scratchpad)
+        case let .subject(id):
+            Task { await scratchpad.openSubject(id: id) }
+            go(.scratchpad)
         case let .search(question):
             paletteSeed = question
             paletteShown = true
@@ -797,9 +813,11 @@ final class AppModel {
             if record.overlayStyle == .none, pillWarningSeconds == nil {
                 pill.hide()
             } else {
+                pillPresentation = PillPresentation(capture: capture, feedback: pillFeedback)
                 pill.show(at: .edge(HudPillEdge(record.overlayPosition)), anew: anew)
             }
         } else if record.hudPillEnabled, !pillAway(record) {
+            pillPresentation = PillPresentation(capture: .idle, feedback: nil)
             pill.dockable = true
             pill.show(at: .edge(record.hudPillPosition), anew: anew)
         } else {

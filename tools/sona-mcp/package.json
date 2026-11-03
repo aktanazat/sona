@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only MCP server over Sona's meeting corpus.",
+  "description": "Local MCP server over Sona's consent-gated corpus CLI.",
   "bin": {
     "sona-mcp": "./src/index.ts"
   },

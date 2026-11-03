@@ -7,6 +7,8 @@ mod automations_run_tests;
 mod automations_tests;
 mod call_speakers;
 mod connections;
+mod context;
+mod conversation_review;
 mod custom_templates;
 #[cfg(test)]
 mod custom_templates_tests;
@@ -25,18 +27,24 @@ mod learning_tests;
 pub(crate) mod loops;
 #[cfg(test)]
 mod loops_tests;
+pub(crate) mod memory_index;
+pub(crate) mod note_evidence;
+#[cfg(test)]
+mod note_evidence_tests;
 mod people;
 mod prep;
 pub(crate) mod prompts;
 pub(crate) mod query_plane;
 #[cfg(test)]
 mod remote_intelligence_tests;
+mod search_projection;
 pub(crate) mod series;
 #[cfg(test)]
 mod series_tests;
 mod snapshots;
 #[cfg(test)]
 mod title_tests;
+pub(crate) mod transcript_corrections;
 mod transcript_retention;
 pub(crate) mod voice_identity;
 #[cfg(test)]
@@ -1503,6 +1511,17 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/custom_templates.sql")),
     M::up(include_str!("store/call_speakers.sql")),
     M::up(include_str!("store/import_recording_end.sql")),
+    M::up(include_str!("store/context.sql")),
+    M::up(include_str!("store/transcript_corrections.sql")),
+    M::up(include_str!("store/people/avatars.sql")),
+    M::up(include_str!("store/transcript_correction_dependencies.sql")),
+    M::up(include_str!("store/transcript_correction_person_merge.sql")),
+    M::up(include_str!("store/search_projection.sql")),
+    M::up(include_str!("store/note_evidence.sql")),
+    M::up(include_str!("store/people/portrait_sources.sql")),
+    M::up(include_str!("store/transcript_correction_context.sql")),
+    M::up(include_str!("store/conversation_review.sql")),
+    M::up(include_str!("store/people/merge_redirects.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -1524,6 +1543,7 @@ pub enum StoreError {
     InsufficientEnrollmentEvidence,
     ProfileModelIncompatible,
     ProfileMergeResolutionRequired,
+    TranscriptCorrectionConflict,
     VoiceInvariant,
     Io,
 }
@@ -2003,6 +2023,21 @@ pub struct MeetingStore {
     /// are written from the track workers, which have no way to reach the
     /// shell; the session manager installs this so they do not need one.
     health_listener: OnceLock<Box<dyn Fn(HealthChange) + Send + Sync>>,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalMeetingRestoreV2 {
+    format_version: u8,
+    meeting: cloud_bundle::CloudMeetingBundleV1,
+    bookmarks: Vec<super::conversation_review::ConversationBookmark>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum LocalMeetingRestore {
+    V2(LocalMeetingRestoreV2),
+    Legacy(cloud_bundle::CloudMeetingBundleV1),
 }
 
 impl MeetingStore {
@@ -5696,7 +5731,8 @@ impl MeetingStore {
         values.push(rusqlite::types::Value::Integer(
             i64::try_from(limit).map_err(|_| StoreError::Invalid)?,
         ));
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
+        search_projection::refresh_in(&mut connection)?;
         let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(values.iter()), |row| {
             let session_id = MeetingSessionId::from_uuid(
@@ -5788,23 +5824,11 @@ impl MeetingStore {
         let user_notes = bounded_text(notes.body.trim(), max_bytes / 8);
         let mut used = user_notes.len();
         let mut transcript = Vec::new();
-        let mut segments = connection.prepare(
-            "SELECT s.segment_id, s.start_offset_ns, s.end_offset_ns,
-                    COALESCE((SELECT e.replacement_text FROM meeting_segment_edits e
-                              WHERE e.segment_id = s.segment_id
-                              ORDER BY e.edit_sequence DESC LIMIT 1), s.base_text)
-             FROM meeting_sessions m
-             JOIN meeting_transcript_segments s
-               ON s.transcript_revision_id = m.current_transcript_revision_id
-             WHERE m.id = ?1
-               AND COALESCE((SELECT e.removed FROM meeting_segment_edits e
-                             WHERE e.segment_id = s.segment_id
-                             ORDER BY e.edit_sequence DESC LIMIT 1), 0) = 0
-             ORDER BY s.start_offset_ns, s.ordinal",
-        )?;
-        let mut rows = segments.query(params![id(session_id)])?;
-        while let Some(row) = rows.next()? {
-            let text: String = row.get(3)?;
+        for segment in effective_segments_for_session(&connection, session_id)? {
+            if segment.removed {
+                continue;
+            }
+            let text = segment.replacement_text.unwrap_or(segment.base.text);
             if text.trim().is_empty() || used >= max_bytes {
                 if used >= max_bytes {
                     break;
@@ -5818,15 +5842,13 @@ impl MeetingStore {
                 citation: MeetingCitation {
                     kind: CitationKind::Transcript,
                     session_id,
-                    entity_id: row.get(0)?,
-                    start_offset_ns: Some(from_i64(row.get(1)?)?),
-                    end_offset_ns: Some(from_i64(row.get(2)?)?),
+                    entity_id: id(segment.base.segment_id),
+                    start_offset_ns: Some(segment.base.start_offset_ns),
+                    end_offset_ns: Some(segment.base.end_offset_ns),
                 },
                 text,
             });
         }
-        drop(rows);
-        drop(segments);
         let mut manual_notes = Vec::new();
         if used < max_bytes {
             let mut notes = connection.prepare(
@@ -6291,10 +6313,16 @@ impl MeetingStore {
         let restore_bundle_json = if cause == DeletionCause::Discard {
             None
         } else {
-            match export_cloud_meeting_bundle_in(&transaction, session_id)
-                .and_then(|bundle| bundle.validate().map(|()| bundle))
-            {
-                Ok(bundle) => encode_json(&bundle).ok(),
+            match export_cloud_meeting_bundle_in(&transaction, session_id).and_then(|bundle| {
+                bundle.validate()?;
+                let bookmarks = conversation_review::export_bookmarks_in(&transaction, session_id)?;
+                encode_json(&LocalMeetingRestoreV2 {
+                    format_version: 2,
+                    meeting: bundle,
+                    bookmarks,
+                })
+            }) {
+                Ok(bundle_json) => Some(bundle_json),
                 Err(error) => {
                     log::info!(
                         "Meeting {session_id:?} is being deleted without an undo: no restorable bundle ({error:?})"
@@ -6473,7 +6501,8 @@ impl MeetingStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT job_id, completed_at_utc_ms,
-                    json_extract(restore_bundle_json, '$.session.title') AS title
+                    COALESCE(json_extract(restore_bundle_json, '$.meeting.session.title'),
+                             json_extract(restore_bundle_json, '$.session.title')) AS title
                FROM meeting_deletion_receipts
               WHERE restore_bundle_json IS NOT NULL AND trash_relative_path IS NOT NULL
               ORDER BY completed_at_utc_ms DESC, job_id DESC",
@@ -6538,7 +6567,13 @@ impl MeetingStore {
         if deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS) <= now_utc_ms {
             return Err(StoreError::NotFound);
         }
-        let bundle: cloud_bundle::CloudMeetingBundleV1 = decode_json(&bundle_json)?;
+        let (bundle, bookmarks) = match decode_json::<LocalMeetingRestore>(&bundle_json)? {
+            LocalMeetingRestore::V2(restore) if restore.format_version == 2 => {
+                (restore.meeting, restore.bookmarks)
+            }
+            LocalMeetingRestore::V2(_) => return Err(StoreError::Invalid),
+            LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new()),
+        };
         let session_id = bundle.session.session_id;
         {
             // Freeze deletion before moving files. A request already on the wire must
@@ -6601,6 +6636,7 @@ impl MeetingStore {
             "restored",
             None,
         )?;
+        conversation_review::import_bookmarks_in(&transaction, session_id, &bookmarks)?;
         folders::restore_trashed_memberships_in(&transaction, &id(job_id), &id(session_id))?;
         transaction.execute(
             "UPDATE meeting_deletion_receipts
@@ -8473,7 +8509,9 @@ fn effective_segments_for_session(
                 .map_err(to_sql_error)?,
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    let mut segments = rows.collect::<Result<Vec<_>, _>>()?;
+    transcript_corrections::apply_learned_corrections_in(connection, session_id, &mut segments)?;
+    Ok(segments)
 }
 
 /// Resolve merged speaker ids once at the store boundary. Analytics and every
@@ -8525,36 +8563,18 @@ fn analytics_segments_in(
     connection: &Connection,
     session_id: MeetingSessionId,
 ) -> Result<Vec<AnalyticsSegment>, StoreError> {
-    let mut statement = connection.prepare(
-        "SELECT s.segment_id, s.start_offset_ns, s.end_offset_ns,
-                COALESCE(a.speaker_id, s.speaker_id),
-                COALESCE(e.replacement_text, s.base_text)
-         FROM meeting_sessions m
-         JOIN meeting_transcript_segments s
-           ON s.transcript_revision_id = m.current_transcript_revision_id
-         LEFT JOIN meeting_diarization_assignments a
-           ON a.generation_id = m.current_diarization_generation_id AND a.segment_id = s.segment_id
-         LEFT JOIN meeting_segment_edits e ON e.segment_id = s.segment_id
-             AND e.edit_sequence = (SELECT MAX(edit_sequence) FROM meeting_segment_edits WHERE segment_id = s.segment_id)
-         WHERE m.id = ?1 AND COALESCE(e.removed, 0) = 0
-         ORDER BY s.start_offset_ns, s.ordinal",
-    )?;
-    let rows = statement.query_map(params![id(session_id)], |row| {
-        let start: i64 = row.get(1)?;
-        let end: i64 = row.get(2)?;
-        Ok(AnalyticsSegment {
-            segment_id: TranscriptSegmentId::from_uuid(
-                parse_uuid(&row.get::<_, String>(0)?).map_err(to_sql_error)?,
-            ),
-            speaker_id: SpeakerId::from_uuid(
-                parse_uuid(&row.get::<_, String>(3)?).map_err(to_sql_error)?,
-            ),
-            start_offset_ns: from_i64(start).map_err(to_sql_error)?,
-            end_offset_ns: from_i64(end).map_err(to_sql_error)?,
-            text: row.get(4)?,
-        })
-    })?;
-    let mut segments = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut segments: Vec<AnalyticsSegment> =
+        effective_segments_for_session(connection, session_id)?
+            .into_iter()
+            .filter(|segment| !segment.removed)
+            .map(|segment| AnalyticsSegment {
+                segment_id: segment.base.segment_id,
+                speaker_id: segment.assigned_speaker_id,
+                start_offset_ns: segment.base.start_offset_ns,
+                end_offset_ns: segment.base.end_offset_ns,
+                text: segment.replacement_text.unwrap_or(segment.base.text),
+            })
+            .collect();
     let canonical_ids = canonical_speaker_ids(connection, session_id)?;
     for segment in &mut segments {
         if let Some(canonical_id) = canonical_ids.get(&segment.speaker_id) {
@@ -8918,18 +8938,29 @@ fn rebuild_search_documents_in(
          SELECT n.session_id, 'note', n.note_id, n.body FROM meeting_notes n WHERE n.session_id = ?1",
         params![id(session_id)],
     )?;
-    transaction.execute(
+    let session_id_text = id(session_id);
+    let mut statement = transaction.prepare_cached(
         "INSERT INTO meeting_search_documents (session_id, entity_kind, entity_id, content)
-         SELECT m.id, 'segment', s.segment_id,
-            COALESCE((SELECT e.replacement_text FROM meeting_segment_edits e
-                      WHERE e.segment_id = s.segment_id ORDER BY e.edit_sequence DESC LIMIT 1), s.base_text)
-         FROM meeting_sessions m
-         JOIN meeting_transcript_segments s
-           ON s.transcript_revision_id = m.current_transcript_revision_id
-         WHERE m.id = ?1
-           AND COALESCE((SELECT e.removed FROM meeting_segment_edits e
-                         WHERE e.segment_id = s.segment_id ORDER BY e.edit_sequence DESC LIMIT 1), 0) = 0",
-        params![id(session_id)],
+         VALUES (?1, 'segment', ?2, ?3)",
+    )?;
+    for segment in effective_segments_for_session(transaction, session_id)?
+        .into_iter()
+        .filter(|segment| !segment.removed)
+    {
+        statement.execute(params![
+            session_id_text,
+            id(segment.base.segment_id),
+            segment
+                .replacement_text
+                .as_deref()
+                .unwrap_or(&segment.base.text),
+        ])?;
+    }
+    transaction.execute(
+        "INSERT INTO meeting_search_projection_state (session_id, input_revision)
+         SELECT id, revision FROM meeting_sessions WHERE id = ?1
+         ON CONFLICT(session_id) DO UPDATE SET input_revision = excluded.input_revision",
+        params![session_id_text],
     )?;
     Ok(())
 }
@@ -10323,6 +10354,8 @@ fn export_cloud_meeting_bundle_in(
         })
         .collect::<Result<Vec<_>, StoreError>>()?;
 
+    let mut learned_text_by_segment =
+        transcript_corrections::learned_projection_in(connection, session_id)?;
     let mut statement = connection.prepare(
         "SELECT s.segment_id, s.transcript_revision_id, s.track_id, s.ordinal, s.start_offset_ns,
                 s.end_offset_ns, s.speaker_id, s.base_text, s.confidence_milli
@@ -10347,8 +10380,9 @@ fn export_cloud_meeting_bundle_in(
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|row| {
+            let segment_id = TranscriptSegmentId::from_uuid(parse_uuid(&row.0)?);
             Ok(cloud_bundle::CloudBundleTranscriptSegment {
-                segment_id: TranscriptSegmentId::from_uuid(parse_uuid(&row.0)?),
+                segment_id,
                 transcript_revision_id: TranscriptRevisionId::from_uuid(parse_uuid(&row.1)?),
                 track_id: SourceTrackId::from_uuid(parse_uuid(&row.2)?),
                 ordinal: from_i64(row.3)?,
@@ -10356,6 +10390,7 @@ fn export_cloud_meeting_bundle_in(
                 end_offset_ns: from_i64(row.5)?,
                 speaker_id: SpeakerId::from_uuid(parse_uuid(&row.6)?),
                 base_text: row.7,
+                learned_text: learned_text_by_segment.remove(&segment_id),
                 confidence_milli: row
                     .8
                     .map(|value| u16::try_from(value).map_err(|_| StoreError::Corrupt))
@@ -10495,6 +10530,7 @@ fn export_cloud_meeting_bundle_in(
     Ok(cloud_bundle::CloudMeetingBundleV1 {
         format_version: cloud_bundle::CLOUD_MEETING_BUNDLE_VERSION,
         audio_included: false,
+        conversation_context: Some(context::context_in(connection, session_id)?),
         transcript_purged_at_utc_ms: session.18,
         retained_analytics: if session.18.is_some() {
             connection
@@ -10577,6 +10613,9 @@ fn import_cloud_meeting_bundle_in(
             bundle.transcript_purged_at_utc_ms,
         ],
     )?;
+    if let Some(context) = &bundle.conversation_context {
+        context::import_in(transaction, context)?;
+    }
 
     for consent in &bundle.consents {
         transaction.execute(
@@ -11829,12 +11868,10 @@ mod tests {
                 .expect("delete meeting");
             connection
                 .execute(
-                    "INSERT INTO meeting_search_documents (
-                        session_id, entity_kind, entity_id, content
-                     ) VALUES (?1, 'title', ?2, 'captured only')",
-                    params![id(captured), id(captured)],
+                    "UPDATE meeting_sessions SET title = 'captured only' WHERE id = ?1",
+                    params![id(captured)],
                 )
-                .expect("seed a narrowed search document");
+                .expect("set the title searched before the trend");
         }
 
         let filtered = store

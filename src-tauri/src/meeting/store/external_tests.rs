@@ -147,7 +147,7 @@ fn meeting(store: &MeetingStore, title: &str, at_utc_ms: i64) -> MeetingSessionI
                 id, phase, revision, title, origin_kind, preflight_json,
                 created_at_utc_ms, started_at_utc_ms, processing_status,
                 retention_policy_json
-             ) VALUES (?1, 'review_ready', 0, ?2, 'manual', '{}', ?3, ?3,
+             ) VALUES (?1, 'review_ready', 0, ?2, '\"manual\"', '{}', ?3, ?3,
                        '{\"kind\":\"succeeded\"}', '{\"kind\":\"keep_forever\"}')",
             params![session_id.uuid().to_string(), title, at_utc_ms],
         )
@@ -492,6 +492,18 @@ fn one_meeting_comes_back_with_its_summary_and_every_row_it_left() {
             "phase": "review_ready",
             "started_at_utc_ms": NOW,
             "processing_status": {"kind": "succeeded"},
+            "context": {
+                "session_id": corpus.session_id.uuid(),
+                "revision": 0,
+                "kind": "unspecified",
+                "origin": "manual",
+                "application_bundle_ids": [],
+                "captured_microphone": false,
+                "captured_system_audio": false,
+                "calendar_name": null,
+                "calendar_location": null,
+                "location": null,
+            },
             "speakers": [ME],
             "summary": SUMMARY,
             "headline": HEADLINE,
@@ -574,6 +586,23 @@ fn a_transcript_comes_back_speaker_labeled() {
     let corpus = corpus();
 
     let lines = transcript_of(&corpus.store, corpus.session_id).unwrap();
+    let (segment_id, revision_id): (String, String) = corpus
+        .store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT segment_id, transcript_revision_id FROM meeting_transcript_segments
+             WHERE transcript_revision_id = (
+                 SELECT current_transcript_revision_id FROM meeting_sessions WHERE id = ?1
+             )",
+            params![corpus.session_id.uuid().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let passage_link = format!(
+        "sona://meeting/{}?atMs=0&segmentId={segment_id}",
+        corpus.session_id.uuid()
+    );
 
     assert_eq!(
         value(&lines),
@@ -587,6 +616,12 @@ fn a_transcript_comes_back_speaker_labeled() {
                 "start_ms": 0,
                 "end_ms": 1_500,
                 "text": SEGMENT,
+                "raw_text": SEGMENT,
+                "corrected_text": null,
+                "segment_id": segment_id,
+                "transcript_revision_id": revision_id,
+                "edit_revision": null,
+                "link": passage_link,
             }],
             "link": format!("sona://meeting/{}", corpus.session_id.uuid()),
         })
@@ -983,6 +1018,7 @@ fn series_event(start_utc_ms: i64) -> CalendarEventSummary {
         attendees: Vec::new(),
         notes: None,
         calendar_name: None,
+        location: None,
         url: None,
     }
 }

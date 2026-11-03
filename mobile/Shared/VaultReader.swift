@@ -6,6 +6,7 @@ enum BoardObject: Codable, Equatable {
     case card(CardManifest)
     case dictationProfile(DictationProfile)
     case meeting(PhoneMeeting)
+    case memoryIndex(PortableMemoryIndex)
     /// A recording or a format this build does not know.
     case other
 }
@@ -24,11 +25,12 @@ struct BoardIndex: Codable, Equatable {
     var vaultId: String
     var cursor: String?
     var heads: [String: BoardHead] = [:]
-    var readVersion: Int? = 2
+    var readVersion: Int? = 4
 
     /// Whether `change` names a revision the index has not read yet.
     func needsRead(_ change: ChangeRow) -> Bool {
-        !change.tombstone && heads[change.objectId]?.revisionId != change.revisionId
+        guard !change.tombstone, let known = heads[change.objectId] else { return !change.tombstone }
+        return known.revisionId != change.revisionId && (known.sequence.map { $0 < change.sequence } ?? true)
     }
 
     mutating func remove(_ objectId: String) {
@@ -36,6 +38,7 @@ struct BoardIndex: Codable, Equatable {
     }
 
     mutating func set(_ change: ChangeRow, chunkCount: Int, object: BoardObject) {
+        guard needsRead(change) else { return }
         heads[change.objectId] = BoardHead(
             revisionId: change.revisionId, chunkCount: chunkCount, object: object, sequence: change.sequence
         )
@@ -60,6 +63,15 @@ struct BoardIndex: Codable, Equatable {
             guard case .dictationProfile(let profile) = head.object else { return nil }
             return (head.sequence ?? 0, profile)
         }.max { $0.0 < $1.0 }?.1
+    }
+
+    var memoryIndex: PortableMemoryIndex? {
+        heads.compactMap { id, head -> (Int64, String, PortableMemoryIndex)? in
+            guard case .memoryIndex(let snapshot) = head.object, let sequence = head.sequence else { return nil }
+            return (sequence, id, snapshot)
+        }.max {
+            $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0
+        }?.2
     }
 
     var meetings: [PhoneMeeting] {
@@ -167,7 +179,7 @@ actor VaultReader {
         self.credentials = credentials
         if let bytes = try? Data(contentsOf: file),
            let stored = try? JSONDecoder().decode(BoardIndex.self, from: bytes),
-           stored.vaultId == credentials?.vaultId, stored.readVersion == 2
+           stored.vaultId == credentials?.vaultId, stored.readVersion == 4
         {
             index = stored
         }
@@ -221,15 +233,23 @@ actor VaultReader {
 
     /// One attachment's bytes, opened chunk by chunk under the thought's revision.
     func attachment(
-        objectId: String, head: BoardHead, chunkStart: Int, chunkCount: Int, sha256: String
+        objectId: String, head: BoardHead, chunkStart: Int, chunkCount: Int,
+        byteLength: Int, sha256: String
     ) async throws -> Data {
+        guard chunkStart >= 0, byteLength > 0, byteLength <= 16 * 1024 * 1024,
+              chunkCount == DeviceRecordingObject.chunkCount(audioByteLength: byteLength),
+              chunkCount <= head.chunkCount, chunkStart <= head.chunkCount - chunkCount
+        else { throw VaultReaderError.integrity }
         let (credentials, client) = try session()
         var bytes = Data()
+        bytes.reserveCapacity(byteLength)
         for index in chunkStart..<(chunkStart + chunkCount) {
             let sealed = try await client.chunk(
                 identity: identity, vaultId: credentials.vaultId,
                 objectId: objectId, revisionId: head.revisionId, index: index
             )
+            guard sealed.count <= DeviceRecordingObject.maxEncryptedChunkBytes
+            else { throw VaultReaderError.integrity }
             bytes.append(
                 try openObjectRevisionPayload(
                     vaultRoot: credentials.vaultRoot,
@@ -246,6 +266,9 @@ actor VaultReader {
                 )
             )
         }
+        guard bytes.count >= byteLength, bytes[byteLength...].allSatisfy({ $0 == 0 })
+        else { throw VaultReaderError.integrity }
+        bytes.removeSubrange(byteLength...)
         guard sha256Base64URL(bytes) == sha256 else { throw VaultReaderError.integrity }
         return bytes
     }
@@ -373,7 +396,8 @@ actor VaultReader {
         {
             return (envelope.chunkCount, .card(card))
         }
-        for format in [DictationProfile.sourceFormat, PhoneMeeting.sourceFormat, PhoneMeeting.phoneSourceFormat] {
+        for format in [DictationProfile.sourceFormat, PhoneMeeting.sourceFormat, PhoneMeeting.phoneSourceFormat,
+                       PortableMemoryIndex.sourceFormat] {
             guard let manifestBytes = open(format) else { continue }
             let manifest = try decoder.decode(PhoneObjectManifest.self, from: manifestBytes)
             guard manifest.version == 1, manifest.source_format == format,
@@ -381,6 +405,10 @@ actor VaultReader {
                   (1...3).contains(manifest.chunk_count),
                   (1...(8 * 1024 * 1024)).contains(manifest.plaintext_bytes)
             else { throw VaultReaderError.integrity }
+            if format == PortableMemoryIndex.sourceFormat {
+                let memoryManifest = try decoder.decode(PortableMemoryIndex.Manifest.self, from: manifestBytes)
+                guard memoryManifest.kind == PortableMemoryIndex.kind else { throw VaultReaderError.integrity }
+            }
             var plaintext = Data()
             plaintext.reserveCapacity(manifest.plaintext_bytes)
             var encryptedBytes = 0
@@ -401,6 +429,9 @@ actor VaultReader {
                 let profile = try decoder.decode(DictationProfile.self, from: plaintext)
                 guard profile.version == 1 else { throw VaultReaderError.integrity }
                 return (envelope.chunkCount, .dictationProfile(profile))
+            }
+            if format == PortableMemoryIndex.sourceFormat {
+                return (envelope.chunkCount, .memoryIndex(try decoder.decode(PortableMemoryIndex.self, from: plaintext)))
             }
             let meeting = try decoder.decode(PhoneMeeting.self, from: plaintext)
             guard meeting.format_version == 1 else { throw VaultReaderError.integrity }

@@ -140,6 +140,7 @@ fn relay_prompt(system_prompt: &str, shape: ReplyShape) -> String {
         ReplyShape::Json
         | ReplyShape::MeetingNotes
         | ReplyShape::MeetingLedger
+        | ReplyShape::MemoryNote
         | ReplyShape::LedgerMerge => format!("{system_prompt}{RELAY_OUTPUT_RULE}"),
         ReplyShape::Prose => system_prompt.to_string(),
     }

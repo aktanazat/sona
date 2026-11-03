@@ -44,6 +44,7 @@ enum PeopleCommandError: String, Decodable {
     case insufficientEnrollmentEvidence = "insufficient_enrollment_evidence"
     case profileModelIncompatible = "profile_model_incompatible"
     case profileMergeResolutionRequired = "profile_merge_resolution_required"
+    case transcriptCorrectionConflict = "transcript_correction_conflict"
     case remoteUnavailable = "remote_unavailable"
     case engineFailure = "engine_failure"
     case importUnreadable = "import_unreadable"
@@ -66,6 +67,8 @@ enum PeopleCommandError: String, Decodable {
             "The label was saved. Sona could not remember this voice from this meeting. Try another meeting."
         case .profileMergeResolutionRequired:
             "Sona needs to know which saved voice to keep before merging these people."
+        case .transcriptCorrectionConflict:
+            "These people learned different replacements for the same phrase. Edit or remove the conflicting learned phrase before merging."
         case .consentRequired: "Confirm the recording acknowledgement first."
         case .consentStale: "The setup changed. Review it again first."
         case .invalidTransition: "That is unavailable in the meeting's current phase."
@@ -737,6 +740,70 @@ struct VoiceProfileRemovalRequest: Encodable {
     enum CodingKeys: String, CodingKey {
         case personId = "person_id"
         case expectedPeopleRevision = "expected_people_revision"
+    }
+}
+
+enum PersonContributionAttribution: String, Decodable {
+    case confirmed
+    case recognized
+}
+
+struct PersonContribution: Decodable, Identifiable {
+    let meetingId: String
+    let meetingTitle: String
+    let meetingAtUtcMs: Int64
+    let transcriptRevisionId: String
+    let segmentId: String
+    let trackId: String
+    let speakerId: String
+    let attribution: PersonContributionAttribution
+    let linkConfidence: PersonLinkConfidence
+    let startOffsetNs: UInt64
+    let endOffsetNs: UInt64
+    let rawText: String
+    let correctedText: String?
+
+    var id: String { segmentId }
+    var at: Date { PeopleFormat.date(meetingAtUtcMs) }
+    var startMilliseconds: UInt64 { startOffsetNs / 1_000_000 }
+    var timestamp: String {
+        let seconds = startOffsetNs / 1_000_000_000
+        return String(format: "%llu:%02llu", seconds / 60, seconds % 60)
+    }
+}
+
+struct PersonContributionsResult: Decodable {
+    let schemaVersion: UInt32
+    let revision: UInt64
+    let entries: [PersonContribution]
+    let nextOffset: UInt64?
+}
+
+struct PersonAvatar: Decodable {
+    let pngBase64: String
+    let updatedAtUtcMs: Int64
+    let provenance: PersonPhotoProvenance?
+}
+
+struct PersonAvatarResult: Decodable {
+    let schemaVersion: UInt32
+    let revision: UInt64
+    let avatar: PersonAvatar?
+}
+
+struct PersonAvatarSetRequest: Encodable {
+    let personId: String
+    let expectedRevision: UInt64
+    let pngBase64: String?
+    let provenance: PersonPhotoProvenance?
+    let originalBase64: String?
+
+    enum CodingKeys: String, CodingKey {
+        case personId = "person_id"
+        case expectedRevision = "expected_revision"
+        case pngBase64 = "png_base64"
+        case provenance
+        case originalBase64 = "original_base64"
     }
 }
 

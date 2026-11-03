@@ -891,6 +891,17 @@ final class MeetingLiveStore {
         }
     }
 
+    func reloadGate() {
+        guard let session = gate, session.phase == .preflight, !refreshing, !starting else { return }
+        refreshing = true
+        Task {
+            defer { refreshing = false }
+            if let latest = await read(session.sessionId)?.session, gate?.sessionId == session.sessionId {
+                gate = latest
+            }
+        }
+    }
+
     /// Leaving the gate cancels the preflight row, so an abandoned start does
     /// not sit in history as a meeting that never recorded.
     func cancel() {
@@ -1266,6 +1277,29 @@ final class MeetingLiveStore {
                         startOffsetNs: moment, body: body))
                 guard await self.settle(result, session) else { return }
                 self.noteBody = ""
+            }
+        }
+    }
+
+    func bookmark() {
+        guard pending == nil, let session = live?.session,
+              session.phase == .capturingRecording else { return }
+        guard let clock = clocks[session.sessionId] else {
+            error = "Capture time is unavailable."
+            return
+        }
+        let moment = clock.elapsedNs(at: Date())
+        let bookmarkId = UUID().uuidString
+        Task {
+            await act("Bookmarking") {
+                let _: ConversationBookmark = try await self.core.request(
+                    "conversation_bookmark_create",
+                    ConversationBookmarkCreateParams(request: .init(
+                        bookmarkId: bookmarkId,
+                        sessionId: session.sessionId,
+                        startOffsetNs: UInt64(moment),
+                        label: nil)))
+                self.notice = "Bookmarked at \(moment.meetingOffsetClock)."
             }
         }
     }

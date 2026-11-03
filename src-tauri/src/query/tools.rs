@@ -207,11 +207,24 @@ async fn answer(
             scope,
             limit,
         } => {
+            if scope == QueryScope::Notes {
+                return Err(
+                    "notes are available through the local CLI and MCP tools only".to_string(),
+                );
+            }
             let (rows, more) = match folder {
                 None => {
-                    let page = super::search(meetings, history, scope, &query, Some(limit), None)
-                        .await
-                        .map_err(refusal)?;
+                    let page = super::search(
+                        meetings,
+                        history,
+                        super::QueryAudience::Remote,
+                        scope,
+                        &query,
+                        Some(limit),
+                        None,
+                    )
+                    .await
+                    .map_err(refusal)?;
                     (page.entries, page.next_cursor.is_some())
                 }
                 Some(folder) => {
@@ -221,7 +234,13 @@ async fn answer(
                         .map_err(refusal)?
                 }
             };
-            Ok(search_result(&store, rows, more))
+            Ok(search_result(
+                &store,
+                rows.into_iter()
+                    .filter(|row| row.kind != QueryRowKind::Note)
+                    .collect(),
+                more,
+            ))
         }
         Request::Recent {
             scope: RecentScope::Meetings,
@@ -329,7 +348,9 @@ fn folder_only(folder: &FolderScope) -> String {
 fn folder_search_scope(scope: QueryScope, folder: &FolderScope) -> Result<(), String> {
     match scope {
         QueryScope::All | QueryScope::Meetings => Ok(()),
-        QueryScope::Dictations | QueryScope::People | QueryScope::Loops => Err(folder_only(folder)),
+        QueryScope::Dictations | QueryScope::People | QueryScope::Loops | QueryScope::Notes => {
+            Err(folder_only(folder))
+        }
     }
 }
 
@@ -436,12 +457,13 @@ fn parse(call: &ToolCall) -> Result<Request, String> {
             scope: match choice(
                 args,
                 "scope",
-                &["all", "meetings", "dictations", "people", "loops"],
+                &["all", "meetings", "dictations", "people", "loops", "notes"],
             )? {
                 None | Some("all") => QueryScope::All,
                 Some("meetings") => QueryScope::Meetings,
                 Some("dictations") => QueryScope::Dictations,
                 Some("people") => QueryScope::People,
+                Some("notes") => QueryScope::Notes,
                 Some(_) => QueryScope::Loops,
             },
             limit: count(args, "limit", 1, 25, 12)?,
@@ -1768,6 +1790,7 @@ mod tests {
                     }],
                     notes: None,
                     calendar_name: None,
+                    location: None,
                     url: None,
                 },
             )
@@ -2445,6 +2468,7 @@ mod tests {
                 }],
                 notes: None,
                 calendar_name: Some("Work".to_string()),
+                location: None,
                 url: None,
             },
             is_recurring: !series_key.is_empty(),

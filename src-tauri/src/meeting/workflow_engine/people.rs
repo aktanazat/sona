@@ -81,9 +81,14 @@ impl MeetingSessionManager {
         &self,
         request: PersonMergeRequest,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
+        let store = self.store().await?;
+        let before = store
+            .transcript_correction_people_snapshot(&[
+                request.source_person_id,
+                request.target_person_id,
+            ])
+            .map_err(map_store_error)?;
+        let result = store
             .merge_persons_with_voice_resolution(
                 request.source_person_id,
                 request.target_person_id,
@@ -92,6 +97,11 @@ impl MeetingSessionManager {
                 now_utc_ms(),
             )
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?,
+        );
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }
@@ -99,11 +109,18 @@ impl MeetingSessionManager {
         &self,
         request: PersonSplitRequest,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
+        let store = self.store().await?;
+        let before = store
+            .transcript_correction_people_snapshot(&[request.source_person_id])
+            .map_err(map_store_error)?;
+        let result = store
             .split_person(request, now_utc_ms())
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?,
+        );
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }
@@ -112,11 +129,18 @@ impl MeetingSessionManager {
         &self,
         request: PersonDeleteRequest,
     ) -> Result<PeopleMutationResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
+        let store = self.store().await?;
+        let before = store
+            .transcript_correction_people_snapshot(&[request.person_id])
+            .map_err(map_store_error)?;
+        let result = store
             .delete_person(request.person_id, request.expected_revision)
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?,
+        );
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
     }

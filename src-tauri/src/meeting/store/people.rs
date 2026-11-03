@@ -1,3 +1,6 @@
+mod avatars;
+mod continuity;
+mod contributions;
 mod mutations;
 mod queries;
 mod vocabulary;
@@ -9,7 +12,7 @@ pub(super) use mutations::{
 pub(super) use queries::{calendar_context_in, continuity_summary_in};
 pub(super) use vocabulary::vocabulary_candidates_in;
 
-use super::StoreError;
+use super::{MeetingStore, StoreError};
 use crate::meeting::people_types::{Person, PersonId, PersonSummary};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -72,6 +75,46 @@ pub(super) fn all_people_in(connection: &Connection) -> Result<Vec<Person>, Stor
         .query_map([], person_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(people)
+}
+impl MeetingStore {
+    pub(crate) fn resolve_person_source(
+        &self,
+        source_id: PersonId,
+    ) -> Result<Option<Person>, StoreError> {
+        let connection = self.connection()?;
+        let target: Option<String> = connection
+            .query_row(
+                "SELECT target_person_id FROM person_merge_redirects WHERE source_person_id = ?1",
+                [source_id.uuid().to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let resolved = target
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt)?
+            .map(PersonId)
+            .unwrap_or(source_id);
+        match person_by_id_in(&connection, resolved) {
+            Ok(person) => Ok(Some(person)),
+            Err(StoreError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn person_source_ids(&self, person_id: PersonId) -> Result<Vec<String>, StoreError> {
+        let connection = self.connection()?;
+        let mut source_ids = vec![person_id.uuid().to_string()];
+        let mut statement = connection.prepare(
+            "SELECT source_person_id FROM person_merge_redirects WHERE target_person_id = ?1",
+        )?;
+        let merged = statement.query_map([person_id.uuid().to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        source_ids.extend(merged.collect::<rusqlite::Result<Vec<_>>>()?);
+        Ok(source_ids)
+    }
 }
 
 fn person_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Person> {

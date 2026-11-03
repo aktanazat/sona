@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// People, one person, one organization: three screens behind one rail entry.
@@ -9,6 +10,7 @@ struct PeopleScreen: View {
     let store: PeopleStore
     /// Opens the meeting a line was said in. Every ledger row is a way into one.
     var openMeeting: (String) -> Void = { _ in }
+    var openContribution: ((String, UInt64) -> Void)?
     /// Adds context about this person. The import surface owns the file
     /// picker and the command behind it; a person's page owns the verb.
     var ingestDocument: () -> Void = {}
@@ -28,6 +30,7 @@ struct PeopleScreen: View {
                 PersonView(
                     store: store,
                     openMeeting: openMeeting,
+                    openContribution: openContribution,
                     ingestDocument: ingestDocument,
                     deleteDocument: deleteDocument)
             case .organization:
@@ -65,7 +68,9 @@ struct PeopleListView: View {
                     } else {
                         PeopleCompaniesSection(store: store)
                         PeopleCardStack(items: entries) { entry in
-                            PersonListRow(entry: entry) { store.openPerson(entry.person.id) }
+                            PersonListRow(entry: entry, photoRevision: store.photoRevision) {
+                                store.openPerson(entry.person.id)
+                            }
                         }
                     }
                 } else {
@@ -168,14 +173,18 @@ struct CompanyRow: View {
 /// person's own page, which is what the card opens.
 struct PersonListRow: View {
     let entry: PersonListEntry
+    var photoRevision: UInt64 = 0
     let open: () -> Void
 
     var body: some View {
         CardRow(action: open) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.person.displayName).headlineText().lineLimit(1)
-                if !facts.isEmpty {
-                    Text(facts).metaText().monospacedDigit().lineLimit(1)
+            HStack(spacing: 12) {
+                PersonPortrait(personId: entry.person.id, name: entry.person.displayName, size: 36, revision: photoRevision)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.person.displayName).headlineText().lineLimit(1)
+                    if !facts.isEmpty {
+                        Text(facts).metaText().monospacedDigit().lineLimit(1)
+                    }
                 }
             }
         } trailing: {
@@ -302,6 +311,7 @@ struct PeopleCandidatesSection: View {
 struct PersonView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
+    var openContribution: ((String, UInt64) -> Void)?
     var ingestDocument: () -> Void = {}
     var deleteDocument: ((String) -> Void)?
 
@@ -348,6 +358,7 @@ struct PersonView: View {
                     detail: detail,
                     prompt: $prompt,
                     openMeeting: openMeeting,
+                    openContribution: openContribution,
                     deleteDocument: deleteDocument)
             } else {
                 PageTitle("People", subtitle: store.detailFailed ? "This person could not be read" : "Loading…")
@@ -388,23 +399,26 @@ struct PersonView: View {
     }
 }
 
-/// The name as the document's title, and the one quiet line under it.
+/// The saved portrait and name, followed by the known meeting context.
 struct PersonHeaderView: View {
     let store: PeopleStore
     let detail: PersonDetail
     @Binding var renaming: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if renaming {
-                PersonNameField(
-                    name: detail.person.displayName,
-                    commit: { store.rename(to: $0) },
-                    close: { renaming = false })
-            } else {
-                Text(detail.person.displayName).heroText().lineLimit(2)
+        HStack(alignment: .center, spacing: 16) {
+            PersonPortrait(personId: detail.person.id, name: detail.person.displayName, size: 52, revision: store.photoRevision)
+            VStack(alignment: .leading, spacing: 6) {
+                if renaming {
+                    PersonNameField(
+                        name: detail.person.displayName,
+                        commit: { store.rename(to: $0) },
+                        close: { renaming = false })
+                } else {
+                    Text(detail.person.displayName).heroText().lineLimit(2)
+                }
+                facts
             }
-            facts
         }
         .padding(.top, 4)
         .padding(.bottom, 24)
@@ -434,6 +448,7 @@ struct PersonHeaderView: View {
     }
 }
 
+
 /// The round ⋯ button every verb on a person's page lives in.
 struct PersonMenu: View {
     let store: PeopleStore
@@ -446,6 +461,8 @@ struct PersonMenu: View {
             Button("Rename") { renaming = true }
             Button("Regenerate") { store.regenerateSummary() }
             Button("Import document", action: ingestDocument)
+            Button("Choose photo") { store.choosePhotoSource() }
+            Button("Remove photo") { store.removeAvatar() }
             Divider()
             Button("Merge") { prompt = .merge }
                 .disabled((store.entries?.count ?? 0) < 2)
@@ -517,44 +534,40 @@ struct PersonNameField: View {
     }
 }
 
-/// The paragraph first, when there is one: who this person is to you. Then
-/// what the page is for — what is still open between you, in both directions —
-/// and only then the archive it came out of: the meetings, the shape they make,
-/// the files, and last of all how Sona connected this person to any of it.
-/// Provenance is the line a reader checks once, so it reads last.
-///
-/// Every one of these draws nothing when it holds nothing: an empty person is
-/// a name and a menu, not eight labelled absences.
 struct PersonSections: View {
     let store: PeopleStore
     let detail: PersonDetail
     @Binding var prompt: PersonView.Prompt?
     var openMeeting: (String) -> Void = { _ in }
+    var openContribution: ((String, UInt64) -> Void)?
     var deleteDocument: ((String) -> Void)?
+    @Environment(AppModel.self) private var model
 
     var body: some View {
-        PersonSummaryView(summary: detail.person.summary, outcome: store.summaryOutcome)
-        BriefingView(row: store.briefing)
-        PersonLedgerView(
-            label: "Open loops",
-            rows: detail.openLoops.map(PersonLedgerRow.init),
-            personName: detail.person.displayName,
-            openMeeting: openMeeting)
-        PersonLedgerView(
-            label: "Commitments",
-            rows: detail.commitments.map(PersonLedgerRow.init),
-            personName: detail.person.displayName,
-            openMeeting: openMeeting)
-        PersonMeetingsView(store: store, links: detail.links, prompt: $prompt, openMeeting: openMeeting)
-        PersonCadenceView(links: detail.links, talkSharePermille: detail.talkShareAvgPermille)
-        PersonDocumentsView(
-            documents: detail.documents,
-            busy: store.busy,
-            prompt: $prompt,
-            deletable: deleteDocument != nil)
-        PersonEvidenceView(person: detail.person, links: detail.links)
+        PersonContinuityView(
+            core: store.core,
+            personId: detail.person.id,
+            revision: store.detailRevision,
+            openMeeting: openMeeting,
+            openContribution: openContribution
+        ) {
+            PersonSummaryView(summary: detail.person.summary, outcome: store.summaryOutcome)
+            TranscriptCorrectionsView(core: store.core, personId: detail.person.id) { sessionId, segmentId in
+                model.meetings.playContribution(sessionId: sessionId, segmentId: segmentId)
+            }
+            ConversationAudioBar(audio: model.meetings.audio)
+            PersonMeetingsView(store: store, links: detail.links, prompt: $prompt, openMeeting: openMeeting)
+            PersonDocumentsView(
+                documents: detail.documents,
+                busy: store.busy,
+                prompt: $prompt,
+                deletable: deleteDocument != nil)
+            PersonEvidenceView(person: detail.person, links: detail.links)
+        }
+        .id(detail.person.id)
     }
 }
+
 
 /// Three sentences about a relationship, and the two facts that make them
 /// readable: a paragraph a model wrote is only readable if you know which
@@ -573,7 +586,7 @@ struct PersonSummaryView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             if let summary {
                                 Text(summary.text).bodyText(14)
-                                Text("Written by \(summary.modelId) on \(PeopleFormat.moment(PeopleFormat.date(summary.generatedAtUtcMs)))")
+                                Text("AI interpretation · \(summary.modelId) · \(PeopleFormat.moment(PeopleFormat.date(summary.generatedAtUtcMs)))")
                                     .metaText()
                                     .monospacedDigit()
                             }
@@ -588,137 +601,6 @@ struct PersonSummaryView: View {
     }
 }
 
-/// What to walk into a room knowing: how often you have met, and the one thing
-/// still open in each direction.
-///
-/// What you owe comes first — it is the thing a reader can act on in the next
-/// thirty seconds — and an overdue handoff is marked, because "still open" and
-/// "still open after two weeks" are different sentences to walk in with.
-struct BriefingView: View {
-    let row: BriefingRow?
-
-    var body: some View {
-        if let row {
-            PageSection("Brief") {
-                Card {
-                    CardRow {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(relationship(row)).bodyText(14).monospacedDigit()
-                            if let owed = BriefingView.owed(row) {
-                                Text("You owe: \(owed.text)").metaText(Theme.inkSecondary).lineLimit(2)
-                            }
-                            if let awaited = BriefingView.awaited(row) {
-                                Text(
-                                    awaited.stale
-                                        ? "Overdue with \(row.displayName): \(awaited.text)"
-                                        : "Waiting on \(row.displayName): \(awaited.text)"
-                                )
-                                .metaText(awaited.stale ? Theme.live : Theme.inkSecondary)
-                                .lineLimit(2)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func relationship(_ row: BriefingRow) -> String {
-        let met = row.meetingsCount == 1
-            ? "You have met \(row.displayName) once"
-            : "You have met \(row.displayName) \(row.meetingsCount) times"
-        guard let last = row.last else { return met }
-        return "\(met) · last \(PeopleFormat.moment(last.at))"
-    }
-
-    /// Only what is still outstanding: the core keeps a done or dropped
-    /// commitment for the relationship's history, and the brief is the two
-    /// lines a reader acts on in the next thirty seconds.
-    private static func rows(_ row: BriefingRow) -> [PersonLedgerRow] {
-        (row.openLoops.map(PersonLedgerRow.init) + row.commitments.map(PersonLedgerRow.init))
-            .filter { $0.status.outstanding }
-            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    }
-
-    static func owed(_ row: BriefingRow) -> PersonLedgerRow? {
-        rows(row).mine.first
-    }
-
-    /// The overdue one if there is one, because that is the sentence worth the
-    /// line.
-    static func awaited(_ row: BriefingRow) -> PersonLedgerRow? {
-        let waiting = rows(row).waitingOn
-        return waiting.first { $0.stale } ?? waiting.first
-    }
-}
-
-/// One ledger, in two groups: what you owe, and what they do.
-///
-/// Two groups inside one section, not two sections: "I owe" and "waiting on
-/// them" are the same register read from opposite ends. A group with nothing in
-/// it says nothing, and with both empty there is no section at all — a heading
-/// over the sentence "nothing is still open" is a row spent saying the row has
-/// nothing to say.
-struct PersonLedgerView: View {
-    let label: String
-    let rows: [PersonLedgerRow]
-    let personName: String
-    var openMeeting: (String) -> Void = { _ in }
-
-    var body: some View {
-        let mine = rows.mine
-        let waitingOn = rows.waitingOn
-        if !mine.isEmpty || !waitingOn.isEmpty {
-            PageSection(label) {
-                Card {
-                    if !mine.isEmpty {
-                        PersonLedgerGroup(heading: "I owe", rows: mine, openMeeting: openMeeting)
-                    }
-                    if !waitingOn.isEmpty {
-                        PersonLedgerGroup(
-                            heading: "Waiting on \(personName)", rows: waitingOn, openMeeting: openMeeting)
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct PersonLedgerGroup: View {
-    let heading: String
-    let rows: [PersonLedgerRow]
-    var openMeeting: (String) -> Void = { _ in }
-
-    var body: some View {
-        Text(heading)
-            .metaText(Theme.inkSecondary)
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        ForEach(rows) { row in
-            CardRow(action: row.meetingId.isEmpty ? nil : { openMeeting(row.meetingId) }) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(row.text).bodyText(14)
-                    HStack(spacing: 12) {
-                        Text(row.title).metaText().lineLimit(1)
-                        Text(PeopleFormat.moment(row.at)).metaText().monospacedDigit()
-                        // "Open" under a heading that reads "Open loops" is
-                        // the heading said twice.
-                        if let contradiction = row.status.contradiction {
-                            Text(contradiction).metaText(Theme.inkSecondary)
-                        }
-                        if row.stale {
-                            Text("Overdue").metaText(Theme.live)
-                        }
-                        if let carried = row.carriedNote {
-                            Text(carried).metaText().monospacedDigit()
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Every meeting linked to this person, and the one word that asks the reader
 /// for a decision. Where a link came from is the page's evidence section; what
@@ -775,61 +657,6 @@ struct PersonMeetingsView: View {
     }
 }
 
-/// Six months of confirmed meetings, and the share of the talking they carried.
-/// A bare number over a chart labelled "Meeting cadence" reads as a cadence,
-/// which it is not: it is how many meetings the bars are drawn from.
-struct PersonCadenceView: View {
-    let links: [PersonMeetingLink]
-    let talkSharePermille: UInt32?
-
-    var body: some View {
-        let confirmed = PeopleModel.confirmed(links)
-        if !confirmed.isEmpty {
-            PageSection("Meeting cadence") {
-                Card {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text(PeopleModel.meetings(UInt64(confirmed.count)))
-                            .font(TypeScale.stat)
-                            .foregroundStyle(Theme.ink)
-                            .monospacedDigit()
-                            .tracking(-0.4)
-                        PersonCadenceBars(values: PeopleModel.cadence(links))
-                        if let talkSharePermille {
-                            HStack(spacing: 6) {
-                                Text("Talk share").metaText(Theme.inkSecondary)
-                                Text(PeopleFormat.talkShare(talkSharePermille)).metaText(Theme.ink).monospacedDigit()
-                            }
-                        }
-                    }
-                    .padding(16)
-                }
-            }
-        }
-    }
-}
-
-/// Six bars, oldest first. A month with no meeting in it keeps its place and
-/// draws the track, because the gap is the fact.
-struct PersonCadenceBars: View {
-    let values: [Double]
-
-    var body: some View {
-        let peak = max(values.max() ?? 0, 1)
-        HStack(alignment: .bottom, spacing: 8) {
-            ForEach(Array(values.enumerated()), id: \.offset) { _, value in
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    RoundedRectangle(cornerRadius: Theme.radiusKey)
-                        .fill(value > 0 ? Theme.accent : Theme.selection)
-                        .frame(height: max(3, 64 * value / peak))
-                }
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .frame(height: 64)
-        .accessibilityLabel("Meetings by month: \(values.map { "\(Int($0))" }.joined(separator: ", "))")
-    }
-}
 
 /// The documents imported about this person. Nothing imported, nothing here:
 /// the verb that imports the first one is in the page's menu, so this section

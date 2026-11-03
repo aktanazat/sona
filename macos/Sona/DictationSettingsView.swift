@@ -161,14 +161,6 @@ struct DictationSettingsView<DataRows: View>: View {
                             )
                         )
                         AcceleratorRows(store: store)
-                        ToggleRow(
-                            title: "Keep the microphone open between dictations",
-                            detail: "Keeps the microphone open for 30 seconds after you stop, so back-to-back dictations start faster. Bluetooth audio quality can drop while it is open.",
-                            isOn: Binding(
-                                get: { store.settings.lazyStreamClose },
-                                set: { value in Task { await store.setLazyStreamClose(value) } }
-                            )
-                        )
                     }
                 }
             }
@@ -250,8 +242,8 @@ struct HudPillRow: View {
     var body: some View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Show the idle pill").bodyText()
-                Text("Keep a small pill on screen between dictations. Click it to start, right-click it to switch modes, drag it to another edge of the screen.")
+                Text("Show pill between dictations").bodyText()
+                Text("A start button, not a listening indicator. Turning it off keeps recording controls.")
                     .metaText()
                 if let back = hiddenUntil {
                     Text("Hidden until \(back.formatted(date: .omitted, time: .shortened)).")
@@ -279,7 +271,7 @@ struct HudPillRow: View {
                     .fixedSize()
                     .disabled(store.isBusy("hud_pill_position"))
                 }
-                Toggle("Show the idle pill", isOn: Binding(
+                Toggle("Show pill between dictations", isOn: Binding(
                     get: { store.settings.hudPillEnabled },
                     set: { value in Task { await store.setHudPillEnabled(value) } }
                 ))
@@ -336,21 +328,29 @@ struct AcceleratorRows: View {
     }
 }
 
-/// The capture settings that live on the debug page: they change what the
-/// microphone does, so they are the dictation slice's rows wherever the shell
-/// decides to show them.
+/// Microphone and sound controls shared by dictation and debug settings.
 struct SettingsCaptureRows: View {
     let store: SettingsStore
 
     var body: some View {
         ToggleRow(
             title: "Always-on microphone",
-            detail: "Hold the microphone open so a dictation starts without waiting for the device.",
+            detail: "Keeps the microphone open between dictations for a faster start.",
             isOn: Binding(
                 get: { store.settings.alwaysOnMicrophone },
                 set: { value in Task { await store.setAlwaysOnMicrophone(value) } }
             )
         )
+        .disabled(store.isBusy("always_on_microphone"))
+        ToggleRow(
+            title: "Keep the microphone open for 30 seconds",
+            detail: "After recording stops. Bluetooth sound quality may drop while it is open.",
+            isOn: Binding(
+                get: { store.settings.lazyStreamClose },
+                set: { value in Task { await store.setLazyStreamClose(value) } }
+            )
+        )
+        .disabled(store.settings.alwaysOnMicrophone || store.isBusy("lazy_stream_close"))
         /// A machine with no lid has no clamshell state to pick a microphone
         /// for.
         if store.laptop {

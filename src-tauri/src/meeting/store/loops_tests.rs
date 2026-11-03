@@ -160,6 +160,7 @@ fn series_event(start_utc_ms: i64) -> CalendarEventSummary {
         attendees: Vec::new(),
         notes: None,
         calendar_name: None,
+        location: None,
         url: None,
     }
 }

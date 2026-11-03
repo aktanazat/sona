@@ -108,6 +108,8 @@ pub struct CalendarEventSummary {
     /// link. `None` when the event carries none.
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
 }
 
 /// Where the nearest calendar event sits relative to now.
@@ -999,6 +1001,7 @@ mod tests {
             attendees: Vec::new(),
             notes: None,
             calendar_name: None,
+            location: None,
             url: None,
         }
     }

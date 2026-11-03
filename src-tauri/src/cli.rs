@@ -1,4 +1,4 @@
-use crate::query::external::ExternalLoopStatus;
+use crate::query::external::{ExternalFormat, ExternalLoopStatus};
 use crate::query::QueryScope;
 use clap::{ArgGroup, Parser};
 use std::path::PathBuf;
@@ -24,7 +24,8 @@ use std::path::PathBuf;
 ))]
 #[command(group(ArgGroup::new("read").args([
     "query", "meetings", "meeting", "transcript", "loops", "people", "events",
-    "upcoming", "loop_resolve",
+    "upcoming", "loop_resolve", "notes", "note", "note_versions", "note_diff", "stats",
+    "person_catch_up", "person_changes", "note_context",
 ])))]
 #[command(group(ArgGroup::new("loop_side").args(["mine", "waiting"])))]
 pub struct CliArgs {
@@ -163,6 +164,23 @@ pub struct CliArgs {
     #[arg(long, value_name = "NAME")]
     pub people: Option<String>,
 
+    /// Read a person's attributed conversations, linked notes and sourced catch-up.
+    #[arg(long, value_name = "PERSON_ID")]
+    pub person_catch_up: Option<String>,
+
+    /// Compare a person's retained evidence since --since-utc-ms.
+    #[arg(long, value_name = "PERSON_ID", requires = "since_utc_ms")]
+    pub person_changes: Option<String>,
+
+    /// Comparison boundary in UTC milliseconds for --person-catch-up or --person-changes.
+    #[arg(
+        long,
+        value_name = "UTC_MS",
+        requires = "read",
+        allow_hyphen_values = true
+    )]
+    pub since_utc_ms: Option<i64>,
+
     /// List what has happened to the corpus, newest first, as JSON.
     #[arg(long)]
     pub events: bool,
@@ -182,6 +200,42 @@ pub struct CliArgs {
     /// Resume --events after an event id or --loops after a loop cursor.
     #[arg(long, value_name = "CURSOR", requires = "read")]
     pub after: Option<String>,
+
+    /// List notes, most recently updated first.
+    #[arg(long)]
+    pub notes: bool,
+
+    /// Read a note with its linked sources and related notes.
+    #[arg(long, value_name = "NOTE_ID")]
+    pub note: Option<String>,
+
+    /// Find relevant notes with their current bodies and resolved source references.
+    #[arg(long, value_name = "TEXT")]
+    pub note_context: Option<String>,
+
+    /// List the saved versions of a note, newest first.
+    #[arg(long, value_name = "NOTE_ID")]
+    pub note_versions: Option<String>,
+
+    /// Compare two saved versions of one note without changing it.
+    #[arg(long, value_name = "NOTE_ID")]
+    pub note_diff: Option<String>,
+
+    /// Older saved version id for --note-diff.
+    #[arg(long, value_name = "VERSION_ID", requires = "note_diff")]
+    pub from_version: Option<i64>,
+
+    /// Newer saved version id for --note-diff. Omit for the current saved version.
+    #[arg(long, value_name = "VERSION_ID", requires = "note_diff")]
+    pub to_version: Option<i64>,
+
+    /// Show statistics over retained meetings, dictations and notes.
+    #[arg(long)]
+    pub stats: bool,
+
+    /// Corpus output format. Defaults to json; text has no terminal color codes.
+    #[arg(long, value_enum, requires = "read", conflicts_with = "json")]
+    pub format: Option<ExternalFormat>,
 
     /// Audio file paths supplied by an operating-system Open With action.
     /// They enter the GUI import queue and never trigger direct delivery.

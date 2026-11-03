@@ -216,12 +216,7 @@ final class OnboardingStore {
         await permissions.start()
         guard step == .probing else { return }
         if returning {
-            if permissions.allGranted {
-                finish()
-            } else {
-                step = .permissions
-                permissions.recheck()
-            }
+            finish()
         } else {
             step = .languages
         }
@@ -473,6 +468,22 @@ final class OnboardingStore {
         }
     }
 
+    func continueWithoutRecording() {
+        guard !isBusy, !practiceState.isBusy, !finishing else { return }
+        finishing = true
+        Task {
+            defer { finishing = false }
+            do {
+                try await core.request("complete_notes_onboarding")
+                returning = true
+                error = nil
+                finish()
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
     func permissionsSettled() {
         guard step == .permissions, permissions.allGranted else { return }
         if returning {
@@ -483,7 +494,7 @@ final class OnboardingStore {
     }
 
     private func finish() {
-        permissions.initializeInput()
+        if permissions.allGranted { permissions.initializeInput() }
         step = .done
     }
 

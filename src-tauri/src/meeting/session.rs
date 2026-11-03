@@ -604,7 +604,7 @@ impl MeetingSessionManager {
     /// it — see [`super::prompts`]. Read-only: the slots inside it are set from
     /// here and from launch, and a second setter would be a second answer to
     /// which engine this app has.
-    pub(super) fn processing(&self) -> &MeetingProcessingService {
+    pub(crate) fn processing(&self) -> &MeetingProcessingService {
         &self.processing
     }
 
@@ -910,6 +910,10 @@ impl MeetingSessionManager {
         let mut purged = 0;
         let mut failed = 0;
         for session_id in due_transcripts {
+            let before = store
+                .transcript_correction_source_snapshot(session_id)
+                .inspect_err(|error| log::warn!("Correction source snapshot failed: {error:?}"))
+                .ok();
             match store.purge_transcript_at(session_id, now_utc_ms) {
                 Ok(Some(change)) => {
                     purged += 1;
@@ -919,6 +923,12 @@ impl MeetingSessionManager {
                 }
                 Ok(None) => continue,
                 Err(_) => failed += 1,
+            }
+            if let Some(before) = before {
+                match store.transcript_correction_projection_changes(before) {
+                    Ok(changed) => self.emit_transcript_correction_changes(changed),
+                    Err(error) => log::warn!("Correction source publication failed: {error:?}"),
+                }
             }
             // The transaction may have committed before removing audio failed.
             // Readers must see the deletion even while its bytes await cleanup.
@@ -2689,6 +2699,10 @@ impl MeetingSessionManager {
         cause: DeletionCause,
     ) -> Result<MeetingRemovalResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_source_snapshot(request.session_id)
+            .inspect_err(|error| log::warn!("Correction source snapshot failed: {error:?}"))
+            .ok();
         let (receipt, job_id) = store
             .reserve_deletion(
                 request.operation_id,
@@ -2744,6 +2758,12 @@ impl MeetingSessionManager {
             }
         }
         let people_revision = store.finish_deletion(job_id).map_err(map_store_error)?;
+        if let Some(before) = before {
+            match store.transcript_correction_projection_changes(before) {
+                Ok(changed) => self.emit_transcript_correction_changes(changed),
+                Err(error) => log::warn!("Correction source publication failed: {error:?}"),
+            }
+        }
         if let Some(people_revision) = people_revision {
             self.emit_artifact_changed(Some(request.session_id), people_revision);
         }
@@ -3309,6 +3329,9 @@ impl MeetingSessionManager {
         request: MeetingSpeakerRenameRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_identity_snapshot(request.session_id, &[request.speaker_id])
+            .map_err(map_store_error)?;
         let display_name = request.display_name.clone();
         let operation_id = request.operation_id;
         let session_id = request.session_id;
@@ -3322,6 +3345,13 @@ impl MeetingSessionManager {
                 request.display_name,
             )
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
         let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         if result.receipt.result == OperationResult::Committed {
@@ -3335,6 +3365,12 @@ impl MeetingSessionManager {
         request: MeetingSpeakerMergeRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_identity_snapshot(
+                request.session_id,
+                &[request.source_speaker_id, request.target_speaker_id],
+            )
+            .map_err(map_store_error)?;
         let receipt = store
             .merge_speaker(
                 request.operation_id,
@@ -3345,6 +3381,13 @@ impl MeetingSessionManager {
                 request.target_speaker_id,
             )
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
         let result = self.result_for_receipt(store, receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         Ok(result)
@@ -3355,6 +3398,9 @@ impl MeetingSessionManager {
         request: MeetingSegmentEditRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_source_snapshot(request.session_id)
+            .map_err(map_store_error)?;
         let receipt = store
             .edit_segment(SegmentEdit {
                 mutation: StoreMutation {
@@ -3370,6 +3416,13 @@ impl MeetingSessionManager {
                 removed: request.removed,
             })
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
         let result = self.result_for_receipt(store, receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         Ok(result)
@@ -4594,7 +4647,7 @@ fn map_secret_error(error: SecretResolveError) -> MeetingCommandError {
     }
 }
 
-fn map_store_error(error: StoreError) -> MeetingCommandError {
+pub(crate) fn map_store_error(error: StoreError) -> MeetingCommandError {
     match error {
         StoreError::NotFound | StoreError::PersonNotFound | StoreError::SpeakerNotFound => {
             MeetingCommandError::NotFound
@@ -4613,6 +4666,9 @@ fn map_store_error(error: StoreError) -> MeetingCommandError {
         StoreError::ProfileModelIncompatible => MeetingCommandError::ProfileModelIncompatible,
         StoreError::ProfileMergeResolutionRequired => {
             MeetingCommandError::ProfileMergeResolutionRequired
+        }
+        StoreError::TranscriptCorrectionConflict => {
+            MeetingCommandError::TranscriptCorrectionConflict
         }
         StoreError::EncryptionUnavailable
         | StoreError::StorageUnavailable
@@ -5466,6 +5522,7 @@ pub(crate) mod tests {
             attendees: Vec::new(),
             notes: None,
             calendar_name: None,
+            location: None,
             url: None,
         };
         let context = MeetingDetectionStartContext {
@@ -5704,6 +5761,7 @@ pub(crate) mod tests {
             attendees: Vec::new(),
             notes: Some("Review Q4".to_string()),
             calendar_name: Some("Work".to_string()),
+            location: None,
             url: Some("https://meet.example/roadmap".to_string()),
         };
         let request = MeetingPreflightCreateRequest {

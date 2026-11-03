@@ -317,6 +317,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sona hears you only while a recording is on.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Sona reads the photo of a contact you choose.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Read upcoming events and create calendar events you approve.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Read upcoming events and create calendar events you approve.";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.";
@@ -352,6 +353,7 @@
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sona hears you only while a recording is on.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Sona reads the photo of a contact you choose.";
 				INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription = "Read upcoming events and create calendar events you approve.";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Read upcoming events and create calendar events you approve.";
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Read recent email only when you enable it, and open Mail drafts you approve. Sona never sends mail.";

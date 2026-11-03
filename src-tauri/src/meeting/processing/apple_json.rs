@@ -1104,7 +1104,10 @@ mod scoped {
             let (root, narrative_root) = match shape {
                 ReplyShape::MeetingNotes => (&*NOTES_FACTUAL, &*NOTES_NARRATIVE),
                 ReplyShape::MeetingLedger => (&*LEDGER, &*LEDGER_NARRATIVE),
-                ReplyShape::Json | ReplyShape::Prose | ReplyShape::LedgerMerge => {
+                ReplyShape::Json
+                | ReplyShape::Prose
+                | ReplyShape::LedgerMerge
+                | ReplyShape::MemoryNote => {
                     return Err("This response does not use a meeting schema".to_string())
                 }
             };
@@ -2129,7 +2132,7 @@ mod scoped {
         let response_shape = match shape {
             ReplyShape::Json => ResponseShape::Json,
             ReplyShape::Prose => ResponseShape::Text,
-            ReplyShape::MeetingNotes => ResponseShape::MeetingNotes,
+            ReplyShape::MeetingNotes | ReplyShape::MemoryNote => ResponseShape::MeetingNotes,
             ReplyShape::MeetingLedger | ReplyShape::LedgerMerge => ResponseShape::MeetingLedger,
         };
         if matches!(shape, ReplyShape::Json | ReplyShape::Prose) {
@@ -2141,8 +2144,11 @@ mod scoped {
                 None,
             );
         }
-        if matches!(shape, ReplyShape::LedgerMerge) {
-            let root = root_schema::<super::super::complete_reading::LedgerMergeReply>();
+        if matches!(shape, ReplyShape::LedgerMerge | ReplyShape::MemoryNote) {
+            let root = match shape {
+                ReplyShape::MemoryNote => root_schema::<crate::scratchpad::synthesis::Synthesis>(),
+                _ => root_schema::<super::super::complete_reading::LedgerMergeReply>(),
+            };
             let schema = serde_json::to_string(&GuidedSchema {
                 schema: &root.schema,
                 definitions: GuidedDefinitions {

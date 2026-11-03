@@ -23,11 +23,7 @@ const EMBEDDING_BYTES: usize = SPEAKER_EMBEDDING_DIMENSIONS * size_of::<f32>();
 // `embedding_dimensions = 256` and `length(centroid) = 1024`. Sample rate and
 // feature bins come from the model manifest at runtime and are checked there.
 const _: () = assert!(SPEAKER_EMBEDDING_DIMENSIONS == 256 && EMBEDDING_BYTES == 1024);
-const MIN_ENROLLMENT_EVIDENCE_SPANS: usize = 2;
-/// Only caller-supplied evidence can exceed the minimum. `local_voice_enrollment_evidence`
-/// returns the moment a run reaches `MIN_ENROLLMENT_EVIDENCE_SPANS`, so this cap
-/// bounds a `VoiceEnrollmentEvidence` the store did not assemble itself.
-const MAX_ENROLLMENT_EVIDENCE_SPANS: usize = 3;
+const MIN_ENROLLMENT_EVIDENCE_DURATION_NS: u64 = 4_000_000_000;
 const MAX_ENROLLMENT_EVIDENCE_DURATION_NS: u64 = 12_000_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -337,40 +333,39 @@ impl MeetingStore {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut run: Option<(String, String, u64, u64, usize)> = None;
+        let mut run: Option<(String, String, u64, u64)> = None;
         for (generation_id, track_id, start_offset_ns, end_offset_ns) in rows {
             let start_offset_ns = from_i64(start_offset_ns)?;
             let end_offset_ns = from_i64(end_offset_ns)?;
             if end_offset_ns <= start_offset_ns {
                 return Err(StoreError::VoiceInvariant);
             }
-            let Some((run_generation, run_track, run_start, run_end, count)) = &mut run else {
-                run = Some((generation_id, track_id, start_offset_ns, end_offset_ns, 1));
-                continue;
-            };
-            let same_run = *run_generation == generation_id
-                && *run_track == track_id
-                && *run_end == start_offset_ns
-                && end_offset_ns
+            match &mut run {
+                Some((run_generation, run_track, _, run_end))
+                    if *run_generation == generation_id
+                        && *run_track == track_id
+                        && *run_end == start_offset_ns =>
+                {
+                    *run_end = end_offset_ns;
+                }
+                _ => run = Some((generation_id, track_id, start_offset_ns, end_offset_ns)),
+            }
+            if let Some((generation_id, track_id, run_start, run_end)) = &run {
+                let duration = run_end
                     .checked_sub(*run_start)
-                    .ok_or(StoreError::VoiceInvariant)?
-                    <= MAX_ENROLLMENT_EVIDENCE_DURATION_NS;
-            if same_run {
-                *run_end = end_offset_ns;
-                *count += 1;
-                if *count >= MIN_ENROLLMENT_EVIDENCE_SPANS {
+                    .ok_or(StoreError::VoiceInvariant)?;
+                if duration >= MIN_ENROLLMENT_EVIDENCE_DURATION_NS {
                     return VoiceEnrollmentEvidence::new(
                         session_id,
-                        MeetingDiarizationGenerationId::from_uuid(parse_uuid(run_generation)?),
+                        MeetingDiarizationGenerationId::from_uuid(parse_uuid(generation_id)?),
                         speaker_id,
-                        SourceTrackId::from_uuid(parse_uuid(run_track)?),
+                        SourceTrackId::from_uuid(parse_uuid(track_id)?),
                         *run_start,
-                        *run_end,
-                    )
-                    .map_err(|_| StoreError::LocalEvidenceUnavailable);
+                        run_start
+                            .checked_add(duration.min(MAX_ENROLLMENT_EVIDENCE_DURATION_NS))
+                            .ok_or(StoreError::VoiceInvariant)?,
+                    );
                 }
-            } else {
-                run = Some((generation_id, track_id, start_offset_ns, end_offset_ns, 1));
             }
         }
         Err(StoreError::InsufficientEnrollmentEvidence)
@@ -392,7 +387,7 @@ impl MeetingStore {
                     "SELECT start_offset_ns, end_offset_ns
                        FROM meeting_diarization_evidence_spans
                       WHERE generation_id = ?1 AND speaker_id = ?2 AND track_id = ?3
-                        AND start_offset_ns >= ?4 AND end_offset_ns <= ?5
+                        AND start_offset_ns < ?5 AND end_offset_ns > ?4
                       ORDER BY start_offset_ns, end_offset_ns",
                 )?;
                 let queried_rows = statement
@@ -413,8 +408,8 @@ impl MeetingStore {
             rows.into_iter()
                 .map(|(start_offset_ns, end_offset_ns)| {
                     Ok(VoiceEnrollmentAudioSpan {
-                        start_offset_ns: from_i64(start_offset_ns)?,
-                        end_offset_ns: from_i64(end_offset_ns)?,
+                        start_offset_ns: from_i64(start_offset_ns)?.max(evidence.start_offset_ns),
+                        end_offset_ns: from_i64(end_offset_ns)?.min(evidence.end_offset_ns),
                     })
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?
@@ -1436,7 +1431,7 @@ fn require_enrollment_evidence_in(
             "SELECT start_offset_ns, end_offset_ns
                FROM meeting_diarization_evidence_spans
               WHERE generation_id = ?1 AND speaker_id = ?2 AND track_id = ?3
-                AND start_offset_ns >= ?4 AND end_offset_ns <= ?5
+                AND start_offset_ns < ?5 AND end_offset_ns > ?4
               ORDER BY start_offset_ns, end_offset_ns",
         )?;
         let selected_spans = statement
@@ -1453,25 +1448,26 @@ fn require_enrollment_evidence_in(
             .collect::<Result<Vec<_>, _>>()?;
         selected_spans
     };
-    if !(MIN_ENROLLMENT_EVIDENCE_SPANS..=MAX_ENROLLMENT_EVIDENCE_SPANS).contains(&spans.len()) {
+    let duration = evidence
+        .end_offset_ns
+        .checked_sub(evidence.start_offset_ns)
+        .ok_or(StoreError::VoiceInvariant)?;
+    if !(MIN_ENROLLMENT_EVIDENCE_DURATION_NS..=MAX_ENROLLMENT_EVIDENCE_DURATION_NS)
+        .contains(&duration)
+        || spans.is_empty()
+    {
         return Err(StoreError::InsufficientEnrollmentEvidence);
     }
     let mut end_offset_ns = evidence.start_offset_ns;
     for (start_offset_ns, span_end_offset_ns) in spans {
-        let start_offset_ns = from_i64(start_offset_ns)?;
-        let span_end_offset_ns = from_i64(span_end_offset_ns)?;
+        let start_offset_ns = from_i64(start_offset_ns)?.max(evidence.start_offset_ns);
+        let span_end_offset_ns = from_i64(span_end_offset_ns)?.min(evidence.end_offset_ns);
         if start_offset_ns != end_offset_ns || span_end_offset_ns <= start_offset_ns {
             return Err(StoreError::InsufficientEnrollmentEvidence);
         }
         end_offset_ns = span_end_offset_ns;
     }
-    if end_offset_ns != evidence.end_offset_ns
-        || evidence
-            .end_offset_ns
-            .checked_sub(evidence.start_offset_ns)
-            .ok_or(StoreError::VoiceInvariant)?
-            > MAX_ENROLLMENT_EVIDENCE_DURATION_NS
-    {
+    if end_offset_ns != evidence.end_offset_ns {
         return Err(StoreError::InsufficientEnrollmentEvidence);
     }
     Ok(())

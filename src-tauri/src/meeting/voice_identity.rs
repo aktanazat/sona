@@ -60,7 +60,11 @@ pub(crate) const fn identity_source_allowed(
     origin: MeetingOrigin,
     source_kind: SourceKind,
 ) -> bool {
-    !matches!(origin, MeetingOrigin::Import) && matches!(source_kind, SourceKind::SystemAudio)
+    !matches!(origin, MeetingOrigin::Import)
+        && matches!(
+            source_kind,
+            SourceKind::SystemAudio | SourceKind::Microphone
+        )
 }
 
 pub(crate) fn automatic_identity_mode(
@@ -643,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_matching_never_opens_a_collector_without_compatible_system_audio_profiles() {
+    fn automatic_matching_requires_compatible_profiles_and_excludes_imports() {
         assert_eq!(
             automatic_identity_mode(
                 MeetingOrigin::Manual,
@@ -669,7 +673,7 @@ mod tests {
                 true,
                 DiarizationEngineKind::WeSpeaker,
             ),
-            None
+            Some(AutoIdentityMode::ReuseWeSpeakerWindows)
         );
     }
 

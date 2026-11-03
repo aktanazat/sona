@@ -15,6 +15,7 @@ import SwiftUI
 /// click on Record below that line is the consent act, so nothing else on the
 /// screen offers a second affirmative.
 struct MeetingStartGateView: View {
+    @Environment(AppModel.self) private var model
     let store: MeetingLiveStore
 
     var body: some View {
@@ -39,6 +40,12 @@ struct MeetingStartGateView: View {
                         expanded: true)
                         .padding(.bottom, 28)
                 }
+
+                ConversationCaptureIntentPicker(
+                    core: model.core,
+                    sessionId: session.sessionId,
+                    onSaved: { store.reloadGate() })
+                    .padding(.bottom, 24)
 
                 PageSection("What this will record") {
                     MeetingSourceListView(readings: store.readings(session))
@@ -97,7 +104,7 @@ struct MeetingStartGateView: View {
                         Button(startWord) { store.record() }
                             .buttonStyle(.primary)
                             .disabled(
-                                store.starting || !store.canStart
+                                store.starting || store.refreshing || !store.canStart
                                     || (store.gateBlocked && !(store.acceptPartial && store.canStartPartial)))
                     }
                 }

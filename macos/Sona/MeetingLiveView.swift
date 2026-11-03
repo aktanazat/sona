@@ -136,6 +136,11 @@ struct MeetingLiveView: View {
                     MeetingClockText(clock: clock, size: 13, color: Theme.ink)
                 }
             }
+            ConversationBookmarkButton(
+                isRecording: session.phase == .capturingRecording
+                    && store.pending == nil && store.clocks[session.sessionId] != nil,
+                saved: false,
+                action: { store.bookmark() })
             if session.phase.isActive {
                 Button("Stop") { store.stop() }
                     .buttonStyle(.primary)

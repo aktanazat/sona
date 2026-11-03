@@ -35,6 +35,25 @@ struct PhoneLibraryScreen: View {
                             .listRowSeparator(.hidden)
                     }
                 }
+                if model.isPaired || model.board?.memoryIndex != nil {
+                    Section {
+                        ForEach(PhoneMemorySection.allCases) { section in
+                            NavigationLink {
+                                PhoneMemoryScreen(model: model, selection: section, search: search)
+                            } label: {
+                                Label(section.title, systemImage: section.symbol)
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .frame(minHeight: 44, alignment: .leading)
+                            }
+                        }
+                    } header: {
+                        Text(String(localized: "memory.fromMac", defaultValue: "Memory from your Mac"))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                            .textCase(nil)
+                    }
+                    .listRowBackground(Theme.surface)
+                }
                 if importBusy {
                     Section {
                         ProgressView("library.importing")
@@ -82,7 +101,7 @@ struct PhoneLibraryScreen: View {
                         }
                         ForEach(remoteMeetings) { meeting in
                             NavigationLink {
-                                PhoneMeetingScreen(meeting: meeting)
+                                PhoneConversationScreen(meeting: meeting)
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(meeting.session.title)
@@ -261,7 +280,11 @@ struct PhoneLibraryScreen: View {
         guard filter == nil || filter == .meeting else { return [] }
         return (model.board?.meetings ?? []).filter {
             search.isEmpty || $0.session.title.localizedStandardContains(search) ||
-                $0.notes.localizedStandardContains(search) || $0.transcript.localizedStandardContains(search)
+                $0.savedNotes.localizedStandardContains(search) || $0.transcript.localizedStandardContains(search) ||
+                $0.originalTranscript.localizedStandardContains(search) ||
+                ($0.user_notes?.body.localizedStandardContains(search) ?? false) ||
+                ($0.manual_notes ?? []).contains { $0.body.localizedStandardContains(search) } ||
+                ($0.conversation_context?.location?.name.localizedStandardContains(search) ?? false)
         }
     }
 }
@@ -366,43 +389,5 @@ private struct PhoneNoteScreen: View {
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text("library.audio"))
-    }
-}
-
-private struct PhoneMeetingScreen: View {
-    let meeting: PhoneMeeting
-    @State private var transcript = false
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Picker("meeting.content", selection: $transcript) {
-                    Text("library.notes").tag(false)
-                    Text("meeting.transcript").tag(true)
-                }.pickerStyle(.segmented)
-                if transcript {
-                    Text(meeting.transcript.isEmpty ? NSLocalizedString("meeting.noTranscript", comment: "") : meeting.transcript)
-                } else {
-                    Text(meeting.notes.isEmpty ? NSLocalizedString("meeting.noNotes", comment: "") : meeting.notes)
-                    if let ownNotes = meeting.user_notes?.body, !ownNotes.isEmpty {
-                        Text("meeting.ownNotes").font(.headline)
-                        Text(ownNotes)
-                    }
-                }
-            }
-            .font(.body)
-            .foregroundStyle(Theme.textPrimary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Theme.pageInset)
-            .textSelection(.enabled)
-        }
-        .background(Theme.background)
-        .navigationTitle(meeting.session.title).navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ShareLink(item: [meeting.session.title, meeting.notes, meeting.user_notes?.body ?? "", meeting.transcript]
-                .filter { !$0.isEmpty }.joined(separator: "\n\n")) {
-                    Label("library.share", systemImage: "square.and.arrow.up")
-                }
-        }
     }
 }

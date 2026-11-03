@@ -11,6 +11,7 @@ struct MeetingReviewView: View {
     /// Opens the agent with a question about this meeting begun, for the
     /// person to finish and send.
     var askAgent: ((String) -> Void)?
+    @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingDelete = false
 
@@ -20,6 +21,14 @@ struct MeetingReviewView: View {
                 MeetingReviewHeader(
                     store: store, snapshot: snapshot, delete: { confirmingDelete = true },
                     openMeetingSettings: openMeetingSettings, askAgent: askAgent)
+                ConversationContextView(
+                    sessionId: snapshot.session.sessionId, editable: store.editable,
+                    partialRecording: snapshot.session.captureCompleteness == .partial)
+                ConversationPlaceCard(core: model.core, store: store,
+                    sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                ConversationBookmarksView(core: model.core, store: store,
+                    sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                ConversationAudioBar(audio: store.audio)
                 MeetingReviewTabs(store: store)
                 pane(snapshot)
             } else {
@@ -45,6 +54,7 @@ struct MeetingReviewView: View {
         } message: {
             Text("It goes to the trash for 30 days, then Sona removes it for good.")
         }
+        .onDisappear { store.audio.stop() }
     }
 
     /// What just worked floats at the foot of the window and leaves by
@@ -68,6 +78,8 @@ struct MeetingReviewView: View {
     @ViewBuilder
     private func pane(_ snapshot: MeetingReviewSnapshot) -> some View {
         switch store.tab {
+        case .review:
+            ConversationAfterCaptureView(store: store, snapshot: snapshot, core: model.core)
         case .transcript:
             TranscriptPane(store: store, snapshot: snapshot)
         case .insights:
@@ -416,20 +428,11 @@ struct MeetingReviewHeader: View {
         return count == 1 ? "1 line has no speaker yet" : "\(count) lines have no speaker yet"
     }
 
-    /// "12 Mar at 09:30 · 48m · Microphone + System audio", and the gaps when
-    /// the recording has them.
     private var facts: String {
         let started = snapshot.session.startedAtUtcMs?.meetingDate
         var parts: [String] = [started.map { "\($0.short) at \($0.time)" } ?? "Never started"]
         if let elapsed = snapshot.session.elapsedOffsetNs {
             parts.append((TimeInterval(elapsed) / 1_000_000_000).spoken)
-        }
-        let sources = snapshot.session.sources.map(\.sourceKind.label)
-        if !sources.isEmpty {
-            parts.append(sources.joined(separator: " + "))
-        }
-        if snapshot.session.captureCompleteness == .partial {
-            parts.append("Partial recording")
         }
         return parts.joined(separator: " · ")
     }
@@ -455,22 +458,46 @@ struct MeetingReviewTabs: View {
     let store: MeetingsStore
 
     var body: some View {
-        HStack(spacing: 12) {
-            Picker("Meeting view", selection: tab) {
-                ForEach(MeetingReviewTab.allCases) { tab in
-                    Text(tab.title).tag(tab)
-                }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                navigation
+                Spacer(minLength: 0)
+                transcriptControls
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .fixedSize()
-            Spacer(minLength: 0)
-            if store.tab == .transcript && !store.transcriptDeleted {
+            VStack(alignment: .leading, spacing: 12) {
+                navigation
+                transcriptControls
+            }
+        }
+        .frame(minHeight: 32, alignment: .top)
+        .padding(.bottom, 24)
+    }
+
+    private var navigation: some View {
+        Picker("Meeting view", selection: tab) {
+            ForEach(MeetingReviewTab.allCases) { tab in
+                Text(tab.title).tag(tab)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private var transcriptControls: some View {
+        if store.tab == .transcript && !store.transcriptDeleted {
+            HStack(spacing: 12) {
+                Picker("Wording", selection: Binding(
+                    get: { store.originalWording }, set: { store.chooseOriginalWording($0) })) {
+                    Text("Edited").tag(false)
+                    Text("Original").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
                 TranscriptSearchField(store: store)
             }
         }
-        .frame(height: 32)
-        .padding(.bottom, 24)
     }
 
     private var tab: Binding<MeetingReviewTab> {
@@ -585,11 +612,12 @@ struct TranscriptPane: View {
 
     private var turns: some View {
         ScrollViewReader { proxy in
-            VStack(alignment: .leading, spacing: 16) {
-                if store.turns.isEmpty {
+            let turns = store.turns
+            LazyVStack(alignment: .leading, spacing: 16) {
+                if turns.isEmpty {
                     Text(emptyLine).bodyText(14, Theme.inkSecondary)
                 } else {
-                    ForEach(store.turns) { turn in
+                    ForEach(turns) { turn in
                         TranscriptTurnRow(
                             store: store,
                             turn: turn,
@@ -605,10 +633,13 @@ struct TranscriptPane: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .onChange(of: store.jump) { _, jump in
-                guard let jump, store.canJumpTo(jump.segmentId) else { return }
+            .onChange(of: store.jump, initial: true) { _, jump in
+                guard let jump, store.canJumpTo(jump.segmentId),
+                      let turn = turns.first(where: { row in
+                          row.segments.contains { $0.base.segmentId == jump.segmentId }
+                      }) else { return }
                 withAnimation(reduceMotion ? nil : .default) {
-                    proxy.scrollTo(jump.segmentId, anchor: .center)
+                    proxy.scrollTo(turn.id, anchor: .center)
                 }
                 store.clearJump()
             }
@@ -661,22 +692,37 @@ struct TranscriptTurnRow: View {
     let speakers: [MeetingSpeaker]
     @Binding var editing: TranscriptSegmentId?
     let rename: (MeetingSpeaker) -> Void
+    @Environment(AppModel.self) private var model
+    @State private var savingPassage: TranscriptEffectiveSegment?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 voice
                 Spacer(minLength: 12)
-                Text(turn.time)
-                    .font(TypeScale.body(12))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.inkTertiary)
+                if let segment = turn.segments.first, store.canPlay(segment.base.segmentId) {
+                    Button { store.playContribution(segment.base.segmentId) } label: {
+                        Label(turn.time, systemImage: "play.fill")
+                            .font(TypeScale.body(12)).monospacedDigit()
+                    }
+                    .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                    .accessibilityLabel("Listen from \(turn.time)")
+                } else {
+                    Text(turn.time).font(TypeScale.body(12)).monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                }
             }
             ForEach(turn.segments) { segment in
                 line(segment)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(item: $savingPassage) { segment in
+            if let sessionId = store.openSessionId {
+                ScratchPassageSheet(store: model.scratchpad, meetingId: sessionId,
+                    segmentId: segment.base.segmentId, excerpt: store.displayedText(segment))
+            }
+        }
     }
 
     /// The name, and behind it the two corrections a voice takes: a new
@@ -721,10 +767,10 @@ struct TranscriptTurnRow: View {
                 editing = segment.base.segmentId
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(TranscriptHighlight.mark(segment.text, query: store.transcriptQuery))
+                    Text(TranscriptHighlight.mark(store.displayedText(segment), query: store.transcriptQuery))
                         .bodyText(14, segment.removed ? Theme.inkDisabled : Theme.ink)
                         .strikethrough(segment.removed, color: Theme.inkDisabled)
-                    if segment.edited {
+                    if segment.edited && !store.originalWording {
                         Text("corrected").font(TypeScale.body(11)).foregroundStyle(Theme.inkTertiary)
                     }
                 }
@@ -734,6 +780,20 @@ struct TranscriptTurnRow: View {
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
+            .contextMenu {
+                if store.canPlay(segment.base.segmentId) {
+                    Button("Listen with context") { store.playContribution(segment.base.segmentId) }
+                }
+                if !segment.removed && !store.transcriptDeleted {
+                    Button("Save passage…") { savingPassage = segment }
+                    Button("Copy source link") {
+                        let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)", forType: .string)
+                    }
+                }
+            }
         }
     }
 }
@@ -832,8 +892,12 @@ struct MeetingInsightsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
             MeetingPeopleBand(store: store, openPerson: openPerson)
-            MeetingVoiceIdentitySection(sessionId: snapshot.session.sessionId)
-            CallNamesReviewSection(store: store, snapshot: snapshot)
+            DisclosureGroup("Call participant names") {
+                CallNamesReviewSection(store: store, snapshot: snapshot)
+                    .padding(.top, 12)
+            }
+            .font(TypeScale.body(14))
+            .foregroundStyle(Theme.inkSecondary)
             MeetingAnalyticsStrip(store: store)
             ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
             MeetingQuestionsCard(store: store, snapshot: snapshot)

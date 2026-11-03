@@ -368,6 +368,7 @@ pub enum ReplyShape {
     Prose,
     MeetingNotes,
     MeetingLedger,
+    MemoryNote,
     /// One JSON object joining the ledgers of a meeting's parts.
     LedgerMerge,
 }
@@ -375,7 +376,11 @@ pub enum ReplyShape {
 impl ReplyShape {
     pub(crate) fn is_json(self) -> bool {
         match self {
-            Self::Json | Self::MeetingNotes | Self::MeetingLedger | Self::LedgerMerge => true,
+            Self::Json
+            | Self::MeetingNotes
+            | Self::MeetingLedger
+            | Self::LedgerMerge
+            | Self::MemoryNote => true,
             Self::Prose => false,
         }
     }

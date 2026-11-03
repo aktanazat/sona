@@ -24,6 +24,7 @@ enum CloudSyncErrorKind: String, Decodable {
     case setupRequired = "setup_required"
     case authRequired = "auth_required"
     case quota
+    case memoryIndexTooLarge = "memory_index_too_large"
     case integrityFailure = "integrity_failure"
     case conflict
     case unsupportedProtocol = "unsupported_protocol"
@@ -37,6 +38,7 @@ enum CloudSyncErrorKind: String, Decodable {
         case .setupRequired: "Set up cloud sync before using this action."
         case .authRequired: "Cloud sign-in is required."
         case .quota: "Cloud storage quota has been reached."
+        case .memoryIndexTooLarge: "Phone memory is over the current sync limit. No new records were uploaded."
         case .integrityFailure: "The cloud operation could not be verified."
         case .conflict: "This meeting has a sync conflict."
         case .unsupportedProtocol: "This device does not support the version of cloud sync in use."

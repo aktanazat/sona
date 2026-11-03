@@ -11,6 +11,11 @@ use crate::meeting::diarization::{
 };
 use crate::meeting::people_types::{PersonId, VoiceProfileMergeResolution};
 use crate::meeting::store::voice_identity::VoiceSpeakerIdentityResult;
+use crate::meeting::transcript_correction_types::{
+    TranscriptCorrection, TranscriptCorrectionContext, TranscriptCorrectionKind,
+    TranscriptCorrectionRemoveRequest, TranscriptCorrectionTeachRequest,
+    TranscriptCorrectionUpdateRequest,
+};
 use crate::meeting::types::{
     MeetingDiarizationGenerationId, MeetingOperationId, MeetingOrigin, SourceTrackId,
 };
@@ -106,7 +111,7 @@ fn session_recording(
         "INSERT INTO meeting_track_records (
             track_id, source_sequence, source_epoch, start_offset_ns, duration_ns,
             frame_count, record_offset_bytes, record_bytes, durable_at_utc_ms
-         ) VALUES (?1, 0, 0, 0, 2000000000, 1, 0, 1, 1)",
+         ) VALUES (?1, 0, 0, 0, 4000000000, 64000, 0, 1, 1)",
         params![id(track_id)],
     )?;
     connection.execute(
@@ -145,7 +150,7 @@ fn enrollment_evidence(
     let connection = store.connection()?;
     let (generation_id, track_id) = session_recording(&connection, session_id)?;
     for (start_offset_ns, end_offset_ns) in
-        [(0_i64, 1_000_000_000_i64), (1_000_000_000, 2_000_000_000)]
+        [(0_i64, 2_000_000_000_i64), (2_000_000_000, 4_000_000_000)]
     {
         connection.execute(
             "INSERT INTO meeting_diarization_evidence_spans (
@@ -166,7 +171,7 @@ fn enrollment_evidence(
         speaker_id,
         track_id,
         0,
-        2_000_000_000,
+        4_000_000_000,
     )
 }
 
@@ -574,6 +579,71 @@ fn enrollment_accepts_the_current_manual_resolution_once() -> Result<(), StoreEr
     ));
     assert_eq!(profile_count(&store, person_id)?, 1);
     assert_eq!(profile_sample_count(&store, person_id)?, 1);
+    Ok(())
+}
+
+#[test]
+fn enrollment_uses_contiguous_speech_duration_not_coalesced_row_count() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let speaker_id = SpeakerId::new();
+    insert_speaker(&store, session_id, speaker_id);
+    let person_id = person(&store, "Ada Lovelace", &[], &[]);
+    let labeled = label_existing(&store, session_id, speaker_id, person_id, 0)?;
+    {
+        let connection = store.connection()?;
+        let (generation_id, track_id) = session_recording(&connection, session_id)?;
+        connection.execute(
+            "UPDATE meeting_track_records SET duration_ns = 14000000000, frame_count = 224000
+             WHERE track_id = ?1",
+            params![id(track_id)],
+        )?;
+        connection.execute(
+            "INSERT INTO meeting_diarization_evidence_spans (
+                generation_id, speaker_id, track_id, start_offset_ns, end_offset_ns, evidence_kind
+             ) VALUES (?1, ?2, ?3, 0, 14000000000, 'sortformer_exclusive')",
+            params![id(generation_id), id(speaker_id), id(track_id)],
+        )?;
+    }
+    let evidence = store.local_voice_enrollment_evidence(session_id, speaker_id)?;
+    assert_eq!(evidence.start_offset_ns(), 0);
+    assert_eq!(evidence.end_offset_ns(), 12_000_000_000);
+    let status = store.commit_voice_profile_enrollment(enrollment_request(
+        person_id,
+        evidence,
+        labeled
+            .receipt
+            .new_revision
+            .ok_or(StoreError::VoiceInvariant)?,
+        store.active_voice_speaker_revision(session_id, speaker_id)?,
+        people_revision(&store),
+    )?)?;
+    assert!(matches!(
+        status,
+        VoiceProfileStatus::Enrolled {
+            sample_count: 1,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn enrollment_does_not_join_short_speech_across_a_gap() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let speaker_id = SpeakerId::new();
+    insert_speaker(&store, session_id, speaker_id);
+    enrollment_evidence(&store, session_id, speaker_id)?;
+    store.connection()?.execute(
+        "UPDATE meeting_diarization_evidence_spans SET start_offset_ns = 2500000000
+         WHERE speaker_id = ?1 AND start_offset_ns = 2000000000",
+        params![id(speaker_id)],
+    )?;
+    assert_eq!(
+        store.local_voice_enrollment_evidence(session_id, speaker_id),
+        Err(StoreError::InsufficientEnrollmentEvidence),
+    );
     Ok(())
 }
 
@@ -1052,5 +1122,348 @@ fn successful_match_names_a_generated_speaker_and_keeps_a_typed_name() -> Result
         |row| row.get(0),
     )?;
     assert_eq!(links, 1);
+    Ok(())
+}
+
+fn learned_phrase_source(
+    store: &MeetingStore,
+    person_id: PersonId,
+    text: &str,
+) -> Result<(MeetingSessionId, TranscriptSegmentId, SpeakerId), StoreError> {
+    let session_id = super::workflow_core_tests::reviewable_meeting(store, "Learned phrase", 1);
+    let speaker_id = SpeakerId::new();
+    insert_speaker(store, session_id, speaker_id);
+    let (generation_id, track_id) = session_recording(&*store.connection()?, session_id)?;
+    let segment_id = TranscriptSegmentId::new();
+    {
+        let connection = store.connection()?;
+        let revision_id: String = connection.query_row(
+            "SELECT transcript_revision_id FROM meeting_diarization_generations
+             WHERE generation_id = ?1",
+            params![id(generation_id)],
+            |row| row.get(0),
+        )?;
+        connection.execute(
+            "INSERT INTO meeting_transcript_segments
+             (segment_id, transcript_revision_id, track_id, ordinal, start_offset_ns,
+              end_offset_ns, speaker_id, base_text)
+             VALUES (?1, ?2, ?3, 0, 0, 4000000000, ?4, ?5)",
+            params![
+                id(segment_id),
+                revision_id,
+                id(track_id),
+                id(speaker_id),
+                text
+            ],
+        )?;
+        connection.execute(
+            "UPDATE meeting_sessions SET current_transcript_revision_id = ?1 WHERE id = ?2",
+            params![revision_id, id(session_id)],
+        )?;
+    }
+    label_existing(store, session_id, speaker_id, person_id, 0)?;
+    Ok((session_id, segment_id, speaker_id))
+}
+
+fn teach_learned_phrase(
+    store: &MeetingStore,
+    person_id: PersonId,
+    session_id: MeetingSessionId,
+    segment_id: TranscriptSegmentId,
+    replacement: &str,
+) -> Result<TranscriptCorrection, StoreError> {
+    let before = store.transcript_correction_review(session_id)?;
+    let learned = store.teach_transcript_correction(TranscriptCorrectionTeachRequest {
+        person_id,
+        session_id,
+        segment_id,
+        expected_meeting_revision: before.meeting_revision,
+        expected_correction_revision: before.correction_revision,
+        original_phrase: "sowna".to_string(),
+        replacement_phrase: replacement.to_string(),
+        kind: TranscriptCorrectionKind::Phrase,
+        context: TranscriptCorrectionContext::Person,
+    })?;
+    learned
+        .corrections
+        .rules
+        .into_iter()
+        .find(|rule| rule.source_segment_id == segment_id)
+        .ok_or(StoreError::Corrupt)
+}
+
+#[test]
+fn merged_learned_phrase_keeps_its_source_and_refreshes_both_search_indexes(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let source_person = person(&store, "Source", &[], &[]);
+    let target_person = person(&store, "Target", &[], &[]);
+    let (source_session, source_segment, _) =
+        learned_phrase_source(&store, source_person, "ship the sowna memory view")?;
+    let (target_session, _, _) =
+        learned_phrase_source(&store, target_person, "keep the sowna transcript")?;
+    let rule = teach_learned_phrase(
+        &store,
+        source_person,
+        source_session,
+        source_segment,
+        "ZephyrReviewProof",
+    )?;
+    assert!(store
+        .query_meetings_lexical("sowna", None, 10)?
+        .iter()
+        .any(|row| row.session_id == target_session));
+    let old_inputs = store
+        .semantic_index_inputs(target_session)?
+        .ok_or(StoreError::Corrupt)?;
+    let embedding = [1.0_f32, 0.0, 0.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
+    store.replace_semantic_chunks(
+        target_session,
+        &old_inputs.key,
+        "learned-phrase-model",
+        1,
+        &[(old_inputs.transcript.join("\n"), embedding)],
+    )?;
+    let vectors = store.query_semantic_chunk_vectors("learned-phrase-model", None)?;
+    assert_eq!(vectors.len(), 1);
+    let old_chunk = vectors[0].chunk_id;
+    store.merge_persons_with_voice_resolution(
+        source_person,
+        target_person,
+        people_revision(&store),
+        None,
+        10,
+    )?;
+    let mut expected_rule = rule;
+    expected_rule.person_id = target_person;
+    assert_eq!(
+        store.transcript_corrections(target_person)?.rules,
+        [expected_rule.clone()]
+    );
+    let new_inputs = store
+        .semantic_index_inputs(target_session)?
+        .ok_or(StoreError::Corrupt)?;
+    assert_ne!(new_inputs.key, old_inputs.key);
+    assert_eq!(
+        new_inputs.transcript,
+        ["keep the ZephyrReviewProof transcript"]
+    );
+    assert!(store
+        .query_semantic_chunk_vectors("learned-phrase-model", None)?
+        .is_empty());
+    assert!(store.query_meetings_by_chunk(&[old_chunk])?.is_empty());
+    for session_id in [source_session, target_session] {
+        assert!(store
+            .query_meetings_lexical("ZephyrReviewProof", None, 10)?
+            .iter()
+            .any(|row| row.session_id == session_id));
+        assert!(!store
+            .query_meetings_lexical("sowna", None, 10)?
+            .iter()
+            .any(|row| row.session_id == session_id));
+    }
+    let current_rules = store.transcript_corrections(target_person)?;
+    store.update_transcript_correction(TranscriptCorrectionUpdateRequest {
+        correction_id: expected_rule.correction_id,
+        person_id: target_person,
+        expected_correction_revision: current_rules.revision,
+        original_phrase: "sowna".to_string(),
+        replacement_phrase: "PolarisReviewProof".to_string(),
+        kind: expected_rule.kind,
+        context: expected_rule.context.clone(),
+        enabled: expected_rule.enabled,
+    })?;
+    assert!(store
+        .query_meetings_lexical("ZephyrReviewProof", None, 10)?
+        .is_empty());
+    for session_id in [source_session, target_session] {
+        assert!(store
+            .query_meetings_lexical("PolarisReviewProof", None, 10)?
+            .iter()
+            .any(|row| row.session_id == session_id));
+        assert!(store.transcript_correction_review(session_id)?.segments[0]
+            .raw_text
+            .contains("sowna"));
+    }
+    let current_rules = store.transcript_corrections(target_person)?;
+    store.remove_transcript_correction(TranscriptCorrectionRemoveRequest {
+        correction_id: expected_rule.correction_id,
+        person_id: target_person,
+        expected_correction_revision: current_rules.revision,
+    })?;
+    assert!(store
+        .query_meetings_lexical("PolarisReviewProof", None, 10)?
+        .is_empty());
+    let raw_hits = store.query_meetings_lexical("sowna", None, 10)?;
+    for session_id in [source_session, target_session] {
+        assert!(raw_hits.iter().any(|row| row.session_id == session_id));
+    }
+    Ok(())
+}
+
+#[test]
+fn removing_a_correction_source_republishes_dependent_words_without_changing_raw_speech(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let person_id = person(&store, "Ada", &[], &[]);
+    let (source_session, source_segment, _) =
+        learned_phrase_source(&store, person_id, "teach sowna")?;
+    let (dependent_session, dependent_segment, _) =
+        learned_phrase_source(&store, person_id, "remember sowna")?;
+    teach_learned_phrase(&store, person_id, source_session, source_segment, "Sona")?;
+    let before_turn = store
+        .transcript_correction_review(dependent_session)?
+        .segments
+        .into_iter()
+        .find(|segment| segment.segment_id == dependent_segment)
+        .ok_or(StoreError::Corrupt)?;
+    assert_eq!(before_turn.raw_text, "remember sowna");
+    assert_eq!(before_turn.corrected_text, "remember Sona");
+
+    let before = store.transcript_correction_source_snapshot(source_session)?;
+    store.edit_segment(SegmentEdit {
+        mutation: StoreMutation {
+            operation_id: MeetingOperationId::new(),
+            actor: OperationActor::User,
+            requested_at_utc_ms: 11,
+            session_id: source_session,
+            expected_revision: meeting_revision(&store, source_session)?,
+            command: MeetingCommandKind::SegmentEdit,
+        },
+        segment_id: source_segment,
+        replacement_text: "teach sowna".to_owned(),
+        removed: true,
+    })?;
+    let changed = store.transcript_correction_projection_changes(before)?;
+    assert!(changed
+        .iter()
+        .any(|session| session.session_id == dependent_session));
+
+    let after_turn = store
+        .transcript_correction_review(dependent_session)?
+        .segments
+        .into_iter()
+        .find(|segment| segment.segment_id == dependent_segment)
+        .ok_or(StoreError::Corrupt)?;
+    assert_eq!(after_turn.raw_text, "remember sowna");
+    assert_eq!(after_turn.corrected_text, "remember sowna");
+    Ok(())
+}
+
+#[test]
+fn conflicting_learned_phrases_reject_a_person_merge_without_changing_either_person(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let source_person = person(&store, "Source", &[], &[]);
+    let target_person = person(&store, "Target", &[], &[]);
+    let (source_session, source_segment, _) =
+        learned_phrase_source(&store, source_person, "ship sowna")?;
+    let (target_session, target_segment, _) =
+        learned_phrase_source(&store, target_person, "keep sowna")?;
+    teach_learned_phrase(
+        &store,
+        source_person,
+        source_session,
+        source_segment,
+        "Sona",
+    )?;
+    teach_learned_phrase(
+        &store,
+        target_person,
+        target_session,
+        target_segment,
+        "Sonar",
+    )?;
+    let source_before = store.transcript_correction_review(source_session)?;
+    let target_before = store.transcript_correction_review(target_session)?;
+    let people_before = people_revision(&store);
+    assert!(matches!(
+        store.merge_persons_with_voice_resolution(
+            source_person,
+            target_person,
+            people_before,
+            None,
+            10,
+        ),
+        Err(StoreError::TranscriptCorrectionConflict)
+    ));
+    assert_eq!(people_revision(&store), people_before);
+    assert_eq!(
+        store.transcript_correction_review(source_session)?,
+        source_before
+    );
+    assert_eq!(
+        store.transcript_correction_review(target_session)?,
+        target_before
+    );
+    let remaining_people: i64 = store.connection()?.query_row(
+        "SELECT COUNT(*) FROM persons WHERE id IN (?1, ?2)",
+        params![id(source_person), id(target_person)],
+        |row| row.get(0),
+    )?;
+    assert_eq!(remaining_people, 2);
+    Ok(())
+}
+
+#[test]
+fn merging_identical_phrases_keeps_supported_evidence_instead_of_an_inactive_copy(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let source_person = person(&store, "Source", &[], &[]);
+    let target_person = person(&store, "Target", &[], &[]);
+    let (target_session, target_segment, target_speaker) =
+        learned_phrase_source(&store, target_person, "old sowna evidence")?;
+    let target_rule = teach_learned_phrase(
+        &store,
+        target_person,
+        target_session,
+        target_segment,
+        "Sona",
+    )?;
+    store.identify_speaker(MeetingSpeakerIdentifyRequest {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 5,
+        session_id: target_session,
+        expected_meeting_revision: meeting_revision(&store, target_session)?,
+        expected_people_revision: people_revision(&store),
+        speaker_id: target_speaker,
+        disposition: MeetingSpeakerIdentifyDisposition::MarkUnknown,
+    })?;
+    assert!(!store.transcript_corrections(target_person)?.rules[0].active);
+    let (source_session, source_segment, _) =
+        learned_phrase_source(&store, source_person, "new sowna evidence")?;
+    let source_rule = teach_learned_phrase(
+        &store,
+        source_person,
+        source_session,
+        source_segment,
+        "Sona",
+    )?;
+    store.merge_persons_with_voice_resolution(
+        source_person,
+        target_person,
+        people_revision(&store),
+        None,
+        10,
+    )?;
+    let mut expected_rule = source_rule;
+    expected_rule.person_id = target_person;
+    let merged = store.transcript_corrections(target_person)?;
+    assert_eq!(merged.rules, [expected_rule]);
+    assert!(merged
+        .rules
+        .iter()
+        .all(|rule| rule.correction_id != target_rule.correction_id));
+    let (future_session, _, _) =
+        learned_phrase_source(&store, target_person, "future sowna contribution")?;
+    let future = store.transcript_correction_review(future_session)?;
+    assert_eq!(future.segments[0].raw_text, "future sowna contribution");
+    assert_eq!(
+        future.segments[0].corrected_text,
+        "future Sona contribution"
+    );
     Ok(())
 }

@@ -29,6 +29,7 @@ pub enum CloudSyncErrorKind {
     SetupRequired,
     AuthRequired,
     Quota,
+    MemoryIndexTooLarge,
     IntegrityFailure,
     Conflict,
     UnsupportedProtocol,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /* The stdio MCP server over Sona's headless query surface.
  *
- * Transport and nothing else: the eight tools are data in `tools.ts`, running
+ * Transport and nothing else: tool definitions are data in `tools.ts`, running
  * the binary is `cli.ts`, and this file is what turns a `tools/call` into an
  * argv and a refusal into an MCP error. Everything an agent reads here came
  * out of Sona a moment ago; this server holds no state between calls.
@@ -38,7 +38,7 @@ function refusalCode(refusal: string): ErrorCode {
   }
 }
 
-/** The server, wired to the eight tools and to nothing else.
+/** The server, wired to the published CLI tools and to nothing else.
  *
  * Construction is separated from `connect` so a test can hold this server on
  * an in-memory transport. That is not ceremony: the ESM link between this file
@@ -58,6 +58,7 @@ export function createServer(): Server {
       title: tool.title,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      annotations: { readOnlyHint: tool.mutates !== true },
     })),
   }));
 

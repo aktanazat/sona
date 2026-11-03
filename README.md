@@ -19,12 +19,13 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - Context capture from the focused field on your Mac, under a global ceiling. At Off, Sona reads nothing from other apps except the text you select for a command.
 
 - A compact recording pill stays the same size while listening, processing, and reporting delivery. A checkmark means macOS confirmed the paste; an arrow means the input was sent but could not be confirmed.
+- In Dictation settings, turn off the idle pill separately from recording controls. Always-on capture and the thirty-second microphone hold are separate switches. With the idle pill off, delivery feedback fades out without switching back to a microphone.
 
 ### Meetings
 
 - Records the microphone and system audio of a meeting after a consent step, with no bot joining the call. Detects meetings from the calendar, from the meeting app you are in, from a call tab in Safari, Chrome, Edge, Firefox, or Arc, and from FaceTime and Phone calls. Presence is not participation: an open but untouched meeting app never prompts, and the status line says why. Calls in apps you grant can record automatically.
 - Transcribes after the meeting, with diarization, notes, a ledger of every thread with its verbatim receipt, people, and series memory; catch-up and questions also work while the meeting is still running. Long transcripts are read in bounded parts and reconciled without cutting off their ending. Notes become ready before optional people and relationship summaries finish. A finished meeting opens on its ledger.
-- Speaker labels: label an unresolved voice as an existing or new person, or correct a wrong one. Remembering a voice for later meetings is a separate opt-in that stays on this Mac, and a person's page can forget it. Saved voices are used only with the same model and audio preparation that created them. Older profiles remain stored but do not name new speech automatically. To learn one again, choose Remove voice profile on the person's page, then remember that person from a meeting.
+- Speaker labels: label an unresolved voice as an existing or new person, or correct a wrong one. Remembering a voice for later meetings is a separate opt-in that stays on this Mac. It uses at least four seconds of retained, contiguous local microphone or call audio; imported recordings cannot enroll voices. A person's page can forget the profile. Saved voices are used only with the same model and audio preparation that created them. Older profiles remain stored but do not name new speech automatically.
 - Live transcript voices are provisional acoustic labels, scoped separately to the microphone and call audio. They are not guessed identities or a promise of final diarization. Short or unclear evidence stays unresolved, and an unavailable voice model is shown explicitly.
 - Call participant names: while recording call audio, open **Names from this call** and choose a Zoom, Teams or Google Meet call. Reading and automatic naming both start off. Readable participant names become review choices; a clear speaking-time match can suggest a name without replacing one you typed or a remembered voice. This needs macOS Accessibility access and a supported English people panel. Missing or ambiguous speech indicators never become a guessed name. Call-name evidence stays on this Mac and is removed when its transcript is deleted.
 - Imports a recording or a Granola, Otter, or Circleback transcript export as a meeting.
@@ -36,6 +37,21 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - The optional Sona Camera extension adds “Recording with Sona” to outgoing video only while Sona is recording. Install it from Meeting settings, approve Camera Extensions in macOS, allow camera access, choose a physical camera, then select Sona Camera in the call app. Installing it does not start video. Stopping or pausing the recording removes the label while normal video continues. The extension stops using the physical camera when its last video consumer closes, and never stores video. The signed native app must be in Applications; both the app and extension require the same Apple team and shared app group.
 - Meeting intelligence runs on Apple Intelligence by default. Settings > Advanced also offers a local OpenAI-compatible endpoint, such as Ollama, for summaries, ledgers, recaps, and answers. Supply its loopback URL (including /v1), model ID, and context window if its model catalog does not report one. “Use cloud AI for meeting notes” is off by default. Turning it on sends meeting text through your paired server to its AI provider; audio stays on this Mac. Selected recurring series can stay local. Turning it off keeps new summaries, ledgers, recaps, and answers local.
 
+### people, conversations, and notes
+
+- home connects people, conversations, and notes. a person’s page shows their contributions and links back to each conversation.
+- a portrait comes from a file you choose, a contact you select, or a public image address you approve and credit. the original image and its source stay with that person. sona never guesses whose face it is.
+- conversation context distinguishes huddles, calls, in-person conversations, and note sessions. sources stay visible. a chosen location can show a map.
+- learned phrases apply only to the person you identify. you can review, edit, or remove them. the original transcript stays available.
+- notes link to people, conversations, and other notes. local synthesis combines selected records into a new note with source links and saved evidence. originals stay unchanged.
+- agents can search notes, read their history, compare versions, and get corpus statistics through the consent-gated cli and memory tools.
+
+mac notes and local synthesis work without microphone access. synthesis needs two to twelve notes or conversations and a ready local model. it does not send sources to cloud ai.
+
+voiceprints and correction rules stay on the mac. a paired iphone can read an encrypted snapshot of saved people, current notes, confirmed speaker assignments and bookmarks. it receives corrected wording for synced conversations without replacing the original words. the snapshot is read-only and contains no audio. a snapshot over 8 mib is refused rather than silently dropping records.
+
+when the original conversation is deleted or its transcript expires, its saved evidence is removed too. the note stays.
+
 ### Screen recording
 
 - Records a screen you pick in the macOS picker, with an optional camera picture-in-picture and microphone, to an H.264/AAC MP4 in `recordings/`. Pause, resume, stop and save, or cancel. Requires macOS 15 or later and Screen Recording access; Camera and Microphone access only when you turn those on. It does not capture system audio, and it refuses to start while a dictation or meeting holds the microphone.
@@ -44,7 +60,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 
 - A chat that answers from your corpus. Once you allow it to send matching quotes to your server, it can search recordings, read a meeting or transcript, look up a person, check open loops and the calendar, and count words and activity, at most three lookups per question, each shown as a step. It can also offer changes (close a commitment, assign an owner, rename a speaker, add a vocabulary term) that apply only when you press Apply, each with a receipt and an undo.
 - In native macOS chat, choose ChatGPT or Claude, then a model and one of its supported thinking levels. The paired server supplies the model list. `Use server default` clears the saved choice.
-- A `sona` CLI and MCP server for reading meetings, people, loops, and the upcoming calendar, plus a consent-gated write to close a loop. `skills/sona/SKILL.md` documents the surface.
+- A `sona` CLI and MCP server for reading notes, note versions and diffs, statistics, meetings, people, loops, and the upcoming calendar, plus a consent-gated write to close a loop. `skills/sona/SKILL.md` documents the surface and JSON schema version 4.
 - Local agent hooks for Claude Code, Codex, Grok, and OMP, with permission requests answerable from Sona where the tool has a reply channel.
 
 ### Phone and watch

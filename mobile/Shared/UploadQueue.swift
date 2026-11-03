@@ -35,6 +35,7 @@ struct QueuedObject: Codable, Equatable, Identifiable {
     var payload: QueuedPayload
     /// The vault whose root the staged ciphertext is bound to, once staged.
     var stagedForVaultId: String?
+    var stagingDirectory: String? = nil
     var chunkSizes: [Int]
     var chunkDigests: [String]
     var attempts: Int
@@ -49,6 +50,7 @@ struct QueuedObject: Codable, Equatable, Identifiable {
 enum UploadQueueError: Error, Equatable {
     case notPaired
     case missingAudio
+    case incompleteAttachment
     case commitIncomplete(state: String)
 }
 
@@ -139,7 +141,9 @@ actor UploadQueue {
         }
         self.client = client
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        for item in items() where !item.parked && item.nextAttemptUtcMs <= now {
+        for item in items() where
+            (!item.parked && item.nextAttemptUtcMs <= now) || needsThoughtRestaging(item)
+        {
             do {
                 try await upload(item, credentials: credentials, client: client)
             } catch {
@@ -217,6 +221,22 @@ actor UploadQueue {
         _ item: QueuedObject, credentials: VaultCredentials
     ) throws -> QueuedObject {
         var item = item
+        if needsThoughtRestaging(item) {
+            try JSONEncoder().encode(item).write(
+                to: itemFile(item, "superseded-\(item.revisionId).json"), options: .atomic
+            )
+            item.revisionId = randomOpaqueId()
+            item.uploadId = randomOpaqueId()
+            item.stagingDirectory = "revision-\(item.revisionId)"
+            item.stagedForVaultId = nil
+            item.chunkSizes = []
+            item.chunkDigests = []
+            item.parked = false
+            item.attempts = 0
+            item.nextAttemptUtcMs = 0
+            item.lastError = nil
+            try save(item)
+        }
         if item.stagedForVaultId == credentials.vaultId, !item.chunkDigests.isEmpty {
             return item
         }
@@ -228,6 +248,9 @@ actor UploadQueue {
             item.uploadId = randomOpaqueId()
         }
         let chunkCount = self.chunkCount(item)
+        try FileManager.default.createDirectory(
+            at: stagingURL(item), withIntermediateDirectories: true
+        )
         let sealedManifest = try sealObjectRevisionPayload(
             vaultRoot: credentials.vaultRoot,
             context: context(
@@ -259,6 +282,13 @@ actor UploadQueue {
         item.chunkDigests = digests
         try save(item)
         return item
+    }
+
+    private func needsThoughtRestaging(_ item: QueuedObject) -> Bool {
+        guard case .thought = item.payload, !item.chunkDigests.isEmpty else { return false }
+        return item.chunkSizes.dropLast().contains {
+            $0 != DeviceRecordingObject.maxEncryptedChunkBytes
+        }
     }
 
     private func plan(
@@ -393,7 +423,14 @@ actor UploadQueue {
         case let .thought(thought):
             guard let (attachment, range) = ThoughtObject.slice(thought.attachments, index: index)
             else { return Data() }
-            return try readSlice(itemFile(item, attachment.file), range)
+            var bytes = try readSlice(itemFile(item, attachment.file), range)
+            let size = ThoughtObject.plaintextSize(
+                thought.attachments, index: index, sourceBytes: bytes.count
+            )
+            if bytes.count < size {
+                bytes.append(Data(count: size - bytes.count))
+            }
+            return bytes
         }
     }
 
@@ -403,7 +440,9 @@ actor UploadQueue {
         }
         defer { try? handle.close() }
         try handle.seek(toOffset: UInt64(range.lowerBound))
-        return try handle.read(upToCount: range.count) ?? Data()
+        let bytes = try handle.read(upToCount: range.count) ?? Data()
+        guard bytes.count == range.count else { throw UploadQueueError.incompleteAttachment }
+        return bytes
     }
 
     // MARK: - Persistence
@@ -483,7 +522,7 @@ actor UploadQueue {
     }
 
     private func removeStagedFiles(_ item: QueuedObject) throws {
-        let directory = root.appending(path: directoryName(item.objectId))
+        let directory = stagingURL(item)
         for name in try FileManager.default.contentsOfDirectory(atPath: directory.path)
         where name.hasPrefix("chunk-") || name == "manifest.bin" {
             try FileManager.default.removeItem(at: directory.appending(path: name))
@@ -497,12 +536,18 @@ actor UploadQueue {
         root.appending(path: directoryName(item.objectId)).appending(path: name)
     }
 
+    private func stagingURL(_ item: QueuedObject) -> URL {
+        let directory = root.appending(path: directoryName(item.objectId))
+        guard let stagingDirectory = item.stagingDirectory else { return directory }
+        return directory.appending(path: stagingDirectory)
+    }
+
     private func manifestURL(_ item: QueuedObject) -> URL {
-        itemFile(item, "manifest.bin")
+        stagingURL(item).appending(path: "manifest.bin")
     }
 
     private func chunkURL(_ item: QueuedObject, index: Int) -> URL {
-        itemFile(item, String(format: "chunk-%06d.bin", index))
+        stagingURL(item).appending(path: String(format: "chunk-%06d.bin", index))
     }
 }
 

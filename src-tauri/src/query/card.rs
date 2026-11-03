@@ -378,6 +378,7 @@ mod tests {
                     attendees: Vec::new(),
                     notes: None,
                     calendar_name: None,
+                    location: None,
                     url: None,
                 },
             )

@@ -2044,6 +2044,15 @@ pub(super) async fn call(
             })
             .await?
         }
+        "complete_notes_onboarding" => {
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::onboarding::complete_notes_onboarding(
+                    handle.clone(),
+                ))
+            })
+            .await?
+        }
         "get_local_cleanup_status" => {
             reply(crate::commands::local_cleanup::get_local_cleanup_status(app.clone()).await)
         }
@@ -2287,6 +2296,112 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
             reply(crate::commands::voice_identity::voice_remove_profile(app.state(), request).await)
+        }
+        "conversation_context" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_context::conversation_context(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_context_update" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::conversation_context::conversation_context_update(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_list" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_list(
+                    app.state(),
+                    person_id,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_review" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_review(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_teach" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_teach(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_update" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_update(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_remove" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_remove(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "person_contributions" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            let offset = args.take("offset")?;
+            let limit = args.take("limit")?;
+            reply(
+                crate::commands::person_content::person_contributions(
+                    app.state(),
+                    person_id,
+                    offset,
+                    limit,
+                )
+                .await,
+            )
+        }
+        "person_avatar" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(crate::commands::person_content::person_avatar(app.state(), person_id).await)
+        }
+        "person_avatar_set" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::person_content::person_avatar_set(app.state(), request).await)
         }
         "get_history_stats" => {
             reply(crate::commands::history::get_history_stats(app.clone(), app.state()).await)
@@ -3007,6 +3122,15 @@ pub(super) async fn call(
             let person_id = args.take("personId")?;
             reply(crate::commands::people::person_detail(app.state(), person_id).await)
         }
+        "person_memory" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            let since_utc_ms = args.take("sinceUtcMs")?;
+            reply(
+                crate::meeting::person_memory::person_memory(app.clone(), person_id, since_utc_ms)
+                    .await,
+            )
+        }
         "organization_detail" => {
             let mut args = Args::parse(params)?;
             let slug = args.take("slug")?;
@@ -3108,6 +3232,74 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
             reply(crate::commands::followup::meeting_follow_up_mail(app.state(), request).await)
+        }
+        "person_avatar_source" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::commands::portrait_source::person_avatar_source(app.state(), person_id)
+                    .await,
+            )
+        }
+        "conversation_audio_clip" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let segment_id = args.take("segmentId")?;
+            let start_offset_ns = args.take("startOffsetNs")?;
+            reply(
+                crate::commands::conversation_review::conversation_audio_clip(
+                    app.state(),
+                    session_id,
+                    segment_id,
+                    start_offset_ns,
+                )
+                .await,
+            )
+        }
+        "conversation_audio_retained" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_review::conversation_audio_retained(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_place_review" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_review::conversation_place_review(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_bookmarks" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_review::conversation_bookmarks(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_bookmark_create" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::conversation_review::conversation_bookmark_create(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
         }
         "meeting_prep_preferences_get" => {
             let handle = app.clone();
@@ -3237,6 +3429,38 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
             reply(crate::commands::documents::doc_delete(app.state(), request).await)
+        }
+        "phone_thought_source_get" => {
+            let mut args = Args::parse(params)?;
+            let note_id = args.take("noteId")?;
+            let object_id = args.take("objectId")?;
+            let revision_id = args.take("revisionId")?;
+            reply(
+                crate::commands::cloud_sync::phone_thought_source_get(
+                    app.state(),
+                    note_id,
+                    object_id,
+                    revision_id,
+                )
+                .await,
+            )
+        }
+        "phone_thought_photo_get" => {
+            let mut args = Args::parse(params)?;
+            let note_id = args.take("noteId")?;
+            let object_id = args.take("objectId")?;
+            let revision_id = args.take("revisionId")?;
+            let index = args.take("index")?;
+            reply(
+                crate::commands::cloud_sync::phone_thought_photo_get(
+                    app.state(),
+                    note_id,
+                    object_id,
+                    revision_id,
+                    index,
+                )
+                .await,
+            )
         }
         "cloud_sync_overview_get" => {
             reply(crate::commands::cloud_sync::cloud_sync_overview_get(app.state()).await)
@@ -3602,6 +3826,15 @@ pub(super) async fn call(
             })
             .await?
         }
+        "scratchpad_recent" => {
+            let mut args = Args::parse(params)?;
+            let limit = args.take("limit")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::scratchpad_recent(handle.state(), limit))
+            })
+            .await?
+        }
         "scratchpad_get" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
@@ -3655,15 +3888,10 @@ pub(super) async fn call(
         "scratchpad_delete" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::scratchpad::scratchpad_delete(
-                    handle.clone(),
-                    handle.state(),
-                    id,
-                ))
-            })
-            .await?
+            reply(
+                crate::scratchpad::scratchpad_delete(app.clone(), app.state(), app.state(), id)
+                    .await,
+            )
         }
         "scratchpad_versions" => {
             let mut args = Args::parse(params)?;
@@ -3688,6 +3916,202 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "scratchpad_capture_passage" => {
+            let mut args = Args::parse(params)?;
+            let meeting_id = args.take("meetingId")?;
+            let segment_id = args.take("segmentId")?;
+            let excerpt = args.take("excerpt")?;
+            let person_id = args.take("personId")?;
+            let body = args.take("body")?;
+            reply(
+                crate::scratchpad::passages::scratchpad_capture_passage(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    meeting_id,
+                    segment_id,
+                    excerpt,
+                    person_id,
+                    body,
+                )
+                .await,
+            )
+        }
+        "scratchpad_review_candidates" => {
+            let mut args = Args::parse(params)?;
+            let period = args.take("period")?;
+            reply(
+                crate::scratchpad::review::scratchpad_review_candidates(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    period,
+                )
+                .await,
+            )
+        }
+        "scratchpad_review_sources" => {
+            let mut args = Args::parse(params)?;
+            let sources = args.take("sources")?;
+            reply(
+                crate::scratchpad::review::scratchpad_review_sources(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    sources,
+                )
+                .await,
+            )
+        }
+        "scratchpad_prepare_synthesis" => {
+            let mut args = Args::parse(params)?;
+            let sources = args.take("sources")?;
+            reply(
+                crate::scratchpad::synthesis::scratchpad_prepare_synthesis(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    sources,
+                )
+                .await,
+            )
+        }
+        "scratchpad_accept_synthesis" => {
+            let mut args = Args::parse(params)?;
+            let draft = args.take("draft")?;
+            reply(
+                crate::scratchpad::synthesis::scratchpad_accept_synthesis(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    draft,
+                )
+                .await,
+            )
+        }
+        "scratchpad_subjects" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subjects(
+                    handle.state(),
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject(
+                    handle.state(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject_create" => {
+            let mut args = Args::parse(params)?;
+            let title = args.take("title")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject_create(
+                    handle.state(),
+                    title,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject_note" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let note_id = args.take("noteId")?;
+            let action = args.take("action")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject_note(
+                    handle.state(),
+                    id,
+                    note_id,
+                    action,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject_delete" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject_delete(
+                    handle.state(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_memory" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            reply(crate::scratchpad::links::scratchpad_memory(app.state(), app.state(), id).await)
+        }
+        "scratchpad_link" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let source = args.take("source")?;
+            reply(
+                crate::scratchpad::links::scratchpad_link(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    id,
+                    source,
+                )
+                .await,
+            )
+        }
+        "scratchpad_unlink" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let source = args.take("source")?;
+            reply(
+                crate::scratchpad::links::scratchpad_unlink(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    id,
+                    source,
+                )
+                .await,
+            )
+        }
+        "scratchpad_synthesize" => {
+            let mut args = Args::parse(params)?;
+            let sources = args.take("sources")?;
+            reply(
+                crate::scratchpad::synthesis::scratchpad_synthesize(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    sources,
+                )
+                .await,
+            )
+        }
+        "scratchpad_source_evidence" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let source = args.take("source")?;
+            reply(
+                crate::scratchpad::evidence::scratchpad_source_evidence(
+                    app.state(),
+                    app.state(),
+                    id,
+                    source,
+                )
+                .await,
+            )
         }
         other => Err(Fault::unknown_method(other)),
     }

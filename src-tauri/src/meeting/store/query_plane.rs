@@ -3,11 +3,8 @@
 //!
 //! Every meeting read the plane needs lives here rather than in `crate::query`
 //! because the store owns this database — its key, its retention sweep, its
-//! cascade on deletion. A second connection opened from outside would own none
-//! of that. Nothing in this file mutates a meeting: the only writes are to
-//! `meeting_semantic_chunks` and `meeting_semantic_index_state`, which are a
-//! cache of vectors derived from rows this file also reads, rebuildable from
-//! them at any time, and deleted with the session they describe.
+//! cascade on deletion. Search documents and semantic chunks are disposable
+//! projections of the canonical meeting rows, refreshed by their store owners.
 
 use super::{MeetingStore, StoreError};
 use crate::meeting::types::{MeetingSessionId, OperationReceipt};
@@ -38,9 +35,9 @@ pub(crate) struct SemanticChunkVector {
 
 /// What one session contributes to the semantic index.
 ///
-/// `key` is what the chunks were built from — the current artifact revision and
-/// the current transcript revision. It is compared, never parsed: a different
-/// key means the cache is stale and the session is indexed again.
+/// `key` covers the current artifact, transcript, retention state and meeting
+/// revision. It is compared, never parsed: a different key means the cache is
+/// stale and the session is indexed again.
 pub(crate) struct SemanticIndexInputs {
     pub key: String,
     pub summaries: Vec<String>,
@@ -74,12 +71,11 @@ const CURRENT_ARTIFACT_ID: &str = "SELECT a.artifact_id
                         AND a.content_json IS NOT NULL
                       ORDER BY a.generated_at_utc_ms DESC LIMIT 1";
 
-/// What a session's chunks were built from, as SQL. Both halves move whenever
-/// the meeting's words change: a regenerated artifact mints a new id, and an
-/// edited transcript mints a new revision.
+/// What a session's chunks were built from, as SQL. The meeting revision also
+/// changes when an identity or learned correction changes the effective words.
 const SEMANTIC_INDEX_KEY: &str = "COALESCE(({CURRENT_ARTIFACT_ID}), '-') || ':' ||
                      COALESCE(m.current_transcript_revision_id, '-') || ':' ||
-                     COALESCE(m.transcript_purged_at_utc_ms, '-')";
+                     COALESCE(m.transcript_purged_at_utc_ms, '-') || ':' || m.revision";
 
 /// The longest snippet the plane will carry per row. Evidence, not payload:
 /// every row of every page rides into a context pack eventually, and the
@@ -117,7 +113,8 @@ impl MeetingStore {
         let Some(match_query) = super::meeting_fts_match_query(query) else {
             return Ok(Vec::new());
         };
-        let connection = self.connection()?;
+        let mut connection = self.connection()?;
+        super::search_projection::refresh_in(&mut connection)?;
         let mut statement = connection.prepare(
             "WITH matched AS MATERIALIZED (
                     SELECT d.session_id AS session_id, m.title AS title,
@@ -160,14 +157,17 @@ impl MeetingStore {
         before_utc_ms: Option<i64>,
     ) -> Result<Vec<SemanticChunkVector>, StoreError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare(&format!(
             "SELECT c.chunk_id, c.session_id, m.created_at_utc_ms, c.embedding
                FROM meeting_semantic_chunks c
                JOIN meeting_sessions m ON m.id = c.session_id
+               JOIN meeting_semantic_index_state index_state ON index_state.session_id = m.id
               WHERE c.model_revision = ?1
                 AND m.phase != 'deleting'
+                AND index_state.indexed_key = ({key})
                 AND (?2 IS NULL OR m.created_at_utc_ms <= ?2)",
-        )?;
+            key = semantic_index_key_sql(),
+        ))?;
         let rows = statement.query_map(params![model_revision, before_utc_ms], |row| {
             Ok(SemanticChunkVector {
                 chunk_id: row.get(0)?,
@@ -199,9 +199,12 @@ impl MeetingStore {
             "SELECT c.session_id, m.title, m.created_at_utc_ms, c.text, 0.0
                FROM meeting_semantic_chunks c
                JOIN meeting_sessions m ON m.id = c.session_id
+               JOIN meeting_semantic_index_state index_state ON index_state.session_id = m.id
               WHERE c.chunk_id IN ({placeholders})
                 AND m.phase != 'deleting'
-              ORDER BY m.created_at_utc_ms DESC, c.session_id ASC"
+                AND index_state.indexed_key = ({key})
+              ORDER BY m.created_at_utc_ms DESC, c.session_id ASC",
+            key = semantic_index_key_sql(),
         ))?;
         let rows = statement.query_map(
             params_from_iter(chunk_ids.iter().map(|chunk_id| *chunk_id)),
@@ -297,11 +300,8 @@ impl MeetingStore {
     ///
     /// The summary and the ledger headline come from the current artifact —
     /// they are the reading of the meeting FTS5 never sees, which is the gap
-    /// this index exists to close. The transcript comes from
-    /// `meeting_search_documents` rather than the segment table, because that
-    /// is where the store already keeps each segment's *effective* text with
-    /// human edits applied; re-deriving it here would be a second answer to a
-    /// question the store has already answered.
+    /// this index exists to close. The transcript uses the same effective-text
+    /// owner as display, including manual edits and learned corrections.
     pub(crate) fn semantic_index_inputs(
         &self,
         session_id: MeetingSessionId,
@@ -336,17 +336,11 @@ impl MeetingStore {
             .flatten()
             .filter(|text| !text.trim().is_empty())
             .collect();
-        let mut statement = connection.prepare(
-            "SELECT content
-               FROM meeting_search_documents
-              WHERE session_id = ?1 AND entity_kind = 'segment'
-              ORDER BY id",
-        )?;
-        let transcript = statement
-            .query_map(params![super::id(session_id)], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let transcript = super::effective_segments_for_session(&connection, session_id)?
+            .into_iter()
+            .filter(|segment| !segment.removed)
+            .map(|segment| segment.replacement_text.unwrap_or(segment.base.text))
+            .collect();
         Ok(Some(SemanticIndexInputs {
             key,
             summaries,

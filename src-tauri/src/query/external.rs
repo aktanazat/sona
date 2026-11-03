@@ -1,5 +1,5 @@
-//! The corpus as a process outside this app sees it: read-only, consent-gated,
-//! one JSON object per invocation.
+//! Consent-gated corpus reads and loop resolution for local CLI and MCP clients.
+//! JSON is the default; text is an explicit presentation of the same answer.
 //!
 //! This is the query plane's third client, after ⌘K and the panel agent, and
 //! it is deliberately the thinnest of them. Everything it answers comes out of
@@ -33,17 +33,19 @@
 //! rows and returns the store receipt verbatim.
 
 use super::{
-    loop_link, meeting_link, person_link, QueryError, QueryEventsPage, QueryPageReason, QueryScope,
-    QuerySearchPage, QUERY_SCHEMA_VERSION,
+    loop_link, meeting_link, note_link, person_link, QueryError, QueryEventsPage, QueryPageReason,
+    QueryScope, QuerySearchPage, QUERY_SCHEMA_VERSION,
 };
+use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::cli::CliArgs;
-use crate::managers::history::HistoryManager;
+use crate::managers::history::{HistoryManager, HistoryStats};
 use crate::meeting::detection::calendar::{CalendarAccess, CalendarSource};
 use crate::meeting::loop_types::{
     MeetingLoopDirection, MeetingLoopId, MeetingLoopKind, MeetingLoopResolution,
     MeetingLoopResolveRequest, MeetingLoopRow, MeetingLoopStatus,
 };
-use crate::meeting::people_types::{PersonListEntry, PersonMeetingHeadline};
+use crate::meeting::people_types::{PersonId, PersonListEntry, PersonMeetingHeadline};
+use crate::meeting::person_memory::{self, PersonMemoryChange, PersonMemorySnapshot};
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::MeetingStore;
 use crate::meeting::types::{
@@ -54,9 +56,13 @@ use crate::meeting::types::{
 };
 use crate::meeting::upcoming::{upcoming_window, UPCOMING_DEFAULT_DAYS};
 use crate::meeting::upcoming_types::MeetingUpcomingRow;
+use crate::scratchpad::links::{ScratchConnection, ScratchSource};
+use crate::scratchpad::passages::ScratchPassage;
+use crate::scratchpad::{self, ScratchNote, ScratchNoteMemory, ScratchNoteVersion};
 use crate::settings::AppSettings;
 use chrono::{Local, NaiveDate, TimeZone};
 use serde::Serialize;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -228,6 +234,14 @@ impl From<QueryError> for ExternalError {
     }
 }
 
+/// An explicit output choice; existing callers continue to receive JSON.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum ExternalFormat {
+    #[default]
+    Json,
+    Text,
+}
+
 /// Which loop rows `--loops` keeps. Narrower than [`MeetingLoopStatus`] on
 /// purpose: `dropped` and `carried` are outcomes a reader sees on the rows
 /// they get back, not questions they ask.
@@ -242,6 +256,13 @@ pub enum ExternalLoopStatus {
 pub enum ExternalLoopSide {
     Mine,
     WaitingOn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalPersonMemoryView {
+    CatchUp,
+    Changes,
 }
 
 /// One thing the corpus can answer or do, after the flags have been checked.
@@ -275,6 +296,11 @@ pub enum ExternalRequest {
         name: String,
         limit: usize,
     },
+    PersonMemory {
+        person_id: PersonId,
+        since_utc_ms: Option<i64>,
+        view: ExternalPersonMemoryView,
+    },
     Events {
         after_id: Option<String>,
         limit: usize,
@@ -282,7 +308,25 @@ pub enum ExternalRequest {
     Upcoming {
         limit: usize,
     },
-    /// The one verb here that writes.
+    Notes {
+        limit: usize,
+    },
+    Note {
+        id: String,
+    },
+    NoteContext {
+        query: String,
+        limit: usize,
+    },
+    NoteVersions {
+        id: String,
+    },
+    NoteDiff {
+        id: String,
+        from_version: i64,
+        to_version: Option<i64>,
+    },
+    Stats,
     LoopResolve {
         loop_id: MeetingLoopId,
     },
@@ -300,8 +344,15 @@ impl ExternalRequest {
             | Self::Transcript { .. }
             | Self::Loops { .. }
             | Self::People { .. }
+            | Self::PersonMemory { .. }
             | Self::Events { .. }
-            | Self::Upcoming { .. } => READ_SCOPES,
+            | Self::Upcoming { .. }
+            | Self::Notes { .. }
+            | Self::Note { .. }
+            | Self::NoteContext { .. }
+            | Self::NoteVersions { .. }
+            | Self::NoteDiff { .. }
+            | Self::Stats => READ_SCOPES,
         }
     }
 }
@@ -343,9 +394,17 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.transcript.is_some()
         || args.loops
         || args.people.is_some()
+        || args.person_catch_up.is_some()
+        || args.person_changes.is_some()
         || args.events
         || args.upcoming
         || args.loop_resolve.is_some()
+        || args.notes
+        || args.note.is_some()
+        || args.note_context.is_some()
+        || args.note_versions.is_some()
+        || args.note_diff.is_some()
+        || args.stats
 }
 
 /// The modifier flag a command line named that its verb does not read, if
@@ -379,7 +438,9 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         || args.loops
         || args.people.is_some()
         || args.events
-        || args.upcoming;
+        || args.upcoming
+        || args.notes
+        || args.note_context.is_some();
     [
         (
             args.scope.is_some(),
@@ -420,7 +481,22 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         (
             args.limit.is_some(),
             pages,
-            "--limit is only read by a verb that returns a page: --query, --meetings, --loops, --people, --events, --upcoming.",
+            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --notes or --note-context.",
+        ),
+        (
+            args.from_version.is_some(),
+            args.note_diff.is_some(),
+            "--from-version is only read by --note-diff.",
+        ),
+        (
+            args.to_version.is_some(),
+            args.note_diff.is_some(),
+            "--to-version is only read by --note-diff.",
+        ),
+        (
+            args.since_utc_ms.is_some(),
+            args.person_catch_up.is_some() || args.person_changes.is_some(),
+            "--since-utc-ms is only read by --person-catch-up or --person-changes.",
         ),
     ]
     .into_iter()
@@ -491,6 +567,37 @@ impl ExternalRequest {
                 limit,
             });
         }
+        if let Some((id, view)) = args
+            .person_catch_up
+            .as_deref()
+            .map(|id| (id, ExternalPersonMemoryView::CatchUp))
+            .or_else(|| {
+                args.person_changes
+                    .as_deref()
+                    .map(|id| (id, ExternalPersonMemoryView::Changes))
+            })
+        {
+            if view == ExternalPersonMemoryView::Changes && args.since_utc_ms.is_none() {
+                return Err(ExternalError::invalid(
+                    "--person-changes requires --since-utc-ms.",
+                ));
+            }
+            if args
+                .since_utc_ms
+                .is_some_and(|since| chrono::DateTime::from_timestamp_millis(since).is_none())
+            {
+                return Err(ExternalError::invalid(
+                    "--since-utc-ms is outside the supported date range.",
+                ));
+            }
+            return Ok(Self::PersonMemory {
+                person_id: Uuid::parse_str(id.trim())
+                    .map(PersonId::from_uuid)
+                    .map_err(|_| ExternalError::invalid(format!("{id:?} is not a person id.")))?,
+                since_utc_ms: args.since_utc_ms,
+                view,
+            });
+        }
         if args.events {
             return Ok(Self::Events {
                 after_id: args.after.clone(),
@@ -500,15 +607,56 @@ impl ExternalRequest {
         if args.upcoming {
             return Ok(Self::Upcoming { limit });
         }
+        if args.notes {
+            return Ok(Self::Notes { limit });
+        }
+        if let Some(id) = args.note.as_deref() {
+            return Ok(Self::Note { id: note_id(id)? });
+        }
+        if let Some(query) = args.note_context.as_ref() {
+            return Ok(Self::NoteContext {
+                query: query.clone(),
+                limit,
+            });
+        }
+        if let Some(id) = args.note_versions.as_deref() {
+            return Ok(Self::NoteVersions { id: note_id(id)? });
+        }
+        if let Some(id) = args.note_diff.as_deref() {
+            let from_version = args.from_version.ok_or_else(|| {
+                ExternalError::invalid(
+                    "--note-diff requires --from-version. Read --note-versions first.",
+                )
+            })?;
+            if from_version <= 0 || args.to_version.is_some_and(|version| version <= 0) {
+                return Err(ExternalError::invalid(
+                    "Version ids must be positive integers.",
+                ));
+            }
+            return Ok(Self::NoteDiff {
+                id: note_id(id)?,
+                from_version,
+                to_version: args.to_version,
+            });
+        }
+        if args.stats {
+            return Ok(Self::Stats);
+        }
         if let Some(value) = args.loop_resolve.as_ref() {
             return Ok(Self::LoopResolve {
                 loop_id: loop_id(value)?,
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass one of --query, --meetings, --meeting, --transcript, --loops, --people, --events, --upcoming, --loop-resolve.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --events, --upcoming, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
         ))
     }
+}
+
+fn note_id(value: &str) -> Result<String, ExternalError> {
+    Uuid::parse_str(value.trim())
+        .map(|id| id.to_string())
+        .map_err(|_| ExternalError::invalid(format!("{value:?} is not a note id.")))
 }
 
 fn session_id(value: &str) -> Result<MeetingSessionId, ExternalError> {
@@ -594,7 +742,7 @@ pub struct ExternalMeetingsPage {
 }
 
 /// One meeting opened: what it was about, and what it left open.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExternalMeetingDetail {
     pub schema_version: u32,
     pub id: Uuid,
@@ -606,6 +754,7 @@ pub struct ExternalMeetingDetail {
     /// nothing in it to read either.
     pub started_at_utc_ms: Option<i64>,
     pub speakers: Vec<String>,
+    pub context: crate::meeting::context::ConversationContext,
     /// The generated summary of the current artifact revision. Absent until
     /// processing has produced one.
     pub summary: Option<String>,
@@ -623,6 +772,12 @@ pub struct ExternalTranscriptLine {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    pub raw_text: String,
+    pub corrected_text: Option<String>,
+    pub segment_id: Uuid,
+    pub transcript_revision_id: Uuid,
+    pub edit_revision: Option<u64>,
+    pub link: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -690,6 +845,14 @@ pub struct ExternalPeoplePage {
     pub reason: Option<QueryPageReason>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalPersonMemory {
+    pub schema_version: u32,
+    pub view: ExternalPersonMemoryView,
+    pub snapshot: PersonMemorySnapshot,
+    pub link: String,
+}
+
 /// One event in the week ahead.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ExternalUpcomingRow {
@@ -741,6 +904,163 @@ pub struct ExternalReceipt {
     pub receipt: OperationReceipt,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteRow {
+    pub id: String,
+    pub title: String,
+    pub pinned: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub link: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNotesPage {
+    pub schema_version: u32,
+    pub entries: Vec<ExternalNoteRow>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteDetail {
+    pub schema_version: u32,
+    pub memory: ScratchNoteMemory,
+    pub link: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteContextEntry {
+    pub note: ScratchNote,
+    pub matched_text: String,
+    pub sources: Vec<ScratchSource>,
+    pub passages: Vec<ScratchPassage>,
+    pub interpretation: bool,
+    pub connections: Vec<ScratchConnection>,
+    pub link: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteContext {
+    pub schema_version: u32,
+    pub query: String,
+    pub entries: Vec<ExternalNoteContextEntry>,
+    pub has_more: bool,
+    pub reason: Option<QueryPageReason>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteVersion {
+    pub id: i64,
+    pub kind: crate::scratchpad::ScratchVersionKind,
+    pub saved_at_ms: i64,
+    pub words: usize,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteVersions {
+    pub schema_version: u32,
+    pub note_id: String,
+    pub entries: Vec<ExternalNoteVersion>,
+    pub link: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalDiffKind {
+    Context,
+    Remove,
+    Add,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalDiffLine {
+    pub kind: ExternalDiffKind,
+    /// Original bytes, including a line ending when one was present.
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteDiff {
+    pub schema_version: u32,
+    pub note_id: String,
+    pub from_version: i64,
+    pub to_version: i64,
+    pub from_saved_at_ms: i64,
+    pub to_saved_at_ms: i64,
+    pub changed: bool,
+    pub from_source: ExternalSavedNoteSource,
+    pub to_source: ExternalSavedNoteSource,
+    pub removed_lines: usize,
+    pub added_lines: usize,
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
+    pub lines: Vec<ExternalDiffLine>,
+    pub link: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalSavedNoteSource {
+    pub version_id: i64,
+    pub saved_at_ms: i64,
+    pub kind: crate::scratchpad::ScratchVersionKind,
+    pub link: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ExternalDatasetStats<T> {
+    Available { totals: T },
+    Unavailable { error: ExternalError },
+}
+
+impl<T> ExternalDatasetStats<T> {
+    fn from_result(result: Result<T, ExternalError>) -> Self {
+        match result {
+            Ok(totals) => Self::Available { totals },
+            Err(error) => Self::Unavailable { error },
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalNoteStats {
+    pub notes: u64,
+    pub pinned: u64,
+    pub saved_versions: u64,
+    pub characters: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalStatsEvidence {
+    pub method: &'static str,
+    pub sample_links: Vec<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalStatsSources {
+    pub meetings: ExternalDatasetStats<ExternalStatsEvidence>,
+    pub dictations: ExternalDatasetStats<ExternalStatsEvidence>,
+    pub notes: ExternalDatasetStats<ExternalStatsEvidence>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalCorpusStats {
+    pub schema_version: u32,
+    pub measured_at_utc_ms: i64,
+    pub population: &'static str,
+    pub complete: bool,
+    pub meetings: ExternalDatasetStats<crate::meeting::types::MeetingTrendTotals>,
+    pub dictations: ExternalDatasetStats<HistoryStats>,
+    pub notes: ExternalDatasetStats<ExternalNoteStats>,
+    pub sources: ExternalStatsSources,
+}
 /// One answer. Serialised untagged: the verb is what the caller asked for, so
 /// repeating it in the payload would be a field nobody reads.
 #[derive(Clone, Debug, Serialize)]
@@ -752,9 +1072,16 @@ pub enum ExternalResponse {
     Transcript(ExternalTranscript),
     Loops(ExternalLoopsPage),
     People(ExternalPeoplePage),
+    PersonMemory(Box<ExternalPersonMemory>),
     Events(QueryEventsPage),
     Upcoming(ExternalUpcomingPage),
     LoopResolve(ExternalReceipt),
+    Notes(ExternalNotesPage),
+    Note(ExternalNoteDetail),
+    NoteContext(ExternalNoteContext),
+    NoteVersions(ExternalNoteVersions),
+    NoteDiff(ExternalNoteDiff),
+    Stats(ExternalCorpusStats),
 }
 
 impl ExternalResponse {
@@ -789,17 +1116,39 @@ impl ExternalResponse {
 /// nothing else detection owns, and the headless branch hands over exactly that.
 pub async fn answer(
     allowed: &AllowedRequest,
+    app: &tauri::AppHandle,
     meetings: &Arc<MeetingSessionManager>,
     history: &Arc<HistoryManager>,
     calendar: &dyn CalendarSource,
 ) -> Result<ExternalResponse, ExternalError> {
+    if matches!(
+        allowed.request(),
+        ExternalRequest::Notes { .. }
+            | ExternalRequest::Note { .. }
+            | ExternalRequest::NoteVersions { .. }
+            | ExternalRequest::PersonMemory { .. }
+            | ExternalRequest::NoteContext { .. }
+            | ExternalRequest::NoteDiff { .. }
+            | ExternalRequest::Stats
+    ) {
+        history.ensure_storage_unlocked().await;
+    }
     match allowed.request() {
         ExternalRequest::Search {
             scope,
             query,
             limit,
         } => Ok(ExternalResponse::Search(
-            super::search(meetings, history, *scope, query, Some(*limit), None).await?,
+            super::search(
+                meetings,
+                history,
+                super::QueryAudience::Local,
+                *scope,
+                query,
+                Some(*limit),
+                None,
+            )
+            .await?,
         )),
         ExternalRequest::Events { after_id, limit } => Ok(ExternalResponse::Events(
             super::events(meetings, after_id.clone(), Some(*limit)).await?,
@@ -838,11 +1187,127 @@ pub async fn answer(
             name,
             *limit,
         )?)),
+        ExternalRequest::PersonMemory {
+            person_id,
+            since_utc_ms,
+            view,
+        } => {
+            store(meetings)
+                .await?
+                .person_detail(*person_id)
+                .map_err(|error| match error {
+                    crate::meeting::store::StoreError::NotFound => ExternalError::new(
+                        ExternalErrorCode::NotFound,
+                        format!("No person {} in this corpus.", person_id.uuid()),
+                    ),
+                    error => ExternalError::from(QueryError::from(error)),
+                })?;
+            let snapshot = person_memory::read(app, *person_id, *since_utc_ms)
+                .await
+                .map_err(|message| note_read_error(history, message))?;
+            Ok(ExternalResponse::PersonMemory(Box::new(
+                ExternalPersonMemory {
+                    schema_version: QUERY_SCHEMA_VERSION,
+                    view: *view,
+                    snapshot,
+                    link: person_link(*person_id),
+                },
+            )))
+        }
         ExternalRequest::Upcoming { limit } => Ok(ExternalResponse::Upcoming(
             upcoming_page(meetings, calendar, *limit).await?,
         )),
         ExternalRequest::LoopResolve { loop_id } => Ok(ExternalResponse::LoopResolve(
             resolve_loop(meetings, loop_id).await?,
+        )),
+        ExternalRequest::Notes { limit } => {
+            Ok(ExternalResponse::Notes(notes_page(history, *limit)?))
+        }
+        ExternalRequest::Note { id } => {
+            let store = store(meetings).await?;
+            let memory = scratchpad::read_note_with_sources(history, &store, id)
+                .map_err(|message| note_read_error(history, message))?
+                .ok_or_else(|| missing_note(id))?;
+            Ok(ExternalResponse::Note(ExternalNoteDetail {
+                schema_version: QUERY_SCHEMA_VERSION,
+                memory,
+                link: note_link(id),
+            }))
+        }
+        ExternalRequest::NoteContext { query, limit } => {
+            let page = super::search(
+                meetings,
+                history,
+                super::QueryAudience::Local,
+                QueryScope::Notes,
+                query,
+                Some(*limit),
+                None,
+            )
+            .await?;
+            let store = store(meetings).await?;
+            let mut entries = Vec::with_capacity(page.entries.len());
+            for row in page.entries {
+                let memory = scratchpad::read_note_with_sources(history, &store, &row.id)
+                    .map_err(|message| note_read_error(history, message))?
+                    .ok_or_else(|| missing_note(&row.id))?;
+                entries.push(ExternalNoteContextEntry {
+                    note: memory.note,
+                    matched_text: row.snippet,
+                    sources: memory.sources,
+                    passages: memory.passages,
+                    interpretation: memory.interpretation,
+                    connections: memory.connections,
+                    link: row.link,
+                });
+            }
+            Ok(ExternalResponse::NoteContext(ExternalNoteContext {
+                schema_version: QUERY_SCHEMA_VERSION,
+                query: query.clone(),
+                entries,
+                has_more: page.next_cursor.is_some(),
+                reason: page.reason,
+            }))
+        }
+        ExternalRequest::NoteVersions { id } => {
+            let entries = note_versions(history, id)?
+                .into_iter()
+                .map(|version| ExternalNoteVersion {
+                    id: version.id,
+                    kind: version.kind,
+                    saved_at_ms: version.saved_at_ms,
+                    words: version.body.split_whitespace().count(),
+                    bytes: version.body.len(),
+                })
+                .collect();
+            Ok(ExternalResponse::NoteVersions(ExternalNoteVersions {
+                schema_version: QUERY_SCHEMA_VERSION,
+                note_id: id.clone(),
+                entries,
+                link: note_link(id),
+            }))
+        }
+        ExternalRequest::NoteDiff {
+            id,
+            from_version,
+            to_version,
+        } => {
+            let versions = note_versions(history, id)?;
+            let from = versions
+                .iter()
+                .find(|version| version.id == *from_version)
+                .ok_or_else(|| missing_version(id, *from_version))?;
+            let to = match to_version {
+                Some(version_id) => versions
+                    .iter()
+                    .find(|version| version.id == *version_id)
+                    .ok_or_else(|| missing_version(id, *version_id))?,
+                None => versions.first().ok_or_else(|| missing_note(id))?,
+            };
+            Ok(ExternalResponse::NoteDiff(note_diff(id, from, to)))
+        }
+        ExternalRequest::Stats => Ok(ExternalResponse::Stats(
+            corpus_stats(meetings, history).await,
         )),
     }
 }
@@ -1120,6 +1585,9 @@ pub(crate) fn meeting_detail(
         processing_status: snapshot.session.processing_status,
         started_at_utc_ms: snapshot.session.started_at_utc_ms,
         speakers: speaker_names(&snapshot),
+        context: store
+            .conversation_context(session_id)
+            .map_err(QueryError::from)?,
         summary: artifacts
             .map(|content| content.summary.text.trim())
             .filter(|summary| !summary.is_empty())
@@ -1197,6 +1665,17 @@ pub(super) fn transcript_line(
         start_ms: segment.base.start_offset_ns / 1_000_000,
         end_ms: segment.base.end_offset_ns / 1_000_000,
         text: text.to_string(),
+        raw_text: segment.base.text.clone(),
+        corrected_text: segment.replacement_text.clone(),
+        segment_id: segment.base.segment_id.uuid(),
+        transcript_revision_id: segment.base.transcript_revision_id.uuid(),
+        edit_revision: segment.edit_revision,
+        link: format!(
+            "{}?atMs={}&segmentId={}",
+            meeting_link(snapshot.session.session_id),
+            segment.base.start_offset_ns / 1_000_000,
+            segment.base.segment_id.uuid(),
+        ),
     })
 }
 
@@ -1411,13 +1890,970 @@ pub(super) fn speaker_names(snapshot: &MeetingReviewSnapshot) -> Vec<String> {
         .collect()
 }
 
+fn missing_note(id: &str) -> ExternalError {
+    ExternalError::new(
+        ExternalErrorCode::NotFound,
+        format!("No note {id} in this corpus."),
+    )
+}
+
+fn missing_version(id: &str, version: i64) -> ExternalError {
+    ExternalError::new(
+        ExternalErrorCode::NotFound,
+        format!("Note {id} has no retained version {version}. Read --note-versions again."),
+    )
+}
+
+fn note_read_error(history: &HistoryManager, message: String) -> ExternalError {
+    ExternalError::new(
+        if history.storage_is_ready() {
+            ExternalErrorCode::Failed
+        } else {
+            ExternalErrorCode::Unavailable
+        },
+        message,
+    )
+}
+
+fn notes_page(history: &HistoryManager, limit: usize) -> Result<ExternalNotesPage, ExternalError> {
+    let mut notes = scratchpad::search_notes(history, "", None, limit + 1)
+        .map_err(|message| note_read_error(history, message))?;
+    let has_more = notes.len() > limit;
+    notes.truncate(limit);
+    Ok(ExternalNotesPage {
+        schema_version: QUERY_SCHEMA_VERSION,
+        entries: notes
+            .into_iter()
+            .map(|note| ExternalNoteRow {
+                link: note_link(&note.id),
+                id: note.id,
+                title: note.title,
+                pinned: note.pinned,
+                created_at_ms: note.created_at_ms,
+                updated_at_ms: note.updated_at_ms,
+            })
+            .collect(),
+        has_more,
+    })
+}
+
+fn note_versions(
+    history: &HistoryManager,
+    id: &str,
+) -> Result<Vec<ScratchNoteVersion>, ExternalError> {
+    scratchpad::read_versions(history, id)
+        .map_err(|message| note_read_error(history, message))?
+        .ok_or_else(|| missing_note(id))
+}
+
+fn note_diff(id: &str, from: &ScratchNoteVersion, to: &ScratchNoteVersion) -> ExternalNoteDiff {
+    let old: Vec<&str> = from.body.split_inclusive('\n').collect();
+    let new: Vec<&str> = to.body.split_inclusive('\n').collect();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_end = old.len() - suffix;
+    let new_end = new.len() - suffix;
+    let removed_lines = old_end - prefix;
+    let added_lines = new_end - prefix;
+    let changed = from.body != to.body;
+    let context_start = prefix.saturating_sub(3);
+    let context_end = suffix.min(3);
+    let mut lines = Vec::new();
+    if changed {
+        for (kind, range) in [
+            (ExternalDiffKind::Context, &old[context_start..prefix]),
+            (ExternalDiffKind::Remove, &old[prefix..old_end]),
+            (ExternalDiffKind::Add, &new[prefix..new_end]),
+            (
+                ExternalDiffKind::Context,
+                &old[old_end..old_end + context_end],
+            ),
+        ] {
+            lines.extend(range.iter().map(|text| ExternalDiffLine {
+                kind,
+                text: (*text).to_string(),
+            }));
+        }
+    }
+    let old_lines = if changed {
+        old_end - context_start + context_end
+    } else {
+        0
+    };
+    let new_lines = if changed {
+        new_end - context_start + context_end
+    } else {
+        0
+    };
+    ExternalNoteDiff {
+        schema_version: QUERY_SCHEMA_VERSION,
+        note_id: id.to_string(),
+        from_version: from.id,
+        to_version: to.id,
+        from_saved_at_ms: from.saved_at_ms,
+        to_saved_at_ms: to.saved_at_ms,
+        from_source: saved_note_source(id, from),
+        to_source: saved_note_source(id, to),
+        changed,
+        removed_lines,
+        added_lines,
+        old_start: if old_lines == 0 {
+            context_start
+        } else {
+            context_start + 1
+        },
+        old_lines,
+        new_start: if new_lines == 0 {
+            context_start
+        } else {
+            context_start + 1
+        },
+        new_lines,
+        lines,
+        link: note_link(id),
+    }
+}
+
+fn saved_note_source(id: &str, version: &ScratchNoteVersion) -> ExternalSavedNoteSource {
+    ExternalSavedNoteSource {
+        version_id: version.id,
+        saved_at_ms: version.saved_at_ms,
+        kind: version.kind,
+        link: format!("{}?version={}", note_link(id), version.id),
+    }
+}
+
+async fn statistics_sources(
+    meetings: &Arc<MeetingSessionManager>,
+    history: &HistoryManager,
+) -> ExternalStatsSources {
+    let meeting_sources = match store(meetings).await {
+        Ok(store) => meetings_page(&store, None, None, DEFAULT_LIMIT).map(|page| ExternalStatsEvidence {
+            method: "All retained meetings; verified audio intervals merge overlapping sources. Links sample the newest retained meetings, not every counted record.",
+            sample_links: page.entries.into_iter().map(|row| row.link).collect(),
+            has_more: page.has_more,
+        }),
+        Err(error) => Err(error),
+    };
+    let dictation_sources = history.with_connection(|connection| {
+        let mut statement = connection.prepare(
+            "SELECT id FROM transcription_history ORDER BY id DESC LIMIT ?1",
+        )?;
+        let ids = statement.query_map([DEFAULT_LIMIT + 1], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }).map(|mut ids| {
+        let has_more = ids.len() > DEFAULT_LIMIT;
+        ids.truncate(DEFAULT_LIMIT);
+        ExternalStatsEvidence {
+            method: "All retained dictation history rows, grouped by recorded source kind. Links sample the newest row ids, not every counted record.",
+            sample_links: ids.into_iter().map(super::dictation_link).collect(),
+            has_more,
+        }
+    }).map_err(|_| note_read_error(history, "Dictation source links could not be read.".to_string()));
+    let note_sources = notes_page(history, DEFAULT_LIMIT).map(|page| ExternalStatsEvidence {
+        method: "All retained notes and saved versions; characters count current bodies only. Links sample the most recently updated notes, not every counted record.",
+        sample_links: page.entries.into_iter().map(|row| row.link).collect(),
+        has_more: page.has_more,
+    });
+    ExternalStatsSources {
+        meetings: ExternalDatasetStats::from_result(meeting_sources),
+        dictations: ExternalDatasetStats::from_result(dictation_sources),
+        notes: ExternalDatasetStats::from_result(note_sources),
+    }
+}
+
+async fn corpus_stats(
+    meetings: &Arc<MeetingSessionManager>,
+    history: &HistoryManager,
+) -> ExternalCorpusStats {
+    let measured_at = Local::now();
+    let meeting_totals = match store(meetings).await {
+        Ok(store) => store
+            .trend_projection_at(
+                DashboardTrendRequest {
+                    range: DashboardTrendRange::Days7,
+                },
+                measured_at,
+            )
+            .map_err(|error| ExternalError::from(QueryError::from(error)))
+            .and_then(|projection| match projection {
+                crate::meeting::types::MeetingTrendProjection::Available { all_time, .. } => {
+                    Ok(all_time)
+                }
+                crate::meeting::types::MeetingTrendProjection::Unavailable { .. } => {
+                    Err(ExternalError::new(
+                        ExternalErrorCode::Unavailable,
+                        "Meeting statistics are unavailable.",
+                    ))
+                }
+            }),
+        Err(error) => Err(error),
+    };
+    let dictation_totals = history.get_history_stats().await.map_err(|_| {
+        note_read_error(
+            history,
+            "Dictation statistics could not be read.".to_string(),
+        )
+    });
+    let note_totals = scratchpad::note_statistics(history)
+        .map(|totals| ExternalNoteStats {
+            notes: totals.notes,
+            pinned: totals.pinned,
+            saved_versions: totals.saved_versions,
+            characters: totals.characters,
+        })
+        .map_err(|message| note_read_error(history, message));
+    let sources = statistics_sources(meetings, history).await;
+    let meetings = ExternalDatasetStats::from_result(meeting_totals);
+    let dictations = ExternalDatasetStats::from_result(dictation_totals);
+    let notes = ExternalDatasetStats::from_result(note_totals);
+    ExternalCorpusStats {
+        schema_version: QUERY_SCHEMA_VERSION,
+        measured_at_utc_ms: measured_at.timestamp_millis(),
+        population: "retained_records",
+        complete: meetings.is_available()
+            && dictations.is_available()
+            && notes.is_available()
+            && sources.meetings.is_available()
+            && sources.dictations.is_available()
+            && sources.notes.is_available(),
+        meetings,
+        dictations,
+        notes,
+        sources,
+    }
+}
+
+fn local_time(milliseconds: i64) -> String {
+    Local
+        .timestamp_millis_opt(milliseconds)
+        .single()
+        .map(|moment| moment.format("%Y-%m-%d %H:%M %Z").to_string())
+        .unwrap_or_else(|| format!("{milliseconds} ms since epoch"))
+}
+
+fn label(value: &impl Serialize) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(text)) => text,
+        Ok(value) => value.to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+fn processing_text(status: crate::meeting::types::ProcessingStatus) -> String {
+    use crate::meeting::types::ProcessingStatus;
+    match status {
+        ProcessingStatus::Pending => "pending".to_string(),
+        ProcessingStatus::Running => "running".to_string(),
+        ProcessingStatus::Succeeded => "succeeded".to_string(),
+        ProcessingStatus::Cancelled => "cancelled".to_string(),
+        ProcessingStatus::Failed { reason, cause } => {
+            let reason = label(&reason).replace('_', " ");
+            match cause {
+                Some(cause) => format!("failed: {reason} ({})", label(&cause).replace('_', " ")),
+                None => format!("failed: {reason}"),
+            }
+        }
+    }
+}
+
+fn duration(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1_000;
+    format!(
+        "{}h {:02}m {:02}s",
+        seconds / 3_600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
+fn page_footer(text: &mut String, has_more: bool) {
+    if has_more {
+        text.push_str("\nmore results exist; narrow the search or raise --limit (maximum 100).\n");
+    }
+}
+
+fn reason_footer(text: &mut String, reason: Option<QueryPageReason>) {
+    if let Some(reason) = reason {
+        let explanation = match reason {
+            QueryPageReason::NoRows => "no matching records.",
+            QueryPageReason::NoSearchableTokens => "the query contains no searchable words.",
+            QueryPageReason::SemanticUnavailable => {
+                "literal matches only; the semantic recall model is unavailable."
+            }
+            QueryPageReason::AwaitingContinuity => {
+                "some meetings are still being connected; their loops are not included."
+            }
+            QueryPageReason::FilteredOut => "the filters exclude every available row.",
+            QueryPageReason::PeopleIndexEmpty => "no people are indexed yet.",
+        };
+        let _ = writeln!(text, "\n{explanation}");
+    }
+}
+
+fn text_response(response: &ExternalResponse) -> String {
+    let mut text = String::new();
+    match response {
+        ExternalResponse::Search(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  [{}]  {}\n{}\n{}\n",
+                    row.title,
+                    label(&row.kind),
+                    local_time(row.when_utc_ms),
+                    row.snippet,
+                    row.link
+                );
+            }
+            reason_footer(&mut text, page.reason);
+            page_footer(&mut text, page.next_cursor.is_some());
+        }
+        ExternalResponse::Meetings(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  {}\n{}  |  {}  |  {}\n{}\n",
+                    local_time(row.when_utc_ms),
+                    row.title,
+                    label(&row.phase),
+                    row.recorded_duration_ms
+                        .and_then(|ms| u64::try_from(ms).ok())
+                        .map(duration)
+                        .unwrap_or_else(|| "duration unknown".to_string()),
+                    row.speakers.join(", "),
+                    row.link
+                );
+                match &row.headline {
+                    MeetingHistoryHeadline::Ledger { text: headline }
+                    | MeetingHistoryHeadline::Summary { text: headline } => {
+                        let _ = writeln!(text, "{headline}\n");
+                    }
+                    MeetingHistoryHeadline::Words { words } => {
+                        let _ = writeln!(text, "{words} transcript words\n");
+                    }
+                    MeetingHistoryHeadline::None => {}
+                }
+            }
+            if page.entries.is_empty() {
+                text.push_str("no retained meetings match.\n");
+            }
+            page_footer(&mut text, page.has_more);
+        }
+        ExternalResponse::Meeting(meeting) => {
+            let _ = writeln!(
+                text,
+                "{}\n{}\nstate: {}\nprocessing: {}\n",
+                meeting.title,
+                meeting.link,
+                label(&meeting.phase),
+                processing_text(meeting.processing_status)
+            );
+            if !meeting.speakers.is_empty() {
+                let _ = writeln!(text, "speakers: {}\n", meeting.speakers.join(", "));
+            }
+            let context = &meeting.context;
+            let _ = writeln!(
+                text,
+                "conversation: {}\nsource: {}",
+                label(&context.kind),
+                label(&context.origin)
+            );
+            if !context.application_bundle_ids.is_empty() {
+                let _ = writeln!(
+                    text,
+                    "applications: {}",
+                    context.application_bundle_ids.join(", ")
+                );
+            }
+            if context.captured_microphone {
+                text.push_str("captured microphone audio\n");
+            }
+            if context.captured_system_audio {
+                text.push_str("captured computer audio\n");
+            }
+            if let Some(name) = &context.calendar_name {
+                let _ = writeln!(text, "calendar: {name}");
+            }
+            if let Some(location) = &context.calendar_location {
+                let _ = writeln!(text, "calendar location: {location}");
+            }
+            if let Some(location) = &context.location {
+                let _ = writeln!(
+                    text,
+                    "location: {} ({}, {})",
+                    location.name, location.latitude, location.longitude
+                );
+            }
+            text.push('\n');
+            if let Some(summary) = &meeting.summary {
+                let _ = writeln!(text, "{summary}\n");
+            }
+            if let Some(headline) = &meeting.headline {
+                let _ = writeln!(text, "{headline}\n");
+            }
+            for note in &meeting.notes {
+                let _ = writeln!(text, "- {note}");
+            }
+            for row in &meeting.loops {
+                let _ = writeln!(text, "[{}] {}\n{}", label(&row.status), row.text, row.link);
+            }
+            if meeting.summary.is_none() {
+                text.push_str("\nno generated summary; read --transcript for captured words.\n");
+            }
+        }
+        ExternalResponse::Transcript(transcript) => {
+            let _ = writeln!(text, "{}\n{}\n", transcript.title, transcript.link);
+            for line in &transcript.lines {
+                let seconds = line.start_ms / 1_000;
+                let speaker = if line.speaker.is_empty() {
+                    "unknown speaker"
+                } else {
+                    &line.speaker
+                };
+                let _ = writeln!(
+                    text,
+                    "[{:02}:{:02}:{:02}] {}: {}",
+                    seconds / 3_600,
+                    seconds / 60 % 60,
+                    seconds % 60,
+                    speaker,
+                    line.text
+                );
+                if line.corrected_text.is_some() {
+                    let _ = writeln!(
+                        text,
+                        "  captured: {}\n  corrected: {}\n  {}",
+                        line.raw_text,
+                        line.corrected_text.as_deref().unwrap_or(&line.text),
+                        line.link
+                    );
+                }
+            }
+            if transcript.lines.is_empty() {
+                text.push_str("no retained transcript lines.\n");
+            }
+        }
+        ExternalResponse::Loops(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "[{}] {}  ({})\n{}  |  {}\n{}\n",
+                    label(&row.status),
+                    row.text,
+                    label(&row.direction),
+                    row.meeting_title,
+                    row.owner.as_deref().unwrap_or("unassigned"),
+                    row.link
+                );
+            }
+            reason_footer(&mut text, page.reason);
+            if let Some(cursor) = &page.next_cursor {
+                let _ = writeln!(
+                    text,
+                    "\ncontinue with the same filters and --after {cursor}"
+                );
+            }
+        }
+        ExternalResponse::People(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  |  {} meetings\n{}",
+                    row.display_name, row.meetings_count, row.link
+                );
+                if let Some(title) = &row.last_meeting_title {
+                    let _ = writeln!(text, "last: {title}");
+                }
+                if let Some(headline) = &row.last_meeting_headline {
+                    let _ = writeln!(text, "{headline}");
+                }
+                text.push('\n');
+            }
+            reason_footer(&mut text, page.reason);
+            page_footer(&mut text, page.has_more);
+        }
+        ExternalResponse::PersonMemory(detail) => {
+            let snapshot = &detail.snapshot;
+            let _ = writeln!(
+                text,
+                "{}\n{}\nread: {}\n",
+                snapshot.display_name,
+                detail.link,
+                local_time(snapshot.read_at_utc_ms)
+            );
+            if let Some(since) = snapshot.since_utc_ms {
+                let _ = writeln!(text, "comparison boundary: {}\n", local_time(since));
+            }
+            if detail.view == ExternalPersonMemoryView::CatchUp {
+                if let Some(last) = &snapshot.catch_up.last_conversation {
+                    let _ = writeln!(
+                        text,
+                        "last conversation: {}  {}\n{}\n",
+                        last.title,
+                        local_time(last.at_utc_ms),
+                        last.link
+                    );
+                    write_person_availability(&mut text, last);
+                } else {
+                    text.push_str("no confirmed retained conversation.\n\n");
+                }
+                for id in &snapshot.catch_up.contribution_ids {
+                    if let Some(entry) = snapshot.contributions.iter().find(|entry| &entry.id == id)
+                    {
+                        let passage = &entry.passage;
+                        let _ = writeln!(
+                            text,
+                            "{} [{}]: {}\n{}\n",
+                            passage.speaker_label,
+                            label(&entry.attribution),
+                            passage
+                                .corrected_text
+                                .as_deref()
+                                .unwrap_or(&passage.raw_text),
+                            passage.source.link
+                        );
+                        write_person_availability(&mut text, &passage.source);
+                        if passage.corrected_text.is_some() {
+                            let _ = writeln!(text, "captured: {}\n", passage.raw_text);
+                        }
+                    }
+                }
+                for id in &snapshot.catch_up.commitment_ids {
+                    if let Some(entry) = snapshot.commitments.iter().find(|entry| &entry.id == id) {
+                        use crate::meeting::person_memory::PersonMemoryCommitmentRelation;
+                        let relation = match entry.relation {
+                            PersonMemoryCommitmentRelation::ExplicitOwner => {
+                                "owner explicitly assigned"
+                            }
+                            PersonMemoryCommitmentRelation::AttributedSpeech => {
+                                "in attributed speech; owner not confirmed"
+                            }
+                            PersonMemoryCommitmentRelation::SharedConversation => {
+                                "from shared conversation; owner not confirmed"
+                            }
+                        };
+                        let _ = writeln!(
+                            text,
+                            "ledger interpretation [{}; {relation}]: {}",
+                            label(&entry.status),
+                            entry.interpretation
+                        );
+                        for passage in &entry.evidence {
+                            let _ = writeln!(
+                                text,
+                                "  evidence: {}\n  {}",
+                                passage
+                                    .corrected_text
+                                    .as_deref()
+                                    .unwrap_or(&passage.raw_text),
+                                passage.source.link
+                            );
+                            write_person_availability(&mut text, &passage.source);
+                        }
+                        text.push('\n');
+                    }
+                }
+                for id in &snapshot.catch_up.note_ids {
+                    if let Some(note) = snapshot.notes.iter().find(|note| &note.source.id == id) {
+                        let _ = writeln!(
+                            text,
+                            "{}{}:\n{}\n{}\n",
+                            if note.includes_ai_synthesis {
+                                "note including ai synthesis: "
+                            } else {
+                                "saved note: "
+                            },
+                            note.source.title,
+                            note.body,
+                            note.source.link
+                        );
+                        write_person_availability(&mut text, &note.source);
+                    }
+                }
+                for id in &snapshot.catch_up.change_ids {
+                    if let Some(change) = snapshot.changes.iter().find(|change| &change.id == id) {
+                        write_person_change(&mut text, change);
+                    }
+                }
+            } else {
+                for change in &snapshot.changes {
+                    write_person_change(&mut text, change);
+                }
+                if snapshot.changes.is_empty() {
+                    text.push_str("no comparable retained evidence differs; this does not prove nothing changed.\n");
+                }
+            }
+            for limitation in &snapshot.limitations {
+                let _ = writeln!(text, "limitation: {limitation}");
+            }
+        }
+        ExternalResponse::Events(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  {}  [{}]\n{}\n",
+                    local_time(row.when_utc_ms),
+                    row.action,
+                    label(&row.result),
+                    row.detail
+                );
+                if let Some(summary) = &row.outcome_summary {
+                    let _ = writeln!(text, "{summary}");
+                }
+                if let Some(link) = &row.link {
+                    let _ = writeln!(text, "{link}");
+                }
+            }
+            if page.entries.is_empty() {
+                text.push_str("no events.\n");
+            }
+            if let Some(cursor) = &page.next_cursor {
+                let _ = writeln!(text, "\ncontinue with --events --after {cursor}");
+            }
+        }
+        ExternalResponse::Upcoming(page) => {
+            let _ = writeln!(
+                text,
+                "calendar access for this caller: {}\n",
+                label(&page.calendar_access)
+            );
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  {}\n{}\n",
+                    local_time(row.start_utc_ms),
+                    row.title,
+                    row.attendees.join(", ")
+                );
+                if let Some(url) = &row.join_url {
+                    let _ = writeln!(text, "{url}");
+                }
+            }
+            if page.entries.is_empty() {
+                text.push_str(if page.calendar_access == CalendarAccess::Authorized {
+                    "no calendar events in this window.\n"
+                } else { "this caller cannot read the calendar; an empty result does not mean a free week.\n" });
+            }
+            page_footer(&mut text, page.has_more);
+        }
+        ExternalResponse::LoopResolve(answer) => {
+            let _ = writeln!(
+                text,
+                "loop resolution: {}\nreceipt: {}",
+                label(&answer.receipt.result),
+                answer.receipt.operation_id.uuid()
+            );
+            if !answer.receipt.reason_codes.is_empty() {
+                let reasons = answer
+                    .receipt
+                    .reason_codes
+                    .iter()
+                    .map(label)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(text, "reasons: {reasons}");
+            }
+        }
+        ExternalResponse::Notes(page) => {
+            for row in &page.entries {
+                let _ = writeln!(
+                    text,
+                    "{}{}  {}\n{}\n",
+                    if row.pinned { "[pinned] " } else { "" },
+                    row.title,
+                    local_time(row.updated_at_ms),
+                    row.link
+                );
+            }
+            if page.entries.is_empty() {
+                text.push_str("no retained notes.\n");
+            }
+            page_footer(&mut text, page.has_more);
+        }
+        ExternalResponse::Note(detail) => {
+            if detail.memory.interpretation {
+                text.push_str("ai interpretation; not a transcript quote.\n\n");
+            }
+            let note = &detail.memory.note;
+            let _ = writeln!(
+                text,
+                "{}\n{}\nupdated: {}\n\n{}\n",
+                note.title,
+                detail.link,
+                local_time(note.updated_at_ms),
+                note.body
+            );
+            write_note_passages(&mut text, &detail.memory.passages);
+            if !detail.memory.sources.is_empty() {
+                text.push_str("sources:\n");
+                for source in &detail.memory.sources {
+                    if source.available {
+                        let _ = writeln!(text, "- {}\n  {}", source.title, source.link);
+                    } else {
+                        text.push_str("- unavailable source\n");
+                    }
+                }
+            }
+            if !detail.memory.related_notes.is_empty() {
+                text.push_str("\nrelated notes:\n");
+                for related in &detail.memory.related_notes {
+                    let _ = writeln!(text, "- {}\n  {}", related.title, note_link(&related.id));
+                    if let Some(connection) = detail
+                        .memory
+                        .connections
+                        .iter()
+                        .find(|connection| connection.note_id == related.id)
+                    {
+                        let _ = writeln!(text, "  {}", connection.reasons.join("; "));
+                    }
+                }
+            }
+        }
+        ExternalResponse::NoteContext(context) => {
+            for entry in &context.entries {
+                if entry.interpretation {
+                    text.push_str("ai interpretation; not a transcript quote.\n\n");
+                }
+                let _ = writeln!(
+                    text,
+                    "{}\n{}\nmatched: {}\n\n{}\n",
+                    entry.note.title, entry.link, entry.matched_text, entry.note.body
+                );
+                write_note_passages(&mut text, &entry.passages);
+                for source in &entry.sources {
+                    if source.available {
+                        let _ = writeln!(text, "source: {}\n{}\n", source.title, source.link);
+                    } else {
+                        text.push_str("source: unavailable\n\n");
+                    }
+                }
+                for connection in &entry.connections {
+                    let _ = writeln!(
+                        text,
+                        "connected note: {}\n{}\n",
+                        note_link(&connection.note_id),
+                        connection.reasons.join("; ")
+                    );
+                }
+            }
+            reason_footer(&mut text, context.reason);
+            page_footer(&mut text, context.has_more);
+        }
+        ExternalResponse::NoteVersions(versions) => {
+            let _ = writeln!(text, "{}\nsaved versions, newest first:\n", versions.link);
+            for version in &versions.entries {
+                let _ = writeln!(
+                    text,
+                    "{}  {}  {}  {} words  {} bytes",
+                    version.id,
+                    local_time(version.saved_at_ms),
+                    label(&version.kind),
+                    version.words,
+                    version.bytes
+                );
+            }
+            text.push_str("\nautosaves within ten minutes may share a version; at most 50 saved versions are retained.\n");
+        }
+        ExternalResponse::NoteDiff(diff) => {
+            let _ = writeln!(
+                text,
+                "{}\n--- version {} ({})\n+++ version {} ({})",
+                diff.link,
+                diff.from_version,
+                local_time(diff.from_saved_at_ms),
+                diff.to_version,
+                local_time(diff.to_saved_at_ms)
+            );
+            let _ = writeln!(
+                text,
+                "earlier source: {}\nlater source: {}",
+                diff.from_source.link, diff.to_source.link
+            );
+            if diff.changed {
+                let _ = writeln!(
+                    text,
+                    "@@ -{},{} +{},{} @@",
+                    diff.old_start, diff.old_lines, diff.new_start, diff.new_lines
+                );
+                for line in &diff.lines {
+                    text.push(match line.kind {
+                        ExternalDiffKind::Context => ' ',
+                        ExternalDiffKind::Remove => '-',
+                        ExternalDiffKind::Add => '+',
+                    });
+                    text.push_str(&line.text);
+                    if !line.text.ends_with('\n') {
+                        text.push_str("\n\\ No newline at end of file\n");
+                    }
+                }
+            } else {
+                text.push_str("no changes.\n");
+            }
+        }
+        ExternalResponse::Stats(stats) => {
+            let _ = writeln!(
+                text,
+                "retained corpus as of {}\n",
+                local_time(stats.measured_at_utc_ms)
+            );
+            match &stats.meetings {
+                ExternalDatasetStats::Available { totals } => {
+                    let _ = writeln!(text, "meetings: {}\n  verified audio: {}\n  transcript turns: {}\n  generated action items: {}",
+                        totals.meetings, duration(totals.verified_captured_duration_ms), totals.transcript_segments, totals.generated_action_items);
+                }
+                ExternalDatasetStats::Unavailable { error } => {
+                    let _ = writeln!(text, "meetings: unavailable ({})", error.message);
+                }
+            }
+            match &stats.dictations {
+                ExternalDatasetStats::Available { totals } => {
+                    let _ = writeln!(
+                        text,
+                        "\ndictations: {}\n  words: {}\n  measured audio: {}",
+                        totals.entries,
+                        totals.total_words,
+                        duration(totals.total_duration_ms)
+                    );
+                    for source in &totals.by_source {
+                        let _ = writeln!(
+                            text,
+                            "  {}: {} records, {} words",
+                            source
+                                .source_kind
+                                .as_ref()
+                                .map(label)
+                                .unwrap_or_else(|| "unknown source".to_string()),
+                            source.entries,
+                            source.total_words
+                        );
+                    }
+                }
+                ExternalDatasetStats::Unavailable { error } => {
+                    let _ = writeln!(text, "\ndictations: unavailable ({})", error.message);
+                }
+            }
+            match &stats.notes {
+                ExternalDatasetStats::Available { totals } => {
+                    let _ = writeln!(
+                        text,
+                        "\nnotes: {}\n  pinned: {}\n  saved versions: {}\n  characters: {}",
+                        totals.notes, totals.pinned, totals.saved_versions, totals.characters
+                    );
+                }
+                ExternalDatasetStats::Unavailable { error } => {
+                    let _ = writeln!(text, "\nnotes: unavailable ({})", error.message);
+                }
+            }
+            for (name, evidence) in [
+                ("meetings", &stats.sources.meetings),
+                ("dictations", &stats.sources.dictations),
+                ("notes", &stats.sources.notes),
+            ] {
+                match evidence {
+                    ExternalDatasetStats::Available { totals } => {
+                        let _ = writeln!(text, "\n{name} evidence: {}", totals.method);
+                        for link in &totals.sample_links {
+                            let _ = writeln!(text, "  {link}");
+                        }
+                        if totals.has_more {
+                            text.push_str(
+                                "  source links are a sample; totals cover all retained records.\n",
+                            );
+                        }
+                    }
+                    ExternalDatasetStats::Unavailable { error } => {
+                        let _ =
+                            writeln!(text, "\n{name} evidence: unavailable ({})", error.message);
+                    }
+                }
+            }
+            if !stats.complete {
+                text.push_str(
+                    "\npartial statistics; unavailable sources are not counted as zero.\n",
+                );
+            }
+        }
+    }
+    text
+}
+
+fn write_note_passages(text: &mut String, passages: &[ScratchPassage]) {
+    for passage in passages {
+        let _ = writeln!(
+            text,
+            "saved passage [{}; {}–{} ms]:\n{}\n",
+            label(&passage.wording),
+            passage.start_ms,
+            passage.end_ms,
+            passage.link
+        );
+    }
+}
+
+fn write_person_change(text: &mut String, change: &PersonMemoryChange) {
+    let _ = writeln!(
+        text,
+        "evidence differs: {} [{}]",
+        change.title,
+        label(&change.kind)
+    );
+    for (label, side) in [("earlier", &change.earlier), ("later", &change.later)] {
+        let _ = writeln!(
+            text,
+            "{label} ({}){}:\n{}\n{}\n",
+            local_time(side.source.at_utc_ms),
+            if side.includes_ai_interpretation {
+                " [includes ai interpretation]"
+            } else {
+                ""
+            },
+            side.text,
+            side.source.link
+        );
+        write_person_availability(text, &side.source);
+    }
+}
+
+fn write_person_availability(text: &mut String, source: &person_memory::PersonMemorySource) {
+    if source.transcript_available == Some(false) {
+        text.push_str("source transcript unavailable.\n");
+    }
+    if source.audio_retained == Some(false) {
+        text.push_str("source recording unavailable.\n");
+    }
+}
+
+fn terminal_safe(text: String) -> String {
+    let Some((start, _)) = text
+        .char_indices()
+        .find(|(_, character)| character.is_control() && *character != '\n' && *character != '\t')
+    else {
+        return text;
+    };
+    let mut safe = String::with_capacity(text.len());
+    safe.push_str(&text[..start]);
+    for character in text[start..].chars() {
+        if character.is_control() && character != '\n' && character != '\t' {
+            let _ = write!(safe, "{}", character.escape_unicode());
+        } else {
+            safe.push(character);
+        }
+    }
+    safe
+}
+
 /// Run one external request for the headless CLI, and report a process exit
 /// code.
 ///
-/// Stdout carries exactly one JSON value on success; stderr carries exactly
-/// one JSON object on failure. Nothing else is printed on either, which is
-/// what makes `sona --query … | jq` work while the app's own log lines are
-/// going to stderr beside it.
+/// Default stdout is one JSON value; `--format text` renders the same result
+/// without ANSI or other terminal control sequences. Errors keep their exit codes.
 pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
     use tauri::Manager;
 
@@ -1432,24 +2868,49 @@ pub fn run_cli(app: &tauri::AppHandle, args: &CliArgs) -> i32 {
             let meetings = app.state::<Arc<MeetingSessionManager>>();
             let history = app.state::<Arc<HistoryManager>>();
             let calendar = crate::meeting::detection::calendar::platform_calendar();
-            tauri::async_runtime::block_on(answer(&allowed, &meetings, &history, calendar.as_ref()))
+            tauri::async_runtime::block_on(answer(
+                &allowed,
+                app,
+                &meetings,
+                &history,
+                calendar.as_ref(),
+            ))
         });
-    let printed = match outcome {
-        Ok(response) => serde_json::to_string(&response).map(|json| {
-            println!("{json}");
-            response.exit_code()
-        }),
-        Err(error) => serde_json::to_string(&error).map(|json| {
-            eprintln!("{json}");
+    let format = args.format.unwrap_or_default();
+    match outcome {
+        Ok(response) => {
+            let output = match format {
+                ExternalFormat::Json => serde_json::to_string(&response),
+                ExternalFormat::Text => Ok(terminal_safe(text_response(&response))),
+            };
+            match output {
+                Ok(output) => {
+                    println!("{output}");
+                    response.exit_code()
+                }
+                Err(_) => {
+                    eprintln!(
+                        r#"{{"schema_version":{QUERY_SCHEMA_VERSION},"error":"failed","message":"The answer could not be serialized."}}"#
+                    );
+                    1
+                }
+            }
+        }
+        Err(error) => {
+            match format {
+                ExternalFormat::Json => match serde_json::to_string(&error) {
+                    Ok(json) => eprintln!("{json}"),
+                    Err(_) => eprintln!(
+                        r#"{{"schema_version":{QUERY_SCHEMA_VERSION},"error":"failed","message":"The refusal could not be serialized."}}"#
+                    ),
+                },
+                ExternalFormat::Text => {
+                    eprintln!("{}: {}", label(&error.error), terminal_safe(error.message))
+                }
+            }
             error.error.exit_code()
-        }),
-    };
-    printed.unwrap_or_else(|error| {
-        eprintln!(
-            r#"{{"schema_version":{QUERY_SCHEMA_VERSION},"error":"failed","message":"The answer could not be serialized: {error}"}}"#
-        );
-        1
-    })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1819,13 +3280,14 @@ mod tests {
             "agent_panel_public_identity",
             "repeat",
             "json",
+            "format",
             "opened_audio_files",
             "help",
             "version",
         ];
         // One invocation per modifier, beside a verb that does not read it.
         // `--from` and `--to` require each other, so they share theirs.
-        let cases: [(&str, &[&str]); 9] = [
+        let cases: [(&str, &[&str]); 12] = [
             ("scope", &["--upcoming", "--scope", "people"]),
             ("limit", &["--meeting", MEETING, "--limit", "3"]),
             ("last", &["--upcoming", "--last", "3"]),
@@ -1840,7 +3302,13 @@ mod tests {
             ("status", &["--upcoming", "--status", "open"]),
             ("mine", &["--upcoming", "--mine"]),
             ("waiting", &["--upcoming", "--waiting"]),
+            (
+                "since_utc_ms",
+                &["--upcoming", "--since-utc-ms", "1700000000000"],
+            ),
             ("after", &["--upcoming", "--after", "abc"]),
+            ("from_version", &["--upcoming", "--from-version", "1"]),
+            ("to_version", &["--upcoming", "--to-version", "2"]),
         ];
 
         let command = CliArgs::command();

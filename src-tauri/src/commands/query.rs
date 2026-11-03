@@ -3,7 +3,9 @@ use crate::meeting::detection::calendar::CalendarSource;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingFolderId;
 use crate::query::pack::QueryPack;
-use crate::query::{QueryCursor, QueryError, QueryEventsPage, QueryScope, QuerySearchPage};
+use crate::query::{
+    QueryAudience, QueryCursor, QueryError, QueryEventsPage, QueryScope, QuerySearchPage,
+};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
@@ -22,7 +24,16 @@ pub async fn sona_query_search(
     limit: Option<usize>,
     cursor: Option<QueryCursor>,
 ) -> Result<QuerySearchPage, QueryError> {
-    crate::query::search(&meetings, &history, scope, &query, limit, cursor).await
+    crate::query::search(
+        &meetings,
+        &history,
+        QueryAudience::Local,
+        scope,
+        &query,
+        limit,
+        cursor,
+    )
+    .await
 }
 
 /// What happened, newest first. `after_id` is the last event id the caller

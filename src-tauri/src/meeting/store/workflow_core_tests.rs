@@ -209,6 +209,7 @@ fn calendar_link(
                 }],
                 notes: None,
                 calendar_name: None,
+                location: None,
                 url: None,
             },
         )

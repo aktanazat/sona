@@ -1,8 +1,5 @@
 import SwiftUI
 
-/// Home: what the microphone is doing, the chord that drives it, the words
-/// as they land and the mode they run through, and under that the overview:
-/// the numbers, what needs a decision, what is coming, what happened lately.
 struct CaptureScreen: View {
     @Environment(AppModel.self) private var model
 
@@ -45,6 +42,7 @@ struct CaptureScreen: View {
                 }
             }
             .padding(.bottom, 16)
+            MemoryHubView()
             OverviewView(
                 store: model.overview,
                 openMeeting: model.openMeeting,

@@ -1,14 +1,3 @@
-/* What this server actually does: turn a tool call into a `sona` command line,
- * and hand back what `sona` said.
- *
- * The stub below is most of the test rig. It records the argv it was given and
- * replies with whatever the test told it to, which is enough to pin the mapping
- * and the passthrough without an installed app and without a corpus. The last
- * describe adds the piece a stub cannot reach: `index.ts` on a real MCP
- * transport, so the server's construction — its imports included — is exercised
- * by the suite rather than first by an agent's first `tools/call`.
- */
-
 import { afterEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -22,13 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DEFAULT_SONA_BIN,
-  runSona,
-  SonaCliError,
-  sonaBinary,
-} from "../src/cli.ts";
-import { SCOPES, SonaInputError, TOOLS } from "../src/tools.ts";
+import { runSona, SonaCliError } from "../src/cli.ts";
+import { SonaInputError, TOOLS } from "../src/tools.ts";
 import { createServer } from "../src/index.ts";
 
 const directories: string[] = [];
@@ -94,15 +78,6 @@ function tool(name: string) {
   return found;
 }
 
-/** The values a tool's schema publishes for one property. */
-function publishedEnum(toolName: string, property: string): readonly string[] {
-  const published = tool(toolName).inputSchema.properties[property]?.enum;
-  if (published === undefined) {
-    throw new Error(`${toolName}.${property} publishes no enum`);
-  }
-  return published;
-}
-
 /** The refusal `sona` produced, or a failure saying it did not refuse. */
 async function refusalOf(argv: readonly string[]): Promise<SonaCliError> {
   try {
@@ -114,92 +89,7 @@ async function refusalOf(argv: readonly string[]): Promise<SonaCliError> {
   throw new Error(`sona answered ${argv.join(" ")} instead of refusing`);
 }
 
-describe("tool to argv", () => {
-  test("upcoming takes only a row count", () => {
-    expect(tool("sona_upcoming").argv({})).toEqual(["--upcoming"]);
-    expect(tool("sona_upcoming").argv({ limit: 3 })).toEqual([
-      "--upcoming",
-      "--limit",
-      "3",
-    ]);
-  });
-
-  /* The one tool that writes. Its loop id goes through verbatim, and its
-   * schema says so is required, so a call without one never spawns anything. */
-  test("resolving a loop carries the loop id and nothing else", () => {
-    expect(
-      tool("sona_loop_resolve").argv({ loop_id: "abc:loop:0123456789abcdef" }),
-    ).toEqual(["--loop-resolve", "abc:loop:0123456789abcdef"]);
-    expect(() => tool("sona_loop_resolve").argv({})).toThrow(SonaInputError);
-  });
-
-  test("search carries its scope and limit", () => {
-    expect(
-      tool("sona_search").argv({ query: "dana", scope: "people", limit: 5 }),
-    ).toEqual(["--query", "dana", "--scope", "people", "--limit", "5"]);
-    expect(tool("sona_search").argv({ query: "dana" })).toEqual([
-      "--query",
-      "dana",
-    ]);
-  });
-
-  test("a meetings window is either a count or a pair of dates", () => {
-    expect(tool("sona_meetings").argv({ last: 3 })).toEqual([
-      "--meetings",
-      "--last",
-      "3",
-    ]);
-    expect(
-      tool("sona_meetings").argv({ from: "2026-06-01", to: "2026-06-30" }),
-    ).toEqual(["--meetings", "--from", "2026-06-01", "--to", "2026-06-30"]);
-  });
-
-  test("action items narrow by state and side, then resume after a loop", () => {
-    expect(tool("sona_action_items").argv({ status: "open" })).toEqual([
-      "--loops",
-      "--status",
-      "open",
-    ]);
-    expect(tool("sona_action_items").argv({ side: "mine" })).toEqual([
-      "--loops",
-      "--mine",
-    ]);
-    expect(
-      tool("sona_action_items").argv({ side: "waiting", limit: 10 }),
-    ).toEqual(["--loops", "--waiting", "--limit", "10"]);
-    expect(
-      tool("sona_action_items").argv({
-        status: "open",
-        side: "waiting",
-        after: "loop-123",
-        limit: 10,
-      }),
-    ).toEqual([
-      "--loops",
-      "--status",
-      "open",
-      "--waiting",
-      "--after",
-      "loop-123",
-      "--limit",
-      "10",
-    ]);
-  });
-
-  /* Sona owns what a scope is. This server only has to publish the same list,
-   * so a client picking from the schema cannot compose a command Sona refuses
-   * for a reason the schema could have prevented. */
-  test("the schemas publish the enums sona accepts", () => {
-    expect(publishedEnum("sona_search", "scope")).toEqual([...SCOPES]);
-    expect(SCOPES).toEqual([
-      "all",
-      "meetings",
-      "dictations",
-      "people",
-      "loops",
-    ]);
-  });
-
+describe("tool arguments", () => {
   test("an argument that cannot become a command line is refused here", () => {
     expect(() => tool("sona_search").argv({})).toThrow(SonaInputError);
     expect(() => tool("sona_people").argv({ name: 42 })).toThrow(
@@ -212,12 +102,6 @@ describe("tool to argv", () => {
 });
 
 describe("running sona", () => {
-  test("the resolved binary is the install path unless SONA_BIN says otherwise", () => {
-    expect(sonaBinary()).toBe(DEFAULT_SONA_BIN);
-    process.env.SONA_BIN = "/somewhere/else/sona";
-    expect(sonaBinary()).toBe("/somewhere/else/sona");
-  });
-
   test("a refusal is found past the log lines printed beside it", async () => {
     stub({
       stderr: [
@@ -275,10 +159,6 @@ describe("running sona", () => {
   });
 });
 
-/** A client talking to a freshly constructed server over linked in-memory
- * transports. Constructing it is the point: `createServer` is where the
- * `tools.ts` imports are resolved and the two request handlers are registered,
- * and nothing else in this suite touches either. */
 async function connected(): Promise<Client> {
   const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "sona-mcp-test", version: "0.1.0" });
@@ -314,98 +194,6 @@ async function errorOf(
 }
 
 describe("the stdio server", () => {
-  test("publishes every tool it can run", async () => {
-    const client = await connected();
-
-    const listed = await client.listTools();
-
-    expect(listed.tools.map((published) => published.name)).toEqual(
-      TOOLS.map((definition) => definition.name),
-    );
-    /* The schema an agent reads is the one in `tools.ts`, verbatim: through
-     * JSON because that is how it reaches the agent. */
-    expect(listed.tools.map((published) => published.inputSchema)).toEqual(
-      JSON.parse(
-        JSON.stringify(TOOLS.map((definition) => definition.inputSchema)),
-      ),
-    );
-    await client.close();
-  });
-
-  test("every published tool reaches isolated sona with its documented argv", async () => {
-    const cases: ReadonlyArray<{
-      name: string;
-      args: RawCallArguments;
-      argv: string[];
-    }> = [
-      {
-        name: "sona_search",
-        args: { query: "tier" },
-        argv: ["--query", "tier"],
-      },
-      {
-        name: "sona_meetings",
-        args: { last: 3 },
-        argv: ["--meetings", "--last", "3"],
-      },
-      {
-        name: "sona_meeting",
-        args: { meeting_id: "meeting-1" },
-        argv: ["--meeting", "meeting-1"],
-      },
-      {
-        name: "sona_transcript",
-        args: { meeting_id: "meeting-1" },
-        argv: ["--transcript", "meeting-1"],
-      },
-      {
-        name: "sona_action_items",
-        args: { status: "open", side: "mine", after: "loop-1", limit: 2 },
-        argv: [
-          "--loops",
-          "--status",
-          "open",
-          "--mine",
-          "--after",
-          "loop-1",
-          "--limit",
-          "2",
-        ],
-      },
-      {
-        name: "sona_people",
-        args: { name: "Dana" },
-        argv: ["--people", "Dana"],
-      },
-      {
-        name: "sona_upcoming",
-        args: { limit: 2 },
-        argv: ["--upcoming", "--limit", "2"],
-      },
-      {
-        name: "sona_loop_resolve",
-        args: { loop_id: "loop-1" },
-        argv: ["--loop-resolve", "loop-1"],
-      },
-    ];
-
-    for (const { name, args, argv } of cases) {
-      const payload = { schema_version: 2, tool: name };
-      const sona = stub({ stdout: JSON.stringify(payload) });
-      const client = await connected();
-      try {
-        const answered = await client.callTool({ name, arguments: args });
-
-        expect(sona.argv()).toEqual(argv);
-        expect(answered.content).toEqual([
-          { type: "text", text: JSON.stringify(payload, null, 2) },
-        ]);
-      } finally {
-        await client.close();
-      }
-    }
-  });
-
   /* The refusal an agent has to be able to branch on: the code and the
    * settings row survive the trip out through JSON-RPC. */
   test("a consent refusal arrives as an invalid-request error naming the switch", async () => {

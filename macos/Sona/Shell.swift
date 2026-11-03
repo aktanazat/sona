@@ -111,6 +111,10 @@ struct Shell: View {
                 PeopleScreen(
                     store: model.people,
                     openMeeting: model.openMeeting,
+                    openContribution: { sessionId, atMilliseconds in
+                        model.meetings.open(sessionId, atMilliseconds: atMilliseconds)
+                        model.go(.meetings)
+                    },
                     ingestDocument: { model.showSettings(.importing) },
                     deleteDocument: { id in Task { await model.documents.delete(id: id) } },
                     openVocabulary: { model.showSettings(.vocabulary) })
@@ -123,7 +127,7 @@ struct Shell: View {
                               saved.body == model.scratchpad.body else { return }
                         sharedNote = saved
                     }
-                })
+                }, openSource: { model.open(link: $0) })
                     .sheet(item: $sharedNote) { note in
                         CloudNoteShareView(note: note)
                     }

@@ -22,9 +22,11 @@ struct HUDPill: View {
         .padding(8)
     }
 
+    private var presentation: PillPresentation { model.pillPresentation }
+
     private var phase: String {
-        if let feedback = model.pillFeedback { return feedback.label }
-        switch model.capture {
+        if let feedback = presentation.feedback { return feedback.label }
+        switch presentation.capture {
         case .idle: return "idle"
         case .recording: return "recording"
         case let .working(kind): return kind
@@ -33,13 +35,13 @@ struct HUDPill: View {
 
     private var showsLiveWords: Bool {
         guard model.settings.settings.overlayStyle == .live else { return false }
-        if case .recording = model.capture { return true }
+        if case .recording = presentation.capture { return true }
         return false
     }
 
     private var capsule: some View {
         Group {
-            if model.capture == .idle, model.pillFeedback == nil {
+            if presentation.capture == .idle, presentation.feedback == nil {
                 idle
             } else {
                 ZStack {
@@ -58,7 +60,7 @@ struct HUDPill: View {
     }
 
     @ViewBuilder private var activeContent: some View {
-        if let feedback = model.pillFeedback {
+        if let feedback = presentation.feedback {
             HStack(spacing: 8) {
                 Image(systemName: feedback.symbol)
                     .font(.system(size: 13, weight: .semibold))
@@ -69,7 +71,7 @@ struct HUDPill: View {
         } else {
             HStack(spacing: 6) {
                 control("Cancel", symbol: "xmark") { model.cancelCapture() }
-                switch model.capture {
+                switch presentation.capture {
                 case .recording:
                     RecordingWaveform(meter: model.meter)
                         .frame(width: 55, height: 18)
@@ -147,6 +149,9 @@ struct HUDPill: View {
             }
             Divider()
             Button("Hide for an hour") { model.hidePillForAnHour() }
+            Button("Hide between dictations") {
+                Task { await model.settings.setHudPillEnabled(false) }
+            }
         }
     }
 
@@ -172,7 +177,7 @@ struct HUDPill: View {
             Text("\(seconds)s")
                 .foregroundStyle(Theme.hudLive)
                 .accessibilityLabel("\(seconds) seconds left")
-        } else if case let .recording(since) = model.capture {
+        } else if case let .recording(since) = presentation.capture {
             TimelineView(.periodic(from: since, by: 1)) { context in
                 Text(context.date.timeIntervalSince(since).clock)
                     .monospacedDigit()
@@ -716,7 +721,8 @@ struct CommandPalette: View {
     /// One page: the newest dozen that matched. Recency orders the plane.
     private static let limit: Int64 = 12
     private static let kinds: [(kind: QueryRowKind, label: String)] = [
-        (.meeting, "Meetings"), (.person, "People"), (.dictation, "Dictations"), (.loop, "Loops"),
+        (.meeting, "Meetings"), (.person, "People"), (.note, "Notes"),
+        (.dictation, "Dictations"), (.loop, "Loops"),
     ]
 
     var body: some View {
@@ -1061,6 +1067,7 @@ private struct PaletteRowView: View {
             switch hit.kind {
             case .meeting: "video"
             case .dictation: "waveform"
+            case .note: "square.and.pencil"
             case .person: "person"
             case .series: "calendar"
             case .loop: "arrow.triangle.2.circlepath"

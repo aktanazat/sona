@@ -66,6 +66,8 @@ struct MeetingNavigationPayload: Decodable {
     let destination: MeetingNavigationDestination
     let sessionId: MeetingSessionId?
     let revision: Int
+    let atMilliseconds: UInt64?
+    let segmentId: String?
 }
 
 // MARK: - Session state
@@ -557,6 +559,7 @@ enum MeetingCommandError: String, Decodable {
     case insufficientEnrollmentEvidence = "insufficient_enrollment_evidence"
     case profileModelIncompatible = "profile_model_incompatible"
     case profileMergeResolutionRequired = "profile_merge_resolution_required"
+    case transcriptCorrectionConflict = "transcript_correction_conflict"
     case remoteUnavailable = "remote_unavailable"
     case engineFailure = "engine_failure"
     case importUnreadable = "import_unreadable"
@@ -583,6 +586,8 @@ enum MeetingCommandError: String, Decodable {
         case .insufficientEnrollmentEvidence: "Sona could not remember that voice."
         case .profileModelIncompatible: "Sona could not remember that voice."
         case .profileMergeResolutionRequired: "Choose which voice profile to keep first."
+        case .transcriptCorrectionConflict:
+            "These people learned different replacements for the same phrase. Edit or remove the conflicting learned phrase before merging."
         case .remoteUnavailable: "The remote engine was unavailable."
         case .engineFailure: "The engine failed while writing this."
         case .importUnreadable: "Sona cannot read that file. Choose a different one."

@@ -612,6 +612,9 @@ pub(crate) fn map_store_error(error: StoreError) -> MeetingCommandError {
         StoreError::ProfileMergeResolutionRequired => {
             MeetingCommandError::ProfileMergeResolutionRequired
         }
+        StoreError::TranscriptCorrectionConflict => {
+            MeetingCommandError::TranscriptCorrectionConflict
+        }
         StoreError::EncryptionUnavailable
         | StoreError::StorageUnavailable
         | StoreError::Unavailable

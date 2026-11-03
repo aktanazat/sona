@@ -31,6 +31,7 @@ struct ScratchNoteVersion: Decodable, Identifiable, Equatable {
     enum Kind: String, Decodable {
         case edit
         case restore
+        case synthesis
     }
 
     let id: Int64
@@ -76,6 +77,157 @@ private struct ScratchPinParams: Encodable {
 private struct ScratchRestoreParams: Encodable {
     let id: String
     let versionId: Int64
+}
+
+struct ScratchSourceRef: Encodable, Hashable {
+    let kind: String
+    let id: String
+
+    var key: String { "\(kind):\(id)" }
+}
+
+struct ScratchSource: Codable, Identifiable, Equatable {
+    let kind: String
+    let id: String
+    let title: String
+    let link: String
+    let revision: Int64?
+    let available: Bool
+
+    var target: ScratchSourceRef { ScratchSourceRef(kind: kind, id: id) }
+    var key: String { target.key }
+}
+
+struct PhoneThoughtReference: Decodable, Identifiable {
+    let vaultId: String
+    let objectId: String
+    let revisionId: String
+    let noteId: String
+    let capturedAtUtcMs: Int64
+    let origin: String
+    let deviceId: String
+    let link: String?
+    let sourceDeleted: Bool
+    let changeSequence: Int64
+
+    var id: String { "\(objectId)/\(revisionId)" }
+}
+
+struct ScratchNoteMemory: Decodable {
+    let note: ScratchNote
+    let sources: [ScratchSource]
+    let phoneSources: [PhoneThoughtReference]
+    let relatedNotes: [ScratchNote]
+    let passages: [ScratchPassage]
+    let interpretation: Bool
+    let connections: [ScratchConnection]
+}
+
+struct ScratchSourceEvidence: Decodable, Identifiable {
+    let source: ScratchSource
+    let text: String
+    var id: String { source.key }
+}
+
+struct ScratchSourceCandidate: Decodable, Identifiable {
+    let kind: String
+    let id: String
+    let title: String
+    let link: String
+    var key: String { "\(kind):\(id)" }
+    var target: ScratchSourceRef { ScratchSourceRef(kind: kind, id: id) }
+
+    init(note: ScratchNote) {
+        kind = "note"
+        id = note.id
+        title = note.title
+        link = "sona://note/\(note.id)"
+    }
+
+    init(source: ScratchSource) {
+        kind = source.kind
+        id = source.id
+        title = source.title
+        link = source.link
+    }
+}
+
+private struct ScratchSourceSearchPage: Decodable {
+    let entries: [ScratchSourceCandidate]
+}
+
+private struct ScratchLinkParams: Encodable {
+    let id: String
+    let source: ScratchSourceRef
+}
+
+private struct ScratchSynthesisParams: Encodable {
+    let sources: [ScratchSourceRef]
+}
+
+struct ScratchPassage: Decodable, Identifiable {
+    let meetingId: String
+    let segmentId: String
+    let startMs: Int64
+    let endMs: Int64
+    let personId: String?
+    let wording: String
+    let link: String
+    var id: String { "\(meetingId):\(segmentId)" }
+}
+
+struct ScratchConnection: Decodable {
+    let noteId: String
+    let reasons: [String]
+}
+
+struct ScratchReviewSource: Codable, Identifiable {
+    let source: ScratchSource
+    let text: String
+    var id: String { source.key }
+}
+
+struct ScratchSynthesisDraft: Codable {
+    var body: String
+    let sources: [ScratchReviewSource]
+    let authorship: String
+}
+
+struct ScratchReviewCandidates: Decodable {
+    let sources: [ScratchSource]
+    let hasMore: Bool
+}
+
+struct ScratchSubject: Decodable, Identifiable {
+    let id: String
+    let title: String
+    let currentNoteId: String?
+    let createdAtMs: Int64
+}
+
+struct ScratchSubjectPage: Decodable, Identifiable {
+    let subject: ScratchSubject
+    let current: ScratchNote?
+    let history: [ScratchNote]
+    var id: String { subject.id }
+}
+
+private struct ScratchAcceptParams: Encodable {
+    let draft: ScratchSynthesisDraft
+}
+
+private struct ScratchPassageParams: Encodable {
+    let meetingId: String
+    let segmentId: String
+    let excerpt: String
+    let personId: String?
+    let body: String
+}
+
+private struct ScratchSubjectNoteParams: Encodable {
+    let id: String
+    let noteId: String
+    let action: String
 }
 
 /// The scratchpad: the notes, the search over them, and the one note open in
@@ -134,6 +286,23 @@ final class ScratchpadStore {
     private(set) var versionsLoading = false
     private(set) var versionsError: String?
     private(set) var restoring = false
+    private(set) var memory: ScratchNoteMemory?
+    private(set) var memoryLoading = false
+    private(set) var synthesizing = false
+    private(set) var viewedVersion: ScratchNoteVersion?
+    private(set) var openedSubject: ScratchSubjectPage?
+    private(set) var evidenceRevision = 0
+
+    var sourceCandidates: [ScratchSourceCandidate] {
+        var candidates = [ScratchSourceCandidate]()
+        if let saved { candidates.append(ScratchSourceCandidate(note: saved)) }
+        candidates += (memory?.sources ?? []).filter(\.available).map(ScratchSourceCandidate.init(source:))
+        candidates += (memory?.relatedNotes ?? []).map(ScratchSourceCandidate.init(note:))
+        candidates += notes.map(ScratchSourceCandidate.init(note:))
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.key).inserted }
+    }
+
 
     /// Quit may proceed only when there is neither a write on its way nor
     /// nonblank words the core has not acknowledged.
@@ -164,6 +333,14 @@ final class ScratchpadStore {
         core.observe(CoreEvent.scratchpadChanged) { [weak self] line in
             guard let change: ScratchpadChanged = try? Core.payload(line) else { return }
             Task { await self?.changed(change) }
+        }
+        for event in [CoreEvent.meetingSessionChanged, CoreEvent.meetingTranscriptChanged, CoreEvent.meetingRemoved] {
+            core.observe(event) { [weak self] _ in
+                guard let self else { return }
+                self.evidenceRevision += 1
+                self.memory = nil
+                if self.editing { Task { await self.loadMemory() } }
+            }
         }
     }
 
@@ -220,7 +397,9 @@ final class ScratchpadStore {
     }
 
     private func changed(_ change: ScratchpadChanged) async {
+        evidenceRevision += 1
         await load()
+        if editing { await loadMemory() }
         guard editing, change.noteId == openId else { return }
         if change.deleted {
             leaveEditor()
@@ -257,6 +436,7 @@ final class ScratchpadStore {
 
     private func take(_ note: ScratchNote?) {
         session = UUID()
+        viewedVersion = nil
         openId = note?.id
         saved = note
         body = note?.body ?? ""
@@ -266,6 +446,9 @@ final class ScratchpadStore {
         error = nil
         editing = true
         focusRequest += 1
+        memory = nil
+        memoryLoading = false
+        Task { await loadMemory() }
     }
 
     /// Bring a retained draft back into focus after quitting was cancelled.
@@ -336,6 +519,7 @@ final class ScratchpadStore {
             openId = note.id
             saved = note
             error = nil
+            if memory == nil { Task { await loadMemory() } }
             saveState = body == text ? .clean : (isBlank(body) ? .blank : .unsaved)
             return true
         } catch {
@@ -367,12 +551,15 @@ final class ScratchpadStore {
         saveTask?.cancel()
         saveTask = nil
         session = UUID()
+        viewedVersion = nil
         editing = false
         openId = nil
         saved = nil
         body = ""
         saveState = .clean
         versions = nil
+        memory = nil
+        memoryLoading = false
     }
 
     // MARK: - Pin, delete, history
@@ -480,6 +667,177 @@ final class ScratchpadStore {
             versionsError = error.localizedDescription
             return false
         }
+    }
+
+    func open(id: String, versionId: Int64? = nil) async {
+        do {
+            let selected: ScratchNoteVersion?
+            if let versionId {
+                let history: [ScratchNoteVersion] = try await core.request("scratchpad_versions", ScratchIdParams(id: id))
+                guard let version = history.first(where: { $0.id == versionId && $0.noteId == id }) else {
+                    error = "This saved version is no longer available."
+                    return
+                }
+                selected = version
+            } else {
+                selected = nil
+            }
+            let note: ScratchNote? = try await core.request("scratchpad_get", ScratchIdParams(id: id))
+            guard let note else {
+                error = "This note no longer exists."
+                return
+            }
+            await open(note)
+            if openId == id { viewedVersion = selected }
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func loadMemory() async {
+        guard let id = openId else { return }
+        let revision = evidenceRevision
+        memoryLoading = true
+        defer { if openId == id { memoryLoading = false } }
+        do {
+            let result: ScratchNoteMemory? = try await core.request("scratchpad_memory", ScratchIdParams(id: id))
+            guard openId == id, evidenceRevision == revision else { return }
+            memory = result
+        } catch {
+            guard openId == id, evidenceRevision == revision else { return }
+            self.error = error.localizedDescription
+        }
+    }
+
+    func capturedSource(_ source: ScratchSource) async throws -> ScratchSourceEvidence? {
+        guard let id = openId else { return nil }
+        let revision = evidenceRevision
+        let evidence: ScratchSourceEvidence? = try await core.request(
+            "scratchpad_source_evidence", ScratchLinkParams(id: id, source: source.target))
+        guard openId == id, evidenceRevision == revision else {
+            throw CoreError.remote(.string("The source changed. Open it again."))
+        }
+        return evidence
+    }
+
+    func searchSources(_ query: String) async throws -> [ScratchSourceCandidate] {
+        let page: ScratchSourceSearchPage = try await core.request(
+            "sona_query_search",
+            ["scope": .string("all"), "query": .string(query), "limit": .number(30), "cursor": .null] as [String: JSONValue]
+        )
+        return page.entries.filter { ["note", "meeting", "person"].contains($0.kind) }
+    }
+
+    func link(_ target: ScratchSourceRef) async -> Bool {
+        guard await flush(), let id = openId else { return false }
+        do {
+            let result: ScratchNoteMemory = try await core.request(
+                "scratchpad_link", ScratchLinkParams(id: id, source: target))
+            guard openId == id else { return false }
+            memory = result
+            error = nil
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    func unlink(_ source: ScratchSource) async {
+        guard let id = openId else { return }
+        do {
+            try await core.request("scratchpad_unlink", ScratchLinkParams(id: id, source: source.target))
+            await loadMemory()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    func closeVersion() { viewedVersion = nil }
+
+    func openSubject(id: String) async {
+        guard await flush() else { return }
+        do {
+            guard let page = try await subject(id: id) else {
+                error = "This subject no longer exists."
+                return
+            }
+            openedSubject = page
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func closeSubject() { openedSubject = nil }
+
+    func prepareSynthesis(_ targets: [ScratchSourceRef]) async throws -> ScratchSynthesisDraft {
+        guard !synthesizing, await flush() else {
+            throw CoreError.remote(.string(error ?? "Save the current note first."))
+        }
+        synthesizing = true
+        defer { synthesizing = false }
+        return try await core.request("scratchpad_prepare_synthesis", ScratchSynthesisParams(sources: targets))
+    }
+
+    func manualReview(_ targets: [ScratchSourceRef]) async throws -> ScratchSynthesisDraft {
+        guard await flush() else { throw CoreError.remote(.string(error ?? "Save the current note first.")) }
+        let sources: [ScratchReviewSource] = try await core.request(
+            "scratchpad_review_sources", ScratchSynthesisParams(sources: targets))
+        return ScratchSynthesisDraft(body: "", sources: sources, authorship: "explicit_note")
+    }
+
+    func reviewCandidates(period: String) async throws -> ScratchReviewCandidates {
+        try await core.request("scratchpad_review_candidates", ["period": period])
+    }
+
+    func acceptSynthesis(_ draft: ScratchSynthesisDraft) async -> Bool {
+        guard !synthesizing, await flush() else { return false }
+        synthesizing = true
+        defer { synthesizing = false }
+        do {
+            let note: ScratchNote = try await core.request("scratchpad_accept_synthesis", ScratchAcceptParams(draft: draft))
+            merge(note)
+            guard await flush() else { return false }
+            take(note)
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    func capturePassage(meetingId: String, segmentId: String, excerpt: String, personId: String?, body: String) async -> Bool {
+        guard await flush() else { return false }
+        do {
+            let note: ScratchNote = try await core.request("scratchpad_capture_passage",
+                ScratchPassageParams(meetingId: meetingId, segmentId: segmentId, excerpt: excerpt, personId: personId, body: body))
+            merge(note)
+            guard await flush() else { return false }
+            take(note)
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
+
+    func subjects() async throws -> [ScratchSubject] {
+        try await core.request("scratchpad_subjects")
+    }
+
+    func subject(id: String) async throws -> ScratchSubjectPage? {
+        try await core.request("scratchpad_subject", ScratchIdParams(id: id))
+    }
+
+    func createSubject(title: String) async throws -> ScratchSubject {
+        try await core.request("scratchpad_subject_create", ["title": title])
+    }
+
+    func subjectNote(id: String, noteId: String, action: String) async throws -> ScratchSubjectPage {
+        guard await flush() else { throw CoreError.remote(.string(error ?? "Save the current note first.")) }
+        return try await core.request("scratchpad_subject_note", ScratchSubjectNoteParams(id: id, noteId: noteId, action: action))
+    }
+
+    func deleteSubject(id: String) async throws {
+        try await core.request("scratchpad_subject_delete", ScratchIdParams(id: id))
     }
 
     private func isBlank(_ text: String) -> Bool {

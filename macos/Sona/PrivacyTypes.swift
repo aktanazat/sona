@@ -232,6 +232,7 @@ struct PrivacyCloudSyncStatus: Decodable {
         case "setup_required": "Set up cloud sync before using this action."
         case "auth_required": "Cloud sign-in is required."
         case "quota": "Cloud storage quota has been reached."
+        case "memory_index_too_large": "Phone memory is over the current sync limit. No new records were uploaded."
         case "integrity_failure": "The cloud operation could not be verified."
         case "conflict": "A meeting has a sync conflict."
         case "unsupported_protocol": "This device does not support the version of cloud sync in use."
@@ -809,6 +810,7 @@ enum QueryScope: String, Codable, CaseIterable, Hashable {
     case dictations
     case people
     case loops
+    case notes
 
     var label: String {
         switch self {
@@ -817,6 +819,7 @@ enum QueryScope: String, Codable, CaseIterable, Hashable {
         case .dictations: "Dictations"
         case .people: "People"
         case .loops: "Loops"
+        case .notes: "Notes"
         }
     }
 }
@@ -828,6 +831,7 @@ enum QueryRowKind: String, Decodable {
     case series
     case loop
     case receipt
+    case note
 
     var word: String {
         switch self {
@@ -837,6 +841,7 @@ enum QueryRowKind: String, Decodable {
         case .series: "Series"
         case .loop: "Loop"
         case .receipt: "Receipt"
+        case .note: "Note"
         }
     }
 }
@@ -966,11 +971,13 @@ enum QueryLinkTarget: Decodable, Equatable {
     case person(id: String)
     case organization(slug: String)
     case dictation(historyId: Int64)
+    case note(id: String, versionId: Int64?)
+    case subject(id: String)
     /// The search surface, with the question the link carried.
     case search(query: String)
 
     private enum Key: String, CodingKey {
-        case kind, personId, slug, historyId, query
+        case kind, personId, slug, historyId, query, noteId, versionId, subjectId
     }
 
     init(from decoder: Decoder) throws {
@@ -983,6 +990,12 @@ enum QueryLinkTarget: Decodable, Equatable {
             self = .organization(slug: try container.decode(String.self, forKey: .slug))
         case "dictation":
             self = .dictation(historyId: try container.decode(Int64.self, forKey: .historyId))
+        case "note":
+            self = .note(
+                id: try container.decode(String.self, forKey: .noteId),
+                versionId: try container.decodeIfPresent(Int64.self, forKey: .versionId))
+        case "subject":
+            self = .subject(id: try container.decode(String.self, forKey: .subjectId))
         case "search":
             self = .search(query: try container.decode(String.self, forKey: .query))
         default:

@@ -24,9 +24,8 @@ pub enum DeepLinkAction {
     /// not begin capture: meetings are prompt-only by product decision, and a
     /// URL is not consent to record a room.
     StartMeeting,
-    /// `sona://meeting/<uuid>` — open one meeting's detail in Library, the same
-    /// destination its row in the list opens.
-    OpenMeeting(Uuid),
+    /// `sona://meeting/<uuid>` opens a conversation; `atMs` and `segmentId` select a retained contribution.
+    OpenMeeting(Uuid, Option<u64>, Option<Uuid>),
     /// `sona://person/<uuid>` — open one person's page.
     OpenPerson(Uuid),
     /// `sona://organization/<slug>` — open the page for everybody at one
@@ -52,6 +51,8 @@ pub enum DeepLinkAction {
     /// had no address. A link that resolves to nothing would be worse than the
     /// route.
     OpenDictation(i64),
+    OpenNote(Uuid, Option<i64>),
+    OpenSubject(Uuid),
     /// `sona://search?q=…` — open the search surface with the question in it.
     /// An empty or absent `q` opens it empty, which is what pressing ⌘K does;
     /// a blank `q=` is a link built wrong and is refused instead.
@@ -127,13 +128,56 @@ pub fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
         let [session_id] = segments[..] else {
             return None;
         };
-        return uuid(session_id).map(DeepLinkAction::OpenMeeting);
+        let session_id = uuid(session_id)?;
+        let mut moments = url.query_pairs().filter(|(key, _)| key == "atMs");
+        let moment = match moments.next() {
+            Some((_, value)) => Some(
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|ms| *ms <= i64::MAX as u64 / 1_000_000)?,
+            ),
+            None => None,
+        };
+        if moments.next().is_some() {
+            return None;
+        }
+        let mut segments = url.query_pairs().filter(|(key, _)| key == "segmentId");
+        let segment = match segments.next() {
+            Some((_, value)) => Some(uuid(&value)?),
+            None => None,
+        };
+        if segments.next().is_some() {
+            return None;
+        }
+        return Some(DeepLinkAction::OpenMeeting(session_id, moment, segment));
     }
     if route.eq_ignore_ascii_case("person") {
         let [person_id] = segments[..] else {
             return None;
         };
         return uuid(person_id).map(DeepLinkAction::OpenPerson);
+    }
+    if route.eq_ignore_ascii_case("note") {
+        let [note_id] = segments[..] else {
+            return None;
+        };
+        let note_id = uuid(note_id)?;
+        let mut versions = url.query_pairs().filter(|(key, _)| key == "version");
+        let version_id = match versions.next() {
+            Some((_, value)) => Some(value.parse::<i64>().ok().filter(|id| *id > 0)?),
+            None => None,
+        };
+        if versions.next().is_some() {
+            return None;
+        }
+        return Some(DeepLinkAction::OpenNote(note_id, version_id));
+    }
+    if route.eq_ignore_ascii_case("subject") {
+        let [subject_id] = segments[..] else {
+            return None;
+        };
+        return uuid(subject_id).map(DeepLinkAction::OpenSubject);
     }
     if route.eq_ignore_ascii_case("organization") {
         let [slug] = segments[..] else {
@@ -235,7 +279,7 @@ mod tests {
         let person = Uuid::from_u128(0x4d10);
         assert_eq!(
             parse_deep_link(&format!("sona://meeting/{session}")),
-            Some(DeepLinkAction::OpenMeeting(session))
+            Some(DeepLinkAction::OpenMeeting(session, None, None))
         );
         assert_eq!(
             parse_deep_link(&format!("sona://person/{person}")),
@@ -313,7 +357,7 @@ mod tests {
 
         assert_eq!(
             parse_deep_link(&crate::query::meeting_link(session_id)),
-            Some(DeepLinkAction::OpenMeeting(session_id.uuid()))
+            Some(DeepLinkAction::OpenMeeting(session_id.uuid(), None, None))
         );
         assert_eq!(
             parse_deep_link(&crate::query::person_link(person_id)),
