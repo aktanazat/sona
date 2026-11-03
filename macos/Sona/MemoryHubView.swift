@@ -159,7 +159,7 @@ struct MemoryHubView: View {
             peopleError = nil
         } catch {
             guard !Task.isCancelled else { return }
-            peopleError = "People could not be read. \(error.localizedDescription)"
+            peopleError = PeopleStore.message(error)
         }
     }
 
@@ -184,7 +184,9 @@ struct MemoryHubView: View {
             return result.entries
         } catch {
             guard !Task.isCancelled else { return [] }
-            conversationsError = "Conversations could not be read. \(error.localizedDescription)"
+            conversationsError =
+                (error as? CoreError)?.remote(as: MeetingCommandError.self)?.label
+                ?? error.localizedDescription
             return []
         }
     }

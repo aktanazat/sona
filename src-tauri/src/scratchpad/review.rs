@@ -1,5 +1,6 @@
 use super::links::{
-    describe, resolve, unique_targets, ScratchSource, ScratchSourceKind, ScratchSourceRef,
+    describe, resolve, resolve_note, unique_targets, ScratchSource, ScratchSourceKind,
+    ScratchSourceRef,
 };
 use super::synthesis::{require_idle, ScratchReviewSource};
 use crate::managers::history::HistoryManager;
@@ -23,6 +24,7 @@ pub enum ScratchReviewPeriod {
 pub struct ScratchReviewCandidates {
     pub sources: Vec<ScratchSource>,
     pub has_more: bool,
+    pub conversations_unavailable: bool,
 }
 
 #[tauri::command]
@@ -45,10 +47,6 @@ pub async fn scratchpad_review_candidates(
         .and_then(|date| Local.from_local_datetime(&date).earliest())
         .ok_or_else(|| "The review dates could not be read.".to_string())?
         .timestamp_millis();
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
     let mut sources = history.with_connection(|conn| {
         let mut statement = conn.prepare("SELECT id, title, updated_at_ms FROM scratch_notes WHERE updated_at_ms >= ?1 ORDER BY updated_at_ms DESC, id LIMIT 101")?;
         let rows = statement.query_map(params![start], |row| {
@@ -59,27 +57,34 @@ pub async fn scratchpad_review_candidates(
     }).map_err(|_| "The review could not be read.".to_string())?;
     let mut has_more = sources.len() > 100;
     sources.truncate(100);
-    let filter = MeetingListFilter {
-        window: match period {
-            ScratchReviewPeriod::Day => MeetingTimeWindow::Today,
-            ScratchReviewPeriod::Week => MeetingTimeWindow::Last7Days,
-        },
-        ..MeetingListFilter::default()
-    };
-    let page = store
-        .list_sessions(None, 100, &filter)
-        .map_err(|_| "The review could not be read.".to_string())?;
-    has_more |= page.has_more;
-    for entry in page.entries {
-        let target = ScratchSourceRef {
-            kind: ScratchSourceKind::Meeting,
-            id: entry.session_id.uuid().to_string(),
+    let store = meetings.store().await.ok();
+    if let Some(store) = &store {
+        let filter = MeetingListFilter {
+            window: match period {
+                ScratchReviewPeriod::Day => MeetingTimeWindow::Today,
+                ScratchReviewPeriod::Week => MeetingTimeWindow::Last7Days,
+            },
+            ..MeetingListFilter::default()
         };
-        if let Ok(source) = describe(&history, &store, &target) {
-            sources.push(source);
+        let page = store
+            .list_sessions(None, 100, &filter)
+            .map_err(|_| "The review could not be read.".to_string())?;
+        has_more |= page.has_more;
+        for entry in page.entries {
+            let target = ScratchSourceRef {
+                kind: ScratchSourceKind::Meeting,
+                id: entry.session_id.uuid().to_string(),
+            };
+            if let Ok(source) = describe(&history, store, &target) {
+                sources.push(source);
+            }
         }
     }
-    Ok(ScratchReviewCandidates { sources, has_more })
+    Ok(ScratchReviewCandidates {
+        sources,
+        has_more,
+        conversations_unavailable: store.is_none(),
+    })
 }
 
 #[tauri::command]
@@ -99,14 +104,33 @@ pub async fn scratchpad_review_sources(
     {
         return Err("Select between 2 and 12 notes or conversations.".to_string());
     }
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
+    let store = if targets
+        .iter()
+        .all(|target| target.kind == ScratchSourceKind::Note)
+    {
+        None
+    } else {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    };
     targets
         .iter()
         .map(|target| {
-            let resolved = resolve(&history, &store, target)?;
+            let resolved = if target.kind == ScratchSourceKind::Note {
+                resolve_note(&history, target)?
+            } else {
+                resolve(
+                    &history,
+                    store
+                        .as_deref()
+                        .ok_or_else(|| "Conversations are still unlocking.".to_string())?,
+                    target,
+                )?
+            };
             let text = resolved
                 .evidence
                 .filter(|text| !text.trim().is_empty())

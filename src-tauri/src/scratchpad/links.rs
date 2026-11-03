@@ -151,6 +151,31 @@ pub(crate) fn describe(
     })
 }
 
+pub(crate) fn resolve_note(
+    history: &HistoryManager,
+    target: &ScratchSourceRef,
+) -> Result<ResolvedSource, String> {
+    if target.kind != ScratchSourceKind::Note {
+        return Err("Choose a saved note.".to_string());
+    }
+    let id = Uuid::parse_str(&target.id).map_err(|_| "Choose a saved source.".to_string())?;
+    let note = history
+        .with_connection(|conn| note_with_connection(conn, &target.id))
+        .map_err(|_| "Notes could not be read.".to_string())?
+        .ok_or_else(|| "This source no longer exists.".to_string())?;
+    Ok(ResolvedSource {
+        source: ScratchSource {
+            kind: ScratchSourceKind::Note,
+            id: target.id.clone(),
+            title: note.title,
+            link: format!("sona://note/{id}"),
+            revision: Some(note.updated_at_ms),
+            available: true,
+        },
+        evidence: Some(note.body),
+    })
+}
+
 pub(crate) fn resolve(
     history: &HistoryManager,
     store: &MeetingStore,
@@ -159,13 +184,7 @@ pub(crate) fn resolve(
     let id = Uuid::parse_str(&target.id).map_err(|_| "Choose a saved source.".to_string())?;
     let mut resolved_person = None;
     let (title, revision, evidence) = match target.kind {
-        ScratchSourceKind::Note => {
-            let note = history
-                .with_connection(|conn| note_with_connection(conn, &target.id))
-                .map_err(|_| "Notes could not be read.".to_string())?
-                .ok_or_else(|| "This source no longer exists.".to_string())?;
-            (note.title, Some(note.updated_at_ms), Some(note.body))
-        }
+        ScratchSourceKind::Note => return resolve_note(history, target),
         ScratchSourceKind::Meeting => {
             let snapshot = store
                 .review_snapshot(MeetingSessionId::from_uuid(id))
@@ -297,9 +316,21 @@ pub(crate) fn insert_source(
     Ok(())
 }
 
+fn has_non_note_sources(history: &HistoryManager, id: &str) -> Result<bool, String> {
+    history
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scratch_note_sources WHERE note_id = ?1 AND kind != 'note')",
+                params![id],
+                |row| row.get(0),
+            )?)
+        })
+        .map_err(|_| "The note's sources could not be read.".to_string())
+}
+
 pub(crate) fn read_memory(
     history: &HistoryManager,
-    store: &MeetingStore,
+    store: Option<&MeetingStore>,
     id: &str,
 ) -> Result<Option<ScratchNoteMemory>, String> {
     let memory = history.with_connection(|conn| {
@@ -324,6 +355,14 @@ pub(crate) fn read_memory(
     let Some(mut memory) = memory else {
         return Ok(None);
     };
+    if store.is_none()
+        && memory
+            .sources
+            .iter()
+            .any(|source| source.kind != ScratchSourceKind::Note)
+    {
+        return Err("Conversations are still unlocking.".to_string());
+    }
     memory.phone_sources = super::phone_import::sources_for_note(history, id)
         .map_err(|_| "The note's phone sources could not be read.".to_string())?;
     let mut captured = if memory
@@ -334,6 +373,7 @@ pub(crate) fn read_memory(
         let note_id =
             Uuid::parse_str(id).map_err(|_| "The note's sources could not be read.".to_string())?;
         store
+            .ok_or_else(|| "Conversations are still unlocking.".to_string())?
             .captured_note_sources(note_id)
             .map_err(|_| "The note's sources could not be read.".to_string())?
     } else {
@@ -344,7 +384,16 @@ pub(crate) fn read_memory(
             kind: source.kind,
             id: source.id.clone(),
         };
-        match describe(history, store, &target) {
+        let current = if source.kind == ScratchSourceKind::Note {
+            resolve_note(history, &target).map(|resolved| resolved.source)
+        } else {
+            describe(
+                history,
+                store.ok_or_else(|| "Conversations are still unlocking.".to_string())?,
+                &target,
+            )
+        };
+        match current {
             Ok(current) if source.kind == ScratchSourceKind::Meeting => {
                 *source = current;
                 let session_id = Uuid::parse_str(&source.id).ok();
@@ -426,11 +475,17 @@ pub async fn scratchpad_memory(
     meetings: State<'_, Arc<MeetingSessionManager>>,
     id: String,
 ) -> Result<Option<ScratchNoteMemory>, String> {
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
-    read_memory(&history, &store, &id)
+    let store = if has_non_note_sources(&history, &id)? {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    } else {
+        None
+    };
+    read_memory(&history, store.as_deref(), &id)
 }
 
 #[tauri::command]
@@ -445,11 +500,27 @@ pub async fn scratchpad_link(
     if source.kind == ScratchSourceKind::Note && source.id == id {
         return Err("A note cannot link to itself.".to_string());
     }
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
-    let source = describe(&history, &store, &source)?;
+    let store = if source.kind == ScratchSourceKind::Note && !has_non_note_sources(&history, &id)? {
+        None
+    } else {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    };
+    let source = if source.kind == ScratchSourceKind::Note {
+        resolve_note(&history, &source)?.source
+    } else {
+        describe(
+            &history,
+            store
+                .as_deref()
+                .ok_or_else(|| "Conversations are still unlocking.".to_string())?,
+            &source,
+        )?
+    };
     run(&history, |conn| {
         if note_with_connection(conn, &id)?.is_none() {
             return Err(ScratchpadRefusal::NotFound.into());
@@ -467,7 +538,8 @@ pub async fn scratchpad_link(
     })
     .map_err(|error| failure_sentence(&history, error, "The source could not be linked."))?;
     emit_changed(&app, &id, false);
-    read_memory(&history, &store, &id)?.ok_or_else(|| "This note no longer exists.".to_string())
+    read_memory(&history, store.as_deref(), &id)?
+        .ok_or_else(|| "This note no longer exists.".to_string())
 }
 
 #[tauri::command]

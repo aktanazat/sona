@@ -46,7 +46,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - notes link to people, conversations, and other notes. local synthesis combines selected records into a new note with source links and saved evidence. originals stay unchanged.
 - agents can search notes, read their history, compare versions, and get corpus statistics through the consent-gated cli and memory tools.
 
-mac notes and local synthesis work without microphone access. synthesis needs two to twelve notes or conversations and a ready local model. it does not send sources to cloud ai.
+mac notes and manual review of two to twelve notes work without microphone access or a conversation store. a review that includes conversations needs the normal credential store. local ai synthesis also needs a ready model and does not send sources to cloud ai.
 
 voiceprints and correction rules stay on the mac. a paired iphone can read an encrypted snapshot of saved people, current notes, confirmed speaker assignments and bookmarks. it receives corrected wording for synced conversations without replacing the original words. the snapshot is read-only and contains no audio. a snapshot over 8 mib is refused rather than silently dropping records.
 

@@ -1,4 +1,4 @@
-use super::links::{describe, ScratchSource, ScratchSourceKind, ScratchSourceRef};
+use super::links::{describe, resolve_note, ScratchSource, ScratchSourceKind, ScratchSourceRef};
 use crate::managers::history::HistoryManager;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingSessionId;
@@ -23,11 +23,27 @@ pub async fn scratchpad_source_evidence(
     id: String,
     source: ScratchSourceRef,
 ) -> Result<Option<ScratchSourceEvidence>, String> {
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
-    describe(&history, &store, &source)?;
+    let store = if source.kind == ScratchSourceKind::Note {
+        None
+    } else {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    };
+    if source.kind == ScratchSourceKind::Note {
+        resolve_note(&history, &source)?;
+    } else {
+        describe(
+            &history,
+            store
+                .as_deref()
+                .ok_or_else(|| "Conversations are still unlocking.".to_string())?,
+            &source,
+        )?;
+    }
     if source.kind == ScratchSourceKind::Meeting {
         let linked = history
             .with_connection(|conn| {
@@ -48,6 +64,8 @@ pub async fn scratchpad_source_evidence(
             .map(MeetingSessionId::from_uuid)
             .map_err(|_| "This conversation is unavailable.".to_string())?;
         let captured = store
+            .as_deref()
+            .ok_or_else(|| "Conversations are still unlocking.".to_string())?
             .captured_note_evidence(note_id, session_id)
             .map_err(|_| "This conversation is unavailable.".to_string())?;
         return Ok(captured.map(|captured| {

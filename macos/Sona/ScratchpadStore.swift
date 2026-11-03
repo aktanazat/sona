@@ -196,6 +196,7 @@ struct ScratchSynthesisDraft: Codable {
 struct ScratchReviewCandidates: Decodable {
     let sources: [ScratchSource]
     let hasMore: Bool
+    let conversationsUnavailable: Bool
 }
 
 struct ScratchSubject: Decodable, Identifiable {

@@ -630,7 +630,7 @@ private struct ScratchSourcePicker: View {
                 guard !Task.isCancelled else { return }
                 periodSources = page.sources.map(ScratchSourceCandidate.init(source:))
                 hasMore = page.hasMore
-                error = nil
+                error = page.conversationsUnavailable ? "Conversations are unavailable. Try again." : nil
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription

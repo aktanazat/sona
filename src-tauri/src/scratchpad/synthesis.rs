@@ -1,6 +1,6 @@
 use super::links::{
-    insert_source, resolve, unique_targets, ResolvedSource, ScratchSource, ScratchSourceKind,
-    ScratchSourceRef,
+    insert_source, resolve, resolve_note, unique_targets, ResolvedSource, ScratchSource,
+    ScratchSourceKind, ScratchSourceRef,
 };
 use super::{
     derive_title, emit_changed, failure_sentence, now_ms, record_version, run, ScratchNote,
@@ -201,7 +201,7 @@ fn generate(
 
 fn resolve_targets(
     history: &HistoryManager,
-    store: &MeetingStore,
+    store: Option<&MeetingStore>,
     targets: Vec<ScratchSourceRef>,
 ) -> Result<Vec<ResolvedSource>, String> {
     let targets = unique_targets(targets);
@@ -219,7 +219,17 @@ fn resolve_targets(
     }
     let sources = targets
         .iter()
-        .map(|target| resolve(history, store, target))
+        .map(|target| {
+            if target.kind == ScratchSourceKind::Note {
+                resolve_note(history, target)
+            } else {
+                resolve(
+                    history,
+                    store.ok_or_else(|| "Conversations are still unlocking.".to_string())?,
+                    target,
+                )
+            }
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if sources.iter().any(|source| {
         source
@@ -234,7 +244,7 @@ fn resolve_targets(
 
 fn save_review(
     history: &HistoryManager,
-    store: &MeetingStore,
+    store: Option<&MeetingStore>,
     draft: ScratchSynthesisDraft,
 ) -> Result<ScratchNote, String> {
     if draft.body.trim().is_empty() {
@@ -290,28 +300,57 @@ fn save_review(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    store.capture_note_evidence(note_id, &captures, || run(history, |conn| {
-        let transaction = conn.transaction()?;
-        for source in resolved.iter().filter(|item| item.source.kind == ScratchSourceKind::Note) {
-            let current = super::note_with_connection(&transaction, &source.source.id)?.ok_or(super::ScratchpadRefusal::NotFound)?;
-            if Some(current.updated_at_ms) != source.source.revision || Some(current.body.as_str()) != source.evidence.as_deref() {
-                return Err(super::ScratchpadRefusal::NotFound.into());
+    let persist = || {
+        run(history, |conn| {
+            let transaction = conn.transaction()?;
+            for source in resolved
+                .iter()
+                .filter(|item| item.source.kind == ScratchSourceKind::Note)
+            {
+                let current = super::note_with_connection(&transaction, &source.source.id)?
+                    .ok_or(super::ScratchpadRefusal::NotFound)?;
+                if Some(current.updated_at_ms) != source.source.revision
+                    || Some(current.body.as_str()) != source.evidence.as_deref()
+                {
+                    return Err(super::ScratchpadRefusal::NotFound.into());
+                }
             }
-        }
-        transaction.execute("INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 0, ?4, ?4)", params![note.id, note.title, note.body, now])?;
-        let kind = match draft.authorship { ScratchReviewAuthorship::Interpretation => ScratchVersionKind::Synthesis, ScratchReviewAuthorship::ExplicitNote => ScratchVersionKind::Edit };
-        record_version(&transaction, &note.id, &note.body, now, kind)?;
-        if draft.authorship == ScratchReviewAuthorship::Interpretation {
-            transaction.execute("INSERT INTO scratch_note_origins (note_id, kind) VALUES (?1, 'interpretation')", params![note.id])?;
-        }
-        for source in &resolved { insert_source(&transaction, &note.id, source)?; }
-        transaction.commit()?;
-        Ok(note)
-    })).map_err(|error| match error {
-        NoteEvidenceError::Persist(error) => failure_sentence(history, error, "The memory note could not be saved."),
-        NoteEvidenceError::Store(StoreError::StaleRevision | StoreError::NotFound | StoreError::TranscriptDeleted) => "A source changed during review. Prepare the note again.".to_string(),
-        NoteEvidenceError::Store(_) => "The memory note could not be saved.".to_string(),
-    })
+            transaction.execute("INSERT INTO scratch_notes (id, title, body, pinned, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 0, ?4, ?4)", params![note.id, note.title, note.body, now])?;
+            let kind = match draft.authorship {
+                ScratchReviewAuthorship::Interpretation => ScratchVersionKind::Synthesis,
+                ScratchReviewAuthorship::ExplicitNote => ScratchVersionKind::Edit,
+            };
+            record_version(&transaction, &note.id, &note.body, now, kind)?;
+            if draft.authorship == ScratchReviewAuthorship::Interpretation {
+                transaction.execute("INSERT INTO scratch_note_origins (note_id, kind) VALUES (?1, 'interpretation')", params![note.id])?;
+            }
+            for source in &resolved {
+                insert_source(&transaction, &note.id, source)?;
+            }
+            transaction.commit()?;
+            Ok(note)
+        })
+    };
+    if captures.is_empty() {
+        persist().map_err(|error| {
+            failure_sentence(history, error, "The memory note could not be saved.")
+        })
+    } else {
+        store
+            .ok_or_else(|| "Conversations are still unlocking.".to_string())?
+            .capture_note_evidence(note_id, &captures, persist)
+            .map_err(|error| match error {
+                NoteEvidenceError::Persist(error) => {
+                    failure_sentence(history, error, "The memory note could not be saved.")
+                }
+                NoteEvidenceError::Store(
+                    StoreError::StaleRevision
+                    | StoreError::NotFound
+                    | StoreError::TranscriptDeleted,
+                ) => "A source changed during review. Prepare the note again.".to_string(),
+                NoteEvidenceError::Store(_) => "The memory note could not be saved.".to_string(),
+            })
+    }
 }
 
 #[tauri::command]
@@ -323,16 +362,25 @@ pub async fn scratchpad_prepare_synthesis(
     sources: Vec<ScratchSourceRef>,
 ) -> Result<ScratchSynthesisDraft, String> {
     require_idle(&app)?;
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
+    let store = if sources
+        .iter()
+        .all(|source| source.kind == ScratchSourceKind::Note)
+    {
+        None
+    } else {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    };
     let history = Arc::clone(&history);
     let processing = meetings.processing().clone();
     let draft = tauri::async_runtime::spawn_blocking(move || {
         require_idle(&app)?;
         let generator = processing.local_text_generator().ok_or_else(|| "No local model is ready. Choose one in Meeting settings or enable Apple Intelligence.".to_string())?;
-        let resolved = resolve_targets(&history, &store, sources)?;
+        let resolved = resolve_targets(&history, store.as_deref(), sources)?;
         let body = generate(generator.as_ref(), &resolved)?;
         require_idle(&app)?;
         Ok(ScratchSynthesisDraft { body, authorship: ScratchReviewAuthorship::Interpretation, sources: resolved.into_iter().map(|item| ScratchReviewSource { source: item.source, text: item.evidence.unwrap_or_default() }).collect() })
@@ -349,11 +397,21 @@ pub async fn scratchpad_accept_synthesis(
     draft: ScratchSynthesisDraft,
 ) -> Result<ScratchNote, String> {
     require_idle(&app)?;
-    let store = meetings
-        .store()
-        .await
-        .map_err(|_| "Conversations are still unlocking.".to_string())?;
-    let note = save_review(&history, &store, draft)?;
+    let store = if draft
+        .sources
+        .iter()
+        .all(|source| source.source.kind == ScratchSourceKind::Note)
+    {
+        None
+    } else {
+        Some(
+            meetings
+                .store()
+                .await
+                .map_err(|_| "Conversations are still unlocking.".to_string())?,
+        )
+    };
+    let note = save_review(&history, store.as_deref(), draft)?;
     emit_changed(&app, &note.id, false);
     Ok(note)
 }

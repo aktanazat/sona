@@ -512,7 +512,7 @@ pub(crate) fn read_note_with_sources(
     store: &crate::meeting::store::MeetingStore,
     id: &str,
 ) -> Result<Option<ScratchNoteMemory>, String> {
-    links::read_memory(history, store, id)
+    links::read_memory(history, Some(store), id)
 }
 
 pub(crate) fn read_versions(
