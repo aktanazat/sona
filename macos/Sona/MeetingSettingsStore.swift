@@ -233,6 +233,10 @@ private struct MeetingSettingsSessionParam: Encodable {
     private(set) var transcriptRetentionLoading = false
     private(set) var transcriptRetentionSaving = false
     private(set) var transcriptRetentionNote: String?
+    private(set) var audioRetention: MeetingAudioRetentionSnapshot?
+    private(set) var audioRetentionLoading = false
+    private(set) var audioRetentionSaving = false
+    private(set) var audioRetentionNote: String?
 
     // Keyword trackers.
     private(set) var trackers: [MeetingTracker] = []
@@ -288,10 +292,12 @@ private struct MeetingSettingsSessionParam: Encodable {
         async let settings: Void = loadSettings()
         async let retention: Void = loadRetention()
         async let transcriptRetention: Void = loadTranscriptRetention()
+        async let audioRetention: Void = loadAudioRetention()
         async let trackers: Void = loadTrackers()
         async let roster: Void = loadRoster()
         async let templateList: Void = templates.load()
-        _ = await (detection, settings, retention, transcriptRetention, trackers, roster, templateList)
+        _ = await (
+            detection, settings, retention, transcriptRetention, audioRetention, trackers, roster, templateList)
     }
 
     /// The identifier a fenced write is retried under. Lowercase, like the
@@ -829,6 +835,38 @@ private struct MeetingSettingsSessionParam: Encodable {
             }
         } catch {
             transcriptRetentionNote = Self.sentence(error, "Couldn't save the recording retention setting. Try again.")
+        }
+    }
+
+    func loadAudioRetention() async {
+        guard !audioRetentionLoading else { return }
+        audioRetentionLoading = true
+        defer { audioRetentionLoading = false }
+        do {
+            audioRetention = try await core.request("meeting_audio_retention_get")
+            audioRetentionNote = nil
+        } catch {
+            audioRetentionNote = Self.sentence(error, "Couldn't read the audio setting.")
+        }
+    }
+
+    func setAudioRetention(_ policy: MeetingRetentionPolicy) async {
+        guard let snapshot = audioRetention, !audioRetentionSaving,
+              !audioRetentionLoading, policy != snapshot.policy else { return }
+        audioRetentionSaving = true
+        audioRetentionNote = nil
+        defer { audioRetentionSaving = false }
+        do {
+            let mutation: MeetingAudioRetentionMutation = try await core.request(
+                "meeting_audio_retention_set",
+                MeetingSettingsEnvelope(
+                    request: MeetingRetentionWrite(expectedRevision: snapshot.revision, policy: policy)))
+            audioRetention = mutation.snapshot
+            if mutation.receipt.result != .committed {
+                audioRetentionNote = "This setting changed in another window. Choose again."
+            }
+        } catch {
+            audioRetentionNote = Self.sentence(error, "Couldn't save the audio setting. Try again.")
         }
     }
 

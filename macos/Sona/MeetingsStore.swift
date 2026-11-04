@@ -1251,6 +1251,7 @@ final class MeetingsStore {
     }
 
     var transcriptDeleted: Bool { snapshot?.session.transcriptDeleted ?? false }
+    var audioDeleted: Bool { snapshot?.session.audioDeleted ?? false }
 
     func canJumpTo(_ segmentId: TranscriptSegmentId) -> Bool {
         !transcriptDeleted && (snapshot?.transcript.contains { $0.base.segmentId == segmentId } ?? false)
@@ -1278,7 +1279,7 @@ final class MeetingsStore {
     }
 
     func canPlay(_ segmentId: TranscriptSegmentId) -> Bool {
-        guard !transcriptDeleted,
+        guard !transcriptDeleted, !audioDeleted,
               let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed })
         else { return false }
         return snapshot?.tracks.contains {
@@ -1358,7 +1359,7 @@ final class MeetingsStore {
     }
 
     func canPlayBookmark(_ offset: UInt64) -> Bool {
-        guard !transcriptDeleted else { return false }
+        guard !transcriptDeleted, !audioDeleted else { return false }
         let moment = Int64(clamping: offset)
         return snapshot?.tracks.contains {
             $0.durableRecordCount > 0
