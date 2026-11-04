@@ -355,6 +355,9 @@ final class MeetingsStore {
 
     private let core: Core
     let audio: ConversationAudioPlayback
+    /// Other meetings' lines that still read the way the last correction
+    /// here fixed.
+    let relisten: RelistenStore
     @ObservationIgnored private var listTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var transcriptTask: Task<Void, Never>?
@@ -378,6 +381,7 @@ final class MeetingsStore {
     init(core: Core) {
         self.core = core
         audio = ConversationAudioPlayback(core: core)
+        relisten = RelistenStore(core: core)
 
         // A meeting that ends, or one whose phase moves, changes the list and
         // the page in front of a reader.
@@ -1417,8 +1421,16 @@ final class MeetingsStore {
         }
     }
 
-    func editSegment(_ segmentId: TranscriptSegmentId, text: String, removed: Bool = false) {
-        mutate(removed ? "Removing the line" : "Correcting the line", "meeting_segment_edit") { session in
+    func editSegment(_ segment: TranscriptEffectiveSegment, text: String, removed: Bool = false) {
+        let segmentId = segment.base.segmentId
+        let fix = removed ? nil : snapshot.flatMap {
+            RelistenFix.between(sessionId: $0.session.sessionId, segmentId: segmentId,
+                                captured: segment.base.text, saved: text)
+        }
+        mutate(removed ? "Removing the line" : "Correcting the line", "meeting_segment_edit", then: {
+            guard self.receipt?.refusal == nil else { return }
+            if let fix { self.relisten.check(fix) } else { self.relisten.clear() }
+        }) { session in
             MeetingRequest.segmentEdit(
                 session.sessionId, revision: session.revision, segmentId: segmentId,
                 replacementText: text, removed: removed)

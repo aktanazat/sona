@@ -48,6 +48,7 @@ struct MeetingReviewView: View {
             .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
                 MeetingFilingSheet(store: store)
             }
+            .relistenSheet(store.relisten)
             .alert("Delete this meeting?", isPresented: $confirmingDelete) {
                 Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
                 Button("Keep it", role: .cancel) {}
@@ -808,6 +809,9 @@ struct TranscriptTurnRow: View {
                     }
                 }
             }
+            if store.relisten.fix?.segmentId == segment.base.segmentId {
+                RelistenPrompt(store: store.relisten)
+            }
         }
     }
 }
@@ -874,7 +878,7 @@ struct SegmentEditor: View {
                 Spacer(minLength: 12)
                 if !segment.removed {
                     Button("Remove this line") {
-                        store.editSegment(segment.base.segmentId, text: segment.text, removed: true)
+                        store.editSegment(segment, text: segment.text, removed: true)
                         close()
                     }
                     .buttonStyle(QuietButton(color: Theme.live))
@@ -889,7 +893,7 @@ struct SegmentEditor: View {
         let next = text.trimmingCharacters(in: .whitespacesAndNewlines)
         close()
         guard !next.isEmpty, next != segment.text else { return }
-        store.editSegment(segment.base.segmentId, text: next)
+        store.editSegment(segment, text: next)
     }
 }
 

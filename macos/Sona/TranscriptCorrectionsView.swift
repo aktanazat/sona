@@ -129,6 +129,7 @@ private struct PersonTranscriptCorrectionMutation: Decodable {
 @Observable
 private final class TranscriptCorrectionsStore {
     private let core: Core
+    let relisten: RelistenStore
     private var scope: TranscriptCorrectionScope?
     private var generation = 0
     private(set) var review: PersonTranscriptCorrectionReview?
@@ -138,13 +139,17 @@ private final class TranscriptCorrectionsStore {
     private(set) var busy = false
     private(set) var error: String?
 
-    init(core: Core) { self.core = core }
+    init(core: Core) {
+        self.core = core
+        relisten = RelistenStore(core: core)
+    }
 
     func load(_ target: TranscriptCorrectionScope) async {
         if scope != target {
             review = nil
             rules = []
             error = nil
+            relisten.clear()
         }
         scope = target
         generation += 1
@@ -191,6 +196,12 @@ private final class TranscriptCorrectionsStore {
                 return false
             }
             if let scope { await load(scope) }
+            if let fix = RelistenFix.between(sessionId: review.sessionId, segmentId: segment.segmentId,
+                                             captured: segment.rawText, saved: text) {
+                relisten.check(fix)
+            } else {
+                relisten.clear()
+            }
             return true
         } catch {
             let message = reason(error)
@@ -204,7 +215,7 @@ private final class TranscriptCorrectionsStore {
                kind: CorrectionKind, context: CorrectionContext) async -> Bool {
         guard let review, review.canEdit, segment.identityConfirmed,
               let personId = segment.personId else { return false }
-        return await mutate("transcript_correction_teach", request: [
+        let taught = await mutate("transcript_correction_teach", request: [
             "person_id": .string(personId),
             "session_id": .string(review.sessionId),
             "segment_id": .string(segment.segmentId),
@@ -215,6 +226,11 @@ private final class TranscriptCorrectionsStore {
             "kind": .string(kind.rawValue),
             "context": context.request,
         ])
+        if taught {
+            relisten.check(RelistenFix(sessionId: review.sessionId, segmentId: segment.segmentId,
+                                       original: original, replacement: replacement))
+        }
+        return taught
     }
 
     func update(_ rule: PersonTranscriptCorrection, original: String, replacement: String,
@@ -328,6 +344,7 @@ struct TranscriptCorrectionsView: View {
                 editingRule = nil
             }
         }
+        .relistenSheet(store.relisten)
         .alert("Remove this learned phrase?", isPresented: Binding(
             get: { removingRule != nil }, set: { if !$0 { removingRule = nil } })
         ) {
@@ -485,6 +502,9 @@ private struct TranscriptCorrectionLineEditor: View {
             .disabled(!canEdit || store.busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || text == segment.correctedText)
             if segment.explicitlyEdited { Text("One-off edit · not a learned phrase").metaText() }
+            if store.relisten.fix?.segmentId == segment.segmentId {
+                RelistenPrompt(store: store.relisten)
+            }
             Hairline()
             if let name = segment.personName, segment.personId != nil, segment.identityConfirmed {
                 DisclosureGroup("Teach a phrase for \(name)") {
