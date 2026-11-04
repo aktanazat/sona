@@ -96,15 +96,20 @@ struct Shell: View {
             SettingsScreen()
         } else {
             switch model.place {
-            case .capture:
-                CaptureScreen()
-            case .library:
-                LibraryScreen(
-                    store: model.library,
-                    importAudio: { model.showSettings(.importing) },
-                    addCorrection: { left, right in
-                        model.vocabulary.add(kind: .vocabulary, left: left, right: right)
-                    })
+            case .capture, .library:
+                VStack(spacing: 0) {
+                    homeTabs
+                    if model.place == .library {
+                        LibraryScreen(
+                            store: model.library,
+                            importAudio: { model.showSettings(.importing) },
+                            addCorrection: { left, right in
+                                model.vocabulary.add(kind: .vocabulary, left: left, right: right)
+                            })
+                    } else {
+                        CaptureScreen()
+                    }
+                }
             case .meetings:
                 MeetingsPlace()
             case .people:
@@ -137,18 +142,33 @@ struct Shell: View {
                     people: model.plannerPeople,
                     peopleUnavailable: model.people.entries == nil || model.people.listFailed,
                     material: model.about.material,
+                    photoRevision: model.people.photoRevision,
                     openEvidence: model.openPlanningEvidence,
                     openPerson: model.openPerson,
                     discussProject: model.discussProject,
-                    planWithSona: model.planWithSona)
+                    planWithSona: model.planWithSona,
+                    showCalendar: { model.go(.calendar) })
             case .calendar:
                 PlannerCalendarView(
                     store: model.projects,
                     material: model.about.material,
                     openProject: model.openProject,
-                    openMeeting: model.openMeeting)
+                    openMeeting: model.openMeeting,
+                    showProjects: { model.go(.projects) })
             }
         }
+    }
+
+    /// Home's two faces: the overview and every dictation.
+    private var homeTabs: some View {
+        SegmentedSwitch(items: [SwitchItem(id: Place.capture, title: "Overview", icon: "house"),
+                                SwitchItem(id: Place.library, title: "Library", icon: "books.vertical")],
+                        selection: model.place) { model.go($0) }
+            .frame(maxWidth: Theme.contentMax, alignment: .leading)
+            .padding(.horizontal, Theme.margin)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
     }
 }
 
@@ -341,10 +361,6 @@ struct MeetingsPlace: View {
 struct Sidebar: View {
     @Environment(AppModel.self) private var model
 
-    /// Settings pages with a row of their own above Settings.
-    private static let ownRows: [SettingsPlace] = [.modes, .vocabulary, .models]
-    private static let settingsPages = SettingsPlace.allCases.filter { !ownRows.contains($0) }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
@@ -394,12 +410,13 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Place.allCases) { place in
+                    ForEach(Place.sidebar) { place in
                         SidebarItem(
                             icon: place.icon,
                             tile: place == .capture ? Theme.tileHome : Theme.tilePlace,
                             title: place.title,
-                            selected: model.place == place && !model.showingSettings,
+                            selected: model.place.parent == place && !model.showingSettings,
+                            count: count(place),
                             live: place == .capture && model.capture != .idle
                                 || place == .meetings && model.live.live != nil
                         ) {
@@ -407,21 +424,17 @@ struct Sidebar: View {
                         }
                     }
                     gap
-                    settingsRow(.modes, icon: "sparkles", tile: Theme.tilePlace)
-                    settingsRow(.vocabulary, icon: "book.closed.fill", tile: Theme.tilePlace)
-                    gap
-                    settingsRow(.models, icon: "square.stack.3d.up.fill", tile: Theme.tileSetting)
                     SidebarItem(
                         icon: "gearshape.fill",
                         tile: Theme.tileSetting,
                         title: "Settings",
                         selected: false
                     ) {
-                        model.showSettings(settingsOpen ? model.settingsPlace : .essentials)
+                        model.showSettings(model.showingSettings ? model.settingsPlace : .essentials)
                     }
-                    .accessibilityAddTraits(settingsOpen ? .isSelected : [])
-                    if settingsOpen {
-                        ForEach(Self.settingsPages) { page in
+                    .accessibilityAddTraits(model.showingSettings ? .isSelected : [])
+                    if model.showingSettings {
+                        ForEach(SettingsPlace.allCases) { page in
                             SidebarSubItem(title: page.title, selected: model.settingsPlace == page) {
                                 model.showSettings(page)
                             }
@@ -442,25 +455,28 @@ struct Sidebar: View {
         }
     }
 
-    /// Settings is open on one of the pages that sit under it.
-    private var settingsOpen: Bool {
-        model.showingSettings && !Self.ownRows.contains(model.settingsPlace)
+    /// The small live number beside a row: open tasks in active projects,
+    /// people waiting to be confirmed.
+    private func count(_ place: Place) -> SidebarCount? {
+        switch place {
+        case .projects:
+            SidebarCount(value: model.projects.activeOpenTaskCount, meaning: "open tasks")
+        case .people:
+            SidebarCount(value: Int(model.people.entries?.reduce(0) { $0 + $1.suggestedCount } ?? 0),
+                         meaning: "to confirm")
+        case .capture, .library, .meetings, .scratchpad, .calendar:
+            nil
+        }
     }
 
     private var gap: some View {
         Spacer().frame(height: 14)
     }
+}
 
-    private func settingsRow(_ page: SettingsPlace, icon: String, tile: Color) -> some View {
-        SidebarItem(
-            icon: icon,
-            tile: tile,
-            title: page.title,
-            selected: model.showingSettings && model.settingsPlace == page
-        ) {
-            model.showSettings(page)
-        }
-    }
+private struct SidebarCount {
+    let value: Int
+    let meaning: String
 }
 
 private struct SidebarItem: View {
@@ -468,6 +484,7 @@ private struct SidebarItem: View {
     let tile: Color
     let title: String
     let selected: Bool
+    var count: SidebarCount?
     var live = false
     let action: () -> Void
     @State private var hovering = false
@@ -484,6 +501,13 @@ private struct SidebarItem: View {
                     .font(TypeScale.body(14))
                     .foregroundStyle(Theme.ink)
                 Spacer(minLength: 4)
+                if let count, count.value > 0 {
+                    Text("\(count.value)")
+                        .font(TypeScale.label(12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                        .contentTransition(.numericText(value: Double(count.value)))
+                }
                 if live {
                     Circle().fill(Theme.live).frame(width: 7, height: 7)
                 }
@@ -499,7 +523,7 @@ private struct SidebarItem: View {
         .buttonStyle(.plain)
         .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityValue(live ? "In progress" : "")
+        .accessibilityValue(live ? "In progress" : count.flatMap { $0.value > 0 ? "\($0.value) \($0.meaning)" : nil } ?? "")
         .onHover { hovering = $0 }
     }
 }

@@ -1282,26 +1282,39 @@ final class MeetingLiveStore {
     }
 
     func bookmark() {
-        guard pending == nil, let session = live?.session,
-              session.phase == .capturingRecording else { return }
+        guard let session = live?.session else { return }
+        Task { await bookmark(session) }
+    }
+
+    /// The docked panel's bookmark, on the session the panel reads. True
+    /// once it is saved.
+    func bookmarkFromPanel() async -> Bool {
+        guard let session = active?.snapshot else { return false }
+        return await bookmark(session)
+    }
+
+    @discardableResult
+    private func bookmark(_ session: MeetingSessionSnapshot) async -> Bool {
+        guard pending == nil, session.phase == .capturingRecording else { return false }
         guard let clock = clocks[session.sessionId] else {
             error = "Capture time is unavailable."
-            return
+            return false
         }
         let moment = clock.elapsedNs(at: Date())
         let bookmarkId = UUID().uuidString
-        Task {
-            await act("Bookmarking") {
-                let _: ConversationBookmark = try await self.core.request(
-                    "conversation_bookmark_create",
-                    ConversationBookmarkCreateParams(request: .init(
-                        bookmarkId: bookmarkId,
-                        sessionId: session.sessionId,
-                        startOffsetNs: UInt64(moment),
-                        label: nil)))
-                self.notice = "Bookmarked at \(moment.meetingOffsetClock)."
-            }
+        var saved = false
+        await act("Bookmarking") {
+            let _: ConversationBookmark = try await self.core.request(
+                "conversation_bookmark_create",
+                ConversationBookmarkCreateParams(request: .init(
+                    bookmarkId: bookmarkId,
+                    sessionId: session.sessionId,
+                    startOffsetNs: UInt64(moment),
+                    label: nil)))
+            self.notice = "Bookmarked at \(moment.meetingOffsetClock)."
+            saved = true
         }
+        return saved
     }
 
     private func mutate(_ word: String, _ action: MeetingAllowedAction, method: () -> String) {

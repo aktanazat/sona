@@ -30,6 +30,11 @@ final class PersonPhotoStore {
         generation &+= 1
     }
 
+    /// The photo already read for a person, without waiting on anything.
+    func cached(_ personId: String) -> Photo? {
+        cache.object(forKey: personId as NSString)?.photo
+    }
+
     func load(_ personId: String) async -> Photo {
         if let cached = cache.object(forKey: personId as NSString) { return cached.photo }
         if let (_, task) = pending[personId] { return await task.value }

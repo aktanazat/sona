@@ -197,12 +197,24 @@ private struct ScratchNoteEditorPage: View {
     }
 
     var body: some View {
-        Page {
-            HStack(alignment: .top, spacing: 8) {
-                BackLink(title: "Notes") {
-                    Task { await store.close() }
-                }
-                Spacer(minLength: 12)
+        Page(back: PageBack("Notes") { Task { await store.close() } }, title: store.saved?.title ?? "New note") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(store.saved?.title ?? "New note")
+                    .heroText()
+                    .lineLimit(2)
+                    .accessibilityAddTraits(.isHeader)
+                    .pageHeadline()
+                Text(status).metaText(Theme.inkSecondary)
+                Text(store.memory?.interpretation == true ? "AI interpretation" : (store.memory?.passages.isEmpty == false ? "Passage note" : "Explicit note")).metaText()
+            }
+            .padding(.bottom, 20)
+            ErrorNote(store.error)
+            ErrorNote(sourceError)
+            ScratchNoteEditor(text: bodyText, focused: $editorFocused)
+            .padding(.bottom, 24)
+            connections
+        } actions: {
+            HStack(spacing: 8) {
                 Button("Subjects", action: showSubjects).buttonStyle(.quiet)
                 Button("Review connections", action: showSynthesis)
                     .buttonStyle(.compact)
@@ -221,21 +233,6 @@ private struct ScratchNoteEditorPage: View {
                     showHistory: { showingHistory = true },
                     confirmDelete: { confirmingDelete = true })
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(store.saved?.title ?? "New note")
-                    .heroText()
-                    .lineLimit(2)
-                    .accessibilityAddTraits(.isHeader)
-                Text(status).metaText(Theme.inkSecondary)
-                Text(store.memory?.interpretation == true ? "AI interpretation" : (store.memory?.passages.isEmpty == false ? "Passage note" : "Explicit note")).metaText()
-            }
-            .padding(.top, 8)
-            .padding(.bottom, 20)
-            ErrorNote(store.error)
-            ErrorNote(sourceError)
-            ScratchNoteEditor(text: bodyText, focused: $editorFocused)
-            .padding(.bottom, 24)
-            connections
         }
         .onAppear { editorFocused = true }
         .onChange(of: store.evidenceRevision) { _, _ in

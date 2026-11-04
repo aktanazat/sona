@@ -34,6 +34,12 @@ final class PrivacyStore {
     private(set) var storage: StorageStatus?
     private(set) var storageFailure: String?
 
+    // What this Mac holds.
+    private(set) var inventory: PrivacyInventory?
+    private(set) var inventoryFailed = false
+    @ObservationIgnored private var inventoryLoading = false
+    @ObservationIgnored private var inventoryStale = false
+
     // The legacy app's data.
     private(set) var upstream: UpstreamImportStatus?
     private(set) var upstreamBusy = false
@@ -69,6 +75,15 @@ final class PrivacyStore {
         core.observe(CoreEvent.historyStorage) { [weak self] _ in
             guard let self else { return }
             Task { await self.loadStorage() }
+        }
+        for event in [
+            CoreEvent.meetingRemoved, CoreEvent.meetingArtifactChanged,
+            CoreEvent.historyUpdate, CoreEvent.scratchpadChanged, CoreEvent.historyStorage,
+        ] {
+            core.observe(event) { [weak self] _ in
+                guard let self, self.inventory != nil else { return }
+                Task { await self.refreshInventory() }
+            }
         }
         core.observe(CoreEvent.privacyCloudSyncChanged) { [weak self] _ in
             guard let self else { return }
@@ -130,6 +145,29 @@ final class PrivacyStore {
 
     func refreshDiagnostics() async {
         await loadDiagnostics()
+    }
+
+    // MARK: - What this Mac holds
+
+    /// Counts are read whenever the page shows and after anything that
+    /// changes them. A read asked for while one runs folds into one more
+    /// read after it, so a burst of events costs two reads, not one each.
+    func refreshInventory() async {
+        guard !inventoryLoading else {
+            inventoryStale = true
+            return
+        }
+        inventoryLoading = true
+        defer { inventoryLoading = false }
+        repeat {
+            inventoryStale = false
+            do {
+                inventory = try await core.request("privacy_inventory")
+                inventoryFailed = false
+            } catch {
+                inventoryFailed = true
+            }
+        } while inventoryStale
     }
 
     // MARK: - External access

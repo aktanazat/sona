@@ -20,7 +20,7 @@ enum MeetingReviewTab: String, CaseIterable, Identifiable {
         switch self {
         case .review: "Review"
         case .transcript: "Transcript"
-        case .insights: "Insights"
+        case .insights: "Notes"
         case .ledger: "Ledger"
         }
     }
@@ -134,14 +134,6 @@ enum LoopChange {
     case assign(personId: MeetingPersonId?)
 }
 
-/// One line of a traced summary: the words, and the moment they came from.
-struct MeetingSummaryLine: Identifiable {
-    let id: Int
-    let text: String
-    let segmentId: TranscriptSegmentId?
-    let startOffsetNs: Int64?
-}
-
 // MARK: - Reading the wire a second way
 
 extension MeetingProcessingStatus {
@@ -230,28 +222,6 @@ extension MeetingTrendTotals {
     /// The captured time the core stands behind, as a length in words.
     var capturedSpoken: String {
         (TimeInterval(verifiedCapturedDurationMs) / 1000).spoken
-    }
-}
-
-extension ArtifactCitedText {
-    /// `summaryLines`: the summary split into the lines the trace anchors,
-    /// or nothing when no line has a moment behind it.
-    func tracedLines(_ trace: [ArtifactSummaryLineTrace]?) -> [MeetingSummaryLine]? {
-        guard let trace, !trace.isEmpty else { return nil }
-        let anchors = Dictionary(trace.map { ($0.line, $0.anchor) }, uniquingKeysWith: { first, _ in first })
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-            .enumerated()
-            .map { (index: $0.offset, text: $0.element.trimmingCharacters(in: .whitespaces)) }
-            .filter { !$0.text.isEmpty }
-            .map { line in
-                MeetingSummaryLine(
-                    id: line.index,
-                    text: line.text,
-                    segmentId: anchors[line.index]?.segmentId,
-                    startOffsetNs: anchors[line.index]?.startOffsetNs
-                )
-            }
-        return lines.allSatisfy { $0.segmentId == nil } ? nil : lines
     }
 }
 

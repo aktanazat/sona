@@ -17,7 +17,7 @@ struct MeetingReviewView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Page {
+            Page(back: PageBack("Meetings") { store.closeReview() }, title: store.snapshot?.session.title) {
                 if let snapshot = store.snapshot {
                     MeetingReviewHeader(
                         store: store, snapshot: snapshot, delete: { confirmingDelete = true },
@@ -33,7 +33,6 @@ struct MeetingReviewView: View {
                     MeetingReviewTabs(store: store)
                     pane(snapshot)
                 } else {
-                    BackLink(title: "Meetings") { store.closeReview() }
                     if let failure = store.reviewFailure {
                         unread(failure)
                     } else if store.reviewLoading {
@@ -183,28 +182,17 @@ struct MeetingReviewHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 12) {
-                    back
-                    Spacer(minLength: 12)
-                    actions
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(height: 28)
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    back
-                    actions
-                }
+            HStack(alignment: .top, spacing: 12) {
+                title
+                Spacer(minLength: 12)
+                actions
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(height: 32)
             }
-            title
             Text(facts).metaText(Theme.inkSecondary)
             status
         }
         .padding(.bottom, 24)
-    }
-
-    private var back: some View {
-        BackLink(title: "Meetings") { store.closeReview() }
     }
 
     @ViewBuilder
@@ -228,6 +216,7 @@ struct MeetingReviewHeader: View {
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Edit the title" : "")
             .accessibilityAddTraits(.isHeader)
+            .pageHeadline()
         }
     }
 
@@ -890,7 +879,7 @@ struct SegmentEditor: View {
 
 // MARK: - What Sona made of it
 
-/// The people, the numbers, the notes, and whatever the model wrote.
+/// What the model wrote first, then the people, the numbers, and the notes.
 struct MeetingInsightsPane: View {
     let store: MeetingsStore
     let settings: MeetingSettingsStore
@@ -900,6 +889,7 @@ struct MeetingInsightsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
+            ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
             MeetingPeopleBand(store: store, openPerson: openPerson)
             DisclosureGroup("Call participant names") {
                 CallNamesReviewSection(store: store, snapshot: snapshot)
@@ -908,7 +898,6 @@ struct MeetingInsightsPane: View {
             .font(TypeScale.body(14))
             .foregroundStyle(Theme.inkSecondary)
             MeetingAnalyticsStrip(store: store)
-            ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
             MeetingQuestionsCard(store: store, snapshot: snapshot)
             MeetingNotesCard(store: store, snapshot: snapshot)
             MeetingSnapshotsSection(sessionId: snapshot.session.sessionId)
@@ -1036,220 +1025,6 @@ struct MeetingAnalyticsStrip: View {
         }
         .help(share.turnCount == 1 ? "1 turn" : "\(share.turnCount) turns")
         .accessibilityElement(children: .combine)
-    }
-}
-
-/// Everything one generation of the model wrote. When nothing was, the
-/// status line under the title already says why and offers the retry.
-struct ArtifactPane: View {
-    let store: MeetingsStore
-    let snapshot: MeetingReviewSnapshot
-    /// For naming the person's own template a generation was written with.
-    let templates: MeetingTemplatesStore
-
-    var body: some View {
-        if let artifact = snapshot.readableArtifact, let content = artifact.content {
-            VStack(alignment: .leading, spacing: 28) {
-                if artifact.state == .outOfDate {
-                    StaleNotesBand(store: store, what: "These notes")
-                }
-                summary(content, artifact: artifact)
-                if !content.outline.isEmpty { outline(content) }
-                if !content.decisions.isEmpty { cited("Decisions", content.decisions) }
-                if !content.actionItems.isEmpty { actionItems(content, artifact: artifact) }
-                if !content.keyQuestions.isEmpty { cited("Questions worth answering", content.keyQuestions) }
-                if !content.risks.isEmpty { cited("Risks", content.risks) }
-                followUp(content)
-            }
-            .padding(.bottom, 28)
-            .task { await templates.loadIfNeeded() }
-        }
-    }
-
-    /// A heading of the notes, and what it heads.
-    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).titleText().accessibilityAddTraits(.isHeader)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func bullet<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
-            content()
-        }
-    }
-
-    private func summary(_ content: MeetingGeneratedArtifacts, artifact: MeetingArtifactRevision) -> some View {
-        section("Summary") {
-            if let lines = content.summary.tracedLines(content.summaryTrace) {
-                ForEach(lines) { line in
-                    CitedLine(
-                        action: line.segmentId.flatMap(store.citationAction),
-                        clock: line.startOffsetNs?.meetingOffsetClock
-                    ) {
-                        Text(line.text).bodyText()
-                    }
-                }
-            } else {
-                Text(content.summary.text).bodyText()
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(templateWords(artifact)) v\(artifact.templateVersion)")
-                    .metaText()
-                if store.canRegenerate {
-                    Button("Write it again") { store.regenerate() }
-                        .buttonStyle(.quiet)
-                        .disabled(store.busy)
-                }
-            }
-            .padding(.top, 4)
-        }
-    }
-
-    /// What the generation was written with: a built-in's own id, or the
-    /// name of the person's template, which is never shown as its raw id.
-    private func templateWords(_ artifact: MeetingArtifactRevision) -> String {
-        guard let templateId = artifact.customTemplateId else { return artifact.templateId }
-        return templates.name(templateId) ?? "Custom template"
-    }
-
-    private func outline(_ content: MeetingGeneratedArtifacts) -> some View {
-        section("What was covered") {
-            ForEach(Array(content.outline.enumerated()), id: \.offset) { _, topic in
-                CitedLine(
-                    action: jump(topic.title),
-                    clock: topic.title.citations.first?.startOffsetNs.meetingOffsetClock
-                ) {
-                    bullet {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(topic.title.text).bodyText()
-                            if let detail = topic.detail {
-                                Text(detail.text).bodyText(13, Theme.inkSecondary)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func actionItems(
-        _ content: MeetingGeneratedArtifacts, artifact: MeetingArtifactRevision
-    ) -> some View {
-        section("Action items") {
-            ForEach(Array(content.actionItems.enumerated()), id: \.offset) { index, item in
-                let done = store.isDone(artifact.artifactId, index)
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Button {
-                        store.toggleActionItem(artifact.artifactId, index, done: !done)
-                    } label: {
-                        Image(systemName: done ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 15))
-                            .foregroundStyle(done ? Theme.accent : Theme.inkTertiary)
-                    }
-                    .buttonStyle(.plain)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.text.text)
-                            .bodyText(14, done ? Theme.inkTertiary : Theme.ink)
-                            .strikethrough(done, color: Theme.inkTertiary)
-                        if let owner = ownerLine(item) {
-                            Text(owner).metaText()
-                        }
-                    }
-                    Spacer(minLength: 12)
-                    if let citation = item.text.citations.first {
-                        Button(citation.startOffsetNs.meetingOffsetClock) {
-                            store.jumpTo(citation.segmentId)
-                        }
-                        .buttonStyle(.quiet)
-                        .disabled(!store.canJumpTo(citation.segmentId))
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
-    }
-
-    private func cited(_ label: String, _ lines: [ArtifactCitedText]) -> some View {
-        section(label) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                CitedLine(action: jump(line), clock: line.citations.first?.startOffsetNs.meetingOffsetClock) {
-                    bullet { Text(line.text).bodyText() }
-                }
-            }
-        }
-    }
-
-    private func followUp(_ content: MeetingGeneratedArtifacts) -> some View {
-        section("Follow up") {
-            Text(content.followUpDraft.text.isEmpty
-                ? "The model wrote no follow-up for this meeting."
-                : content.followUpDraft.text)
-                .bodyText(14, content.followUpDraft.text.isEmpty ? Theme.inkSecondary : Theme.ink)
-            Button("Draft follow-up") { store.openFollowUp() }
-                .buttonStyle(.compact)
-                .padding(.top, 4)
-        }
-    }
-
-    private func ownerLine(_ item: MeetingActionItem) -> String? {
-        let parts = [item.ownerText, item.dueText].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
-    private func jump(_ line: ArtifactCitedText) -> (() -> Void)? {
-        line.citations.first.flatMap { store.citationAction($0.segmentId) }
-    }
-}
-
-/// A line of the notes that leads to the words it came from: the whole line
-/// is the press, washed under the pointer, with its clock at the end.
-private struct CitedLine<Content: View>: View {
-    let action: (() -> Void)?
-    let clock: String?
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        if let action {
-            Button(action: action) { row }
-                .buttonStyle(CitedLineStyle())
-        } else {
-            row
-        }
-    }
-
-    private var row: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            content
-            Spacer(minLength: 12)
-            if let clock {
-                Text(clock)
-                    .font(TypeScale.body(12))
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.inkTertiary)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-/// The wash spills past the line's text, so the text stays in line with the
-/// heading above it.
-private struct CitedLineStyle: ButtonStyle {
-    @State private var hovering = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .padding(.horizontal, 8)
-            .background(
-                configuration.isPressed || hovering ? Theme.wash : .clear,
-                in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .contentShape(Rectangle())
-            .onHover { hovering = $0 }
-            .padding(.horizontal, -8)
     }
 }
 

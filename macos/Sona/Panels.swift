@@ -227,24 +227,30 @@ private struct RecordingWaveform: View {
     }
 }
 
-/// A line of text read from bottom to top, as the pill's label runs on a
-/// side edge. Turning a view does not turn the room it takes, so the text
-/// is measured flat and given a frame of its turned size.
-private struct UprightText: View {
-    private let text: String
+/// Content read from bottom to top, as a label runs on a side edge.
+/// Turning a view does not turn the room it takes, so the content is
+/// measured flat and given a frame of its turned size.
+struct UprightText<Content: View>: View {
+    private let content: Content
     @State private var flat = CGSize.zero
 
-    init(_ text: String) {
-        self.text = text
+    init(@ViewBuilder _ content: () -> Content) {
+        self.content = content()
     }
 
     var body: some View {
-        Text(text)
+        content
             .lineLimit(1)
             .fixedSize()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { flat = $0 }
             .rotationEffect(.degrees(-90))
             .frame(width: flat.height, height: flat.width)
+    }
+}
+
+extension UprightText where Content == Text {
+    init(_ text: String) {
+        self.init { Text(text) }
     }
 }
 
@@ -254,6 +260,18 @@ enum PanelPlacement: Equatable {
     case edge(HudPillEdge)
     /// Tucked into the top right corner.
     case topTrailing
+    /// Flush against the right edge, centred top to bottom.
+    case flushRight
+}
+
+/// How a floating panel comes and goes.
+enum PanelArrival {
+    /// It fades in and out where it stands, and eases to a new size.
+    case fade
+    /// It slides in from the right edge of its screen and leaves the same
+    /// way, frame and alpha together on `Theme.Slide`. Its content animates
+    /// its own changes, so the window only makes room for them at once.
+    case slide
 }
 
 extension HudPillEdge {
@@ -290,6 +308,76 @@ private final class DockablePanel: NSPanel {
     override func sendEvent(_ event: NSEvent) {
         if intercept?(event) == true { return }
         super.sendEvent(event)
+    }
+}
+
+/// Hears the pointer enter and leave a view, and the presses on it. The
+/// panels never become key and usually sit over another app, which only an
+/// `.activeAlways` tracking area still hears.
+private struct PointerTracking: NSViewRepresentable {
+    let inside: (Bool) -> Void
+    let press: () -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        TrackingView()
+    }
+
+    func updateNSView(_ view: TrackingView, context: Context) {
+        view.inside = inside
+        view.press = press
+    }
+
+    final class TrackingView: NSView {
+        var inside: ((Bool) -> Void)?
+        var press: (() -> Void)?
+        private var monitor: Any?
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil))
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func mouseEntered(with event: NSEvent) {
+            inside?(true)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            inside?(false)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard let self, event.window === self.window,
+                          self.bounds.contains(self.convert(event.locationInWindow, from: nil))
+                    else { return }
+                    self.press?()
+                }
+                return event
+            }
+        }
+    }
+}
+
+extension View {
+    /// `inside` hears the pointer enter and leave this view and `press` a
+    /// press on it, while another app is in front too.
+    func onPointer(inside: @escaping (Bool) -> Void, press: @escaping () -> Void) -> some View {
+        background(PointerTracking(inside: inside, press: press))
     }
 }
 
@@ -351,6 +439,7 @@ private enum PillDrag {
 final class FloatingPanel {
     private let panel: DockablePanel
     private let host: NSHostingView<AnyView>
+    private let arrival: PanelArrival
     private var placement: PanelPlacement?
     /// The point the placement pins, fixed when the panel is placed: its
     /// top right corner, or the middle of the edge it stands on. A resize
@@ -362,6 +451,12 @@ final class FloatingPanel {
     private var targetsHost: NSHostingView<EdgeTargets>?
     private var shown = false
     private var visibilityRevision = 0
+    /// Where a slide is headed while one runs. Bumping `glideRevision` lets
+    /// only the latest slide's end say it is over.
+    private var glideTarget: NSRect?
+    private var glideRevision = 0
+    /// A shrink waiting out the transition of the view on its way out.
+    private var settling: Task<Void, Never>?
     /// While on, a left press on the panel is the panel's: a release without
     /// travel is a click, and travel is a drag to another edge. Off, presses
     /// reach the views as they always did.
@@ -379,6 +474,7 @@ final class FloatingPanel {
         switch placement {
         case let .edge(edge): return edge.alignment
         case .topTrailing: return .topTrailing
+        case .flushRight: return .trailing
         }
     }
 
@@ -396,7 +492,8 @@ final class FloatingPanel {
         }
     }
 
-    init(_ content: some View) {
+    init(_ content: some View, arrival: PanelArrival = .fade) {
+        self.arrival = arrival
         let panel = DockablePanel(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -429,20 +526,32 @@ final class FloatingPanel {
         visibilityRevision += 1
         panel.ignoresMouseEvents = false
         self.placement = placement
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+        if let screen {
             anchor = Self.anchor(for: placement, on: screen.visibleFrame)
         }
         let target = frame(host.fittingSize, at: placement)
-        if appearing {
-            panel.setFrame(target, display: false)
-            panel.alphaValue = 0
-            panel.orderFrontRegardless()
-        } else {
-            move(to: target)
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.fadeDuration
-            panel.animator().alphaValue = 1
+        switch arrival {
+        case .fade:
+            if appearing {
+                panel.setFrame(target, display: false)
+                panel.alphaValue = 0
+                panel.orderFrontRegardless()
+            } else {
+                move(to: target)
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Self.fadeDuration
+                panel.animator().alphaValue = 1
+            }
+        case .slide:
+            if appearing {
+                let start = Self.reduceMotion ? target : Self.offstage(target, beyond: screen?.frame ?? target)
+                panel.setFrame(start, display: false)
+                panel.alphaValue = 0
+                panel.orderFrontRegardless()
+            }
+            glide(to: target, alpha: 1)
         }
     }
 
@@ -453,25 +562,88 @@ final class FloatingPanel {
         visibilityRevision += 1
         let revision = visibilityRevision
         panel.ignoresMouseEvents = true
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.fadeDuration
-            panel.animator().alphaValue = 0
-        } completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, !self.shown, self.visibilityRevision == revision else { return }
-                self.panel.orderOut(nil)
+        switch arrival {
+        case .fade:
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Self.fadeDuration
+                panel.animator().alphaValue = 0
+            } completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.shown, self.visibilityRevision == revision else { return }
+                    self.panel.orderOut(nil)
+                }
             }
+        case .slide:
+            let exit = Self.reduceMotion ? panel.frame : Self.offstage(panel.frame, beyond: screen?.frame ?? panel.frame)
+            glide(to: exit, alpha: 0)
         }
     }
 
     private func fit(_ size: CGSize) {
         guard let placement, shown else { return }
         if case .dragging = drag { return }
-        move(to: frame(size, at: placement))
+        let target = frame(size, at: placement)
+        switch arrival {
+        case .fade:
+            move(to: target)
+        case .slide:
+            if let glideTarget {
+                if glideTarget != target { glide(to: target, alpha: 1) }
+            } else {
+                settle(to: target)
+            }
+        }
     }
 
     private static var fadeDuration: TimeInterval {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.1 : 0.18
+    }
+
+    private static var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// A sliding panel's one motion: frame and alpha together on the panel
+    /// curve. With motion reduced, the frame lands at once and only the
+    /// alpha moves. A slide that ends with the panel hidden orders it out.
+    private func glide(to target: NSRect, alpha: CGFloat) {
+        settling?.cancel()
+        glideRevision += 1
+        let revision = glideRevision
+        glideTarget = target
+        let reduced = Self.reduceMotion
+        if reduced { panel.setFrame(target, display: true) }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = reduced ? Theme.Slide.fade : Theme.Slide.duration
+            context.timingFunction = reduced ? CAMediaTimingFunction(name: .easeInEaseOut) : Theme.Slide.timing
+            if !reduced { panel.animator().setFrame(target, display: true) }
+            panel.animator().alphaValue = alpha
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.glideRevision == revision else { return }
+                self.glideTarget = nil
+                if !self.shown { self.panel.orderOut(nil) }
+            }
+        }
+    }
+
+    /// SwiftUI draws a view on its way out until its transition ends, so a
+    /// panel shrinking to new content keeps room for both until then.
+    private func settle(to target: NSRect) {
+        settling?.cancel()
+        let room = panel.frame.union(target)
+        panel.setFrame(room, display: true)
+        guard room != target else { return }
+        settling = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Theme.Slide.duration))
+            guard !Task.isCancelled, let self else { return }
+            self.panel.setFrame(target, display: true)
+        }
+    }
+
+    /// `frame`, moved right until it clears `screen`'s right edge.
+    private static func offstage(_ frame: NSRect, beyond screen: NSRect) -> NSRect {
+        frame.offsetBy(dx: max(0, screen.maxX - frame.minX), dy: 0)
     }
 
     private func move(to target: NSRect) {
@@ -490,6 +662,7 @@ final class FloatingPanel {
         case .edge(.left): NSPoint(x: visible.minX + 24, y: visible.midY)
         case .edge(.right): NSPoint(x: visible.maxX - 24, y: visible.midY)
         case .topTrailing: NSPoint(x: visible.maxX - 16, y: visible.maxY - 16)
+        case .flushRight: NSPoint(x: visible.maxX, y: visible.midY)
         }
     }
 
@@ -498,7 +671,7 @@ final class FloatingPanel {
         case .edge(.bottom): NSPoint(x: anchor.x - size.width / 2, y: anchor.y)
         case .edge(.top): NSPoint(x: anchor.x - size.width / 2, y: anchor.y - size.height)
         case .edge(.left): NSPoint(x: anchor.x, y: anchor.y - size.height / 2)
-        case .edge(.right): NSPoint(x: anchor.x - size.width, y: anchor.y - size.height / 2)
+        case .edge(.right), .flushRight: NSPoint(x: anchor.x - size.width, y: anchor.y - size.height / 2)
         case .topTrailing: NSPoint(x: anchor.x - size.width, y: anchor.y - size.height)
         }
         return NSRect(origin: origin, size: size)
@@ -1076,6 +1249,9 @@ private struct PaletteRowView: View {
         case let .action(action):
             switch action.id {
             case "go-settings": "gearshape"
+            case "go-settings-modes": "slider.horizontal.3"
+            case "go-settings-vocabulary": "character.book.closed"
+            case "go-settings-models": "cpu"
             case "toggle-recording": "mic"
             case "record-meeting": "video"
             case "record-screen": "rectangle.dashed.badge.record"

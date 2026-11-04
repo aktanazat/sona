@@ -102,6 +102,62 @@ struct PlanningProjectDetail: Decodable, Equatable {
     var countedTaskCount: Int { completedTaskCount + openTaskCount }
 }
 
+/// What the projects list is narrowed to.
+struct PlanningListFilter: Equatable {
+    var status: PlanningProjectStatus?
+    var overdueOnly = false
+    var mineOnly = false
+
+    var isActive: Bool { status != nil || overdueOnly || mineOnly }
+}
+
+extension PlanningProject {
+    func with(status: PlanningProjectStatus, at now: Int64) -> PlanningProject {
+        PlanningProject(id: id, title: title, description: description, status: status, revision: revision,
+                        createdAtMs: createdAtMs, updatedAtMs: now)
+    }
+}
+
+extension PlanningMilestone {
+    func isOverdue(at now: Int64) -> Bool { status.isOpen && (dueAtMs ?? .max) < now }
+
+    func with(status: PlanningWorkStatus, at now: Int64) -> PlanningMilestone {
+        PlanningMilestone(id: id, projectId: projectId, title: title, dueAtMs: dueAtMs, status: status,
+                          revision: revision, createdAtMs: createdAtMs, updatedAtMs: now)
+    }
+}
+
+extension PlanningTask {
+    func isOverdue(at now: Int64) -> Bool { status.isOpen && (dueAtMs ?? .max) < now }
+
+    func with(status: PlanningWorkStatus, at now: Int64) -> PlanningTask {
+        PlanningTask(id: id, projectId: projectId, milestoneId: milestoneId, title: title, details: details,
+                     dueAtMs: dueAtMs, ownerPersonId: ownerPersonId, ownerIsSelf: ownerIsSelf,
+                     ownerAvailable: ownerAvailable, status: status, revision: revision,
+                     createdAtMs: createdAtMs, updatedAtMs: now)
+    }
+}
+
+extension PlanningProjectDetail {
+    func replacing(project: PlanningProject) -> PlanningProjectDetail {
+        PlanningProjectDetail(project: project, milestones: milestones, tasks: tasks, evidence: evidence)
+    }
+
+    func replacing(milestone: PlanningMilestone) -> PlanningProjectDetail {
+        PlanningProjectDetail(project: project, milestones: milestones.map { $0.id == milestone.id ? milestone : $0 },
+                              tasks: tasks, evidence: evidence)
+    }
+
+    func replacing(task: PlanningTask) -> PlanningProjectDetail {
+        PlanningProjectDetail(project: project, milestones: milestones,
+                              tasks: tasks.map { $0.id == task.id ? task : $0 }, evidence: evidence)
+    }
+
+    func overdueTaskCount(at now: Int64) -> Int { tasks.filter { $0.isOverdue(at: now) }.count }
+
+    var hasMyOpenWork: Bool { tasks.contains { $0.ownerIsSelf && $0.status.isOpen } }
+}
+
 struct PlanningCalendarItem: Decodable, Identifiable, Equatable {
     enum Kind: String, Decodable { case task, milestone, meeting }
     let id: String
@@ -330,6 +386,10 @@ private struct PlanningLinkParams: Encodable {
     let operationId: String
 }
 
+private struct PlanningChange: Decodable {
+    let projectId: String
+}
+
 @MainActor
 @Observable
 final class ProjectsStore {
@@ -337,7 +397,7 @@ final class ProjectsStore {
     private(set) var listLoading = false
     private(set) var listError: String?
     private(set) var selectedProjectId: String?
-    private(set) var detail: PlanningProjectDetail?
+    private(set) var details: [String: PlanningProjectDetail] = [:]
     private(set) var detailLoading = false
     private(set) var detailError: String?
     private(set) var calendarItems: [PlanningCalendarItem]?
@@ -358,10 +418,15 @@ final class ProjectsStore {
     private(set) var quietReviewRunningProjectId: String?
     private(set) var quietReviewStatus: [String: String] = [:]
     private(set) var quietReviewRevocationsPending: Set<String> = []
+    /// What the list is narrowed to. Home sets it when it opens late work.
+    var filter = PlanningListFilter()
+
+    var detail: PlanningProjectDetail? { selectedProjectId.flatMap { details[$0] } }
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var listSequence = 0
-    @ObservationIgnored private var detailSequence = 0
+    @ObservationIgnored private var detailStamp = 0
+    @ObservationIgnored private var detailStamps: [String: Int] = [:]
     @ObservationIgnored private var calendarSequence = 0
     @ObservationIgnored private var calendarRange: DateInterval?
     @ObservationIgnored private var statusOperations: [String: String] = [:]
@@ -379,32 +444,37 @@ final class ProjectsStore {
             CoreEvent.meetingSourceHealthChanged, CoreEvent.scratchpadChanged
         ]
         for event in ["planning-changed-event"] + sourceEvents {
-            core.observe(event) { [weak self] _ in
+            core.observe(event) { [weak self] line in
                 guard let self else { return }
-                self.detailSequence += 1
-                self.detail = nil
                 self.invalidateSuggestions()
                 if event != "planning-changed-event" { self.sourcesRevision += 1 }
-                Task { await self.refresh() }
+                let changed = event == "planning-changed-event" ? (try? Core.payload(line) as PlanningChange)?.projectId : nil
+                Task {
+                    await self.refresh()
+                    if let changed { await self.loadDetails([changed]) }
+                }
             }
         }
     }
 
-    func start() async { await refresh() }
+    /// Every project's page is read up front, so rows can show owners and
+    /// late work, and an opened project draws at once.
+    func start() async {
+        await refresh()
+        await loadDetails((projects ?? []).map(\.id))
+    }
 
     func open(_ id: String) {
         guard selectedProjectId != id else { return }
         selectedProjectId = id
-        detailSequence += 1
-        detail = nil
+        detailLoading = false
         detailError = nil
         mutationError = nil
     }
 
     func closeProject() {
         selectedProjectId = nil
-        detailSequence += 1
-        detail = nil
+        detailLoading = false
         detailError = nil
         mutationError = nil
     }
@@ -435,20 +505,47 @@ final class ProjectsStore {
 
     func loadDetail(_ id: String) async {
         guard selectedProjectId == id else { return }
-        detailSequence += 1
-        let sequence = detailSequence
+        let stamp = nextStamp(id)
         detailLoading = true
-        defer { if sequence == detailSequence { detailLoading = false } }
+        defer { if detailStamps[id] == stamp, selectedProjectId == id { detailLoading = false } }
         do {
             let result: PlanningProjectDetail = try await core.request("planning_project", PlanningIdParams(id: id))
-            guard sequence == detailSequence, selectedProjectId == id else { return }
-            detail = result
-            detailError = nil
+            guard detailStamps[id] == stamp else { return }
+            details[id] = result
+            if selectedProjectId == id { detailError = nil }
         } catch {
-            guard sequence == detailSequence, selectedProjectId == id else { return }
-            detail = nil
+            guard detailStamps[id] == stamp, selectedProjectId == id else { return }
+            details[id] = nil
             detailError = error.localizedDescription
         }
+    }
+
+    /// Pages other than the open one, read one after another and shown in
+    /// one change, so the list settles once.
+    private func loadDetails(_ ids: [String]) async {
+        let ids = ids.filter { $0 != selectedProjectId }
+        guard !ids.isEmpty else { return }
+        var stamps: [String: Int] = [:]
+        for id in ids { stamps[id] = nextStamp(id) }
+        var loaded: [String: PlanningProjectDetail] = [:]
+        for id in ids {
+            if let result: PlanningProjectDetail = try? await core.request("planning_project", PlanningIdParams(id: id)) {
+                loaded[id] = result
+            }
+        }
+        var merged = details
+        for (id, result) in loaded where detailStamps[id] == stamps[id] { merged[id] = result }
+        if let projects {
+            let listed = Set(projects.map(\.id))
+            merged = merged.filter { listed.contains($0.key) || $0.key == selectedProjectId }
+        }
+        details = merged
+    }
+
+    private func nextStamp(_ id: String) -> Int {
+        detailStamp += 1
+        detailStamps[id] = detailStamp
+        return detailStamp
     }
 
     func stopCalendar() {
@@ -742,6 +839,17 @@ final class ProjectsStore {
     }
 
     func setProjectStatus(_ project: PlanningProject, _ status: PlanningProjectStatus) async {
+        guard !mutating else {
+            mutationError = "Wait for the current change to finish."
+            return
+        }
+        let changed = project.with(status: status, at: Self.milliseconds(.now))
+        if let index = projects?.firstIndex(where: { $0.id == project.id }), let summary = projects?[index] {
+            projects?[index] = PlanningProjectSummary(project: changed, openTaskCount: summary.openTaskCount,
+                                                      completedTaskCount: summary.completedTaskCount,
+                                                      nextDueAtMs: summary.nextDueAtMs)
+        }
+        if let detail = details[project.id] { details[project.id] = detail.replacing(project: changed) }
         await changeStatus(key: "project:\(project.id):\(project.revision):\(status.rawValue)") { operationId in
             let _: PlanningProject = try await self.core.request("planning_update_project", PlanningStatusParams(
                 id: project.id, expectedRevision: project.revision, status: status, operationId: operationId))
@@ -749,6 +857,13 @@ final class ProjectsStore {
     }
 
     func setMilestoneStatus(_ milestone: PlanningMilestone, _ status: PlanningWorkStatus) async {
+        guard !mutating else {
+            mutationError = "Wait for the current change to finish."
+            return
+        }
+        if let detail = details[milestone.projectId] {
+            details[milestone.projectId] = detail.replacing(milestone: milestone.with(status: status, at: Self.milliseconds(.now)))
+        }
         await changeStatus(key: "milestone:\(milestone.id):\(milestone.revision):\(status.rawValue)") { operationId in
             let _: PlanningMilestone = try await self.core.request("planning_update_milestone", PlanningStatusParams(
                 id: milestone.id, expectedRevision: milestone.revision, status: status, operationId: operationId))
@@ -756,6 +871,13 @@ final class ProjectsStore {
     }
 
     func setTaskStatus(_ task: PlanningTask, _ status: PlanningWorkStatus) async {
+        guard !mutating else {
+            mutationError = "Wait for the current change to finish."
+            return
+        }
+        if let detail = details[task.projectId] {
+            details[task.projectId] = detail.replacing(task: task.with(status: status, at: Self.milliseconds(.now)))
+        }
         await changeStatus(key: "task:\(task.id):\(task.revision):\(status.rawValue)") { operationId in
             let _: PlanningTask = try await self.core.request("planning_update_task", PlanningStatusParams(
                 id: task.id, expectedRevision: task.revision, status: status, operationId: operationId))
@@ -773,6 +895,24 @@ final class ProjectsStore {
     }
 
     func clearMutationError() { mutationError = nil }
+
+    var activeOpenTaskCount: Int {
+        Int((projects ?? []).filter { $0.project.status == .active }.reduce(0) { $0 + $1.openTaskCount })
+    }
+
+    /// Open tasks past their date in active projects, from the pages read so far.
+    func overdueTasks(at now: Int64) -> [PlanningTask] {
+        let active = Set((projects ?? []).filter { $0.project.status == .active }.map(\.id))
+        return details.values
+            .filter { active.contains($0.project.id) }
+            .flatMap { detail in detail.tasks.filter { $0.isOverdue(at: now) } }
+            .sorted { ($0.dueAtMs ?? 0) < ($1.dueAtMs ?? 0) }
+    }
+
+    func showOverdue() {
+        closeProject()
+        filter = PlanningListFilter(overdueOnly: true)
+    }
 
     private func changeStatus(key: String, _ change: @MainActor (String) async throws -> Void) async {
         let operationId = statusOperations[key] ?? UUID().uuidString

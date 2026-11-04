@@ -3,11 +3,23 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// The places in the sidebar, in the order it shows them.
+/// The places a window shows. Library opens from Home and Calendar from
+/// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
     case capture, library, meetings, people, scratchpad, projects, calendar
 
+    static let sidebar: [Place] = [.capture, .meetings, .people, .scratchpad, .projects]
+
     var id: Int { rawValue }
+
+    /// The sidebar row that stays lit while this place shows.
+    var parent: Place {
+        switch self {
+        case .library: .capture
+        case .calendar: .projects
+        case .capture, .meetings, .people, .scratchpad, .projects: self
+        }
+    }
 
     var title: String {
         switch self {
@@ -34,8 +46,7 @@ enum Place: Int, CaseIterable, Identifiable {
     }
 }
 
-/// Settings' pages. Modes, vocabulary and models have their own rows in the
-/// sidebar; the rest sit under Settings there.
+/// Settings' pages, in the order its list shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
     case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
@@ -268,7 +279,7 @@ final class AppModel {
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
-    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel())
+    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
     @ObservationIgnored private lazy var quietReviewScheduler = QuietReviewScheduler(store: projects) { [weak self] in
         guard let self, ready, !coreStopped, !coreRestarting, onboarding.step == .done,
               capture == .idle, !live.starting, live.pending == nil, live.live == nil, live.active == nil,
@@ -360,6 +371,11 @@ final class AppModel {
         actions.append(PaletteAction(id: "go-settings", group: .navigation, title: "Settings") { [weak self] in
             self?.showSettings(.essentials)
         })
+        for page in [SettingsPlace.modes, .vocabulary, .models] {
+            actions.append(PaletteAction(id: "go-settings-\(page.rawValue)", group: .navigation, title: page.title) { [weak self] in
+                self?.showSettings(page)
+            })
+        }
         if let title = captureActionTitle {
             actions.append(PaletteAction(id: "toggle-recording", group: .actions, title: title) { [weak self] in
                 self?.toggleCapture()
@@ -934,13 +950,13 @@ final class AppModel {
 
     /// The consent panel: an offer to record, the recording in progress, a
     /// prep or wrap card. The view reads the store and draws its own surface;
-    /// this only floats it at the top right of the screen the pointer is on
-    /// when a card appears, as the Tauri window did, and leaves it there.
+    /// this only places it on the screen the pointer is on: a card at the top
+    /// right, a recording flush against the right edge.
     private func syncConsent() {
-        if live.card == nil {
-            consent.hide()
+        if let card = live.card {
+            consent.show(at: card.docksAtEdge ? .flushRight : .topTrailing)
         } else {
-            consent.show(at: .topTrailing)
+            consent.hide()
         }
     }
 
@@ -958,7 +974,6 @@ final class AppModel {
                 return draft.body
             }
         )
-        .padding(8)
         .environment(self)
     }
 

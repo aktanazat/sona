@@ -83,15 +83,19 @@ final class PersonWorkStore {
         }
     }
 
+    /// Reads one person's work. The last answer stays up while a re-read of
+    /// the same person is out, so the page never blanks to redraw itself.
     func load(_ personId: String) async {
         guard !Task.isCancelled else { return }
         active = true
+        if self.personId != personId {
+            snapshot = nil
+            error = nil
+        }
         self.personId = personId
         refreshTask?.cancel()
         generation += 1
         let stamp = generation
-        snapshot = nil
-        error = nil
         loading = true
         await read(personId, stamp: stamp)
     }
@@ -101,8 +105,6 @@ final class PersonWorkStore {
         refreshTask?.cancel()
         generation += 1
         let stamp = generation
-        snapshot = nil
-        error = nil
         loading = true
         refreshTask = Task { [weak self] in
             guard let self, self.active, self.generation == stamp, !Task.isCancelled else { return }
@@ -127,6 +129,7 @@ final class PersonWorkStore {
                 "planning_person_work", PersonWorkParams(personId: personId))
             guard active, generation == stamp, !Task.isCancelled else { return }
             snapshot = result
+            error = nil
         } catch {
             guard active, generation == stamp, !Task.isCancelled else { return }
             self.error = PeopleStore.message(error)

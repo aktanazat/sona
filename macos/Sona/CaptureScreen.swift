@@ -2,11 +2,23 @@ import SwiftUI
 
 struct CaptureScreen: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showRecordingPermission = false
 
     var body: some View {
+        ScrollViewReader { proxy in
+            page(proxy)
+        }
+        .onChange(of: model.onboarding.permissions.microphone) { _, _ in
+            hidePermissionNoticeIfReady()
+        }
+        .onChange(of: model.onboarding.permissions.accessibility) { _, _ in
+            hidePermissionNoticeIfReady()
+        }
+    }
+
+    private func page(_ proxy: ScrollViewProxy) -> some View {
         Page {
-            PageTitle("Home", subtitle: "")
             VStack(alignment: .leading, spacing: 12) {
                 SecureInputBanner(store: model.secureInput)
                 if showRecordingPermission {
@@ -45,18 +57,16 @@ struct CaptureScreen: View {
                 }
             }
             .padding(.bottom, 16)
-            MemoryHubView()
             OverviewView(
                 store: model.overview,
                 openMeeting: model.openMeeting,
                 openRunLog: { model.showSettings(.workflows) },
-                series: seriesActions)
-        }
-        .onChange(of: model.onboarding.permissions.microphone) { _, _ in
-            hidePermissionNoticeIfReady()
-        }
-        .onChange(of: model.onboarding.permissions.accessibility) { _, _ in
-            hidePermissionNoticeIfReady()
+                series: seriesActions,
+                showNeedsYou: {
+                    withAnimation(Motion.settle(reduced: reduceMotion)) {
+                        proxy.scrollTo(OverviewView.needsYouAnchor, anchor: .top)
+                    }
+                })
         }
     }
 

@@ -49,6 +49,27 @@ enum Theme {
     static let margin: CGFloat = 28
     static let contentMax: CGFloat = 880
 
+    /// The one curve panels move on, in AppKit and SwiftUI alike: 0.3 s,
+    /// quick off the screen's edge and settling without a bounce. With
+    /// motion reduced, a panel fades in place for `fade` instead.
+    enum Slide {
+        static let duration: TimeInterval = 0.3
+        static let fade: TimeInterval = 0.15
+        private static let points: (Float, Float, Float, Float) = (0.2, 0.8, 0.2, 1)
+
+        static var animation: Animation {
+            .timingCurve(Double(points.0), Double(points.1), Double(points.2), Double(points.3), duration: duration)
+        }
+
+        static var timing: CAMediaTimingFunction {
+            CAMediaTimingFunction(controlPoints: points.0, points.1, points.2, points.3)
+        }
+
+        static func animation(reduced: Bool) -> Animation {
+            reduced ? .easeInOut(duration: fade) : animation
+        }
+    }
+
     private static func dynamic(light: UInt32, dark: UInt32, alpha: CGFloat = 1, darkAlpha: CGFloat? = nil) -> Color {
         Color(
             nsColor: NSColor(name: nil) { appearance in

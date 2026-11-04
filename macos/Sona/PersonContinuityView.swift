@@ -1,136 +1,103 @@
 import SwiftUI
 
+/// The parts of a person's page below the numbers, one at a time.
+enum PersonPageTab: String, CaseIterable, Identifiable {
+    case history = "History"
+    case catchUp = "Before we talk"
+    case work = "Work"
+    case changes = "What changed"
+    case subjects = "Subjects"
+    case profile = "Profile"
+
+    var id: String { rawValue }
+}
+
+/// A person's page below the numbers: their history, what to know before you
+/// next talk, the work you share, what changed, your subjects, and the
+/// profile. The page owns the reads behind each tab, so moving between tabs
+/// never reads anything again.
 struct PersonContinuityView<Profile: View>: View {
-    let core: Core
     let personId: String
-    let revision: UInt64
+    let memory: PersonMemoryStore?
+    let work: PersonWorkStore?
+    /// What is still open between you, from the person's ledger.
+    let openLoops: [PersonOpenLoop]
+    @Binding var tab: PersonPageTab
     let openMeeting: (String) -> Void
     let openContribution: ((String, UInt64) -> Void)?
     @ViewBuilder let profile: () -> Profile
 
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var memory: PersonMemoryStore?
-    @State private var work: PersonWorkStore?
-    @State private var mode: Mode = .history
     @State private var comparisonDate = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
 
-    private enum Mode: String, CaseIterable, Identifiable {
-        case history = "History"
-        case catchUp = "Before we talk"
-        case work = "Work"
-        case changes = "What changed"
-        case subjects = "Subjects"
-        case profile = "Profile"
-        var id: String { rawValue }
-    }
-
-    private struct LoadKey: Equatable {
-        let personId: String
-        let revision: UInt64
+    private static var tabs: [SwitchItem<PersonPageTab>] {
+        PersonPageTab.allCases.map { SwitchItem(id: $0, title: $0.rawValue) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            modeNavigation
+            SegmentedSwitch(items: Self.tabs, selection: tab, select: show)
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel("Person view")
                 .help("Switch views with Control–Option–1 through Control–Option–6")
-            if mode == .profile {
-                profile()
-            } else if mode == .work {
-                workContent
-            } else if let memory {
-                if let error = memory.error {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(error).bodyText(14, Theme.inkSecondary)
-                        Button("Retry") { memory.refresh() }.buttonStyle(.compact)
-                    }
-                } else if let snapshot = memory.snapshot, snapshot.personId == personId {
-                    content(snapshot, memory: memory)
-                    DisclosureGroup("Evidence limits") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(snapshot.limitations, id: \.self) { Text($0).metaText(Theme.inkSecondary) }
-                        }
-                        .padding(.top, 6)
-                    }
-                    .font(TypeScale.body(12))
-                    .foregroundStyle(Theme.inkSecondary)
-                } else {
-                    ProgressView("Reading history…").controlSize(.small)
-                        .frame(minHeight: 100, alignment: .topLeading)
+            VStack(alignment: .leading, spacing: 16) {
+                switch tab {
+                case .profile: profile()
+                case .work: workContent
+                default: memoryContent
                 }
             }
+            .id(tab)
+            .transition(.asymmetric(insertion: .opacity, removal: .identity))
         }
         .background {
             Group {
-                Button("History") { mode = .history }.keyboardShortcut("1", modifiers: [.control, .option])
-                Button("Before we talk") { mode = .catchUp }.keyboardShortcut("2", modifiers: [.control, .option])
-                Button("Work") { mode = .work }.keyboardShortcut("3", modifiers: [.control, .option])
-                Button("What changed") { mode = .changes }.keyboardShortcut("4", modifiers: [.control, .option])
-                Button("Subjects") { mode = .subjects }.keyboardShortcut("5", modifiers: [.control, .option])
-                Button("Profile") { mode = .profile }.keyboardShortcut("6", modifiers: [.control, .option])
+                Button("History") { show(.history) }.keyboardShortcut("1", modifiers: [.control, .option])
+                Button("Before we talk") { show(.catchUp) }.keyboardShortcut("2", modifiers: [.control, .option])
+                Button("Work") { show(.work) }.keyboardShortcut("3", modifiers: [.control, .option])
+                Button("What changed") { show(.changes) }.keyboardShortcut("4", modifiers: [.control, .option])
+                Button("Subjects") { show(.subjects) }.keyboardShortcut("5", modifiers: [.control, .option])
+                Button("Profile") { show(.profile) }.keyboardShortcut("6", modifiers: [.control, .option])
             }
             .hidden()
             .accessibilityHidden(true)
         }
-        .task(id: LoadKey(personId: personId, revision: revision)) {
-            let memory = self.memory ?? PersonMemoryStore(core: core)
-            self.memory = memory
-            await memory.load(personId)
-        }
-        .task(id: LoadKey(personId: personId, revision: revision)) {
-            let work = self.work ?? PersonWorkStore(core: core)
-            self.work = work
-            await work.load(personId)
-        }
-        .onDisappear {
-            memory?.stop()
-            work?.stop()
-        }
+    }
+
+    private func show(_ next: PersonPageTab) {
+        guard next != tab else { return }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.14)) { tab = next }
     }
 
     @ViewBuilder
-    private var modeNavigation: some View {
-        if model.about.material == .glass {
-            if #available(macOS 26.0, *) {
-                modeControls
-                    .controlSize(.large)
-                    .padding(8)
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Theme.radiusControl + 8, style: .continuous))
-            } else {
-                modeControls
-                    .controlSize(.large)
-                    .padding(8)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.radiusControl + 8, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: Theme.radiusControl + 8, style: .continuous)
-                            .strokeBorder(Theme.border, lineWidth: 1)
-                            .allowsHitTesting(false)
-                    }
+    private var memoryContent: some View {
+        if let memory, let error = memory.error {
+            Card {
+                CardRow {
+                    Text(error).bodyText(14, Theme.inkSecondary)
+                } trailing: {
+                    Button("Retry") { memory.refresh() }.buttonStyle(.compact)
+                }
             }
+        } else if let memory, let snapshot = memory.snapshot, snapshot.personId == personId {
+            content(snapshot, memory: memory)
+            DisclosureGroup("Evidence limits") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(snapshot.limitations, id: \.self) { Text($0).metaText(Theme.inkSecondary) }
+                }
+                .padding(.top, 6)
+            }
+            .font(TypeScale.body(12))
+            .foregroundStyle(Theme.inkSecondary)
         } else {
-            modeControls
+            PersonRowsPlaceholder()
         }
-    }
-
-    private var modeControls: some View {
-        ViewThatFits(in: .horizontal) {
-            modePicker.pickerStyle(.segmented).fixedSize(horizontal: true, vertical: false)
-            modePicker.pickerStyle(.menu)
-        }
-    }
-
-    private var modePicker: some View {
-        Picker("Person view", selection: $mode) {
-            ForEach(Mode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-        }
-        .labelsHidden()
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: mode)
     }
 
     @ViewBuilder
     private func content(_ snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> some View {
-        switch mode {
+        switch tab {
         case .history:
             history(snapshot, memory: memory)
         case .catchUp:
@@ -147,15 +114,16 @@ struct PersonContinuityView<Profile: View>: View {
     }
 
     private func history(_ snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> some View {
-        @Bindable var memory = memory
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("History filter", selection: $memory.filter) {
-                    ForEach(PersonHistoryFilter.allCases) { filter in Text(filter.rawValue).tag(filter) }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                ForEach(PersonHistoryFilter.allCases) { filter in
+                    PersonFilterChip(
+                        title: filter.rawValue,
+                        count: count(filter, in: snapshot, memory: memory),
+                        on: memory.filter == filter
+                    ) { memory.filter = filter }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                Spacer()
+                Spacer(minLength: 8)
                 Button { memory.refresh() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.quiet)
                     .help("Refresh history")
@@ -163,31 +131,20 @@ struct PersonContinuityView<Profile: View>: View {
                     .disabled(memory.loading)
             }
             if memory.filteredTimeline.isEmpty {
-                Text(emptyHistory(memory.filter)).bodyText(14, Theme.inkSecondary)
-                    .padding(.vertical, 12)
+                Card { CardLine(emptyHistory(memory.filter)) }
             } else {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(memory.filteredTimeline.prefix(memory.visibleCount)) { entry in
-                        CardRow {
-                            switch entry {
-                            case let .conversation(row):
-                                conversation(row)
-                            case let .contribution(row):
-                                PersonMemoryContributionRow(row: row, open: open)
-                            case let .note(row):
-                                PersonMemoryNoteRow(row: row, open: open)
-                            case let .commitment(row):
-                                PersonMemoryCommitmentRow(row: row, open: open)
-                            }
+                Card {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(memory.filteredTimeline.prefix(memory.visibleCount)) { entry in
+                            PersonHistoryRow(entry: entry, open: open)
+                        }
+                        if memory.visibleCount < memory.filteredTimeline.count {
+                            Button("Show earlier") { memory.showMore() }
+                                .buttonStyle(.quiet)
+                                .padding(16)
                         }
                     }
-                    if memory.visibleCount < memory.filteredTimeline.count {
-                        Button("Show earlier") { memory.showMore() }
-                            .buttonStyle(.quiet)
-                            .padding(16)
-                    }
                 }
-                .background(Theme.surface)
             }
             if memory.filter == .contributions && snapshot.contributions.isEmpty && !snapshot.conversations.isEmpty {
                 Text("No voice is attributed to this person in these conversations.")
@@ -196,55 +153,75 @@ struct PersonContinuityView<Profile: View>: View {
         }
     }
 
-    private func conversation(_ row: PersonMemoryConversation) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            PersonMemorySourceButton(source: row.source, open: open)
-            HStack(spacing: 10) {
-                Text(row.confidence == .suggested ? "Suggested link" : "Conversation").metaText(Theme.inkSecondary)
-                if row.transcriptAvailable && row.attributedContributions == 0 {
-                    Text("No attributed words").metaText(Theme.inkSecondary)
-                }
-            }
+    private func count(_ filter: PersonHistoryFilter, in snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> Int {
+        switch filter {
+        case .all: memory.timeline.count
+        case .conversations: snapshot.conversations.count
+        case .contributions: snapshot.contributions.count
+        case .notes: snapshot.notes.count
+        case .commitments: snapshot.commitments.count
         }
     }
 
     private func catchUp(_ snapshot: PersonMemorySnapshot) -> some View {
         let catchUp = snapshot.catchUp
-        return VStack(alignment: .leading, spacing: 20) {
-            if let last = catchUp.lastConversation {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Last conversation").sectionLabel()
-                    PersonMemorySourceButton(source: last, open: open)
+        let stillOpen = openLoops.filter(\.status.outstanding)
+        return VStack(alignment: .leading, spacing: 0) {
+            PageSection("Still open") {
+                Card {
+                    if stillOpen.isEmpty {
+                        CardLine("Nothing is still open.")
+                    } else {
+                        ForEach(stillOpen) { loop in
+                            PersonLoopRow(loop: loop, openMeeting: openMeeting)
+                        }
+                    }
                 }
-            } else {
-                Text("No confirmed conversation yet.").bodyText(14, Theme.inkSecondary)
+            }
+            PageSection("Last conversation") {
+                Card {
+                    if let last = catchUp.lastConversation {
+                        CardRow { PersonMemorySourceButton(source: last, open: self.open) }
+                    } else {
+                        CardLine("No confirmed conversation yet.")
+                    }
+                }
             }
             if !catchUp.contributionIds.isEmpty {
                 PageSection("Their words") {
-                    ForEach(snapshot.contributions.filter { catchUp.contributionIds.contains($0.id) }) { row in
-                        PersonMemoryContributionRow(row: row, open: open)
-                            .padding(.vertical, 6)
+                    Card {
+                        ForEach(snapshot.contributions.filter { catchUp.contributionIds.contains($0.id) }) { row in
+                            CardRow { PersonMemoryContributionRow(row: row, open: self.open) }
+                        }
                     }
                 }
             }
             let commitments = snapshot.commitments.filter { catchUp.commitmentIds.contains($0.id) }
             PageSection("Recent open commitments") {
-                if commitments.isEmpty {
-                    Text("No open commitments with retained evidence.").bodyText(14, Theme.inkSecondary)
-                } else {
-                    ForEach(commitments) { row in PersonMemoryCommitmentRow(row: row, open: open) }
+                Card {
+                    if commitments.isEmpty {
+                        CardLine("No open commitments with retained evidence.")
+                    } else {
+                        ForEach(commitments) { row in
+                            CardRow { PersonMemoryCommitmentRow(row: row, open: self.open) }
+                        }
+                    }
                 }
             }
             let notes = snapshot.notes.filter { catchUp.noteIds.contains($0.id) }
             if !notes.isEmpty {
                 PageSection("Related notes") {
-                    ForEach(notes) { row in PersonMemoryNoteRow(row: row, open: open) }
+                    Card {
+                        ForEach(notes) { row in
+                            CardRow { PersonMemoryNoteRow(row: row, open: self.open) }
+                        }
+                    }
                 }
             }
             let changes = snapshot.changes.filter { catchUp.changeIds.contains($0.id) }
             if !changes.isEmpty {
                 PageSection("Source differences") {
-                    ForEach(changes) { row in PersonMemoryChangeRow(row: row, open: open) }
+                    ForEach(changes) { row in PersonMemoryChangeRow(row: row, open: self.open) }
                 }
             }
         }
@@ -264,7 +241,7 @@ struct PersonContinuityView<Profile: View>: View {
                 Text("Since \(PeopleFormat.moment(PeopleFormat.date(since)))").metaText(Theme.inkSecondary)
             }
             if snapshot.changes.isEmpty {
-                Text("No retained source differences for this period.").bodyText(14, Theme.inkSecondary)
+                Card { CardLine("No retained source differences for this period.") }
             } else {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     ForEach(snapshot.changes) { row in PersonMemoryChangeRow(row: row, open: open) }
@@ -276,7 +253,7 @@ struct PersonContinuityView<Profile: View>: View {
     private func subjects(_ snapshot: PersonMemorySnapshot) -> some View {
         LazyVStack(alignment: .leading, spacing: 18) {
             if snapshot.threads.isEmpty {
-                Text("No linked subjects yet.").bodyText(14, Theme.inkSecondary)
+                Card { CardLine("No linked subjects yet.") }
             }
             ForEach(snapshot.threads) { thread in
                 VStack(alignment: .leading, spacing: 8) {
@@ -314,69 +291,54 @@ struct PersonContinuityView<Profile: View>: View {
 
     @ViewBuilder
     private var workContent: some View {
-        if let work {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Spacer()
-                    Button { work.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.quiet)
-                        .help("Refresh work")
-                        .accessibilityLabel("Refresh work")
-                        .disabled(work.loading)
+        if let work, let error = work.error {
+            Card {
+                CardRow {
+                    Text(error).bodyText(14, Theme.inkSecondary)
+                } trailing: {
+                    Button("Retry") { work.refresh() }.buttonStyle(.compact)
                 }
-                if let error = work.error {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(error).bodyText(14, Theme.inkSecondary)
-                        Button("Retry") { work.refresh() }.buttonStyle(.compact)
-                    }
-                } else if let snapshot = work.snapshot, snapshot.personId == personId {
-                    switch snapshot.identityStatus {
-                    case .unavailable:
-                        Text("This person is no longer available.").bodyText(14, Theme.inkSecondary)
-                    case .merged:
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            }
+        } else if let work, let snapshot = work.snapshot, snapshot.personId == personId {
+            VStack(alignment: .leading, spacing: 0) {
+                switch snapshot.identityStatus {
+                case .unavailable:
+                    Card { CardLine("This person is no longer available.") }
+                case .merged:
+                    Card {
+                        CardRow {
                             Text("This person was merged.").bodyText(14, Theme.inkSecondary)
+                        } trailing: {
                             if let id = snapshot.canonicalPersonId {
                                 Button("Open current person") { model.openPerson(id) }.buttonStyle(.compact)
                             }
                         }
-                    case .available:
-                        selectedTasks(snapshot.tasks)
-                        linkedWorkConversations(snapshot.conversations)
                     }
-                } else {
-                    ProgressView("Reading work…").controlSize(.small)
-                        .frame(minHeight: 100, alignment: .topLeading)
+                case .available:
+                    selectedTasks(snapshot.tasks, refresh: work.refresh, loading: work.loading)
+                    linkedWorkConversations(snapshot.conversations)
                 }
             }
         } else {
-            ProgressView("Reading work…").controlSize(.small)
-                .frame(minHeight: 100, alignment: .topLeading)
+            PersonRowsPlaceholder(rows: 2)
         }
     }
 
-    private func selectedTasks(_ rows: [PersonWorkTask]) -> some View {
+    private func selectedTasks(_ rows: [PersonWorkTask], refresh: @escaping () -> Void, loading: Bool) -> some View {
         PageSection("Tasks you selected") {
-            if rows.isEmpty {
-                Text("No tasks selected for this person.").bodyText(14, Theme.inkSecondary)
-            } else {
-                Card {
+            Card {
+                if rows.isEmpty {
+                    CardLine("No tasks selected for this person.")
+                } else {
                     ForEach(rows) { row in
                         CardRow(action: { model.openProject(row.project.id) }) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(row.task.title).bodyText(14)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text("\(row.project.title) · \(row.project.status.label)")
-                                    .metaText(Theme.inkSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                if let milestone = row.milestone {
-                                    Text("\(milestone.title) · \(milestone.status.label)")
-                                        .metaText(Theme.inkSecondary)
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                WorkStatusIcon(status: row.task.status, size: 12)
+                                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(row.task.title).bodyText(14)
                                         .fixedSize(horizontal: false, vertical: true)
-                                }
-                                Text("Private task · \(row.task.status.label)").metaText(Theme.inkSecondary)
-                                if let due = row.task.dueAtMs {
-                                    Text(PlanningFormat.date(due)).metaText(Theme.inkSecondary)
+                                    Text(taskFacts(row)).metaText().monospacedDigit().lineLimit(1)
                                 }
                             }
                         } trailing: {
@@ -392,41 +354,50 @@ struct PersonContinuityView<Profile: View>: View {
         }
     }
 
+    /// "Launch · Beta milestone · In progress · Due 4 Nov".
+    private func taskFacts(_ row: PersonWorkTask) -> String {
+        [row.project.title, row.milestone?.title, row.task.status.label, row.task.dueAtMs.map { "Due \(PlanningFormat.date($0))" }]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
     private func linkedWorkConversations(_ rows: [PersonWorkConversation]) -> some View {
         PageSection("Confirmed conversation context") {
-            if rows.isEmpty {
-                Text("No confirmed conversations linked to projects.").bodyText(14, Theme.inkSecondary)
-            } else {
-                Card {
+            Card {
+                if rows.isEmpty {
+                    CardLine("No confirmed conversations linked to projects.")
+                } else {
                     ForEach(rows) { row in
                         CardRow {
-                            VStack(alignment: .leading, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 Button { openWorkConversation(row) } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(row.meetingTitle).bodyText(14, Theme.accent)
-                                            .fixedSize(horizontal: false, vertical: true)
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Text(row.meetingTitle).font(TypeScale.body(14)).foregroundStyle(Theme.accent)
+                                            .lineLimit(1)
                                         let moment = row.meetingStartedAtMs.map {
                                             PeopleFormat.moment(PeopleFormat.date($0))
                                         }
                                         let detail = [moment, row.timestamp].compactMap { $0 }.joined(separator: " · ")
                                         if !detail.isEmpty {
-                                            Text(detail).metaText(Theme.inkSecondary).monospacedDigit()
+                                            Text(detail).metaText().monospacedDigit().lineLimit(1).layoutPriority(1)
                                         }
                                     }
                                 }
                                 .buttonStyle(.quiet)
                                 .accessibilityLabel("Open conversation \(row.meetingTitle)\(row.timestamp.map { " at \($0)" } ?? "")")
-                                if row.targetKind != .project {
-                                    Text(row.targetTitle).metaText(Theme.inkSecondary)
-                                        .fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 6) {
+                                    if row.targetKind != .project {
+                                        Text(row.targetTitle).metaText(Theme.inkSecondary).lineLimit(1)
+                                        Text("·").metaText()
+                                    }
+                                    Button { model.openProject(row.project.id) } label: {
+                                        Text("\(row.project.title) · \(row.project.status.label)")
+                                            .font(TypeScale.body(12))
+                                            .lineLimit(1)
+                                    }
+                                    .buttonStyle(QuietButton(color: Theme.accent))
+                                    .accessibilityLabel("Open project \(row.project.title)")
                                 }
-                                Button { model.openProject(row.project.id) } label: {
-                                    Text("\(row.project.title) · \(row.project.status.label)")
-                                        .bodyText(13, Theme.accent)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .buttonStyle(.quiet)
-                                .accessibilityLabel("Open project \(row.project.title)")
                             }
                         }
                     }
@@ -466,26 +437,120 @@ struct PersonContinuityView<Profile: View>: View {
     }
 }
 
+/// One way to narrow the history, with how many rows it keeps.
+private struct PersonFilterChip: View {
+    let title: String
+    let count: Int
+    let on: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title).foregroundStyle(on ? Theme.ink : Theme.inkSecondary)
+                Text("\(count)").foregroundStyle(Theme.inkTertiary).monospacedDigit()
+            }
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(on ? Theme.selection : hovering ? Theme.wash : .clear, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityLabel("\(title), \(count)")
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/// One line of a person's history: a mark for what kind it is, then the
+/// words and where they were said.
+struct PersonHistoryRow: View {
+    let entry: PersonHistoryEntry
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        CardRow {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                Group {
+                    switch entry {
+                    case let .conversation(row):
+                        PersonMemoryConversationRow(row: row, open: open)
+                    case let .contribution(row):
+                        PersonMemoryContributionRow(row: row, open: open)
+                    case let .note(row):
+                        PersonMemoryNoteRow(row: row, open: open)
+                    case let .commitment(row):
+                        PersonMemoryCommitmentRow(row: row, open: open)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var icon: String {
+        switch entry {
+        case .conversation: "bubble.left.and.bubble.right"
+        case .contribution: "quote.opening"
+        case .note: "note.text"
+        case .commitment: "checkmark.circle"
+        }
+    }
+}
+
+/// Where something was said, on one line: the meeting, then the day and the
+/// moment in it. The line opens the meeting there.
 struct PersonMemorySourceButton: View {
     let source: PersonMemorySource
     let open: (PersonMemorySource) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             Button { open(source) } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(source.title).font(TypeScale.body(13)).foregroundStyle(Theme.accent)
-                        .lineLimit(2)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(source.title).foregroundStyle(Theme.accent).lineLimit(1)
                     Text([PeopleFormat.moment(source.at), source.timestamp].compactMap { $0 }.joined(separator: " · "))
-                        .metaText(Theme.inkSecondary).monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .layoutPriority(1)
                 }
+                .font(TypeScale.body(12))
             }
             .buttonStyle(.quiet)
             .accessibilityLabel("Open \(source.title)\(source.timestamp.map { " at \($0)" } ?? "")")
             if source.transcriptAvailable == false {
-                Text("Transcript unavailable").metaText(Theme.inkSecondary)
+                Text("· Transcript unavailable").metaText().lineLimit(1)
             } else if source.audioRetained == false {
-                Text("Recording unavailable · transcript retained").metaText(Theme.inkSecondary)
+                Text("· Recording unavailable").metaText().lineLimit(1)
+            }
+        }
+    }
+}
+
+/// A conversation with this person: the meeting, and how sure the link is.
+struct PersonMemoryConversationRow: View {
+    let row: PersonMemoryConversation
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PersonMemorySourceButton(source: row.source, open: open)
+            if row.confidence == .suggested || (row.transcriptAvailable && row.attributedContributions == 0) {
+                HStack(spacing: 6) {
+                    if row.confidence == .suggested { Chip("Suggested link") }
+                    if row.transcriptAvailable && row.attributedContributions == 0 {
+                        Text("No attributed words").metaText()
+                    }
+                }
             }
         }
     }
@@ -494,14 +559,16 @@ struct PersonMemorySourceButton: View {
 struct PersonMemoryPassageView: View {
     let passage: PersonMemoryPassage
     let open: (PersonMemorySource) -> Void
+    /// Off where every passage around it is this person's own.
+    var showsSpeaker = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
+            if showsSpeaker {
                 Text(passage.speakerLabel).font(TypeScale.body(12)).foregroundStyle(Theme.inkSecondary)
-                Text(passage.correctedText == nil ? "Transcript" : "Corrected transcript").metaText(Theme.inkSecondary)
             }
             Text(passage.correctedText ?? passage.rawText).bodyText(14).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
             if passage.correctedText != nil {
                 DisclosureGroup("Original transcript") {
                     Text(passage.rawText).bodyText(13, Theme.inkSecondary).textSelection(.enabled)
@@ -520,11 +587,11 @@ struct PersonMemoryContributionRow: View {
     let open: (PersonMemorySource) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 8) {
             if row.attribution == .recognized {
-                Text("Recognized voice").metaText(Theme.inkSecondary)
+                Chip("Recognized voice")
             }
-            PersonMemoryPassageView(passage: row.passage, open: open)
+            PersonMemoryPassageView(passage: row.passage, open: open, showsSpeaker: false)
             if row.before != nil || row.after != nil {
                 DisclosureGroup("Surrounding dialogue") {
                     VStack(alignment: .leading, spacing: 14) {
@@ -547,9 +614,10 @@ struct PersonMemoryNoteRow: View {
     let open: (PersonMemorySource) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(row.includesAiSynthesis ? "Note · includes AI synthesis" : "Saved note")
-                .metaText(Theme.inkSecondary)
+        VStack(alignment: .leading, spacing: 6) {
+            if row.includesAiSynthesis {
+                Chip("Includes AI synthesis")
+            }
             Text(row.body).bodyText(14).lineLimit(5).textSelection(.enabled)
             PersonMemorySourceButton(source: row.source, open: open)
             if !row.directlyLinked, !row.relatedSources.isEmpty {
@@ -560,7 +628,6 @@ struct PersonMemoryNoteRow: View {
                 .foregroundStyle(Theme.inkSecondary)
             }
         }
-        .padding(.vertical, 6)
     }
 }
 
@@ -569,10 +636,10 @@ struct PersonMemoryCommitmentRow: View {
     let open: (PersonMemorySource) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("AI interpretation · \(status)").metaText(Theme.inkSecondary)
+        VStack(alignment: .leading, spacing: 6) {
             Text(row.interpretation).bodyText(14).textSelection(.enabled)
-            Text(relation).metaText(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(status) · \(relation) · AI interpretation").metaText().lineLimit(1)
             DisclosureGroup("Evidence") {
                 ForEach(row.evidence, id: \.source.id) { passage in
                     PersonMemoryPassageView(passage: passage, open: open).padding(.vertical, 6)
@@ -581,7 +648,6 @@ struct PersonMemoryCommitmentRow: View {
             .font(TypeScale.body(12))
             .foregroundStyle(Theme.inkSecondary)
         }
-        .padding(.vertical, 6)
     }
 
     private var relation: String {

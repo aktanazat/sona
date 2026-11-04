@@ -431,11 +431,42 @@ struct PageSection<Content: View>: View {
     }
 }
 
-struct Page<Content: View>: View {
-    let content: Content
+/// Where a detail page goes back to: the word on its back button and the
+/// step that takes it there.
+struct PageBack {
+    let title: String
+    let action: () -> Void
 
-    init(@ViewBuilder content: () -> Content) {
+    init(_ title: String, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+}
+
+/// The scrolling column every screen sits in. A detail page names where it
+/// goes back to, and its bar stays pinned below the window's title bar: in
+/// that strip the window takes a click as the start of a drag, so a back
+/// button that scrolled up into it stopped answering.
+struct Page<Content: View, Actions: View>: View {
+    let back: PageBack?
+    let title: String?
+    let content: Content
+    let actions: Actions
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var scroll = PageScroll()
+    @State private var headlineBottom: CGFloat?
+
+    init(
+        back: PageBack? = nil,
+        title: String? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder actions: () -> Actions
+    ) {
+        self.back = back
+        self.title = title
         self.content = content()
+        self.actions = actions()
     }
 
     var body: some View {
@@ -448,8 +479,92 @@ struct Page<Content: View>: View {
             .padding(.top, 12)
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity)
+            .coordinateSpace(.named(PageHeadlineKey.space))
         }
         .scrollIndicators(.automatic)
+        .onScrollGeometryChange(for: PageScroll.self) { geometry in
+            guard back != nil else { return PageScroll() }
+            return PageScroll(
+                offset: geometry.contentOffset.y + geometry.contentInsets.top,
+                headlineBottom: headlineBottom)
+        } action: { _, next in
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) { scroll = next }
+        }
+        .onPreferenceChange(PageHeadlineKey.self) { headlineBottom = $0 }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let back { bar(back) }
+        }
+    }
+
+    /// "‹ People › Noah Sample": the way back, the page's name once its own
+    /// headline has scrolled away, and the page's actions.
+    private func bar(_ back: PageBack) -> some View {
+        HStack(spacing: 10) {
+            BackLink(title: back.title, action: back.action)
+                .keyboardShortcut("[", modifiers: .command)
+            if let title, scroll.pastHeadline {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .accessibilityHidden(true)
+                    Text(title).headlineText().lineLimit(1)
+                }
+                .transition(.opacity)
+            }
+            Spacer(minLength: 12)
+            actions
+        }
+        .frame(maxWidth: Theme.contentMax, alignment: .leading)
+        .padding(.horizontal, Theme.margin)
+        .frame(maxWidth: .infinity)
+        .frame(height: 44)
+        .background { Theme.page.ignoresSafeArea(edges: .top) }
+        .overlay(alignment: .bottom) {
+            Hairline().opacity(scroll.scrolled ? 1 : 0)
+        }
+    }
+}
+
+extension Page where Actions == EmptyView {
+    init(back: PageBack? = nil, title: String? = nil, @ViewBuilder content: () -> Content) {
+        self.init(back: back, title: title, content: content) { EmptyView() }
+    }
+}
+
+/// How far a detail page has scrolled, in the two steps its bar shows.
+private struct PageScroll: Equatable {
+    var scrolled = false
+    var pastHeadline = false
+
+    init() {}
+
+    init(offset: CGFloat, headlineBottom: CGFloat?) {
+        scrolled = offset > 0.5
+        pastHeadline = headlineBottom.map { offset > $0 } ?? false
+    }
+}
+
+/// Where a detail page's headline ends, measured down its column.
+private struct PageHeadlineKey: PreferenceKey {
+    static let space = "page.column"
+    static let defaultValue: CGFloat? = nil
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
+extension View {
+    /// Marks the line a detail page's bar repeats once it has scrolled away.
+    func pageHeadline() -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: PageHeadlineKey.self,
+                    value: proxy.frame(in: .named(PageHeadlineKey.space)).maxY)
+            }
+        }
     }
 }
 
@@ -471,7 +586,6 @@ struct BackLink: View {
             }
         }
         .buttonStyle(.quiet)
-        .padding(.bottom, 12)
     }
 }
 

@@ -1,9 +1,9 @@
 import AppKit
 import Foundation
 
-/// Everything the capture page shows under the record button: this week's
-/// numbers, what needs the reader, what Sona did on its own, and the mode the
-/// next dictation runs in.
+/// Everything Home shows under the record button: this week's numbers, what
+/// needs the reader, the latest conversations and notes, what Sona did on its
+/// own, and the mode the next dictation runs in.
 ///
 /// One store because the lists answer to the same handful of events: a
 /// dictation lands, a meeting artifact changes, a meeting is removed, a mode
@@ -19,8 +19,11 @@ final class OverviewStore {
     /// One page of the run log, and how many feed rows are worth drawing.
     private static let runPageSize = 20
     private static let receiptLimit = 3
-    /// How many open loops the inbox is asked for.
-    private static let openLoopLimit = 5
+    /// How many open loops the inbox is asked for. Home counts them, so a
+    /// full answer reads as this many or more.
+    static let openLoopLimit = 100
+    private static let recentMeetingLimit = 20
+    private static let recentNoteLimit = 8
 
     private(set) var trend: ActivityTrend?
     private(set) var meetings: ActivityMeetingTrend?
@@ -33,6 +36,10 @@ final class OverviewStore {
     private(set) var suggestions: [LearningEntry]?
     private(set) var receipts: FeedState<FeedReceipt> = .loading
     private(set) var openLoops: FeedState<FeedOpenLoop> = .loading
+    /// The newest conversations and notes, each its own read so one failing
+    /// leaves the other drawn.
+    private(set) var recentMeetings: FeedState<MeetingHistorySummary> = .loading
+    private(set) var recentNotes: FeedState<ScratchNote> = .loading
     private(set) var upcoming: OverviewUpcoming?
     private(set) var modes: CaptureModeSnapshot?
     private(set) var update: OverviewUpdate?
@@ -54,6 +61,7 @@ final class OverviewStore {
     @ObservationIgnored private let core: Core
     /// A refresh that lands after a newer one started is stale.
     @ObservationIgnored private var feedGeneration = 0
+    @ObservationIgnored private var recentGeneration = 0
     /// The sleep until the first upcoming event ends.
     @ObservationIgnored private var upcomingWake: Task<Void, Never>?
 
@@ -90,14 +98,21 @@ final class OverviewStore {
             self.refreshFeed()
             Task { await self.loadMeetingTrend() }
             Task { await self.loadSuggestions() }
+            Task { await self.loadRecent() }
         }
         core.observe(CoreEvent.meetingSessionChanged) { [weak self] _ in
-            Task { await self?.loadMeetingTrend() }
+            guard let self else { return }
+            Task { await self.loadMeetingTrend() }
+            Task { await self.loadRecent() }
         }
         core.observe(CoreEvent.overviewMeetingRemoved) { [weak self] _ in
             guard let self else { return }
             self.refreshFeed()
             Task { await self.loadMeetingTrend() }
+            Task { await self.loadRecent() }
+        }
+        core.observe(CoreEvent.scratchpadChanged) { [weak self] _ in
+            Task { await self?.loadRecent() }
         }
         core.observe(CoreEvent.activity) { [weak self] line in
             guard let self, let activity: DictationActivity = try? Core.payload(line) else { return }
@@ -123,6 +138,7 @@ final class OverviewStore {
             Task { await self.loadSuggestions() },
             Task { await self.loadUpcoming() },
             Task { await self.checkUpdate() },
+            Task { await self.loadRecent() },
         ]
         refreshFeed()
         for read in reads {
@@ -197,12 +213,12 @@ final class OverviewStore {
         }
     }
 
-    /// Both lists, on one refresh. A read that fails keeps its own row.
+    /// Both lists, on one refresh. Each keeps what it showed until its answer
+    /// lands, so Home does not blink on every event; a read that fails keeps
+    /// its own row.
     func refreshFeed() {
         feedGeneration += 1
         let generation = feedGeneration
-        receipts = .loading
-        openLoops = .loading
 
         Task {
             do {
@@ -224,6 +240,37 @@ final class OverviewStore {
                 guard generation == feedGeneration else { return }
                 openLoops = .failed
             }
+        }
+    }
+
+    /// The recent conversations and notes. A list keeps what it showed until
+    /// a newer answer replaces it, so a refresh never blanks the section.
+    func loadRecent() async {
+        recentGeneration += 1
+        let generation = recentGeneration
+        async let meetings = readRecentMeetings()
+        async let notes = readRecentNotes()
+        let (meetingState, noteState) = await (meetings, notes)
+        guard generation == recentGeneration else { return }
+        recentMeetings = meetingState
+        recentNotes = noteState
+    }
+
+    private func readRecentMeetings() async -> FeedState<MeetingHistorySummary> {
+        do {
+            let page: MeetingsPage = try await core.request("meeting_list", ["limit": Self.recentMeetingLimit])
+            return .loaded(page.entries)
+        } catch {
+            return .failed
+        }
+    }
+
+    private func readRecentNotes() async -> FeedState<ScratchNote> {
+        do {
+            let notes: [ScratchNote] = try await core.request("scratchpad_recent", ["limit": Self.recentNoteLimit])
+            return .loaded(notes)
+        } catch {
+            return .failed
         }
     }
 

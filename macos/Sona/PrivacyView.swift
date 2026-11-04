@@ -9,20 +9,34 @@ import SwiftUI
 struct PrivacyView: View {
     let store: PrivacyStore
 
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingRevert = false
+
+    private static let storageAnchor = "history-storage"
 
     var body: some View {
         Page {
-            PageTitle("Privacy", subtitle: "What Sona reads, what leaves this Mac, and what it keeps.")
-            ErrorNote(store.error)
-            contextSection
-            diagnosticsSection
-            externalSection
-            egressSection
-            storageSection
-            upstreamSection
-            identitySection
+            ScrollViewReader { scroller in
+                VStack(alignment: .leading, spacing: 0) {
+                    PageTitle("Privacy", subtitle: "What Sona reads, what leaves this Mac, and what it keeps.")
+                    ErrorNote(store.error)
+                    holdingsSection {
+                        withAnimation(reduceMotion ? nil : .smooth) {
+                            scroller.scrollTo(Self.storageAnchor, anchor: .top)
+                        }
+                    }
+                    contextSection
+                    diagnosticsSection
+                    externalSection
+                    egressSection
+                    storageSection.id(Self.storageAnchor)
+                    upstreamSection
+                    identitySection
+                }
+            }
         }
+        .task { await store.refreshInventory() }
         .alert("Put the adopted data back?", isPresented: $confirmingRevert) {
             Button("Revert and quit", role: .destructive) {
                 Task { await store.revertIdentity() }
@@ -418,6 +432,222 @@ struct PrivacyView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - What this Mac holds
+
+extension PrivacyView {
+    fileprivate func holdingsSection(showStorage: @escaping () -> Void) -> some View {
+        PageSection("On this Mac") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], alignment: .leading, spacing: 8) {
+                ForEach(holdingTiles(showStorage: showStorage)) { tile in
+                    HoldingTileView(tile: tile)
+                }
+            }
+        }
+    }
+
+    private func holdingTiles(showStorage: @escaping () -> Void) -> [HoldingTile] {
+        let meetings = part(\.meetings)
+        let measuredAt = store.inventory?.measuredAtUtcMs ?? 0
+        return [
+            HoldingTile(label: "Recordings", meetings, open: { model.go(.meetings) }) { held in
+                let length = HoldingFormat.length(held.recordings.durationMs)
+                return HoldingFigure(length.value, unit: length.unit, detail: Model.bytes(held.recordings.bytes))
+            },
+            HoldingTile(label: "Transcripts", meetings, open: { model.go(.meetings) }) { held in
+                HoldingFigure(held.transcripts.formatted())
+            },
+            HoldingTile(label: "Dictations", part(\.dictations), open: { model.go(.library) }) { held in
+                HoldingFigure(held.count.formatted(), detail: Model.bytes(held.bytes))
+            },
+            HoldingTile(label: "Notes", part(\.notes), open: { model.go(.scratchpad) }) { held in
+                HoldingFigure(held.count.formatted())
+            },
+            HoldingTile(label: "Voiceprints", meetings, open: { model.go(.people) }) { held in
+                let prints = held.voiceprints
+                let voice = HoldingFormat.length(prints.sampleMs)
+                let detail = [
+                    prints.people == 0 ? nil : "\(voice.value) \(voice.unit) of voice",
+                    prints.speakers == 0 ? nil : "\(prints.speakers.formatted()) from meetings",
+                ].compactMap { $0 }
+                return HoldingFigure(
+                    (prints.people + prints.speakers).formatted(),
+                    detail: detail.isEmpty ? nil : detail.joined(separator: " · "))
+            },
+            HoldingTile(label: "Portraits", meetings, open: { model.go(.people) }) { held in
+                let cards = held.contactCards
+                let detail = [
+                    Model.bytes(held.portraits.bytes),
+                    cards == 0 ? nil : "\(cards.formatted()) contact \(cards == 1 ? "card" : "cards")",
+                ].compactMap { $0 }
+                return HoldingFigure(held.portraits.count.formatted(), detail: detail.joined(separator: " · "))
+            },
+            HoldingTile(label: "Purging", meetings, open: { model.showSettings(.meetings) }) { held in
+                HoldingFigure(held.purgingWithinWeek.formatted(), detail: "Next 7 days")
+            },
+            HoldingTile(label: "Encrypted", whole, open: showStorage) { inventory in
+                inventory.historyEncrypted
+                    ? HoldingFigure("Yes")
+                    : HoldingFigure("No", detail: "Dictation history", tone: Theme.live)
+            },
+            HoldingTile(label: "Backup", whole, open: { model.showSettings(.sync) }) { inventory in
+                let upload = meetings.flatMap(\.value)?.lastCloudUploadAtUtcMs
+                return HoldingFigure(
+                    inventory.cloudBackup.word,
+                    detail: upload.map { "Last \(HoldingFormat.ago($0, now: measuredAt).phrase)" })
+            },
+            HoldingTile(label: "Phone", part(\.phoneSnapshot), open: { model.showSettings(.sync) }) { held in
+                guard let published = held.lastPublishedAtUtcMs else { return HoldingFigure("Never") }
+                let ago = HoldingFormat.ago(published, now: measuredAt)
+                return HoldingFigure(ago.value, unit: ago.unit, detail: "Last snapshot")
+            },
+        ]
+    }
+
+    /// Nil while the first read is out; a read that failed makes every part
+    /// unreadable rather than zero.
+    private func part<Value>(_ read: (PrivacyInventory) -> Holding<Value>) -> Holding<Value>? {
+        if store.inventoryFailed { return .unavailable(.unavailable) }
+        return store.inventory.map(read)
+    }
+
+    private var whole: Holding<PrivacyInventory>? {
+        part { .available($0) }
+    }
+}
+
+private extension Holding {
+    var value: Value? {
+        if case let .available(value) = self { return value }
+        return nil
+    }
+}
+
+private extension CloudBackup {
+    var word: String {
+        switch self {
+        case .off: "Off"
+        case .paused: "Paused"
+        case .on: "On"
+        }
+    }
+}
+
+private struct HoldingFigure {
+    let value: String
+    var unit: String?
+    var detail: String?
+    var tone: Color = Theme.ink
+
+    init(_ value: String, unit: String? = nil, detail: String? = nil, tone: Color = Theme.ink) {
+        self.value = value
+        self.unit = unit
+        self.detail = detail
+        self.tone = tone
+    }
+}
+
+private struct HoldingTile: Identifiable {
+    let label: String
+    let figure: HoldingFigure
+    let open: () -> Void
+
+    var id: String { label }
+
+    /// A dash while the first read is out; a dash and the reason when the
+    /// part could not be read; a printed zero only when there is nothing.
+    init<Value>(
+        label: String, _ holding: Holding<Value>?, open: @escaping () -> Void,
+        figure: (Value) -> HoldingFigure
+    ) {
+        self.label = label
+        self.open = open
+        switch holding {
+        case nil:
+            self.figure = HoldingFigure("–", tone: Theme.inkDisabled)
+        case let .unavailable(gap):
+            self.figure = HoldingFigure("—", detail: gap.word, tone: Theme.inkDisabled)
+        case let .available(value):
+            self.figure = figure(value)
+        }
+    }
+}
+
+private enum HoldingFormat {
+    /// Minutes under an hour, hours above it.
+    static func length(_ milliseconds: Double) -> (value: String, unit: String) {
+        let minutes = Int(milliseconds / 60_000)
+        if minutes < 60 { return (minutes.formatted(), "min") }
+        let hours = milliseconds / 3_600_000
+        return hours < 10
+            ? (hours.formatted(.number.precision(.fractionLength(1))), "h")
+            : (Int(hours).formatted(), "h")
+    }
+
+    static func ago(_ at: Double, now: Double) -> (value: String, unit: String?, phrase: String) {
+        let minutes = Int(max(0, now - at) / 60_000)
+        if minutes < 1 { return ("Now", nil, "just now") }
+        if minutes < 60 { return ("\(minutes)", "min ago", "\(minutes) min ago") }
+        let hours = minutes / 60
+        if hours < 48 { return ("\(hours)", "h ago", "\(hours) h ago") }
+        let days = hours / 24
+        return ("\(days)", "d ago", "\(days) d ago")
+    }
+}
+
+private struct HoldingTileView: View {
+    let tile: HoldingTile
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let figure = tile.figure
+        Button(action: tile.open) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(figure.value)
+                        .font(TypeScale.hero)
+                        .monospacedDigit()
+                        .foregroundStyle(figure.tone)
+                        .contentTransition(.numericText())
+                    if let unit = figure.unit {
+                        Text(unit)
+                            .font(TypeScale.label(13))
+                            .foregroundStyle(Theme.inkSecondary)
+                    }
+                }
+                Text(tile.label)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.inkSecondary)
+                Text(figure.detail ?? " ")
+                    .metaText()
+                    .monospacedDigit()
+            }
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(HoldingTileStyle())
+        .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: figure.value)
+        .accessibilityLabel(tile.label)
+        .accessibilityValue([figure.value, figure.unit, figure.detail].compactMap { $0 }.joined(separator: " "))
+    }
+}
+
+private struct HoldingTileStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(14)
+            .background(
+                configuration.isPressed ? Theme.selection : hovering ? Theme.inset : Theme.surface,
+                in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 

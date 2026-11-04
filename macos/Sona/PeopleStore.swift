@@ -72,6 +72,8 @@ final class PeopleStore {
     @ObservationIgnored let core: Core
     @ObservationIgnored private let photos: PersonPhotoStore
     @ObservationIgnored private var photoChooser: PersonPhotoChooser?
+    /// The Contacts picker a person's page attaches a contact through.
+    @ObservationIgnored let contactPicker = PersonContactPicker()
     /// Reads are stamped: an answer for a person the screen has left is
     /// dropped rather than drawn over the one it moved to.
     @ObservationIgnored private var generation: UInt64 = 0
@@ -349,6 +351,34 @@ final class PeopleStore {
         }
     }
 
+    /// Opens the Contacts picker. The contact picked there is the only one
+    /// that ever reaches this person.
+    func chooseContact() {
+        guard !busy, case let .person(personId) = route,
+              let person = detail?.person, person.id == personId else { return }
+        contactPicker.present(fallbackName: person.displayName) { [weak self] card in
+            guard let self else { return }
+            guard let card else {
+                error = "That contact has nothing besides a name to add."
+                return
+            }
+            setContact(card, for: personId)
+        }
+    }
+
+    func removeContact() {
+        guard case let .person(personId) = route else { return }
+        setContact(nil, for: personId)
+    }
+
+    private func setContact(_ card: PersonContactCard?, for personId: String) {
+        guard !busy, route == .person(personId) else { return }
+        write { revision, core in
+            let request = PersonContactSetRequest(personId: personId, expectedRevision: revision, contact: card)
+            return try await core.request("person_contact_set", ["request": request])
+        }
+    }
+
     /// Merging keeps both records' samples, which is what merging two records
     /// of one person means, and follows whatever the merge left behind. Two
     /// saved voices from different models cannot be combined; that merge
@@ -593,6 +623,9 @@ final class VoiceIdentityStore {
     private(set) var speakers: [VoiceIdentitySpeaker] = []
     /// The ones with nobody behind them yet.
     private(set) var unresolved: [VoiceIdentitySpeaker] = []
+    /// Waiting speakers whose voice matches someone you named in another
+    /// meeting. Only a confirm writes; one is gone once its speaker has a name.
+    private(set) var suggestions: [VoiceSpeakerSuggestion] = []
     /// Who a label can point at. Nil until the read answers.
     private(set) var people: [PersonListEntry]?
     private(set) var peopleFailed = false
@@ -635,6 +668,7 @@ final class VoiceIdentityStore {
             loaded = false
             speakers = []
             unresolved = []
+            suggestions = []
         }
         self.sessionId = sessionId
         do {
@@ -657,9 +691,12 @@ final class VoiceIdentityStore {
             // A status id can name a speaker this read has not seen yet; a
             // count nobody can act on is worse than one refresh late.
             unresolved = meeting.speakers.filter { waiting.contains($0.speakerId) }
+            let askable = Set(unresolved.map(\.speakerId))
+            suggestions = status.suggestions.filter { askable.contains($0.speakerId) }
         } catch {
             speakers = []
             unresolved = []
+            suggestions = []
             throw error
         }
     }
@@ -765,6 +802,21 @@ final class VoiceIdentityStore {
                 sessionId: sessionId, speakerId: question.speakerId, action: .markUnknown)
             try await reread(sessionId)
             ask(nil)
+        }
+    }
+
+    /// Names a waiting speaker as the person their voice matches: the same
+    /// write the sheet makes when that person is picked.
+    func confirm(_ suggestion: VoiceSpeakerSuggestion) {
+        guard let sessionId else { return }
+        busy = true
+        act { [self] in
+            defer { busy = false }
+            _ = try await identify(
+                sessionId: sessionId,
+                speakerId: suggestion.speakerId,
+                action: .label(.existing(personId: suggestion.personId)))
+            try await reread(sessionId)
         }
     }
 

@@ -5,8 +5,10 @@ struct PlannerCalendarView: View {
     var material: AppearanceMaterial = .solid
     let openProject: (String) -> Void
     let openMeeting: (String) -> Void
+    let showProjects: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("projects.layout") private var layout = ProjectsLayout.list
     @State private var selectedDate = Date()
     @State private var displayedMonth = Date()
     private let calendar = Calendar.current
@@ -42,23 +44,18 @@ struct PlannerCalendarView: View {
 
     var body: some View {
         Page {
-            PageTitle("Calendar", subtitle: "") {
-                HStack(spacing: 12) {
-                    Button("Today") {
-                        let today = Date()
-                        selectedDate = today
-                        displayedMonth = today
-                    }
-                    .buttonStyle(.secondary)
-                    Button {
-                        if let range = visibleInterval { Task { await store.loadCalendar(range) } }
-                    } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.quiet)
-                        .accessibilityLabel("Refresh calendar")
-                        .help("Refresh calendar")
-                        .disabled(store.calendarLoading)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    calendarTitle
+                    Spacer(minLength: 16)
+                    calendarControls
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    calendarTitle
+                    HStack(spacing: 10) { calendarControls }
                 }
             }
+            .padding(.bottom, 18)
             if let error = store.calendarError {
                 PlannerFailure(message: error) {
                     if let range = visibleInterval { Task { await store.loadCalendar(range) } }
@@ -82,6 +79,39 @@ struct PlannerCalendarView: View {
         .onDisappear { store.stopCalendar() }
         .transaction {
             if reduceMotion { $0.animation = nil; $0.disablesAnimations = true }
+        }
+    }
+
+    private var calendarTitle: some View {
+        Text("Calendar").titleText().accessibilityAddTraits(.isHeader)
+    }
+
+    @ViewBuilder
+    private var calendarControls: some View {
+        Button {
+            if let range = visibleInterval { Task { await store.loadCalendar(range) } }
+        } label: { Image(systemName: "arrow.clockwise") }
+            .buttonStyle(.quiet)
+            .accessibilityLabel("Refresh calendar")
+            .help("Refresh calendar")
+            .disabled(store.calendarLoading)
+        Button("Today") {
+            let today = Date()
+            selectedDate = today
+            displayedMonth = today
+        }
+        .buttonStyle(.compact)
+        SegmentedSwitch(items: ProjectsViewChoice.items, selection: .calendar, iconOnly: true) { choice in
+            switch choice {
+            case .list:
+                layout = .list
+                showProjects()
+            case .board:
+                layout = .board
+                showProjects()
+            case .calendar:
+                break
+            }
         }
     }
 

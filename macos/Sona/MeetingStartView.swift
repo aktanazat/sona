@@ -19,17 +19,14 @@ struct MeetingStartGateView: View {
     let store: MeetingLiveStore
 
     var body: some View {
-        Page {
+        Page(back: store.gate == nil ? nil : PageBack("Back") { store.cancel() }) {
             if let session = store.gate {
-                VStack(alignment: .leading, spacing: 0) {
-                    BackLink(title: "Back") { store.cancel() }
-                    Text(
-                        store.gateBlocked || !store.canStart
-                            ? "Recording did not start" : "Ready to record"
-                    )
-                    .titleText()
-                    .accessibilityAddTraits(.isHeader)
-                }
+                Text(
+                    store.gateBlocked || !store.canStart
+                        ? "Recording did not start" : "Ready to record"
+                )
+                .titleText()
+                .accessibilityAddTraits(.isHeader)
                 .padding(.bottom, 24)
 
                 if let facts = store.options?.preview {

@@ -283,6 +283,100 @@ struct StorageStatus: Decodable {
     }
 }
 
+// MARK: - What Sona holds
+
+/// `privacy_inventory`: what this Mac keeps, counted where it is stored.
+struct PrivacyInventory: Decodable {
+    let measuredAtUtcMs: Double
+    let meetings: Holding<MeetingHoldings>
+    let dictations: Holding<DictationHoldings>
+    let notes: Holding<NoteHoldings>
+    /// Dictation history and notes. Meeting data is always encrypted: its
+    /// store does not open without the key.
+    let historyEncrypted: Bool
+    let cloudBackup: CloudBackup
+    let phoneSnapshot: Holding<PhoneSnapshotHoldings>
+}
+
+/// One part of the inventory, or why it could not be read. A part that could
+/// not be read is never a zero.
+enum Holding<Value: Decodable>: Decodable {
+    case available(Value)
+    case unavailable(HoldingGap)
+
+    private enum Keys: String, CodingKey { case status, reason }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Keys.self)
+        switch try container.decode(String.self, forKey: .status) {
+        case "available":
+            self = .available(try Value(from: decoder))
+        case "unavailable":
+            self = .unavailable(try container.decode(HoldingGap.self, forKey: .reason))
+        case let status:
+            throw DecodingError.dataCorruptedError(
+                forKey: .status, in: container, debugDescription: "Unknown holding status \(status)")
+        }
+    }
+}
+
+enum HoldingGap: String, Decodable {
+    case locked
+    case unavailable
+
+    var word: String {
+        switch self {
+        case .locked: "Locked"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
+struct MeetingHoldings: Decodable {
+    let recordings: RecordingHoldings
+    let transcripts: Int
+    let voiceprints: VoiceprintHoldings
+    let portraits: PortraitHoldings
+    let contactCards: Int
+    let purgingWithinWeek: Int
+    let lastCloudUploadAtUtcMs: Double?
+}
+
+struct RecordingHoldings: Decodable {
+    let meetings: Int
+    let durationMs: Double
+    let bytes: UInt64
+}
+
+struct VoiceprintHoldings: Decodable {
+    let people: Int
+    let sampleMs: Double
+    let speakers: Int
+}
+
+struct PortraitHoldings: Decodable {
+    let count: Int
+    let bytes: UInt64
+}
+
+struct DictationHoldings: Decodable {
+    let count: Int
+    let durationMs: Double
+    let bytes: UInt64
+}
+
+struct NoteHoldings: Decodable {
+    let count: Int
+}
+
+struct PhoneSnapshotHoldings: Decodable {
+    let lastPublishedAtUtcMs: Double?
+}
+
+enum CloudBackup: String, Decodable {
+    case off, paused, on
+}
+
 // MARK: - Upstream import
 
 enum UpstreamImportAppState: String, Decodable {

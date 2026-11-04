@@ -1,12 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// Home under the dictation card: the numbers, everything that asks the
-/// reader a question, what is coming, and what Sona did without being asked.
+/// Home under the dictation card, read top to bottom: six widgets, each the
+/// head of a place; everything that asks the reader a question; what is
+/// coming; the newest conversations and notes; what Sona did without being
+/// asked; and the dictation numbers in full.
 ///
-/// Read in that order. The card above it — the state word, the chord, the
-/// record control and the mode — belongs to the capture screen.
+/// The card above it — the state word, the chord, the record control and the
+/// mode — belongs to the capture screen.
 struct OverviewView: View {
+    /// Where the commitments widget scrolls to.
+    static let needsYouAnchor = "overview-needs-you"
+
     let store: OverviewStore
     /// Opens a retained meeting named by an open loop or a receipt.
     var openMeeting: (String) -> Void = { _ in }
@@ -15,16 +20,192 @@ struct OverviewView: View {
     /// The standing decisions the recurring upcoming rows offer. Meeting
     /// settings owns those three commands, so the integrator hands them in.
     var series: OverviewSeriesActions?
+    /// Brings the needs-you list into view. The page owns the scroll.
+    var showNeedsYou: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ErrorNote(store.error)
-            OverviewStatsCard(store: store)
+            OverviewWidgets(store: store, showNeedsYou: showNeedsYou)
             OverviewNeedsYou(store: store, openMeeting: openMeeting)
+                .id(Self.needsYouAnchor)
             OverviewUpcomingSection(store: store, series: series)
+            OverviewConversations(store: store)
             FeedRecentView(store: store, openMeeting: openMeeting, seeAll: openRunLog)
+            OverviewStatsCard(store: store)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Widgets
+
+/// Home's six numbers, each a tile that opens the place it counts.
+struct OverviewWidgets: View {
+    @Environment(AppModel.self) private var model
+    let store: OverviewStore
+    let showNeedsYou: () -> Void
+
+    private static let columns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let now = context.date
+            let week = OverviewWeek(ending: now)
+            LazyVGrid(columns: Self.columns, alignment: .leading, spacing: 12) {
+                today(now)
+                recorded(week)
+                dictated(week)
+                commitments
+                overdue(now)
+                peopleMet(week)
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    private func today(_ now: Date) -> some View {
+        let calendar = Calendar.current
+        let recorded: [MeetingHistorySummary] = if case let .loaded(entries) = store.recentMeetings {
+            entries.filter { calendar.isDate($0.date, inSameDayAs: now) }
+        } else {
+            []
+        }
+        let ahead = (store.upcoming?.rows ?? []).filter {
+            calendar.isDate(FeedClock.date($0.startUtcMs), inSameDayAs: now) && FeedClock.date($0.endUtcMs) > now
+        }
+        let blocks = recorded.map {
+            DayStripBlock(id: "recorded:\($0.id)", start: $0.date,
+                          end: $0.date.addingTimeInterval($0.recordedDuration ?? 0), recorded: true)
+        } + ahead.map {
+            DayStripBlock(id: "ahead:\($0.eventKey)", start: FeedClock.date($0.startUtcMs),
+                          end: FeedClock.date($0.endUtcMs), recorded: false)
+        }
+        let count = recorded.count + ahead.count
+        var caption: [String] = []
+        if !recorded.isEmpty {
+            let seconds = recorded.compactMap(\.recordedDuration).reduce(0, +)
+            caption.append(seconds > 0 ? "\(Int((seconds / 60).rounded(.up))) min recorded" : "\(recorded.count) recorded")
+        }
+        if let next = ahead.min(by: { $0.startUtcMs < $1.startUtcMs }) {
+            caption.append("next \(FeedClock.date(next.startUtcMs).formatted(date: .omitted, time: .shortened))")
+        }
+        return WidgetTile("Today", icon: "calendar", value: "\(count)", unit: count == 1 ? "meeting" : "meetings",
+                          caption: caption.isEmpty ? nil : caption.joined(separator: " · "),
+                          action: { model.go(.meetings) }) {
+            DayStrip(blocks: blocks, now: now)
+        }
+    }
+
+    private func recorded(_ week: OverviewWeek) -> some View {
+        let points: [ActivityMeetingPoint]? = if case let .available(days) = store.meetings { days } else { nil }
+        var minutes: [String: Double] = [:]
+        var meetings = 0
+        for point in points ?? [] where week.keys.contains(point.localDate) {
+            minutes[point.localDate, default: 0] += Double(point.verifiedCapturedDurationMs) / 60_000
+            meetings += point.meetings
+        }
+        let total = Int(minutes.values.reduce(0, +).rounded())
+        return WidgetTile("Recorded this week", icon: "waveform", value: points == nil ? "–" : total.formatted(),
+                          unit: "min", caption: points == nil ? nil : meetings == 1 ? "1 meeting" : "\(meetings) meetings",
+                          action: { model.go(.meetings) }) {
+            if points != nil {
+                DayBars(days: week.chart { minutes[$0] ?? 0 } spoken: { "\(Int($0.rounded())) minutes" })
+            }
+        }
+    }
+
+    private func dictated(_ week: OverviewWeek) -> some View {
+        var words: [String: Double] = [:]
+        for point in store.trend?.points ?? [] where week.keys.contains(point.localDate) {
+            words[point.localDate, default: 0] += Double(point.words)
+        }
+        let total = Int(words.values.reduce(0, +))
+        return WidgetTile("Dictated this week", icon: "mic", value: store.trend == nil ? "–" : total.formatted(),
+                          unit: "words", caption: store.trend.map { "\($0.allTime.words.formatted()) all time" },
+                          action: { model.go(.library) }) {
+            if store.trend != nil {
+                Sparkline(days: week.chart { words[$0] ?? 0 } spoken: { "\(Int($0)) words" })
+            }
+        }
+    }
+
+    private var commitments: some View {
+        let loops: [FeedOpenLoop]? = if case let .loaded(entries) = store.openLoops { entries } else { nil }
+        let count = loops?.count ?? 0
+        let meetings = Set((loops ?? []).map(\.meetingId).filter { !$0.isEmpty }).count
+        return WidgetTile("Commitments", icon: "checklist",
+                          value: loops == nil ? "–" : count >= OverviewStore.openLoopLimit ? "\(count)+" : "\(count)",
+                          unit: "open",
+                          caption: meetings == 0 ? nil : meetings == 1 ? "from 1 meeting" : "from \(meetings) meetings",
+                          action: count == 0 ? nil : showNeedsYou) {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach((loops ?? []).prefix(2)) { loop in
+                    Text(loop.text).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func overdue(_ now: Date) -> some View {
+        let projects = model.projects
+        let late = projects.overdueTasks(at: Int64(now.timeIntervalSince1970 * 1000))
+            .sorted { ($0.dueAtMs ?? .max) < ($1.dueAtMs ?? .max) }
+        let open = projects.activeOpenTaskCount
+        let known = projects.projects != nil
+        return WidgetTile("Overdue", icon: "exclamationmark.circle", value: known ? "\(late.count)" : "–",
+                          unit: late.count == 1 ? "task" : "tasks", caption: known ? "of \(open) open" : nil,
+                          tone: late.isEmpty ? Theme.ink : Theme.live,
+                          action: {
+                              if !late.isEmpty { projects.showOverdue() }
+                              model.go(.projects)
+                          }) {
+            if known, open > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    ShareBar(fraction: Double(late.count) / Double(open), tint: Theme.live)
+                    if let oldest = late.first {
+                        Text(oldest.title).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func peopleMet(_ week: OverviewWeek) -> some View {
+        let entries = model.people.entries
+        let since = Int64(week.start.timeIntervalSince1970 * 1000)
+        let met = (entries ?? [])
+            .filter { ($0.lastMeetingAtUtcMs ?? .min) >= since }
+            .sorted { ($0.lastMeetingAtUtcMs ?? 0) > ($1.lastMeetingAtUtcMs ?? 0) }
+        return WidgetTile("People this week", icon: "person.2", value: entries == nil ? "–" : "\(met.count)",
+                          unit: "met", caption: entries.map { $0.count == 1 ? "of 1 person" : "of \($0.count) people" },
+                          action: { model.go(.people) }) {
+            AvatarStack(faces: met.map { AvatarFace(kind: .person($0.person.id), name: $0.person.displayName) },
+                        size: 22, limit: 6, revision: model.people.photoRevision)
+        }
+    }
+}
+
+/// The seven local days ending today: what "this week" means on Home, the
+/// same span the numbers card counts.
+private struct OverviewWeek {
+    let days: [Date]
+    let keys: [String]
+
+    init(ending now: Date) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        days = (0..<7).reversed().compactMap { calendar.date(byAdding: .day, value: -$0, to: today) }
+        keys = days.map(ActivityDates.key)
+    }
+
+    var start: Date { days.first ?? .now }
+
+    func chart(_ value: (String) -> Double, spoken: (Double) -> String) -> [ChartDay] {
+        zip(days, keys).map { day, key in
+            let amount = value(key)
+            return ChartDay(date: day, value: amount, spoken: spoken(amount))
+        }
     }
 }
 
@@ -153,6 +334,10 @@ private struct CaptureModeRow: View {
 struct OverviewNeedsYou: View {
     let store: OverviewStore
     var openMeeting: (String) -> Void = { _ in }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showingAll = false
+    /// How many promises the list draws before "Show all".
+    private static let shown = 5
 
     var body: some View {
         // A list still being read is not an empty list, so the section draws
@@ -171,8 +356,15 @@ struct OverviewNeedsYou: View {
                     if case .failed = store.openLoops {
                         FeedFailedRow(retry: store.refreshFeed)
                     }
-                    ForEach(loops) { loop in
+                    ForEach(showingAll ? loops : Array(loops.prefix(Self.shown))) { loop in
                         OverviewLoopRow(loop: loop, openMeeting: openMeeting)
+                    }
+                    if loops.count > Self.shown {
+                        CardRow(action: {
+                            withAnimation(Motion.settle(reduced: reduceMotion)) { showingAll.toggle() }
+                        }) {
+                            Text(showingAll ? "Show fewer" : "Show all \(total)").metaText(Theme.inkSecondary)
+                        }
                     }
                     ForEach(store.suggestions ?? []) { entry in
                         LearningRow(entry: entry, busy: store.answering.contains(entry.id)) { status in
@@ -189,6 +381,10 @@ struct OverviewNeedsYou: View {
 
     private var loops: [FeedOpenLoop] {
         if case let .loaded(entries) = store.openLoops { entries } else { [] }
+    }
+
+    private var total: String {
+        loops.count >= OverviewStore.openLoopLimit ? "\(loops.count)+" : "\(loops.count)"
     }
 
     private var updateWaiting: OverviewUpdate? {
@@ -874,6 +1070,10 @@ enum ActivityDates {
         wire.date(from: localDate)
     }
 
+    static func key(_ date: Date) -> String {
+        wire.string(from: date)
+    }
+
     static func narrowWeekday(_ localDate: String) -> String {
         guard let date = parse(localDate) else { return "" }
         return narrow.string(from: date)
@@ -940,6 +1140,117 @@ private struct UsageAppRowView: View {
             Text(row.counts).metaText()
         }
     }
+}
+
+// MARK: - Conversations and notes
+
+/// The newest conversations and notes as one list, newest first, each
+/// opening where it lives, beside the two ways to start another.
+struct OverviewConversations: View {
+    @Environment(AppModel.self) private var model
+    let store: OverviewStore
+    private static let shown = 6
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Conversations and notes").sectionLabel()
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
+                Button("New note") {
+                    model.go(.scratchpad)
+                    Task { await model.scratchpad.newNote() }
+                }
+                .buttonStyle(.compact)
+                Button("Record conversation", action: model.recordMeeting).buttonStyle(.compact)
+            }
+            Card {
+                if failed {
+                    FeedFailedRow { Task { await store.loadRecent() } }
+                }
+                if entries.isEmpty {
+                    if loading {
+                        CardLine("Loading…")
+                    } else if !failed {
+                        CardLine("No conversations or notes yet.")
+                    }
+                }
+                ForEach(entries) { entry in
+                    CardRow(action: { open(entry) }) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Image(systemName: entry.isNote ? "note.text" : "bubble.left.and.bubble.right")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.inkTertiary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.title).bodyText(14).lineLimit(1)
+                                if !entry.detail.isEmpty {
+                                    Text(entry.detail).metaText().lineLimit(1)
+                                }
+                            }
+                        }
+                    } trailing: {
+                        Text(FeedClock.ago(entry.atMs)).metaText()
+                    }
+                }
+            }
+            HStack(spacing: 16) {
+                Button("All conversations") { model.go(.meetings) }.buttonStyle(.quiet)
+                Button("All notes") { model.go(.scratchpad) }.buttonStyle(.quiet)
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    private var entries: [OverviewRecentEntry] {
+        var all: [OverviewRecentEntry] = []
+        if case let .loaded(meetings) = store.recentMeetings {
+            all += meetings.map {
+                OverviewRecentEntry(
+                    id: "meeting:\($0.id)", target: $0.id, isNote: false, title: $0.title,
+                    detail: $0.headline?.text ?? ($0.speakerLabels ?? []).joined(separator: ", "),
+                    atMs: $0.createdAtUtcMs)
+            }
+        }
+        if case let .loaded(notes) = store.recentNotes {
+            all += notes.map {
+                OverviewRecentEntry(
+                    id: "note:\($0.id)", target: $0.id, isNote: true, title: $0.title, detail: $0.preview,
+                    atMs: $0.updatedAtMs)
+            }
+        }
+        all.sort { $0.atMs == $1.atMs ? $0.id < $1.id : $0.atMs > $1.atMs }
+        return Array(all.prefix(Self.shown))
+    }
+
+    private var loading: Bool {
+        if case .loading = store.recentMeetings { return true }
+        if case .loading = store.recentNotes { return true }
+        return false
+    }
+
+    private var failed: Bool {
+        if case .failed = store.recentMeetings { return true }
+        if case .failed = store.recentNotes { return true }
+        return false
+    }
+
+    private func open(_ entry: OverviewRecentEntry) {
+        if entry.isNote {
+            model.open(link: "sona://note/\(entry.target)")
+        } else {
+            model.openMeeting(entry.target)
+        }
+    }
+}
+
+private struct OverviewRecentEntry: Identifiable {
+    let id: String
+    let target: String
+    let isNote: Bool
+    let title: String
+    let detail: String
+    let atMs: Int64
 }
 
 // MARK: - Recent

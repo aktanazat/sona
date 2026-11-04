@@ -534,6 +534,17 @@ private extension MeetingSessionSnapshot {
 
 // MARK: - The consent panel
 
+extension MeetingConsentCard {
+    /// A recording docks against the right edge of the screen; an offer, a
+    /// prep and a wrap float at the top right.
+    var docksAtEdge: Bool {
+        switch self {
+        case .active, .recording: true
+        case .prompt, .prep, .wrap: false
+        }
+    }
+}
+
 struct MeetingConsentPanelView: View {
     let store: MeetingLiveStore
 
@@ -547,57 +558,321 @@ struct MeetingConsentPanelView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The surface's inset, which also makes its corner concentric with the
-    /// corner of a button in it.
-    private static let inset: CGFloat = 12
-    private static let radius = Theme.radiusControl + inset
-
+    /// The window slides; a card changing for another only crossfades.
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        ZStack(alignment: .trailing) {
             if let card = store.card {
-                VStack(alignment: .leading, spacing: 8) {
-                    content(card)
-                    if let error = store.error {
-                        Text(error)
-                            .bodyText(12, Theme.live)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(Self.inset)
-                .frame(width: 320, alignment: .leading)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
-                        .strokeBorder(Theme.border, lineWidth: 1))
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-                .id(card.id)
-                .transition(arrival)
+                surface(card)
+                    .id(card.id)
+                    .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: store.card?.id)
+        .animation(Theme.Slide.animation(reduced: reduceMotion), value: store.card?.id)
     }
 
-    @ViewBuilder private func content(_ card: MeetingConsentCard) -> some View {
+    @ViewBuilder private func surface(_ card: MeetingConsentCard) -> some View {
         switch card {
         case let .prompt(prompt):
-            DetectionPromptView(store: store, prompt: prompt)
+            PanelCard(store: store) { DetectionPromptView(store: store, prompt: prompt) }
+                .padding(8)
         case let .active(state):
-            MeetingConsentActiveCard(store: store, state: state)
+            MeetingRecordingDock(store: store, recording: .panel(state))
         case let .recording(event, recording):
-            RitualRecordingView(store: store, event: event, card: recording)
+            MeetingRecordingDock(store: store, recording: .ritual(event, recording))
         case let .prep(event, prep):
-            RitualPrepView(store: store, event: event, card: prep, onOpenBrief: onOpenBrief)
+            PanelCard(store: store) {
+                RitualPrepView(store: store, event: event, card: prep, onOpenBrief: onOpenBrief)
+            }
+            .padding(8)
         case let .wrap(event, wrap):
-            RitualWrapView(
-                store: store, event: event, card: wrap,
-                onOpenNotes: onOpenNotes, followUp: followUp)
+            PanelCard(store: store) {
+                RitualWrapView(
+                    store: store, event: event, card: wrap,
+                    onOpenNotes: onOpenNotes, followUp: followUp)
+            }
+            .padding(8)
+        }
+    }
+}
+
+/// The panel's surface: its width, its inset, and a corner concentric with
+/// the corner of a button inside that inset.
+private enum PanelSurface {
+    static let width: CGFloat = 320
+    static let inset: CGFloat = 12
+    static let radius = Theme.radiusControl + inset
+}
+
+private extension View {
+    /// The panel's fill, hairline and shadow. Docked, the right side runs
+    /// flush into the screen's edge: only the left corners round, and the
+    /// hairline runs on past the edge.
+    func panelSurface(docked: Bool, radius: CGFloat = PanelSurface.radius) -> some View {
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: radius,
+            bottomLeadingRadius: radius,
+            bottomTrailingRadius: docked ? 0 : radius,
+            topTrailingRadius: docked ? 0 : radius,
+            style: .continuous)
+        return background(Theme.surface, in: shape)
+            .overlay(shape.strokeBorder(Theme.border, lineWidth: 1).padding(.trailing, docked ? -1 : 0))
+            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .contentShape(shape)
+    }
+}
+
+/// A card on the panel's surface, with the store's last error under it.
+private struct PanelCard<Content: View>: View {
+    let store: MeetingLiveStore
+    var docked = false
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content
+            if let error = store.error {
+                Text(error)
+                    .bodyText(12, Theme.live)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(PanelSurface.inset)
+        .frame(width: PanelSurface.width, alignment: .leading)
+        .panelSurface(docked: docked)
+    }
+}
+
+/// The recording a docked panel shows: one the panel started, or one Sona
+/// started by itself.
+private enum DockedRecording {
+    case panel(MeetingConsentPanelSessionState)
+    case ritual(RitualEvent, RitualRecordingCard)
+}
+
+/// A recording, docked flush against the right edge of the screen. At rest
+/// it is a strip: the dot, the word and the clock, read upright. The pointer
+/// on it pulls a drawer out with the title, the clock, a bookmark and Stop.
+/// A click opens the whole card, which stays until it is collapsed, or
+/// until the pointer leaves after a press in it.
+private struct MeetingRecordingDock: View {
+    let store: MeetingLiveStore
+    let recording: DockedRecording
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var drawer = Drawer.shut
+    /// Room for the drawer: made before the drawer comes out and given back
+    /// once it is in, each in an update of its own. Inside the drawer's
+    /// animation, SwiftUI would slide the strip across the room as it grows.
+    @State private var wide = false
+    /// The drawer that comes out once the room is made.
+    @State private var pending: Drawer?
+    @State private var shutting: Task<Void, Never>?
+    @State private var narrowing: Task<Void, Never>?
+    @State private var marked = false
+
+    private enum Drawer: Equatable {
+        case shut
+        /// Pulled out while the pointer is on it.
+        case peeking
+        /// Opened by a click. Once a press lands in it, the pointer leaving
+        /// shuts it.
+        case open(pressed: Bool)
+    }
+
+    /// The strip and the drawer share a height, so the drawer covers the
+    /// strip it comes out of and leaving one is leaving both.
+    private static let height: CGFloat = 152
+    private static let stripWidth: CGFloat = 32
+
+    /// The strip is hidden, never removed: SwiftUI draws a view on its way
+    /// out where it last sat, and the drawer comes out over it.
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Color.clear
+                .frame(width: wide ? PanelSurface.width : Self.stripWidth, height: Self.height)
+            strip
+                .opacity(drawer == .shut ? 1 : 0)
+                .allowsHitTesting(drawer == .shut)
+                .accessibilityHidden(drawer != .shut)
+            switch drawer {
+            case .shut:
+                EmptyView()
+            case .peeking:
+                peek.transition(reduceMotion ? .opacity : .asymmetric(
+                    insertion: .move(edge: .trailing),
+                    removal: .move(edge: .trailing).combined(with: .opacity)))
+            case .open:
+                open.transition(.asymmetric(
+                    insertion: .opacity,
+                    removal: reduceMotion ? .opacity : .move(edge: .trailing)))
+            }
+        }
+        .onGeometryChange(for: Bool.self) { $0.size.width > Self.stripWidth } action: { grown in
+            guard grown, let pending else { return }
+            self.pending = nil
+            drawer = pending
+        }
+        .onPointer(inside: pointer, press: press)
+        .animation(Theme.Slide.animation(reduced: reduceMotion), value: drawer)
+        .padding([.vertical, .leading], 8)
+    }
+
+    private var strip: some View {
+        VStack(spacing: 10) {
+            LiveDot(state: dot)
+            UprightText(word)
+                .font(TypeScale.label(12))
+                .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
+            if let clock {
+                UprightText { MeetingClockText(clock: clock, size: 11) }
+            }
+        }
+        .frame(width: Self.stripWidth, height: Self.height)
+        .panelSurface(docked: true, radius: Self.stripWidth / 2)
+        .onTapGesture { pull(.open(pressed: false)) }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { pull(.open(pressed: false)) }
+    }
+
+    private var peek: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                LiveDot(state: dot)
+                Text(word)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
+                Spacer(minLength: 8)
+                if let clock {
+                    MeetingClockText(clock: clock)
+                }
+            }
+            if let error = store.error {
+                Text(error).bodyText(12, Theme.live).lineLimit(3)
+            } else {
+                Text(title)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                Button(action: mark) {
+                    Image(systemName: marked ? "bookmark.fill" : "bookmark")
+                }
+                .buttonStyle(.circle)
+                .disabled(!canBookmark)
+                .help("Bookmark this moment")
+                .accessibilityLabel(marked ? "Bookmarked" : "Bookmark")
+                Spacer(minLength: 8)
+                Button("Stop", action: stop)
+                    .buttonStyle(.compact)
+                    .disabled(store.pending != nil)
+            }
+        }
+        .padding(PanelSurface.inset)
+        .frame(width: PanelSurface.width, height: Self.height, alignment: .topLeading)
+        .panelSurface(docked: true)
+        .onTapGesture { pull(.open(pressed: false)) }
+    }
+
+    private var open: some View {
+        PanelCard(store: store, docked: true) {
+            switch recording {
+            case let .panel(state):
+                MeetingConsentActiveCard(store: store, state: state, collapse: shut)
+            case let .ritual(event, card):
+                RitualRecordingView(store: store, event: event, card: card, collapse: shut)
+            }
         }
     }
 
-    private var arrival: AnyTransition {
-        let entering: AnyTransition =
-            reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 4))
-        return .asymmetric(insertion: entering, removal: .opacity)
+    private func pointer(_ inside: Bool) {
+        shutting?.cancel()
+        shutting = nil
+        if inside {
+            if drawer == .shut { pull(.peeking) }
+        } else if drawer == .peeking || drawer == .open(pressed: true) {
+            shutting = Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                if !Task.isCancelled { shut() }
+            }
+        }
+    }
+
+    private func press() {
+        if drawer == .open(pressed: false) { drawer = .open(pressed: true) }
+    }
+
+    private func pull(_ next: Drawer) {
+        narrowing?.cancel()
+        narrowing = nil
+        if wide {
+            drawer = next
+        } else {
+            pending = next
+            wide = true
+        }
+    }
+
+    private func shut() {
+        shutting?.cancel()
+        shutting = nil
+        pending = nil
+        drawer = .shut
+        narrowing?.cancel()
+        narrowing = Task {
+            try? await Task.sleep(for: .seconds(reduceMotion ? Theme.Slide.fade : Theme.Slide.duration))
+            if !Task.isCancelled { wide = false }
+        }
+    }
+
+    private func mark() {
+        Task {
+            guard await store.bookmarkFromPanel() else { return }
+            marked = true
+            try? await Task.sleep(for: .seconds(1.5))
+            marked = false
+        }
+    }
+
+    private func stop() {
+        switch recording {
+        case .panel: store.stopFromPanel()
+        case let .ritual(event, _): store.respond(event, action: .recordingStop)
+        }
+    }
+
+    private var sessionId: MeetingSessionId {
+        switch recording {
+        case let .panel(state): state.snapshot.sessionId
+        case let .ritual(_, card): card.sessionId
+        }
+    }
+
+    /// The session as the panel reads it, while it is this recording.
+    private var session: MeetingSessionSnapshot? {
+        guard let snapshot = store.active?.snapshot, snapshot.sessionId == sessionId else { return nil }
+        return snapshot
+    }
+
+    private var paused: Bool { session?.phase == .capturingPaused }
+    private var word: String { paused ? "Paused" : "Recording" }
+    private var dot: CaptureState { paused ? .idle : .recording(since: since) }
+    private var clock: MeetingCaptureClock? { store.clocks[sessionId] }
+    private var canBookmark: Bool { store.pending == nil && session?.phase == .capturingRecording }
+
+    private var title: String {
+        switch recording {
+        case let .panel(state): state.snapshot.title
+        case let .ritual(_, card): session?.title ?? card.appName
+        }
+    }
+
+    private var since: Date {
+        switch recording {
+        case let .panel(state): state.snapshot.captureStart
+        case let .ritual(_, card): card.startedAtUtcMs.meetingDate
+        }
     }
 }
 
@@ -672,13 +947,15 @@ struct DetectionPromptView: View {
 }
 
 /// The session the panel is watching, in one row: the dot, the word, the
-/// clock, and Stop. The dot carries the colour; the word beside it is plain
-/// ink. The title sits under the row, and so does the chat notice's outcome
-/// when the person asked for one, because it asks them to send it. Telling
-/// this series to stop recording itself waits behind the `…`.
+/// clock, Stop, and the `›` that tucks the card back into its strip. The
+/// dot carries the colour; the word beside it is plain ink. The title sits
+/// under the row, and so does the chat notice's outcome when the person
+/// asked for one, because it asks them to send it. Telling this series to
+/// stop recording itself waits behind the `…`.
 struct MeetingConsentActiveCard: View {
     let store: MeetingLiveStore
     let state: MeetingConsentPanelSessionState
+    let collapse: () -> Void
 
     var body: some View {
         let paused = state.snapshot.phase == .capturingPaused
@@ -701,6 +978,7 @@ struct MeetingConsentActiveCard: View {
                             .disabled(store.pending != nil)
                     }
                 }
+                PanelCollapse(action: collapse)
             }
             Text(state.snapshot.title)
                 .font(TypeScale.label(13))
@@ -720,6 +998,7 @@ struct RitualRecordingView: View {
     let store: MeetingLiveStore
     let event: RitualEvent
     let card: RitualRecordingCard
+    let collapse: () -> Void
 
     var body: some View {
         // The card is an event; the phase is the session's. Paused is the
@@ -745,6 +1024,7 @@ struct RitualRecordingView: View {
                     }
                     .disabled(store.pending != nil)
                 }
+                PanelCollapse(action: collapse)
             }
             Text(card.appName)
                 .font(TypeScale.label(13))
@@ -776,6 +1056,24 @@ private struct PanelMore<Items: View>: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("More")
+    }
+}
+
+/// The `›` on a docked card: back into the strip at the screen's edge.
+private struct PanelCollapse: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 22, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Collapse")
+        .accessibilityLabel("Collapse")
     }
 }
 

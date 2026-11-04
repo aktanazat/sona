@@ -124,6 +124,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 0) {
             BackLink(title: "Languages", action: store.changeLanguages)
                 .disabled(store.isBusy)
+                .padding(.bottom, 12)
             OnboardingHeading(title: "Pick a transcription model", line: store.languageSummary)
             ErrorNote(store.error)
             if let featured = store.featured {
@@ -223,6 +224,7 @@ struct OnboardingView: View {
         return VStack(alignment: .leading, spacing: 0) {
             BackLink(title: "Speech model", action: store.backToModels)
                 .disabled(store.practiceState.isBusy || store.finishing)
+                .padding(.bottom, 12)
             Text("Try dictation").heroText().padding(.bottom, 10)
             Text(practiceStatus)
                 .bodyText(14, store.practiceState == .listening ? Theme.live : Theme.inkSecondary)
