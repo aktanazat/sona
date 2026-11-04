@@ -1292,6 +1292,11 @@ pub struct MeetingArtifactRevision {
     pub state: MeetingArtifactState,
     pub generated_at_utc_ms: i64,
     pub content: Option<GeneratedMeetingArtifacts>,
+    /// What the run that wrote this revision took. Absent for a revision no
+    /// measured run wrote: one written again by hand, or from a transcript
+    /// with no recorded audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ProcessingReceipt>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -1489,6 +1494,77 @@ pub struct MeetingNavigationRequestedEvent(pub MeetingNavigationPayload);
 
 impl tauri_specta::Event for MeetingNavigationRequestedEvent {
     const NAME: &'static str = "meeting:navigation-requested";
+}
+
+/// The five stages of processing a meeting, in the order they run.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Type,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingStage {
+    Audio,
+    Speech,
+    Speakers,
+    Notes,
+    People,
+}
+
+impl ProcessingStage {
+    pub const ALL: [Self; 5] = [
+        Self::Audio,
+        Self::Speech,
+        Self::Speakers,
+        Self::Notes,
+        Self::People,
+    ];
+}
+
+/// Where a running pipeline is, and how long the rest should take on this
+/// Mac.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct ProcessingProgress {
+    pub stage: ProcessingStage,
+    pub stage_fraction_permille: u16,
+    /// Absent for a meeting with no recorded audio, such as an imported
+    /// transcript.
+    pub audio_ns_total: Option<u64>,
+    pub started_at_utc_ms: i64,
+    /// Absent until this Mac has finished the stage under way at least once:
+    /// time left is measured here, never assumed.
+    pub eta_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingProcessingProgressPayload {
+    pub event_schema_version: u32,
+    pub session_id: MeetingSessionId,
+    /// Absent once the run is over, however it ended.
+    pub progress: Option<ProcessingProgress>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(transparent)]
+pub struct MeetingProcessingProgressEvent(pub MeetingProcessingProgressPayload);
+
+impl tauri_specta::Event for MeetingProcessingProgressEvent {
+    const NAME: &'static str = "meeting:processing-progress";
+}
+
+/// Where a meeting's notes were written.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingRoute {
+    Local,
+    Relay,
+}
+
+/// What one finished run took: its wall time, the audio it read, and where
+/// its notes were written.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct ProcessingReceipt {
+    pub wall_ms: u64,
+    pub audio_ns: u64,
+    pub route: ProcessingRoute,
 }
 
 #[cfg(test)]

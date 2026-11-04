@@ -6645,6 +6645,93 @@ pub(crate) mod tests {
         );
     }
 
+    /// A run says which of its five stages it is in, in order and never
+    /// back, and ends by saying it is over. The first run on a Mac has
+    /// measured nothing here, so it shows no time left; what it measured is
+    /// what times the next one, and its notes carry what the run cost.
+    #[test]
+    fn a_run_reports_each_stage_in_order_and_leaves_a_receipt() {
+        let (files, manager) = importing_manager();
+        manager.processing.set_text_generators(
+            Arc::new(super::super::processing::tests::EchoingGenerator),
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+        );
+        let import = |name: &str| {
+            let path = files.path().join(name);
+            write_mono_wav(&path, 16_000);
+            tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
+                path,
+                title: None,
+                recorded_at_utc_ms: Some(1_700_000_000_000),
+                origin: RecordingOrigin::LocalFile,
+            }))
+            .expect("the recording imports")
+            .session_id
+        };
+
+        let first = import("first.wav");
+        let published = manager.processing.published_progress();
+        let (end, updates) = published.split_last().expect("the run reported");
+        assert_eq!(end.session_id, first);
+        assert_eq!(end.progress, None, "the run ends by saying it is over");
+        let updates: Vec<_> = updates
+            .iter()
+            .map(|payload| {
+                assert_eq!(payload.session_id, first);
+                payload.progress.clone().expect("only the last update ends")
+            })
+            .collect();
+        let stages: Vec<_> = updates.iter().map(|update| update.stage).collect();
+        assert!(
+            stages.windows(2).all(|pair| pair[0] <= pair[1]),
+            "a run never steps back a stage: {stages:?}"
+        );
+        let mut reported = stages.clone();
+        reported.dedup();
+        assert_eq!(reported, ProcessingStage::ALL, "every stage is reported");
+        assert!(
+            updates.iter().all(|update| update.eta_ms.is_none()),
+            "nothing has been measured on this Mac yet"
+        );
+
+        let review = tauri::async_runtime::block_on(manager.get(first))
+            .expect("the imported meeting is readable");
+        let receipt = review
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.state == MeetingArtifactState::Current)
+            .expect("the run wrote notes")
+            .receipt
+            .expect("the notes carry the run's receipt");
+        let listed = retained_meetings(&manager)
+            .into_iter()
+            .find(|meeting| meeting.session_id == first)
+            .expect("the meeting is listed");
+        assert_eq!(
+            listed.recorded_duration_ms,
+            i64::try_from(receipt.audio_ns / 1_000_000).ok(),
+            "the receipt counts the recording the way the list does"
+        );
+        assert_eq!(receipt.route, ProcessingRoute::Local);
+
+        let second = import("second.wav");
+        assert!(
+            manager
+                .processing
+                .published_progress()
+                .iter()
+                .filter(|payload| payload.session_id == second)
+                .any(|payload| payload
+                    .progress
+                    .as_ref()
+                    .is_some_and(|update| update.eta_ms.is_some())),
+            "the first run's stages time the second"
+        );
+    }
+
     /// A transcript-only import has no audio, so the two passes that read audio
     /// are skipped and the meeting still arrives at review — with the vendor's
     /// speaker names as the attribution on its segments.

@@ -913,6 +913,7 @@ mod tests {
             state: MeetingArtifactState::Current,
             generated_at_utc_ms: 3,
             content: Some(content),
+            receipt: None,
         });
         bundle.questions.push(MeetingAnswer {
             question_id: MeetingQuestionId::new(),

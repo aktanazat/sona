@@ -3,6 +3,9 @@ mod apple_json;
 pub(crate) use apple_json::root_schema as json_response_schema;
 
 mod complete_reading;
+mod progress;
+
+use progress::{RunProgress, TrackSpan};
 
 use super::analytics::{
     merge_turns, talk_metrics, tracker_results, AnalyticsSegment, KeywordTracker, MeetingAnalytics,
@@ -64,7 +67,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 const VAD_FRAME_SAMPLES: usize = 480;
@@ -793,6 +796,10 @@ pub struct MeetingProcessingService {
     /// of which jobs are live; this is how a caller waits for one to finish
     /// without polling it.
     jobs_idle: Arc<Condvar>,
+    /// Every progress update published, for the tests that follow a run
+    /// through its stages.
+    #[cfg(test)]
+    published_progress: Arc<Mutex<Vec<MeetingProcessingProgressPayload>>>,
 }
 
 pub(crate) struct RelationshipRefresh {
@@ -813,6 +820,8 @@ impl MeetingProcessingService {
             capture_active: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             jobs_idle: Arc::new(Condvar::new()),
+            #[cfg(test)]
+            published_progress: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -877,6 +886,14 @@ impl MeetingProcessingService {
             .relay_text_generator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = relay;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_progress(&self) -> Vec<MeetingProcessingProgressPayload> {
+        self.published_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Which engine writes one meeting's text, and `None` when there is not
@@ -1357,6 +1374,7 @@ impl MeetingProcessingService {
         cancelled: Arc<AtomicBool>,
         origin: ProcessingOrigin,
     ) {
+        let mut progress = self.start_progress(&store, session_id);
         // The row says the work is under way from the moment it is. Until
         // this was written, a meeting read "waiting to be processed" for the
         // whole of its transcription and its notes pass, and the only status
@@ -1382,6 +1400,7 @@ impl MeetingProcessingService {
                 &cancelled,
                 origin,
                 &mut relationship_generator,
+                &mut progress,
             )
         }))
         .unwrap_or_else(|_| {
@@ -1413,7 +1432,8 @@ impl MeetingProcessingService {
             self.finish_review(Arc::clone(&store), session_id, origin, run_completed);
             if run_completed {
                 if let Some(generator) = relationship_generator {
-                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                    self.enter_stage(session_id, &mut progress, ProcessingStage::People);
+                    let refreshed = catch_unwind(AssertUnwindSafe(|| {
                         self.refresh_relationship_summaries(
                             &store,
                             session_id,
@@ -1421,9 +1441,13 @@ impl MeetingProcessingService {
                             &cancelled,
                         );
                     }));
+                    if refreshed.is_ok() {
+                        progress.stage_did_work();
+                    }
                 }
             }
         }
+        self.finish_progress(&store, session_id, progress, run_completed);
     }
 
     fn finish_review(
@@ -1535,6 +1559,7 @@ impl MeetingProcessingService {
         cancelled: &AtomicBool,
         origin: ProcessingOrigin,
         relationship_generator: &mut Option<Arc<dyn MeetingTextGenerator>>,
+        progress: &mut RunProgress,
     ) -> Result<Option<RunFailure>, RunFailure> {
         store.require_retained_transcript(session_id)?;
         let plan = store.processing_plan(session_id)?;
@@ -1549,11 +1574,12 @@ impl MeetingProcessingService {
         // teaching each of them to tolerate an empty track is what keeps that
         // true.
         if origin != ProcessingOrigin::ImportedTranscript {
-            self.transcribe_and_diarize(store, session_id, &plan, cancelled)?;
+            self.transcribe_and_diarize(store, session_id, &plan, cancelled, progress)?;
         }
         if cancelled.load(Ordering::Acquire) {
             return Err(ProcessingFailure::Cancelled.into());
         }
+        self.enter_stage(session_id, progress, ProcessingStage::Notes);
         let input_revision = store.session_snapshot(session_id)?.revision;
         // Metrics come from the transcript, not from the generated notes, so
         // they are derived before generation and survive a model that is
@@ -1568,6 +1594,9 @@ impl MeetingProcessingService {
             generator.clone(),
         ) {
             Ok(outcome) => {
+                if let ArtifactGenerationOutcome::Generated { artifact, engine } = &outcome {
+                    progress.wrote_notes(artifact.artifact_id, self.route_for(engine));
+                }
                 if matches!(
                     outcome,
                     ArtifactGenerationOutcome::Generated { .. }
@@ -1609,6 +1638,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         plan: &MeetingRunPlan,
         cancelled: &AtomicBool,
+        progress: &mut RunProgress,
     ) -> Result<(), RunFailure> {
         let engine = self
             .transcript_engine
@@ -1640,6 +1670,7 @@ impl MeetingProcessingService {
             .map_err(RunFailure::from)?;
         let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
         let tracks = review.tracks;
+        self.enter_stage(session_id, progress, ProcessingStage::Speech);
         let abandoned = AtomicBool::new(false);
         thread::scope(|scope| {
             // Sortformer's one pass over the speakers' lane reads no
@@ -1660,11 +1691,13 @@ impl MeetingProcessingService {
                  * too, and without this every line they said would appear
                  * twice, once as the operator. */
                 let mut far_end = FarEnd::default();
+                let mut before_ns = 0;
                 for source_kind in [SourceKind::SystemAudio, SourceKind::Microphone] {
                     for track in tracks
                         .iter()
                         .filter(|track| track.source_kind == source_kind)
                     {
+                        let span = TrackSpan::of(track, before_ns);
                         self.process_track(
                             store,
                             session_id,
@@ -1675,10 +1708,13 @@ impl MeetingProcessingService {
                             &asr_plan,
                             &mut far_end,
                             cancelled,
+                            progress,
+                            span,
                         )?;
+                        before_ns = span.end_ns();
                     }
                 }
-                self.wait_for_capture(cancelled)?;
+                progress.paused(self.wait_for_capture(cancelled)?);
                 store
                     .complete_transcript_revision(session_id, transcript_revision_id)
                     .map_err(RunFailure::from)?;
@@ -1687,6 +1723,8 @@ impl MeetingProcessingService {
             })();
             if transcribed.is_err() {
                 abandoned.store(true, Ordering::Release);
+            } else {
+                self.enter_stage(session_id, progress, ProcessingStage::Speakers);
             }
             let early = early.and_then(|(track_id, start)| Some((track_id, start.join().ok()?)));
             transcribed?;
@@ -1697,6 +1735,7 @@ impl MeetingProcessingService {
                 &tracks,
                 early,
                 cancelled,
+                progress,
             );
             Ok(())
         })
@@ -1714,6 +1753,8 @@ impl MeetingProcessingService {
         asr_plan: &AsrPlan,
         far_end: &mut FarEnd,
         cancelled: &AtomicBool,
+        progress: &mut RunProgress,
+        span: TrackSpan,
     ) -> Result<(), RunFailure> {
         let detector = self
             .vad_factory
@@ -1729,7 +1770,7 @@ impl MeetingProcessingService {
         let mut refused = None;
         let visited = store.visit_durable_track_records(session_id, track_id, None, |record| {
             let mut pass = || -> Result<(), RunFailure> {
-                self.wait_for_capture(cancelled)?;
+                progress.paused(self.wait_for_capture(cancelled)?);
                 if frames.starts_new_span(&record) {
                     if let Some(chunk) = chunker.finish(false) {
                         self.transcribe_chunk(
@@ -1757,7 +1798,10 @@ impl MeetingProcessingService {
                         far_end,
                         chunk,
                     )
-                })
+                })?;
+                let end = record.start_offset_ns.saturating_add(record.duration_ns);
+                self.advance_stage(session_id, progress, span.done_ns(end));
+                Ok(())
             };
             pass().map_err(|failure| {
                 let error = store_error_from_processing(failure.reason());
@@ -1829,6 +1873,7 @@ impl MeetingProcessingService {
             .map_err(RunFailure::from)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_diarization(
         &self,
         store: &MeetingStore,
@@ -1837,6 +1882,7 @@ impl MeetingProcessingService {
         tracks: &[MeetingTrackSnapshot],
         early: Option<(SourceTrackId, DiarizerStart)>,
         cancelled: &AtomicBool,
+        progress: &mut RunProgress,
     ) {
         let Ok(origin) = store.meeting_origin(session_id) else {
             return;
@@ -1974,10 +2020,13 @@ impl MeetingProcessingService {
         let mut contiguous_audio = ContiguousAudioSpans::default();
         let mut cluster_speakers = HashMap::new();
         let mut fallback_evidence = Vec::new();
+        let span = TrackSpan::of(track, 0);
         let mut result =
             store.visit_durable_track_records(session_id, track.track_id, None, |record| {
-                self.wait_for_capture(cancelled)
-                    .map_err(store_error_from_processing)?;
+                progress.paused(
+                    self.wait_for_capture(cancelled)
+                        .map_err(store_error_from_processing)?,
+                );
                 // This loop discards the pending window where `process_track`
                 // flushes its pending chunk: a window cut by a gap holds two
                 // pieces of audio that are not adjacent, so scoring it would
@@ -2012,6 +2061,8 @@ impl MeetingProcessingService {
                 // stops the walk and never needs a cause.
                 .map_err(|failure| store_error_from_processing(failure.reason()))?;
                 contiguous_audio.observe(&record)?;
+                let end = record.start_offset_ns.saturating_add(record.duration_ns);
+                self.advance_stage(session_id, progress, span.done_ns(end));
                 Ok(())
             });
         if result.is_ok() {
@@ -2135,7 +2186,7 @@ impl MeetingProcessingService {
             if abandoned.load(Ordering::Acquire) {
                 return Err(ProcessingFailure::Cancelled);
             }
-            self.wait_for_capture(cancelled)
+            self.wait_for_capture(cancelled).map(drop)
         };
         let model_directory = store.diarization_model_directory();
         let prepared = match self.diarizer.prepare(&model_directory) {
@@ -3026,7 +3077,10 @@ impl MeetingProcessingService {
         Ok(())
     }
 
-    fn wait_for_capture(&self, cancelled: &AtomicBool) -> Result<(), ProcessingFailure> {
+    /// Hold the run while a capture is under way, and say for how long: that
+    /// time is the capture's, not processing's.
+    fn wait_for_capture(&self, cancelled: &AtomicBool) -> Result<Duration, ProcessingFailure> {
+        let started = Instant::now();
         while self.capture_active.load(Ordering::Acquire) {
             if cancelled.load(Ordering::Acquire) {
                 return Err(ProcessingFailure::Cancelled);
@@ -3036,7 +3090,7 @@ impl MeetingProcessingService {
         if cancelled.load(Ordering::Acquire) {
             return Err(ProcessingFailure::Cancelled);
         }
-        Ok(())
+        Ok(started.elapsed())
     }
 
     fn emit_current(&self, store: &MeetingStore, event: &str, session_id: MeetingSessionId) {
@@ -3055,6 +3109,102 @@ impl MeetingProcessingService {
                     revision,
                 },
             );
+        }
+    }
+
+    /// Open a run's progress at its first stage, timed against what this Mac
+    /// has measured before. Neither read is allowed to stop the run: without
+    /// them the run reports its stages and no time left.
+    fn start_progress(&self, store: &MeetingStore, session_id: MeetingSessionId) -> RunProgress {
+        let work = store.processing_work(session_id).unwrap_or_default();
+        let speeds = store.processing_speeds().unwrap_or_default();
+        let mut progress = RunProgress::start(work, speeds, utc_now_ms(), Instant::now());
+        let update = progress.current(Instant::now());
+        self.publish_progress(session_id, Some(update));
+        progress
+    }
+
+    fn enter_stage(
+        &self,
+        session_id: MeetingSessionId,
+        progress: &mut RunProgress,
+        stage: ProcessingStage,
+    ) {
+        let update = progress.enter(stage, Instant::now());
+        self.publish_progress(session_id, Some(update));
+    }
+
+    fn advance_stage(
+        &self,
+        session_id: MeetingSessionId,
+        progress: &mut RunProgress,
+        done_ns: u64,
+    ) {
+        if let Some(update) = progress.advance(done_ns, Instant::now()) {
+            self.publish_progress(session_id, Some(update));
+        }
+    }
+
+    /// Keep what the run measured and the receipt for the notes it wrote,
+    /// then say the run is over. The receipt lands first, so the review the
+    /// last update sends a reader back to already carries it.
+    fn finish_progress(
+        &self,
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        progress: RunProgress,
+        completed: bool,
+    ) {
+        let finished = progress.finish(completed, Instant::now());
+        if !finished.samples.is_empty() {
+            if let Err(error) =
+                store.record_processing_speeds(session_id, &finished.samples, utc_now_ms())
+            {
+                log::warn!("Could not keep the processing speed of {session_id:?}: {error:?}");
+            }
+        }
+        if let Some((artifact_id, receipt)) = finished.receipt {
+            match store.record_processing_receipt(artifact_id, receipt) {
+                Ok(()) => self.emit_current(store, "meeting:artifact-changed", session_id),
+                Err(error) => {
+                    log::warn!("Could not keep the receipt of {session_id:?}: {error:?}")
+                }
+            }
+        }
+        self.publish_progress(session_id, None);
+    }
+
+    fn publish_progress(&self, session_id: MeetingSessionId, progress: Option<ProcessingProgress>) {
+        let payload = MeetingProcessingProgressPayload {
+            event_schema_version: 1,
+            session_id,
+            progress,
+        };
+        #[cfg(test)]
+        self.published_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(payload.clone());
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                <MeetingProcessingProgressEvent as tauri_specta::Event>::NAME,
+                payload,
+            );
+        }
+    }
+
+    /// Where the engine that wrote a meeting's notes runs: the relay's is the
+    /// operator's own server, and every other engine is on this Mac.
+    fn route_for(&self, engine: &str) -> ProcessingRoute {
+        let relay = self
+            .relay_text_generator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .model_id();
+        if engine == relay {
+            ProcessingRoute::Relay
+        } else {
+            ProcessingRoute::Local
         }
     }
 }
@@ -5597,7 +5747,7 @@ fn utc_now_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::analytics::MeetingNotesTemplate;
     use super::super::local_generator::test_support::read_http_request;
     use super::*;
@@ -6866,6 +7016,49 @@ mod tests {
                 self.artifact.clone()
             } else {
                 self.ledger.clone()
+            })
+        }
+    }
+
+    /// An engine that writes the fixture notes and ledger about the first
+    /// turn of whatever transcript it is shown, so a whole run writes notes
+    /// without its test knowing the segments in advance.
+    pub(crate) struct EchoingGenerator;
+
+    impl MeetingTextGenerator for EchoingGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "apple-intelligence"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("echoing-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let pack: serde_json::Value =
+                serde_json::from_str(evidence).expect("a JSON evidence pack");
+            let turn = &pack["transcript"][0];
+            let text = turn["text"].as_str().expect("the turn's words");
+            Ok(match turn["segment_uuid"].as_str() {
+                Some(segment_id) => fixture_ledger_json(segment_id, text),
+                None => fixture_artifact_json(
+                    turn["entity_id"].as_str().expect("the turn's citation"),
+                    text,
+                ),
             })
         }
     }

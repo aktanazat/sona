@@ -36,6 +36,7 @@ mod note_evidence_tests;
 mod people;
 mod prep;
 pub(crate) mod privacy_inventory;
+pub(crate) mod processing_speed;
 pub(crate) mod prompts;
 pub(crate) mod query_plane;
 #[cfg(test)]
@@ -1530,6 +1531,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/people/contact_cards.sql")),
     M::up(include_str!("store/speaker_voiceprints.sql")),
     M::up(include_str!("store/conversation_bookmark_kinds.sql")),
+    M::up(include_str!("store/processing_speed.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -8787,10 +8789,12 @@ fn artifact_revision_for_key(
 ) -> Result<Option<MeetingArtifactRevision>, StoreError> {
     connection
         .query_row(
-            "SELECT artifact_id, transcript_revision_id, input_revision, template_id,
-                    template_version, generation_key, state, content_json, generated_at_utc_ms
-             FROM meeting_artifact_revisions
-             WHERE session_id = ?1 AND generation_key = ?2",
+            "SELECT a.artifact_id, a.transcript_revision_id, a.input_revision, a.template_id,
+                    a.template_version, a.generation_key, a.state, a.content_json,
+                    a.generated_at_utc_ms, r.wall_ms, r.audio_ns, r.route
+             FROM meeting_artifact_revisions a
+             LEFT JOIN meeting_processing_receipts r ON r.artifact_id = a.artifact_id
+             WHERE a.session_id = ?1 AND a.generation_key = ?2",
             params![id(session_id), generation_key],
             |row| artifact_revision_from_row(row, session_id),
         )
@@ -8803,10 +8807,12 @@ fn artifact_revisions_for_session(
     session_id: MeetingSessionId,
 ) -> Result<Vec<MeetingArtifactRevision>, StoreError> {
     let mut statement = connection.prepare(
-        "SELECT artifact_id, transcript_revision_id, input_revision, template_id,
-                template_version, generation_key, state, content_json, generated_at_utc_ms
-         FROM meeting_artifact_revisions
-         WHERE session_id = ?1 ORDER BY generated_at_utc_ms DESC",
+        "SELECT a.artifact_id, a.transcript_revision_id, a.input_revision, a.template_id,
+                a.template_version, a.generation_key, a.state, a.content_json,
+                a.generated_at_utc_ms, r.wall_ms, r.audio_ns, r.route
+         FROM meeting_artifact_revisions a
+         LEFT JOIN meeting_processing_receipts r ON r.artifact_id = a.artifact_id
+         WHERE a.session_id = ?1 ORDER BY a.generated_at_utc_ms DESC",
     )?;
     let rows = statement.query_map(params![id(session_id)], |row| {
         artifact_revision_from_row(row, session_id)
@@ -8840,6 +8846,8 @@ fn artifact_revision_from_row(
             .as_deref()
             .map(decode_json)
             .transpose()
+            .map_err(to_sql_error)?,
+        receipt: processing_speed::receipt_from_columns(row.get(9)?, row.get(10)?, row.get(11)?)
             .map_err(to_sql_error)?,
     })
 }

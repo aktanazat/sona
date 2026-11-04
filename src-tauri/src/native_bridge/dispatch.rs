@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 39] = [
+pub(super) const TYPED_EVENTS: [&str; 40] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -39,6 +39,7 @@ pub(super) const TYPED_EVENTS: [&str; 39] = [
     crate::meeting::types::MeetingRemovedEvent::NAME,
     crate::cloud_sync::types::CloudSyncChangedEvent::NAME,
     crate::meeting::types::MeetingNavigationRequestedEvent::NAME,
+    crate::meeting::types::MeetingProcessingProgressEvent::NAME,
     crate::meeting::snapshots::MeetingSnapshotChangedEvent::NAME,
     crate::meeting::detection::DetectionPromptEvent::NAME,
     crate::meeting::detection::DetectionPromptRetractedEvent::NAME,

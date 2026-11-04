@@ -1984,6 +1984,7 @@ pub fn run(cli_args: CliArgs) {
             meeting::types::MeetingRemovedEvent,
             cloud_sync::types::CloudSyncChangedEvent,
             meeting::types::MeetingNavigationRequestedEvent,
+            meeting::types::MeetingProcessingProgressEvent,
             meeting::snapshots::MeetingSnapshotChangedEvent,
             meeting::detection::DetectionPromptEvent,
             meeting::detection::DetectionPromptRetractedEvent,

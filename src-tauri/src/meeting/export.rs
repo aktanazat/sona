@@ -517,6 +517,7 @@ mod tests {
                 ledger: None,
                 ledger_failure: None,
             }),
+            receipt: None,
         }
     }
 
