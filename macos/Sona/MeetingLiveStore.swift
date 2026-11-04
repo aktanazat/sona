@@ -270,6 +270,10 @@ final class MeetingLiveStore {
     /// once a second while a capture records. Nil while the call is heard.
     private(set) var callSilent: MeetingCallSilent?
     @ObservationIgnored private var silenceWatch: (sessionId: MeetingSessionId, task: Task<Void, Never>)?
+    /// A meeting capture is running or moving, on the live screen's session
+    /// or the panel's. Sound played meanwhile would land in its call track
+    /// and its microphone, so the shared player holds while this is set.
+    private(set) var capturing = false
     /// The word for what is in flight, which disables the controls that would
     /// contradict it.
     private(set) var pending: String?
@@ -1575,6 +1579,8 @@ final class MeetingLiveStore {
             .compactMap { $0 }
             .first { $0.phase == .capturingRecording }
         watchSilence(recording?.sessionId)
+        let capturingNow = [live?.session, active?.snapshot].contains { $0?.phase.isActive == true }
+        if capturingNow != capturing { capturing = capturingNow }
     }
 
     /// Asks the core about the call's sound once a second while `sessionId`

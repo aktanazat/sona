@@ -25,11 +25,16 @@ final class ConversationAudioPlayback {
     private(set) var duration: TimeInterval = 0
     private(set) var startOffsetNs: UInt64 = 0
     private(set) var error: String?
+    /// A meeting is capturing. Sound played now would land in its call track
+    /// and its microphone, so nothing plays until the capture ends.
+    private(set) var heldForRecording = false
     @ObservationIgnored private var player: AVAudioPlayer?
     @ObservationIgnored private var clip: ConversationAudioClip?
     @ObservationIgnored private var request: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+
+    private static let heldNotice = "Plays after the recording ends."
 
     init(core: Core) {
         self.core = core
@@ -77,6 +82,29 @@ final class ConversationAudioPlayback {
         error = nil
     }
 
+    /// Holds playback while a meeting captures, stopping what is playing, and
+    /// lets it go when the capture ends.
+    func hold(_ capturing: Bool) {
+        guard capturing != heldForRecording else { return }
+        heldForRecording = capturing
+        if capturing {
+            if sessionId != nil || loading {
+                stop()
+                error = Self.heldNotice
+            }
+        } else if error == Self.heldNotice {
+            error = nil
+        }
+    }
+
+    /// Stops and says why when a meeting is capturing.
+    private func refusedWhileHeld() -> Bool {
+        guard heldForRecording else { return false }
+        stop()
+        error = Self.heldNotice
+        return true
+    }
+
     func toggle() {
         guard let player else { return }
         if playing {
@@ -110,6 +138,7 @@ final class ConversationAudioPlayback {
     }
 
     private func load(sessionId: String, segmentId: String?, offset: UInt64?) {
+        guard !refusedWhileHeld() else { return }
         loading = true
         let expected = generation
         request = Task { [weak self] in
@@ -146,6 +175,7 @@ final class ConversationAudioPlayback {
     }
 
     private func resume() {
+        guard !refusedWhileHeld() else { return }
         guard let player, player.play() else {
             stop()
             error = "Audio output is unavailable."
@@ -214,7 +244,7 @@ struct ConversationAudioBar: View {
             }
             .padding(.vertical, 8)
         } else if let error = audio.error {
-            Text(error).metaText(Theme.live).padding(.vertical, 8)
+            Text(error).metaText(audio.heldForRecording ? Theme.inkSecondary : Theme.live).padding(.vertical, 8)
         }
     }
 }

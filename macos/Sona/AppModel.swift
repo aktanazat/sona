@@ -750,6 +750,7 @@ final class AppModel {
         track { [weak self] in self?.syncConsent() }
         track { [weak self] in self?.syncNavigation() }
         track { [weak self] in self?.quietReviewScheduler.update() }
+        track { [weak self] in self?.holdPlaybackWhileCapturing() }
         openPendingURLs()
     }
 
@@ -834,6 +835,12 @@ final class AppModel {
         withObservationTracking(apply) { [weak self] in
             Task { @MainActor [weak self] in self?.track(apply) }
         }
+    }
+
+    /// Sound played while a meeting captures lands in its call track and its
+    /// microphone, so the shared player holds until the capture ends.
+    private func holdPlaybackWhileCapturing() {
+        meetings.audio.hold(live.capturing)
     }
 
     /// The catalog and which model is current. A failed read keeps the last
