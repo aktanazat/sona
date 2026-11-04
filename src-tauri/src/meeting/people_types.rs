@@ -1,4 +1,5 @@
 use super::document_types::{DocumentId, DocumentSummary};
+use super::ledger::LedgerOutcomeCounts;
 use super::loop_types::{MeetingLoopDirection, MeetingLoopId, MeetingLoopStatus};
 use super::types::{
     MeetingSessionId, SourceTrackId, SpeakerId, TranscriptRevisionId, TranscriptSegmentId,
@@ -199,6 +200,12 @@ pub struct PersonDetail {
     pub open_loops: Vec<PersonOpenLoop>,
     pub commitments: Vec<PersonCommitment>,
     pub talk_share_avg_permille: Option<u32>,
+    /// Time recorded across the confirmed meetings, in milliseconds. Nil
+    /// when none of them has a finished capture window.
+    pub recorded_ms: Option<u64>,
+    /// What became of the substantive threads across the confirmed meetings.
+    /// Nil when none of them has a ledger.
+    pub ledger_outcomes: Option<LedgerOutcomeCounts>,
     pub documents: Vec<DocumentSummary>,
     pub contact: Option<PersonContactCard>,
 }

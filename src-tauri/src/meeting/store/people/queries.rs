@@ -1,8 +1,8 @@
 mod artifacts;
 
 use self::artifacts::{
-    all_open_loops_in, document_summaries_in, facts_for_person_in, meeting_summary_in,
-    person_meeting_headline_from_json, talk_share_average_in, PersonFacts,
+    all_open_loops_in, confirmed_totals_in, document_summaries_in, facts_for_person_in,
+    meeting_summary_in, person_meeting_headline_from_json, talk_share_average_in, PersonFacts,
 };
 use super::contact_cards::contact_card_in;
 use super::{
@@ -350,6 +350,7 @@ fn person_detail_in(
     let links = links_for_person_in(connection, person_id)?;
     let documents = document_summaries_in(connection, person_id)?;
     let talk_share_avg_permille = talk_share_average_in(connection, &person)?;
+    let (recorded_ms, ledger_outcomes) = confirmed_totals_in(connection, person_id)?;
     let contact = contact_card_in(connection, person_id)?;
     Ok(PersonDetailResult {
         schema_version: SCHEMA_VERSION,
@@ -360,6 +361,8 @@ fn person_detail_in(
             open_loops: facts.open_loops,
             commitments: facts.commitments,
             talk_share_avg_permille,
+            recorded_ms,
+            ledger_outcomes,
             documents,
             contact,
         },

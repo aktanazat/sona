@@ -111,6 +111,16 @@ impl LedgerOutcomeCounts {
     }
 }
 
+impl std::ops::AddAssign for LedgerOutcomeCounts {
+    fn add_assign(&mut self, other: Self) {
+        self.landed += other.landed;
+        self.open += other.open;
+        self.dropped += other.dropped;
+        self.decided += other.decided;
+        self.actions += other.actions;
+    }
+}
+
 impl LedgerThreadState {
     pub const fn outcome(self) -> LedgerOutcome {
         match self {

@@ -4493,15 +4493,7 @@ impl MeetingStore {
                     row.summary_text.as_deref(),
                     row.has_transcript,
                 )?,
-                ledger_outcomes: row
-                    .ledger_threads
-                    .as_deref()
-                    .and_then(|threads| decode_json::<Vec<ListedLedgerThread>>(threads).ok())
-                    .map(|threads| {
-                        LedgerOutcomeCounts::tally(
-                            threads.into_iter().map(|thread| (thread.state, thread.substantive)),
-                        )
-                    }),
+                ledger_outcomes: listed_outcomes(row.ledger_threads.as_deref()),
             });
         }
         let has_more = entries.len() > page_size;
@@ -8085,6 +8077,20 @@ struct ListedSessionRow {
 struct ListedLedgerThread {
     state: LedgerThreadState,
     substantive: bool,
+}
+
+/// The outcome bar of one stored ledger, read from its `$.ledger.threads`.
+/// Nil when there is no ledger or it no longer reads as threads.
+fn listed_outcomes(threads: Option<&str>) -> Option<LedgerOutcomeCounts> {
+    threads
+        .and_then(|threads| decode_json::<Vec<ListedLedgerThread>>(threads).ok())
+        .map(|threads| {
+            LedgerOutcomeCounts::tally(
+                threads
+                    .into_iter()
+                    .map(|thread| (thread.state, thread.substantive)),
+            )
+        })
 }
 
 /// The stored state each list filter selects. `processing_status` holds the
@@ -13053,6 +13059,76 @@ mod tests {
         );
         // No ledger is no counts, not zero of each.
         assert_eq!(outcomes(unledgered), None);
+    }
+
+    #[test]
+    fn person_totals_count_confirmed_meetings_only() {
+        use super::workflow_core_tests::{link, person};
+        let (_directory, store) = store();
+        let today = local_noon_ms(Local::now().date_naive());
+        let noah = person(&store, "Noah", &[], &[]);
+        let with_ledger = |at: i64, capture_ms: i64, states: &[&str]| {
+            let session_id = list_session(
+                &store,
+                at,
+                MeetingPhase::ReviewReady,
+                r#"{"kind":"succeeded"}"#,
+                capture_ms,
+                &[],
+            );
+            list_artifact(&store, session_id, "Summary.", Some("Headline."));
+            let threads = states
+                .iter()
+                .map(|state| {
+                    serde_json::json!({
+                        "topic": state, "state": state, "substantive": true, "owner": null,
+                        "receipt": {"quote": "Quote.", "speaker": null, "t_ms": 0, "citations": []},
+                    })
+                })
+                .collect::<Vec<_>>();
+            store
+                .connection()
+                .expect("store connection")
+                .execute(
+                    "UPDATE meeting_artifact_revisions
+                        SET content_json = json_set(content_json, '$.ledger.threads', json(?1))
+                      WHERE session_id = ?2",
+                    params![
+                        serde_json::Value::Array(threads).to_string(),
+                        id(session_id)
+                    ],
+                )
+                .expect("set ledger threads");
+            session_id
+        };
+        for (back, capture_ms, states) in [
+            (1, 60_000, &["decided", "partial"][..]),
+            (2, 120_000, &["action"][..]),
+            (3, 180_000, &["unanswered"][..]),
+        ] {
+            link(
+                &store,
+                with_ledger(today - back, capture_ms, states),
+                noah,
+                "manual",
+                "confirmed",
+            );
+        }
+        let suggested = with_ledger(today - 4, 600_000, &["decided", "decided"]);
+        link(&store, suggested, noah, "title", "suggested");
+
+        let detail = store.person_detail(noah).expect("person detail").detail;
+        assert_eq!(detail.recorded_ms, Some(360_000));
+        assert_eq!(
+            detail.ledger_outcomes,
+            Some(LedgerOutcomeCounts {
+                landed: 2,
+                open: 1,
+                dropped: 1,
+                decided: 1,
+                actions: 1,
+            })
+        );
     }
 
     #[test]
