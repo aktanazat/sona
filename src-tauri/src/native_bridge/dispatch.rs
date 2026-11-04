@@ -4387,6 +4387,20 @@ pub(super) async fn call(
             })
             .await?
         }
+        "planning_restore_action" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::untracked::planning_restore_action(
+                    handle.state(),
+                    loop_id,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
         "planning_suggestions" => reply(
             crate::planning::suggestions::planning_suggestions(app.state(), app.state()).await,
         ),

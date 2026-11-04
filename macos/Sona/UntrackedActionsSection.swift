@@ -25,15 +25,31 @@ struct UntrackedActionsSection: View {
                 }
             }
         case let .read(untracked):
-            if !untracked.actions.isEmpty {
+            if !untracked.actions.isEmpty || !store.setAside.isEmpty {
                 PageSection("Not tracked yet") {
                     Card {
                         ForEach(untracked.actions) { action in
                             row(action, projects: untracked.projects)
                         }
+                        ForEach(store.setAside) { action in
+                            setAsideRow(action)
+                        }
                     }
                 }
             }
+        }
+    }
+
+    private func setAsideRow(_ action: MeetingLoopRow) -> some View {
+        CardRow {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(action.text).bodyText(14).foregroundStyle(Theme.inkSecondary)
+                Text("Set aside as not work").metaText()
+            }
+        } trailing: {
+            Button("Undo") { store.undoSetAside(action) }
+                .buttonStyle(QuietButton())
+                .disabled(store.untrackedBusy)
         }
     }
 

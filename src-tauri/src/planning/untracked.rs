@@ -1,5 +1,9 @@
 //! Meeting commitments nobody has put in the planner yet, and the two answers
 //! a person gives one: track it as a task, or say it is not work.
+//!
+//! Tracking copies the commitment's words into the task title. That copy is
+//! the person's own task once they pick a project, so it stays when the
+//! meeting is deleted, as a title they typed would.
 
 use super::sources;
 use super::store::{self, Refusal};
@@ -102,6 +106,24 @@ pub fn planning_dismiss_action(
     })
 }
 
+/// Asks about a commitment again after it was set aside as not work.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_restore_action(
+    history_state: State<'_, Arc<HistoryManager>>,
+    loop_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    super::history(&history_state, |conn| {
+        restore(
+            conn,
+            &loop_id,
+            &operation_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    })
+}
+
 fn read(
     history: &Connection,
     meetings: &Connection,
@@ -117,7 +139,10 @@ fn read(
             continue;
         }
         let lineage = lineage(meetings, row.loop_id.as_str())?;
-        if !any(history, TRACKED, &lineage)? && !any(history, DISMISSED, &lineage)? {
+        if any(history, TRACKED, &lineage)? || any(history, DISMISSED, &lineage)? {
+            continue;
+        }
+        if sources::loop_words(history, meetings, row.loop_id.as_str())?.is_some() {
             actions.push(row);
         }
     }
@@ -206,6 +231,29 @@ fn dismiss(
             tx.execute(
                 "INSERT INTO planning_dismissed_loops (loop_id, dismissed_at_ms) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
                 params![loop_id, now_ms],
+            )?;
+            Ok(())
+        },
+    )
+}
+
+fn restore(
+    history: &mut Connection,
+    loop_id: &str,
+    operation_id: &str,
+    now_ms: i64,
+) -> StorageResult<()> {
+    let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
+    store::mutate(
+        history,
+        operation_id,
+        "restore_loop",
+        &loop_id,
+        now_ms,
+        |tx| {
+            tx.execute(
+                "DELETE FROM planning_dismissed_loops WHERE loop_id = ?1",
+                [&loop_id],
             )?;
             Ok(())
         },
@@ -419,6 +467,13 @@ mod tests {
                     .expect("third read")
                     .actions
                     .is_empty());
+
+                restore(&mut history, venue, &Uuid::new_v4().to_string(), AT)
+                    .expect("ask about the venue again");
+                assert_eq!(
+                    texts(&read(&history, connection, session_id).expect("fourth read")),
+                    ["Book the venue"]
+                );
                 Ok(())
             })
             .expect("read the encrypted meeting snapshot");

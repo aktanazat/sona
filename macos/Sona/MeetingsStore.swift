@@ -314,6 +314,9 @@ final class MeetingsStore {
     /// The open meeting's commitments that nothing in the planner cites yet.
     private(set) var untracked: MeetingUntrackedActionsRead = .reading
     private(set) var untrackedBusy = false
+    /// Commitments set aside while this meeting is open, kept in view so the
+    /// choice can be undone.
+    private(set) var setAside: [MeetingLoopRow] = []
     private(set) var people: [MeetingPersonContextRow] = []
     private(set) var transcriptQuery = ""
     /// The one voice the transcript is narrowed to, picked on the talk bar.
@@ -938,6 +941,7 @@ final class MeetingsStore {
         loopsKey = nil
         untracked = .reading
         untrackedKey = nil
+        setAside = []
         people = []
         receipt = nil
         chosenTab = if outcome != nil { .ledger } else if noteId != nil { .review } else { nil }
@@ -1657,7 +1661,9 @@ final class MeetingsStore {
             let read: MeetingUntrackedActions = try await core.request(
                 "meeting_untracked_actions", MeetingRequest.session(sessionId))
             guard isOpen(sessionId) else { return }
-            untracked = .read(read)
+            untracked = .read(MeetingUntrackedActions(
+                actions: read.actions.filter { action in !setAside.contains { $0.loopId == action.loopId } },
+                projects: read.projects))
         } catch {
             guard isOpen(sessionId) else { return }
             untracked = .unavailable(reason(error))
@@ -1673,8 +1679,8 @@ final class MeetingsStore {
     /// One planner task for the commitment, in the project picked. The row
     /// leaves and the toast names where it went.
     func track(_ action: MeetingLoopRow, in project: PlanningProject) {
+        untrackedBusy = true
         Task {
-            untrackedBusy = true
             defer { untrackedBusy = false }
             do {
                 let _: PlanningTask = try await core.request(
@@ -1688,18 +1694,35 @@ final class MeetingsStore {
         }
     }
 
-    /// The commitment is not work, so it stops asking to be tracked.
+    /// The commitment is not work, so it stops asking to be tracked. It stays
+    /// in view, set aside, until the meeting is closed.
     func setAside(_ action: MeetingLoopRow) {
+        untrackedBusy = true
         Task {
-            untrackedBusy = true
             defer { untrackedBusy = false }
             do {
                 try await core.request("planning_dismiss_action", MeetingRequest.dismissAction(action.loopId))
                 drop(action)
+                setAside.append(action)
             } catch {
                 self.error = reason(error)
                 await reloadUntracked()
             }
+        }
+    }
+
+    /// Asks about a set-aside commitment again.
+    func undoSetAside(_ action: MeetingLoopRow) {
+        untrackedBusy = true
+        Task {
+            defer { untrackedBusy = false }
+            do {
+                try await core.request("planning_restore_action", MeetingRequest.dismissAction(action.loopId))
+                setAside.removeAll { $0.loopId == action.loopId }
+            } catch {
+                self.error = reason(error)
+            }
+            await reloadUntracked()
         }
     }
 

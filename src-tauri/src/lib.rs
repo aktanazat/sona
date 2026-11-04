@@ -1946,6 +1946,7 @@ pub fn run(cli_args: CliArgs) {
             planning::untracked::meeting_untracked_actions,
             planning::untracked::planning_track_action,
             planning::untracked::planning_dismiss_action,
+            planning::untracked::planning_restore_action,
             planning::suggestions::planning_suggestions,
             planning::suggestions::planning_generate_suggestions,
             planning::suggestions::planning_decline_suggestion,

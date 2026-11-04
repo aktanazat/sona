@@ -180,6 +180,15 @@ pub(crate) fn require_loop(
     meetings: &Connection,
     id: &str,
 ) -> Result<String> {
+    loop_words(history, meetings, id)?.ok_or_else(|| Refusal::SourceUnavailable.into())
+}
+
+/// The words of a meeting loop, or none once its receipt is gone.
+pub(crate) fn loop_words(
+    history: &Connection,
+    meetings: &Connection,
+    id: &str,
+) -> Result<Option<String>> {
     source_title(
         history,
         Some(meetings),
@@ -187,8 +196,7 @@ pub(crate) fn require_loop(
         id,
         None,
         None,
-    )?
-    .ok_or_else(|| Refusal::SourceUnavailable.into())
+    )
 }
 
 pub(crate) fn require_meeting_note(

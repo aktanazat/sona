@@ -2138,8 +2138,8 @@ enum MeetingRequest {
         ["loopId": .string(loopId), "projectId": .string(projectId), "operationId": .string(operationId())]
     }
 
-    /// `planning_dismiss_action`: the commitment is not work, so it stops
-    /// asking to be tracked.
+    /// `planning_dismiss_action` and `planning_restore_action`: the
+    /// commitment is not work, or asks to be tracked again.
     static func dismissAction(_ loopId: MeetingLoopId) -> [String: JSONValue] {
         ["loopId": .string(loopId), "operationId": .string(operationId())]
     }
