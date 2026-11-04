@@ -19,7 +19,7 @@ A denied request exits `1` and prints a JSON refusal on stderr:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "error": "consent_required",
   "message": "…",
   "settings_path": "…"
@@ -56,6 +56,7 @@ explicit JSON. Existing `--json` uses remain supported.
 | `--people <NAME>`                                                    | A person by name, alias or calendar address                                       |
 | `--person-catch-up <PERSON_ID> [--since-utc-ms N]`                    | Shared person-memory snapshot and sourced catch-up selections                      |
 | `--person-changes <PERSON_ID> --since-utc-ms N`                       | Same snapshot with paired earlier/later evidence and source links                  |
+| `--person-stats <PERSON_ID>`                                         | The numbers the person page leads with: meetings, time together, last met, loops   |
 | `--events [--after CURSOR]`                                          | Receipts and workflow runs, newest first                                          |
 | `--upcoming [--limit N]`                                             | Today and the next seven local days of calendar                                   |
 | `--notes [--limit N]`                                                | Notes, most recently updated first; pin state does not change this ordering       |
@@ -157,7 +158,7 @@ A note result is:
 
 ```text
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "memory": {
     "note": {"id": str, "title": str, "body": str, "pinned": bool,
              "created_at_ms": int, "updated_at_ms": int},
@@ -262,7 +263,7 @@ does not turn otherwise available totals into zero.
 
 ## Reading other results
 
-Every current payload carries `schema_version:5`. Existing verb fields remain
+Every current payload carries `schema_version:6`. Existing verb fields remain
 available. Search rows contain `kind`, `id`, `title`, `snippet`, `when_utc_ms` and
 `link`; `kind` can now be `note` as well as `meeting`, `dictation`, `person` or
 `loop`. Dictation ids are digit strings, not meeting uuids.
@@ -273,6 +274,17 @@ available. Search rows contain `kind`, `id`, `title`, `snippet`, `when_utc_ms` a
 per-milestone `meetings` with `last_meeting_at_ms`. Canceled tasks count
 nowhere. Work due today is open, not overdue, until its local day ends. Owners
 are person ids only; read the person to learn a name.
+
+`--person-stats` carries the numbers the person page leads with. `meetings` has
+`confirmed` and `suggested`; a suggested link counts nowhere else.
+`recorded_ms`, `last_met_utc_ms`, `talk_share_avg_permille` (their average
+share of the talking), `ledger_outcomes` (`landed`, `open`, `dropped`) and
+`usual_gap_days` are null when the corpus cannot supply them, never zero.
+`open_loops` counts open and carried loops as `i_owe` and `owed_to_me`.
+`weekly_counts` has 52 confirmed-meeting counts, oldest first, by local week
+starting Monday; the last is the week holding `read_at_utc_ms`.
+`usual_gap_days` is the median gap between distinct meeting days and needs at
+least four. No transcript text, titles or names; read the person for those.
 
 - Meetings, people, upcoming events and notes return `has_more`. Narrow a
   request or raise its limit when there are more rows.

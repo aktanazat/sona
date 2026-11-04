@@ -60,7 +60,7 @@ use std::sync::Arc;
 /// Wire version of everything in this module, and of the read-only external
 /// surface in [`external`] that projects the same nouns out of the same
 /// corpus. Bumped whenever a public payload's bytes or interpretation changes.
-pub const QUERY_SCHEMA_VERSION: u32 = 5;
+pub const QUERY_SCHEMA_VERSION: u32 = 6;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;

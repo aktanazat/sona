@@ -99,6 +99,16 @@ describe("tool arguments", () => {
       SonaInputError,
     );
   });
+
+  test("person stats are read by the exact person id", () => {
+    const stats = tool("sona_person_stats");
+
+    expect(stats.argv({ person_id: "2e2a5f0e-0000-4000-8000-000000000002" })).toEqual([
+      "--person-stats",
+      "2e2a5f0e-0000-4000-8000-000000000002",
+    ]);
+    expect(() => stats.argv({})).toThrow(SonaInputError);
+  });
 });
 
 describe("running sona", () => {

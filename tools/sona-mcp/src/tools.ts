@@ -324,6 +324,19 @@ export const TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "sona_person_stats",
+    title: "Read a person's numbers",
+    description:
+      "Read the numbers a person's page in Sona leads with: confirmed and suggested meeting counts, time recorded together, when you last met, their average talk share in permille, ledger outcomes (landed, open, dropped), open loops you owe and owed to you, confirmed meetings in each of the last 52 local weeks (oldest first, weeks start Monday) and the usual gap in days between meeting days. Suggested links count only as suggested. Unavailable numbers are null, not zero. No transcript text, titles or names. Requires external access; no writes.",
+    inputSchema: {
+      type: "object",
+      properties: { person_id: PERSON_ID },
+      required: ["person_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--person-stats", text(input, "person_id", true)],
+  },
+  {
     name: "sona_upcoming",
     title: "List upcoming meetings",
     description:

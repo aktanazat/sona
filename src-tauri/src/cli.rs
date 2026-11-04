@@ -25,7 +25,7 @@ use std::path::PathBuf;
 #[command(group(ArgGroup::new("read").args([
     "query", "meetings", "meeting", "transcript", "loops", "people", "events",
     "upcoming", "loop_resolve", "notes", "note", "note_versions", "note_diff", "stats",
-    "person_catch_up", "person_changes", "note_context", "projects", "project",
+    "person_catch_up", "person_changes", "person_stats", "note_context", "projects", "project",
 ])))]
 #[command(group(ArgGroup::new("loop_side").args(["mine", "waiting"])))]
 pub struct CliArgs {
@@ -171,6 +171,11 @@ pub struct CliArgs {
     /// Compare a person's retained evidence since --since-utc-ms.
     #[arg(long, value_name = "PERSON_ID", requires = "since_utc_ms")]
     pub person_changes: Option<String>,
+
+    /// Read the numbers a person's page leads with: meetings, time together,
+    /// last met, talk share, ledger outcomes, open loops and a 52-week strip.
+    #[arg(long, value_name = "PERSON_ID")]
+    pub person_stats: Option<String>,
 
     /// Comparison boundary in UTC milliseconds for --person-catch-up or --person-changes.
     #[arg(

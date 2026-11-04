@@ -44,7 +44,9 @@ use crate::meeting::loop_types::{
     MeetingLoopDirection, MeetingLoopId, MeetingLoopKind, MeetingLoopResolution,
     MeetingLoopResolveRequest, MeetingLoopRow, MeetingLoopStatus,
 };
-use crate::meeting::people_types::{PersonId, PersonListEntry, PersonMeetingHeadline};
+use crate::meeting::people_types::{
+    PersonId, PersonLinkConfidence, PersonListEntry, PersonMeetingHeadline,
+};
 use crate::meeting::person_memory::{self, PersonMemoryChange, PersonMemorySnapshot};
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::MeetingStore;
@@ -61,8 +63,9 @@ use crate::scratchpad::links::{ScratchConnection, ScratchSource};
 use crate::scratchpad::passages::ScratchPassage;
 use crate::scratchpad::{self, ScratchNote, ScratchNoteMemory, ScratchNoteVersion};
 use crate::settings::AppSettings;
-use chrono::{Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -302,6 +305,9 @@ pub enum ExternalRequest {
         since_utc_ms: Option<i64>,
         view: ExternalPersonMemoryView,
     },
+    PersonStats {
+        person_id: PersonId,
+    },
     Events {
         after_id: Option<String>,
         limit: usize,
@@ -352,6 +358,7 @@ impl ExternalRequest {
             | Self::Loops { .. }
             | Self::People { .. }
             | Self::PersonMemory { .. }
+            | Self::PersonStats { .. }
             | Self::Events { .. }
             | Self::Upcoming { .. }
             | Self::Projects { .. }
@@ -405,6 +412,7 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.people.is_some()
         || args.person_catch_up.is_some()
         || args.person_changes.is_some()
+        || args.person_stats.is_some()
         || args.events
         || args.upcoming
         || args.projects
@@ -603,11 +611,14 @@ impl ExternalRequest {
                 ));
             }
             return Ok(Self::PersonMemory {
-                person_id: Uuid::parse_str(id.trim())
-                    .map(PersonId::from_uuid)
-                    .map_err(|_| ExternalError::invalid(format!("{id:?} is not a person id.")))?,
+                person_id: person_id(id)?,
                 since_utc_ms: args.since_utc_ms,
                 view,
+            });
+        }
+        if let Some(id) = args.person_stats.as_deref() {
+            return Ok(Self::PersonStats {
+                person_id: person_id(id)?,
             });
         }
         if args.events {
@@ -669,7 +680,7 @@ impl ExternalRequest {
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --events, --upcoming, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
         ))
     }
 }
@@ -678,6 +689,12 @@ fn note_id(value: &str) -> Result<String, ExternalError> {
     Uuid::parse_str(value.trim())
         .map(|id| id.to_string())
         .map_err(|_| ExternalError::invalid(format!("{value:?} is not a note id.")))
+}
+
+fn person_id(value: &str) -> Result<PersonId, ExternalError> {
+    Uuid::parse_str(value.trim())
+        .map(PersonId::from_uuid)
+        .map_err(|_| ExternalError::invalid(format!("{value:?} is not a person id.")))
 }
 
 fn session_id(value: &str) -> Result<MeetingSessionId, ExternalError> {
@@ -872,6 +889,58 @@ pub struct ExternalPersonMemory {
     pub view: ExternalPersonMemoryView,
     pub snapshot: PersonMemorySnapshot,
     pub link: String,
+}
+
+/// The numbers a person's page leads with, defined the way the page defines
+/// them. Only confirmed meeting links count toward any figure; a suggested
+/// link is counted in `meetings.suggested` and nowhere else. A figure the
+/// corpus cannot supply is null, never zero.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExternalPersonStats {
+    pub schema_version: u32,
+    pub person_id: Uuid,
+    pub link: String,
+    /// The moment `weekly_counts` and the text's "days ago" are measured from.
+    pub read_at_utc_ms: i64,
+    pub meetings: ExternalPersonMeetingCounts,
+    /// Time recorded across the confirmed meetings.
+    pub recorded_ms: Option<u64>,
+    pub last_met_utc_ms: Option<i64>,
+    /// This person's average share of the talking across the confirmed
+    /// meetings, in thousandths.
+    pub talk_share_avg_permille: Option<u32>,
+    /// Null when no confirmed meeting has a ledger, or when every count is
+    /// zero, where the page shows a dash.
+    pub ledger_outcomes: Option<ExternalLedgerOutcomes>,
+    pub open_loops: ExternalPersonOpenLoops,
+    /// Confirmed meetings in each of the last 52 local weeks, oldest first;
+    /// the last entry is the week holding `read_at_utc_ms`. Weeks start on
+    /// Monday. A meeting dated after the read counts nowhere.
+    pub weekly_counts: Vec<u32>,
+    /// The median gap in days between the distinct local days of confirmed
+    /// meetings, an even sample rounding up. Null under four such days.
+    pub usual_gap_days: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ExternalPersonMeetingCounts {
+    pub confirmed: u64,
+    pub suggested: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ExternalLedgerOutcomes {
+    pub landed: u32,
+    pub open: u32,
+    pub dropped: u32,
+}
+
+/// Loops still outstanding (open or carried forward), by whose move it is:
+/// the user's, or anybody else's, unattributed rows included.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ExternalPersonOpenLoops {
+    pub i_owe: u64,
+    pub owed_to_me: u64,
 }
 
 /// One event in the week ahead.
@@ -1207,6 +1276,7 @@ pub enum ExternalResponse {
     Loops(ExternalLoopsPage),
     People(ExternalPeoplePage),
     PersonMemory(Box<ExternalPersonMemory>),
+    PersonStats(ExternalPersonStats),
     Events(QueryEventsPage),
     Upcoming(ExternalUpcomingPage),
     Projects(ExternalProjectsPage),
@@ -1335,13 +1405,7 @@ pub async fn answer(
             store(meetings)
                 .await?
                 .person_detail(*person_id)
-                .map_err(|error| match error {
-                    crate::meeting::store::StoreError::NotFound => ExternalError::new(
-                        ExternalErrorCode::NotFound,
-                        format!("No person {} in this corpus.", person_id.uuid()),
-                    ),
-                    error => ExternalError::from(QueryError::from(error)),
-                })?;
+                .map_err(person_read_error(*person_id))?;
             let snapshot = person_memory::read(app, *person_id, *since_utc_ms)
                 .await
                 .map_err(|message| note_read_error(history, message))?;
@@ -1354,6 +1418,9 @@ pub async fn answer(
                 },
             )))
         }
+        ExternalRequest::PersonStats { person_id } => Ok(ExternalResponse::PersonStats(
+            person_stats(store(meetings).await?.as_ref(), *person_id, Local::now())?,
+        )),
         ExternalRequest::Upcoming { limit } => Ok(ExternalResponse::Upcoming(
             upcoming_page(meetings, calendar, *limit).await?,
         )),
@@ -2008,6 +2075,137 @@ fn person_row(entry: PersonListEntry) -> ExternalPersonRow {
     }
 }
 
+/// A person read's refusal. An id that names nobody is the one a caller holding
+/// an id can act on.
+fn person_read_error(
+    person_id: PersonId,
+) -> impl Fn(crate::meeting::store::StoreError) -> ExternalError {
+    move |error| match error {
+        crate::meeting::store::StoreError::NotFound => ExternalError::new(
+            ExternalErrorCode::NotFound,
+            format!("No person {} in this corpus.", person_id.uuid()),
+        ),
+        error => ExternalError::from(QueryError::from(error)),
+    }
+}
+
+const PERSON_STATS_WEEKS: usize = 52;
+
+/// The numbers a person's page leads with, as of `now`, out of the native
+/// person detail that page draws.
+pub(crate) fn person_stats(
+    store: &MeetingStore,
+    person_id: PersonId,
+    now: DateTime<Local>,
+) -> Result<ExternalPersonStats, ExternalError> {
+    let detail = store
+        .person_detail(person_id)
+        .map_err(person_read_error(person_id))?
+        .detail;
+    let confirmed = detail
+        .links
+        .iter()
+        .filter(|link| link.confidence == PersonLinkConfidence::Confirmed)
+        .map(|link| link.meeting.at_utc_ms)
+        .collect::<Vec<_>>();
+    let outstanding = detail
+        .open_loops
+        .iter()
+        .filter(|open| {
+            matches!(
+                open.status,
+                MeetingLoopStatus::Open | MeetingLoopStatus::Carried
+            )
+        })
+        .collect::<Vec<_>>();
+    let i_owe = outstanding
+        .iter()
+        .filter(|open| open.direction == MeetingLoopDirection::Mine)
+        .count();
+    Ok(ExternalPersonStats {
+        schema_version: QUERY_SCHEMA_VERSION,
+        person_id: person_id.uuid(),
+        link: person_link(person_id),
+        read_at_utc_ms: now.timestamp_millis(),
+        meetings: ExternalPersonMeetingCounts {
+            confirmed: row_count(confirmed.len()),
+            suggested: row_count(detail.links.len() - confirmed.len()),
+        },
+        recorded_ms: detail.recorded_ms,
+        last_met_utc_ms: confirmed.iter().copied().max(),
+        talk_share_avg_permille: detail.talk_share_avg_permille,
+        ledger_outcomes: detail
+            .ledger_outcomes
+            .filter(|counts| counts.landed != 0 || counts.open != 0 || counts.dropped != 0)
+            .map(|counts| ExternalLedgerOutcomes {
+                landed: counts.landed,
+                open: counts.open,
+                dropped: counts.dropped,
+            }),
+        open_loops: ExternalPersonOpenLoops {
+            i_owe: row_count(i_owe),
+            owed_to_me: row_count(outstanding.len() - i_owe),
+        },
+        weekly_counts: weekly_counts(&confirmed, now.date_naive()),
+        usual_gap_days: usual_gap_days(&confirmed),
+    })
+}
+
+fn row_count(rows: usize) -> u64 {
+    u64::try_from(rows).unwrap_or(u64::MAX)
+}
+
+fn local_day(utc_ms: i64) -> Option<NaiveDate> {
+    Local
+        .timestamp_millis_opt(utc_ms)
+        .single()
+        .map(|moment| moment.date_naive())
+}
+
+fn week_start(day: NaiveDate) -> NaiveDate {
+    day - Days::new(u64::from(day.weekday().num_days_from_monday()))
+}
+
+fn weekly_counts(meetings_utc_ms: &[i64], today: NaiveDate) -> Vec<u32> {
+    let mut counts = vec![0; PERSON_STATS_WEEKS];
+    let this_week = week_start(today);
+    for day in meetings_utc_ms.iter().copied().filter_map(local_day) {
+        let weeks_back = (this_week - week_start(day)).num_days() / 7;
+        let slot = usize::try_from(weeks_back)
+            .ok()
+            .and_then(|back| (PERSON_STATS_WEEKS - 1).checked_sub(back))
+            .and_then(|index| counts.get_mut(index));
+        if let Some(count) = slot {
+            *count += 1;
+        }
+    }
+    counts
+}
+
+fn usual_gap_days(meetings_utc_ms: &[i64]) -> Option<u32> {
+    let days = meetings_utc_ms
+        .iter()
+        .copied()
+        .filter_map(local_day)
+        .collect::<BTreeSet<_>>();
+    if days.len() < 4 {
+        return None;
+    }
+    let mut gaps = days
+        .iter()
+        .zip(days.iter().skip(1))
+        .map(|(earlier, later)| (*later - *earlier).num_days())
+        .collect::<Vec<_>>();
+    gaps.sort_unstable();
+    let middle = gaps.len() / 2;
+    let median = if gaps.len() % 2 == 0 {
+        (gaps[middle - 1] + gaps[middle] + 1) / 2
+    } else {
+        gaps[middle]
+    };
+    u32::try_from(median).ok()
+}
+
 fn review(
     store: &MeetingStore,
     session_id: MeetingSessionId,
@@ -2473,6 +2671,48 @@ fn duration(milliseconds: u64) -> String {
     )
 }
 
+/// "40 min", "9 h", "9 h 40 min".
+fn time_together(milliseconds: u64) -> String {
+    let minutes = milliseconds / 60_000;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    }
+}
+
+fn last_met(last_utc_ms: i64, now_utc_ms: i64) -> String {
+    let days = local_day(now_utc_ms)
+        .zip(local_day(last_utc_ms))
+        .map(|(today, last)| (today - last).num_days());
+    match days {
+        Some(0) => "last met today".to_string(),
+        Some(days) if days > 0 => format!("last met {days} d ago"),
+        _ => format!("last met {}", local_time(last_utc_ms)),
+    }
+}
+
+/// One block character per week, scaled to the busiest week; a week with no
+/// meeting is a middle dot.
+fn week_strip(counts: &[u32]) -> String {
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let most = u64::from(counts.iter().copied().max().unwrap_or(0));
+    counts
+        .iter()
+        .map(|&count| {
+            if count == 0 {
+                return '·';
+            }
+            let level = (u64::from(count) * 8).div_ceil(most);
+            usize::try_from(level - 1)
+                .ok()
+                .and_then(|index| LEVELS.get(index))
+                .copied()
+                .unwrap_or('█')
+        })
+        .collect()
+}
+
 fn page_footer(text: &mut String, has_more: bool) {
     if has_more {
         text.push_str("\nmore results exist; narrow the search or raise --limit (maximum 100).\n");
@@ -2792,6 +3032,44 @@ fn text_response(response: &ExternalResponse) -> String {
             }
             for limitation in &snapshot.limitations {
                 let _ = writeln!(text, "limitation: {limitation}");
+            }
+        }
+        ExternalResponse::PersonStats(stats) => {
+            let mut tiles = vec![match stats.meetings.confirmed {
+                1 => "1 meeting".to_string(),
+                count => format!("{count} meetings"),
+            }];
+            if stats.meetings.suggested > 0 {
+                tiles.push(format!("{} suggested", stats.meetings.suggested));
+            }
+            if let Some(recorded) = stats.recorded_ms {
+                tiles.push(format!("{} together", time_together(recorded)));
+            }
+            if let Some(last) = stats.last_met_utc_ms {
+                tiles.push(last_met(last, stats.read_at_utc_ms));
+            }
+            if let Some(share) = stats.talk_share_avg_permille {
+                tiles.push(format!("they talk {}%", share.saturating_add(5) / 10));
+            }
+            if let Some(outcomes) = &stats.ledger_outcomes {
+                tiles.push(format!(
+                    "{} landed, {} open, {} dropped",
+                    outcomes.landed, outcomes.open, outcomes.dropped
+                ));
+            }
+            tiles.push(format!(
+                "you owe {}, owed to you {}",
+                stats.open_loops.i_owe, stats.open_loops.owed_to_me
+            ));
+            let _ = writeln!(
+                text,
+                "{}\n{}\nlast 52 weeks: {}",
+                stats.link,
+                tiles.join(" · "),
+                week_strip(&stats.weekly_counts)
+            );
+            if let Some(days) = stats.usual_gap_days {
+                let _ = writeln!(text, "usually every {days} d");
             }
         }
         ExternalResponse::Events(page) => {
@@ -3375,6 +3653,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     const MEETING: &str = "1e1a5f0e-0000-4000-8000-000000000001";
+    const PERSON: &str = "2e2a5f0e-0000-4000-8000-000000000002";
 
     /// The loop id `--loop-resolve` is given in the tests below: any meeting
     /// uuid plus a content key, which is all this surface checks.
@@ -3508,6 +3787,12 @@ mod tests {
             request(&["--loop-resolve", LOOP]),
             ExternalRequest::LoopResolve {
                 loop_id: MeetingLoopId(LOOP.to_string()),
+            }
+        );
+        assert_eq!(
+            request(&["--person-stats", PERSON]),
+            ExternalRequest::PersonStats {
+                person_id: PersonId::from_uuid(Uuid::parse_str(PERSON).unwrap()),
             }
         );
     }
@@ -3883,6 +4168,23 @@ mod tests {
         assert_eq!(refused.settings_path, Some(EXTERNAL_ACCESS_SETTING_PATH));
     }
 
+    /// The person figures read the corpus, so they sit behind the same read
+    /// grant as every other person read, and the mutation grant alone does
+    /// not open them.
+    #[test]
+    fn person_stats_are_refused_without_the_read_grant() {
+        for grants in [consent(false, false), consent(false, true)] {
+            let refused = AllowedRequest::new(grants, request(&["--person-stats", PERSON]))
+                .expect_err("external access is off");
+
+            assert_eq!(refused.error, ExternalErrorCode::ConsentRequired);
+            assert_eq!(refused.settings_path, Some(EXTERNAL_ACCESS_SETTING_PATH));
+        }
+        assert!(
+            AllowedRequest::new(consent(true, false), request(&["--person-stats", PERSON])).is_ok()
+        );
+    }
+
     /// Every refusal but the consent one is a fault rather than a choice, so
     /// only the consent refusal points at a switch.
     #[test]
@@ -3925,6 +4227,7 @@ mod tests {
             vec!["--people", "Dana"],
             vec!["--events"],
             vec!["--upcoming"],
+            vec!["--person-stats", PERSON],
         ] {
             assert_eq!(
                 request(&argv).required_scopes(),

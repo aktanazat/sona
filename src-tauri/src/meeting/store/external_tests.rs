@@ -31,13 +31,14 @@ use crate::meeting::types::{
 };
 use crate::meeting::workflow_types::WorkflowEventKind;
 use crate::query::external::{
-    loops_page, meeting_detail, meetings_page, people_page, resolve_loop,
+    loops_page, meeting_detail, meetings_page, people_page, person_stats, resolve_loop,
     transcript as transcript_of, AllowedRequest, ExternalConsent, ExternalErrorCode,
     ExternalLoopSide, ExternalLoopStatus, ExternalRequest, ExternalResponse,
     EXTERNAL_ACCESS_SETTING_PATH, EXTERNAL_MUTATIONS_SETTING_PATH,
 };
 use crate::query::{QueryEventsPage, QueryPageReason, QuerySearchPage, QUERY_SCHEMA_VERSION};
 use crate::secrets::{MemorySecretBackend, SecretManager};
+use chrono::TimeZone;
 use clap::Parser;
 use rusqlite::params;
 use serde_json::json;
@@ -847,6 +848,85 @@ fn a_lookup_with_no_name_in_it_is_a_usage_error() {
         people_page(&corpus.store, "   ", 25).unwrap_err().error,
         ExternalErrorCode::InvalidRequest
     );
+}
+
+/// The figures an agent gets are the native person detail's own, read the way
+/// the person page reads them. Three confirmed meetings in three different
+/// weeks and one suggested one in a fourth: the suggested link is counted as
+/// suggested and nowhere else. Were it counted, the strip would show a fourth
+/// week and the four distinct days would produce a usual gap.
+#[test]
+fn person_stats_are_the_person_pages_numbers() {
+    const DAY: i64 = 24 * 60 * 60 * 1_000;
+    let corpus = corpus();
+    let third = meeting(&corpus.store, "Planning", NOW - 10 * DAY);
+    let suggested = meeting(&corpus.store, "Maybe Dana", NOW - 17 * DAY);
+    let connection = corpus.store.connection().unwrap();
+    for (session_id, confidence) in [
+        (corpus.session_id, "confirmed"),
+        (corpus.older_id, "confirmed"),
+        (third, "confirmed"),
+        (suggested, "suggested"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO meeting_person_links (
+                    meeting_id, person_id, source, confidence, created_at_utc_ms
+                 ) VALUES (?1, ?2, 'calendar', ?3, 1)",
+                params![
+                    session_id.uuid().to_string(),
+                    corpus.person_id.uuid().to_string(),
+                    confidence
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let detail = corpus.store.person_detail(corpus.person_id).unwrap().detail;
+    let now = chrono::Local.timestamp_millis_opt(NOW).unwrap();
+
+    let stats = person_stats(&corpus.store, corpus.person_id, now).unwrap();
+
+    let mut weekly_counts = vec![0; 52];
+    weekly_counts[49..].copy_from_slice(&[1, 1, 1]);
+    let outcomes = detail
+        .ledger_outcomes
+        .expect("the pricing review has a ledger");
+    assert_eq!(
+        value(&stats),
+        json!({
+            "schema_version": QUERY_SCHEMA_VERSION,
+            "person_id": corpus.person_id.uuid(),
+            "link": format!("sona://person/{}", corpus.person_id.uuid()),
+            "read_at_utc_ms": NOW,
+            "meetings": {"confirmed": 3, "suggested": 1},
+            "recorded_ms": detail.recorded_ms,
+            "last_met_utc_ms": NOW,
+            "talk_share_avg_permille": detail.talk_share_avg_permille,
+            "ledger_outcomes": {
+                "landed": outcomes.landed,
+                "open": outcomes.open,
+                "dropped": outcomes.dropped,
+            },
+            "open_loops": {"i_owe": 0, "owed_to_me": 1},
+            "weekly_counts": weekly_counts,
+            "usual_gap_days": null,
+        })
+    );
+    assert_eq!(
+        (outcomes.landed, outcomes.open, outcomes.dropped),
+        (0, 1, 0),
+        "one substantive thread, still open"
+    );
+}
+
+#[test]
+fn person_stats_for_an_id_the_corpus_does_not_hold_is_not_found() {
+    let corpus = corpus();
+
+    let refused = person_stats(&corpus.store, PersonId::new(), chrono::Local::now()).unwrap_err();
+
+    assert_eq!(refused.error, ExternalErrorCode::NotFound);
 }
 
 /// `--query` and `--events` are the plane's own pages. This surface adds a

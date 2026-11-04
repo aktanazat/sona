@@ -48,6 +48,7 @@ claude mcp add sona --env SONA_BIN=/path/to/sona/src-tauri/target/debug/sona \
 | `sona_people`        | `name`, `limit?`                         | `sona --people <name> [--limit …]`                                      |
 | `sona_person_catch_up` | `person_id`, `since_utc_ms?`            | `sona --person-catch-up <id> [--since-utc-ms …]`                        |
 | `sona_person_changes`  | `person_id`, `since_utc_ms`             | `sona --person-changes <id> --since-utc-ms …`                            |
+| `sona_person_stats`    | `person_id`                             | `sona --person-stats <id>`                                              |
 | `sona_upcoming`      | `limit?`                                 | `sona --upcoming [--limit …]`                                           |
 | `sona_projects`      | `limit?`                                 | `sona --projects [--limit …]`                                           |
 | `sona_project`       | `project_id`                             | `sona --project <uuid>`                                                |
