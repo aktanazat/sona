@@ -104,35 +104,36 @@ pub async fn planning_project(
     id: String,
 ) -> Result<ProjectDetail, String> {
     let id = store::uuid(&id).map_err(failure)?;
-    let (detail, local_only) = history(&history_state, |conn| {
-        let mut detail = store::detail(conn, &id)?;
-        let local_only = detail
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let (records, local_only) = history(&history_state, |conn| {
+        let mut records = store::records(conn, &id)?;
+        let local_only = records
             .tasks
             .iter()
             .all(|task| task.owner_person_id.is_none())
-            && detail
+            && records
                 .evidence
                 .iter()
                 .all(|link| link.source_kind == EvidenceSourceKind::Note);
         if local_only {
-            for link in &mut detail.evidence {
+            for link in &mut records.evidence {
                 sources::resolve_note(conn, link)?;
             }
         }
-        Ok((detail, local_only))
+        Ok((records, local_only))
     })?;
     if local_only {
-        return Ok(detail);
+        return store::detail(records, None, now_ms).map_err(failure);
     }
     with_sources(&history_state, &meetings, |history_conn, meeting_conn| {
-        let mut detail = store::detail(history_conn, &id)?;
-        for task in &mut detail.tasks {
+        let mut records = store::records(history_conn, &id)?;
+        for task in &mut records.tasks {
             sources::resolve_owner(meeting_conn, task)?;
         }
-        for link in &mut detail.evidence {
+        for link in &mut records.evidence {
             sources::resolve_link(history_conn, meeting_conn, link)?;
         }
-        Ok(detail)
+        store::detail(records, Some(meeting_conn), now_ms)
     })
     .await
 }

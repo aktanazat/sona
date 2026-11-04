@@ -482,7 +482,7 @@ mod tests {
                 )
                 .expect("link the retained commitment without a meeting citation");
                 assert_eq!(link.source_kind, EvidenceSourceKind::Loop);
-                let saved = super::super::store::detail(&history, &project.id)
+                let saved = super::super::store::records(&history, &project.id)
                     .expect("read saved evidence");
                 assert_eq!(saved.evidence.len(), 1);
                 assert_eq!(saved.evidence[0].id, link.id);

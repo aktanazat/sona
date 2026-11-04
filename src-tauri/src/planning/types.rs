@@ -156,11 +156,47 @@ pub struct ProjectSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectOwnerCount {
+    pub person_id: String,
+    pub open_tasks: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MilestonePulse {
+    pub milestone_id: String,
+    /// Distinct meetings that still exist among the milestone's meeting evidence.
+    pub meetings: u32,
+    /// When the latest of those meetings started.
+    pub last_meeting_at_ms: i64,
+}
+
+/// A project at a glance as of the moment it was read. Canceled tasks count
+/// nowhere, and work is overdue once its due day has ended.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPulse {
+    pub done: u32,
+    pub open: u32,
+    pub overdue: u32,
+    /// The earliest due date, today or later, among open tasks and milestones.
+    pub next_due_at_ms: Option<i64>,
+    /// Distinct meetings in the project's evidence held in the last seven local days.
+    pub meetings_this_week: u32,
+    /// People who own open tasks, most open tasks first.
+    pub owners: Vec<ProjectOwnerCount>,
+    /// Milestones with meeting evidence, in the same order as the detail's milestones.
+    pub milestones: Vec<MilestonePulse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectDetail {
     pub project: Project,
     pub milestones: Vec<Milestone>,
     pub tasks: Vec<PlanningTask>,
     pub evidence: Vec<EvidenceLink>,
+    pub pulse: ProjectPulse,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

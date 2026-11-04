@@ -751,11 +751,11 @@ pub(super) fn accept(
                 )?;
                 insert_citations(tx, &sources, &link.citations, kind, target_id, now_ms)?;
             }
-            let mut detail = store::detail(tx, &project.id)?;
-            for link in &mut detail.evidence {
+            let mut records = store::records(tx, &project.id)?;
+            for link in &mut records.evidence {
                 link.available = true;
             }
-            Ok(detail)
+            store::detail(records, meetings, now_ms)
         },
     )
 }
@@ -1002,7 +1002,7 @@ mod tests {
                 0,
             )
             .expect("delete only the first meeting note");
-        let mut links = store::detail(&history, &project.project.id)
+        let mut links = store::records(&history, &project.project.id)
             .expect("read saved project")
             .evidence;
         meetings

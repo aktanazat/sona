@@ -1,11 +1,15 @@
 use super::types::{
-    EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarItem,
-    PlanningCalendarKind, PlanningTask, Project, ProjectDetail, ProjectStatus, ProjectSummary,
-    TaskStatus,
+    EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, MilestonePulse,
+    PlanningCalendarItem, PlanningCalendarKind, PlanningTask, Project, ProjectDetail,
+    ProjectOwnerCount, ProjectPulse, ProjectStatus, ProjectSummary, TaskStatus,
 };
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
+use chrono::{Local, TimeZone};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Row, Transaction, TransactionBehavior,
+};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use uuid::Uuid;
 
@@ -248,7 +252,18 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-pub(crate) fn detail(conn: &Connection, id: &str) -> Result<ProjectDetail> {
+/// A project's saved rows. Serializes exactly as `ProjectDetail` did before it
+/// carried a pulse, so fingerprints the quiet review already stored still match.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectRecords {
+    pub(crate) project: Project,
+    pub(crate) milestones: Vec<Milestone>,
+    pub(crate) tasks: Vec<PlanningTask>,
+    pub(crate) evidence: Vec<EvidenceLink>,
+}
+
+pub(crate) fn records(conn: &Connection, id: &str) -> Result<ProjectRecords> {
     let project = project(conn, id)?;
     let mut statement = conn.prepare(&format!(
         "SELECT {MILESTONE_COLUMNS} FROM planning_milestones WHERE project_id = ?1
@@ -274,12 +289,165 @@ pub(crate) fn detail(conn: &Connection, id: &str) -> Result<ProjectDetail> {
     let evidence = statement
         .query_map([id], read_evidence)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ProjectDetail {
+    Ok(ProjectRecords {
         project,
         milestones,
         tasks,
         evidence,
     })
+}
+
+/// The page for one project: rows the caller has resolved, and their pulse as
+/// of `now_ms`. Meeting times come from `meetings` in one query; without it the
+/// rows must hold no meeting evidence.
+pub(crate) fn detail(
+    records: ProjectRecords,
+    meetings: Option<&Connection>,
+    now_ms: i64,
+) -> Result<ProjectDetail> {
+    let now = Local
+        .timestamp_millis_opt(now_ms)
+        .single()
+        .ok_or_else(|| anyhow::anyhow!("clock is outside the supported calendar"))?;
+    let today_ms = crate::analytics::local_days_start_utc_ms(now, 1)?;
+    let week_ms = crate::analytics::local_days_start_utc_ms(now, 7)?;
+    let pulse = pulse(&records, meetings, today_ms, week_ms)?;
+    Ok(ProjectDetail {
+        project: records.project,
+        milestones: records.milestones,
+        tasks: records.tasks,
+        evidence: records.evidence,
+        pulse,
+    })
+}
+
+const fn is_open(status: TaskStatus) -> bool {
+    matches!(status, TaskStatus::NotStarted | TaskStatus::InProgress)
+}
+
+fn pulse(
+    records: &ProjectRecords,
+    meetings: Option<&Connection>,
+    today_ms: i64,
+    week_ms: i64,
+) -> Result<ProjectPulse> {
+    let mut done = 0_usize;
+    let mut open = 0_usize;
+    let mut overdue = 0_usize;
+    let mut owned = HashMap::<&str, usize>::new();
+    for task in &records.tasks {
+        if task.status == TaskStatus::Done {
+            done += 1;
+        }
+        if !is_open(task.status) {
+            continue;
+        }
+        open += 1;
+        if task.due_at_ms.is_some_and(|due| due < today_ms) {
+            overdue += 1;
+        }
+        if let Some(person_id) = task.owner_person_id.as_deref() {
+            *owned.entry(person_id).or_default() += 1;
+        }
+    }
+    let next_due_at_ms = records
+        .tasks
+        .iter()
+        .filter(|task| is_open(task.status))
+        .filter_map(|task| task.due_at_ms)
+        .chain(
+            records
+                .milestones
+                .iter()
+                .filter(|milestone| is_open(milestone.status))
+                .filter_map(|milestone| milestone.due_at_ms),
+        )
+        .filter(|due| *due >= today_ms)
+        .min();
+    let mut owners = owned
+        .into_iter()
+        .map(|(person_id, open_tasks)| {
+            Ok(ProjectOwnerCount {
+                person_id: person_id.to_owned(),
+                open_tasks: u32::try_from(open_tasks)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    owners.sort_by(|left, right| {
+        right
+            .open_tasks
+            .cmp(&left.open_tasks)
+            .then_with(|| left.person_id.cmp(&right.person_id))
+    });
+    let held = held_meetings(records, meetings)?;
+    let mut milestone_meetings = HashMap::<&str, HashMap<&str, i64>>::new();
+    for link in &records.evidence {
+        if link.target_kind != EvidenceTargetKind::Milestone
+            || link.source_kind != EvidenceSourceKind::Meeting
+        {
+            continue;
+        }
+        if let Some(&at_ms) = held.get(link.source_id.as_str()) {
+            milestone_meetings
+                .entry(link.target_id.as_str())
+                .or_default()
+                .insert(link.source_id.as_str(), at_ms);
+        }
+    }
+    let milestones = records
+        .milestones
+        .iter()
+        .filter_map(|milestone| {
+            let linked = milestone_meetings.get(milestone.id.as_str())?;
+            let last_meeting_at_ms = linked.values().copied().max()?;
+            Some((milestone, linked.len(), last_meeting_at_ms))
+        })
+        .map(|(milestone, linked, last_meeting_at_ms)| {
+            Ok(MilestonePulse {
+                milestone_id: milestone.id.clone(),
+                meetings: u32::try_from(linked)?,
+                last_meeting_at_ms,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let this_week = held.values().filter(|at_ms| **at_ms >= week_ms).count();
+    Ok(ProjectPulse {
+        done: u32::try_from(done)?,
+        open: u32::try_from(open)?,
+        overdue: u32::try_from(overdue)?,
+        next_due_at_ms,
+        meetings_this_week: u32::try_from(this_week)?,
+        owners,
+        milestones,
+    })
+}
+
+/// When each meeting cited by the rows started, for meetings that still exist.
+fn held_meetings(
+    records: &ProjectRecords,
+    meetings: Option<&Connection>,
+) -> Result<HashMap<String, i64>> {
+    let ids = records
+        .evidence
+        .iter()
+        .filter(|link| link.source_kind == EvidenceSourceKind::Meeting)
+        .map(|link| link.source_id.as_str())
+        .collect::<HashSet<_>>();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let meetings = meetings.ok_or(Refusal::SourceUnavailable)?;
+    let mut statement = meetings.prepare(&format!(
+        "SELECT id, COALESCE(started_at_utc_ms, created_at_utc_ms) FROM meeting_sessions
+         WHERE phase != 'deleting' AND id IN ({})",
+        vec!["?"; ids.len()].join(", ")
+    ))?;
+    let held = statement
+        .query_map(params_from_iter(ids), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(held)
 }
 
 pub(crate) fn create_project(
@@ -666,4 +834,72 @@ pub(crate) fn calendar(
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pulse_counts_work_due_today_as_open_not_overdue() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        for migration in [
+            super::super::schema::MIGRATION,
+            super::super::schema::QUIET_REVIEW_MIGRATION,
+            super::super::schema::MEETING_NOTE_LINK_MIGRATION,
+        ] {
+            conn.execute_batch(migration)?;
+        }
+        let now = Local::now();
+        let today_ms = crate::analytics::local_days_start_utc_ms(now, 1)?;
+        let project = insert_project(&conn, "Launch", None, today_ms)?;
+        let owner = Uuid::new_v4().to_string();
+        let task = |title: &str, due_at_ms: i64, owner_person_id: Option<&str>| {
+            insert_task(
+                &conn,
+                &TaskDraft {
+                    project_id: &project.id,
+                    milestone_id: None,
+                    title,
+                    details: None,
+                    due_at_ms: Some(due_at_ms),
+                    owner_person_id,
+                    owner_is_self: false,
+                },
+                today_ms,
+                |id| Ok(id.to_owned()),
+            )
+        };
+        task("Send the brief", today_ms - 3_600_000, Some(&owner))?;
+        let due_today = task("Book the room", today_ms + 1, None)?;
+        let canceled = task("Order banners", today_ms - 3_600_000, None)?;
+        let done = task("Draft the outline", today_ms - 3_600_000, None)?;
+        conn.execute(
+            "UPDATE planning_tasks SET status = 'canceled' WHERE id = ?1",
+            [&canceled.id],
+        )?;
+        conn.execute(
+            "UPDATE planning_tasks SET status = 'done' WHERE id = ?1",
+            [&done.id],
+        )?;
+
+        let detail = detail(records(&conn, &project.id)?, None, now.timestamp_millis())?;
+
+        assert_eq!(
+            detail.pulse,
+            ProjectPulse {
+                done: 1,
+                open: 2,
+                overdue: 1,
+                next_due_at_ms: due_today.due_at_ms,
+                meetings_this_week: 0,
+                owners: vec![ProjectOwnerCount {
+                    person_id: owner,
+                    open_tasks: 1,
+                }],
+                milestones: Vec::new(),
+            }
+        );
+        Ok(())
+    }
 }

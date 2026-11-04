@@ -310,7 +310,7 @@ fn input_hash(
         target_hash: &'a str,
         sources: Vec<&'a super::proposal::PlanningReviewSource>,
     }
-    let target_hash = proposal_sources::fingerprint(&store::detail(history, project_id)?)?;
+    let target_hash = proposal_sources::fingerprint(&store::records(history, project_id)?)?;
     let receipt = serde_json::to_string(&InputReceipt {
         version: 1,
         project_id,
