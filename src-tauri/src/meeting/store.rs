@@ -38,6 +38,7 @@ pub(crate) mod prompts;
 pub(crate) mod query_plane;
 #[cfg(test)]
 mod remote_intelligence_tests;
+mod said;
 mod search_projection;
 pub(crate) mod series;
 #[cfg(test)]

@@ -1754,6 +1754,7 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_trend,
             commands::meeting::meeting_get,
             commands::meeting::meeting_search,
+            commands::meeting::meeting_said_search,
             commands::meeting::meeting_title_set,
             commands::meeting::meeting_speaker_rename,
             commands::call_names::meeting_call_name_targets,

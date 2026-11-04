@@ -13,13 +13,14 @@ use crate::meeting::series_types::{
     MeetingSeriesRemoteRoster, MeetingSeriesTemplateSetRequest,
 };
 use crate::meeting::session::{
-    ImportRecordingRequest, MeetingActionItemDoneRequest, MeetingConsentPanelSessionState,
-    MeetingConsentPanelStartRequest, MeetingMutationRequest, MeetingMutationResult,
-    MeetingNoteCreateRequest, MeetingNoteDeleteRequest, MeetingNoteUpdateRequest,
-    MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest, MeetingReenhanceRequest,
-    MeetingRemovalResult, MeetingSegmentEditRequest, MeetingSessionManager,
-    MeetingSpeakerMergeRequest, MeetingSpeakerRenameRequest, MeetingStartRequest, MeetingStopCause,
-    MeetingStopSurface, MeetingTitleSetRequest, MeetingUserNotesSaveRequest,
+    map_store_error, ImportRecordingRequest, MeetingActionItemDoneRequest,
+    MeetingConsentPanelSessionState, MeetingConsentPanelStartRequest, MeetingMutationRequest,
+    MeetingMutationResult, MeetingNoteCreateRequest, MeetingNoteDeleteRequest,
+    MeetingNoteUpdateRequest, MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest,
+    MeetingReenhanceRequest, MeetingRemovalResult, MeetingSegmentEditRequest,
+    MeetingSessionManager, MeetingSpeakerMergeRequest, MeetingSpeakerRenameRequest,
+    MeetingStartRequest, MeetingStopCause, MeetingStopSurface, MeetingTitleSetRequest,
+    MeetingUserNotesSaveRequest,
 };
 use crate::meeting::suggestions::MeetingSuggestion;
 use crate::meeting::types::*;
@@ -435,6 +436,22 @@ pub async fn meeting_search(
     request: MeetingSearchRequest,
 ) -> Result<MeetingSearchResult, MeetingCommandError> {
     manager.search(request).await
+}
+
+/// The spoken lines a palette query matches, for hearing them again. A query
+/// under two letters matches nothing.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_said_search(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<SaidMoment>, MeetingCommandError> {
+    let store = manager.store().await?;
+    tauri::async_runtime::spawn_blocking(move || store.said_search(&query, limit.unwrap_or(4)))
+        .await
+        .map_err(|_| MeetingCommandError::StorageUnavailable)?
+        .map_err(map_store_error)
 }
 
 #[tauri::command]

@@ -588,7 +588,7 @@ pub(crate) fn resolved_person_for_speaker_in(
         .transpose()
 }
 
-fn confirmed_person_for_speaker_in(
+pub(crate) fn confirmed_person_for_speaker_in(
     connection: &Connection,
     session_id: MeetingSessionId,
     speaker_id: SpeakerId,

@@ -1,4 +1,5 @@
 use super::ledger::{LedgerOutcomeCounts, MeetingLedger};
+use super::people_types::PersonId;
 use crate::analytics::DashboardTrendRange;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -1374,6 +1375,30 @@ pub struct MeetingSearchRequest {
     pub query: String,
     pub session_ids: Vec<MeetingSessionId>,
     pub limit: Option<usize>,
+}
+
+/// One transcript line a palette search matched, for hearing it again.
+/// `person` comes only from a confirmed identification; `speaker_label` is
+/// the transcript's own label, absent for unknown or overlapping speech and
+/// when automatic voice matching may have written it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SaidMoment {
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+    pub meeting_title: String,
+    pub meeting_started_at_utc_ms: i64,
+    pub start_offset_ns: u64,
+    pub end_offset_ns: u64,
+    pub text: String,
+    pub speaker_label: Option<String>,
+    pub person: Option<SaidPerson>,
+    pub audio_retained: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SaidPerson {
+    pub person_id: PersonId,
+    pub display_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

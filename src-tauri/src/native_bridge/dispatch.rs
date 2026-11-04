@@ -2762,6 +2762,12 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::meeting::meeting_search(app.state(), request).await)
         }
+        "meeting_said_search" => {
+            let mut args = Args::parse(params)?;
+            let query = args.take("query")?;
+            let limit = args.take("limit")?;
+            reply(crate::commands::meeting::meeting_said_search(app.state(), query, limit).await)
+        }
         "meeting_title_set" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
