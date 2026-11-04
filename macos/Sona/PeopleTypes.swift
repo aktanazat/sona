@@ -269,6 +269,10 @@ struct PersonDetail: Decodable {
     let commitments: [PersonCommitment]
     /// Average share of the talking, in thousandths.
     let talkShareAvgPermille: UInt32?
+    /// Time recorded across the confirmed meetings, in milliseconds.
+    let recordedMs: UInt64?
+    /// What became of the threads across the confirmed meetings.
+    let ledgerOutcomes: LedgerOutcomeCounts?
     let documents: [PersonDocumentSummary]
     let contact: PersonContactCard?
 }
@@ -933,6 +937,19 @@ enum PeopleModel {
 
     static func lastConfirmed(_ links: [PersonMeetingLink]) -> Date? {
         confirmed(links).map(\.meeting.at).max()
+    }
+
+    /// The usual number of days between meetings: the median gap between
+    /// the distinct days of confirmed meetings. Nil under four such days,
+    /// where a median says nothing yet.
+    static func usualGapDays(_ links: [PersonMeetingLink]) -> Int? {
+        let calendar = Calendar.current
+        let days = Set(confirmed(links).map { calendar.startOfDay(for: $0.meeting.at) }).sorted()
+        guard days.count >= 4 else { return nil }
+        let gaps = zip(days, days.dropFirst())
+            .compactMap { calendar.dateComponents([.day], from: $0, to: $1).day }
+            .sorted()
+        return gaps[gaps.count / 2]
     }
 
     /// "1 open item", "3 open items".

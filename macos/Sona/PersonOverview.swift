@@ -124,6 +124,9 @@ struct PersonFigures: Equatable {
     /// Their average share of the talking, in thousandths. Nil once read
     /// means it was never measured.
     var talkShare: UInt32?
+    var recordedMs: UInt64?
+    var outcomes: LedgerOutcomeCounts?
+    var usualGapDays: Int?
     var openMine: Int?
     var openTheirs = 0
     var notes = Count.unread
@@ -146,6 +149,9 @@ struct PersonFigures: Equatable {
         lastMeetingId = last?.meeting.id
         recentDays = PeopleModel.recentDays(detail.links, now: now)
         talkShare = detail.talkShareAvgPermille
+        recordedMs = detail.recordedMs
+        outcomes = detail.ledgerOutcomes
+        usualGapDays = PeopleModel.usualGapDays(detail.links)
         let open = detail.openLoops.filter(\.status.outstanding)
         let mine = open.filter { $0.direction == .mine }.count
         openMine = mine
@@ -184,6 +190,8 @@ struct PersonStats: View, Equatable {
                 open
             }
             HStack(spacing: 10) {
+                together
+                landed
                 count(figures.notes, label: "Notes") { show(.history, .notes) }
                 count(figures.tasks, label: "Open tasks") { show(.work, nil) }
                 count(figures.words, label: "Their words") { show(.history, .contributions) }
@@ -218,7 +226,8 @@ struct PersonStats: View, Equatable {
             "Last met", icon: "clock",
             value: since?.value ?? (figures.meetings == nil ? " " : "—"),
             unit: since?.unit,
-            caption: figures.lastMet.map { "\($0.short) \($0.time)" },
+            caption: figures.usualGapDays.map { $0 == 1 ? "Usually every day" : "Usually every \($0) days" }
+                ?? figures.lastMet.map { "\($0.short) \($0.time)" },
             tone: since == nil ? Theme.inkTertiary : Theme.ink,
             action: figures.lastMeetingId.map { id -> () -> Void in { openMeeting(id) } }
         ) {
@@ -252,6 +261,36 @@ struct PersonStats: View, Equatable {
                 PersonSplitBar(mine: mine, theirs: figures.openTheirs)
             }
         }
+    }
+
+    private var together: some View {
+        let time = figures.recordedMs.map(Self.timeTogether)
+        return Button { show(.history, .conversations) } label: {
+            NumberTile(
+                time?.value ?? (figures.meetings == nil ? " " : "—"), label: "Together", unit: time?.unit,
+                tone: time == nil ? Theme.inkTertiary : Theme.ink)
+        }
+        .buttonStyle(TilePress())
+        .disabled(figures.meetings == nil)
+        .help("Show conversations")
+    }
+
+    /// Threads that landed out of every substantive thread, with no action:
+    /// no list of them exists across meetings to open.
+    private var landed: some View {
+        let total = figures.outcomes.map { $0.landed + $0.open + $0.dropped } ?? 0
+        return NumberTile(
+            figures.outcomes.map { "\($0.landed)" } ?? (figures.meetings == nil ? " " : "—"),
+            label: "Landed", unit: total > 0 ? "of \(total)" : nil,
+            tone: figures.outcomes == nil ? Theme.inkTertiary : Theme.ink)
+    }
+
+    /// "45 min", "2.5 h", "12 h".
+    private static func timeTogether(_ ms: UInt64) -> (value: String, unit: String) {
+        let minutes = Int((Double(ms) / 60_000).rounded())
+        if minutes < 60 { return ("\(minutes)", "min") }
+        let hours = Double(minutes) / 60
+        return hours < 10 ? (hours.formatted(.number.precision(.fractionLength(1))), "h") : ("\(Int(hours.rounded()))", "h")
     }
 
     private func count(_ value: PersonFigures.Count, label: String, action: @escaping () -> Void) -> some View {
