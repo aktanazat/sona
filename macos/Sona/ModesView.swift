@@ -71,10 +71,15 @@ struct ModesList: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Your modes").sectionLabel()
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
-                Button("New mode") { store.createMode() }
-                    .buttonStyle(.secondary)
-                    .disabled(store.busy)
+                Button { store.createMode() } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.circle)
+                .help("New mode")
+                .accessibilityLabel("New mode")
+                .disabled(store.busy)
             }
             Card {
                 ForEach(Array(store.modes.enumerated()), id: \.element.id) { index, mode in
@@ -102,24 +107,29 @@ struct ModeRow: View {
 
     var body: some View {
         CardRow(action: { store.select(mode) }) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(mode.name)
-                    .bodyText(14, isActive ? Theme.ink : Theme.inkSecondary)
-                    .lineLimit(1)
-                if mode.isPreset || isActive {
-                    HStack(spacing: 8) {
-                        if mode.isPreset {
-                            Text("Preset").metaText()
-                        }
-                        if isActive {
-                            Text("Active").font(TypeScale.label(12)).foregroundStyle(Theme.accent)
-                        }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: mode.symbol)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(isActive ? Theme.accent : Theme.inkSecondary)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.name)
+                        .bodyText()
+                        .lineLimit(1)
+                    if mode.isPreset {
+                        Text("Preset").metaText()
                     }
-                    .fixedSize()
                 }
             }
         } trailing: {
             HStack(spacing: 10) {
+                if isActive {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .accessibilityLabel("Active")
+                }
                 Text(mode.asr.requestedEngine.summary).metaText().fixedSize()
                 ModeChord(mode.shortcuts.transcribe.currentBinding)
                 ModeRowMenu(store: store, mode: mode)
@@ -171,6 +181,7 @@ struct ModeRowMenu: View {
                 .frame(width: 24, height: 24)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Actions for \(mode.name)")
@@ -200,7 +211,7 @@ struct ModeEmptyCard: View {
                     Text("Sona always keeps one mode. Reload to fetch the current list.").metaText()
                 }
             } trailing: {
-                Button("Retry") { store.reload() }.buttonStyle(.secondary)
+                Button("Retry") { store.reload() }.buttonStyle(.compact)
             }
         }
     }
@@ -385,6 +396,7 @@ struct ModeEngineRow: View {
                 Text(selectedLabel).bodyText(14, Theme.ink)
             }
             .menuStyle(.borderlessButton)
+            .tint(Theme.inkSecondary)
             .fixedSize()
         }
     }
@@ -598,18 +610,27 @@ struct ModeShortcutRow: View {
                 Text(shortcut.description).metaText()
             }
         } trailing: {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if isRecording {
                     let preview = store.recording?.preview ?? ""
                     Text(preview.isEmpty ? "Press keys…" : preview).metaText(Theme.accent)
                     Button("Cancel") { store.cancelRecording() }.buttonStyle(.quiet)
                         .help("Press Escape to keep the current shortcut")
                 } else {
-                    ModeChord(shortcut.currentBinding)
-                    Button("Change") { store.record(shortcut) }.buttonStyle(.secondary)
                     if shortcut.changed {
-                        Button("Reset") { store.resetShortcut(shortcut) }.buttonStyle(.quiet)
+                        Button { store.resetShortcut(shortcut) } label: {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 12, weight: .regular))
+                                .foregroundStyle(Theme.inkSecondary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Reset")
+                        .accessibilityLabel("Reset")
                     }
+                    ModeChord(shortcut.currentBinding)
+                    Button("Change") { store.record(shortcut) }.buttonStyle(.compact)
                 }
             }
         }
@@ -721,6 +742,7 @@ struct ModeLlmModelRow: View {
                             Text("Choose")
                         }
                         .menuStyle(.borderlessButton)
+                        .tint(Theme.inkSecondary)
                         .fixedSize()
                     }
                     Button(store.catalogLoading ? "Loading…" : "Refresh") { store.discoverCatalog() }
@@ -891,7 +913,7 @@ struct ModeVocabularyBlock: View {
             } trailing: {
                 HStack(spacing: 8) {
                     Button("Global vocabulary", action: openVocabulary).buttonStyle(.quiet)
-                    Button("Add pair") { store.addVocabularyRow() }.buttonStyle(.secondary)
+                    Button("Add pair") { store.addVocabularyRow() }.buttonStyle(.compact)
                 }
             }
             ForEach(store.vocabularyRows) { row in
@@ -902,9 +924,7 @@ struct ModeVocabularyBlock: View {
                             text: Binding(
                                 get: { row.entry.spoken },
                                 set: { store.setVocabulary(row.index, spoken: $0) }))
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.inkTertiary)
+                        KeyCap("→").accessibilityHidden(true)
                         InputField(
                             prompt: "What to write",
                             text: Binding(
@@ -1088,12 +1108,13 @@ struct ModeInlineNotice: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.body(14))
+            .font(TypeScale.body(13))
             .foregroundStyle(tone.color)
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .overlay(alignment: .bottom) { Hairline() }
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -1106,13 +1127,13 @@ struct ModeLinkNotice: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(text).font(TypeScale.body(14)).foregroundStyle(tone.color)
+            Text(text).font(TypeScale.body(13)).foregroundStyle(tone.color)
             Button(action, action: perform).buttonStyle(.quiet)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -1137,16 +1158,18 @@ struct ModeFieldRow<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(label).bodyText(15, disabled ? Theme.inkDisabled : Theme.ink)
-            if let hint {
-                Text(hint).metaText()
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label).bodyText(14, disabled ? Theme.inkDisabled : Theme.ink)
+                if let hint {
+                    Text(hint).metaText()
+                }
             }
             content
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -1174,7 +1197,7 @@ struct ModeTextBox: View {
                 .padding(.vertical, 6)
         }
         .frame(height: CGFloat(lines) * 22 + 20)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
     }
 }
@@ -1194,7 +1217,7 @@ struct ModeNumberField: View {
                 .frame(width: 72)
                 .padding(.horizontal, 10)
                 .frame(height: 32)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .background(Theme.inset, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
                 .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
         }
     }
@@ -1209,6 +1232,19 @@ extension ModesStore {
         Binding(
             get: { self.editing?[keyPath: path] ?? fallback },
             set: { next in self.edit { $0[keyPath: path] = next } })
+    }
+}
+
+extension Mode {
+    /// The glyph beside the mode's name: one per preset, one for the rest.
+    var symbol: String {
+        switch id {
+        case Self.defaultId: "bubble.left"
+        case "email": "envelope"
+        case "meeting": "person.2"
+        case "notes": "note.text"
+        default: "square.dashed"
+        }
     }
 }
 

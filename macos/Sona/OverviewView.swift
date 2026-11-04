@@ -1,40 +1,401 @@
 import AppKit
 import SwiftUI
 
-/// The capture page under the record button: the mode the next dictation runs
-/// in, everything that asks the reader a question, what is coming, this
-/// week's numbers, and what Sona did without being asked.
+/// Home under the dictation card, read top to bottom: today's counts, six
+/// widgets, each the head of a place; everything that asks the reader a
+/// question; what is coming; the newest conversations and notes; what Sona did
+/// without being asked; and the dictation numbers in full.
 ///
-/// Read in that order, from the same origin every other page starts at. The
-/// hero above it — the state word, the chord and the record control — belongs
-/// to the shell.
+/// The card above it — the state word, the chord, the record control and the
+/// mode — belongs to the capture screen.
 struct OverviewView: View {
+    /// Where the commitments widget scrolls to.
+    static let needsYouAnchor = "overview-needs-you"
+    /// Where the Today strip's meetings count scrolls to.
+    static let upcomingAnchor = "overview-upcoming"
+
     let store: OverviewStore
     /// Opens a retained meeting named by an open loop or a receipt.
     var openMeeting: (String) -> Void = { _ in }
-    /// Opens the Modes editor. Capture has no editor of its own.
-    var openModes: () -> Void = {}
+    /// Opens the full run log the recent list is the head of.
+    var openRunLog: () -> Void = {}
     /// The standing decisions the recurring upcoming rows offer. Meeting
     /// settings owns those three commands, so the integrator hands them in.
     var series: OverviewSeriesActions?
+    /// Brings the needs-you list into view. The page owns the scroll.
+    var showNeedsYou: () -> Void = {}
+    /// Brings the calendar ahead into view.
+    var showUpcoming: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            CaptureModeChipView(store: store, openModes: openModes)
             ErrorNote(store.error)
+            if let today = store.today {
+                OverviewTodayStrip(today: today, showUpcoming: showUpcoming, showNeedsYou: showNeedsYou)
+            }
+            OverviewWidgets(store: store, showNeedsYou: showNeedsYou)
             OverviewNeedsYou(store: store, openMeeting: openMeeting)
+                .id(Self.needsYouAnchor)
             OverviewUpcomingSection(store: store, series: series)
-            ActivityBandView(store: store)
-            UsageStatsView(store: store)
-            FeedRecentView(store: store, openMeeting: openMeeting)
+                .id(Self.upcomingAnchor)
+            OverviewConversations(store: store)
+            FeedRecentView(store: store, openMeeting: openMeeting, seeAll: openRunLog)
+            OverviewStatsCard(store: store)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
+// MARK: - Today
+
+/// One row across the top of Home: what today holds and what is waiting, each
+/// a count that opens its list. A zero is left out; a count whose source could
+/// not be read says so instead of reading as zero.
+struct OverviewTodayStrip: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let today: HomeToday
+    let showUpcoming: () -> Void
+    let showNeedsYou: () -> Void
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let counters = counters(context.date)
+            if !counters.isEmpty {
+                HStack(spacing: 0) {
+                    ForEach(Array(counters.enumerated()), id: \.element.id) { index, counter in
+                        if index > 0 {
+                            Rectangle().fill(Theme.border).frame(width: 1, height: 20)
+                        }
+                        TodayCounterView(counter: counter, revision: model.people.photoRevision)
+                            .transition(.opacity)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(4)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
+                .animation(Motion.settle(reduced: reduceMotion), value: counters.map(\.id))
+                .padding(.bottom, 12)
+            }
+        }
+    }
+
+    private func counters(_ now: Date) -> [TodayCounter] {
+        let meetings = today.meetings.value
+        let speakers = today.unknownSpeakers.value
+        let untracked = today.untracked.value
+        let owed = today.owed.value
+        let counters = [
+            TodayCounter(
+                id: "meetings", value: meetings?.count, label: meetings?.count == 1 ? "meeting" : "meetings",
+                name: "Meetings today", unreadable: "Calendar unavailable",
+                faces: (meetings?.people ?? []).map { AvatarFace(kind: .person($0.personId), name: $0.name) },
+                action: showUpcoming),
+            TodayCounter(
+                id: "processing", value: today.processing.value, label: "processing",
+                name: "Meetings processing",
+                action: {
+                    model.meetings.closeReview()
+                    model.meetings.choose(status: .processing)
+                    model.go(.meetings)
+                }),
+            TodayCounter(
+                id: "speakers", value: speakers?.count, label: "unnamed", name: "Speakers not named",
+                action: speakers?.meetingId.map(review)),
+            TodayCounter(
+                id: "untracked", value: untracked?.count, label: "untracked", name: "Promises not in a project",
+                action: untracked?.meetingId.map(review)),
+            TodayCounter(
+                id: "owed", value: owed?.count, label: "owed", name: "Promises you owe",
+                detail: owed?.oldestAtUtcMs.map { Self.age(since: $0, now: now) },
+                late: owed?.late ?? 0,
+                action: showNeedsYou),
+        ]
+        return counters.filter { $0.value != 0 }
+    }
+
+    /// A meeting's review, where its speakers are named and its promises
+    /// tracked.
+    private func review(_ meetingId: MeetingSessionId) -> () -> Void {
+        {
+            model.openMeeting(meetingId)
+            model.meetings.choose(tab: .review)
+        }
+    }
+
+    private static func age(since milliseconds: Int64, now: Date) -> String {
+        let calendar = Calendar.current
+        let days = calendar.dateComponents(
+            [.day], from: calendar.startOfDay(for: FeedClock.date(milliseconds)),
+            to: calendar.startOfDay(for: now)).day ?? 0
+        return days < 1 ? "oldest today" : days == 1 ? "oldest 1 day" : "oldest \(days) days"
+    }
+}
+
+/// One count on the Today strip. `value` is absent when its source could not
+/// be read.
+private struct TodayCounter: Identifiable {
+    let id: String
+    let value: Int?
+    let label: String
+    /// What the count is, in words, for the tooltip and VoiceOver.
+    let name: String
+    var unreadable = "Can't be read right now"
+    var faces: [AvatarFace] = []
+    var detail: String?
+    var late = 0
+    let action: (() -> Void)?
+
+    var help: String { value == nil ? "\(name): \(unreadable.lowercased())" : name }
+
+    var spoken: String {
+        guard let value else { return help }
+        return ["\(name): \(value)", detail, late > 0 ? "\(late) late" : nil]
+            .compactMap { $0 }.joined(separator: ", ")
+    }
+}
+
+private struct TodayCounterView: View {
+    let counter: TodayCounter
+    let revision: UInt64
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if counter.value != nil, let action = counter.action {
+            Button(action: action) { content }
+                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
+                .help(counter.help)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(counter.spoken)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { action() }
+        } else {
+            content
+                .help(counter.help)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(counter.spoken)
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(counter.value.map { "\($0)" } ?? "–")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(counter.value == nil ? Theme.inkTertiary : Theme.ink)
+                    .monospacedDigit()
+                    .contentTransition(reduceMotion ? .opacity : .numericText())
+                Text(counter.label).font(TypeScale.body(12)).foregroundStyle(Theme.inkSecondary)
+                if let detail = counter.detail {
+                    Text(detail).metaText()
+                }
+                if counter.late > 0 {
+                    Text("\(counter.late) late")
+                        .font(TypeScale.body(12))
+                        .foregroundStyle(Theme.live)
+                        .monospacedDigit()
+                        .contentTransition(reduceMotion ? .opacity : .numericText())
+                }
+            }
+            .lineLimit(1)
+            .animation(Motion.settle(reduced: reduceMotion), value: counter.value)
+            .animation(Motion.settle(reduced: reduceMotion), value: counter.late)
+            if !counter.faces.isEmpty {
+                AvatarStack(faces: counter.faces, size: 18, limit: 4, revision: revision)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.wash.opacity(hovering ? 1 : 0), in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+// MARK: - Widgets
+
+/// Home's six numbers, each a tile that opens the place it counts.
+struct OverviewWidgets: View {
+    @Environment(AppModel.self) private var model
+    let store: OverviewStore
+    let showNeedsYou: () -> Void
+
+    private static let columns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let now = context.date
+            let week = OverviewWeek(ending: now)
+            LazyVGrid(columns: Self.columns, alignment: .leading, spacing: 12) {
+                today(now)
+                recorded(week)
+                dictated(week)
+                commitments()
+                overdue(now)
+                peopleMet(week)
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    /// Today's minutes and the next event. How many meetings today holds
+    /// leads the Today strip, so it is not counted twice here.
+    private func today(_ now: Date) -> some View {
+        let calendar = Calendar.current
+        let loaded: [MeetingHistorySummary]? = if case let .loaded(entries) = store.recentMeetings {
+            entries.filter { calendar.isDate($0.date, inSameDayAs: now) }
+        } else {
+            nil
+        }
+        let recorded = loaded ?? []
+        let ahead = (store.upcoming?.rows ?? []).filter {
+            calendar.isDate(FeedClock.date($0.startUtcMs), inSameDayAs: now) && FeedClock.date($0.endUtcMs) > now
+        }
+        let blocks = recorded.map {
+            DayStripBlock(id: "recorded:\($0.id)", start: $0.date,
+                          end: $0.date.addingTimeInterval($0.recordedDuration ?? 0), recorded: true)
+        } + ahead.map {
+            DayStripBlock(id: "ahead:\($0.eventKey)", start: FeedClock.date($0.startUtcMs),
+                          end: FeedClock.date($0.endUtcMs), recorded: false)
+        }
+        let seconds = recorded.compactMap(\.recordedDuration).reduce(0, +)
+        let countOnly = seconds == 0 && !recorded.isEmpty
+        let value = loaded == nil ? "–" : countOnly ? "\(recorded.count)" : "\(Int((seconds / 60).rounded(.up)))"
+        let unit = countOnly ? "recorded" : "min recorded"
+        let next = ahead.min(by: { $0.startUtcMs < $1.startUtcMs })
+        return WidgetTile("Today", icon: "calendar", value: value, unit: unit,
+                          caption: next.map { "next \(FeedClock.date($0.startUtcMs).formatted(date: .omitted, time: .shortened))" },
+                          action: { model.go(.meetings) }) {
+            DayStrip(blocks: blocks, now: now)
+        }
+    }
+
+    private func recorded(_ week: OverviewWeek) -> some View {
+        let points: [ActivityMeetingPoint]? = if case let .available(days) = store.meetings { days } else { nil }
+        var minutes: [String: Double] = [:]
+        var meetings = 0
+        for point in points ?? [] where week.keys.contains(point.localDate) {
+            minutes[point.localDate, default: 0] += Double(point.verifiedCapturedDurationMs) / 60_000
+            meetings += point.meetings
+        }
+        let total = Int(minutes.values.reduce(0, +).rounded())
+        return WidgetTile("Recorded this week", icon: "waveform", value: points == nil ? "–" : total.formatted(),
+                          unit: "min", caption: points == nil ? nil : meetings == 1 ? "1 meeting" : "\(meetings) meetings",
+                          action: { model.go(.meetings) }) {
+            if points != nil {
+                DayBars(days: week.chart { minutes[$0] ?? 0 } spoken: { "\(Int($0.rounded())) minutes" })
+            }
+        }
+    }
+
+    private func dictated(_ week: OverviewWeek) -> some View {
+        var words: [String: Double] = [:]
+        for point in store.trend?.points ?? [] where week.keys.contains(point.localDate) {
+            words[point.localDate, default: 0] += Double(point.words)
+        }
+        let total = Int(words.values.reduce(0, +))
+        return WidgetTile("Dictated this week", icon: "mic", value: store.trend == nil ? "–" : total.formatted(),
+                          unit: "words", caption: store.trend.map { "\($0.allTime.words.formatted()) all time" },
+                          action: { model.go(.library) }) {
+            if store.trend != nil {
+                Sparkline(days: week.chart { words[$0] ?? 0 } spoken: { "\(Int($0)) words" })
+            }
+        }
+    }
+
+    /// Every open promise, split by who owes it, and the oldest of yours. How
+    /// many are yours and how long the oldest has waited lead the Today strip.
+    private func commitments() -> some View {
+        let loops: [FeedOpenLoop]? = if case let .loaded(entries) = store.openLoops { entries } else { nil }
+        let count = loops?.count ?? 0
+        let complete = count < OverviewStore.openLoopLimit
+        let mine = complete ? (loops ?? []).filter { $0.direction == .mine } : []
+        let theirs = complete ? (loops ?? []).filter { $0.direction == .waitingOn }.count : 0
+        let oldest = mine.min { $0.raisedAtUtcMs < $1.raisedAtUtcMs }
+        return WidgetTile("Commitments", icon: "checklist",
+                          value: loops == nil ? "–" : complete ? "\(count)" : "\(count)+",
+                          unit: "open",
+                          action: count == 0 ? nil : showNeedsYou) {
+            if count > 0, complete {
+                VStack(alignment: .leading, spacing: 6) {
+                    PersonSplitBar(mine: mine.count, theirs: theirs)
+                    if let oldest {
+                        Text(oldest.text).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func overdue(_ now: Date) -> some View {
+        let projects = model.projects
+        let late = projects.overdueTasks(at: Int64(now.timeIntervalSince1970 * 1000))
+            .sorted { ($0.dueAtMs ?? .max) < ($1.dueAtMs ?? .max) }
+        let open = projects.activeOpenTaskCount
+        let known = projects.projects != nil
+        return WidgetTile("Overdue", icon: "exclamationmark.circle", value: known ? "\(late.count)" : "–",
+                          unit: late.count == 1 ? "task" : "tasks", caption: known ? "of \(open) open" : nil,
+                          tone: late.isEmpty ? Theme.ink : Theme.live,
+                          action: {
+                              if !late.isEmpty { projects.showOverdue() }
+                              model.go(.projects)
+                          }) {
+            if known, open > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    ShareBar(fraction: Double(late.count) / Double(open), tint: Theme.live)
+                    if let oldest = late.first {
+                        Text(oldest.title).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func peopleMet(_ week: OverviewWeek) -> some View {
+        let entries = model.people.entries
+        let since = Int64(week.start.timeIntervalSince1970 * 1000)
+        let met = (entries ?? [])
+            .filter { ($0.lastMeetingAtUtcMs ?? .min) >= since }
+            .sorted { ($0.lastMeetingAtUtcMs ?? 0) > ($1.lastMeetingAtUtcMs ?? 0) }
+        return WidgetTile("People this week", icon: "person.2", value: entries == nil ? "–" : "\(met.count)",
+                          unit: "met", caption: entries.map { $0.count == 1 ? "of 1 person" : "of \($0.count) people" },
+                          action: { model.go(.people) }) {
+            AvatarStack(faces: met.map { AvatarFace(kind: .person($0.person.id), name: $0.person.displayName) },
+                        size: 22, limit: 6, revision: model.people.photoRevision)
+        }
+    }
+}
+
+/// The seven local days ending today: what "this week" means on Home, the
+/// same span the numbers card counts.
+private struct OverviewWeek {
+    let days: [Date]
+    let keys: [String]
+
+    init(ending now: Date) {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        days = (0..<7).reversed().compactMap { calendar.date(byAdding: .day, value: -$0, to: today) }
+        keys = days.map(ActivityDates.key)
+    }
+
+    var start: Date { days.first ?? .now }
+
+    func chart(_ value: (String) -> Double, spoken: (Double) -> String) -> [ChartDay] {
+        zip(days, keys).map { day, key in
+            let amount = value(key)
+            return ChartDay(date: day, value: amount, spoken: spoken(amount))
+        }
+    }
+}
+
 // MARK: - Capture mode
 
-/// Which mode the next dictation will run in, changeable in place.
+/// Which mode the next dictation will run in, changeable in place: the last
+/// row of the dictation card.
 ///
 /// Modes left the sidebar: picking one is a capture decision and editing one
 /// is a settings task, so this is the picking half. It reads and writes the
@@ -46,21 +407,26 @@ struct CaptureModeChipView: View {
     @State private var open = false
 
     var body: some View {
-        // Nothing to say before the modes arrive, and a chip naming a mode
-        // this install does not have would be worse than no chip.
+        // Nothing to say before the modes arrive, and a row naming a mode
+        // this install does not have would be worse than no row.
         if let snapshot = store.modes, let active = snapshot.active {
-            HStack(spacing: 8) {
-                Text("Mode").metaText()
+            CardRow {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Mode").bodyText()
+                    if store.capturing {
+                        Text("switching is off while a dictation is running").metaText()
+                    }
+                }
+            } trailing: {
                 Button { open = true } label: {
-                    HStack(spacing: 5) {
-                        Text(active.name).font(TypeScale.label(14)).foregroundStyle(Theme.ink)
-                        Image(systemName: "chevron.down")
+                    HStack(spacing: 6) {
+                        Text(active.name).lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(Theme.inkTertiary)
                     }
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.compact)
                 .disabled(store.switchingMode || store.capturing)
                 .popover(isPresented: $open, arrowEdge: .bottom) {
                     CaptureModePicker(store: store) {
@@ -68,17 +434,13 @@ struct CaptureModeChipView: View {
                         openModes()
                     }
                 }
-                if store.capturing {
-                    Text("switching is off while a dictation is running").metaText()
-                }
             }
-            .padding(.bottom, 16)
         }
     }
 }
 
-/// The list inside the chip's popover: every mode, the current one marked,
-/// and one line out to the editor.
+/// The list inside the mode row's popover: every mode, the current one
+/// marked, and one line out to the editor.
 struct CaptureModePicker: View {
     let store: OverviewStore
     var openModes: () -> Void = {}
@@ -155,6 +517,10 @@ private struct CaptureModeRow: View {
 struct OverviewNeedsYou: View {
     let store: OverviewStore
     var openMeeting: (String) -> Void = { _ in }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showingAll = false
+    /// How many promises the list draws before "Show all".
+    private static let shown = 5
 
     var body: some View {
         // A list still being read is not an empty list, so the section draws
@@ -173,8 +539,15 @@ struct OverviewNeedsYou: View {
                     if case .failed = store.openLoops {
                         FeedFailedRow(retry: store.refreshFeed)
                     }
-                    ForEach(loops) { loop in
+                    ForEach(showingAll ? loops : Array(loops.prefix(Self.shown))) { loop in
                         OverviewLoopRow(loop: loop, openMeeting: openMeeting)
+                    }
+                    if loops.count > Self.shown {
+                        CardRow(action: {
+                            withAnimation(Motion.settle(reduced: reduceMotion)) { showingAll.toggle() }
+                        }) {
+                            Text(showingAll ? "Show fewer" : "Show all \(total)").metaText(Theme.inkSecondary)
+                        }
                     }
                     ForEach(store.suggestions ?? []) { entry in
                         LearningRow(entry: entry, busy: store.answering.contains(entry.id)) { status in
@@ -191,6 +564,10 @@ struct OverviewNeedsYou: View {
 
     private var loops: [FeedOpenLoop] {
         if case let .loaded(entries) = store.openLoops { entries } else { [] }
+    }
+
+    private var total: String {
+        loops.count >= OverviewStore.openLoopLimit ? "\(loops.count)+" : "\(loops.count)"
     }
 
     private var updateWaiting: OverviewUpdate? {
@@ -214,9 +591,14 @@ private struct OverviewLoopRow: View {
         CardRow(action: loop.meetingId.isEmpty ? nil : { openMeeting(loop.meetingId) }) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(loop.text).bodyText(14)
-                Text("\(loop.title) · \(FeedClock.ago(loop.atUtcMs))").metaText().lineLimit(1)
+                Text(meta).metaText().lineLimit(1)
             }
         }
+    }
+
+    private var meta: String {
+        let base = "\(loop.title) · \(FeedClock.ago(loop.raisedAtUtcMs))"
+        return loop.waitingOnStale ? "\(base) · waiting over a week" : base
     }
 }
 
@@ -400,43 +782,168 @@ private struct OverviewSeriesControls: View {
     }
 }
 
-// MARK: - Activity
+// MARK: - Numbers
 
-/// This week, as one closed row until somebody wants the shape of it.
+/// Which stretch the numbers card reads.
+private enum OverviewPeriod: CaseIterable {
+    case allTime
+    case week
+
+    var title: String {
+        switch self {
+        case .allTime: "All time"
+        case .week: "This week"
+        }
+    }
+}
+
+/// How much has been said, as one card: the period, its numbers in a row,
+/// and what they rest on behind the chevron.
 ///
-/// The fact is always this week's numbers, never the paged week's: the label
-/// says "This week", and a summary that changed its numbers as you paged
-/// backwards would be describing a week its own label denies. The caption
-/// inside says which week the charts are drawing.
-struct ActivityBandView: View {
+/// This week's numbers are always this week's, never the paged week's: the
+/// period says "This week", and numbers that changed as the charts paged
+/// backwards would describe a week the period denies. The caption over the
+/// charts says which week they draw.
+struct OverviewStatsCard: View {
+    @Environment(AppModel.self) private var model
     let store: OverviewStore
+    @State private var period = OverviewPeriod.allTime
     @State private var page = 0
+    @State private var open = false
 
     var body: some View {
-        if let trend = store.trend {
-            OverviewDisclosure("This week", fact: ActivityBandView.fact(trend)) {
-                ActivityBandBody(trend: trend, meetings: store.meetings, page: $page)
+        // The week is its own read and may not answer; all time is the one
+        // period with numbers then.
+        let week = store.trend.flatMap { period == .week ? $0 : nil }
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    periodControl
+                    Spacer(minLength: 12)
+                    Button { open.toggle() } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.inkTertiary)
+                            .rotationEffect(.degrees(open ? 180 : 0))
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(open ? "Hide details" : "Show details")
+                    .accessibilityLabel(open ? "Hide details" : "Show details")
+                }
+                if let week {
+                    weekFigures(week)
+                } else {
+                    allTimeFigures
+                }
+            }
+            .padding(16)
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
+            if open {
+                if let week {
+                    ActivityBandBody(trend: week, meetings: store.meetings, page: $page)
+                } else {
+                    allTimeDetails
+                }
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    @ViewBuilder
+    private var periodControl: some View {
+        if store.trend == nil {
+            Text(OverviewPeriod.allTime.title)
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+        } else {
+            Menu {
+                Picker("Period", selection: $period) {
+                    ForEach(OverviewPeriod.allCases, id: \.self) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                Text(period.title)
+            }
+            .menuStyle(.borderlessButton)
+            .tint(Theme.inkSecondary)
+            .fixedSize()
+            .foregroundStyle(Theme.inkSecondary)
+        }
+    }
+
+    @ViewBuilder
+    private var allTimeFigures: some View {
+        switch store.usage {
+        case .loading:
+            Text("Loading…").metaText()
+        case .failed:
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Couldn't read your usage.").metaText()
+                Spacer(minLength: 12)
+                Button("Retry", action: store.reloadUsage).buttonStyle(.quiet)
+            }
+        case let .loaded(stats, _):
+            if stats.dictations == 0 {
+                Text("No dictations yet.").metaText()
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    Stat(label: "Words", value: stats.totalWords.formatted())
+                    Stat(label: "Words a minute", value: stats.wordsPerMinuteDictations > 0 ? "\(stats.wordsPerMinute)" : "–")
+                    Stat(label: "Time saved", value: stats.timeSaved)
+                    Stat(label: "Streak", value: UsageStats.days(stats.currentStreakDays))
+                }
             }
         }
     }
 
-    /// Page 0 whatever the charts are drawing: the fact belongs to the label,
-    /// not to the paged range.
-    private static func fact(_ trend: ActivityTrend) -> String {
-        let week = activityWindow(trend.points, page: 0).points
+    /// Page 0 whatever the charts are drawing: the numbers belong to the
+    /// period, not to the paged range.
+    private func weekFigures(_ trend: ActivityTrend) -> some View {
+        let days = Array(activityWindow(trend.points, page: 0).points)
         var dictations = 0
         var words = 0
-        for point in week {
-            dictations += point.recordings
-            words += point.words
+        for day in days {
+            dictations += day.recordings
+            words += day.words
         }
-        return [
-            dictations == 1 ? "1 dictation" : "\(dictations) dictations",
-            words == 1 ? "1 word" : "\(words) words",
-            "\(trend.currentStreakDays)-day streak",
-        ].joined(separator: " · ")
+        let meetings = ActivityBandBody.meetingCounts(days, store.meetings)?.reduce(0, +)
+        return HStack(alignment: .top, spacing: 16) {
+            Stat(label: "Dictations", value: dictations.formatted())
+            Stat(label: "Words", value: words.formatted())
+            Stat(label: "Streak", value: UsageStats.days(trend.currentStreakDays))
+            if let meetings {
+                Stat(label: "Meetings", value: meetings.formatted())
+            }
+        }
+    }
+
+    /// What the four numbers rest on, which apps the words went into, and the
+    /// switch that decides whether an app is recorded with a dictation at
+    /// all, beside the list it exists for rather than on a settings page.
+    @ViewBuilder
+    private var allTimeDetails: some View {
+        if case let .loaded(stats, apps) = store.usage, stats.dictations > 0 {
+            CardLine(stats.footing)
+            UsageAppsList(apps: apps, other: stats.other, counting: model.settings.settings.countWordsPerApp)
+        }
+        ToggleRow(
+            title: "Count words per app",
+            detail: "Remembers which app each dictation went into. Stays on this Mac.",
+            isOn: Binding(
+                get: { model.settings.settings.countWordsPerApp },
+                set: { value in Task { await model.settings.setCountWordsPerApp(value) } }
+            )
+        )
+        .disabled(model.settings.isBusy("count_words_per_app"))
     }
 }
+
+// MARK: - Activity
 
 private struct ActivityBandBody: View {
     let trend: ActivityTrend
@@ -466,20 +973,20 @@ private struct ActivityBandBody: View {
                 ActivityMeasure("Streak") {
                     ActivityWeekDots(points: points, labels: labels)
                 }
-                if let counts = meetingCounts(points) {
+                if let counts = Self.meetingCounts(points, meetings) {
                     ActivityMeasure("Meetings") {
                         ActivityBars(values: counts, labels: labels)
                     }
                 }
             }
         }
-        .padding(12)
+        .padding(16)
     }
 
     /// The meeting trend joined onto the days the dictation charts are
-    /// drawing. Storage that cannot answer draws no column at all, rather
-    /// than a week of zeroes it never measured.
-    private func meetingCounts(_ points: [ActivityTrendPoint]) -> [Int]? {
+    /// drawing. Storage that cannot answer gets no column and no number,
+    /// rather than a week of zeroes it never measured.
+    static func meetingCounts(_ points: [ActivityTrendPoint], _ meetings: ActivityMeetingTrend?) -> [Int]? {
         guard case let .available(days) = meetings else { return nil }
         var byDate: [String: Int] = [:]
         byDate.reserveCapacity(days.count)
@@ -751,6 +1258,10 @@ enum ActivityDates {
         wire.date(from: localDate)
     }
 
+    static func key(_ date: Date) -> String {
+        wire.string(from: date)
+    }
+
     static func narrowWeekday(_ localDate: String) -> String {
         guard let date = parse(localDate) else { return "" }
         return narrow.string(from: date)
@@ -771,73 +1282,6 @@ enum ActivityDates {
 }
 
 // MARK: - Usage
-
-/// All time, as one closed row: how much has been said, how fast, what
-/// typing it would have cost, and which apps it went into.
-///
-/// The fact carries the three numbers worth a glance. Opening the row shows
-/// the rest, the apps, and the switch that decides whether an app is
-/// recorded with a dictation at all; the switch sits beside the list it
-/// exists for rather than on a settings page.
-struct UsageStatsView: View {
-    @Environment(AppModel.self) private var model
-    let store: OverviewStore
-
-    var body: some View {
-        OverviewDisclosure("All time", fact: fact) {
-            switch store.usage {
-            case .loading:
-                CardRow { Text("Loading…").metaText() }
-            case .failed:
-                FeedFailedRow(message: "Couldn't read your usage.", retry: store.reloadUsage)
-            case let .loaded(stats, apps):
-                if stats.dictations == 0 {
-                    CardRow { Text("No dictations yet.").metaText() }
-                } else {
-                    UsageTiles(stats: stats)
-                    UsageAppsList(apps: apps, other: stats.other, counting: model.settings.settings.countWordsPerApp)
-                }
-            }
-            ToggleRow(
-                title: "Count words per app",
-                detail: "Remembers which app each dictation went into. Stays on this Mac.",
-                isOn: Binding(
-                    get: { model.settings.settings.countWordsPerApp },
-                    set: { value in Task { await model.settings.setCountWordsPerApp(value) } }
-                )
-            )
-            .disabled(model.settings.isBusy("count_words_per_app"))
-        }
-    }
-
-    private var fact: String? {
-        guard case let .loaded(stats, _) = store.usage else { return nil }
-        if stats.dictations == 0 { return "Nothing yet" }
-        var parts = ["\(stats.totalWords.formatted()) words"]
-        if stats.wordsPerMinuteDictations > 0 {
-            parts.append("\(stats.wordsPerMinute) wpm")
-        }
-        parts.append("\(stats.timeSaved) saved")
-        return parts.joined(separator: " · ")
-    }
-}
-
-/// The four numbers, and the line under them saying what they rest on.
-private struct UsageTiles: View {
-    let stats: UsageStats
-
-    var body: some View {
-        CardRow {
-            HStack(alignment: .top, spacing: 16) {
-                Stat(label: "Words", value: stats.totalWords.formatted())
-                Stat(label: "Words a minute", value: stats.wordsPerMinuteDictations > 0 ? "\(stats.wordsPerMinute)" : "–")
-                Stat(label: "Time saved", value: stats.timeSaved)
-                Stat(label: "Streak", value: UsageStats.days(stats.currentStreakDays))
-            }
-        }
-        CardLine(stats.footing)
-    }
-}
 
 /// Where the words went, most first. Rows the core could not name are one
 /// "Other" line, so the list adds up to the total above it. With counting
@@ -886,36 +1330,152 @@ private struct UsageAppRowView: View {
     }
 }
 
+// MARK: - Conversations and notes
+
+/// The newest conversations and notes as one list, newest first, each
+/// opening where it lives, beside the two ways to start another.
+struct OverviewConversations: View {
+    @Environment(AppModel.self) private var model
+    let store: OverviewStore
+    private static let shown = 6
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Conversations and notes").sectionLabel()
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
+                Button("New note") {
+                    model.go(.scratchpad)
+                    Task { await model.scratchpad.newNote() }
+                }
+                .buttonStyle(.compact)
+                Button("Record conversation", action: model.recordMeeting).buttonStyle(.compact)
+            }
+            Card {
+                if failed {
+                    FeedFailedRow { Task { await store.loadRecent() } }
+                }
+                if entries.isEmpty {
+                    if loading {
+                        CardLine("Loading…")
+                    } else if !failed {
+                        CardLine("No conversations or notes yet.")
+                    }
+                }
+                ForEach(entries) { entry in
+                    CardRow(action: { open(entry) }) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Image(systemName: entry.isNote ? "note.text" : "bubble.left.and.bubble.right")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.inkTertiary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.title).bodyText(14).lineLimit(1)
+                                if !entry.detail.isEmpty {
+                                    Text(entry.detail).metaText().lineLimit(1)
+                                }
+                            }
+                        }
+                    } trailing: {
+                        Text(FeedClock.ago(entry.atMs)).metaText()
+                    }
+                }
+            }
+            HStack(spacing: 16) {
+                Button("All conversations") { model.go(.meetings) }.buttonStyle(.quiet)
+                Button("All notes") { model.go(.scratchpad) }.buttonStyle(.quiet)
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    private var entries: [OverviewRecentEntry] {
+        var all: [OverviewRecentEntry] = []
+        if case let .loaded(meetings) = store.recentMeetings {
+            all += meetings.map {
+                OverviewRecentEntry(
+                    id: "meeting:\($0.id)", target: $0.id, isNote: false, title: $0.title,
+                    detail: $0.headline?.text ?? ($0.speakerLabels ?? []).joined(separator: ", "),
+                    atMs: $0.createdAtUtcMs)
+            }
+        }
+        if case let .loaded(notes) = store.recentNotes {
+            all += notes.map {
+                OverviewRecentEntry(
+                    id: "note:\($0.id)", target: $0.id, isNote: true, title: $0.title, detail: $0.preview,
+                    atMs: $0.updatedAtMs)
+            }
+        }
+        all.sort { $0.atMs == $1.atMs ? $0.id < $1.id : $0.atMs > $1.atMs }
+        return Array(all.prefix(Self.shown))
+    }
+
+    private var loading: Bool {
+        if case .loading = store.recentMeetings { return true }
+        if case .loading = store.recentNotes { return true }
+        return false
+    }
+
+    private var failed: Bool {
+        if case .failed = store.recentMeetings { return true }
+        if case .failed = store.recentNotes { return true }
+        return false
+    }
+
+    private func open(_ entry: OverviewRecentEntry) {
+        if entry.isNote {
+            model.open(link: "sona://note/\(entry.target)")
+        } else {
+            model.openMeeting(entry.target)
+        }
+    }
+}
+
+private struct OverviewRecentEntry: Identifiable {
+    let id: String
+    let target: String
+    let isNote: Bool
+    let title: String
+    let detail: String
+    let atMs: Int64
+}
+
 // MARK: - Recent
 
-/// What Sona did without being asked, closed by default.
-///
-/// The fact counts today's passes, so a reader knows whether opening this says
-/// anything new: "0 today" over three older rows is the answer as often as
-/// "3 today" is.
+/// What Sona did without being asked: the latest runs that changed
+/// something, each on its own card, and the way into the full run log.
 struct FeedRecentView: View {
     let store: OverviewStore
     var openMeeting: (String) -> Void = { _ in }
+    var seeAll: () -> Void = {}
 
     var body: some View {
-        OverviewDisclosure("Recent", fact: fact) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Recent").sectionLabel()
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 12)
+                Button("See all", action: seeAll).buttonStyle(.quiet)
+            }
             switch store.receipts {
             case .loading:
-                CardRow { Text("Loading…").metaText() }
+                Card { CardLine("Loading…") }
             case .failed:
-                FeedFailedRow(retry: store.refreshFeed)
+                Card { FeedFailedRow(retry: store.refreshFeed) }
             case .loaded:
                 if entries.isEmpty {
-                    CardRow {
-                        Text("No recent activity.").metaText()
-                    }
+                    Card { CardLine("No recent activity.") }
                 } else {
-                    ForEach(entries) { receipt in
-                        FeedReceiptRow(receipt: receipt, openMeeting: openMeeting)
+                    VStack(spacing: 8) {
+                        ForEach(entries) { receipt in
+                            Card { FeedReceiptRow(receipt: receipt, openMeeting: openMeeting) }
+                        }
                     }
                 }
             }
         }
+        .padding(.bottom, 28)
     }
 
     /// The list is effects, so a receipt with none does not reach it: the same
@@ -923,12 +1483,6 @@ struct FeedRecentView: View {
     private var entries: [FeedReceipt] {
         guard case let .loaded(receipts) = store.receipts else { return [] }
         return Array(receipts.filter(\.hasEffect).prefix(3))
-    }
-
-    private var fact: String? {
-        guard case .loaded = store.receipts else { return nil }
-        if entries.isEmpty { return "Nothing yet" }
-        return "\(entries.filter { FeedClock.isToday($0.finishedAtUtcMs) }.count) today"
     }
 }
 
@@ -942,7 +1496,7 @@ private struct FeedReceiptRow: View {
         let meetingId = receipt.jumpTarget?.meetingId
         CardRow(action: meetingId.map { id in { openMeeting(id) } }) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(receipt.sentence).bodyText(14)
+                Text(receipt.sentence).bodyText(14).lineLimit(2)
                 Text("\(receipt.source) · \(FeedClock.ago(receipt.finishedAtUtcMs))").metaText()
             }
         }
@@ -951,51 +1505,13 @@ private struct FeedReceiptRow: View {
 
 /// A list that could not be read keeps its own row, and the way to ask again.
 private struct FeedFailedRow: View {
-    var message = "Couldn't load this list."
     let retry: () -> Void
 
     var body: some View {
         CardRow {
-            Text(message).metaText()
+            Text("Couldn't load this list.").metaText()
         } trailing: {
             Button("Retry", action: retry).buttonStyle(.quiet)
-        }
-    }
-}
-
-// MARK: - Shared
-
-/// A closed row that carries the measurement deciding whether to open it.
-struct OverviewDisclosure<Content: View>: View {
-    private let label: String
-    private let fact: String?
-    private let content: Content
-    @State private var open = false
-
-    init(_ label: String, fact: String? = nil, @ViewBuilder content: () -> Content) {
-        self.label = label
-        self.fact = fact
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            CardRow(action: { open.toggle() }) {
-                HStack(spacing: 10) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.inkTertiary)
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                    Text(label).bodyText()
-                }
-            } trailing: {
-                if let fact {
-                    Text(fact).metaText().multilineTextAlignment(.trailing)
-                }
-            }
-            if open {
-                content
-            }
         }
     }
 }

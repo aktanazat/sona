@@ -1,6 +1,9 @@
 use super::document_types::{DocumentId, DocumentSummary};
+use super::ledger::LedgerOutcomeCounts;
 use super::loop_types::{MeetingLoopDirection, MeetingLoopId, MeetingLoopStatus};
-use super::types::MeetingSessionId;
+use super::types::{
+    MeetingSessionId, SourceTrackId, SpeakerId, TranscriptRevisionId, TranscriptSegmentId,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
@@ -197,7 +200,14 @@ pub struct PersonDetail {
     pub open_loops: Vec<PersonOpenLoop>,
     pub commitments: Vec<PersonCommitment>,
     pub talk_share_avg_permille: Option<u32>,
+    /// Time recorded across the confirmed meetings, in milliseconds. Nil
+    /// when none of them has a finished capture window.
+    pub recorded_ms: Option<u64>,
+    /// What became of the substantive threads across the confirmed meetings.
+    /// Nil when none of them has a ledger.
+    pub ledger_outcomes: Option<LedgerOutcomeCounts>,
     pub documents: Vec<DocumentSummary>,
+    pub contact: Option<PersonContactCard>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -298,6 +308,12 @@ pub struct PersonBriefingRow {
     pub meetings_count: u64,
     pub last: Option<PersonBriefingLastMeeting>,
     pub open_loops: Vec<PersonOpenLoop>,
+    /// Everything this person owes the user, counted before `open_loops` is
+    /// cut to the first few.
+    pub waiting_on_count: u64,
+    /// Every open item from meetings with this person, either way, counted
+    /// before `open_loops` is cut.
+    pub open_loop_count: u64,
     pub commitments: Vec<PersonCommitment>,
 }
 
@@ -410,6 +426,125 @@ pub struct PeopleMutationResult {
     pub revision: u64,
     pub person: Option<Person>,
     pub removed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonContributionAttribution {
+    Confirmed,
+    Recognized,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContribution {
+    pub meeting_id: MeetingSessionId,
+    pub meeting_title: String,
+    pub meeting_at_utc_ms: i64,
+    pub transcript_revision_id: TranscriptRevisionId,
+    pub segment_id: TranscriptSegmentId,
+    pub track_id: SourceTrackId,
+    pub speaker_id: SpeakerId,
+    pub attribution: PersonContributionAttribution,
+    pub link_confidence: PersonLinkConfidence,
+    pub start_offset_ns: u64,
+    pub end_offset_ns: u64,
+    pub raw_text: String,
+    pub corrected_text: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContributionsResult {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub entries: Vec<PersonContribution>,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PersonPhotoProvenance {
+    LocalFile {
+        file_name: String,
+        confirmed_at_utc_ms: i64,
+    },
+    LocalContact {
+        contact_name: String,
+        confirmed_at_utc_ms: i64,
+    },
+    PublicImage {
+        source_url: String,
+        image_url: String,
+        attribution: String,
+        confirmed_at_utc_ms: i64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonAvatar {
+    pub png_base64: String,
+    pub updated_at_utc_ms: i64,
+    pub provenance: Option<PersonPhotoProvenance>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonAvatarResult {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub avatar: Option<PersonAvatar>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonAvatarSetRequest {
+    pub person_id: PersonId,
+    pub expected_revision: u64,
+    pub png_base64: Option<String>,
+    pub provenance: Option<PersonPhotoProvenance>,
+    pub original_base64: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonAvatarSourceResult {
+    pub original_base64: Option<String>,
+    pub provenance: Option<PersonPhotoProvenance>,
+}
+
+/// The fields the user kept from a macOS contact they picked for this person.
+/// Only an explicit pick writes one; a name match never does.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactCard {
+    /// The contact's name as Contacts shows it.
+    pub name: String,
+    pub emails: Vec<PersonContactValue>,
+    pub phones: Vec<PersonContactValue>,
+    pub organization: Option<String>,
+    pub job_title: Option<String>,
+    /// Each address formatted as Contacts formats it, one line per row.
+    pub addresses: Vec<PersonContactValue>,
+    /// `http` or `https` only.
+    pub urls: Vec<PersonContactValue>,
+    pub birthday: Option<PersonContactBirthday>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactValue {
+    /// Contacts' label for the value, already localized: "work", "mobile".
+    pub label: Option<String>,
+    pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactBirthday {
+    pub month: u8,
+    pub day: u8,
+    pub year: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactSetRequest {
+    pub person_id: PersonId,
+    pub expected_revision: u64,
+    /// `None` detaches the card.
+    pub contact: Option<PersonContactCard>,
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ import SwiftUI
 struct Shell: View {
     @Environment(AppModel.self) private var model
     @State private var sharedNote: ScratchNote?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -26,11 +27,12 @@ struct Shell: View {
                 }
                 if model.paletteShown {
                     CommandPalette()
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
                 }
             }
         }
         .background(Theme.page.ignoresSafeArea())
-        .tint(Theme.accent)
+        .animation(.easeOut(duration: reduceMotion ? 0.1 : 0.2), value: model.paletteShown)
         .frame(minWidth: 900, minHeight: 640)
         .sheet(item: Bindable(model).sheet) { sheet in
             switch sheet {
@@ -94,21 +96,30 @@ struct Shell: View {
             SettingsScreen()
         } else {
             switch model.place {
-            case .capture:
-                CaptureScreen()
-            case .library:
-                LibraryScreen(
-                    store: model.library,
-                    importAudio: { model.showSettings(.importing) },
-                    addCorrection: { left, right in
-                        model.vocabulary.add(kind: .vocabulary, left: left, right: right)
-                    })
+            case .capture, .library:
+                VStack(spacing: 0) {
+                    homeTabs
+                    if model.place == .library {
+                        LibraryScreen(
+                            store: model.library,
+                            importAudio: { model.showSettings(.importing) },
+                            addCorrection: { left, right in
+                                model.vocabulary.add(kind: .vocabulary, left: left, right: right)
+                            })
+                    } else {
+                        CaptureScreen()
+                    }
+                }
             case .meetings:
                 MeetingsPlace()
             case .people:
                 PeopleScreen(
                     store: model.people,
                     openMeeting: model.openMeeting,
+                    openContribution: { sessionId, atMilliseconds in
+                        model.meetings.open(sessionId, atMilliseconds: atMilliseconds)
+                        model.go(.meetings)
+                    },
                     ingestDocument: { model.showSettings(.importing) },
                     deleteDocument: { id in Task { await model.documents.delete(id: id) } },
                     openVocabulary: { model.showSettings(.vocabulary) })
@@ -121,12 +132,43 @@ struct Shell: View {
                               saved.body == model.scratchpad.body else { return }
                         sharedNote = saved
                     }
-                })
+                }, openSource: { model.open(link: $0) })
                     .sheet(item: $sharedNote) { note in
                         CloudNoteShareView(note: note)
                     }
+            case .projects:
+                ProjectsView(
+                    store: model.projects,
+                    people: model.plannerPeople,
+                    peopleUnavailable: model.people.entries == nil || model.people.listFailed,
+                    material: model.about.material,
+                    photoRevision: model.people.photoRevision,
+                    openEvidence: model.openPlanningEvidence,
+                    openPerson: model.openPerson,
+                    discussProject: model.discussProject,
+                    planWithSona: model.planWithSona,
+                    showCalendar: { model.go(.calendar) })
+            case .calendar:
+                PlannerCalendarView(
+                    store: model.projects,
+                    material: model.about.material,
+                    openProject: model.openProject,
+                    openMeeting: model.openMeeting,
+                    showProjects: { model.go(.projects) })
             }
         }
+    }
+
+    /// Home's two faces: the overview and every dictation.
+    private var homeTabs: some View {
+        SegmentedSwitch(items: [SwitchItem(id: Place.capture, title: "Overview", icon: "house"),
+                                SwitchItem(id: Place.library, title: "Library", icon: "books.vertical")],
+                        selection: model.place) { model.go($0) }
+            .frame(maxWidth: Theme.contentMax, alignment: .leading)
+            .padding(.horizontal, Theme.margin)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
     }
 }
 
@@ -154,10 +196,12 @@ struct CoreStoppedBanner: View {
                     .buttonStyle(.primary)
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(Theme.surface)
-        .overlay(alignment: .bottom) { Hairline() }
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
+        .padding(.horizontal, Theme.margin)
+        .padding(.top, 12)
         .accessibilityElement(children: .contain)
     }
 
@@ -179,7 +223,7 @@ struct MeetingsPlace: View {
         let live = model.live
         let meetings = model.meetings
         if live.live != nil {
-            MeetingLiveView(store: live, onOpenReview: model.openMeeting)
+            MeetingLiveView(store: live, onOpenReview: model.openMeeting, onOpenRecalled: model.openRecalled)
         } else if live.gate != nil {
             MeetingStartGateView(store: live)
         } else if meetings.openSessionId != nil {
@@ -206,17 +250,26 @@ struct MeetingsPlace: View {
                             .disabled(meetings.busy)
                     } label: {
                         Image(systemName: "ellipsis")
-                            .frame(width: 30, height: 30)
                     }
-                    .menuStyle(.borderlessButton)
+                    .menuStyle(.button)
+                    .buttonStyle(.circle)
                     .menuIndicator(.hidden)
                     .fixedSize()
+                    .help("Meeting library options")
                     .accessibilityLabel("Meeting library options")
-                    Button("Deleted") { meetings.openTrash() }
-                        .buttonStyle(.secondary)
-                    Button("Import recording") { live.importMeeting() }
-                        .buttonStyle(.secondary)
-                        .disabled(live.importing)
+                    Button { meetings.openTrash() } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.circle)
+                    .help("Deleted meetings")
+                    .accessibilityLabel("Deleted")
+                    Button { live.importMeeting() } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.circle)
+                    .help("Import recording")
+                    .accessibilityLabel("Import recording")
+                    .disabled(live.importing)
                     Button(live.starting ? "Starting…" : "Record…") { live.startManual() }
                         .buttonStyle(.primary)
                         .disabled(live.starting || live.pending != nil)
@@ -230,9 +283,15 @@ struct MeetingsPlace: View {
                 // Every engine warning is fixed under Settings → Meetings; the
                 // Apple Intelligence switch and its download are one pane
                 // further, in System Settings.
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("No notes will be written for the next meeting. \(engine.sentence)")
-                        .bodyText(13, Theme.live)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.inkSecondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("No notes will be written for the next meeting.").bodyText(14)
+                        Text(engine.sentence).bodyText(13, Theme.inkSecondary)
+                    }
+                    Spacer(minLength: 12)
                     HStack(spacing: 8) {
                         if engine.settingsPaneBlocker != nil {
                             Button("Open System Settings") { live.openAppleIntelligenceSettings() }
@@ -242,6 +301,10 @@ struct MeetingsPlace: View {
                             .buttonStyle(.compact)
                     }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
                 .padding(.bottom, 16)
             }
             if let running = live.active?.snapshot {
@@ -300,106 +363,193 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image("Mark")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 16, height: 16)
-                Text("Sona")
-                    .font(.system(size: 14, weight: .semibold))
+            HStack(spacing: 6) {
+                Button {
+                    model.paletteShown = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Search")
+                        Spacer(minLength: 4)
+                        Text("⌘K").font(TypeScale.body(12))
+                    }
+                    .font(TypeScale.body(13))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Theme.wash, in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search")
+                Button {
+                    model.sheet = .chat
+                } label: {
+                    Image(systemName: "bubble.left")
+                }
+                .buttonStyle(.circle)
+                .overlay(alignment: .topTrailing) {
+                    if model.agents.pending.count > 0 {
+                        Text("\(model.agents.pending.count)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.onAccent)
+                            .padding(.horizontal, 4)
+                            .frame(minWidth: 16, minHeight: 16)
+                            .background(Theme.accentFill, in: Capsule())
+                            .offset(x: 4, y: -4)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .accessibilityLabel("Chat")
+                .accessibilityValue(model.agents.pending.isEmpty ? "" : "\(model.agents.pending.count) waiting")
             }
-            .foregroundStyle(Theme.ink)
-            .padding(.leading, 8)
-            .padding(.top, 18)
+            .padding(.horizontal, 4)
+            .padding(.top, 8)
             .padding(.bottom, 16)
 
-            SidebarItem(icon: "magnifyingglass", title: "Search", shortcut: "⌘ K", selected: false) {
-                model.paletteShown = true
-            }
-            SidebarItem(
-                icon: "bubble.left", title: "Chat", shortcut: nil, selected: false,
-                badge: model.agents.pending.count
-            ) {
-                model.sheet = .chat
-            }
-
-            Spacer().frame(height: 12)
-
-            ForEach(Place.allCases) { place in
-                SidebarItem(
-                    icon: place.icon,
-                    title: place.title,
-                    shortcut: nil,
-                    selected: model.place == place && !model.showingSettings,
-                    live: place == .capture && model.capture != .idle
-                        || place == .meetings && model.live.live != nil
-                ) {
-                    model.go(place)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Place.sidebar) { place in
+                        SidebarItem(
+                            icon: place.icon,
+                            tile: place == .capture ? Theme.tileHome : Theme.tilePlace,
+                            title: place.title,
+                            selected: model.place.parent == place && !model.showingSettings,
+                            count: count(place),
+                            live: place == .capture && model.capture != .idle
+                                || place == .meetings && model.live.live != nil
+                        ) {
+                            model.go(place)
+                        }
+                    }
+                    gap
+                    SidebarItem(
+                        icon: "gearshape.fill",
+                        tile: Theme.tileSetting,
+                        title: "Settings",
+                        selected: false
+                    ) {
+                        model.showSettings(model.showingSettings ? model.settingsPlace : .essentials)
+                    }
+                    .accessibilityAddTraits(model.showingSettings ? .isSelected : [])
+                    if model.showingSettings {
+                        ForEach(SettingsPlace.allCases) { page in
+                            SidebarSubItem(title: page.title, selected: model.settingsPlace == page) {
+                                model.showSettings(page)
+                            }
+                        }
+                    }
                 }
+                .padding(.horizontal, 4)
+                .padding(.bottom, 12)
             }
-            Spacer()
-            SidebarItem(icon: "gearshape", title: "Settings", shortcut: nil, selected: model.showingSettings) {
-                model.showSettings(model.settingsPlace)
-            }
+            .scrollIndicators(.never)
         }
         .padding(.horizontal, 8)
-        .padding(.bottom, 10)
         .frame(width: Theme.sidebarWidth)
-        .frame(maxHeight: .infinity)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.rail.ignoresSafeArea())
         .overlay(alignment: .trailing) {
-            Rectangle().fill(Theme.hairline).frame(width: 1)
+            Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
         }
     }
+
+    /// The small live number beside a row: open tasks in active projects,
+    /// people waiting to be confirmed.
+    private func count(_ place: Place) -> SidebarCount? {
+        switch place {
+        case .projects:
+            SidebarCount(value: model.projects.activeOpenTaskCount, meaning: "open tasks")
+        case .people:
+            SidebarCount(value: Int(model.people.entries?.reduce(0) { $0 + $1.suggestedCount } ?? 0),
+                         meaning: "to confirm")
+        case .capture, .library, .meetings, .scratchpad, .calendar:
+            nil
+        }
+    }
+
+    private var gap: some View {
+        Spacer().frame(height: 14)
+    }
+}
+
+private struct SidebarCount {
+    let value: Int
+    let meaning: String
 }
 
 private struct SidebarItem: View {
     let icon: String
+    let tile: Color
     let title: String
-    let shortcut: String?
     let selected: Bool
+    var count: SidebarCount?
     var live = false
-    var badge = 0
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .frame(width: 16)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(tile, in: RoundedRectangle(cornerRadius: 6))
                 Text(title)
                     .font(TypeScale.body(14))
                     .foregroundStyle(Theme.ink)
+                Spacer(minLength: 4)
+                if let count, count.value > 0 {
+                    Text("\(count.value)")
+                        .font(TypeScale.label(12))
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
+                        .contentTransition(.numericText(value: Double(count.value)))
+                }
                 if live {
                     Circle().fill(Theme.live).frame(width: 7, height: 7)
                 }
-                Spacer()
-                if badge > 0 {
-                    Text("\(badge)")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.onInvert)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Theme.invert, in: Capsule())
-                } else if let shortcut {
-                    Text(shortcut).metaText()
-                }
             }
             .padding(.horizontal, 8)
-            .frame(height: 32)
+            .frame(height: 34)
             .background(
                 selected ? Theme.selection : (hovering ? Theme.wash : .clear),
-                in: RoundedRectangle(cornerRadius: Theme.radiusControl)
+                in: RoundedRectangle(cornerRadius: 10)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityValue(live ? "In progress" : "")
+        .accessibilityValue(live ? "In progress" : count.flatMap { $0.value > 0 ? "\($0.value) \($0.meaning)" : nil } ?? "")
+        .onHover { hovering = $0 }
+    }
+}
+
+/// A page under Settings, lined up with the titles above it.
+private struct SidebarSubItem: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(TypeScale.body(13))
+                .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
+                .padding(.leading, 40)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .background(
+                    selected ? Theme.selection : (hovering ? Theme.wash : .clear),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .onHover { hovering = $0 }
     }
 }

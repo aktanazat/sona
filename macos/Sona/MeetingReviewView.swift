@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// One recorded meeting, read three ways: the words, what Sona made of them,
@@ -10,37 +11,58 @@ struct MeetingReviewView: View {
     /// Opens the agent with a question about this meeting begun, for the
     /// person to finish and send.
     var askAgent: ((String) -> Void)?
+    @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var confirmingDelete = false
 
     var body: some View {
-        Page {
-            BackLink(title: "Meetings") { store.closeReview() }
-            if let snapshot = store.snapshot {
-                MeetingReviewHeader(
-                    store: store, snapshot: snapshot, delete: { confirmingDelete = true },
-                    openMeetingSettings: openMeetingSettings, askAgent: askAgent)
-                MeetingReviewTabs(store: store)
-                pane(snapshot)
-            } else if let failure = store.reviewFailure {
-                unread(failure)
-            } else if store.reviewLoading {
-                Text("Reading the meeting…").bodyText(15, Theme.inkSecondary)
-            } else {
-                Text("That meeting is no longer here.").bodyText(15, Theme.inkSecondary)
+        ScrollViewReader { proxy in
+            Page(back: PageBack("Meetings") { store.closeReview() }, title: store.snapshot?.session.title) {
+                if let snapshot = store.snapshot {
+                    MeetingReviewHeader(
+                        store: store, snapshot: snapshot, delete: { confirmingDelete = true },
+                        openMeetingSettings: openMeetingSettings, askAgent: askAgent)
+                    ConversationContextView(
+                        sessionId: snapshot.session.sessionId, editable: store.editable,
+                        partialRecording: snapshot.session.captureCompleteness == .partial)
+                    ConversationPlaceCard(core: model.core, store: store,
+                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    ConversationBookmarksView(core: model.core, store: store,
+                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    ConversationAudioBar(audio: store.audio)
+                    MeetingReviewTabs(store: store)
+                    pane(snapshot)
+                } else {
+                    if let failure = store.reviewFailure {
+                        unread(failure)
+                    } else if store.reviewLoading {
+                        Text("Reading the meeting…").bodyText(14, Theme.inkSecondary)
+                    } else {
+                        Text("That meeting is no longer here.").bodyText(14, Theme.inkSecondary)
+                    }
+                }
             }
-        }
-        .overlay(alignment: .bottom) { toast }
-        .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
-        .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
-        .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
-            MeetingFilingSheet(store: store)
-        }
-        .alert("Delete this meeting?", isPresented: $confirmingDelete) {
-            Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
-            Button("Keep it", role: .cancel) {}
-        } message: {
-            Text("It goes to the trash for 30 days, then Sona removes it for good.")
+            .overlay(alignment: .bottom) { toast }
+            .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
+            .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
+            .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
+                MeetingFilingSheet(store: store)
+            }
+            .relistenSheet(store.relisten)
+            .alert("Delete this meeting?", isPresented: $confirmingDelete) {
+                Button("Delete", role: .destructive) { store.deleteOpenMeeting() }
+                Button("Keep it", role: .cancel) {}
+            } message: {
+                Text("It goes to the trash for 30 days, then Sona removes it for good.")
+            }
+            .onDisappear { store.audio.stop() }
+            .onChange(of: store.snapshot?.session.sessionId) { _, _ in
+                guard let noteId = store.focusedNoteId,
+                      store.snapshot?.notes.contains(where: { $0.noteId == noteId }) == true else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
+                    proxy.scrollTo("meeting-note:\(noteId)", anchor: .center)
+                }
+            }
         }
     }
 
@@ -65,6 +87,8 @@ struct MeetingReviewView: View {
     @ViewBuilder
     private func pane(_ snapshot: MeetingReviewSnapshot) -> some View {
         switch store.tab {
+        case .review:
+            ConversationAfterCaptureView(store: store, snapshot: snapshot, core: model.core)
         case .transcript:
             TranscriptPane(store: store, snapshot: snapshot)
         case .insights:
@@ -110,7 +134,7 @@ private struct MeetingReviewToast: View {
     @State private var hovering = false
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 14) {
+        HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(notice)
                 .font(TypeScale.body(13))
                 .foregroundStyle(Theme.ink)
@@ -124,10 +148,10 @@ private struct MeetingReviewToast: View {
                 .buttonStyle(QuietButton(color: Theme.accent, compact: true))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
         .onHover { hovering = $0 }
         .task(id: hovering ? nil : notice) {
@@ -159,43 +183,44 @@ struct MeetingReviewHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    title.fixedSize(horizontal: true, vertical: false)
-                    Spacer(minLength: 12)
-                    actions.fixedSize(horizontal: true, vertical: false)
-                }
-                VStack(alignment: .leading, spacing: 12) {
-                    title
-                    actions
-                }
+            HStack(alignment: .top, spacing: 12) {
+                title
+                Spacer(minLength: 12)
+                actions
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(height: 32)
             }
             Text(facts).metaText(Theme.inkSecondary)
+            if update == nil, let receipt = snapshot.currentArtifact?.receipt {
+                Text(receipt.line).metaText(Theme.inkTertiary)
+            }
             status
         }
-        .padding(.bottom, 20)
+        .padding(.bottom, 24)
     }
 
     @ViewBuilder
     private var title: some View {
         if editing {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 InputField(prompt: "Meeting title", text: $draft)
                     .frame(maxWidth: 420)
                     .onSubmit(commit)
-                Button("Save", action: commit).buttonStyle(SecondaryButton(compact: true))
-                Button("Cancel") { editing = false }.buttonStyle(QuietButton())
+                Button("Save", action: commit).buttonStyle(.compact)
+                Button("Cancel") { editing = false }.buttonStyle(.quiet)
             }
         } else {
             Button { start() } label: {
                 Text(snapshot.session.title)
-                    .titleText()
+                    .heroText()
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
             }
             .buttonStyle(.plain)
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Edit the title" : "")
+            .accessibilityAddTraits(.isHeader)
+            .pageHeadline()
         }
     }
 
@@ -204,7 +229,7 @@ struct MeetingReviewHeader: View {
     private var actions: some View {
         HStack(spacing: 8) {
             if let doing = store.pending ?? (store.catchingUp ? "Catching up" : nil) {
-                Text("\(doing)…").metaText(Theme.accent)
+                Text("\(doing)…").metaText(Theme.inkSecondary)
             }
             if let copied {
                 Text(copied).metaText(Theme.inkSecondary)
@@ -216,10 +241,13 @@ struct MeetingReviewHeader: View {
             }
             if store.hasLedger {
                 Button("Follow up") { store.openFollowUp() }
-                    .buttonStyle(SecondaryButton(compact: true))
+                    .buttonStyle(.compact)
             }
             if store.canExport {
                 MeetingSendToMenu(sessionId: snapshot.session.sessionId)
+                    .menuStyle(.button)
+                    .buttonStyle(.compact)
+                    .fixedSize()
             }
             Menu {
                 Button("Add to folder…") {
@@ -265,15 +293,13 @@ struct MeetingReviewHeader: View {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .frame(width: 30, height: 26)
-                    .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.circle)
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(store.busy)
+            .help("Meeting options")
             .accessibilityLabel("Meeting options")
         }
     }
@@ -293,8 +319,8 @@ struct MeetingReviewHeader: View {
     }
 
     /// At most one line under the facts: what the core refused, else a remote
-    /// run that has not stopped, else what became of the notes and the
-    /// voices. Each carries the one thing to do about it.
+    /// run that has not stopped, else the run under way, else what became of
+    /// the notes and the voices. Each carries the one thing to do about it.
     @ViewBuilder
     private var status: some View {
         if let error = store.error {
@@ -314,6 +340,8 @@ struct MeetingReviewHeader: View {
                         .disabled(store.busy)
                 }
             }
+        } else if let update {
+            MeetingProcessingLine(update: update)
         } else if let standing {
             statusLine(standing) {
                 if processing.offersSettings {
@@ -341,6 +369,10 @@ struct MeetingReviewHeader: View {
     }
 
     private var processing: MeetingProcessingStatus { snapshot.session.processingStatus }
+
+    private var update: MeetingProcessingUpdate? {
+        store.processingUpdate(snapshot.session.sessionId, phase: snapshot.session.phase)
+    }
 
     /// "Notes failed: the model did not answer · Separating speakers
     /// failed · 12 lines have no speaker yet". Only the failure's own word
@@ -404,20 +436,11 @@ struct MeetingReviewHeader: View {
         return count == 1 ? "1 line has no speaker yet" : "\(count) lines have no speaker yet"
     }
 
-    /// "12 Mar at 09:30 · 48m · Microphone + System audio", and the gaps when
-    /// the recording has them.
     private var facts: String {
         let started = snapshot.session.startedAtUtcMs?.meetingDate
         var parts: [String] = [started.map { "\($0.short) at \($0.time)" } ?? "Never started"]
         if let elapsed = snapshot.session.elapsedOffsetNs {
             parts.append((TimeInterval(elapsed) / 1_000_000_000).spoken)
-        }
-        let sources = snapshot.session.sources.map(\.sourceKind.label)
-        if !sources.isEmpty {
-            parts.append(sources.joined(separator: " + "))
-        }
-        if snapshot.session.captureCompleteness == .partial {
-            parts.append("Partial recording")
         }
         return parts.joined(separator: " · ")
     }
@@ -436,40 +459,57 @@ struct MeetingReviewHeader: View {
     }
 }
 
-/// The three readings, with the one in front of the reader underlined, and
-/// the transcript's search at the end of the row. The row keeps one height
-/// on every tab, so switching never moves the page.
+/// The three readings as one segmented control, and the transcript's search
+/// at the end of the row. The row keeps one height on every tab, so
+/// switching never moves the page.
 struct MeetingReviewTabs: View {
     let store: MeetingsStore
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 20) {
-            ForEach(MeetingReviewTab.allCases) { tab in
-                Button {
-                    store.choose(tab: tab)
-                } label: {
-                    VStack(spacing: 6) {
-                        Text(tab.title)
-                            .font(TypeScale.label())
-                            .foregroundStyle(store.tab == tab ? Theme.ink : Theme.inkSecondary)
-                        Rectangle()
-                            .fill(store.tab == tab ? Theme.ink : .clear)
-                            .frame(height: 1)
-                    }
-                    .fixedSize()
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(store.tab == tab ? .isSelected : [])
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                navigation
+                Spacer(minLength: 0)
+                transcriptControls
             }
-            Spacer(minLength: 0)
-            if store.tab == .transcript && !store.transcriptDeleted {
+            VStack(alignment: .leading, spacing: 12) {
+                navigation
+                transcriptControls
+            }
+        }
+        .frame(minHeight: 32, alignment: .top)
+        .padding(.bottom, 24)
+    }
+
+    private var navigation: some View {
+        Picker("Meeting view", selection: tab) {
+            ForEach(MeetingReviewTab.allCases) { tab in
+                Text(tab.title).tag(tab)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private var transcriptControls: some View {
+        if store.tab == .transcript && !store.transcriptDeleted {
+            HStack(spacing: 12) {
+                Picker("Wording", selection: Binding(
+                    get: { store.originalWording }, set: { store.chooseOriginalWording($0) })) {
+                    Text("Edited").tag(false)
+                    Text("Original").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
                 TranscriptSearchField(store: store)
             }
         }
-        .frame(height: 32, alignment: .bottom)
-        .overlay(alignment: .bottom) { Hairline() }
-        .padding(.bottom, 20)
+    }
+
+    private var tab: Binding<MeetingReviewTab> {
+        Binding(get: { store.tab }, set: { store.choose(tab: $0) })
     }
 }
 
@@ -484,7 +524,7 @@ private struct TranscriptSearchField: View {
         HStack(spacing: 6) {
             Button { focused = true } label: {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(Theme.inkTertiary)
             }
             .buttonStyle(.plain)
@@ -519,9 +559,9 @@ private struct TranscriptSearchField: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(width: 216, height: 28)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(width: 216, height: 30)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 
     private var query: Binding<String> {
@@ -545,6 +585,13 @@ struct TranscriptPane: View {
         VStack(alignment: .leading, spacing: 28) {
             if !store.transcriptDeleted && !store.elsewhereHits.isEmpty {
                 elsewhere
+            }
+            if let speaker = store.transcriptSpeaker {
+                HStack(spacing: 10) {
+                    Text("Only \(store.speakerName(speaker))").metaText(Theme.inkSecondary)
+                    Button("Show everyone") { store.showOnly(speaker: nil) }
+                        .buttonStyle(QuietButton(color: Theme.accent))
+                }
             }
             turns
             if !store.transcriptDeleted && !store.gapRuns.isEmpty {
@@ -580,13 +627,12 @@ struct TranscriptPane: View {
 
     private var turns: some View {
         ScrollViewReader { proxy in
-            Card {
-                if store.turns.isEmpty {
-                    CardRow {
-                        Text(emptyLine).bodyText(14, Theme.inkSecondary)
-                    }
+            let turns = store.turns
+            LazyVStack(alignment: .leading, spacing: 16) {
+                if turns.isEmpty {
+                    Text(emptyLine).bodyText(14, Theme.inkSecondary)
                 } else {
-                    ForEach(store.turns) { turn in
+                    ForEach(turns) { turn in
                         TranscriptTurnRow(
                             store: store,
                             turn: turn,
@@ -601,10 +647,14 @@ struct TranscriptPane: View {
                     }
                 }
             }
-            .onChange(of: store.jump) { _, jump in
-                guard let jump, store.canJumpTo(jump.segmentId) else { return }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onChange(of: store.jump, initial: true) { _, jump in
+                guard let jump, store.canJumpTo(jump.segmentId),
+                      let turn = turns.first(where: { row in
+                          row.segments.contains { $0.base.segmentId == jump.segmentId }
+                      }) else { return }
                 withAnimation(reduceMotion ? nil : .default) {
-                    proxy.scrollTo(jump.segmentId, anchor: .center)
+                    proxy.scrollTo(turn.id, anchor: .center)
                 }
                 store.clearJump()
             }
@@ -648,29 +698,44 @@ struct TranscriptPane: View {
     }
 }
 
-/// One voice, one stretch: the clock, the name, and the words. The name opens
-/// what can be done about the voice; a press on a line opens it for
-/// correction.
+/// One voice, one stretch: the name in the voice's color with the clock
+/// across from it, then the words. The name opens what can be done about the
+/// voice; a press on a line opens it for correction.
 struct TranscriptTurnRow: View {
     let store: MeetingsStore
     let turn: TranscriptTurn
     let speakers: [MeetingSpeaker]
     @Binding var editing: TranscriptSegmentId?
     let rename: (MeetingSpeaker) -> Void
+    @Environment(AppModel.self) private var model
+    @State private var savingPassage: TranscriptEffectiveSegment?
 
     var body: some View {
-        CardRow {
-            HStack(alignment: .top, spacing: 16) {
-                Text(turn.time)
-                    .font(TypeScale.mono(12))
-                    .foregroundStyle(Theme.inkTertiary)
-                    .frame(width: 62, alignment: .leading)
-                VStack(alignment: .leading, spacing: 6) {
-                    voice
-                    ForEach(turn.segments) { segment in
-                        line(segment)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                voice
+                Spacer(minLength: 12)
+                if let segment = turn.segments.first, store.canPlay(segment.base.segmentId) {
+                    Button { store.playContribution(segment.base.segmentId) } label: {
+                        Label(turn.time, systemImage: "play.fill")
+                            .font(TypeScale.body(12)).monospacedDigit()
                     }
+                    .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+                    .accessibilityLabel("Listen from \(turn.time)")
+                } else {
+                    Text(turn.time).font(TypeScale.body(12)).monospacedDigit()
+                        .foregroundStyle(Theme.inkTertiary)
                 }
+            }
+            ForEach(turn.segments) { segment in
+                line(segment)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(item: $savingPassage) { segment in
+            if let sessionId = store.openSessionId {
+                ScratchPassageSheet(store: model.scratchpad, meetingId: sessionId,
+                    segmentId: segment.base.segmentId, excerpt: store.displayedText(segment))
             }
         }
     }
@@ -680,8 +745,8 @@ struct TranscriptTurnRow: View {
     @ViewBuilder
     private var voice: some View {
         let label = Text(store.speakerName(turn.speakerId))
-            .font(TypeScale.label(13))
-            .foregroundStyle(Theme.accent)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(SpeakerInk.color(at: speakers.firstIndex { $0.speakerId == turn.speakerId }))
         if let speaker = speakers.first(where: { $0.speakerId == turn.speakerId }) {
             Menu {
                 if store.editable {
@@ -697,7 +762,8 @@ struct TranscriptTurnRow: View {
             } label: {
                 label
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize()
             .accessibilityHint(store.editable ? "Rename this voice or merge it with another" : "")
@@ -716,10 +782,10 @@ struct TranscriptTurnRow: View {
                 editing = segment.base.segmentId
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(TranscriptHighlight.mark(segment.text, query: store.transcriptQuery))
-                        .bodyText(15, segment.removed ? Theme.inkDisabled : Theme.ink)
+                    Text(TranscriptHighlight.mark(store.displayedText(segment), query: store.transcriptQuery))
+                        .bodyText(14, segment.removed ? Theme.inkDisabled : Theme.ink)
                         .strikethrough(segment.removed, color: Theme.inkDisabled)
-                    if segment.edited {
+                    if segment.edited && !store.originalWording {
                         Text("corrected").font(TypeScale.body(11)).foregroundStyle(Theme.inkTertiary)
                     }
                 }
@@ -729,7 +795,49 @@ struct TranscriptTurnRow: View {
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Correct these words" : "")
             .id(segment.base.segmentId)
+            .contextMenu {
+                if store.canPlay(segment.base.segmentId) {
+                    Button("Listen with context") { store.playContribution(segment.base.segmentId) }
+                }
+                if !segment.removed && !store.transcriptDeleted {
+                    Button("Save passage…") { savingPassage = segment }
+                    Button("Copy source link") {
+                        let milliseconds = max(0, segment.base.startOffsetNs) / 1_000_000
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            "sona://meeting/\(store.openSessionId ?? "")?atMs=\(milliseconds)&segmentId=\(segment.base.segmentId)", forType: .string)
+                    }
+                }
+            }
+            if store.relisten.fix?.segmentId == segment.base.segmentId {
+                RelistenPrompt(store: store.relisten)
+            }
         }
+    }
+}
+
+/// A voice's color in a transcript, by its place among the meeting's
+/// speakers, so a name keeps one color from line to line. A line no voice is
+/// sure of stays gray.
+enum SpeakerInk {
+    private static let palette: [Color] = [
+        NSColor.systemBlue, .systemOrange, .systemGreen, .systemPink, .systemTeal, .systemYellow,
+    ].map { hue in
+        Color(nsColor: NSColor(name: nil) { appearance in
+            guard appearance.bestMatch(from: [.aqua, .darkAqua]) != .darkAqua else { return hue }
+            // The system hues fall under 2:1 contrast on the light page; at
+            // half brightness every one clears 4.5:1.
+            var shade = hue
+            appearance.performAsCurrentDrawingAppearance {
+                shade = hue.blended(withFraction: 0.5, of: .black) ?? hue
+            }
+            return shade
+        })
+    }
+
+    static func color(at index: Int?) -> Color {
+        guard let index else { return Theme.inkSecondary }
+        return palette[index % palette.count]
     }
 }
 
@@ -770,7 +878,7 @@ struct SegmentEditor: View {
                 Spacer(minLength: 12)
                 if !segment.removed {
                     Button("Remove this line") {
-                        store.editSegment(segment.base.segmentId, text: segment.text, removed: true)
+                        store.editSegment(segment, text: segment.text, removed: true)
                         close()
                     }
                     .buttonStyle(QuietButton(color: Theme.live))
@@ -785,13 +893,13 @@ struct SegmentEditor: View {
         let next = text.trimmingCharacters(in: .whitespacesAndNewlines)
         close()
         guard !next.isEmpty, next != segment.text else { return }
-        store.editSegment(segment.base.segmentId, text: next)
+        store.editSegment(segment, text: next)
     }
 }
 
 // MARK: - What Sona made of it
 
-/// The people, the numbers, the notes, and whatever the model wrote.
+/// What the model wrote first, then the people, the numbers, and the notes.
 struct MeetingInsightsPane: View {
     let store: MeetingsStore
     let settings: MeetingSettingsStore
@@ -801,11 +909,15 @@ struct MeetingInsightsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
-            MeetingPeopleBand(store: store, openPerson: openPerson)
-            MeetingVoiceIdentitySection(sessionId: snapshot.session.sessionId)
-            CallNamesReviewSection(store: store, snapshot: snapshot)
-            MeetingAnalyticsStrip(store: store)
             ArtifactPane(store: store, snapshot: snapshot, templates: settings.templates)
+            MeetingPeopleBand(store: store, openPerson: openPerson)
+            DisclosureGroup("Call participant names") {
+                CallNamesReviewSection(store: store, snapshot: snapshot)
+                    .padding(.top, 12)
+            }
+            .font(TypeScale.body(14))
+            .foregroundStyle(Theme.inkSecondary)
+            MeetingAnalyticsStrip(store: store)
             MeetingQuestionsCard(store: store, snapshot: snapshot)
             MeetingNotesCard(store: store, snapshot: snapshot)
             MeetingSnapshotsSection(sessionId: snapshot.session.sessionId)
@@ -832,7 +944,7 @@ struct MeetingPeopleBand: View {
                                 Text(row.displayName).bodyText()
                                 Text(line(row)).metaText()
                                 if let loop = row.topOpenLoop {
-                                    Text("Still open: \(loop.text)").metaText(Theme.accent)
+                                    Text("Still open: \(loop.text)").metaText(Theme.inkSecondary)
                                 }
                             }
                         } trailing: {
@@ -859,8 +971,10 @@ struct MeetingPeopleBand: View {
     }
 }
 
-/// Who talked, for how long, and how the room handed over: the numbers this
-/// meeting can say something with, in one strip, then a thin bar a voice.
+/// Who talked and how the room handed over: one bar of everyone's share of
+/// the talk, where a voice's name narrows the transcript to its words, a
+/// timeline of when each voice spoke, and the numbers this meeting can say
+/// something with.
 struct MeetingAnalyticsStrip: View {
     let store: MeetingsStore
 
@@ -868,28 +982,28 @@ struct MeetingAnalyticsStrip: View {
         if let talk = store.talk {
             Card {
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .firstTextBaseline, spacing: 32) {
-                        figure(talk.longestMonologueNs.meetingTalkDuration, "Longest run")
-                        if let patience = store.patience {
-                            figure(patience, "Patience")
+                    let slices = TalkSlice.fold(store.talkShares)
+                    if !slices.isEmpty {
+                        TalkShareBar(slices: slices, color: color)
+                        ChatFlowRow(spacing: 14) {
+                            ForEach(slices) { legend($0) }
                         }
-                        if let handovers = store.handovers {
-                            figure("\(handovers)", "Handovers in \(talk.turnCount) turns")
-                        }
+                        TalkTimeline(store: store, talk: talk, slices: slices, color: color)
                     }
-                    let shares = store.talkShares
-                    if !shares.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(shares) { share in
-                                bar(share)
-                            }
+                    HStack(alignment: .top, spacing: 16) {
+                        Stat(label: "Turns", value: "\(talk.turnCount)")
+                        if let handovers = store.handovers {
+                            Stat(label: "Handovers", value: "\(handovers)")
+                        }
+                        longestRun(talk)
+                        if let patience = store.patience {
+                            Stat(label: "Patience", value: patience)
                         }
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(alignment: .bottom) { Hairline() }
+                .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
                 ForEach(store.trackers) { tracker in
                     CardRow {
                         HStack(spacing: 10) {
@@ -906,226 +1020,316 @@ struct MeetingAnalyticsStrip: View {
                     }
                 }
             }
-            .padding(.bottom, 32)
+            .padding(.bottom, 28)
         }
     }
 
-    /// A number over its name: 17 points, never wrapped.
-    private func figure(_ value: String, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(value)
-                .font(TypeScale.headline)
-                .monospacedDigit()
-                .foregroundStyle(Theme.ink)
-            Text(label).metaText()
+    private func color(_ slice: TalkSlice) -> Color {
+        switch slice {
+        case let .voice(share):
+            SpeakerInk.color(at: store.snapshot?.speakers.firstIndex { $0.speakerId == share.speakerId })
+        case .others:
+            Theme.inkTertiary
         }
-        .lineLimit(1)
-        .fixedSize()
     }
 
-    /// One voice on one line: the name, a thin bar of its share, the share,
-    /// and the time it held.
-    private func bar(_ share: SpeakerTalkShare) -> some View {
-        HStack(spacing: 12) {
-            Text(store.speakerName(share.speakerId))
-                .font(TypeScale.body(13))
-                .foregroundStyle(Theme.inkSecondary)
-                .lineLimit(1)
-                .frame(width: 120, alignment: .leading)
-            Meter(fraction: Double(share.sharePermille) / 1000)
-                .frame(maxWidth: 360)
-            Text(share.sharePermille.meetingTalkShare)
+    /// A voice's name and share, a press that reads only its words. The
+    /// folded voices have no one transcript to narrow to.
+    @ViewBuilder
+    private func legend(_ slice: TalkSlice) -> some View {
+        let label = HStack(spacing: 6) {
+            Circle().fill(color(slice)).frame(width: 7, height: 7)
+            Text(slice.name(store)).font(TypeScale.body(13)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+            Text(slice.permille.meetingTalkShare)
                 .font(TypeScale.label(13))
                 .monospacedDigit()
                 .foregroundStyle(Theme.ink)
-                .frame(width: 40, alignment: .trailing)
-            Text(share.speakingNs.meetingTalkDuration)
-                .font(TypeScale.body(13))
-                .monospacedDigit()
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 56, alignment: .trailing)
         }
-        .help(share.turnCount == 1 ? "1 turn" : "\(share.turnCount) turns")
-        .accessibilityElement(children: .combine)
+        switch slice {
+        case let .voice(share):
+            Button { store.showOnly(speaker: share.speakerId) } label: { label }
+                .buttonStyle(.plain)
+                .help("\(share.speakingNs.meetingTalkDuration) in \(share.turnCount == 1 ? "1 turn" : "\(share.turnCount) turns")")
+                .accessibilityElement(children: .combine)
+                .accessibilityHint("Show only these words in the transcript")
+        case .others:
+            label.accessibilityElement(children: .combine)
+        }
+    }
+
+    /// The longest run and who held it, a press that plays it from its start.
+    @ViewBuilder
+    private func longestRun(_ talk: MeetingTalkMetrics) -> some View {
+        let who = talk.longestMonologueSpeakerId.map { store.speakerName($0) }
+        let stat = Stat(label: who.map { "Longest run · \($0)" } ?? "Longest run", value: talk.longestMonologueNs.meetingTalkDuration)
+        if let start = talk.longestMonologueStartNs, let speaker = talk.longestMonologueSpeakerId,
+           let segmentId = store.segmentStarting(at: start, speaker: speaker), store.canPlay(segmentId) {
+            Button {
+                store.jumpTo(segmentId)
+                store.playContribution(segmentId)
+            } label: { stat }
+                .buttonStyle(.plain)
+                .help("Play it from the start")
+        } else {
+            stat
+        }
     }
 }
 
-/// Everything one generation of the model wrote. When nothing was, the
-/// status line under the title already says why and offers the retry.
-struct ArtifactPane: View {
-    let store: MeetingsStore
-    let snapshot: MeetingReviewSnapshot
-    /// For naming the person's own template a generation was written with.
-    let templates: MeetingTemplatesStore
+/// One part of the talk bar: a voice, or the voices too small to draw.
+private enum TalkSlice: Identifiable {
+    case voice(SpeakerTalkShare)
+    case others(permille: Int)
+
+    /// A voice under one part in fifty would draw thinner than the gap
+    /// beside it, so those fold into one part at the end.
+    private static let foldPermille = 20
+
+    /// The shares come apportioned to add up to 1000; folding only sums them.
+    static func fold(_ shares: [SpeakerTalkShare]) -> [TalkSlice] {
+        let voices = shares.filter { $0.sharePermille >= foldPermille }.map(TalkSlice.voice)
+        let folded = shares.filter { $0.sharePermille < foldPermille }.reduce(0) { $0 + $1.sharePermille }
+        return folded > 0 ? voices + [.others(permille: folded)] : voices
+    }
+
+    var id: String {
+        switch self {
+        case let .voice(share): share.speakerId
+        case .others: "others"
+        }
+    }
+
+    var permille: Int {
+        switch self {
+        case let .voice(share): share.sharePermille
+        case let .others(permille): permille
+        }
+    }
+
+    @MainActor
+    func name(_ store: MeetingsStore) -> String {
+        switch self {
+        case let .voice(share): store.speakerName(share.speakerId)
+        case .others: "Others"
+        }
+    }
+}
+
+/// Every voice's share of the talk, end to end in one bar.
+private struct TalkShareBar: View {
+    let slices: [TalkSlice]
+    let color: (TalkSlice) -> Color
+
+    private static let gap: CGFloat = 2
 
     var body: some View {
-        if let artifact = snapshot.readableArtifact, let content = artifact.content {
-            VStack(alignment: .leading, spacing: 28) {
-                if artifact.state == .outOfDate {
-                    StaleNotesBand(store: store, what: "These notes")
-                }
-                summary(content, artifact: artifact)
-                if !content.outline.isEmpty { outline(content) }
-                if !content.decisions.isEmpty { decisions(content) }
-                if !content.actionItems.isEmpty { actionItems(content, artifact: artifact) }
-                if !content.keyQuestions.isEmpty { cited("Questions worth answering", content.keyQuestions) }
-                if !content.risks.isEmpty { cited("Risks", content.risks) }
-                followUp(content)
-            }
-            .task { await templates.loadIfNeeded() }
-        }
-    }
-
-    private func summary(_ content: MeetingGeneratedArtifacts, artifact: MeetingArtifactRevision) -> some View {
-        PageSection("Summary") {
-            Card {
-                if let lines = content.summary.tracedLines(content.summaryTrace) {
-                    ForEach(lines) { line in
-                        CardRow(action: line.segmentId.flatMap(store.citationAction)) {
-                            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                if let offset = line.startOffsetNs {
-                                    Text(offset.meetingOffsetClock)
-                                        .font(TypeScale.mono(12))
-                                        .foregroundStyle(Theme.inkTertiary)
-                                        .frame(width: 52, alignment: .leading)
-                                }
-                                Text(line.text).bodyText()
-                            }
-                        }
-                    }
-                } else {
-                    CardRow {
-                        Text(content.summary.text).bodyText()
-                    }
-                }
-                CardRow {
-                    Text("Written \(artifact.generatedAtUtcMs.meetingDate.short) at \(artifact.generatedAtUtcMs.meetingDate.time) · \(templateWords(artifact)) v\(artifact.templateVersion)")
-                        .metaText()
-                } trailing: {
-                    if store.canRegenerate {
-                        Button("Write it again") { store.regenerate() }
-                            .buttonStyle(QuietButton())
-                            .disabled(store.busy)
-                    }
+        GeometryReader { proxy in
+            let room = proxy.size.width - Self.gap * CGFloat(max(slices.count - 1, 0))
+            HStack(spacing: Self.gap) {
+                ForEach(slices) { slice in
+                    Capsule()
+                        .fill(color(slice))
+                        .frame(width: max(room * CGFloat(slice.permille) / 1000, 0))
                 }
             }
         }
+        .frame(height: 8)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The transcript laid out for the timeline: each line in the lane of its
+/// part of the talk bar, and the turns a press can open. A voice the bar
+/// folds into Others shares the Others lane; a line from no voice on the
+/// bar is left out, as the bar leaves it out.
+private struct TalkRibbon {
+    struct Mark {
+        let lane: Int
+        let startNs: Int64
+        let endNs: Int64
     }
 
-    /// What the generation was written with: a built-in's own id, or the
-    /// name of the person's template, which is never shown as its raw id.
-    private func templateWords(_ artifact: MeetingArtifactRevision) -> String {
-        guard let templateId = artifact.customTemplateId else { return artifact.templateId }
-        return templates.name(templateId) ?? "Custom template"
+    struct Turn: Identifiable {
+        let lane: Int
+        let speakerId: SpeakerId
+        let startNs: Int64
+        var endNs: Int64
+        let segmentId: TranscriptSegmentId
+
+        var id: TranscriptSegmentId { segmentId }
     }
 
-    private func outline(_ content: MeetingGeneratedArtifacts) -> some View {
-        PageSection("What was covered") {
-            Card {
-                ForEach(Array(content.outline.enumerated()), id: \.offset) { _, topic in
-                    CardRow(action: jump(topic.title)) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(topic.title.text).bodyText()
-                            if let detail = topic.detail {
-                                Text(detail.text).metaText(Theme.inkSecondary)
-                            }
-                        }
+    let lanes: [SpeakerId: Int]
+    let marks: [Mark]
+    let turns: [Turn]
+    /// Where the last line that still reads ends: the right edge.
+    let endNs: Int64
+
+    init(transcript: [TranscriptEffectiveSegment], shares: [SpeakerTalkShare], slices: [TalkSlice]) {
+        var lanes: [SpeakerId: Int] = [:]
+        var othersLane: Int?
+        for (index, slice) in slices.enumerated() {
+            switch slice {
+            case let .voice(share): lanes[share.speakerId] = index
+            case .others: othersLane = index
+            }
+        }
+        if let othersLane {
+            for share in shares where lanes[share.speakerId] == nil {
+                lanes[share.speakerId] = othersLane
+            }
+        }
+        let spoken = transcript
+            .filter { !$0.removed }
+            .sorted { $0.base.startOffsetNs < $1.base.startOffsetNs }
+        var marks: [Mark] = []
+        var turns: [Turn] = []
+        var lastSpeaker: SpeakerId?
+        for segment in spoken {
+            let speaker = segment.assignedSpeakerId
+            defer { lastSpeaker = speaker }
+            guard let lane = lanes[speaker] else { continue }
+            let start = max(0, segment.base.startOffsetNs)
+            let end = max(start, segment.base.endOffsetNs)
+            marks.append(Mark(lane: lane, startNs: start, endNs: end))
+            if lastSpeaker == speaker, let last = turns.indices.last {
+                turns[last].endNs = max(turns[last].endNs, end)
+            } else {
+                turns.append(Turn(lane: lane, speakerId: speaker, startNs: start, endNs: end,
+                                  segmentId: segment.base.segmentId))
+            }
+        }
+        self.lanes = lanes
+        self.marks = marks
+        self.turns = turns
+        endNs = spoken.map { $0.base.endOffsetNs }.max() ?? 0
+    }
+}
+
+/// When each voice spoke, where the bar above says how much: one lane per
+/// part of the bar, the meeting left to right from its start to its last
+/// word, and the longest run outlined. A press opens that turn in the
+/// transcript.
+private struct TalkTimeline: View {
+    let store: MeetingsStore
+    let talk: MeetingTalkMetrics
+    let slices: [TalkSlice]
+    let color: (TalkSlice) -> Color
+
+    private static let laneHeight: CGFloat = 7
+    private static let laneGap: CGFloat = 3
+    private static let axisGap: CGFloat = 5
+    private static let tick: CGFloat = 3
+    private static let narrowestBar: CGFloat = 1.5
+    private static let narrowestPress: CGFloat = 6
+
+    var body: some View {
+        let ribbon = TalkRibbon(
+            transcript: store.snapshot?.transcript ?? [], shares: store.talkShares, slices: slices)
+        if ribbon.marks.count >= 2, ribbon.endNs > 0 {
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { proxy in
+                    plot(ribbon, size: proxy.size)
+                }
+                .frame(height: Self.lanesHeight(slices.count) + Self.axisGap + Self.tick + 1)
+                ZStack {
+                    Text((ribbon.endNs / 2).meetingOffsetClock)
+                    HStack {
+                        Text(Int64(0).meetingOffsetClock)
+                        Spacer(minLength: 8)
+                        Text(ribbon.endNs.meetingOffsetClock)
                     }
                 }
+                .metaText()
+                .monospacedDigit()
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Who spoke when")
+            .accessibilityValue(summary(ribbon))
         }
     }
 
-    private func decisions(_ content: MeetingGeneratedArtifacts) -> some View {
-        cited("Decisions", content.decisions)
-    }
-
-    private func actionItems(
-        _ content: MeetingGeneratedArtifacts, artifact: MeetingArtifactRevision
-    ) -> some View {
-        PageSection("Action items") {
-            Card {
-                ForEach(Array(content.actionItems.enumerated()), id: \.offset) { index, item in
-                    CardRow {
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Button {
-                                store.toggleActionItem(
-                                    artifact.artifactId, index,
-                                    done: !store.isDone(artifact.artifactId, index))
-                            } label: {
-                                Image(systemName: store.isDone(artifact.artifactId, index)
-                                    ? "checkmark.square.fill" : "square")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(store.isDone(artifact.artifactId, index)
-                                        ? Theme.accent : Theme.inkTertiary)
-                            }
-                            .buttonStyle(.plain)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.text.text)
-                                    .bodyText(15, store.isDone(artifact.artifactId, index)
-                                        ? Theme.inkTertiary : Theme.ink)
-                                    .strikethrough(store.isDone(artifact.artifactId, index),
-                                                   color: Theme.inkTertiary)
-                                if let owner = ownerLine(item) {
-                                    Text(owner).metaText()
-                                }
-                            }
-                        }
-                    } trailing: {
-                        if let citation = item.text.citations.first {
-                            Button(citation.startOffsetNs.meetingOffsetClock) {
-                                store.jumpTo(citation.segmentId)
-                            }
-                            .buttonStyle(QuietButton())
-                            .disabled(!store.canJumpTo(citation.segmentId))
-                        }
-                    }
+    private func plot(_ ribbon: TalkRibbon, size: CGSize) -> some View {
+        let scale = size.width / CGFloat(ribbon.endNs)
+        let inks = slices.map(color)
+        let axis = Self.lanesHeight(slices.count) + Self.axisGap + 0.5
+        let longest = longestRun(ribbon, scale: scale)
+        return ZStack(alignment: .topLeading) {
+            Canvas { context, canvas in
+                for mark in ribbon.marks {
+                    let rect = Self.bar(mark.lane, from: mark.startNs, to: mark.endNs, scale: scale,
+                                        narrowest: Self.narrowestBar)
+                    context.fill(Path(roundedRect: rect, cornerRadius: min(2, rect.width / 2)),
+                                 with: .color(inks[mark.lane]))
                 }
-            }
-        }
-    }
-
-    private func cited(_ label: String, _ lines: [ArtifactCitedText]) -> some View {
-        PageSection(label) {
-            Card {
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    CardRow(action: jump(line)) {
-                        Text(line.text).bodyText()
-                    } trailing: {
-                        if let citation = line.citations.first {
-                            Text(citation.startOffsetNs.meetingOffsetClock)
-                                .font(TypeScale.mono(12))
-                                .foregroundStyle(Theme.inkTertiary)
-                        }
-                    }
+                if let longest {
+                    context.stroke(Path(roundedRect: longest.insetBy(dx: -2, dy: -2), cornerRadius: 3.5),
+                                   with: .color(Theme.inkSecondary), lineWidth: 1)
                 }
-            }
-        }
-    }
-
-    private func followUp(_ content: MeetingGeneratedArtifacts) -> some View {
-        PageSection("Follow up") {
-            Card {
-                CardRow {
-                    Text(content.followUpDraft.text.isEmpty
-                        ? "The model wrote no follow-up for this meeting."
-                        : content.followUpDraft.text)
-                        .bodyText()
-                } trailing: {
-                    Button("Draft follow-up") { store.openFollowUp() }
-                        .buttonStyle(SecondaryButton(compact: true))
+                var rule = Path()
+                rule.move(to: CGPoint(x: 0, y: axis))
+                rule.addLine(to: CGPoint(x: canvas.width, y: axis))
+                for x in [0.5, canvas.width / 2, canvas.width - 0.5] {
+                    rule.move(to: CGPoint(x: x, y: axis))
+                    rule.addLine(to: CGPoint(x: x, y: axis + Self.tick))
                 }
+                context.stroke(rule, with: .color(Theme.border), lineWidth: 1)
+            }
+            ForEach(ribbon.turns) { turn in
+                press(turn, scale: scale, width: size.width)
             }
         }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
-    private func ownerLine(_ item: MeetingActionItem) -> String? {
-        let parts = [item.ownerText, item.dueText].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    /// A turn's press: its lane's height and gap, never narrower than a
+    /// pointer can land on, held inside the plot.
+    private func press(_ turn: TalkRibbon.Turn, scale: CGFloat, width: CGFloat) -> some View {
+        let drawn = Self.bar(turn.lane, from: turn.startNs, to: turn.endNs, scale: scale, narrowest: 0)
+        let wide = max(drawn.width, Self.narrowestPress)
+        let x = min(max(drawn.midX - wide / 2, 0), max(width - wide, 0))
+        return Color.clear
+            .frame(width: wide, height: Self.laneHeight + Self.laneGap)
+            .contentShape(Rectangle())
+            .onTapGesture { store.jumpTo(turn.segmentId) }
+            .help("\(store.speakerName(turn.speakerId)) · \(turn.startNs.meetingOffsetClock) – \(turn.endNs.meetingOffsetClock)")
+            .offset(x: x, y: drawn.minY - Self.laneGap / 2)
     }
 
-    private func jump(_ line: ArtifactCitedText) -> (() -> Void)? {
-        line.citations.first.flatMap { store.citationAction($0.segmentId) }
+    private func longestRun(_ ribbon: TalkRibbon, scale: CGFloat) -> CGRect? {
+        guard let start = talk.longestMonologueStartNs, let speaker = talk.longestMonologueSpeakerId,
+              talk.longestMonologueNs > 0, let lane = ribbon.lanes[speaker] else { return nil }
+        return Self.bar(lane, from: start, to: start + talk.longestMonologueNs, scale: scale,
+                        narrowest: Self.narrowestBar)
+    }
+
+    /// Each lane as a screen reader hears it: who, how many turns the core
+    /// counted, and when they first and last spoke.
+    private func summary(_ ribbon: TalkRibbon) -> String {
+        slices.enumerated().map { lane, slice -> String in
+            let count = store.talkShares
+                .filter { ribbon.lanes[$0.speakerId] == lane }
+                .reduce(0) { $0 + $1.turnCount }
+            var line = "\(slice.name(store)), \(count == 1 ? "1 turn" : "\(count) turns")"
+            let turns = ribbon.turns.filter { $0.lane == lane }
+            if let first = turns.first, let last = turns.last {
+                line += first.id == last.id
+                    ? ", at \(first.startNs.meetingOffsetClock)"
+                    : ", first at \(first.startNs.meetingOffsetClock), last at \(last.startNs.meetingOffsetClock)"
+            }
+            return line
+        }
+        .joined(separator: ". ")
+    }
+
+    private static func lanesHeight(_ count: Int) -> CGFloat {
+        CGFloat(count) * laneHeight + CGFloat(max(count - 1, 0)) * laneGap
+    }
+
+    private static func bar(_ lane: Int, from start: Int64, to end: Int64, scale: CGFloat,
+                            narrowest: CGFloat) -> CGRect {
+        CGRect(x: CGFloat(start) * scale, y: CGFloat(lane) * (laneHeight + laneGap),
+               width: max(CGFloat(end - start) * scale, narrowest), height: laneHeight)
     }
 }
 
@@ -1171,7 +1375,7 @@ struct MeetingQuestionsCard: View {
                                     Text(text).bodyText(14, Theme.inkSecondary)
                                 }
                                 HStack(spacing: 10) {
-                                    Text(answer.state.label).metaText(Theme.accent)
+                                    Text(answer.state.label).metaText(Theme.inkSecondary)
                                     if answer.provisional {
                                         Text("provisional").metaText()
                                     }
@@ -1205,7 +1409,7 @@ struct MeetingNotesCard: View {
         PageSection("Notes in the moment") {
             Card {
                 ForEach(snapshot.notes) { note in
-                    row(note)
+                    row(note).id("meeting-note:\(note.noteId)")
                 }
                 CardRow {
                     InputField(prompt: "Add a note", text: newNote)
@@ -1238,7 +1442,8 @@ struct MeetingNotesCard: View {
             CardRow(action: store.editable ? { start(note) } : nil) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(note.startOffsetNs?.meetingOffsetClock ?? note.createdAtUtcMs.meetingDate.time)
-                        .font(TypeScale.mono(12))
+                        .font(TypeScale.body(12))
+                        .monospacedDigit()
                         .foregroundStyle(Theme.inkTertiary)
                         .frame(width: 52, alignment: .leading)
                     Text(note.body).bodyText()
@@ -1300,6 +1505,7 @@ struct MeetingUserNotesCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("Your own notes").sectionLabel()
+                .accessibilityAddTraits(.isHeader)
             if let saved = store.notesSavedLine {
                 Text(saved).metaText()
             }
@@ -1310,11 +1516,19 @@ struct MeetingUserNotesCard: View {
                 templates: templates,
                 selection: template
             ) {
-                Text(templateLabel)
-                    .font(TypeScale.label(13))
-                    .foregroundStyle(Theme.inkSecondary)
+                HStack(spacing: 4) {
+                    Text(templateLabel)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .accessibilityHidden(true)
+                }
+                .font(TypeScale.label(13))
+                .foregroundStyle(Theme.inkSecondary)
+                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
             .fixedSize()
             .disabled(store.userNotes == nil || store.enhancing || store.busy)
             if store.canRegenerate, !store.notesBody.isEmpty {
@@ -1399,12 +1613,15 @@ struct LedgerPane: View {
     var body: some View {
         if let readable = snapshot.readableLedger {
             let ledger = readable.ledger
+            let counts = LedgerOutcomeCounts(ledger)
+            // A ledger written again may have nothing under the pick; it then reads as no pick.
+            let picked = store.ledgerOutcome.flatMap { counts.count($0) > 0 ? $0 : nil }
             VStack(alignment: .leading, spacing: 28) {
                 if readable.stale {
                     StaleNotesBand(store: store, what: "This ledger")
                 }
-                headline(ledger)
-                if !ledger.threads.isEmpty { threads(ledger) }
+                headline(ledger, counts: counts, picked: picked)
+                if !ledger.threads.isEmpty { threads(ledger, picked: picked) }
                 LoopList(store: store, kind: .loop, openPerson: openPerson)
                 LoopList(store: store, kind: .commitment, openPerson: openPerson)
                 if !ledger.stances.isEmpty { stances(ledger) }
@@ -1415,7 +1632,7 @@ struct LedgerPane: View {
                 Card {
                     CardRow {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(missing).bodyText(15, Theme.inkSecondary)
+                            Text(missing).bodyText(14, Theme.inkSecondary)
                             if snapshot.ledgerFailure != nil {
                                 Text("The notes above were written; only this second pass was not.")
                                     .metaText(Theme.inkSecondary)
@@ -1445,18 +1662,33 @@ struct LedgerPane: View {
         return "No ledger was written for this meeting."
     }
 
-    private func headline(_ ledger: MeetingLedger) -> some View {
+    private func headline(_ ledger: MeetingLedger, counts: LedgerOutcomeCounts, picked: LedgerOutcome?) -> some View {
         Card {
             CardRow {
-                Text(ledger.headline).font(TypeScale.headline).foregroundStyle(Theme.ink)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(ledger.headline).font(TypeScale.headline).foregroundStyle(Theme.ink)
+                    if counts.total > 0 {
+                        HStack(alignment: .center, spacing: 10) {
+                            OutcomeBar(counts: counts, selected: picked) { store.pick(outcome: $0) }
+                            if let choices = counts.choices {
+                                Text(choices).metaText()
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    private func threads(_ ledger: MeetingLedger) -> some View {
-        PageSection("Threads") {
+    /// Every thread, or only the substantive ones in the picked part of the
+    /// bar, which are the ones it counts.
+    private func threads(_ ledger: MeetingLedger, picked: LedgerOutcome?) -> some View {
+        let shown = ledger.threads.filter { thread in
+            picked.map { thread.substantive && thread.state.outcome == $0 } ?? true
+        }
+        return PageSection(picked.map { "Threads · \($0.label)" } ?? "Threads") {
             Card {
-                ForEach(Array(ledger.threads.enumerated()), id: \.offset) { _, thread in
+                ForEach(Array(shown.enumerated()), id: \.offset) { _, thread in
                     LedgerThreadRow(store: store, thread: thread)
                 }
             }
@@ -1485,7 +1717,8 @@ struct LedgerPane: View {
                         }
                     } trailing: {
                         Text(stance.atMs.meetingMsClock)
-                            .font(TypeScale.mono(12))
+                            .font(TypeScale.body(12))
+                            .monospacedDigit()
                             .foregroundStyle(Theme.inkTertiary)
                     }
                 }
@@ -1520,7 +1753,8 @@ struct LedgerThreadRow: View {
             }
         } trailing: {
             Text(thread.receipt.tMs.meetingMsClock)
-                .font(TypeScale.mono(12))
+                .font(TypeScale.body(12))
+                .monospacedDigit()
                 .foregroundStyle(Theme.inkTertiary)
         }
     }
@@ -1533,8 +1767,7 @@ struct LedgerThreadRow: View {
 
     private var color: Color {
         switch thread.state.outcome {
-        case .landed: Theme.accent
-        case .open: Theme.ink
+        case .landed, .open: Theme.ink
         case .dropped: Theme.inkTertiary
         }
     }
@@ -1576,18 +1809,18 @@ struct LoopRowView: View {
                 Button {
                     store.change(row, row.status == .open ? .resolve(dropped: false) : .reopen)
                 } label: {
-                    Image(systemName: row.status == .done ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 14, weight: .medium))
+                    Image(systemName: row.status == .done ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 15))
                         .foregroundStyle(row.status == .done ? Theme.accent : Theme.inkTertiary)
                 }
                 .buttonStyle(.plain)
                 .disabled(store.loopsBusy)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.text)
-                        .bodyText(15, row.status == .open ? Theme.ink : Theme.inkTertiary)
+                        .bodyText(14, row.status == .open ? Theme.ink : Theme.inkTertiary)
                         .strikethrough(row.status == .done, color: Theme.inkTertiary)
                     HStack(spacing: 10) {
-                        Text(row.status.label).metaText(row.status == .open ? Theme.accent : Theme.inkTertiary)
+                        Text(row.status.label).metaText(row.status == .open ? Theme.ink : Theme.inkTertiary)
                         Text(row.direction.label).metaText()
                         if let owner = row.owner {
                             Text(owner).metaText()
@@ -1604,6 +1837,9 @@ struct LoopRowView: View {
                     }
                     if let instead = row.instead, !instead.isEmpty {
                         Text("What happened instead: \(instead)").metaText()
+                    }
+                    if store.audio.failedReelKey == receiptsKey, let error = store.audio.error {
+                        Text(error).metaText(error == ConversationAudioPlayback.heldNotice ? Theme.inkSecondary : Theme.live)
                     }
                 }
             }
@@ -1624,7 +1860,39 @@ struct LoopRowView: View {
                         .buttonStyle(QuietButton(color: Theme.accent))
                         .disabled(!store.canJumpTo(citation.segmentId))
                 }
+                if hasReceipts {
+                    receipts
+                }
             }
+        }
+    }
+
+    private var receiptsKey: String { "loop:\(row.loopId)" }
+
+    /// A promise worth hearing through: it was carried between meetings or
+    /// read from more than one line.
+    private var hasReceipts: Bool {
+        row.carriedSinceAtUtcMs != nil || row.carriedIntoLoopId != nil || row.citations.count > 1
+    }
+
+    /// "Play receipts": the promise and every later mention of it, oldest
+    /// first, across the meetings it was carried through.
+    @ViewBuilder
+    private var receipts: some View {
+        let audio = store.audio
+        if audio.reelKey == receiptsKey {
+            if let index = audio.reelIndex {
+                Text("\(index + 1) of \(audio.reelClips.count)").metaText()
+            }
+            Button("Stop") { audio.stop() }
+                .buttonStyle(QuietButton(color: Theme.accent))
+        } else {
+            Button("Play receipts") {
+                audio.playReel(reading: "conversation_reel_for_loop", ["loopId": .string(row.loopId)], key: receiptsKey)
+            }
+            .buttonStyle(QuietButton(color: Theme.accent))
+            .disabled(audio.heldForRecording)
+            .help(audio.heldForRecording ? ConversationAudioPlayback.heldNotice : "")
         }
     }
 
@@ -1644,6 +1912,7 @@ struct LoopRowView: View {
                 .foregroundStyle(Theme.inkSecondary)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
         .disabled(store.loopsBusy)
@@ -1690,7 +1959,7 @@ struct FollowUpSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Follow up").font(TypeScale.headline).foregroundStyle(Theme.ink)
+                    Text("Follow up").titleText().accessibilityAddTraits(.isHeader)
                     if let draft = store.followUp {
                         Text(draft.source.label).metaText(Theme.inkSecondary)
                         Text(draft.mailContextStatus).metaText(Theme.inkSecondary)
@@ -1739,7 +2008,7 @@ struct CatchUpSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Caught up").font(TypeScale.headline).foregroundStyle(Theme.ink)
+                    Text("Caught up").titleText().accessibilityAddTraits(.isHeader)
                     if let catchUp = store.catchUp {
                         Text(line(catchUp)).metaText(Theme.inkSecondary)
                     }
@@ -1754,12 +2023,12 @@ struct CatchUpSheet: View {
                     if let catchUp = store.catchUp, !catchUp.bullets.isEmpty {
                         ForEach(Array(catchUp.bullets.enumerated()), id: \.offset) { _, bullet in
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                Text("·").bodyText(15, Theme.accent)
+                                Text("•").bodyText(14, Theme.inkSecondary)
                                 Text(bullet).bodyText()
                             }
                         }
                     } else if let catchUp = store.catchUp {
-                        Text(catchUp.state.label).bodyText(15, Theme.inkSecondary)
+                        Text(catchUp.state.label).bodyText(14, Theme.inkSecondary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

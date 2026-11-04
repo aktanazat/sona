@@ -1,6 +1,11 @@
 mod apple_json;
 
+pub(crate) use apple_json::root_schema as json_response_schema;
+
 mod complete_reading;
+mod progress;
+
+use progress::{RunProgress, TrackSpan};
 
 use super::analytics::{
     merge_turns, talk_metrics, tracker_results, AnalyticsSegment, KeywordTracker, MeetingAnalytics,
@@ -10,8 +15,8 @@ use super::analytics::{
 };
 use super::diarization::{
     model_manifest, wespeaker_embedding_model_key, DiarizationEngineKind, DiarizationError,
-    DiarizedWindow, MeetingDiarizationSession, MeetingDiarizer, SpeakerEmbedding,
-    SpeakerEmbeddingModelKey, SpeakerEmbeddingSession,
+    DiarizedWindow, MeetingDiarizationSession, MeetingDiarizer, PreparedDiarizationModel,
+    SpeakerEmbedding, SpeakerEmbeddingModelKey, SpeakerEmbeddingSession,
 };
 use super::ledger::{
     self, LedgerCommitment, LedgerFirmness, LedgerOpenLoop, LedgerReceipt, LedgerReceiptState,
@@ -26,6 +31,7 @@ use super::prompt_types::{
     PromptTargetRef, SavedPrompt,
 };
 use super::relay_generator::RelayTextGenerator;
+use super::store::recall::RecallMemory;
 use super::store::voice_identity::{
     DiarizationEvidenceKind, DiarizationEvidenceSpanInput, VoiceEnrollmentEvidence,
     VoiceEnrollmentRecord,
@@ -62,7 +68,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 const VAD_FRAME_SAMPLES: usize = 480;
@@ -70,6 +76,11 @@ const VAD_FRAME_NS: u64 = 30_000_000;
 const ASR_MAX_SAMPLES: usize = 15 * 16_000;
 const ASR_OVERLAP_SAMPLES: usize = 8_000;
 const ASR_SILENCE_FRAMES: u32 = 10;
+/// Fewest voiced frames a chunk needs before it is transcribed. Measured with
+/// TEN-VAD at 0.55: room noise from -40 to -30 dBFS and breathing started
+/// chunks holding one or two voiced frames, and parakeet wrote each down as
+/// "Okay."; the shortest spoken word measured, "no" at -45 dBFS, held four.
+const ASR_MIN_VOICED_FRAMES: u32 = 3;
 const DIARIZATION_WINDOW_SAMPLES: usize = 2 * 16_000;
 const DIARIZATION_MIN_VOICED_FRAMES: u32 = 10;
 const MAX_ARTIFACT_EVIDENCE_BYTES: usize = 96 * 1024;
@@ -173,7 +184,13 @@ impl MeetingTranscriptEngine for LocalMeetingTranscriptEngine {
     fn transcribe(&self, plan: &AsrPlan, samples: &[f32]) -> Result<String, ProcessingFailure> {
         self.manager
             .transcribe_shared(plan, samples)
-            .map(|decode| decode.text)
+            .map(|decode| {
+                if decode.model_produced_text {
+                    decode.text
+                } else {
+                    String::new()
+                }
+            })
             .map_err(|_| ProcessingFailure::EngineFailure)
     }
 
@@ -368,6 +385,7 @@ pub enum ReplyShape {
     Prose,
     MeetingNotes,
     MeetingLedger,
+    MemoryNote,
     /// One JSON object joining the ledgers of a meeting's parts.
     LedgerMerge,
 }
@@ -375,7 +393,11 @@ pub enum ReplyShape {
 impl ReplyShape {
     pub(crate) fn is_json(self) -> bool {
         match self {
-            Self::Json | Self::MeetingNotes | Self::MeetingLedger | Self::LedgerMerge => true,
+            Self::Json
+            | Self::MeetingNotes
+            | Self::MeetingLedger
+            | Self::LedgerMerge
+            | Self::MemoryNote => true,
             Self::Prose => false,
         }
     }
@@ -427,6 +449,18 @@ pub trait MeetingTextGenerator: Send + Sync {
         max_tokens: i32,
         shape: ReplyShape,
     ) -> Result<String, MeetingTextGenerationError>;
+
+    /// Use native constrained generation when supported. Other engines keep
+    /// the strict JSON prompt-and-parser path without constructing a schema.
+    fn generate_json(
+        &self,
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        _schema: fn() -> &'static schemars::schema::RootSchema,
+    ) -> Result<String, MeetingTextGenerationError> {
+        self.generate(system_prompt, evidence, max_tokens, ReplyShape::Json)
+    }
 }
 
 struct AppleIntelligenceGenerator;
@@ -490,6 +524,107 @@ impl MeetingTextGenerator for AppleIntelligenceGenerator {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             let _ = (system_prompt, evidence, max_tokens, shape);
+            Err(MeetingTextGenerationError::Failed)
+        }
+    }
+
+    fn generate_json(
+        &self,
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        schema: fn() -> &'static schemars::schema::RootSchema,
+    ) -> Result<String, MeetingTextGenerationError> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let reply_tokens = i32::try_from(ON_DEVICE_REPLY_TOKENS)
+                .map_err(|_| MeetingTextGenerationError::Failed)?;
+            apple_json::generate_json(
+                system_prompt,
+                evidence,
+                max_tokens.min(reply_tokens),
+                schema(),
+            )
+            .map_err(|_| MeetingTextGenerationError::Failed)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            let _ = (system_prompt, evidence, max_tokens, schema);
+            Err(MeetingTextGenerationError::Failed)
+        }
+    }
+}
+
+struct QuietReviewGenerator {
+    cancellation: Arc<crate::planning::quiet::Cancellation>,
+}
+
+pub(crate) fn quiet_review_generator(
+    cancellation: Arc<crate::planning::quiet::Cancellation>,
+) -> Option<Arc<dyn MeetingTextGenerator>> {
+    AppleIntelligenceGenerator
+        .is_available()
+        .then(|| Arc::new(QuietReviewGenerator { cancellation }) as Arc<dyn MeetingTextGenerator>)
+}
+
+impl MeetingTextGenerator for QuietReviewGenerator {
+    fn is_available(&self) -> bool {
+        !self.cancellation.is_cancelled() && AppleIntelligenceGenerator.is_available()
+    }
+
+    fn model_id(&self) -> &'static str {
+        AppleIntelligenceGenerator.model_id()
+    }
+
+    fn model_version(&self) -> Cow<'static, str> {
+        AppleIntelligenceGenerator.model_version()
+    }
+
+    fn max_input_bytes(&self) -> usize {
+        AppleIntelligenceGenerator.max_input_bytes()
+    }
+
+    fn context_window_bytes(&self) -> Option<usize> {
+        AppleIntelligenceGenerator.context_window_bytes()
+    }
+
+    fn reserved_output_tokens(&self, requested: i32) -> usize {
+        AppleIntelligenceGenerator.reserved_output_tokens(requested)
+    }
+
+    fn generate(
+        &self,
+        _system_prompt: &str,
+        _evidence: &str,
+        _max_tokens: i32,
+        _shape: ReplyShape,
+    ) -> Result<String, MeetingTextGenerationError> {
+        Err(MeetingTextGenerationError::Failed)
+    }
+
+    fn generate_json(
+        &self,
+        system_prompt: &str,
+        evidence: &str,
+        max_tokens: i32,
+        schema: fn() -> &'static schemars::schema::RootSchema,
+    ) -> Result<String, MeetingTextGenerationError> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let reply_tokens = i32::try_from(ON_DEVICE_REPLY_TOKENS)
+                .map_err(|_| MeetingTextGenerationError::Failed)?;
+            apple_json::generate_json_cancellable(
+                system_prompt,
+                evidence,
+                max_tokens.min(reply_tokens),
+                schema(),
+                Some(&self.cancellation),
+            )
+            .map_err(|_| MeetingTextGenerationError::Failed)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            let _ = (system_prompt, evidence, max_tokens, schema);
             Err(MeetingTextGenerationError::Failed)
         }
     }
@@ -662,6 +797,10 @@ pub struct MeetingProcessingService {
     /// of which jobs are live; this is how a caller waits for one to finish
     /// without polling it.
     jobs_idle: Arc<Condvar>,
+    /// Every progress update published, for the tests that follow a run
+    /// through its stages.
+    #[cfg(test)]
+    published_progress: Arc<Mutex<Vec<MeetingProcessingProgressPayload>>>,
 }
 
 pub(crate) struct RelationshipRefresh {
@@ -682,6 +821,8 @@ impl MeetingProcessingService {
             capture_active: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             jobs_idle: Arc::new(Condvar::new()),
+            #[cfg(test)]
+            published_progress: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -746,6 +887,14 @@ impl MeetingProcessingService {
             .relay_text_generator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = relay;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_progress(&self) -> Vec<MeetingProcessingProgressPayload> {
+        self.published_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Which engine writes one meeting's text, and `None` when there is not
@@ -923,6 +1072,7 @@ impl MeetingProcessingService {
     }
 
     pub fn set_capture_active(&self, active: bool) {
+        let _activity = active.then(crate::planning::quiet::foreground_activity);
         self.capture_active.store(active, Ordering::Release);
     }
 
@@ -973,18 +1123,21 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         origin: ProcessingOrigin,
     ) {
+        let activity = crate::planning::quiet::foreground_activity();
         let cancelled = Arc::new(AtomicBool::new(false));
         self.jobs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id, Arc::clone(&cancelled));
         if self.app.is_none() {
+            let _activity = activity;
             self.run(store, session_id, Arc::clone(&cancelled), origin);
             self.retire_job(session_id, &cancelled);
             return;
         }
         let service = Arc::clone(self);
         thread::spawn(move || {
+            let _activity = activity;
             service.run(store, session_id, Arc::clone(&cancelled), origin);
             service.retire_job(session_id, &cancelled);
         });
@@ -1029,6 +1182,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         refresh: RelationshipRefresh,
     ) {
+        let activity = crate::planning::quiet::foreground_activity();
         let cancelled = Arc::new(AtomicBool::new(false));
         {
             let mut jobs = self
@@ -1045,6 +1199,7 @@ impl MeetingProcessingService {
         let spawned = thread::Builder::new()
             .name("meeting-people".to_string())
             .spawn(move || {
+                let _activity = activity;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     service.refresh_relationship_summaries(
                         &store,
@@ -1220,6 +1375,7 @@ impl MeetingProcessingService {
         cancelled: Arc<AtomicBool>,
         origin: ProcessingOrigin,
     ) {
+        let mut progress = self.start_progress(&store, session_id);
         // The row says the work is under way from the moment it is. Until
         // this was written, a meeting read "waiting to be processed" for the
         // whole of its transcription and its notes pass, and the only status
@@ -1245,6 +1401,7 @@ impl MeetingProcessingService {
                 &cancelled,
                 origin,
                 &mut relationship_generator,
+                &mut progress,
             )
         }))
         .unwrap_or_else(|_| {
@@ -1276,17 +1433,22 @@ impl MeetingProcessingService {
             self.finish_review(Arc::clone(&store), session_id, origin, run_completed);
             if run_completed {
                 if let Some(generator) = relationship_generator {
-                    let _ = catch_unwind(AssertUnwindSafe(|| {
+                    self.enter_stage(session_id, &mut progress, ProcessingStage::People);
+                    let refreshed = catch_unwind(AssertUnwindSafe(|| {
                         self.refresh_relationship_summaries(
                             &store,
                             session_id,
                             generator.as_ref(),
                             &cancelled,
-                        );
+                        )
                     }));
+                    if refreshed.unwrap_or(false) {
+                        progress.stage_did_work();
+                    }
                 }
             }
         }
+        self.finish_progress(&store, session_id, progress, run_completed);
     }
 
     fn finish_review(
@@ -1398,6 +1560,7 @@ impl MeetingProcessingService {
         cancelled: &AtomicBool,
         origin: ProcessingOrigin,
         relationship_generator: &mut Option<Arc<dyn MeetingTextGenerator>>,
+        progress: &mut RunProgress,
     ) -> Result<Option<RunFailure>, RunFailure> {
         store.require_retained_transcript(session_id)?;
         let plan = store.processing_plan(session_id)?;
@@ -1412,11 +1575,12 @@ impl MeetingProcessingService {
         // teaching each of them to tolerate an empty track is what keeps that
         // true.
         if origin != ProcessingOrigin::ImportedTranscript {
-            self.transcribe_and_diarize(store, session_id, &plan, cancelled)?;
+            self.transcribe_and_diarize(store, session_id, &plan, cancelled, progress)?;
         }
         if cancelled.load(Ordering::Acquire) {
             return Err(ProcessingFailure::Cancelled.into());
         }
+        self.enter_stage(session_id, progress, ProcessingStage::Notes);
         let input_revision = store.session_snapshot(session_id)?.revision;
         // Metrics come from the transcript, not from the generated notes, so
         // they are derived before generation and survive a model that is
@@ -1431,6 +1595,9 @@ impl MeetingProcessingService {
             generator.clone(),
         ) {
             Ok(outcome) => {
+                if let ArtifactGenerationOutcome::Generated { artifact, engine } = &outcome {
+                    progress.wrote_notes(artifact.artifact_id, self.route_for(engine));
+                }
                 if matches!(
                     outcome,
                     ArtifactGenerationOutcome::Generated { .. }
@@ -1472,6 +1639,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         plan: &MeetingRunPlan,
         cancelled: &AtomicBool,
+        progress: &mut RunProgress,
     ) -> Result<(), RunFailure> {
         let engine = self
             .transcript_engine
@@ -1503,43 +1671,75 @@ impl MeetingProcessingService {
             .map_err(RunFailure::from)?;
         let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
         let tracks = review.tracks;
-        /* The far end first, so the microphone pass can recognise it: on
-         * speakers the other side of a call reaches the microphone too, and
-         * without this every line they said would appear twice, once as the
-         * operator. */
-        let mut far_end = FarEnd::default();
-        for source_kind in [SourceKind::SystemAudio, SourceKind::Microphone] {
-            for track in tracks
-                .iter()
-                .filter(|track| track.source_kind == source_kind)
-            {
-                self.process_track(
-                    store,
-                    session_id,
-                    transcript_revision_id,
-                    track.track_id,
-                    source_kind,
-                    engine.as_ref(),
-                    &asr_plan,
-                    &mut far_end,
-                    cancelled,
-                )?;
+        self.enter_stage(session_id, progress, ProcessingStage::Speech);
+        let abandoned = AtomicBool::new(false);
+        thread::scope(|scope| {
+            // Sortformer's one pass over the speakers' lane reads no
+            // transcript, so it runs while the tracks are transcribed. When
+            // the transcript points diarization at another lane, this start
+            // is dropped and that lane starts on its own.
+            let abandoned = &abandoned;
+            let early = Self::expected_diarization_track(origin, &tracks).map(|track| {
+                let track_id = track.track_id;
+                let start = scope.spawn(move || {
+                    self.start_diarizer(store, session_id, track_id, cancelled, abandoned)
+                });
+                (track_id, start)
+            });
+            let transcribed = (|| -> Result<(), RunFailure> {
+                /* The far end first, so the microphone pass can recognise it:
+                 * on speakers the other side of a call reaches the microphone
+                 * too, and without this every line they said would appear
+                 * twice, once as the operator. */
+                let mut far_end = FarEnd::default();
+                let mut before_ns = 0;
+                for source_kind in [SourceKind::SystemAudio, SourceKind::Microphone] {
+                    for track in tracks
+                        .iter()
+                        .filter(|track| track.source_kind == source_kind)
+                    {
+                        let span = TrackSpan::of(track, before_ns);
+                        self.process_track(
+                            store,
+                            session_id,
+                            transcript_revision_id,
+                            track.track_id,
+                            source_kind,
+                            engine.as_ref(),
+                            &asr_plan,
+                            &mut far_end,
+                            cancelled,
+                            progress,
+                            span,
+                        )?;
+                        before_ns = span.end_ns();
+                    }
+                }
+                progress.paused(self.wait_for_capture(cancelled)?);
+                store
+                    .complete_transcript_revision(session_id, transcript_revision_id)
+                    .map_err(RunFailure::from)?;
+                self.emit_current(store, "meeting:transcript-changed", session_id);
+                Ok(())
+            })();
+            if transcribed.is_err() {
+                abandoned.store(true, Ordering::Release);
+            } else {
+                self.enter_stage(session_id, progress, ProcessingStage::Speakers);
             }
-        }
-        self.wait_for_capture(cancelled)?;
-        store
-            .complete_transcript_revision(session_id, transcript_revision_id)
-            .map_err(RunFailure::from)?;
-        self.emit_current(store, "meeting:transcript-changed", session_id);
-        self.run_diarization(
-            store,
-            session_id,
-            transcript_revision_id,
-            origin,
-            &tracks,
-            cancelled,
-        );
-        Ok(())
+            let early = early.and_then(|(track_id, start)| Some((track_id, start.join().ok()?)));
+            transcribed?;
+            self.run_diarization(
+                store,
+                session_id,
+                transcript_revision_id,
+                &tracks,
+                early,
+                cancelled,
+                progress,
+            );
+            Ok(())
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1554,6 +1754,8 @@ impl MeetingProcessingService {
         asr_plan: &AsrPlan,
         far_end: &mut FarEnd,
         cancelled: &AtomicBool,
+        progress: &mut RunProgress,
+        span: TrackSpan,
     ) -> Result<(), RunFailure> {
         let detector = self
             .vad_factory
@@ -1569,7 +1771,7 @@ impl MeetingProcessingService {
         let mut refused = None;
         let visited = store.visit_durable_track_records(session_id, track_id, None, |record| {
             let mut pass = || -> Result<(), RunFailure> {
-                self.wait_for_capture(cancelled)?;
+                progress.paused(self.wait_for_capture(cancelled)?);
                 if frames.starts_new_span(&record) {
                     if let Some(chunk) = chunker.finish(false) {
                         self.transcribe_chunk(
@@ -1597,7 +1799,10 @@ impl MeetingProcessingService {
                         far_end,
                         chunk,
                     )
-                })
+                })?;
+                let end = record.start_offset_ns.saturating_add(record.duration_ns);
+                self.advance_stage(session_id, progress, span.done_ns(end));
+                Ok(())
             };
             pass().map_err(|failure| {
                 let error = store_error_from_processing(failure.reason());
@@ -1669,15 +1874,20 @@ impl MeetingProcessingService {
             .map_err(RunFailure::from)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_diarization(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
         transcript_revision_id: TranscriptRevisionId,
-        origin: MeetingOrigin,
         tracks: &[MeetingTrackSnapshot],
+        early: Option<(SourceTrackId, DiarizerStart)>,
         cancelled: &AtomicBool,
+        progress: &mut RunProgress,
     ) {
+        let Ok(origin) = store.meeting_origin(session_id) else {
+            return;
+        };
         // A lane spoke when this revision gave it a line. Records alone do
         // not say so: a call's system audio records silence the whole way
         // through when the far end reaches Sona only through the microphone.
@@ -1694,12 +1904,22 @@ impl MeetingProcessingService {
         let Some(track) = Self::diarization_track(origin, tracks, spoken) else {
             return;
         };
-        let manifest = model_manifest();
-        let model_directory = store.diarization_model_directory();
-        let mut prepared = match self.diarizer.prepare(&model_directory) {
-            Ok(prepared) => prepared,
-            Err(DiarizationError::ModelUnavailable) => {
-                let status = self.diarizer.availability(&model_directory).status();
+        let start = early
+            .filter(|(track_id, _)| *track_id == track.track_id)
+            .map(|(_, start)| start)
+            .unwrap_or_else(|| {
+                self.start_diarizer(
+                    store,
+                    session_id,
+                    track.track_id,
+                    cancelled,
+                    &AtomicBool::new(false),
+                )
+            });
+        let (prepared, mut diarizer) = match start {
+            DiarizerStart::Ready { prepared, session } => (prepared, session),
+            DiarizerStart::Refused(status) => {
+                let manifest = model_manifest();
                 let _ = store.set_diarization_status(
                     session_id,
                     status,
@@ -1708,59 +1928,8 @@ impl MeetingProcessingService {
                 );
                 return;
             }
-            Err(_) => {
-                let _ = store.set_diarization_status(
-                    session_id,
-                    DiarizationStatus::Failed,
-                    &manifest.id,
-                    &manifest.revision,
-                );
-                return;
-            }
         };
-        let mut diarizer = match self.diarizer.open(&prepared) {
-            Ok(diarizer) => diarizer,
-            Err(_) => {
-                let _ = store.set_diarization_status(
-                    session_id,
-                    DiarizationStatus::Failed,
-                    &manifest.id,
-                    &manifest.revision,
-                );
-                return;
-            }
-        };
-        // Sortformer scores the whole track in one pass, so it has to see the
-        // track before any window resolves. A track too long to hold, or a run
-        // that fails, degrades to the streaming fallback when its weights are
-        // on disk rather than dropping diarization for this meeting.
-        if diarizer.needs_priming()
-            && prime_diarizer(store, session_id, track.track_id, &mut diarizer).is_err()
-        {
-            match self
-                .diarizer
-                .wespeaker_fallback(&model_directory)
-                .and_then(|fallback| {
-                    self.diarizer
-                        .open(&fallback)
-                        .ok()
-                        .map(|session| (fallback, session))
-                }) {
-                Some((fallback, session)) => {
-                    prepared = fallback;
-                    diarizer = session;
-                }
-                None => {
-                    let _ = store.set_diarization_status(
-                        session_id,
-                        DiarizationStatus::Failed,
-                        &manifest.id,
-                        &manifest.revision,
-                    );
-                    return;
-                }
-            }
-        }
+        let model_directory = store.diarization_model_directory();
         let model_id = prepared.model_id();
         let model_revision = prepared.model_revision();
         info!(
@@ -1811,12 +1980,7 @@ impl MeetingProcessingService {
                 return;
             }
         };
-        let identity_model = wespeaker_embedding_model_key();
         let identity_source_allowed = identity_source_allowed(origin, track.source_kind);
-        let has_compatible_profiles = identity_source_allowed
-            && store
-                .has_compatible_local_voice_profiles(identity_model)
-                .unwrap_or(false);
         // Which engine is diarizing drives three decisions, so it is read once
         // and matched once. A new engine variant then fails to compile here
         // rather than answering false to a scattered `==` and writing empty
@@ -1831,37 +1995,39 @@ impl MeetingProcessingService {
             }
         };
         let collect_window_evidence = !evidence_from_exclusive_spans;
-        let mut identity_collector = match automatic_identity_mode(
-            origin,
-            track.source_kind,
-            has_compatible_profiles,
-            engine,
-        ) {
-            // The embedder is the plain WeSpeaker graph, not a diarization
-            // session: the collector wants one vector per candidate, and the
-            // streaming session would also apply its own clustering policy,
-            // whose overlap verdict can veto a Sortformer-exclusive span.
-            Some(AutoIdentityMode::EmbedSortformerCandidates) => self
-                .diarizer
-                .wespeaker_fallback(&model_directory)
-                .and_then(|fallback| SpeakerEmbeddingSession::open(&fallback.path).ok())
-                .map(|embedder| {
-                    VoiceIdentityCollector::primary(diarizer.exclusive_spans(), Box::new(embedder))
-                }),
-            Some(AutoIdentityMode::ReuseWeSpeakerWindows) => {
-                Some(VoiceIdentityCollector::fallback())
-            }
-            None => None,
-        };
+        let mut identity_collector =
+            match automatic_identity_mode(origin, track.source_kind, engine) {
+                // The embedder is the plain WeSpeaker graph, not a diarization
+                // session: the collector wants one vector per candidate, and the
+                // streaming session would also apply its own clustering policy,
+                // whose overlap verdict can veto a Sortformer-exclusive span.
+                Some(AutoIdentityMode::EmbedSortformerCandidates) => self
+                    .diarizer
+                    .voiceprint_embedder(&model_directory)
+                    .and_then(|embedder| SpeakerEmbeddingSession::open(&embedder.path).ok())
+                    .map(|embedder| {
+                        VoiceIdentityCollector::primary(
+                            diarizer.exclusive_spans(),
+                            Box::new(embedder),
+                        )
+                    }),
+                Some(AutoIdentityMode::ReuseWeSpeakerWindows) => {
+                    Some(VoiceIdentityCollector::fallback())
+                }
+                None => None,
+            };
         let mut windower = DiarizationWindower::new(detector);
         let mut frames = RecordFrameBuffer::new();
         let mut contiguous_audio = ContiguousAudioSpans::default();
         let mut cluster_speakers = HashMap::new();
         let mut fallback_evidence = Vec::new();
+        let span = TrackSpan::of(track, 0);
         let mut result =
             store.visit_durable_track_records(session_id, track.track_id, None, |record| {
-                self.wait_for_capture(cancelled)
-                    .map_err(store_error_from_processing)?;
+                progress.paused(
+                    self.wait_for_capture(cancelled)
+                        .map_err(store_error_from_processing)?,
+                );
                 // This loop discards the pending window where `process_track`
                 // flushes its pending chunk: a window cut by a gap holds two
                 // pieces of audio that are not adjacent, so scoring it would
@@ -1896,6 +2062,8 @@ impl MeetingProcessingService {
                 // stops the walk and never needs a cause.
                 .map_err(|failure| store_error_from_processing(failure.reason()))?;
                 contiguous_audio.observe(&record)?;
+                let end = record.start_offset_ns.saturating_add(record.duration_ns);
+                self.advance_stage(session_id, progress, span.done_ns(end));
                 Ok(())
             });
         if result.is_ok() {
@@ -1951,7 +2119,7 @@ impl MeetingProcessingService {
                 .is_ok()
         {
             if let Some(collector) = identity_collector {
-                self.apply_automatic_voice_matches(
+                self.apply_speaker_voices(
                     store,
                     session_id,
                     &cluster_speakers,
@@ -1985,15 +2153,72 @@ impl MeetingProcessingService {
         tracks: &[MeetingTrackSnapshot],
         spoken: impl Fn(&MeetingTrackSnapshot) -> bool,
     ) -> Option<&MeetingTrackSnapshot> {
-        let source_kind = match origin {
-            MeetingOrigin::Import => SourceKind::Microphone,
-            _ => SourceKind::SystemAudio,
-        };
-        let expected = tracks.iter().find(|track| track.source_kind == source_kind);
+        let expected = Self::expected_diarization_track(origin, tracks);
         expected
             .filter(|track| spoken(track))
             .or_else(|| tracks.iter().find(|track| spoken(track)))
             .or(expected)
+    }
+
+    fn expected_diarization_track(
+        origin: MeetingOrigin,
+        tracks: &[MeetingTrackSnapshot],
+    ) -> Option<&MeetingTrackSnapshot> {
+        let source_kind = match origin {
+            MeetingOrigin::Import => SourceKind::Microphone,
+            _ => SourceKind::SystemAudio,
+        };
+        tracks.iter().find(|track| track.source_kind == source_kind)
+    }
+
+    /// Open the engine for one lane and, for Sortformer, score the whole lane.
+    /// A lane too long to hold, or a run that fails, degrades to the streaming
+    /// fallback when its weights are on disk rather than dropping diarization
+    /// for this meeting.
+    fn start_diarizer(
+        &self,
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        track_id: SourceTrackId,
+        cancelled: &AtomicBool,
+        abandoned: &AtomicBool,
+    ) -> DiarizerStart {
+        let proceed = || {
+            if abandoned.load(Ordering::Acquire) {
+                return Err(ProcessingFailure::Cancelled);
+            }
+            self.wait_for_capture(cancelled).map(drop)
+        };
+        let model_directory = store.diarization_model_directory();
+        let prepared = match self.diarizer.prepare(&model_directory) {
+            Ok(prepared) => prepared,
+            Err(DiarizationError::ModelUnavailable) => {
+                return DiarizerStart::Refused(
+                    self.diarizer.availability(&model_directory).status(),
+                )
+            }
+            Err(_) => return DiarizerStart::Refused(DiarizationStatus::Failed),
+        };
+        let Ok(mut session) = self.diarizer.open(&prepared) else {
+            return DiarizerStart::Refused(DiarizationStatus::Failed);
+        };
+        if !session.needs_priming()
+            || prime_diarizer(store, session_id, track_id, &mut session, &proceed).is_ok()
+        {
+            return DiarizerStart::Ready { prepared, session };
+        }
+        if proceed().is_err() {
+            return DiarizerStart::Refused(DiarizationStatus::Failed);
+        }
+        self.diarizer
+            .wespeaker_fallback(&model_directory)
+            .and_then(|prepared| {
+                self.diarizer
+                    .open(&prepared)
+                    .ok()
+                    .map(|session| DiarizerStart::Ready { prepared, session })
+            })
+            .unwrap_or(DiarizerStart::Refused(DiarizationStatus::Failed))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2076,7 +2301,10 @@ impl MeetingProcessingService {
         Ok(())
     }
 
-    fn apply_automatic_voice_matches(
+    /// Remember every diarized speaker's voice, then name the speakers an
+    /// enrolled profile matches. A voice that only resembles someone the user
+    /// named elsewhere is never applied here; it waits as a suggestion.
+    fn apply_speaker_voices(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
@@ -2084,10 +2312,21 @@ impl MeetingProcessingService {
         candidates: Vec<VoiceMatchCandidate>,
     ) {
         let model = wespeaker_embedding_model_key();
-        for candidate in candidates {
-            let Some(&speaker_id) = cluster_speakers.get(&candidate.cluster) else {
-                continue;
-            };
+        let voices = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                cluster_speakers
+                    .get(&candidate.cluster)
+                    .map(|&speaker_id| (speaker_id, candidate.embedding))
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) =
+            store.store_speaker_voiceprints(session_id, model, &voices, utc_now_ms())
+        {
+            log::warn!("Speaker voices for {session_id:?} could not be remembered: {error:?}");
+        }
+        for (speaker_id, embedding) in &voices {
+            let speaker_id = *speaker_id;
             let speaker_revision = match store.active_voice_speaker_revision(session_id, speaker_id)
             {
                 Ok(revision) => revision,
@@ -2099,7 +2338,7 @@ impl MeetingProcessingService {
                     continue;
                 }
             };
-            let matched = match store.match_local_voice_profile(&candidate.embedding, model) {
+            let matched = match store.match_local_voice_profile(embedding, model) {
                 Ok(Some(matched)) => matched,
                 Ok(None) => continue,
                 Err(error) => {
@@ -2354,21 +2593,24 @@ impl MeetingProcessingService {
     /// trade the thing a reader came for against the thing they did not.
     ///
     /// The write lands per person rather than at the end, so a run interrupted
-    /// halfway leaves the paragraphs it did produce.
+    /// halfway leaves the paragraphs it did produce. True when it ran to the
+    /// end and wrote at least one paragraph: the only runs whose time says
+    /// how long this step takes.
     fn refresh_relationship_summaries(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
         generator: &dyn MeetingTextGenerator,
         cancelled: &AtomicBool,
-    ) {
+    ) -> bool {
         let person_ids = match store.person_ids_for_meeting(session_id) {
             Ok(person_ids) => person_ids,
             Err(error) => {
                 log::warn!("No relationship summaries for {session_id:?}: {error:?}");
-                return;
+                return false;
             }
         };
+        let mut wrote = false;
         for person_id in person_ids
             .into_iter()
             .take(MAX_RELATIONSHIP_SUMMARIES_PER_ARTIFACT)
@@ -2376,7 +2618,7 @@ impl MeetingProcessingService {
             if cancelled.load(Ordering::Acquire)
                 || store.require_retained_transcript(session_id).is_err()
             {
-                return;
+                return false;
             }
             match write_relationship_summary_guarded(
                 store,
@@ -2384,11 +2626,13 @@ impl MeetingProcessingService {
                 generator,
                 Some((session_id, cancelled)),
             ) {
-                Ok(PersonSummaryOutcome::Written | PersonSummaryOutcome::NoEvidence) => {}
+                Ok(PersonSummaryOutcome::Written) => wrote = true,
+                Ok(PersonSummaryOutcome::NoEvidence) => {}
                 Ok(outcome) => log::warn!("Could not summarize {person_id:?}: {outcome:?}"),
                 Err(error) => log::warn!("Could not summarize {person_id:?}: {error:?}"),
             }
         }
+        wrote && !cancelled.load(Ordering::Acquire)
     }
 
     /// The template a meeting uses when the user has not chosen one. Reading
@@ -2839,7 +3083,10 @@ impl MeetingProcessingService {
         Ok(())
     }
 
-    fn wait_for_capture(&self, cancelled: &AtomicBool) -> Result<(), ProcessingFailure> {
+    /// Hold the run while a capture is under way, and say for how long: that
+    /// time is the capture's, not processing's.
+    fn wait_for_capture(&self, cancelled: &AtomicBool) -> Result<Duration, ProcessingFailure> {
+        let started = Instant::now();
         while self.capture_active.load(Ordering::Acquire) {
             if cancelled.load(Ordering::Acquire) {
                 return Err(ProcessingFailure::Cancelled);
@@ -2849,7 +3096,7 @@ impl MeetingProcessingService {
         if cancelled.load(Ordering::Acquire) {
             return Err(ProcessingFailure::Cancelled);
         }
-        Ok(())
+        Ok(started.elapsed())
     }
 
     fn emit_current(&self, store: &MeetingStore, event: &str, session_id: MeetingSessionId) {
@@ -2868,6 +3115,102 @@ impl MeetingProcessingService {
                     revision,
                 },
             );
+        }
+    }
+
+    /// Open a run's progress at its first stage, timed against what this Mac
+    /// has measured before. Neither read is allowed to stop the run: without
+    /// them the run reports its stages and no time left.
+    fn start_progress(&self, store: &MeetingStore, session_id: MeetingSessionId) -> RunProgress {
+        let work = store.processing_work(session_id).unwrap_or_default();
+        let speeds = store.processing_speeds().unwrap_or_default();
+        let mut progress = RunProgress::start(work, speeds, utc_now_ms(), Instant::now());
+        let update = progress.current(Instant::now());
+        self.publish_progress(session_id, Some(update));
+        progress
+    }
+
+    fn enter_stage(
+        &self,
+        session_id: MeetingSessionId,
+        progress: &mut RunProgress,
+        stage: ProcessingStage,
+    ) {
+        let update = progress.enter(stage, Instant::now());
+        self.publish_progress(session_id, Some(update));
+    }
+
+    fn advance_stage(
+        &self,
+        session_id: MeetingSessionId,
+        progress: &mut RunProgress,
+        done_ns: u64,
+    ) {
+        if let Some(update) = progress.advance(done_ns, Instant::now()) {
+            self.publish_progress(session_id, Some(update));
+        }
+    }
+
+    /// Keep what the run measured and the receipt for the notes it wrote,
+    /// then say the run is over. The receipt lands first, so the review the
+    /// last update sends a reader back to already carries it.
+    fn finish_progress(
+        &self,
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        progress: RunProgress,
+        completed: bool,
+    ) {
+        let finished = progress.finish(completed, Instant::now());
+        if !finished.samples.is_empty() {
+            if let Err(error) =
+                store.record_processing_speeds(session_id, &finished.samples, utc_now_ms())
+            {
+                log::warn!("Could not keep the processing speed of {session_id:?}: {error:?}");
+            }
+        }
+        if let Some((artifact_id, receipt)) = finished.receipt {
+            match store.record_processing_receipt(artifact_id, receipt) {
+                Ok(()) => self.emit_current(store, "meeting:artifact-changed", session_id),
+                Err(error) => {
+                    log::warn!("Could not keep the receipt of {session_id:?}: {error:?}")
+                }
+            }
+        }
+        self.publish_progress(session_id, None);
+    }
+
+    fn publish_progress(&self, session_id: MeetingSessionId, progress: Option<ProcessingProgress>) {
+        let payload = MeetingProcessingProgressPayload {
+            event_schema_version: 1,
+            session_id,
+            progress,
+        };
+        #[cfg(test)]
+        self.published_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(payload.clone());
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                <MeetingProcessingProgressEvent as tauri_specta::Event>::NAME,
+                payload,
+            );
+        }
+    }
+
+    /// Where the engine that wrote a meeting's notes runs: the relay's is the
+    /// operator's own server, and every other engine is on this Mac.
+    fn route_for(&self, engine: &str) -> ProcessingRoute {
+        let relay = self
+            .relay_text_generator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .model_id();
+        if engine == relay {
+            ProcessingRoute::Relay
+        } else {
+            ProcessingRoute::Local
         }
     }
 }
@@ -2931,6 +3274,8 @@ pub(crate) struct LiveTranscript {
     /// scheduled pass and a pass a catch-up runs for itself can never read the
     /// same records twice or interleave one utterance with another.
     cursors: Mutex<HashMap<SourceTrackId, LiveTrackCursor>>,
+    /// What this capture's recall checks have read from the store.
+    recall: Mutex<RecallMemory>,
 }
 
 impl LiveTranscript {
@@ -2938,6 +3283,7 @@ impl LiveTranscript {
         Self {
             segments: Mutex::new(Vec::new()),
             cursors: Mutex::new(HashMap::new()),
+            recall: Mutex::new(RecallMemory::default()),
         }
     }
 
@@ -3069,6 +3415,33 @@ impl LiveTranscript {
             });
         }
         evidence
+    }
+
+    /// The words of the lines that end within `window_ns` of the newest
+    /// line's end: what the call is about right now. Copies only those.
+    pub(crate) fn recent_lines(&self, window_ns: u64) -> Vec<String> {
+        let segments = self
+            .segments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cutoff = segments
+            .iter()
+            .map(|segment| segment.end_offset_ns)
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(window_ns);
+        segments
+            .iter()
+            .filter(|segment| segment.end_offset_ns >= cutoff)
+            .map(|segment| segment.text.clone())
+            .collect()
+    }
+
+    /// What this capture's recall checks have read from the store so far.
+    pub(crate) fn recall_memory(&self) -> MutexGuard<'_, RecallMemory> {
+        self.recall
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -3354,6 +3727,8 @@ struct SpeechChunker {
     start_offset_ns: Option<u64>,
     end_offset_ns: u64,
     silence_frames: u32,
+    voiced_frames: u32,
+    continues_carry: bool,
     carry: Vec<f32>,
     carry_start_offset_ns: Option<u64>,
 }
@@ -3366,6 +3741,8 @@ impl SpeechChunker {
             start_offset_ns: None,
             end_offset_ns: 0,
             silence_frames: 0,
+            voiced_frames: 0,
+            continues_carry: false,
             carry: Vec::with_capacity(ASR_OVERLAP_SAMPLES),
             carry_start_offset_ns: None,
         }
@@ -3373,9 +3750,16 @@ impl SpeechChunker {
 
     fn finish(&mut self, forced: bool) -> Option<AudioChunk> {
         let start_offset_ns = self.start_offset_ns.take()?;
+        self.silence_frames = 0;
+        let voiced_frames = std::mem::take(&mut self.voiced_frames);
+        if !std::mem::take(&mut self.continues_carry) && voiced_frames < ASR_MIN_VOICED_FRAMES {
+            self.current.clear();
+            self.carry.clear();
+            self.carry_start_offset_ns = None;
+            return None;
+        }
         let samples = std::mem::take(&mut self.current);
         let end_offset_ns = self.end_offset_ns;
-        self.silence_frames = 0;
         if forced && samples.len() > ASR_OVERLAP_SAMPLES {
             let overlap_start = samples.len() - ASR_OVERLAP_SAMPLES;
             self.carry.clear();
@@ -3419,6 +3803,7 @@ impl FrameConsumer for SpeechChunker {
             if let Some(carry_start) = self.carry_start_offset_ns.take() {
                 self.current = std::mem::take(&mut self.carry);
                 self.start_offset_ns = Some(carry_start);
+                self.continues_carry = true;
             } else {
                 self.start_offset_ns = Some(start_offset_ns);
             }
@@ -3427,6 +3812,7 @@ impl FrameConsumer for SpeechChunker {
         self.end_offset_ns = start_offset_ns.saturating_add(VAD_FRAME_NS);
         if voice {
             self.silence_frames = 0;
+            self.voiced_frames = self.voiced_frames.saturating_add(1);
         } else {
             self.silence_frames = self.silence_frames.saturating_add(1);
         }
@@ -3522,6 +3908,16 @@ impl FrameConsumer for DiarizationWindower {
     }
 }
 
+/// How a lane's diarizer started: the engine that will score its windows, or
+/// the status the meeting reports instead.
+enum DiarizerStart {
+    Ready {
+        prepared: PreparedDiarizationModel,
+        session: MeetingDiarizationSession,
+    },
+    Refused(DiarizationStatus),
+}
+
 /// Feed the whole track to a one-pass diarizer, then score it. Runs before the
 /// window pass so speaker ids are resolved once, for the whole track, by the
 /// model's own arrival-order cache instead of being re-derived per window.
@@ -3530,9 +3926,11 @@ fn prime_diarizer(
     session_id: MeetingSessionId,
     track_id: SourceTrackId,
     diarizer: &mut MeetingDiarizationSession,
+    proceed: impl Fn() -> Result<(), ProcessingFailure>,
 ) -> Result<(), DiarizationError> {
     let mut push_failure = None;
     let visited = store.visit_durable_track_records(session_id, track_id, None, |record| {
+        proceed().map_err(store_error_from_processing)?;
         let samples = downmix_and_resample(&record)?;
         if let Err(error) = diarizer.push_priming_audio(&samples, record.start_offset_ns) {
             push_failure = Some(error);
@@ -3546,6 +3944,7 @@ fn prime_diarizer(
     if visited.is_err() {
         return Err(DiarizationError::InferenceFailed);
     }
+    proceed().map_err(|_| DiarizationError::InferenceFailed)?;
     diarizer.prime()
 }
 
@@ -3570,9 +3969,10 @@ impl FarEnd {
         self.spans.push((start_ns, end_ns, spoken_words(text)));
     }
 
-    /// True when at least 70% of the line's words were in what the far end
-    /// said over the same stretch. A chunk where the operator talked over the
-    /// far end keeps his words and so falls below the bar.
+    /// True when every word of the line, in order, was in what the far end
+    /// said over the same stretch. One word the far end never said keeps the
+    /// line: "we should not send it" over "we should send it" is the operator
+    /// correcting them, and dropping it would reverse the meeting's meaning.
     fn echoes(&self, start_ns: u64, end_ns: u64, text: &str) -> bool {
         let words = spoken_words(text);
         if words.is_empty() {
@@ -3580,17 +3980,14 @@ impl FarEnd {
         }
         let from = start_ns.saturating_sub(Self::SLACK_NS);
         let to = end_ns.saturating_add(Self::SLACK_NS);
-        let nearby: std::collections::HashSet<&str> = self
+        let mut nearby: Vec<&(u64, u64, Vec<String>)> = self
             .spans
             .iter()
             .filter(|(start, end, _)| *start < to && *end > from)
-            .flat_map(|(_, _, words)| words.iter().map(String::as_str))
             .collect();
-        let matched = words
-            .iter()
-            .filter(|word| nearby.contains(word.as_str()))
-            .count();
-        matched * 10 >= words.len() * 7
+        nearby.sort_by_key(|(start, _, _)| *start);
+        let mut heard = nearby.iter().flat_map(|(_, _, words)| words.iter());
+        words.iter().all(|word| heard.any(|said| said == word))
     }
 }
 
@@ -4239,25 +4636,23 @@ fn artifact_system_prompt(
     );
     if let NotesTemplate::Custom(template) = template {
         prompt.push_str("\n\nThe user's custom template arranges only the outline. The summary, decisions, action items, key questions, risks and follow-up draft retain the schema and all citation, text and list limits above. Use these outline sections in the order given, at most once each, with each title spelled exactly as given. Write each section's detail from the transcript following that section's instructions. Omit sections not covered by the transcript; an empty outline is valid. Each title and non-null detail still needs at least one transcript citation. Section instructions guide emphasis, never supply facts or override this schema.");
-        write!(
+        let _ = write!(
             prompt,
             " The outline has at most {} entries.",
             template.sections.len()
-        )
-        .expect("writing to a String cannot fail");
+        );
         if !template.purpose.is_empty() {
             prompt.push_str("\nPurpose: ");
             prompt.push_str(&template.purpose);
         }
         for (index, section) in template.sections.iter().enumerate() {
-            write!(
+            let _ = write!(
                 prompt,
                 "\n{}. Title: {}\nInstructions: {}",
                 index + 1,
                 section.title,
                 section.instructions
-            )
-            .expect("writing to a String cannot fail");
+            );
         }
     }
     prompt.push_str("\n\n");
@@ -4370,6 +4765,8 @@ fn catch_up_prompt() -> String {
 const MAX_LIVE_HELP_EVIDENCE_BYTES: usize = 32 * 1024;
 /// "What did I miss?" reads the lines that end within this long of the newest.
 const LIVE_HELP_RECENT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
+/// Recall reads the lines that end within this long of the newest.
+pub(crate) const LIVE_RECALL_WINDOW_NS: u64 = 60 * 1_000_000_000;
 /// A few short cited points, never a document.
 const LIVE_HELP_MAX_TOKENS: i32 = 800;
 /// The longest point live help shows, in characters.
@@ -4826,10 +5223,13 @@ fn validate_artifact_output(
             .iter()
             .take(64)
             .map(|item| {
+                let said = |phrase: Option<String>| {
+                    phrase.filter(|phrase| cited_words_say(&item.text.citations, evidence, phrase))
+                };
                 Ok(MeetingActionItem {
                     text: validate_cited_text(&item.text, evidence)?,
-                    owner_text: bounded_generated_text(item.owner_text.as_deref())?,
-                    due_text: bounded_generated_text(item.due_text.as_deref())?,
+                    owner_text: said(bounded_generated_text(item.owner_text.as_deref())?),
+                    due_text: said(bounded_generated_text(item.due_text.as_deref())?),
                 })
             })
             .collect::<Result<Vec<_>, ()>>()?,
@@ -5357,12 +5757,35 @@ fn bounded_generated_text(value: Option<&str>) -> Result<Option<String>, ()> {
         .transpose()
 }
 
+/// Whether one of the cited segments says `phrase` as whole words. An owner
+/// or a deadline the cited words never say is the model's guess, not the
+/// meeting's, so it is left off the action rather than shown as fact.
+fn cited_words_say(citations: &[String], evidence: &[MeetingEvidence], phrase: &str) -> bool {
+    let phrase = phrase.to_lowercase();
+    evidence
+        .iter()
+        .filter(|evidence| citations.contains(&evidence.citation.entity_id))
+        .any(|evidence| {
+            let text = evidence.text.to_lowercase();
+            text.match_indices(&phrase).any(|(start, _)| {
+                !text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphanumeric)
+                    && !text[start + phrase.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_alphanumeric)
+            })
+        })
+}
+
 fn utc_now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::analytics::MeetingNotesTemplate;
     use super::super::local_generator::test_support::read_http_request;
     use super::*;
@@ -5404,6 +5827,38 @@ mod tests {
             16 * SECOND_NS,
             "petroleum? no way, I washed it twice this morning honestly"
         ));
+    }
+
+    #[test]
+    fn a_correction_spoken_over_the_far_end_stays_in_the_transcript() {
+        let mut far_end = FarEnd::default();
+        far_end.heard(
+            10 * SECOND_NS,
+            14 * SECOND_NS,
+            "We should send the final report today.",
+        );
+        far_end.heard(
+            20 * SECOND_NS,
+            24 * SECOND_NS,
+            "Send it today, not tomorrow.",
+        );
+
+        assert!(
+            !far_end.echoes(
+                10 * SECOND_NS,
+                14 * SECOND_NS,
+                "we should not send the final report today"
+            ),
+            "one added word is the operator objecting"
+        );
+        assert!(
+            !far_end.echoes(
+                20 * SECOND_NS,
+                24 * SECOND_NS,
+                "not today, send it tomorrow"
+            ),
+            "the far end's words in another order say something else"
+        );
     }
 
     struct EnergyVad;
@@ -5823,6 +6278,61 @@ mod tests {
         let first = chunks.first().expect("forced chunk");
         assert_eq!(first.samples.len(), ASR_MAX_SAMPLES);
         assert_eq!(chunker.carry.len(), ASR_OVERLAP_SAMPLES);
+    }
+
+    fn feed(
+        chunker: &mut SpeechChunker,
+        voice: bool,
+        frames: u32,
+        offset_ns: &mut u64,
+    ) -> Vec<AudioChunk> {
+        let frame = vec![if voice { 0.5 } else { 0.0 }; VAD_FRAME_SAMPLES];
+        let mut chunks = Vec::new();
+        for _ in 0..frames {
+            chunks.extend(chunker.push(voice, &frame, *offset_ns).expect("frame"));
+            *offset_ns += VAD_FRAME_NS;
+        }
+        chunks
+    }
+
+    #[test]
+    fn a_noise_blip_is_not_transcribed_but_the_shortest_word_is() {
+        let mut chunker = SpeechChunker::new(Box::new(EnergyVad));
+        let mut offset_ns = 0;
+        let mut chunks = Vec::new();
+        for voiced_frames in [1, 2, 4] {
+            chunks.extend(feed(&mut chunker, true, voiced_frames, &mut offset_ns));
+            chunks.extend(feed(
+                &mut chunker,
+                false,
+                ASR_SILENCE_FRAMES,
+                &mut offset_ns,
+            ));
+        }
+        chunks.extend(chunker.finish(false));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].start_offset_ns, 23 * VAD_FRAME_NS);
+        assert_eq!(chunks[0].samples.len(), 14 * VAD_FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn the_tail_of_speech_cut_at_the_length_limit_is_transcribed() {
+        let mut chunker = SpeechChunker::new(Box::new(EnergyVad));
+        let mut offset_ns = 0;
+        let limit_frames = u32::try_from(ASR_MAX_SAMPLES / VAD_FRAME_SAMPLES).expect("frames");
+        let mut chunks = feed(&mut chunker, true, limit_frames, &mut offset_ns);
+        chunks.extend(feed(&mut chunker, true, 1, &mut offset_ns));
+        chunks.extend(feed(
+            &mut chunker,
+            false,
+            ASR_SILENCE_FRAMES,
+            &mut offset_ns,
+        ));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[1].samples.len(),
+            ASR_OVERLAP_SAMPLES + 11 * VAD_FRAME_SAMPLES
+        );
     }
 
     #[test]
@@ -6544,6 +7054,49 @@ mod tests {
                 self.artifact.clone()
             } else {
                 self.ledger.clone()
+            })
+        }
+    }
+
+    /// An engine that writes the fixture notes and ledger about the first
+    /// turn of whatever transcript it is shown, so a whole run writes notes
+    /// without its test knowing the segments in advance.
+    pub(crate) struct EchoingGenerator;
+
+    impl MeetingTextGenerator for EchoingGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "apple-intelligence"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("echoing-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            _system_prompt: &str,
+            evidence: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let pack: serde_json::Value =
+                serde_json::from_str(evidence).expect("a JSON evidence pack");
+            let turn = &pack["transcript"][0];
+            let text = turn["text"].as_str().expect("the turn's words");
+            Ok(match turn["segment_uuid"].as_str() {
+                Some(segment_id) => fixture_ledger_json(segment_id, text),
+                None => fixture_artifact_json(
+                    turn["entity_id"].as_str().expect("the turn's citation"),
+                    text,
+                ),
             })
         }
     }
@@ -7286,7 +7839,7 @@ mod tests {
 
     fn press_evidence() -> Vec<MeetingEvidence> {
         let session_id = MeetingSessionId::new();
-        let segment = |entity_id: &str, start_offset_ns: u64| MeetingEvidence {
+        let segment = |entity_id: &str, start_offset_ns: u64, text: &str| MeetingEvidence {
             citation: MeetingCitation {
                 kind: CitationKind::Transcript,
                 session_id,
@@ -7294,11 +7847,15 @@ mod tests {
                 start_offset_ns: Some(start_offset_ns),
                 end_offset_ns: Some(start_offset_ns + 1_000_000_000),
             },
-            text: "Pricing review".to_string(),
+            text: text.to_string(),
         };
         vec![
-            segment(PRESS_TIER_SEGMENT, 0),
-            segment(PRESS_ROLLOUT_SEGMENT, 60_000_000_000),
+            segment(
+                PRESS_TIER_SEGMENT,
+                0,
+                "Thanks for joining the pricing review, Stephen. Steven will send the tier comparison to the team.",
+            ),
+            segment(PRESS_ROLLOUT_SEGMENT, 60_000_000_000, "Pricing review"),
         ]
     }
 

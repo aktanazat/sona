@@ -608,6 +608,7 @@ final class AppModel: NSObject, ObservableObject {
             head: head,
             chunkStart: image.chunk_start,
             chunkCount: image.chunk_count,
+            byteLength: image.byte_length,
             sha256: image.sha256
         ) else { return nil }
         try? bytes.write(to: cached, options: .atomic)

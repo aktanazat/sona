@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// A question of your own, on the right in a bubble: the well it was typed
-/// in, filled a shade deeper, as Halcyon's thread draws it.
+/// A question of your own, on the right in a quiet grey bubble.
 struct ChatQuestion: View {
     let message: String
 
@@ -13,19 +12,18 @@ struct ChatQuestion: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(Theme.selection, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .padding(.vertical, 10)
+                .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("You asked: \(message)")
     }
 }
 
-/// An answer is prose on the surface, not a card and not a bubble: it is the
-/// thing the sheet exists to show, and putting a container around it would
-/// make it look like an aside to something else. Only the addresses inside it
-/// are chrome, because only they are pressable. The answer that lands while
-/// the chat is open types itself out; history is simply there.
+/// An answer, as plain prose on the page with no bubble around it. Only the
+/// addresses inside it are chrome, because only they are pressable. The
+/// answer that lands while the chat is open types itself out; history is
+/// simply there.
 struct ChatAnswer: View, Equatable {
     let message: String
     /// When this answer landed, for the one that arrived while the chat was
@@ -34,17 +32,18 @@ struct ChatAnswer: View, Equatable {
     let store: ChatStore
 
     var body: some View {
-        ChatRevealText(text: prose, landed: landed)
-            .font(TypeScale.body(14))
-            .foregroundStyle(Theme.ink)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .environment(
-                \.openURL,
-                OpenURLAction { url in
-                    store.openLink(url.absoluteString)
-                    return .handled
-                })
+        HStack(spacing: 0) {
+            ChatRevealText(text: prose, landed: landed)
+                .bodyText(15)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 32)
+        }
+        .environment(
+            \.openURL,
+            OpenURLAction { url in
+                store.openLink(url.absoluteString)
+                return .handled
+            })
     }
 
     /// The addresses are links in the run of text rather than buttons beside
@@ -186,33 +185,6 @@ private struct ChatRevealRenderer: TextRenderer {
     }
 }
 
-/// The agent's mark, from Halcyon: a four-pointed star with a small one above
-/// it, filled with whatever colour it is given.
-struct ChatSparkle: Shape {
-    func path(in rect: CGRect) -> Path {
-        let side = min(rect.width, rect.height)
-        let large = side * 0.8
-        let small = side * 0.38
-        var path = Path()
-        Self.addStar(in: CGRect(x: rect.minX, y: rect.maxY - large, width: large, height: large), to: &path)
-        Self.addStar(in: CGRect(x: rect.minX + side - small, y: rect.minY, width: small, height: small), to: &path)
-        return path
-    }
-
-    /// Four points on the middle of the box's edges, joined by curves that
-    /// pinch in toward the centre.
-    private static func addStar(in box: CGRect, to path: inout Path) {
-        let centre = CGPoint(x: box.midX, y: box.midY)
-        let pinch = box.width * 0.14
-        path.move(to: CGPoint(x: centre.x, y: box.minY))
-        path.addQuadCurve(to: CGPoint(x: box.maxX, y: centre.y), control: CGPoint(x: centre.x + pinch, y: centre.y - pinch))
-        path.addQuadCurve(to: CGPoint(x: centre.x, y: box.maxY), control: CGPoint(x: centre.x + pinch, y: centre.y + pinch))
-        path.addQuadCurve(to: CGPoint(x: box.minX, y: centre.y), control: CGPoint(x: centre.x - pinch, y: centre.y + pinch))
-        path.addQuadCurve(to: CGPoint(x: centre.x, y: box.minY), control: CGPoint(x: centre.x - pinch, y: centre.y - pinch))
-        path.closeSubpath()
-    }
-}
-
 /// The one curve every change in the thread moves on. With Reduce Motion
 /// nothing moves: new parts fade in where they stand, or are simply there.
 enum ChatMotion {
@@ -293,25 +265,20 @@ struct ChatFades: View {
     }
 }
 
-/// An empty chat, as Halcyon's opens: the agent's mark, the one question the
-/// sheet is for, and a line on what it can be asked. The questions to press
-/// sit on the composer, where the next one is typed.
+/// An empty chat's question, standing on the field as a page's opening line
+/// rather than as a control. The questions to press sit under the field,
+/// where the next one is typed.
 struct ChatEmptyState: View {
     let workspace: AgentPanelWorkspace
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ChatSparkle()
-                .fill(Theme.accent)
-                .frame(width: 18, height: 18)
-                .padding(.bottom, 4)
-                .accessibilityHidden(true)
-            Text(workspace.greeting).headlineText()
-            Text(workspace.reach)
-                .metaText(Theme.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        Text(workspace.greeting)
+            .font(.system(size: 22, weight: .regular, design: .serif))
+            .foregroundStyle(Theme.ink)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -322,7 +289,7 @@ struct ChatSuggestionPills: View {
     let ask: (String) -> Void
 
     var body: some View {
-        ChatFlowRow {
+        ChatFlowRow(spacing: 8) {
             ForEach(suggestions, id: \.self) { suggestion in
                 ChatSuggestionPill(title: suggestion) { ask(suggestion) }
             }
@@ -330,8 +297,8 @@ struct ChatSuggestionPills: View {
     }
 }
 
-/// One suggestion: a question in a hairline capsule, the unchosen pill of
-/// Halcyon's composer in Sona's surface and border.
+/// One suggestion: a question in a quiet outline that fills in under the
+/// pointer.
 private struct ChatSuggestionPill: View {
     let title: String
     let action: () -> Void
@@ -346,12 +313,17 @@ private struct ChatSuggestionPill: View {
                 .truncationMode(.middle)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
-                .background(hovering ? Theme.selection : Theme.surface, in: Capsule())
-                .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
-                .contentShape(Capsule())
+                .background(
+                    hovering ? Theme.wash : Color.clear,
+                    in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.border, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         .help(title)
     }
 }

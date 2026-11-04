@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -42,10 +43,7 @@ final class PeopleStore {
     /// The revision `person_detail` answered with, which is what this page's
     /// writes carry.
     private(set) var detailRevision: UInt64 = 0
-    /// The relationship brief for the open person: how often you have met and
-    /// what is still open, in one line each.
-    private(set) var briefing: BriefingRow?
-
+    var photoRevision: UInt64 { max(revision, detailRevision) }
     private(set) var organization: OrganizationDetail?
     private(set) var organizationFailed = false
     /// Every company the people are at, or nil until the first read answers.
@@ -71,20 +69,31 @@ final class PeopleStore {
     /// The last thing the core could not do, shown until the next success.
     private(set) var error: String?
 
-    @ObservationIgnored private let core: Core
+    @ObservationIgnored let core: Core
+    @ObservationIgnored private let photos: PersonPhotoStore
+    @ObservationIgnored private var photoChooser: PersonPhotoChooser?
+    /// The Contacts picker a person's page attaches a contact through.
+    @ObservationIgnored let contactPicker = PersonContactPicker()
     /// Reads are stamped: an answer for a person the screen has left is
     /// dropped rather than drawn over the one it moved to.
     @ObservationIgnored private var generation: UInt64 = 0
     /// How many rows the inbox asks for, as the web app asked for them.
     @ObservationIgnored private let inboxLimit = 5
 
-    init(core: Core) {
+    init(core: Core, photos: PersonPhotoStore) {
         self.core = core
+        self.photos = photos
         // A meeting's ledger is what a person's loops are read out of, and a
         // deleted meeting takes its links with it, so both re-read whatever is
         // on screen.
         core.observe(CoreEvent.peopleArtifactChanged) { [weak self] _ in self?.reload() }
         core.observe(CoreEvent.peopleMeetingRemoved) { [weak self] _ in self?.reload() }
+        for event in [CoreEvent.meetingTranscriptChanged, CoreEvent.meetingSessionChanged] {
+            core.observe(event) { [weak self] _ in
+                guard let self, case .person = self.route else { return }
+                self.reload()
+            }
+        }
     }
 
     /// The first load, once the core is up.
@@ -139,9 +148,8 @@ final class PeopleStore {
             _ = await (list, companies, inbox, candidates)
         case let .person(personId):
             async let detail: Void = loadDetail(personId, stamp)
-            async let briefing: Void = loadBriefing(personId, stamp)
             async let list: Void = loadList(stamp)
-            _ = await (detail, briefing, list)
+            _ = await (detail, list)
         case let .organization(name):
             async let organization: Void = loadOrganization(name, stamp)
             async let list: Void = loadList(stamp)
@@ -151,7 +159,6 @@ final class PeopleStore {
 
     private func clearPerson() {
         detail = nil
-        briefing = nil
         detailFailed = false
         linkPicker = LinkPicker()
         voiceConflict = nil
@@ -185,19 +192,6 @@ final class PeopleStore {
         }
     }
 
-    /// The brief for one person: `person_context` answers for a set of them,
-    /// and a person's own page is the set of one. A person you have never met
-    /// has nothing to brief, and the row says so by counting zero.
-    private func loadBriefing(_ personId: String, _ stamp: UInt64) async {
-        do {
-            let result: BriefingResult = try await core.request("person_context", ["personIds": [personId]])
-            guard stamp == generation else { return }
-            briefing = result.rows.first { $0.meetingsCount > 0 }
-        } catch {
-            guard stamp == generation else { return }
-            briefing = nil
-        }
-    }
 
     /// The label on a chip and the slug in a link are the same key: the
     /// command slugifies whatever it is given, so neither side derives one.
@@ -319,6 +313,69 @@ final class PeopleStore {
             let request = PersonRenameRequest(
                 personId: personId, displayName: displayName, expectedRevision: revision)
             return try await core.request("person_rename", ["request": request])
+        }
+    }
+
+    func choosePhotoSource() {
+        guard !busy, case let .person(personId) = route,
+              let person = detail?.person, person.id == personId else { return }
+        if let photoChooser {
+            photoChooser.showWindow(nil)
+            return
+        }
+        let chooser = PersonPhotoChooser(
+            core: core, personId: personId, name: person.displayName, revision: detailRevision,
+            saved: { [weak self] in self?.photos.invalidate(); self?.reload() },
+            closed: { [weak self] in self?.photoChooser = nil })
+        photoChooser = chooser
+        chooser.present()
+    }
+
+    func removeAvatar() {
+        guard !busy, case let .person(personId) = route else { return }
+        busy = true
+        let revision = detailRevision
+        act { [self] in
+            defer { busy = false }
+            let request = PersonAvatarSetRequest(
+                personId: personId, expectedRevision: revision, pngBase64: nil,
+                provenance: nil, originalBase64: nil)
+            do {
+                let _: PersonAvatarResult = try await core.request("person_avatar_set", ["request": request])
+                photos.invalidate()
+                await reread()
+            } catch {
+                await reread()
+                throw error
+            }
+        }
+    }
+
+    /// Opens the Contacts picker. The contact picked there is the only one
+    /// that ever reaches this person.
+    func chooseContact() {
+        guard !busy, case let .person(personId) = route,
+              let person = detail?.person, person.id == personId else { return }
+        contactPicker.present(fallbackName: person.displayName) { [weak self] card in
+            guard let self else { return }
+            guard let card else {
+                error = "That contact has nothing besides a name to add."
+                return
+            }
+            setContact(card, for: personId)
+        }
+    }
+
+    func removeContact() {
+        guard case let .person(personId) = route else { return }
+        setContact(nil, for: personId)
+    }
+
+    private func setContact(_ card: PersonContactCard?, for personId: String) {
+        guard !busy, route == .person(personId) else { return }
+        write { revision, core in
+            let request = PersonContactSetRequest(personId: personId, expectedRevision: revision, contact: card)
+            return try await core.request("person_contact_set", ["request": request])
         }
     }
 
@@ -566,6 +623,9 @@ final class VoiceIdentityStore {
     private(set) var speakers: [VoiceIdentitySpeaker] = []
     /// The ones with nobody behind them yet.
     private(set) var unresolved: [VoiceIdentitySpeaker] = []
+    /// Waiting speakers whose voice matches someone you named in another
+    /// meeting. Only a confirm writes; one is gone once its speaker has a name.
+    private(set) var suggestions: [VoiceSpeakerSuggestion] = []
     /// Who a label can point at. Nil until the read answers.
     private(set) var people: [PersonListEntry]?
     private(set) var peopleFailed = false
@@ -608,6 +668,7 @@ final class VoiceIdentityStore {
             loaded = false
             speakers = []
             unresolved = []
+            suggestions = []
         }
         self.sessionId = sessionId
         do {
@@ -630,9 +691,12 @@ final class VoiceIdentityStore {
             // A status id can name a speaker this read has not seen yet; a
             // count nobody can act on is worse than one refresh late.
             unresolved = meeting.speakers.filter { waiting.contains($0.speakerId) }
+            let askable = Set(unresolved.map(\.speakerId))
+            suggestions = status.suggestions.filter { askable.contains($0.speakerId) }
         } catch {
             speakers = []
             unresolved = []
+            suggestions = []
             throw error
         }
     }
@@ -738,6 +802,21 @@ final class VoiceIdentityStore {
                 sessionId: sessionId, speakerId: question.speakerId, action: .markUnknown)
             try await reread(sessionId)
             ask(nil)
+        }
+    }
+
+    /// Names a waiting speaker as the person their voice matches: the same
+    /// write the sheet makes when that person is picked.
+    func confirm(_ suggestion: VoiceSpeakerSuggestion) {
+        guard let sessionId else { return }
+        busy = true
+        act { [self] in
+            defer { busy = false }
+            _ = try await identify(
+                sessionId: sessionId,
+                speakerId: suggestion.speakerId,
+                action: .label(.existing(personId: suggestion.personId)))
+            try await reread(sessionId)
         }
     }
 

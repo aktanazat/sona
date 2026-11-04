@@ -46,6 +46,7 @@ extension CoreEvent {
     static let meetingRemoved = "meeting:removed"
     static let meetingNavigationRequested = "meeting:navigation-requested"
     static let meetingSourceHealthChanged = "meeting:source-health-changed"
+    static let meetingProcessingProgress = "meeting:processing-progress"
 }
 
 /// The payload every `meeting:*` event but navigation carries.
@@ -66,6 +67,107 @@ struct MeetingNavigationPayload: Decodable {
     let destination: MeetingNavigationDestination
     let sessionId: MeetingSessionId?
     let revision: Int
+    let atMilliseconds: UInt64?
+    let segmentId: String?
+}
+
+// MARK: - Processing progress
+
+/// `ProcessingStage`: the five steps of processing a meeting, in the order
+/// they run.
+enum MeetingProcessingStage: String, Decodable, CaseIterable {
+    case audio
+    case speech
+    case speakers
+    case notes
+    case people
+
+    var ordinal: Int {
+        switch self {
+        case .audio: 0
+        case .speech: 1
+        case .speakers: 2
+        case .notes: 3
+        case .people: 4
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .audio: "Reading the audio"
+        case .speech: "Transcribing"
+        case .speakers: "Separating speakers"
+        case .notes: "Writing the notes"
+        case .people: "Updating people"
+        }
+    }
+}
+
+/// `ProcessingProgress`.
+struct MeetingProcessingProgress: Decodable, Equatable {
+    let stage: MeetingProcessingStage
+    let stageFractionPermille: Int
+    let audioNsTotal: UInt64?
+    let startedAtUtcMs: Int64
+    /// Nil until this Mac has finished the step once: no guess stands in
+    /// for a measurement.
+    let etaMs: UInt64?
+
+    var stageFraction: Double { Double(min(max(stageFractionPermille, 0), 1000)) / 1000 }
+}
+
+/// `MeetingProcessingProgressPayload`. No progress means the run is over,
+/// however it ended.
+struct MeetingProcessingProgressPayload: Decodable {
+    let eventSchemaVersion: Int
+    let sessionId: MeetingSessionId
+    let progress: MeetingProcessingProgress?
+}
+
+/// One progress update and when it arrived, so the time left counts down
+/// between updates without asking the core.
+struct MeetingProcessingUpdate: Equatable {
+    let progress: MeetingProcessingProgress
+    let receivedAt: Date
+
+    /// "Transcribing · 2:10 left", or the step alone when there is no time
+    /// to show or the time shown has run out.
+    func line(at now: Date) -> String {
+        guard let left = left(at: now) else { return progress.stage.label }
+        return "\(progress.stage.label) · \(left.clock) left"
+    }
+
+    func left(at now: Date) -> TimeInterval? {
+        guard let etaMs = progress.etaMs else { return nil }
+        let left = (TimeInterval(etaMs) / 1000 - now.timeIntervalSince(receivedAt)).rounded(.up)
+        return left >= 1 ? left : nil
+    }
+}
+
+/// `ProcessingRoute`: where the notes were written.
+enum MeetingProcessingRoute: String, Decodable {
+    case local
+    case relay
+}
+
+/// `ProcessingReceipt`: what one finished run took.
+struct MeetingProcessingReceipt: Decodable {
+    let wallMs: UInt64
+    let audioNs: UInt64
+    let route: MeetingProcessingRoute
+
+    /// "41 min in 2:31 · 16× · on this Mac".
+    var line: String {
+        let audio = TimeInterval(audioNs) / 1_000_000_000
+        let wall = TimeInterval(wallMs) / 1000
+        let factor = audio / max(wall, 0.001)
+        let speed = factor >= 10 ? "\(Int(factor.rounded()))×" : String(format: "%.1f×", factor)
+        let place = switch route {
+        case .local: "on this Mac"
+        case .relay: "on your server"
+        }
+        return "\(audio.spoken) in \(wall.clock) · \(speed) · \(place)"
+    }
 }
 
 // MARK: - Session state
@@ -557,6 +659,7 @@ enum MeetingCommandError: String, Decodable {
     case insufficientEnrollmentEvidence = "insufficient_enrollment_evidence"
     case profileModelIncompatible = "profile_model_incompatible"
     case profileMergeResolutionRequired = "profile_merge_resolution_required"
+    case transcriptCorrectionConflict = "transcript_correction_conflict"
     case remoteUnavailable = "remote_unavailable"
     case engineFailure = "engine_failure"
     case importUnreadable = "import_unreadable"
@@ -583,6 +686,8 @@ enum MeetingCommandError: String, Decodable {
         case .insufficientEnrollmentEvidence: "Sona could not remember that voice."
         case .profileModelIncompatible: "Sona could not remember that voice."
         case .profileMergeResolutionRequired: "Choose which voice profile to keep first."
+        case .transcriptCorrectionConflict:
+            "These people learned different replacements for the same phrase. Edit or remove the conflicting learned phrase before merging."
         case .remoteUnavailable: "The remote engine was unavailable."
         case .engineFailure: "The engine failed while writing this."
         case .importUnreadable: "Sona cannot read that file. Choose a different one."
@@ -768,6 +873,54 @@ enum LedgerOutcome: String, CaseIterable {
     }
 }
 
+/// `LedgerOutcomeCounts`: a ledger's substantive threads by where they
+/// landed, and how many were choices and owned next steps. The review
+/// counts its open ledger with the same rule the core uses for a row.
+struct LedgerOutcomeCounts: Decodable, Equatable {
+    let landed: Int
+    let open: Int
+    let dropped: Int
+    let decided: Int
+    let actions: Int
+
+    init(landed: Int, open: Int, dropped: Int, decided: Int, actions: Int) {
+        self.landed = landed
+        self.open = open
+        self.dropped = dropped
+        self.decided = decided
+        self.actions = actions
+    }
+
+    init(_ ledger: MeetingLedger) {
+        let states = ledger.threads.filter(\.substantive).map(\.state)
+        self.init(
+            landed: states.count { $0.outcome == .landed },
+            open: states.count { $0.outcome == .open },
+            dropped: states.count { $0.outcome == .dropped },
+            decided: states.count { $0 == .decided || $0 == .agreed },
+            actions: states.count { $0 == .action })
+    }
+
+    var total: Int { landed + open + dropped }
+
+    func count(_ outcome: LedgerOutcome) -> Int {
+        switch outcome {
+        case .landed: landed
+        case .open: open
+        case .dropped: dropped
+        }
+    }
+
+    /// "2 decisions · 1 action", leaving out a count that is zero. Nil when
+    /// both are.
+    var choices: String? {
+        var parts: [String] = []
+        if decided > 0 { parts.append(decided == 1 ? "1 decision" : "\(decided) decisions") }
+        if actions > 0 { parts.append(actions == 1 ? "1 action" : "\(actions) actions") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
 /// The quote a ledger state was read from.
 struct LedgerReceipt: Decodable {
     let quote: String
@@ -874,6 +1027,7 @@ struct MeetingArtifactRevision: Decodable, Identifiable {
     let state: MeetingArtifactState
     let generatedAtUtcMs: Int64
     let content: MeetingGeneratedArtifacts?
+    let receipt: MeetingProcessingReceipt?
 
     var id: MeetingArtifactId { artifactId }
 
@@ -1086,7 +1240,10 @@ struct MeetingHistorySummary: Decodable, Identifiable {
     let recordedDurationMs: Int64?
     let sources: [MeetingSourceKind]?
     let speakerLabels: [String]?
+    /// The apps whose audio this meeting captured. Empty when it named none.
+    let applicationBundleIds: [String]
     let headline: MeetingHistoryHeadline?
+    let ledgerOutcomes: LedgerOutcomeCounts?
 
     var id: MeetingSessionId { sessionId }
     var date: Date { Date(timeIntervalSince1970: TimeInterval(createdAtUtcMs) / 1000) }
@@ -1220,6 +1377,141 @@ struct MeetingSearchResult: Decodable {
     let entries: [MeetingSearchHit]
 }
 
+/// `SaidMoment`: one transcript line `meeting_said_search` matched. `person`
+/// comes only from a confirmed identification; `speakerLabel` is the
+/// transcript's own label and never brings a face.
+struct SaidMoment: Decodable, Identifiable {
+    let sessionId: MeetingSessionId
+    let segmentId: TranscriptSegmentId
+    let meetingTitle: String
+    let meetingStartedAtUtcMs: Int64
+    let startOffsetNs: UInt64
+    let endOffsetNs: UInt64
+    let text: String
+    let speakerLabel: String?
+    let person: SaidPerson?
+    let audioRetained: Bool
+
+    var id: TranscriptSegmentId { segmentId }
+    var meetingStarted: Date { meetingStartedAtUtcMs.meetingDate }
+    /// Who said it: the confirmed person, else the transcript's label.
+    var speaker: String? { person?.displayName ?? speakerLabel }
+    /// The meeting opened at this line, as the transcript's copied link.
+    var link: String {
+        "sona://meeting/\(sessionId)?atMs=\(startOffsetNs / 1_000_000)&segmentId=\(segmentId)"
+    }
+}
+
+/// `SaidPerson`.
+struct SaidPerson: Decodable, Equatable {
+    let personId: MeetingPersonId
+    let displayName: String
+}
+
+/// `ReelMomentKind`.
+enum ReelMomentKind: String, Decodable {
+    case promise, decision, question, line
+
+    /// What the moment was, beside its day: "Promised".
+    var word: String {
+        switch self {
+        case .promise: "Promised"
+        case .decision: "Decided"
+        case .question: "Asked"
+        case .line: "Said"
+        }
+    }
+}
+
+/// `ReelMoment`: one recorded moment of a reel, and the stretch of its
+/// meeting the core chose to play for it.
+struct ReelMoment: Decodable, Identifiable {
+    let said: SaidMoment
+    let kind: ReelMomentKind
+    let direction: MeetingLoopDirection?
+    let status: MeetingLoopStatus?
+    let playStartOffsetNs: UInt64
+    let playEndOffsetNs: UInt64
+
+    var id: TranscriptSegmentId { said.segmentId }
+    var clip: ReelClip { ReelClip(said: said, startOffsetNs: playStartOffsetNs, endOffsetNs: playEndOffsetNs) }
+    /// How long it plays: nothing when its audio is gone.
+    var playableNs: UInt64 {
+        said.audioRetained && playEndOffsetNs > playStartOffsetNs ? playEndOffsetNs - playStartOffsetNs : 0
+    }
+}
+
+/// `ConversationReel`: oldest first.
+struct ConversationReel: Decodable {
+    let moments: [ReelMoment]
+}
+
+/// `MeetingLiveRecall`: past lines the running capture's last minute was
+/// already said in. A store that could not be read is its own answer, never
+/// an empty list.
+enum MeetingLiveRecall: Decodable {
+    case available([MeetingRecallMatch])
+    case unavailable
+
+    private enum Key: String, CodingKey {
+        case status, matches
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let status = try container.decode(String.self, forKey: .status)
+        switch status {
+        case "available":
+            self = .available(try container.decode([MeetingRecallMatch].self, forKey: .matches))
+        case "unavailable":
+            self = .unavailable
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .status, in: container, debugDescription: "unknown recall status \(status)")
+        }
+    }
+}
+
+/// `MeetingRecallKind`: what became of a recalled line in its own meeting.
+enum MeetingRecallKind: String, Decodable {
+    case stillOpen = "still_open"
+    case decided
+    case saidBefore = "said_before"
+
+    var label: String {
+        switch self {
+        case .stillOpen: "Still open"
+        case .decided: "Decided"
+        case .saidBefore: "Said before"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .stillOpen: "circle.dashed"
+        case .decided: "checkmark.seal"
+        case .saidBefore: "quote.opening"
+        }
+    }
+}
+
+/// `MeetingRecallMatch`: one past line the words being said now were already
+/// said in. `person` comes only from a confirmed identification.
+struct MeetingRecallMatch: Decodable, Equatable, Identifiable {
+    let kind: MeetingRecallKind
+    let text: String
+    let sessionId: MeetingSessionId
+    let segmentId: TranscriptSegmentId
+    let startOffsetNs: UInt64
+    let meetingTitle: String
+    let meetingStartedAtUtcMs: Int64
+    let appBundleId: String?
+    let person: SaidPerson?
+    let term: String
+
+    var id: String { "\(sessionId):\(segmentId)" }
+}
+
 /// The meetings a person deleted and can still get back.
 struct MeetingTrashEntry: Decodable, Identifiable {
     let jobId: MeetingDeletionJobId
@@ -1338,6 +1630,7 @@ struct MeetingTalkMetrics: Decodable {
     let speakers: [SpeakerTalkShare]
     let longestMonologueNs: Int64
     let longestMonologueSpeakerId: SpeakerId?
+    let longestMonologueStartNs: Int64?
     let medianSwitchGapMs: Int64?
 }
 
@@ -1552,6 +1845,22 @@ struct MeetingLoopsResult: Decodable {
 struct MeetingLoopMutationResult: Decodable {
     let receipt: MeetingOperationReceipt
     let loops: MeetingLoopsResult
+}
+
+/// `UntrackedActions`: the meeting's open commitments that no planner work
+/// cites and nobody set aside, with the projects still taking work, the one
+/// worked in most recently first.
+struct MeetingUntrackedActions: Decodable {
+    let actions: [MeetingLoopRow]
+    let projects: [PlanningProject]
+}
+
+/// The untracked-actions read: still out, refused in the core's words, or
+/// answered. A refusal is never an empty list.
+enum MeetingUntrackedActionsRead {
+    case reading
+    case unavailable(String)
+    case read(MeetingUntrackedActions)
 }
 
 // MARK: - People context
@@ -2026,6 +2335,18 @@ enum MeetingRequest {
             "expected_revision": .number(Double(revision)),
             "owner_person_id": ownerPersonId.map { JSONValue.string($0) } ?? .null,
         ])
+    }
+
+    /// `planning_track_action`: one planner task for the commitment, owned by
+    /// the person using Sona.
+    static func trackAction(_ loopId: MeetingLoopId, projectId: String) -> [String: JSONValue] {
+        ["loopId": .string(loopId), "projectId": .string(projectId), "operationId": .string(operationId())]
+    }
+
+    /// `planning_dismiss_action` and `planning_restore_action`: the
+    /// commitment is not work, or asks to be tracked again.
+    static func dismissAction(_ loopId: MeetingLoopId) -> [String: JSONValue] {
+        ["loopId": .string(loopId), "operationId": .string(operationId())]
     }
 
     /// A trashed meeting by its deletion job: what a restore and a delete

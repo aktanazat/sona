@@ -219,6 +219,7 @@ mod tests {
                 attendees,
                 notes: None,
                 calendar_name: Some("Work".to_string()),
+                location: None,
                 url: Some("https://meet.example.com/abc".to_string()),
             },
             is_recurring,

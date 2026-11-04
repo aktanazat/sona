@@ -132,6 +132,7 @@ pub async fn for_question(
     let page = super::search(
         meetings,
         history,
+        super::QueryAudience::Remote,
         QueryScope::All,
         question,
         Some(PACK_HITS),
@@ -272,6 +273,7 @@ pub(super) async fn folder_search(
         let page = super::search(
             meetings,
             history,
+            super::QueryAudience::Remote,
             QueryScope::Meetings,
             query,
             Some(FOLDER_SEARCH_PAGE_ROWS),
@@ -366,6 +368,9 @@ pub(crate) fn without_excluded_series(store: &MeetingStore, rows: Vec<QueryRow>)
     let mut excluded: HashMap<MeetingSessionId, bool> = HashMap::new();
     rows.into_iter()
         .filter(|row| {
+            if row.kind == QueryRowKind::Note {
+                return false;
+            }
             let Some(session_id) = session_behind(row) else {
                 return true;
             };
@@ -752,6 +757,7 @@ mod tests {
                         attendees: Vec::new(),
                         notes: None,
                         calendar_name: None,
+                        location: None,
                         url: None,
                     },
                 )

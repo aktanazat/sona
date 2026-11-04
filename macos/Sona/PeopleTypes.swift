@@ -44,6 +44,7 @@ enum PeopleCommandError: String, Decodable {
     case insufficientEnrollmentEvidence = "insufficient_enrollment_evidence"
     case profileModelIncompatible = "profile_model_incompatible"
     case profileMergeResolutionRequired = "profile_merge_resolution_required"
+    case transcriptCorrectionConflict = "transcript_correction_conflict"
     case remoteUnavailable = "remote_unavailable"
     case engineFailure = "engine_failure"
     case importUnreadable = "import_unreadable"
@@ -66,6 +67,8 @@ enum PeopleCommandError: String, Decodable {
             "The label was saved. Sona could not remember this voice from this meeting. Try another meeting."
         case .profileMergeResolutionRequired:
             "Sona needs to know which saved voice to keep before merging these people."
+        case .transcriptCorrectionConflict:
+            "These people learned different replacements for the same phrase. Edit or remove the conflicting learned phrase before merging."
         case .consentRequired: "Confirm the recording acknowledgement first."
         case .consentStale: "The setup changed. Review it again first."
         case .invalidTransition: "That is unavailable in the meeting's current phase."
@@ -266,7 +269,12 @@ struct PersonDetail: Decodable {
     let commitments: [PersonCommitment]
     /// Average share of the talking, in thousandths.
     let talkShareAvgPermille: UInt32?
+    /// Time recorded across the confirmed meetings, in milliseconds.
+    let recordedMs: UInt64?
+    /// What became of the threads across the confirmed meetings.
+    let ledgerOutcomes: LedgerOutcomeCounts?
     let documents: [PersonDocumentSummary]
+    let contact: PersonContactCard?
 }
 
 struct PersonDetailResult: Decodable {
@@ -428,6 +436,18 @@ struct PersonMeetingContextResult: Decodable {
 
 struct VoiceIdentityStatus: Decodable {
     let unresolvedActiveSpeakerIds: [String]
+    /// At most one per speaker, and only for speakers still waiting.
+    let suggestions: [VoiceSpeakerSuggestion]
+}
+
+/// A speaker whose voice matches the one you named as this person in other
+/// meetings. It names nobody until it is confirmed.
+struct VoiceSpeakerSuggestion: Decodable, Identifiable {
+    let speakerId: String
+    let personId: String
+    let displayName: String
+
+    var id: String { speakerId }
 }
 
 /// One diarized speaker in a meeting, as `meeting_get` reports it. The
@@ -740,6 +760,139 @@ struct VoiceProfileRemovalRequest: Encodable {
     }
 }
 
+enum PersonContributionAttribution: String, Decodable {
+    case confirmed
+    case recognized
+}
+
+struct PersonContribution: Decodable, Identifiable {
+    let meetingId: String
+    let meetingTitle: String
+    let meetingAtUtcMs: Int64
+    let transcriptRevisionId: String
+    let segmentId: String
+    let trackId: String
+    let speakerId: String
+    let attribution: PersonContributionAttribution
+    let linkConfidence: PersonLinkConfidence
+    let startOffsetNs: UInt64
+    let endOffsetNs: UInt64
+    let rawText: String
+    let correctedText: String?
+
+    var id: String { segmentId }
+    var at: Date { PeopleFormat.date(meetingAtUtcMs) }
+    var startMilliseconds: UInt64 { startOffsetNs / 1_000_000 }
+    var timestamp: String {
+        let seconds = startOffsetNs / 1_000_000_000
+        return String(format: "%llu:%02llu", seconds / 60, seconds % 60)
+    }
+}
+
+struct PersonContributionsResult: Decodable {
+    let schemaVersion: UInt32
+    let revision: UInt64
+    let entries: [PersonContribution]
+    let nextOffset: UInt64?
+}
+
+struct PersonAvatar: Decodable {
+    let pngBase64: String
+    let updatedAtUtcMs: Int64
+    let provenance: PersonPhotoProvenance?
+}
+
+struct PersonAvatarResult: Decodable {
+    let schemaVersion: UInt32
+    let revision: UInt64
+    let avatar: PersonAvatar?
+}
+
+struct PersonAvatarSetRequest: Encodable {
+    let personId: String
+    let expectedRevision: UInt64
+    let pngBase64: String?
+    let provenance: PersonPhotoProvenance?
+    let originalBase64: String?
+
+    enum CodingKeys: String, CodingKey {
+        case personId = "person_id"
+        case expectedRevision = "expected_revision"
+        case pngBase64 = "png_base64"
+        case provenance
+        case originalBase64 = "original_base64"
+    }
+}
+
+/// The fields of the one contact the user chose in the Contacts picker, kept
+/// beside the person. Sona never reads the address book itself.
+struct PersonContactCard: Codable, Equatable {
+    let name: String
+    let emails: [PersonContactValue]
+    let phones: [PersonContactValue]
+    let organization: String?
+    let jobTitle: String?
+    /// Formatted the way Contacts formats them, one line per row.
+    let addresses: [PersonContactValue]
+    let urls: [PersonContactValue]
+    let birthday: PersonContactBirthday?
+
+    private enum WireKeys: String, CodingKey {
+        case name, emails, phones, organization, addresses, urls, birthday
+        case jobTitle = "job_title"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: WireKeys.self)
+        try values.encode(name, forKey: .name)
+        try values.encode(emails, forKey: .emails)
+        try values.encode(phones, forKey: .phones)
+        try values.encodeIfPresent(organization, forKey: .organization)
+        try values.encodeIfPresent(jobTitle, forKey: .jobTitle)
+        try values.encode(addresses, forKey: .addresses)
+        try values.encode(urls, forKey: .urls)
+        try values.encodeIfPresent(birthday, forKey: .birthday)
+    }
+}
+
+struct PersonContactValue: Codable, Equatable, Hashable {
+    /// Contacts' own label, already localized: "work", "mobile".
+    let label: String?
+    let value: String
+}
+
+struct PersonContactBirthday: Codable, Equatable {
+    let month: UInt8
+    let day: UInt8
+    let year: Int32?
+
+    /// "29 February", or "29 February 1990" when the year is known.
+    var text: String {
+        var parts = DateComponents()
+        parts.calendar = Calendar(identifier: .gregorian)
+        parts.year = year.map(Int.init) ?? 2000
+        parts.month = Int(month)
+        parts.day = Int(day)
+        guard let date = parts.date else { return "\(day)/\(month)" }
+        return year == nil
+            ? date.formatted(.dateTime.day().month(.wide))
+            : date.formatted(.dateTime.day().month(.wide).year())
+    }
+}
+
+struct PersonContactSetRequest: Encodable {
+    let personId: String
+    let expectedRevision: UInt64
+    /// Nil takes the card off the person.
+    let contact: PersonContactCard?
+
+    enum CodingKeys: String, CodingKey {
+        case personId = "person_id"
+        case expectedRevision = "expected_revision"
+        case contact
+    }
+}
+
 // MARK: - Reading the corpus
 
 /// The projections the people surfaces draw, kept out of the views so the
@@ -749,28 +902,55 @@ enum PeopleModel {
         links.filter { $0.confidence == .confirmed }
     }
 
-    /// Six UTC calendar-month buckets, oldest first. UTC keeps the projection
-    /// deterministic at local midnight and matches the store's timestamps.
-    static func cadence(_ links: [PersonMeetingLink], now: Date = .now, months: Int = 6) -> [Double] {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
-        let month = { (date: Date) -> Int in
-            let parts = calendar.dateComponents([.year, .month], from: date)
-            return (parts.year ?? 0) * 12 + (parts.month ?? 1) - 1
+    /// Confirmed meetings in each of the last `months` calendar months, oldest
+    /// first. The months are the user's own, so a meeting late on the last
+    /// evening of a month counts in the month they remember it in.
+    static func cadence(_ links: [PersonMeetingLink], now: Date = .now, months: Int = 6) -> [PersonMonthCount] {
+        let calendar = Calendar.current
+        guard let current = calendar.dateInterval(of: .month, for: now)?.start else { return [] }
+        let starts = (0..<months).compactMap {
+            calendar.date(byAdding: .month, value: $0 - months + 1, to: current)
         }
-        let first = month(now) - months + 1
-        var values = [Double](repeating: 0, count: months)
+        var counts = [Int](repeating: 0, count: starts.count)
         for link in links where link.confidence == .confirmed {
-            let index = month(link.meeting.at) - first
-            if index >= 0, index < months {
-                values[index] += 1
+            guard let start = calendar.dateInterval(of: .month, for: link.meeting.at)?.start,
+                  let index = starts.firstIndex(of: start) else { continue }
+            counts[index] += 1
+        }
+        return zip(starts, counts).map { PersonMonthCount(start: $0, count: $1) }
+    }
+
+    /// Whether a confirmed meeting fell on each of the last `days` days,
+    /// oldest first and today last.
+    static func recentDays(_ links: [PersonMeetingLink], now: Date = .now, days: Int = 14) -> [Bool] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        var met = [Bool](repeating: false, count: days)
+        for link in links where link.confidence == .confirmed {
+            let back = calendar.dateComponents([.day], from: calendar.startOfDay(for: link.meeting.at), to: today).day ?? -1
+            if back >= 0, back < days {
+                met[days - 1 - back] = true
             }
         }
-        return values
+        return met
     }
 
     static func lastConfirmed(_ links: [PersonMeetingLink]) -> Date? {
         confirmed(links).map(\.meeting.at).max()
+    }
+
+    /// The usual number of days between meetings: the median gap between
+    /// the distinct days of confirmed meetings. Nil under four such days,
+    /// where a median says nothing yet.
+    static func usualGapDays(_ links: [PersonMeetingLink]) -> Int? {
+        let calendar = Calendar.current
+        let days = Set(confirmed(links).map { calendar.startOfDay(for: $0.meeting.at) }).sorted()
+        guard days.count >= 4 else { return nil }
+        let gaps = zip(days, days.dropFirst())
+            .compactMap { calendar.dateComponents([.day], from: $0, to: $1).day }
+            .sorted()
+        let middle = gaps.count / 2
+        return gaps.count.isMultiple(of: 2) ? (gaps[middle - 1] + gaps[middle] + 1) / 2 : gaps[middle]
     }
 
     /// "1 open item", "3 open items".
@@ -786,6 +966,14 @@ enum PeopleModel {
     static func people(_ count: Int) -> String {
         count == 1 ? "1 person" : "\(count) people"
     }
+}
+
+/// One calendar month of meetings with a person.
+struct PersonMonthCount: Identifiable, Equatable {
+    let start: Date
+    let count: Int
+
+    var id: Date { start }
 }
 
 /// One ledger line in the shape both ledgers keep it, so open loops and
@@ -869,6 +1057,21 @@ enum PeopleFormat {
         let days = Int(seconds / 86400)
         if days < 30 { return days == 1 ? "yesterday" : "\(days) days ago" }
         return moment(date)
+    }
+
+    /// How long ago, as a number and the words after it: ("3", "days ago").
+    /// Today and yesterday are words of their own.
+    static func since(_ date: Date, now: Date = .now) -> (value: String, unit: String?) {
+        let calendar = Calendar.current
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)).day ?? 0
+        switch days {
+        case ..<1: return ("Today", nil)
+        case 1: return ("Yesterday", nil)
+        case ..<14: return ("\(days)", "days ago")
+        case ..<61: return ("\(days / 7)", "weeks ago")
+        case ..<730: return ("\(days / 30)", "months ago")
+        default: return ("\(days / 365)", "years ago")
+        }
     }
 
     /// "18.4%" — the talk share, from thousandths.

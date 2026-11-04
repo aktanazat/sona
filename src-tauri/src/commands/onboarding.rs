@@ -381,6 +381,13 @@ pub fn complete_onboarding_practice(
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn complete_notes_onboarding(app: AppHandle) -> Result<(), String> {
+    update_settings(&app, |settings| settings.onboarding_completed = true)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

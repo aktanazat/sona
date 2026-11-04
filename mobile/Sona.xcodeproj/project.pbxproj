@@ -78,11 +78,16 @@
 		CA000000000000000000003C /* PhoneLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003C /* PhoneLibrary.swift */; };
 		CC000000000000000000003C /* PhoneLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003C /* PhoneLibrary.swift */; };
 		CA000000000000000000003D /* PhoneLibraryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003D /* PhoneLibraryScreen.swift */; };
+		CA0000000000000000000047 /* PhoneConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000047 /* PhoneConversationScreen.swift */; };
+		CA0000000000000000000048 /* PortableMemoryIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000048 /* PortableMemoryIndex.swift */; };
+		CC0000000000000000000048 /* PortableMemoryIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000048 /* PortableMemoryIndex.swift */; };
+		CA0000000000000000000049 /* PhoneMemoryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000049 /* PhoneMemoryScreen.swift */; };
 		CA000000000000000000003E /* PhoneCalendar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003E /* PhoneCalendar.swift */; };
 		CA000000000000000000003F /* SonaIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000003F /* SonaIntents.swift */; };
 		CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000040 /* PhoneCallsScreen.swift */; };
 		CC0000000000000000000041 /* PhoneParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000041 /* PhoneParityTests.swift */; };
 		CA0000000000000000000042 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000042 /* Assets.xcassets */; };
+		CA0000000000000000000046 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000046 /* PrivacyInfo.xcprivacy */; };
 		CB0000000000000000000043 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000043 /* Assets.xcassets */; };
 		CA0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
 		CC0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
@@ -182,6 +187,9 @@
 		BB000000000000000000003B /* CallService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallService.swift; sourceTree = "<group>"; };
 		BB000000000000000000003C /* PhoneLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibrary.swift; sourceTree = "<group>"; };
 		BB000000000000000000003D /* PhoneLibraryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLibraryScreen.swift; sourceTree = "<group>"; };
+		BB0000000000000000000047 /* PhoneConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneConversationScreen.swift; sourceTree = "<group>"; };
+		BB0000000000000000000048 /* PortableMemoryIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortableMemoryIndex.swift; sourceTree = "<group>"; };
+		BB0000000000000000000049 /* PhoneMemoryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMemoryScreen.swift; sourceTree = "<group>"; };
 		BB000000000000000000003E /* PhoneCalendar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCalendar.swift; sourceTree = "<group>"; };
 		BB000000000000000000003F /* SonaIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonaIntents.swift; sourceTree = "<group>"; };
 		BB0000000000000000000040 /* PhoneCallsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCallsScreen.swift; sourceTree = "<group>"; };
@@ -190,6 +198,7 @@
 		BB0000000000000000000043 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB0000000000000000000044 /* BoundedRewrite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedRewrite.swift; sourceTree = "<group>"; };
 		BB0000000000000000000045 /* DictationDeliveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationDeliveryTests.swift; sourceTree = "<group>"; };
+		BB0000000000000000000046 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -271,6 +280,7 @@
 				BB0000000000000000000030 /* ThoughtObject.swift */,
 				BB0000000000000000000031 /* CardObject.swift */,
 				BB0000000000000000000032 /* VaultReader.swift */,
+				BB0000000000000000000048 /* PortableMemoryIndex.swift */,
 				BB0000000000000000000001 /* CanonicalRecord.swift */,
 				BB0000000000000000000002 /* SonaCrypto.swift */,
 				BB0000000000000000000003 /* DeviceRecordingObject.swift */,
@@ -310,10 +320,13 @@
 				BB0000000000000000000026 /* Sona.entitlements */,
 				BB000000000000000000003C /* PhoneLibrary.swift */,
 				BB000000000000000000003D /* PhoneLibraryScreen.swift */,
+				BB0000000000000000000047 /* PhoneConversationScreen.swift */,
+				BB0000000000000000000049 /* PhoneMemoryScreen.swift */,
 				BB000000000000000000003E /* PhoneCalendar.swift */,
 				BB000000000000000000003F /* SonaIntents.swift */,
 				BB0000000000000000000040 /* PhoneCallsScreen.swift */,
 				BB0000000000000000000042 /* Assets.xcassets */,
+				BB0000000000000000000046 /* PrivacyInfo.xcprivacy */,
 			);
 			path = Sona;
 			sourceTree = "<group>";
@@ -491,6 +504,7 @@
 			files = (
 				CA0000000000000000000017 /* Localizable.strings in Resources */,
 				CA0000000000000000000042 /* Assets.xcassets in Resources */,
+				CA0000000000000000000046 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -555,6 +569,9 @@
 				CA000000000000000000003B /* CallService.swift in Sources */,
 				CA000000000000000000003C /* PhoneLibrary.swift in Sources */,
 				CA000000000000000000003D /* PhoneLibraryScreen.swift in Sources */,
+				CA0000000000000000000047 /* PhoneConversationScreen.swift in Sources */,
+				CA0000000000000000000048 /* PortableMemoryIndex.swift in Sources */,
+				CA0000000000000000000049 /* PhoneMemoryScreen.swift in Sources */,
 				CA000000000000000000003E /* PhoneCalendar.swift in Sources */,
 				CA000000000000000000003F /* SonaIntents.swift in Sources */,
 				CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */,
@@ -600,6 +617,7 @@
 				CC0000000000000000000038 /* KeyboardSession.swift in Sources */,
 				CC0000000000000000000039 /* DictationProfile.swift in Sources */,
 				CC000000000000000000003A /* PhoneMeeting.swift in Sources */,
+				CC0000000000000000000048 /* PortableMemoryIndex.swift in Sources */,
 				CC000000000000000000003B /* CallService.swift in Sources */,
 				CC000000000000000000003C /* PhoneLibrary.swift in Sources */,
 				CC0000000000000000000041 /* PhoneParityTests.swift in Sources */,

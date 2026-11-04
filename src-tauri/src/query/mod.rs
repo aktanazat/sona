@@ -60,7 +60,7 @@ use std::sync::Arc;
 /// Wire version of everything in this module, and of the read-only external
 /// surface in [`external`] that projects the same nouns out of the same
 /// corpus. Bumped whenever a public payload's bytes or interpretation changes.
-pub const QUERY_SCHEMA_VERSION: u32 = 3;
+pub const QUERY_SCHEMA_VERSION: u32 = 6;
 
 const DEFAULT_PAGE_SIZE: usize = 25;
 const MAX_PAGE_SIZE: usize = 100;
@@ -95,6 +95,7 @@ pub enum QueryScope {
     Dictations,
     People,
     Loops,
+    Notes,
 }
 
 impl QueryScope {
@@ -106,13 +107,21 @@ impl QueryScope {
                     | QueryRowKind::Dictation
                     | QueryRowKind::Person
                     | QueryRowKind::Loop
+                    | QueryRowKind::Note
             ),
             Self::Meetings => kind == QueryRowKind::Meeting,
             Self::Dictations => kind == QueryRowKind::Dictation,
             Self::People => kind == QueryRowKind::Person,
             Self::Loops => kind == QueryRowKind::Loop,
+            Self::Notes => kind == QueryRowKind::Note,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryAudience {
+    Local,
+    Remote,
 }
 
 /// Which noun a row is.
@@ -136,6 +145,7 @@ pub enum QueryRowKind {
     Series,
     Loop,
     Receipt,
+    Note,
 }
 
 /// One answer. `link` is always a `sona://` URL this app parses, so an agent
@@ -347,6 +357,14 @@ pub enum QueryLinkTarget {
     Dictation {
         history_id: i64,
     },
+    Note {
+        note_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version_id: Option<i64>,
+    },
+    Subject {
+        subject_id: String,
+    },
     /// The search surface, with the question the link carried. Empty means the
     /// link named no question, which is what the ⌘K chord does.
     Search {
@@ -403,6 +421,21 @@ pub fn dictation_link(history_id: i64) -> String {
     format!("sona://dictation/{history_id}")
 }
 
+pub fn note_link(note_id: &str) -> String {
+    format!("sona://note/{note_id}")
+}
+
+pub(crate) fn note_row(note: &crate::scratchpad::ScratchNote) -> QueryRow {
+    QueryRow {
+        kind: QueryRowKind::Note,
+        id: note.id.clone(),
+        title: bounded(&note.title, MAX_TITLE_CHARS),
+        snippet: bounded(&note.body, MAX_SNIPPET_CHARS),
+        when_utc_ms: note.updated_at_ms,
+        link: note_link(&note.id),
+    }
+}
+
 /// `sona://search?q=…` — this plane's own surface, with the question in it.
 pub fn search_link(query: &str) -> String {
     // SAFETY: this constant ASCII URL is valid by construction.
@@ -431,12 +464,14 @@ pub(crate) struct SearchRequest<'a> {
 pub async fn search(
     meetings: &Arc<MeetingSessionManager>,
     history: &Arc<HistoryManager>,
+    audience: QueryAudience,
     scope: QueryScope,
     query: &str,
     limit: Option<usize>,
     cursor: Option<QueryCursor>,
 ) -> Result<QuerySearchPage, QueryError> {
     let limit = page_size(limit)?;
+    let includes_notes = audience == QueryAudience::Local && scope.includes(QueryRowKind::Note);
     if tokens(query).is_empty() {
         return Ok(QuerySearchPage::nothing_searchable());
     }
@@ -466,17 +501,48 @@ pub async fn search(
         Vec::new()
     };
     let model = history.semantic_model();
-    assemble(
+    let page = assemble(
         &store,
         model.as_deref(),
         dictations,
         SearchRequest {
             scope,
             query,
-            limit,
+            limit: if includes_notes { limit + 1 } else { limit },
             cursor: cursor.as_ref(),
         },
+    )?;
+    if !includes_notes {
+        return Ok(page);
+    }
+    history.ensure_storage_unlocked().await;
+    let notes = crate::scratchpad::search_notes_after(
+        history,
+        query,
+        cursor.as_ref().map(|cursor| cursor.when_utc_ms),
+        cursor
+            .as_ref()
+            .filter(|cursor| cursor.kind == QueryRowKind::Note)
+            .map(|cursor| cursor.id.as_str()),
+        limit + 1,
     )
+    .map_err(|_| {
+        if history.storage_is_ready() {
+            QueryError::Failed
+        } else {
+            QueryError::Unavailable
+        }
+    })?;
+    let mut candidates = page.entries;
+    candidates.extend(notes.iter().map(note_row));
+    let (entries, next_cursor) = merge(candidates, cursor.as_ref(), limit);
+    let reason = search_reason(&entries, model.as_deref(), scope);
+    Ok(QuerySearchPage {
+        schema_version: QUERY_SCHEMA_VERSION,
+        entries,
+        next_cursor,
+        reason,
+    })
 }
 
 pub(crate) fn assemble(

@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 /// them. Which one opens first depends on what the core has written: a ledger
 /// wins, then notes, then the words themselves.
 enum MeetingReviewTab: String, CaseIterable, Identifiable {
+    case review
     case transcript
     case insights
     case ledger
@@ -17,8 +18,9 @@ enum MeetingReviewTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .review: "Review"
         case .transcript: "Transcript"
-        case .insights: "Insights"
+        case .insights: "Notes"
         case .ledger: "Ledger"
         }
     }
@@ -132,14 +134,6 @@ enum LoopChange {
     case assign(personId: MeetingPersonId?)
 }
 
-/// One line of a traced summary: the words, and the moment they came from.
-struct MeetingSummaryLine: Identifiable {
-    let id: Int
-    let text: String
-    let segmentId: TranscriptSegmentId?
-    let startOffsetNs: Int64?
-}
-
 // MARK: - Reading the wire a second way
 
 extension MeetingProcessingStatus {
@@ -231,28 +225,6 @@ extension MeetingTrendTotals {
     }
 }
 
-extension ArtifactCitedText {
-    /// `summaryLines`: the summary split into the lines the trace anchors,
-    /// or nothing when no line has a moment behind it.
-    func tracedLines(_ trace: [ArtifactSummaryLineTrace]?) -> [MeetingSummaryLine]? {
-        guard let trace, !trace.isEmpty else { return nil }
-        let anchors = Dictionary(trace.map { ($0.line, $0.anchor) }, uniquingKeysWith: { first, _ in first })
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-            .enumerated()
-            .map { (index: $0.offset, text: $0.element.trimmingCharacters(in: .whitespaces)) }
-            .filter { !$0.text.isEmpty }
-            .map { line in
-                MeetingSummaryLine(
-                    id: line.index,
-                    text: line.text,
-                    segmentId: anchors[line.index]?.segmentId,
-                    startOffsetNs: anchors[line.index]?.startOffsetNs
-                )
-            }
-        return lines.allSatisfy { $0.segmentId == nil } ? nil : lines
-    }
-}
-
 // MARK: - The store
 
 /// Every recorded meeting and the one being read.
@@ -287,6 +259,9 @@ final class MeetingsStore {
     private(set) var listError: String?
     private(set) var trend: MeetingTrendProjection?
     private(set) var trendRange: MeetingTrendRange = .days30
+    /// Each running meeting's latest progress. The core says when a run is
+    /// over, whatever its outcome, and that removes the entry.
+    private(set) var processing: [MeetingSessionId: MeetingProcessingUpdate] = [:]
 
     /// The cursor stack: one `created_at_utc_ms` per page walked back through.
     private var cursors: [Int64] = []
@@ -332,15 +307,27 @@ final class MeetingsStore {
     private(set) var reviewFailure: String?
     private(set) var tab: MeetingReviewTab = .transcript
     private(set) var chosenTab: MeetingReviewTab?
+    /// The part of the ledger's outcome bar picked, which narrows its threads.
+    private(set) var ledgerOutcome: LedgerOutcome?
     private(set) var receipt: MeetingOperationReceipt?
     private(set) var pending: String?
     private(set) var analytics: MeetingAnalyticsSnapshot?
     private(set) var loops: [MeetingLoopRow]?
     private(set) var loopsBusy = false
+    /// The open meeting's commitments that nothing in the planner cites yet.
+    private(set) var untracked: MeetingUntrackedActionsRead = .reading
+    private(set) var untrackedBusy = false
+    /// Commitments set aside while this meeting is open, kept in view so the
+    /// choice can be undone.
+    private(set) var setAside: [MeetingLoopRow] = []
     private(set) var people: [MeetingPersonContextRow] = []
     private(set) var transcriptQuery = ""
+    /// The one voice the transcript is narrowed to, picked on the talk bar.
+    private(set) var transcriptSpeaker: SpeakerId?
     private(set) var searchHits: [MeetingSearchHit]?
     private(set) var jump: SegmentJump?
+    private(set) var focusedNoteId: MeetingNoteId?
+    private(set) var originalWording = false
     private(set) var newNote = ""
 
     // MARK: What a person typed
@@ -367,6 +354,10 @@ final class MeetingsStore {
     private(set) var notice: String?
 
     private let core: Core
+    let audio: ConversationAudioPlayback
+    /// Other meetings' lines that still read the way the last correction
+    /// here fixed.
+    let relisten: RelistenStore
     @ObservationIgnored private var listTask: Task<Void, Never>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var transcriptTask: Task<Void, Never>?
@@ -382,12 +373,15 @@ final class MeetingsStore {
     /// without the session's revision moving, so the generation counts too.
     @ObservationIgnored private var analyticsKey: String?
     @ObservationIgnored private var loopsKey: String?
+    @ObservationIgnored private var untrackedKey: String?
     /// The note revision the core acknowledged: what the next save expects.
     @ObservationIgnored private var savedNoteRevision = 0
     @ObservationIgnored private var jumpNonce = 0
 
     init(core: Core) {
         self.core = core
+        audio = ConversationAudioPlayback(core: core)
+        relisten = RelistenStore(core: core)
 
         // A meeting that ends, or one whose phase moves, changes the list and
         // the page in front of a reader.
@@ -404,6 +398,12 @@ final class MeetingsStore {
                 self?.sessionChanged(line)
             }
         }
+        core.observe(CoreEvent.meetingProcessingProgress) { [weak self] line in
+            guard let self, let payload: MeetingProcessingProgressPayload = try? Core.payload(line) else { return }
+            self.processing[payload.sessionId] = payload.progress.map {
+                MeetingProcessingUpdate(progress: $0, receivedAt: Date())
+            }
+        }
         core.observe(CoreEvent.meetingRemoved) { [weak self] line in
             guard let self else { return }
             let payload: MeetingEventPayload? = try? Core.payload(line)
@@ -412,6 +412,10 @@ final class MeetingsStore {
             }
             self.reloadListSoon()
             Task { await self.loadFolders() }
+        }
+        core.observe("planning-changed-event") { [weak self] _ in
+            guard let self, self.openSessionId != nil else { return }
+            Task { await self.reloadUntracked() }
         }
         // A preflight is the live store's gate, not a page to read; opening it
         // here would put an empty review in front of the consent.
@@ -422,7 +426,7 @@ final class MeetingsStore {
                 self.closeReview()
             case .session:
                 if let sessionId = payload.sessionId {
-                    self.open(sessionId)
+                    self.open(sessionId, atMilliseconds: payload.atMilliseconds, segmentId: payload.segmentId)
                 }
             case .preflight:
                 break
@@ -430,8 +434,10 @@ final class MeetingsStore {
         }
     }
 
-    /// The first load: a page of meetings, the trend over them, and the folders.
+    /// The first load: a page of meetings, the trend over them, and the
+    /// folders. Progress heard from a core that has since gone is dropped.
     func start() async {
+        processing = [:]
         await loadPage()
         await loadTrend()
         await loadFolders()
@@ -449,6 +455,14 @@ final class MeetingsStore {
             guard !Task.isCancelled else { return }
             await self?.refreshSnapshot()
         }
+    }
+
+    /// The progress a meeting shows. Every step before the people runs while
+    /// the meeting is still processing, so an update from one of those steps
+    /// on a meeting that has moved on is from a run that ended unheard.
+    func processingUpdate(_ sessionId: MeetingSessionId, phase: MeetingPhase) -> MeetingProcessingUpdate? {
+        guard let update = processing[sessionId] else { return nil }
+        return phase == .processing || update.progress.stage == .people ? update : nil
     }
 
     /// Coalesces a burst of events into one list read.
@@ -933,7 +947,13 @@ final class MeetingsStore {
 
     // MARK: - Opening one meeting
 
-    func open(_ sessionId: MeetingSessionId) {
+    func open(
+        _ sessionId: MeetingSessionId,
+        atMilliseconds: UInt64? = nil,
+        segmentId: TranscriptSegmentId? = nil,
+        noteId: MeetingNoteId? = nil,
+        outcome: LedgerOutcome? = nil
+    ) {
         leaveOpenMeeting()
         openSessionId = sessionId
         snapshot = nil
@@ -942,13 +962,20 @@ final class MeetingsStore {
         analyticsKey = nil
         loops = nil
         loopsKey = nil
+        untracked = .reading
+        untrackedKey = nil
+        setAside = []
         people = []
         receipt = nil
-        chosenTab = nil
-        tab = .transcript
+        chosenTab = if outcome != nil { .ledger } else if noteId != nil { .review } else { nil }
+        tab = chosenTab ?? .transcript
+        ledgerOutcome = outcome
+        focusedNoteId = noteId
         transcriptQuery = ""
+        transcriptSpeaker = nil
         searchHits = nil
         jump = nil
+        originalWording = false
         newNote = ""
         userNotes = nil
         notesBody = ""
@@ -960,6 +987,9 @@ final class MeetingsStore {
         openTask = Task { [weak self] in
             guard let self else { return }
             await refreshSnapshot()
+            if isOpen(sessionId), !Task.isCancelled, atMilliseconds != nil || segmentId != nil {
+                openSource(atMilliseconds: atMilliseconds, segmentId: segmentId)
+            }
             await loadUserNotes()
             await loadPeople()
             if isOpen(sessionId) { reviewLoading = false }
@@ -972,6 +1002,7 @@ final class MeetingsStore {
         snapshot = nil
         reviewFailure = nil
         reviewLoading = false
+        focusedNoteId = nil
         followUpOpen = false
     }
 
@@ -983,6 +1014,7 @@ final class MeetingsStore {
         openTask?.cancel()
         notesTask?.cancel()
         transcriptTask?.cancel()
+        audio.stop()
         eventTask?.cancel()
         guard notesState == .unsaved, let draft = pendingDraft else { return }
         Task { await persist(draft) }
@@ -998,6 +1030,10 @@ final class MeetingsStore {
         self.tab = tab
     }
 
+    func pick(outcome: LedgerOutcome?) {
+        ledgerOutcome = outcome
+    }
+
     /// `meeting_get`. A meeting that is no longer there closes the page; a
     /// read that failed for any other reason says so on the page, with the
     /// way to read again.
@@ -1009,8 +1045,10 @@ final class MeetingsStore {
             guard isOpen(sessionId) else { return }
             snapshot = next
             if next.session.transcriptDeleted {
+                audio.stop()
                 transcriptTask?.cancel()
                 transcriptQuery = ""
+                transcriptSpeaker = nil
                 searchHits = nil
                 jump = nil
             }
@@ -1018,6 +1056,7 @@ final class MeetingsStore {
             settleTab(next)
             await loadAnalytics(next)
             await loadLoops(next)
+            await loadUntracked(next)
         } catch {
             guard isOpen(sessionId) else { return }
             if (error as? CoreError)?.remote(as: MeetingCommandError.self) == .notFound {
@@ -1057,7 +1096,9 @@ final class MeetingsStore {
             tab = chosenTab
             return
         }
-        if snapshot.currentLedger != nil {
+        if snapshot.session.phase == .reviewReady {
+            tab = .review
+        } else if snapshot.currentLedger != nil {
             tab = .ledger
         } else if !snapshot.artifacts.isEmpty || !snapshot.notes.isEmpty {
             tab = .insights
@@ -1102,9 +1143,10 @@ final class MeetingsStore {
             openSegments = []
         }
         for segment in snapshot.transcript {
-            let keep = needle.isEmpty
-                || hits.contains(segment.base.segmentId)
-                || segment.text.lowercased().contains(needle)
+            let keep = (transcriptSpeaker == nil || segment.assignedSpeakerId == transcriptSpeaker)
+                && (needle.isEmpty
+                    || hits.contains(segment.base.segmentId)
+                    || displayedText(segment).lowercased().contains(needle))
             guard keep else {
                 close()
                 continue
@@ -1198,6 +1240,7 @@ final class MeetingsStore {
         chosenTab = .transcript
         tab = .transcript
         transcriptQuery = ""
+        transcriptSpeaker = nil
         searchHits = nil
         jumpNonce += 1
         jump = SegmentJump(segmentId: segmentId, nonce: jumpNonce)
@@ -1213,9 +1256,131 @@ final class MeetingsStore {
         !transcriptDeleted && (snapshot?.transcript.contains { $0.base.segmentId == segmentId } ?? false)
     }
 
+    /// Narrows the transcript to one voice and shows it, or lets it go.
+    func showOnly(speaker: SpeakerId?) {
+        transcriptSpeaker = speaker
+        guard speaker != nil else { return }
+        chosenTab = .transcript
+        tab = .transcript
+    }
+
     func citationAction(_ segmentId: TranscriptSegmentId) -> (() -> Void)? {
         guard canJumpTo(segmentId) else { return nil }
         return { [weak self] in self?.jumpTo(segmentId) }
+    }
+
+    func chooseOriginalWording(_ original: Bool) {
+        originalWording = original
+    }
+
+    func displayedText(_ segment: TranscriptEffectiveSegment) -> String {
+        originalWording ? segment.base.text : segment.text
+    }
+
+    func canPlay(_ segmentId: TranscriptSegmentId) -> Bool {
+        guard !transcriptDeleted,
+              let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed })
+        else { return false }
+        return snapshot?.tracks.contains {
+            $0.trackId == segment.base.trackId && $0.durableRecordCount > 0
+                && ($0.firstOffsetNs ?? Int64.max) < segment.base.endOffsetNs
+                && ($0.lastOffsetNs ?? 0) > segment.base.startOffsetNs
+        } == true
+    }
+
+    func playContribution(_ segmentId: TranscriptSegmentId) {
+        guard let sessionId = openSessionId, canPlay(segmentId) else { return }
+        audio.play(sessionId: sessionId, segmentId: segmentId)
+    }
+
+    func playContribution(sessionId: String, segmentId: String) {
+        audio.play(sessionId: sessionId, segmentId: segmentId)
+    }
+
+    private func segment(at offset: UInt64, uniqueOnly: Bool = false) -> TranscriptEffectiveSegment? {
+        let moment = Int64(clamping: offset)
+        var result: TranscriptEffectiveSegment?
+        for segment in snapshot?.transcript ?? [] where !segment.removed
+            && ((segment.base.startOffsetNs <= moment && segment.base.endOffsetNs > moment)
+                || (offset.isMultiple(of: 1_000_000) && segment.base.startOffsetNs > moment
+                    && segment.base.startOffsetNs / 1_000_000 == moment / 1_000_000)) {
+            if !uniqueOnly { return segment }
+            if result != nil { return nil }
+            result = segment
+        }
+        return result
+    }
+
+    /// The segment where this speaker's turn starts at this moment: a
+    /// previous turn still finishing there is not the one asked for.
+    func segmentStarting(at offset: Int64, speaker: SpeakerId) -> TranscriptSegmentId? {
+        snapshot?.transcript.first {
+            !$0.removed && $0.base.startOffsetNs == offset && $0.assignedSpeakerId == speaker
+        }?.base.segmentId
+    }
+
+    private func openSource(atMilliseconds: UInt64?, segmentId: TranscriptSegmentId?) {
+        let conversion = atMilliseconds?.multipliedReportingOverflow(by: 1_000_000)
+        guard conversion?.overflow != true else {
+            notice = "Source timestamp is unavailable."
+            return
+        }
+        if let segmentId {
+            guard let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed }),
+                  segment.base.startOffsetNs >= 0, segment.base.endOffsetNs > segment.base.startOffsetNs
+            else {
+                notice = "Source words and recording are unavailable."
+                return
+            }
+            let start = UInt64(segment.base.startOffsetNs)
+            let requested = conversion?.partialValue ?? start
+            let moment = requested / 1_000_000 == start / 1_000_000 ? max(requested, start) : requested
+            guard moment >= start, moment < UInt64(segment.base.endOffsetNs) else {
+                notice = "Source timestamp does not match these words."
+                return
+            }
+            jumpTo(segmentId)
+            guard canPlay(segmentId), let sessionId = openSessionId else {
+                notice = "Recording is not retained."
+                return
+            }
+            audio.play(sessionId: sessionId, segmentId: segmentId,
+                startOffsetNs: moment > 4_000_000_000 ? moment - 4_000_000_000 : 0)
+        } else if let offset = conversion?.partialValue, let segment = segment(at: offset) {
+            if canPlay(segment.base.segmentId) { playAtOffset(offset) }
+            else {
+                jumpTo(segment.base.segmentId)
+                notice = "Recording is not retained."
+            }
+        } else {
+            notice = "Source words and recording are unavailable."
+        }
+    }
+
+    func canPlayBookmark(_ offset: UInt64) -> Bool {
+        guard !transcriptDeleted else { return false }
+        let moment = Int64(clamping: offset)
+        return snapshot?.tracks.contains {
+            $0.durableRecordCount > 0
+                && ($0.firstOffsetNs ?? .max) <= moment
+                && ($0.lastOffsetNs ?? 0) > moment
+        } == true
+    }
+
+    func playBookmark(_ offset: UInt64) {
+        guard let sessionId = openSessionId, canPlayBookmark(offset) else { return }
+        audio.playBookmark(sessionId: sessionId, offset: offset)
+    }
+
+    func playAtOffset(_ offset: UInt64) {
+        guard let sessionId = openSessionId, let segment = segment(at: offset),
+              canPlay(segment.base.segmentId) else { return }
+        jumpTo(segment.base.segmentId)
+        if self.segment(at: offset, uniqueOnly: true) == nil {
+            notice = "Speakers overlap at this moment."
+        }
+        let contextStart = offset > 4_000_000_000 ? offset - 4_000_000_000 : 0
+        audio.play(sessionId: sessionId, segmentId: segment.base.segmentId, startOffsetNs: contextStart)
     }
 
     // MARK: - Editing what the core wrote
@@ -1244,14 +1409,28 @@ final class MeetingsStore {
     }
 
     func mergeSpeaker(_ source: SpeakerId, into target: SpeakerId) {
-        mutate("Merging the speakers", "meeting_speaker_merge") { session in
+        mutate(
+            "Merging the speakers", "meeting_speaker_merge",
+            then: {
+                guard self.receipt?.refusal == nil, self.transcriptSpeaker == source else { return }
+                self.transcriptSpeaker = target
+            }
+        ) { session in
             MeetingRequest.speakerMerge(
                 session.sessionId, revision: session.revision, source: source, target: target)
         }
     }
 
-    func editSegment(_ segmentId: TranscriptSegmentId, text: String, removed: Bool = false) {
-        mutate(removed ? "Removing the line" : "Correcting the line", "meeting_segment_edit") { session in
+    func editSegment(_ segment: TranscriptEffectiveSegment, text: String, removed: Bool = false) {
+        let segmentId = segment.base.segmentId
+        let fix = removed ? nil : snapshot.flatMap {
+            RelistenFix.between(sessionId: $0.session.sessionId, segmentId: segmentId,
+                                shown: segment.text, saved: text)
+        }
+        mutate(removed ? "Removing the line" : "Correcting the line", "meeting_segment_edit", then: {
+            guard self.receipt?.refusal == nil else { return }
+            if let fix { self.relisten.check(fix) } else { self.relisten.clear() }
+        }) { session in
             MeetingRequest.segmentEdit(
                 session.sessionId, revision: session.revision, segmentId: segmentId,
                 replacementText: text, removed: removed)
@@ -1495,7 +1674,93 @@ final class MeetingsStore {
                 self.error = reason(error)
                 await reloadLoops()
             }
+            await reloadUntracked()
         }
+    }
+
+    // MARK: - Commitments not in the planner yet
+
+    private func loadUntracked(_ snapshot: MeetingReviewSnapshot) async {
+        guard untrackedKey != MeetingsStore.key(snapshot) else { return }
+        untrackedKey = MeetingsStore.key(snapshot)
+        await reloadUntracked()
+    }
+
+    private func reloadUntracked() async {
+        guard let sessionId = openSessionId else { return }
+        do {
+            let read: MeetingUntrackedActions = try await core.request(
+                "meeting_untracked_actions", MeetingRequest.session(sessionId))
+            guard isOpen(sessionId) else { return }
+            untracked = .read(MeetingUntrackedActions(
+                actions: read.actions.filter { action in !setAside.contains { $0.loopId == action.loopId } },
+                projects: read.projects))
+        } catch {
+            guard isOpen(sessionId) else { return }
+            untracked = .unavailable(reason(error))
+        }
+    }
+
+    /// Read the commitments again after a read that failed.
+    func retryUntracked() {
+        untracked = .reading
+        Task { await reloadUntracked() }
+    }
+
+    /// One planner task for the commitment, in the project picked. The row
+    /// leaves and the toast names where it went.
+    func track(_ action: MeetingLoopRow, in project: PlanningProject) {
+        untrackedBusy = true
+        Task {
+            defer { untrackedBusy = false }
+            do {
+                let _: PlanningTask = try await core.request(
+                    "planning_track_action", MeetingRequest.trackAction(action.loopId, projectId: project.id))
+                drop(action)
+                notice = "Tracked in \(project.title)."
+            } catch {
+                self.error = reason(error)
+                await reloadUntracked()
+            }
+        }
+    }
+
+    /// The commitment is not work, so it stops asking to be tracked. It stays
+    /// in view, set aside, until the meeting is closed.
+    func setAside(_ action: MeetingLoopRow) {
+        untrackedBusy = true
+        Task {
+            defer { untrackedBusy = false }
+            do {
+                try await core.request("planning_dismiss_action", MeetingRequest.dismissAction(action.loopId))
+                drop(action)
+                setAside.append(action)
+            } catch {
+                self.error = reason(error)
+                await reloadUntracked()
+            }
+        }
+    }
+
+    /// Asks about a set-aside commitment again.
+    func undoSetAside(_ action: MeetingLoopRow) {
+        untrackedBusy = true
+        Task {
+            defer { untrackedBusy = false }
+            do {
+                try await core.request("planning_restore_action", MeetingRequest.dismissAction(action.loopId))
+                setAside.removeAll { $0.loopId == action.loopId }
+            } catch {
+                self.error = reason(error)
+            }
+            await reloadUntracked()
+        }
+    }
+
+    private func drop(_ action: MeetingLoopRow) {
+        guard case let .read(read) = untracked else { return }
+        untracked = .read(MeetingUntrackedActions(
+            actions: read.actions.filter { $0.loopId != action.loopId }, projects: read.projects))
     }
 
     // MARK: - People in the room

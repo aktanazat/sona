@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::SystemTime;
 use transcribe_cpp::{
     Diarize, Model as SortformerModel, RunExtension, RunOptions, Session as SortformerRunSession,
     SortformerPreset, SortformerStreamOptions, SpeakerSegment,
@@ -171,6 +172,7 @@ impl DiarizationModelAvailability {
 #[derive(Clone)]
 pub struct MeetingDiarizer {
     state: Arc<Mutex<DownloadState>>,
+    voiceprint_state: Arc<Mutex<DownloadState>>,
     allow_download: bool,
     #[cfg(test)]
     wespeaker_ensure_requests: Arc<AtomicUsize>,
@@ -197,6 +199,7 @@ impl MeetingDiarizer {
     fn with_download(allow_download: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(DownloadState::Idle)),
+            voiceprint_state: Arc::new(Mutex::new(DownloadState::Idle)),
             allow_download,
             #[cfg(test)]
             wespeaker_ensure_requests: Arc::new(AtomicUsize::new(0)),
@@ -241,7 +244,7 @@ impl MeetingDiarizer {
             });
         }
         let fallback = verified_asset_path(model_directory, wespeaker_manifest());
-        self.start_download(model_directory);
+        self.start_download(&self.state, model_directory, model_manifest());
         match fallback {
             Some(path) => Ok(PreparedDiarizationModel {
                 path,
@@ -272,25 +275,43 @@ impl MeetingDiarizer {
             .ok_or(DiarizationError::ModelInvalid)
     }
 
-    /// Start at most one background download of the primary asset. Already
-    /// downloading, or downloads disabled: does nothing.
-    fn start_download(&self, model_directory: &Path) {
+    /// The WeSpeaker asset that turns each diarized speaker into a remembered
+    /// voice. When it is not on disk yet, one background download starts and
+    /// this meeting goes without.
+    pub fn voiceprint_embedder(&self, model_directory: &Path) -> Option<PreparedDiarizationModel> {
+        let embedder = self.wespeaker_fallback(model_directory);
+        if embedder.is_none() {
+            self.start_download(
+                &self.voiceprint_state,
+                model_directory,
+                wespeaker_manifest(),
+            );
+        }
+        embedder
+    }
+
+    /// Start at most one background download per asset. Already downloading,
+    /// or downloads disabled: does nothing.
+    fn start_download(
+        &self,
+        state: &Arc<Mutex<DownloadState>>,
+        model_directory: &Path,
+        manifest: &'static DiarizationModelManifest,
+    ) {
         if !self.allow_download {
             return;
         }
-        let mut state = self
-            .state
+        let mut current = state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *state != DownloadState::Idle && *state != DownloadState::Failed {
+        if *current != DownloadState::Idle && *current != DownloadState::Failed {
             return;
         }
-        *state = DownloadState::Downloading;
-        let state = Arc::clone(&self.state);
+        *current = DownloadState::Downloading;
+        let state = Arc::clone(state);
         let model_directory = model_directory.to_path_buf();
         thread::spawn(move || {
-            let result =
-                tauri::async_runtime::block_on(download_asset(&model_directory, model_manifest()));
+            let result = tauri::async_runtime::block_on(download_asset(&model_directory, manifest));
             let mut state = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -464,7 +485,7 @@ fn stage_verified_asset(
         .map_err(|_| DiarizationError::DownloadFailed)?;
     drop(destination);
 
-    if !asset_is_verified(temporary, manifest) {
+    if !asset_hashes_to_manifest(temporary, manifest) {
         return Err(DiarizationError::ModelInvalid);
     }
     Ok(())
@@ -478,7 +499,46 @@ fn verified_asset_path(
     asset_is_verified(&path, manifest).then_some(path)
 }
 
+/// Files whose bytes already hashed to their manifest digest in this process.
+/// A model is opened several times per meeting and hashing it is most of the
+/// cost of opening it; a file that is replaced or rewritten changes its length
+/// or modification time and is hashed again.
+static VERIFIED_ASSETS: Mutex<Vec<(PathBuf, String, u64, SystemTime)>> = Mutex::new(Vec::new());
+
 fn asset_is_verified(path: &Path, manifest: &DiarizationModelManifest) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if metadata.len() != manifest.size_bytes {
+        return false;
+    }
+    let Ok(modified) = metadata.modified() else {
+        return asset_hashes_to_manifest(path, manifest);
+    };
+    let memo = || {
+        VERIFIED_ASSETS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    let stamp = (
+        path.to_path_buf(),
+        manifest.sha256.clone(),
+        metadata.len(),
+        modified,
+    );
+    if memo().contains(&stamp) {
+        return true;
+    }
+    if !asset_hashes_to_manifest(path, manifest) {
+        return false;
+    }
+    let mut verified = memo();
+    verified.retain(|(known, sha256, _, _)| known != path || *sha256 != manifest.sha256);
+    verified.push(stamp);
+    true
+}
+
+fn asset_hashes_to_manifest(path: &Path, manifest: &DiarizationModelManifest) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
     };

@@ -10,7 +10,7 @@ const MAX_CLOUD_MEETING_BUNDLE_ROWS: usize = 100_000;
 const MAX_CLOUD_MEETING_BUNDLE_TEXT_BYTES: usize = 256 * 1024;
 
 /// A portable, non-audio normalized meeting snapshot suitable for encrypted sync.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CloudMeetingBundleV1 {
     pub format_version: u32,
@@ -20,6 +20,8 @@ pub(crate) struct CloudMeetingBundleV1 {
     pub transcript_purged_at_utc_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_analytics: Option<super::analytics::MeetingAnalytics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_context: Option<super::context::ConversationContext>,
     pub session: CloudBundleSession,
     pub run_plans: Vec<CloudBundleRunPlan>,
     pub consents: Vec<CloudBundleConsent>,
@@ -189,6 +191,8 @@ pub(crate) struct CloudBundleTranscriptSegment {
     pub end_offset_ns: u64,
     pub speaker_id: SpeakerId,
     pub base_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned_text: Option<String>,
     pub confidence_milli: Option<u16>,
 }
 
@@ -298,6 +302,19 @@ impl CloudMeetingBundleV1 {
                 return Err(StoreError::Invalid);
             }
             validate_text(&notes.body)?;
+        }
+        if let Some(context) = &self.conversation_context {
+            if context.session_id != self.session.session_id
+                || i64::try_from(context.revision).is_err()
+                || context
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| !location.is_valid())
+            {
+                return Err(StoreError::Invalid);
+            }
+            validate_optional_text(&context.calendar_name)?;
+            validate_optional_text(&context.calendar_location)?;
         }
 
         let plan_ids = unique_ids(self.run_plans.iter().map(|plan| plan.plan_id))?;
@@ -478,6 +495,7 @@ impl CloudMeetingBundleV1 {
                 return Err(StoreError::Invalid);
             }
             validate_text(&segment.base_text)?;
+            validate_optional_text(&segment.learned_text)?;
         }
         let mut edit_keys = HashSet::new();
         for edit in &self.segment_edits {
@@ -775,6 +793,7 @@ mod tests {
             format_version: CLOUD_MEETING_BUNDLE_VERSION,
             audio_included: false,
             transcript_purged_at_utc_ms: None,
+            conversation_context: None,
             retained_analytics: None,
             session: CloudBundleSession {
                 session_id,
@@ -894,6 +913,7 @@ mod tests {
             state: MeetingArtifactState::Current,
             generated_at_utc_ms: 3,
             content: Some(content),
+            receipt: None,
         });
         bundle.questions.push(MeetingAnswer {
             question_id: MeetingQuestionId::new(),

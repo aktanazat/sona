@@ -8,7 +8,6 @@ struct AgentBridgeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
             ErrorNote(store.error)
             controls
             projects
@@ -17,21 +16,6 @@ struct AgentBridgeView: View {
             queue
             rules
         }
-    }
-
-    private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Agents").headlineText()
-                Text("Coding agents on this Mac, what they asked for, and what Sona may answer.")
-                    .bodyText(15, Theme.inkSecondary)
-            }
-            Spacer()
-            Button(store.loading ? "Refreshing…" : "Refresh") { store.refreshAll() }
-                .buttonStyle(.compact)
-                .disabled(store.loading)
-        }
-        .padding(.bottom, 20)
     }
 
     private var controls: some View {
@@ -64,7 +48,7 @@ struct AgentBridgeView: View {
         } content: {
             Card {
                 if store.bridge.allowedProjects.isEmpty {
-                    AgentBridgeEmpty("No projects are authorized.")
+                    CardLine("No projects are authorized.")
                 } else {
                     ForEach(store.bridge.allowedProjects) { project in
                         CardRow {
@@ -117,10 +101,10 @@ struct AgentBridgeView: View {
 
     private var activity: some View {
         VStack(alignment: .leading, spacing: 0) {
-            AgentBridgeSection("Sessions") {
+            PageSection("Sessions") {
                 Card {
                     if store.sessions.isEmpty {
-                        AgentBridgeEmpty("No agent activity yet.")
+                        CardLine("No agent activity yet.")
                     } else {
                         ForEach(store.sessions) { session in
                             CardRow {
@@ -136,10 +120,10 @@ struct AgentBridgeView: View {
                     }
                 }
             }
-            AgentBridgeSection("Requests") {
+            PageSection("Requests") {
                 Card {
                     if store.requests.isEmpty {
-                        AgentBridgeEmpty("No requests yet.")
+                        CardLine("No requests yet.")
                     } else {
                         ForEach(store.requests) { request in
                             AgentBridgeRequestRow(store: store, request: request)
@@ -152,13 +136,13 @@ struct AgentBridgeView: View {
 
     private var queue: some View {
         VStack(alignment: .leading, spacing: 0) {
-            AgentBridgeSection("Reply preview") {
+            PageSection("Reply preview") {
                 AgentBridgeComposer(store: store)
             }
-            AgentBridgeSection("Pending replies") {
+            PageSection("Pending replies") {
                 Card {
                     if store.pending.isEmpty {
-                        AgentBridgeEmpty("No pending replies.")
+                        CardLine("No pending replies.")
                     } else {
                         ForEach(store.pending) { message in
                             AgentBridgePendingRow(store: store, message: message)
@@ -176,7 +160,7 @@ struct AgentBridgeView: View {
         ) {
             Card {
                 if store.bridge.permissionRules.isEmpty {
-                    AgentBridgeEmpty("No permission rules.")
+                    CardLine("No permission rules.")
                 } else {
                     ForEach(store.bridge.permissionRules) { rule in
                         CardRow {
@@ -293,7 +277,7 @@ private struct AgentBridgeComposer: View {
     var body: some View {
         Card {
             if !store.interactiveReady {
-                AgentBridgeEmpty("Turn on agent connections and at least one agent before replying.")
+                CardLine("Turn on agent connections and at least one agent before replying.")
             }
             CardRow {
                 Text("Reply destination").bodyText()
@@ -359,10 +343,11 @@ private struct AgentBridgeSection<Action: View, Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(label).sectionLabel()
+                        .accessibilityAddTraits(.isHeader)
                     if let meta {
                         Text(meta).metaText()
                     }
@@ -372,7 +357,7 @@ private struct AgentBridgeSection<Action: View, Content: View>: View {
             }
             content
         }
-        .padding(.bottom, 32)
+        .padding(.bottom, 28)
     }
 }
 
@@ -395,25 +380,10 @@ private struct AgentBridgeBlock<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             content
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
-    }
-}
-
-/// What a list says when it has nothing in it.
-private struct AgentBridgeEmpty: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        CardRow {
-            Text(text).metaText()
-        }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 

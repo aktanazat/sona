@@ -101,7 +101,7 @@ struct ProvidersView: View {
             Card {
                 if let status = store.localCleanup {
                     CardRow {
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(status.name).bodyText()
                             Text("\(status.language) · \(Model.bytes(status.sizeBytes))").metaText()
                             if status.phase == .downloading {
@@ -161,7 +161,7 @@ struct ProvidersView: View {
                 if store.isLocalProvider {
                     ProviderFieldRow("Model") {
                         Text(store.localCleanup.map { "\($0.name) · \($0.language)" } ?? store.model)
-                            .bodyText(15, Theme.inkSecondary)
+                            .bodyText(14, Theme.inkSecondary)
                     }
                 } else if store.isAppleProvider {
                     if store.appleIntelligenceUnavailable {
@@ -172,7 +172,7 @@ struct ProvidersView: View {
                     }
                     ProviderFieldRow("Model") {
                         Text(store.model.isEmpty ? (store.selectedProvider?.label ?? "") : store.model)
-                            .bodyText(15, Theme.inkSecondary)
+                            .bodyText(14, Theme.inkSecondary)
                     }
                 } else {
                     if store.isCustomProvider {
@@ -306,6 +306,7 @@ struct ProvidersView: View {
                         .bodyText(14, store.model.isEmpty ? Theme.inkTertiary : Theme.ink)
                 }
                 .menuStyle(.borderlessButton)
+                .tint(Theme.inkSecondary)
                 .fixedSize()
                 .disabled(store.modelChoices.isEmpty || store.isSavingModel)
 
@@ -457,8 +458,7 @@ struct ProviderNoteRow: View {
     var body: some View {
         CardRow {
             Text(text)
-                .font(TypeScale.body(13))
-                .foregroundStyle(tone)
+                .metaText(tone)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -479,7 +479,7 @@ struct SecretKeyField: View {
         .font(TypeScale.body())
         .foregroundStyle(Theme.ink)
         .padding(.horizontal, 12)
-        .frame(height: 36)
+        .frame(height: 32)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
         .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
         .onSubmit(onCommit)

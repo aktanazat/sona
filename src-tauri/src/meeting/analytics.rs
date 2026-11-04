@@ -54,6 +54,8 @@ pub struct MeetingTalkMetrics {
     pub speakers: Vec<SpeakerTalkShare>,
     pub longest_monologue_ns: u64,
     pub longest_monologue_speaker_id: Option<SpeakerId>,
+    /// Where the longest monologue starts, so a reader can play it.
+    pub longest_monologue_start_ns: Option<u64>,
     /// Median silence left between one speaker finishing and the next starting.
     /// `None` when the floor never changed hands.
     pub median_switch_gap_ms: Option<u64>,
@@ -443,6 +445,7 @@ pub fn talk_metrics(segments: &[AnalyticsSegment]) -> MeetingTalkMetrics {
 
     let mut longest_monologue_ns = 0_u64;
     let mut longest_monologue_speaker_id = None;
+    let mut longest_monologue_start_ns = None;
     for turn in &turns {
         let length_ns = turn.end_offset_ns - turn.start_offset_ns;
         if let Some(share) = shares
@@ -455,6 +458,7 @@ pub fn talk_metrics(segments: &[AnalyticsSegment]) -> MeetingTalkMetrics {
         if length_ns > longest_monologue_ns {
             longest_monologue_ns = length_ns;
             longest_monologue_speaker_id = Some(turn.speaker_id);
+            longest_monologue_start_ns = Some(turn.start_offset_ns);
         }
     }
 
@@ -484,6 +488,7 @@ pub fn talk_metrics(segments: &[AnalyticsSegment]) -> MeetingTalkMetrics {
         speakers: shares,
         longest_monologue_ns,
         longest_monologue_speaker_id,
+        longest_monologue_start_ns,
         median_switch_gap_ms: median(&mut switch_gaps_ms),
     }
 }
@@ -627,6 +632,7 @@ mod tests {
         assert!(metrics.speakers.is_empty());
         assert_eq!(metrics.longest_monologue_ns, 0);
         assert_eq!(metrics.longest_monologue_speaker_id, None);
+        assert_eq!(metrics.longest_monologue_start_ns, None);
         assert_eq!(metrics.median_switch_gap_ms, None);
     }
 
@@ -684,6 +690,7 @@ mod tests {
         );
         assert_eq!(metrics.longest_monologue_ns, 59 * SECOND_NS);
         assert_eq!(metrics.longest_monologue_speaker_id, Some(buyer));
+        assert_eq!(metrics.longest_monologue_start_ns, Some(41 * SECOND_NS));
         // Gaps of 1s and 3s.
         assert_eq!(metrics.median_switch_gap_ms, Some(2_000));
     }

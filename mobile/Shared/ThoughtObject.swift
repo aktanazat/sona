@@ -92,9 +92,9 @@ enum ThoughtObject {
     /// sorter and the board open a manifest under this value and no other.
     static let sourceFormat = "sona-thought-v1"
 
-    /// Attachments occupy consecutive chunk ranges in attachment order, each sliced at
-    /// the crypto v1 chunk ceiling. Crypto v1 also requires at least one chunk, so a
-    /// thought with nothing attached carries one empty chunk.
+    /// Attachment spans stay separate so existing readers can locate each source.
+    /// Crypto v1 requires every non-final ciphertext chunk to be exactly 4 MiB;
+    /// bytes after an attachment's declared byte_length are zero padding.
     static func spans(_ attachments: [ThoughtAttachment]) -> [ThoughtChunkSpan] {
         var next = 0
         return attachments.enumerated().map { index, attachment in
@@ -121,6 +121,13 @@ enum ThoughtObject {
             index: index - span.start, audioByteLength: attachment.byteLength
         )
         return (attachment, range)
+    }
+
+    static func plaintextSize(
+        _ attachments: [ThoughtAttachment], index: Int, sourceBytes: Int
+    ) -> Int {
+        index < chunkCount(attachments) - 1
+            ? DeviceRecordingObject.maxPlaintextChunkBytes : sourceBytes
     }
 
     static func manifest(

@@ -28,9 +28,9 @@ use crate::meeting::loop_types::{
 };
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
-    ArtifactCitation, GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId,
-    MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationActor, OperationReceipt,
-    SourceKind,
+    ArtifactCitation, GeneratedMeetingArtifacts, MeetingActionItem, MeetingCommandKind,
+    MeetingOperationId, MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationActor,
+    OperationReceipt, SourceKind,
 };
 use crate::meeting::workflow_types::WorkflowId;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -370,6 +370,8 @@ pub(crate) struct MeetingLedgerRows {
     /// never started.
     pub at_utc_ms: i64,
     pub rows: Vec<MeetingLoopRow>,
+    /// The notes pass's action items, where a commitment's due day lives.
+    pub action_items: Vec<MeetingActionItem>,
 }
 
 /// One corpus-wide ledger read: the rows a reader may have, and the one fact
@@ -434,6 +436,7 @@ pub(crate) fn ledger_rows_in(
                 session_id,
                 ledger_loop_seeds(session_id, &ledger),
             )?,
+            action_items: content.action_items,
         });
     }
     Ok(walked)
@@ -810,6 +813,56 @@ pub(crate) fn carried_since_in(
         current = MeetingLoopId(predecessor_id);
     }
     Ok(earliest)
+}
+
+/// Every occurrence of this loop, oldest first: the carry chain walked back to
+/// its root and forward to the occurrence still live. Read from the stored
+/// links like [`carried_since_in`], and bounded the same way.
+pub(crate) fn carry_chain_in(
+    connection: &Connection,
+    loop_id: &MeetingLoopId,
+) -> Result<Vec<MeetingLoopId>, StoreError> {
+    let mut chain = Vec::new();
+    let mut current = loop_id.clone();
+    for _ in 0..MAX_CARRY_CHAIN {
+        let predecessor: Option<String> = connection
+            .query_row(
+                "SELECT loop_id FROM meeting_loop_states WHERE carried_into_loop_id = ?1",
+                params![current.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(predecessor) = predecessor.map(MeetingLoopId) else {
+            break;
+        };
+        if predecessor == *loop_id || chain.contains(&predecessor) {
+            break;
+        }
+        chain.push(predecessor.clone());
+        current = predecessor;
+    }
+    chain.reverse();
+    chain.push(loop_id.clone());
+    let mut current = loop_id.clone();
+    for _ in 0..MAX_CARRY_CHAIN {
+        let successor: Option<String> = connection
+            .query_row(
+                "SELECT carried_into_loop_id FROM meeting_loop_states WHERE loop_id = ?1",
+                params![current.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(successor) = successor.map(MeetingLoopId) else {
+            break;
+        };
+        if chain.contains(&successor) {
+            break;
+        }
+        chain.push(successor.clone());
+        current = successor;
+    }
+    Ok(chain)
 }
 
 /// Who the operation that closed this row was run by, off the receipt it

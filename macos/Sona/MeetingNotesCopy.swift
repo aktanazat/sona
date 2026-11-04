@@ -2,8 +2,8 @@ import AppKit
 
 /// "Copy notes": the notes the review page shows, put on the clipboard once as
 /// formatted text that pastes into a mail or a document with its headings and
-/// lists, and once as Markdown. The sections, labels and order are the page's
-/// and a shared link's: what Sona wrote, then the person's own notes.
+/// lists, and once as Markdown. The sections, labels and order are the page's:
+/// what Sona wrote, then the person's own notes.
 enum MeetingNotesCopy {
     struct Item {
         let text: String
@@ -58,22 +58,25 @@ enum MeetingNotesCopy {
             if !section.paragraphs.isEmpty || !section.items.isEmpty { result.append(section) }
         }
         if let content = snapshot.readableArtifact?.content {
-            add(Section(heading: "Summary", paragraphs: paragraphs(content.summary.text)))
-            add(Section(
-                heading: "What was covered",
-                items: content.outline.compactMap { item($0.title.text, meta: $0.detail?.text) }))
-            add(Section(heading: "Decisions", items: content.decisions.compactMap { item($0.text) }))
-            add(Section(heading: "Action items", items: content.actionItems.compactMap { action in
-                let owner = [action.ownerText, action.dueText]
-                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
+            let notes = MeetingNotesDigest(
+                content, transcript: snapshot.transcript, speakerNames: snapshot.speakerNames)
+            add(Section(heading: "Outcome", paragraphs: notes.outcome.map { [$0.text] } ?? []))
+            add(Section(heading: "Decisions", items: notes.decisions.compactMap { item($0.text) }))
+            add(Section(heading: "Action items", items: notes.actions.compactMap { action in
+                let meta = [action.owner, action.due.map { "due \($0)" }]
+                    .compactMap { $0 }
                     .joined(separator: " · ")
-                return item(action.text.text, meta: owner)
+                return item(action.line.text, meta: meta)
             }))
             add(Section(
-                heading: "Questions worth answering",
-                items: content.keyQuestions.compactMap { item($0.text) }))
-            add(Section(heading: "Risks", items: content.risks.compactMap { item($0.text) }))
+                heading: "Key numbers",
+                items: notes.figures.compactMap { item($0.value, meta: $0.line.text) }))
+            add(Section(heading: "Open questions", items: notes.questions.compactMap { item($0.text) }))
+            add(Section(heading: "Risks", items: notes.risks.compactMap { item($0.text) }))
+            add(Section(
+                heading: "What was covered",
+                items: notes.topics.compactMap { item($0.line.text, meta: $0.points.joined(separator: " ")) }
+                    + notes.covered.compactMap { item($0.text) }))
             add(Section(heading: "Follow up", paragraphs: paragraphs(content.followUpDraft.text)))
         }
         add(Section(heading: "Your own notes", paragraphs: paragraphs(userNotes)))

@@ -483,6 +483,7 @@ fn error_code(error: StoreError) -> &'static str {
         StoreError::InsufficientEnrollmentEvidence => "insufficient_enrollment_evidence",
         StoreError::ProfileModelIncompatible => "profile_model_incompatible",
         StoreError::ProfileMergeResolutionRequired => "profile_merge_resolution_required",
+        StoreError::TranscriptCorrectionConflict => "transcript_correction_conflict",
         StoreError::VoiceInvariant => "voice_invariant",
     }
 }

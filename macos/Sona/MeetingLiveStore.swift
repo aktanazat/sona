@@ -73,6 +73,20 @@ struct MeetingLiveWarning {
     let urgent: Bool
 }
 
+/// `MeetingCallSilence`: how long the running call has had no sound while
+/// the person talked. Nil while the call can be heard.
+struct MeetingCallSilence: Decodable {
+    let silentMs: UInt64?
+}
+
+/// The call of one recording, silent for this long while the person talks.
+struct MeetingCallSilent: Equatable {
+    let sessionId: MeetingSessionId
+    let silentMs: UInt64
+
+    var clock: String { (Int64(clamping: silentMs) * 1_000_000).meetingOffsetClock }
+}
+
 /// A capture's clock, as every surface counts it. The core reports how far
 /// the capture has durably written, which trails the recording by however
 /// full the current chunk is, so each read implies a start a little late,
@@ -239,12 +253,47 @@ final class MeetingLiveStore {
     /// The words recognized so far by the pass that runs during capture.
     /// Separate from `live.transcript`, which is the stored reading and is
     /// empty until the meeting stops.
-    private(set) var provisional: [MeetingProvisionalSegment] = []
+    private(set) var provisional: [MeetingProvisionalSegment] = [] {
+        didSet { scheduleRecall() }
+    }
     /// The clock of each capture a surface shows, by session: the live
     /// screen's, the panel's, and a ritual card's, which are one session
     /// unless two captures overlap. Only `anchorClocks` writes it, on every
     /// read of `live` or `active`, so each surface counts the same seconds.
     private(set) var clocks: [MeetingSessionId: MeetingCaptureClock] = [:]
+    /// The typed bookmarks the live recording holds, by kind.
+    private(set) var bookmarkCounts: BookmarkCounts?
+
+    struct BookmarkCounts: Equatable {
+        let sessionId: MeetingSessionId
+        var counts: [ConversationBookmarkKind: Int]
+    }
+    /// The recording whose call has gone silent while the person talks, read
+    /// once a second while a capture records. Nil while the call is heard.
+    private(set) var callSilent: MeetingCallSilent?
+    @ObservationIgnored private var silenceWatch: (sessionId: MeetingSessionId, task: Task<Void, Never>)?
+    /// A meeting capture is running or moving, on the live screen's session
+    /// or the panel's. Sound played meanwhile would land in its call track
+    /// and its microphone, so the shared player holds while this is set.
+    private(set) var capturing = false
+
+    /// Past lines the live words were already said in, newest on top, for
+    /// the recording they came from. Kept when the screen closes, so a card
+    /// put away stays away for the whole recording.
+    private(set) var recall: Recall?
+    @ObservationIgnored private var recallAsked:
+        (sessionId: MeetingSessionId, lines: Int, at: ContinuousClock.Instant)?
+    @ObservationIgnored private var recallTask: Task<Void, Never>?
+    private static let recallSpacing: Duration = .seconds(15)
+    private static let recallShown = 3
+
+    struct Recall: Equatable {
+        let sessionId: MeetingSessionId
+        var cards: [MeetingRecallMatch] = []
+        var dismissed: Set<String> = []
+        /// The last read could not reach past meetings.
+        var unavailable = false
+    }
     /// The word for what is in flight, which disables the controls that would
     /// contradict it.
     private(set) var pending: String?
@@ -733,11 +782,11 @@ final class MeetingLiveStore {
                         alwaysRecordSeries: self.alwaysRecordSeries(prompt),
                         announceInChat: self.announceInChat(prompt)))
                 guard self.receive(result.receipt) else { return }
-                self.prompts.removeAll { $0.promptId == prompt.promptId }
-                self.choices = nil
                 if result.snapshot.phase == .capturingRecording {
                     await self.loadActive()
                 }
+                self.prompts.removeAll { $0.promptId == prompt.promptId }
+                self.choices = nil
             }
         }
     }
@@ -891,6 +940,17 @@ final class MeetingLiveStore {
         }
     }
 
+    func reloadGate() {
+        guard let session = gate, session.phase == .preflight, !refreshing, !starting else { return }
+        refreshing = true
+        Task {
+            defer { refreshing = false }
+            if let latest = await read(session.sessionId)?.session, gate?.sessionId == session.sessionId {
+                gate = latest
+            }
+        }
+    }
+
     /// Leaving the gate cancels the preflight row, so an abandoned start does
     /// not sit in history as a meeting that never recorded.
     func cancel() {
@@ -989,9 +1049,71 @@ final class MeetingLiveStore {
         notesError = nil
         dismissLiveHelp()
         helpQuestion = ""
+        recallTask?.cancel()
+        recallTask = nil
         live = nil
         provisional = []
         noteBody = ""
+    }
+
+    // MARK: - Recall, while it runs
+
+    /// The recall the live screen shows: the one for the capture it stands on.
+    var shownRecall: Recall? {
+        guard let recall, recall.sessionId == live?.session.sessionId else { return nil }
+        return recall
+    }
+
+    /// Puts a recall card away for the rest of its recording.
+    func dismissRecall(_ match: MeetingRecallMatch) {
+        guard var next = recall else { return }
+        next.dismissed.insert(match.id)
+        next.cards.removeAll { $0.id == match.id }
+        recall = next
+    }
+
+    /// Asks what the live words were already said in once they have grown,
+    /// while the live screen's capture records, and no sooner than
+    /// `recallSpacing` after the last ask.
+    private func scheduleRecall() {
+        guard recallTask == nil, let session = live?.session,
+              session.phase == .capturingRecording else { return }
+        let sessionId = session.sessionId
+        let asked = recallAsked?.sessionId == sessionId ? recallAsked : nil
+        guard provisional.count > asked?.lines ?? 0 else { return }
+        let wait = asked.map { max(.zero, Self.recallSpacing - $0.at.duration(to: .now)) } ?? .zero
+        recallTask = Task { [weak self] in
+            do { try await Task.sleep(for: wait) } catch { return }
+            guard let self else { return }
+            await self.askRecall(sessionId)
+            guard !Task.isCancelled else { return }
+            self.recallTask = nil
+            self.scheduleRecall()
+        }
+    }
+
+    /// One ask. New matches go on top in the core's order; a card already
+    /// shown or put away is not shown again. A read that fails keeps the
+    /// cards and says past meetings could not be read.
+    private func askRecall(_ sessionId: MeetingSessionId) async {
+        recallAsked = (sessionId: sessionId, lines: provisional.count, at: .now)
+        let answer: MeetingLiveRecall
+        do {
+            answer = try await core.request("meeting_live_recall", MeetingRequest.session(sessionId))
+        } catch {
+            answer = .unavailable
+        }
+        var next = recall.flatMap { $0.sessionId == sessionId ? $0 : nil } ?? Recall(sessionId: sessionId)
+        switch answer {
+        case let .available(matches):
+            let known = next.dismissed.union(next.cards.map(\.id))
+            let fresh = matches.filter { !known.contains($0.id) }
+            next.cards = Array((fresh + next.cards).prefix(Self.recallShown))
+            next.unavailable = false
+        case .unavailable:
+            next.unavailable = true
+        }
+        if next != recall { recall = next }
     }
 
     func pause() {
@@ -1270,6 +1392,60 @@ final class MeetingLiveStore {
         }
     }
 
+    func bookmark(_ kind: ConversationBookmarkKind = .mark) {
+        guard let session = live?.session else { return }
+        Task { await bookmark(session, kind: kind) }
+    }
+
+    /// The docked panel's bookmark, on the session the panel reads. True
+    /// once it is saved.
+    func bookmarkFromPanel() async -> Bool {
+        guard let session = active?.snapshot else { return false }
+        return await bookmark(session, kind: .mark)
+    }
+
+    /// How many of each typed bookmark the recording holds, read once when
+    /// the recording window shows it; nil while unread or unreadable.
+    func loadBookmarkCounts(_ sessionId: MeetingSessionId) async {
+        guard bookmarkCounts?.sessionId != sessionId else { return }
+        let read: [ConversationBookmark]? = try? await core.request(
+            "conversation_bookmarks", ["sessionId": sessionId])
+        guard let read, live?.session.sessionId == sessionId else { return }
+        bookmarkCounts = BookmarkCounts(
+            sessionId: sessionId, counts: Dictionary(grouping: read, by: \.kind).mapValues(\.count))
+    }
+
+    @discardableResult
+    private func bookmark(_ session: MeetingSessionSnapshot, kind: ConversationBookmarkKind) async -> Bool {
+        guard pending == nil, session.phase == .capturingRecording else { return false }
+        guard let clock = clocks[session.sessionId] else {
+            error = "Capture time is unavailable."
+            return false
+        }
+        let moment = clock.elapsedNs(at: Date())
+        let bookmarkId = UUID().uuidString
+        var saved = false
+        await act("Bookmarking") {
+            let _: ConversationBookmark = try await self.core.request(
+                "conversation_bookmark_create",
+                ConversationBookmarkCreateParams(request: .init(
+                    bookmarkId: bookmarkId,
+                    sessionId: session.sessionId,
+                    startOffsetNs: UInt64(moment),
+                    label: nil,
+                    kind: kind)))
+            self.notice = kind == .mark
+                ? "Bookmarked at \(moment.meetingOffsetClock)."
+                : "\(kind.label) marked at \(moment.meetingOffsetClock)."
+            if var counts = self.bookmarkCounts, counts.sessionId == session.sessionId {
+                counts.counts[kind, default: 0] += 1
+                self.bookmarkCounts = counts
+            }
+            saved = true
+        }
+        return saved
+    }
+
     private func mutate(_ word: String, _ action: MeetingAllowedAction, method: () -> String) {
         guard let session = live?.session, session.allows(action) else { return }
         let method = method()
@@ -1402,7 +1578,7 @@ final class MeetingLiveStore {
         guard let prompt = prompts.last, let eventKey = prompt.prompt.eventKey,
               let countdown, countdown.event.eventKey == eventKey,
               let person = countdown.briefing.first else { return nil }
-        let loops = countdown.briefing.reduce(0) { $0 + $1.openLoops.count }
+        let loops = person.openLoopCount
         let nth = person.meetingsCount + 1
         let loopWord = loops == 1 ? "1 open loop" : "\(loops) open loops"
         return "Meeting \(nth) with \(person.displayName) · \(loopWord)"
@@ -1481,6 +1657,34 @@ final class MeetingLiveStore {
         }
         next = next.filter { shown.contains($0.key) }
         if next != clocks { clocks = next }
+        let recording = [live?.session, active?.snapshot]
+            .compactMap { $0 }
+            .first { $0.phase == .capturingRecording }
+        watchSilence(recording?.sessionId)
+        let capturingNow = [live?.session, active?.snapshot].contains { $0?.phase.isActive == true }
+        if capturingNow != capturing { capturing = capturingNow }
+    }
+
+    /// Asks the core about the call's sound once a second while `sessionId`
+    /// records, and lets it go when nothing does.
+    private func watchSilence(_ sessionId: MeetingSessionId?) {
+        guard silenceWatch?.sessionId != sessionId else { return }
+        silenceWatch?.task.cancel()
+        silenceWatch = nil
+        if callSilent != nil { callSilent = nil }
+        guard let sessionId else { return }
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self else { return }
+                let reading: MeetingCallSilence? = try? await self.core.request(
+                    "meeting_call_silence", MeetingRequest.session(sessionId))
+                guard !Task.isCancelled, self.silenceWatch?.sessionId == sessionId else { return }
+                let next = reading?.silentMs.map { MeetingCallSilent(sessionId: sessionId, silentMs: $0) }
+                if next != self.callSilent { self.callSilent = next }
+            }
+        }
+        silenceWatch = (sessionId, task)
     }
 
     /// The two lines the live screen has to say, in the order it says them:
@@ -1493,6 +1697,12 @@ final class MeetingLiveStore {
         }
         if let audio = audioWarning(session) {
             lines.append(audio)
+        }
+        if let silent = callSilent, silent.sessionId == session.sessionId {
+            lines.append(MeetingLiveWarning(
+                text: "No sound from the call for \(silent.clock) while you talk. "
+                    + "Check that the call is still playing on this Mac.",
+                urgent: false))
         }
         return lines
     }

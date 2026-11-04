@@ -141,14 +141,6 @@ enum AgentPanelWorkspace: String, Codable, CaseIterable, Identifiable {
         case .sonaConfig: "What would you like to change?"
         }
     }
-
-    /// The line under the greeting: what this brain can be asked.
-    var reach: String {
-        switch self {
-        case .sonaChat: "Ask what was said, what you owe, or who someone is."
-        case .sonaConfig: "Describe the setting you want changed."
-        }
-    }
 }
 
 /// Three questions to press while a chat is empty, from what Sona already

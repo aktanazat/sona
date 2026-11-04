@@ -41,6 +41,7 @@ mod native_bridge;
 mod net_policy;
 mod overlay;
 mod paste_tx;
+mod planning;
 pub mod portable;
 mod prompt_renderer;
 pub mod query;
@@ -150,7 +151,7 @@ pub(crate) fn show_meeting_destination(
     let (session_id, revision) = snapshot
         .map(|snapshot| (Some(snapshot.session_id), snapshot.revision))
         .unwrap_or((None, 0));
-    show_meeting_navigation(app, destination, session_id, revision);
+    show_meeting_navigation(app, destination, session_id, revision, None, None);
 }
 
 /// Open one meeting by id.
@@ -160,12 +161,19 @@ pub(crate) fn show_meeting_destination(
 /// which is exactly what the Overview's meeting links rely on. A URL handler
 /// opening the encrypted store to read a number its destination re-reads
 /// anyway would be a second answer to the same question.
-fn show_meeting_by_id(app: &AppHandle, session_id: meeting::types::MeetingSessionId) {
+fn show_meeting_by_id(
+    app: &AppHandle,
+    session_id: meeting::types::MeetingSessionId,
+    at_milliseconds: Option<u64>,
+    segment_id: Option<uuid::Uuid>,
+) {
     show_meeting_navigation(
         app,
         MeetingNavigationDestination::Session,
         Some(session_id),
         0,
+        at_milliseconds,
+        segment_id,
     );
 }
 
@@ -174,6 +182,8 @@ fn show_meeting_navigation(
     destination: MeetingNavigationDestination,
     session_id: Option<meeting::types::MeetingSessionId>,
     revision: u64,
+    at_milliseconds: Option<u64>,
+    segment_id: Option<uuid::Uuid>,
 ) {
     show_main_window(app);
     let _ = app.emit(
@@ -183,6 +193,8 @@ fn show_meeting_navigation(
             destination,
             session_id,
             revision,
+            at_milliseconds,
+            segment_id: segment_id.map(|id| id.to_string()),
         },
     );
 }
@@ -255,8 +267,13 @@ pub(crate) fn dispatch_deep_link(app: &AppHandle, raw: &str) -> bool {
             // is not consent to record a room, and meetings are prompt-only.
             show_meeting_destination(app, MeetingNavigationDestination::Preflight, None);
         }
-        deeplink::DeepLinkAction::OpenMeeting(session_id) => {
-            show_meeting_by_id(app, meeting::types::MeetingSessionId::from_uuid(session_id));
+        deeplink::DeepLinkAction::OpenMeeting(session_id, at_milliseconds, segment_id) => {
+            show_meeting_by_id(
+                app,
+                meeting::types::MeetingSessionId::from_uuid(session_id),
+                at_milliseconds,
+                segment_id,
+            );
         }
         deeplink::DeepLinkAction::OpenLoop(loop_id) => {
             // A loop's address carries its meeting, so this routes without a
@@ -265,7 +282,7 @@ pub(crate) fn dispatch_deep_link(app: &AppHandle, raw: &str) -> bool {
             // not something a URL handler can reach into.
             let loop_id = meeting::loop_types::MeetingLoopId(loop_id);
             match loop_id.session_id() {
-                Some(session_id) => show_meeting_by_id(app, session_id),
+                Some(session_id) => show_meeting_by_id(app, session_id, None, None),
                 None => log::warn!("Deep link loop id names no meeting: {}", loop_id.as_str()),
             }
         }
@@ -274,6 +291,23 @@ pub(crate) fn dispatch_deep_link(app: &AppHandle, raw: &str) -> bool {
                 app,
                 query::QueryLinkTarget::Person {
                     person_id: meeting::people_types::PersonId(person_id),
+                },
+            );
+        }
+        deeplink::DeepLinkAction::OpenNote(note_id, version_id) => {
+            show_query_link(
+                app,
+                query::QueryLinkTarget::Note {
+                    note_id: note_id.to_string(),
+                    version_id,
+                },
+            );
+        }
+        deeplink::DeepLinkAction::OpenSubject(subject_id) => {
+            show_query_link(
+                app,
+                query::QueryLinkTarget::Subject {
+                    subject_id: subject_id.to_string(),
                 },
             );
         }
@@ -1620,6 +1654,7 @@ pub fn run(cli_args: CliArgs) {
             commands::onboarding::stop_onboarding_practice,
             commands::onboarding::cancel_onboarding_practice,
             commands::onboarding::complete_onboarding_practice,
+            commands::onboarding::complete_notes_onboarding,
             commands::local_cleanup::get_local_cleanup_status,
             commands::local_cleanup::download_local_cleanup,
             commands::local_cleanup::cancel_local_cleanup_download,
@@ -1660,6 +1695,19 @@ pub fn run(cli_args: CliArgs) {
             commands::voice_identity::voice_identify_speaker,
             commands::voice_identity::voice_enroll_profile,
             commands::voice_identity::voice_remove_profile,
+            commands::conversation_context::conversation_context,
+            commands::conversation_context::conversation_context_update,
+            commands::transcript_corrections::transcript_correction_list,
+            commands::transcript_corrections::transcript_correction_review,
+            commands::transcript_corrections::transcript_correction_teach,
+            commands::transcript_corrections::transcript_correction_update,
+            commands::transcript_corrections::transcript_correction_remove,
+            commands::transcript_corrections::transcript_relisten_offer,
+            commands::transcript_corrections::transcript_relisten_decide,
+            commands::person_content::person_contributions,
+            commands::person_content::person_avatar,
+            commands::person_content::person_avatar_set,
+            commands::person_content::person_contact_set,
             commands::history::get_history_stats,
             commands::history::get_history_trend,
             commands::history::get_history_usage_stats,
@@ -1674,7 +1722,9 @@ pub fn run(cli_args: CliArgs) {
             commands::history::update_history_limit,
             commands::history::update_recording_retention_period,
             commands::history::history_storage_status,
+            commands::privacy::privacy_inventory,
             commands::meeting::meeting_suggestions_list,
+            commands::meeting::home_today,
             commands::meeting::meeting_preflight_create,
             commands::meeting::meeting_preflight_refresh,
             commands::meeting::meeting_preflight_cancel,
@@ -1707,6 +1757,7 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_trend,
             commands::meeting::meeting_get,
             commands::meeting::meeting_search,
+            commands::meeting::meeting_said_search,
             commands::meeting::meeting_title_set,
             commands::meeting::meeting_speaker_rename,
             commands::call_names::meeting_call_name_targets,
@@ -1741,6 +1792,8 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_catch_up,
             commands::meeting::meeting_live_help,
             commands::meeting::meeting_live_transcript,
+            commands::meeting::meeting_live_recall,
+            commands::meeting::meeting_call_silence,
             commands::meeting::meeting_series_template_get,
             commands::meeting::meeting_series_template_for_session,
             commands::meeting::meeting_series_template_set,
@@ -1757,6 +1810,7 @@ pub fn run(cli_args: CliArgs) {
             commands::upcoming::meeting_upcoming_events,
             commands::people::people_list,
             commands::people::person_detail,
+            meeting::person_memory::person_memory,
             commands::people::organization_detail,
             commands::people::companies_list,
             commands::people::person_summary_regenerate,
@@ -1777,6 +1831,14 @@ pub fn run(cli_args: CliArgs) {
             commands::loops::meeting_loop_assign,
             commands::followup::meeting_follow_up_draft,
             commands::followup::meeting_follow_up_mail,
+            commands::portrait_source::person_avatar_source,
+            commands::conversation_review::conversation_audio_clip,
+            commands::conversation_review::conversation_audio_retained,
+            commands::conversation_review::conversation_reel_for_person,
+            commands::conversation_review::conversation_reel_for_loop,
+            commands::conversation_review::conversation_place_review,
+            commands::conversation_review::conversation_bookmarks,
+            commands::conversation_review::conversation_bookmark_create,
             meeting::prep::meeting_prep_preferences_get,
             meeting::prep::meeting_prep_preferences_set,
             meeting::prep::meeting_mail_context_check,
@@ -1796,6 +1858,8 @@ pub fn run(cli_args: CliArgs) {
             commands::documents::doc_ingest,
             commands::documents::doc_list,
             commands::documents::doc_delete,
+            commands::cloud_sync::phone_thought_source_get,
+            commands::cloud_sync::phone_thought_photo_get,
             commands::cloud_sync::cloud_sync_overview_get,
             commands::cloud_sync::cloud_sync_meeting_status_get,
             commands::cloud_sync::cloud_sync_meeting_status_list,
@@ -1848,6 +1912,7 @@ pub fn run(cli_args: CliArgs) {
             commands::templates::meeting_custom_template_save,
             commands::templates::meeting_custom_template_delete,
             scratchpad::scratchpad_list,
+            scratchpad::scratchpad_recent,
             scratchpad::scratchpad_get,
             scratchpad::scratchpad_create,
             scratchpad::scratchpad_update_body,
@@ -1855,6 +1920,47 @@ pub fn run(cli_args: CliArgs) {
             scratchpad::scratchpad_delete,
             scratchpad::scratchpad_versions,
             scratchpad::scratchpad_restore_version,
+            scratchpad::passages::scratchpad_capture_passage,
+            scratchpad::review::scratchpad_review_candidates,
+            scratchpad::review::scratchpad_review_sources,
+            scratchpad::synthesis::scratchpad_prepare_synthesis,
+            scratchpad::synthesis::scratchpad_accept_synthesis,
+            scratchpad::subjects::scratchpad_subjects,
+            scratchpad::subjects::scratchpad_subject,
+            scratchpad::subjects::scratchpad_subject_create,
+            scratchpad::subjects::scratchpad_subject_note,
+            scratchpad::subjects::scratchpad_subject_delete,
+            scratchpad::links::scratchpad_memory,
+            scratchpad::links::scratchpad_link,
+            scratchpad::links::scratchpad_unlink,
+            scratchpad::synthesis::scratchpad_synthesize,
+            scratchpad::evidence::scratchpad_source_evidence,
+            planning::planning_projects,
+            planning::planning_project,
+            planning::planning_create_project,
+            planning::planning_create_milestone,
+            planning::planning_create_task,
+            planning::planning_update_project,
+            planning::planning_update_milestone,
+            planning::planning_update_task,
+            planning::planning_link_source,
+            planning::planning_calendar,
+            planning::planning_prepare,
+            planning::planning_revise,
+            planning::planning_accept,
+            planning::person::planning_person_work,
+            planning::untracked::meeting_untracked_actions,
+            planning::untracked::planning_track_action,
+            planning::untracked::planning_dismiss_action,
+            planning::untracked::planning_restore_action,
+            planning::suggestions::planning_suggestions,
+            planning::suggestions::planning_generate_suggestions,
+            planning::suggestions::planning_decline_suggestion,
+            planning::suggestions::planning_accept_suggestion,
+            planning::quiet::planning_quiet_review_set,
+            planning::quiet::planning_quiet_review_grants,
+            planning::quiet::planning_quiet_review_run,
+            planning::quiet::planning_quiet_review_cancel,
         ])
         .events(collect_events![
             chat_voice::ChatVoiceEvent,
@@ -1884,6 +1990,7 @@ pub fn run(cli_args: CliArgs) {
             meeting::types::MeetingRemovedEvent,
             cloud_sync::types::CloudSyncChangedEvent,
             meeting::types::MeetingNavigationRequestedEvent,
+            meeting::types::MeetingProcessingProgressEvent,
             meeting::snapshots::MeetingSnapshotChangedEvent,
             meeting::detection::DetectionPromptEvent,
             meeting::detection::DetectionPromptRetractedEvent,
@@ -1895,6 +2002,7 @@ pub fn run(cli_args: CliArgs) {
             tray::TrayCopyFailedEvent,
             query::QueryLinkRequestedEvent,
             scratchpad::ScratchpadChangedEvent,
+            planning::PlanningChangedEvent,
         ]);
 
     let invoke_handler = specta_builder.invoke_handler();
@@ -2148,6 +2256,9 @@ pub fn run(cli_args: CliArgs) {
                 });
                 return Ok(());
             }
+
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            planning::quiet::initialize();
 
             let settings = get_settings(app.handle());
             // The native app owns the Dock tile and all application windows.

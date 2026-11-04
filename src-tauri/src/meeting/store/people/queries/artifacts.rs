@@ -1,13 +1,12 @@
 use crate::meeting::analytics::MeetingAnalytics;
-use crate::meeting::loop_types::{
-    waiting_on_is_stale, MeetingLoopDirection, MeetingLoopId, MeetingLoopKind,
-};
+use crate::meeting::ledger::LedgerOutcomeCounts;
+use crate::meeting::loop_types::{waiting_on_is_stale, MeetingLoopId, MeetingLoopKind};
 use crate::meeting::people_types::{
     Person, PersonCommitment, PersonId, PersonMeetingHeadline, PersonMeetingSummary, PersonOpenLoop,
 };
 use crate::meeting::store::loops::{ledger_loop_seeds, ledger_rows_in, rows_from_seeds_in};
-use crate::meeting::store::people::{all_people_in, owner_matches};
-use crate::meeting::store::{utc_now_ms, StoreError};
+use crate::meeting::store::people::{all_people_in, loop_concerns_person, owner_matches};
+use crate::meeting::store::{listed_outcomes, utc_now_ms, StoreError, CURRENT_ARTIFACT_CONTENT};
 use crate::meeting::types::{GeneratedMeetingArtifacts, MeetingSessionId};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -123,24 +122,7 @@ pub(super) fn facts_for_person_in(
             ledger_loop_seeds(meeting_id, &ledger),
         )?;
         for row in loop_rows {
-            // Two ways a row belongs on this page. Something this person owes
-            // needs them named on it: an explicit assignment, or the name the
-            // ledger read off the transcript. Something the user owes belongs
-            // here because it was raised in a meeting with them — no name
-            // needed, since the user is never a `Person`. A row attributed to
-            // some third party, or to nobody, is neither.
-            let relevant = match row.direction {
-                MeetingLoopDirection::Mine => true,
-                MeetingLoopDirection::WaitingOn => match row.owner_person_id {
-                    Some(owner) => owner == person.id,
-                    None => row
-                        .owner_text
-                        .as_deref()
-                        .is_some_and(|owner| owner_matches(person, owner)),
-                },
-                MeetingLoopDirection::Unattributed => false,
-            };
-            if !relevant {
+            if !loop_concerns_person(person, &row) {
                 continue;
             }
             let waiting_on_stale = waiting_on_is_stale(
@@ -288,6 +270,44 @@ pub(super) fn talk_share_average_in(
     u32::try_from((total + count / 2) / count)
         .map(Some)
         .map_err(|_| StoreError::Corrupt)
+}
+
+/// The time recorded and what became of the threads across a person's
+/// confirmed meetings, by the same rules a meeting's list row uses. Each is
+/// nil when none of those meetings has one.
+pub(super) fn confirmed_totals_in(
+    connection: &Connection,
+    person_id: PersonId,
+) -> Result<(Option<u64>, Option<LedgerOutcomeCounts>), StoreError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT (SELECT SUM(w.end_offset_ns - w.start_offset_ns)
+                   FROM meeting_capture_windows w
+                  WHERE w.session_id = m.id AND w.end_offset_ns IS NOT NULL),
+                json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads')
+           FROM meeting_person_links l
+           JOIN meeting_sessions m ON m.id = l.meeting_id
+          WHERE l.person_id = ?1 AND l.confidence = 'confirmed'"
+    ))?;
+    let rows = statement
+        .query_map([person_id.uuid().to_string()], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut recorded_ns: Option<u64> = None;
+    let mut outcomes: Option<LedgerOutcomeCounts> = None;
+    for (duration_ns, threads) in rows {
+        if let Some(duration_ns) = duration_ns {
+            let duration_ns = u64::try_from(duration_ns).map_err(|_| StoreError::Corrupt)?;
+            *recorded_ns.get_or_insert(0) += duration_ns;
+        }
+        if let Some(counts) = listed_outcomes(threads.as_deref()) {
+            *outcomes.get_or_insert_with(LedgerOutcomeCounts::default) += counts;
+        }
+    }
+    Ok((recorded_ns.map(|ns| ns / 1_000_000), outcomes))
 }
 
 pub(super) fn document_summaries_in(

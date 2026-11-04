@@ -329,7 +329,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.receipt.result, OperationResult::Committed);
-        result.prompts.prompts.last().unwrap().prompt_id
+        result
+            .prompts
+            .prompts
+            .iter()
+            .find(|prompt| prompt.name == name)
+            .unwrap()
+            .prompt_id
     }
 
     #[test]
@@ -818,6 +824,7 @@ mod tests {
                     attendees: Vec::new(),
                     notes: None,
                     calendar_name: None,
+                    location: None,
                     url: None,
                 },
             )

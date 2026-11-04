@@ -1,19 +1,6 @@
-/* The eight tools, as data.
- *
- * Each one is a name, a schema an agent reads, and the argv it becomes. The
- * mapping is 1:1 with `sona`'s headless flags and deliberately does nothing
- * else: no defaults invented here, no ranges re-checked here. Sona owns what a
- * scope is, what a limit may be and what a meeting id looks like, and it
- * answers a bad one with a typed JSON refusal this server passes straight
- * back. A second validator here would be a second opinion, and the two would
- * drift.
- *
- * Seven of them only read. `sona_loop_resolve` reads a loop revision before
- * it writes, so Sona requires both external-access rows and returns whichever
- * `consent_required` refusal names the missing row.
- *
- * The only checking below is what building an argv actually requires: a
- * required string has to be there, or there is no command to run. */
+/* Tool schemas map directly to Sona's CLI flags.
+ * Sona owns validation, corpus reads and consent. This server holds no corpus
+ * state and provides no alternate write path. */
 
 import { z } from "zod";
 
@@ -24,6 +11,7 @@ export const SCOPES = [
   "dictations",
   "people",
   "loops",
+  "notes",
 ] as const;
 
 /** Which loop rows `sona_action_items` keeps. */
@@ -58,6 +46,7 @@ export interface ToolDefinition {
   readonly name: string;
   readonly title: string;
   readonly description: string;
+  readonly mutates?: true;
   readonly inputSchema: {
     readonly type: "object";
     readonly properties: Record<string, ToolProperty>;
@@ -114,12 +103,30 @@ const MEETING_ID = {
     "The meeting's uuid, as it appears in a sona://meeting/<id> link or in the id field of a sona_search or sona_meetings row.",
 } as const;
 
+const PROJECT_ID = {
+  type: "string",
+  description:
+    "The exact saved project uuid returned by sona_projects. Project titles are not ids.",
+} as const;
+
+
+const PERSON_ID = {
+  type: "string",
+  description:
+    "The exact person uuid returned by sona_people. Do not guess identity from a name or calendar address.",
+} as const;
+
+const SINCE_UTC_MS = {
+  type: "integer",
+  description:
+    "Comparison boundary in UTC milliseconds since the Unix epoch. Changes require retained evidence on both sides; missing earlier evidence is not proof nothing changed.",
+} as const;
 export const TOOLS: readonly ToolDefinition[] = [
   {
     name: "sona_search",
     title: "Search Sona",
     description:
-      "Search everything Sona keeps — meetings, dictations, people and open loops — and get back the rows that matched, each with the text that matched it and a sona:// address. Newest first. `reason` names whatever shaped the page other than the corpus: `no_searchable_tokens` when the query held no word to match, `semantic_unavailable` when the recall model is not on this machine and only literal word matching ran, `no_rows` when every source was read and nothing matched. Null means the rows are all there are.",
+      "Search retained meetings, dictations, people, loops and notes. Results include matching text and a sona:// link. Read reason before treating an empty result as complete; semantic_unavailable means only literal matches were available. Notes are local data exposed through Sona's external-access grant, not remote panel context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -132,7 +139,7 @@ export const TOOLS: readonly ToolDefinition[] = [
           type: "string",
           enum: [...SCOPES],
           description:
-            "Which nouns to search. 'all' (the default) searches meetings, dictations, people and loops; the others narrow to exactly one of those. Narrowing skips the other sources rather than filtering the page afterwards.",
+            "Which records to search. 'all' includes notes; selecting one scope skips other sources.",
         },
         limit: LIMIT,
       },
@@ -198,7 +205,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_transcript",
     title: "Read a Sona transcript",
     description:
-      "Read one meeting's transcript, speaker-labeled, with each line's offset in milliseconds. Human edits are applied and removed lines are gone.",
+      "Read one meeting's retained transcript with speaker labels and offsets. text stays the effective corrected reading; raw_text preserves captured words, corrected_text is the separate human edit or null. Segment, transcript revision and edit revision identify the evidence. Removed lines remain excluded.",
     inputSchema: {
       type: "object",
       properties: { meeting_id: MEETING_ID },
@@ -272,6 +279,64 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_person_catch_up",
+    title: "Catch up before talking",
+    description:
+      "Read a person's sourced catch-up, attributed words, linked notes, explicit assignments and evidence differences from Sona's shared person-memory snapshot. catch_up contains ids into the snapshot, not generated answers. Quotes, corrections and AI ledger interpretation stay distinct. Read limitations and cite source links; no identity or commitment is inferred from a matching name.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        person_id: PERSON_ID,
+        since_utc_ms: SINCE_UTC_MS,
+      },
+      required: ["person_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "--person-catch-up",
+      text(input, "person_id", true),
+      ...optional("--since-utc-ms", count(input, "since_utc_ms")),
+    ],
+  },
+  {
+    name: "sona_person_changes",
+    title: "Read what changed",
+    description:
+      "Compare a person's retained source evidence since a UTC boundary. Each snapshot.changes entry includes earlier and later text, separate source links and interpretation labels. A text difference is not proof a decision changed or that two statements contradict. No comparable evidence means unknown, not no change. Uses the same snapshot as the native person page and catch-up.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        person_id: PERSON_ID,
+        since_utc_ms: SINCE_UTC_MS,
+      },
+      required: ["person_id", "since_utc_ms"],
+      additionalProperties: false,
+    },
+    argv: (input) => {
+      const since = count(input, "since_utc_ms");
+      if (since === null) throw new SonaInputError("since_utc_ms is required.");
+      return [
+        "--person-changes",
+        text(input, "person_id", true),
+        "--since-utc-ms",
+        since,
+      ];
+    },
+  },
+  {
+    name: "sona_person_stats",
+    title: "Read a person's numbers",
+    description:
+      "Read the numbers a person's page in Sona leads with: confirmed and suggested meeting counts, time recorded together, when you last met, their average talk share in permille, ledger outcomes (landed, open, dropped), open loops you owe and owed to you, confirmed meetings in each of the last 52 local weeks (oldest first, weeks start Monday, null before the corpus's first meeting) and the usual gap in days between meeting days. Suggested links count only as suggested. Unavailable numbers are null, not zero. No transcript text, titles or names. Requires external access; no writes.",
+    inputSchema: {
+      type: "object",
+      properties: { person_id: PERSON_ID },
+      required: ["person_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--person-stats", text(input, "person_id", true)],
+  },
+  {
     name: "sona_upcoming",
     title: "List upcoming meetings",
     description:
@@ -287,10 +352,175 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_projects",
+    title: "List Sona personal projects",
+    description:
+      "List saved local personal projects, most recently updated first, with their saved titles, states, revisions, task counts and next saved task or milestone due date. Returns at most 100 rows. Read has_more and complete before claiming the list is complete. Requires Sona's existing external-access grant; no project is changed.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: LIMIT },
+      additionalProperties: false,
+    },
+    argv: (input) => ["--projects", ...optional("--limit", count(input, "limit"))],
+  },
+  {
+    name: "sona_project",
+    title: "Read a Sona personal project",
+    description:
+      "Read one saved personal project with its description, its pulse (done, open and overdue task counts, next due date, meetings in the last 7 days, and person ids owning open work), milestones, tasks, states, revisions and exact source references. Owner and source availability are resolved live by the native planner. Unavailable sources have available:false, no title and no link. Nullable due dates are saved values, not inferred deadlines. Owners are explicit personal-plan assignments, not team membership. Requires external access; no writes, notifications or provider calls.",
+    inputSchema: {
+      type: "object",
+      properties: { project_id: PROJECT_ID },
+      required: ["project_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--project", text(input, "project_id", true)],
+  },
+  {
+    name: "sona_notes",
+    title: "List Sona notes",
+    description:
+      "List retained notes, most recently updated first. Read one with sona_note for its body and source links. No note is changed.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: LIMIT },
+      additionalProperties: false,
+    },
+    argv: (input) => ["--notes", ...optional("--limit", count(input, "limit"))],
+  },
+  {
+    name: "sona_note",
+    title: "Read a Sona note",
+    description:
+      "Read one note with linked source records, saved passage references, interpretation label, related notes and connection reasons. interpretation:true means the note is AI interpretation, not a direct transcript quote. Deleted or unavailable sources have available:false and disclose no source title, content or link.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: {
+          type: "string",
+          description:
+            "The note uuid from sona_notes, sona_search or a sona://note/<id> link.",
+        },
+      },
+      required: ["note_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--note", text(input, "note_id", true)],
+  },
+  {
+    name: "sona_note_context",
+    title: "Read relevant note context",
+    description:
+      "Find matching retained notes with matched_text, current note bodies, resolved sources, passage references, interpretation labels and connection reasons. Uses the requested local note-search page limit; related-note bodies outside the page are not exported. interpretation:true is not a direct quote. Read has_more and reason. Unavailable sources expose no previous content. No provider is called and no note is changed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Words remembered from a note. Every word must match.",
+        },
+        limit: LIMIT,
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "--note-context",
+      text(input, "query", true),
+      ...optional("--limit", count(input, "limit")),
+    ],
+  },
+  {
+    name: "sona_note_versions",
+    title: "List saved note versions",
+    description:
+      "List a note's retained saved versions, newest first, with version ids, save times, kinds and sizes. Autosaves may merge within ten minutes; at most 50 versions are retained. Use these ids with sona_note_diff.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: { type: "string", description: "The note uuid." },
+      },
+      required: ["note_id"],
+      additionalProperties: false,
+    },
+    argv: (input) => ["--note-versions", text(input, "note_id", true)],
+  },
+  {
+    name: "sona_note_diff",
+    title: "Compare saved note versions",
+    description:
+      "Read the exact line replacement between two retained versions without changing the note. from_source and to_source identify both saved versions with source links, times and kinds. Line text preserves original line endings. This is one replacement hunk, not a minimal edit script. Omit to_version to compare with the newest saved version.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note_id: { type: "string", description: "The note uuid." },
+        from_version: {
+          type: "integer",
+          minimum: 1,
+          description: "A saved version id from sona_note_versions.",
+        },
+        to_version: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "The destination saved version id; defaults to newest saved version.",
+        },
+      },
+      required: ["note_id", "from_version"],
+      additionalProperties: false,
+    },
+    argv: (input) => {
+      const from = count(input, "from_version");
+      if (from === null) throw new SonaInputError("from_version is required.");
+      return [
+        "--note-diff",
+        text(input, "note_id", true),
+        "--from-version",
+        from,
+        ...optional("--to-version", count(input, "to_version")),
+      ];
+    },
+  },
+  {
+    name: "sona_stats",
+    title: "Read Sona corpus statistics",
+    description:
+      "Read content-free statistics for all retained meetings, dictations and notes, with measured time, population, counting methods and up to 25 sample source links per dataset. Sample links do not enumerate every counted record. Each dataset or source sample can be unavailable with an error; complete:false means partial coverage. Never treat unavailable as zero. Meeting duration counts verified audio intervals once even when capture sources overlap.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    argv: () => ["--stats"],
+  },
+  {
+    name: "sona_events",
+    title: "Read Sona events",
+    description:
+      "Read receipts and workflow results, newest first. Pass next_cursor as after to continue. This read does not change the corpus.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        after: {
+          type: "string",
+          description: "An event next_cursor from the previous page.",
+        },
+        limit: LIMIT,
+      },
+      additionalProperties: false,
+    },
+    argv: (input) => [
+      "--events",
+      ...optional("--after", text(input, "after")),
+      ...optional("--limit", count(input, "limit")),
+    ],
+  },
+  {
     name: "sona_loop_resolve",
     title: "Resolve a Sona loop",
     description:
       "Mark one loop or commitment done, and get back the operation receipt. It reads the loop revision before writing, so it requires both Settings > Agents > External access and External mutations. If either is off, Sona returns consent_required and names the missing setting. The receipt's result is 'committed' when the write landed and 'rejected' when the meeting moved underneath it.",
+    mutates: true,
     inputSchema: {
       type: "object",
       properties: {

@@ -175,7 +175,7 @@ private struct ChatStepRow: View {
                 .frame(width: 16)
                 .accessibilityHidden(true)
             Text(title)
-                .font(isTool ? TypeScale.mono(12) : TypeScale.body(14))
+                .font(isTool ? TypeScale.mono(12) : TypeScale.body(13))
                 .foregroundStyle(failed ? Theme.live : Theme.inkSecondary)
                 .lineLimit(1)
             Spacer(minLength: 8)

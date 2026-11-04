@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One pixel of divider, edge to edge.
+/// One pixel of divider.
 struct Hairline: View {
     var body: some View {
         Rectangle().fill(Theme.hairline).frame(height: 1)
@@ -8,29 +8,50 @@ struct Hairline: View {
 }
 
 struct Card<Content: View>: View {
+    let material: AppearanceMaterial
     let content: Content
 
-    init(@ViewBuilder content: () -> Content) {
+    init(material: AppearanceMaterial = .solid, @ViewBuilder content: () -> Content) {
+        self.material = material
         self.content = content()
     }
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusCard)
+        if material == .glass {
+            if #available(macOS 26.0, *) {
+                cardContent.glassEffect(.regular, in: shape)
+            } else {
+                cardContent
+                    .background(.regularMaterial, in: shape)
+                    .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+            }
+        } else {
+            cardContent
+                .background(Theme.surface)
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+        }
+    }
+
+    private var cardContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
+        // Each row draws its own separator underneath; pulling the stack up
+        // one point lets the clip take the last row's, so a card never ends
+        // on a line.
+        .padding(.bottom, -1)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.page)
-        .overlay(alignment: .top) { Hairline() }
-        .overlay(alignment: .bottom) { Hairline() }
     }
 }
 
 /// A row in a card: leading content, trailing meta or controls, a hairline
 /// underneath. With an action it is a button to every input: the pointer
 /// clicks it, keyboard navigation tabs to it and presses it with space or
-/// return, and VoiceOver presses it as one. It stays a plain stack rather
-/// than a `Button` so the controls a row may carry in `trailing` keep their
-/// own clicks.
+/// return, and VoiceOver reads it as one element whose press is the row's,
+/// with the controls it carries listed as its other actions. It stays a
+/// plain stack rather than a `Button` so those controls keep their own clicks.
 struct CardRow<Leading: View, Trailing: View>: View {
     let leading: Leading
     let trailing: Trailing
@@ -49,16 +70,27 @@ struct CardRow<Leading: View, Trailing: View>: View {
     }
 
     var body: some View {
+        if let action {
+            row
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { action() }
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             leading
             Spacer(minLength: 12)
             trailing
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(action != nil && hovering ? Theme.wash : .clear)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
         .overlay {
             RoundedRectangle(cornerRadius: Theme.radiusControl)
                 .strokeBorder(focused ? Theme.accent : .clear, lineWidth: 2)
@@ -70,8 +102,6 @@ struct CardRow<Leading: View, Trailing: View>: View {
         .focused($focused)
         .onKeyPress(.space) { press() }
         .onKeyPress(.return) { press() }
-        .accessibilityAddTraits(action != nil ? .isButton : [])
-        .accessibilityAction { action?() }
     }
 
     /// Space or return on the row itself. A control the row carries keeps
@@ -102,10 +132,10 @@ struct CardLine: View {
         Text(text)
             .metaText()
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline() }
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -115,12 +145,13 @@ struct PrimaryButton: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 14))
-            .foregroundStyle(Theme.onInvert)
-            .padding(.horizontal, compact ? 10 : 12)
-            .frame(height: compact ? 28 : 32)
-            .background(Theme.invert.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .font(TypeScale.label(13))
+            .foregroundStyle(Theme.onAccent)
+            .padding(.horizontal, compact ? 10 : 14)
+            .frame(height: compact ? 26 : 30)
+            .background(Theme.accentFill.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -130,13 +161,13 @@ struct SecondaryButton: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 14))
+            .font(TypeScale.label(13))
             .foregroundStyle(Theme.ink)
-            .padding(.horizontal, compact ? 10 : 12)
-            .frame(height: compact ? 28 : 32)
-            .background(configuration.isPressed ? Theme.selection : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
+            .padding(.horizontal, compact ? 10 : 14)
+            .frame(height: compact ? 26 : 30)
+            .background(configuration.isPressed ? Theme.selection : Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -149,10 +180,11 @@ struct QuietButton: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(TypeScale.label(compact ? 13 : 14))
+            .font(TypeScale.label(13))
             .foregroundStyle(configuration.isPressed ? Theme.ink : color)
             .opacity(isEnabled ? 1 : 0.45)
             .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -169,6 +201,31 @@ extension ButtonStyle where Self == QuietButton {
     static var quiet: QuietButton { QuietButton() }
 }
 
+/// A round icon button for a page's header: back, add, search, share, more.
+struct CircleButton: ButtonStyle {
+    var size: CGFloat = 28
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Theme.ink)
+            .frame(width: size, height: size)
+            .background(configuration.isPressed || hovering ? Theme.selection : Theme.surface, in: Circle())
+            .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
+            .contentShape(Circle())
+            .onHover { hovering = $0 }
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+extension ButtonStyle where Self == CircleButton {
+    static var circle: CircleButton { CircleButton() }
+}
+
 /// A key cap: "⌥", "Space".
 struct KeyCap: View {
     let text: String
@@ -179,13 +236,12 @@ struct KeyCap: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.body(12))
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.inkSecondary)
             .fixedSize()
-            .padding(.horizontal, 5)
-            .frame(height: 20)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
-            .overlay(RoundedRectangle(cornerRadius: Theme.radiusKey).strokeBorder(Theme.border, lineWidth: 1))
+            .padding(.horizontal, 6)
+            .frame(minWidth: 22, minHeight: 22)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
     }
 }
 
@@ -246,9 +302,9 @@ struct SearchField: View {
                 .focused($focused)
         }
         .padding(.horizontal, 10)
-        .frame(height: 32)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
+        .frame(height: 30)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
     }
 }
 
@@ -264,7 +320,7 @@ struct InputField: View {
             .font(TypeScale.body())
             .foregroundStyle(Theme.ink)
             .focused($focused)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .frame(height: 32)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(focused ? Theme.accent : Theme.border, lineWidth: 1))
@@ -310,11 +366,11 @@ struct Chip: View {
 
     var body: some View {
         Text(text)
-            .font(TypeScale.label(12))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Theme.inkSecondary)
             .padding(.horizontal, 6)
-            .frame(height: 20)
-            .background(Theme.selection, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
+            .frame(height: 18)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: Theme.radiusKey))
     }
 }
 
@@ -331,15 +387,16 @@ struct PageTitle<Action: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .center, spacing: 12) {
                     heading.fixedSize(horizontal: true, vertical: false)
                     Spacer(minLength: 12)
                     action.fixedSize(horizontal: true, vertical: false)
                 }
+                .frame(minHeight: 30)
                 VStack(alignment: .leading, spacing: 12) {
-                    heading
+                    heading.frame(minHeight: 30)
                     action
                 }
             }
@@ -374,19 +431,51 @@ struct PageSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(label).sectionLabel()
+                .accessibilityAddTraits(.isHeader)
             content
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, 28)
     }
 }
 
-struct Page<Content: View>: View {
-    let content: Content
+/// Where a detail page goes back to: the word on its back button and the
+/// step that takes it there.
+struct PageBack {
+    let title: String
+    let action: () -> Void
 
-    init(@ViewBuilder content: () -> Content) {
+    init(_ title: String, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+}
+
+/// The scrolling column every screen sits in. A detail page names where it
+/// goes back to, and its bar stays pinned below the window's title bar: in
+/// that strip the window takes a click as the start of a drag, so a back
+/// button that scrolled up into it stopped answering.
+struct Page<Content: View, Actions: View>: View {
+    let back: PageBack?
+    let title: String?
+    let content: Content
+    let actions: Actions
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var scroll = PageScroll()
+    @State private var headlineBottom: CGFloat?
+
+    init(
+        back: PageBack? = nil,
+        title: String? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder actions: () -> Actions
+    ) {
+        self.back = back
+        self.title = title
         self.content = content()
+        self.actions = actions()
     }
 
     var body: some View {
@@ -396,11 +485,95 @@ struct Page<Content: View>: View {
             }
             .frame(maxWidth: Theme.contentMax, alignment: .leading)
             .padding(.horizontal, Theme.margin)
-            .padding(.top, 24)
+            .padding(.top, 12)
             .padding(.bottom, 40)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .coordinateSpace(.named(PageHeadlineKey.space))
         }
         .scrollIndicators(.automatic)
+        .onScrollGeometryChange(for: PageScroll.self) { geometry in
+            guard back != nil else { return PageScroll() }
+            return PageScroll(
+                offset: geometry.contentOffset.y + geometry.contentInsets.top,
+                headlineBottom: headlineBottom)
+        } action: { _, next in
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) { scroll = next }
+        }
+        .onPreferenceChange(PageHeadlineKey.self) { headlineBottom = $0 }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let back { bar(back) }
+        }
+    }
+
+    /// "‹ People › Noah Sample": the way back, the page's name once its own
+    /// headline has scrolled away, and the page's actions.
+    private func bar(_ back: PageBack) -> some View {
+        HStack(spacing: 10) {
+            BackLink(title: back.title, action: back.action)
+                .keyboardShortcut("[", modifiers: .command)
+            if let title, scroll.pastHeadline {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .accessibilityHidden(true)
+                    Text(title).headlineText().lineLimit(1)
+                }
+                .transition(.opacity)
+            }
+            Spacer(minLength: 12)
+            actions
+        }
+        .frame(maxWidth: Theme.contentMax, alignment: .leading)
+        .padding(.horizontal, Theme.margin)
+        .frame(maxWidth: .infinity)
+        .frame(height: 44)
+        .background { Theme.page.ignoresSafeArea(edges: .top) }
+        .overlay(alignment: .bottom) {
+            Hairline().opacity(scroll.scrolled ? 1 : 0)
+        }
+    }
+}
+
+extension Page where Actions == EmptyView {
+    init(back: PageBack? = nil, title: String? = nil, @ViewBuilder content: () -> Content) {
+        self.init(back: back, title: title, content: content) { EmptyView() }
+    }
+}
+
+/// How far a detail page has scrolled, in the two steps its bar shows.
+private struct PageScroll: Equatable {
+    var scrolled = false
+    var pastHeadline = false
+
+    init() {}
+
+    init(offset: CGFloat, headlineBottom: CGFloat?) {
+        scrolled = offset > 0.5
+        pastHeadline = headlineBottom.map { offset > $0 } ?? false
+    }
+}
+
+/// Where a detail page's headline ends, measured down its column.
+private struct PageHeadlineKey: PreferenceKey {
+    static let space = "page.column"
+    static let defaultValue: CGFloat? = nil
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
+extension View {
+    /// Marks the line a detail page's bar repeats once it has scrolled away.
+    func pageHeadline() -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: PageHeadlineKey.self,
+                    value: proxy.frame(in: .named(PageHeadlineKey.space)).maxY)
+            }
+        }
     }
 }
 
@@ -411,13 +584,17 @@ struct BackLink: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.surface, in: Circle())
+                    .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
                 Text(title)
             }
         }
         .buttonStyle(.quiet)
-        .padding(.bottom, 12)
     }
 }
 
@@ -431,7 +608,7 @@ struct ToggleRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).bodyText()
                 if let detail {
-                    Text(detail).metaText()
+                    Text(detail).metaText(Theme.inkSecondary)
                 }
             }
         } trailing: {
@@ -449,14 +626,18 @@ struct ToggleRow: View {
 struct Stat: View {
     let label: String
     let value: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label).metaText(Theme.inkSecondary)
+        VStack(alignment: .leading, spacing: 4) {
             Text(value).font(TypeScale.stat).foregroundStyle(Theme.ink).monospacedDigit()
+                .contentTransition(reduceMotion ? .opacity : .numericText())
+                .animation(Motion.settle(reduced: reduceMotion), value: value)
+            Text(label).metaText(Theme.inkSecondary)
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 }
 

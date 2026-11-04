@@ -73,8 +73,18 @@ use super::{
 #[path = "dictation_profile.rs"]
 mod dictation_profile;
 
+#[path = "memory_index.rs"]
+mod memory_index;
+pub(crate) use memory_index::phone_snapshot_published_at;
+
 #[path = "note_shares.rs"]
 mod note_shares;
+
+#[path = "phone_thought_manifest.rs"]
+mod phone_thought_manifest;
+
+#[path = "phone_thoughts.rs"]
+pub(crate) mod phone_thoughts;
 
 const PROTOCOL_AUDIENCE: &str = "sona-companion";
 const PROTOCOL_VERSION: u32 = 1;
@@ -193,7 +203,7 @@ impl BackgroundScanGate {
 /// with credential storage. The background scan gates on this and so does
 /// every error the UI shows, so a sync that is deliberately off cannot report
 /// a failure it is not trying to reach.
-fn sync_requested(settings: &CloudSyncSettings, portable_mode: bool) -> bool {
+pub(crate) fn sync_requested(settings: &CloudSyncSettings, portable_mode: bool) -> bool {
     settings.enabled
         && settings.has_current_consent()
         && !settings.paused
@@ -235,6 +245,7 @@ pub(crate) struct CloudSyncRuntime {
     client: Mutex<Option<EndpointClient>>,
     operational_error: Mutex<Option<CloudSyncErrorKind>>,
     background_scan: BackgroundScanGate,
+    phone_thought_gate: Mutex<()>,
 }
 
 struct EndpointClient {
@@ -333,6 +344,7 @@ enum RemoteObject {
     Meeting(Box<CloudMeetingBundleV1>),
     /// A paired device's recording, decrypted to a file this process owns.
     DeviceRecording(DeviceRecordingImport),
+    Thought(phone_thoughts::ThoughtImport),
     /// A device recording this Mac wrote itself. The audio never left, so the
     /// revision is acknowledged and nothing is imported.
     OwnDeviceRecording,
@@ -541,6 +553,7 @@ pub(crate) enum CloudRuntimeError {
     IntegrityFailure,
     Conflict,
     UnsupportedProtocol,
+    MemoryIndexTooLarge,
     Deferred,
     Client(CloudClientError),
     Storage,
@@ -557,6 +570,7 @@ impl CloudRuntimeError {
             Self::IntegrityFailure | Self::Storage | Self::File => {
                 CloudSyncErrorKind::IntegrityFailure
             }
+            Self::MemoryIndexTooLarge => CloudSyncErrorKind::MemoryIndexTooLarge,
             Self::Conflict => CloudSyncErrorKind::Conflict,
             Self::UnsupportedProtocol => CloudSyncErrorKind::UnsupportedProtocol,
             Self::Deferred | Self::Randomness => CloudSyncErrorKind::Transient,
@@ -586,6 +600,9 @@ impl fmt::Display for CloudRuntimeError {
             CloudSyncErrorKind::SetupRequired => "cloud sync needs setup",
             CloudSyncErrorKind::AuthRequired => "cloud sync authentication is required",
             CloudSyncErrorKind::Quota => "cloud sync quota is exhausted",
+            CloudSyncErrorKind::MemoryIndexTooLarge => {
+                "memory sync snapshot exceeds 8 MiB; no records were uploaded"
+            }
             CloudSyncErrorKind::IntegrityFailure => "cloud sync integrity validation failed",
             CloudSyncErrorKind::Conflict => "cloud sync has a conflict",
             CloudSyncErrorKind::UnsupportedProtocol => "cloud sync protocol is unsupported",
@@ -621,6 +638,7 @@ impl CloudSyncRuntime {
             client: Mutex::new(None),
             operational_error: Mutex::new(None),
             background_scan: BackgroundScanGate::default(),
+            phone_thought_gate: Mutex::new(()),
         }
     }
 
@@ -630,21 +648,23 @@ impl CloudSyncRuntime {
         }
         self.cloud_settings_changed(&settings::get_settings(&self.app).cloud_sync);
 
-        let event_runtime = Arc::clone(self);
-        self.app.listen("meeting:session-changed", move |event| {
-            let Ok(payload) =
-                serde_json::from_str::<crate::meeting::types::MeetingEventPayload>(event.payload())
-            else {
-                return;
-            };
-            let Some(session_id) = payload.session_id else {
-                return;
-            };
-            let runtime = Arc::clone(&event_runtime);
-            tauri::async_runtime::spawn(async move {
-                let _ = runtime.queue_current_session(session_id).await;
+        for event_name in ["meeting:session-changed", "meeting:transcript-changed"] {
+            let event_runtime = Arc::clone(self);
+            self.app.listen(event_name, move |event| {
+                let Ok(payload) =
+                    serde_json::from_str::<crate::meeting::types::MeetingEventPayload>(event.payload())
+                else {
+                    return;
+                };
+                let Some(session_id) = payload.session_id else {
+                    return;
+                };
+                let runtime = Arc::clone(&event_runtime);
+                tauri::async_runtime::spawn(async move {
+                    let _ = runtime.queue_current_session(session_id).await;
+                });
             });
-        });
+        }
 
         let runtime = Arc::clone(self);
         let _ = thread::Builder::new()
@@ -1441,6 +1461,7 @@ impl CloudSyncRuntime {
         &self,
         request: CloudShareImportRequest,
     ) -> Result<CloudShareImportResult, CloudRuntimeError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let path = Path::new(&request.path);
         if !path
             .extension()
@@ -1485,7 +1506,9 @@ impl CloudSyncRuntime {
         self.drain_outbox(&access).await?;
         if self.request_permitted(&access.state).await {
             self.pull_changes(&access).await?;
+            self.backfill_phone_thoughts(&access).await?;
             dictation_profile::sync(self, &access).await?;
+            memory_index::sync(self, &access).await?;
         }
         Ok(())
     }
@@ -1686,10 +1709,30 @@ impl CloudSyncRuntime {
         &self,
         session_id: MeetingSessionId,
     ) -> Result<(), CloudRuntimeError> {
-        let Some(access) = self.active_access().await? else {
+        let cloud_settings = settings::get_settings(&self.app).cloud_sync;
+        if self.stopped.load(Ordering::Acquire)
+            || portable::is_portable()
+            || !cloud_settings.enabled
+            || !cloud_settings.has_current_consent()
+        {
+            return Ok(());
+        }
+        let endpoint = match cloud_settings.endpoint() {
+            Ok(Some(endpoint)) => endpoint,
+            Ok(None) | Err(_) => return Ok(()),
+        };
+        let store = self
+            .meetings
+            .cloud_store()
+            .await
+            .map_err(|_| CloudRuntimeError::Storage)?;
+        let Some(state) = store.cloud_state().map_err(map_store_error)? else {
             return Ok(());
         };
-        if queue_session_upload(&access.store, session_id)? {
+        if state.endpoint != endpoint {
+            return Ok(());
+        }
+        if queue_session_upload(&store, session_id)? {
             self.emit_changed(Some(session_id), Some(CloudObjectState::Queued));
         }
         Ok(())
@@ -2809,6 +2852,36 @@ impl CloudSyncRuntime {
             .map_err(map_store_error)?;
         if current
             .as_ref()
+            .is_some_and(|head| head.change_sequence > sequence)
+        {
+            return Ok(());
+        }
+        if tombstone
+            && current
+                .as_ref()
+                .is_none_or(|head| head.source_session_id.is_none())
+        {
+            self.delete_phone_thought_source(access, object_id, revision_id, sequence)?;
+            return access
+                .store
+                .upsert_cloud_head(&CloudHead {
+                    object_id: object_id.to_owned(),
+                    source_session_id: None,
+                    remote_revision_id: Some(revision_id.to_owned()),
+                    tombstone: true,
+                    acknowledged_revision_id: Some(revision_id.to_owned()),
+                    change_sequence: sequence,
+                })
+                .map_err(map_store_error);
+        }
+        if current
+            .as_ref()
+            .is_some_and(|head| head.tombstone && head.source_session_id.is_none())
+        {
+            return Ok(());
+        }
+        if current
+            .as_ref()
             .is_some_and(|head| head.remote_revision_id.as_deref() == Some(revision_id))
         {
             let mut head = current.ok_or(CloudRuntimeError::IntegrityFailure)?;
@@ -2867,6 +2940,9 @@ impl CloudSyncRuntime {
                 self.install_device_recording(access, object_id, revision_id, sequence, recording)
                     .await
             }
+            RemoteObject::Thought(thought) => {
+                self.install_phone_thought(access, object_id, revision_id, sequence, thought)
+            }
             RemoteObject::OwnDeviceRecording => {
                 acknowledge_remote_revision(&access.store, object_id, revision_id, sequence)
             }
@@ -2921,6 +2997,31 @@ impl CloudSyncRuntime {
             .map_err(|_| CloudRuntimeError::IntegrityFailure)?;
         if sha256_base64url(&encrypted_manifest) != envelope.manifest_sha256 {
             return Err(CloudRuntimeError::IntegrityFailure);
+        }
+        if let Some(manifest) = phone_thought_manifest::open_manifest(
+            &*access.keys.vault_root,
+            &ObjectRevisionCryptoContext {
+                vault_id: &access.state.vault_id,
+                object_id,
+                revision_id,
+                index: 0,
+                total: u64::from(envelope.chunk_count),
+                content_kind: ObjectContentKind::Manifest,
+                source_format: phone_thought_manifest::SOURCE_FORMAT,
+            },
+            &encrypted_manifest,
+        )? {
+            return self
+                .download_phone_thought(
+                    access,
+                    object_id,
+                    revision_id,
+                    &envelope,
+                    &encrypted_manifest,
+                    manifest,
+                )
+                .await
+                .map(RemoteObject::Thought);
         }
         match open_remote_manifest(
             &*access.keys.vault_root,

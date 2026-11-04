@@ -160,22 +160,29 @@ struct MeetingBriefView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 16) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(store.brief?.title ?? "Meeting brief").font(TypeScale.headline).foregroundStyle(Theme.ink)
-                    if let brief = store.brief {
-                        Text(brief.startUtcMs.meetingDate.formatted(date: .abbreviated, time: .shortened))
-                            .metaText(Theme.inkSecondary)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 16) {
+                    Text(store.brief?.title ?? "Meeting brief")
+                        .titleText()
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 12)
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
                     }
+                    .buttonStyle(.circle)
+                    .help("Close")
+                    .accessibilityLabel("Close")
                 }
-                Spacer(minLength: 12)
-                Button("Close", action: onClose).buttonStyle(.primary)
+                if let brief = store.brief {
+                    Text(brief.startUtcMs.meetingDate.formatted(date: .abbreviated, time: .shortened))
+                        .metaText(Theme.inkSecondary)
+                }
             }
             .padding(24)
             Hairline()
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 24) {
                         if store.briefLoading {
                             ProgressView("Preparing your brief…")
                         }
@@ -189,35 +196,42 @@ struct MeetingBriefView: View {
                             points("What to know", brief.content.highlights, brief: brief, proxy: proxy)
                             points("Suggested agenda", brief.content.agenda, brief: brief, proxy: proxy)
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Context used").font(TypeScale.label(15))
+                                Text("Context used").titleText().accessibilityAddTraits(.isHeader)
                                 Text(brief.mail.state.detail).bodyText(13, Theme.inkSecondary)
                                 Text(brief.webStatus).bodyText(13, Theme.inkSecondary)
                                 Text("Prepared \(brief.generatedAtUtcMs.meetingDate.formatted(date: .abbreviated, time: .shortened)).")
                                     .metaText(Theme.inkSecondary)
                             }
-                            VStack(alignment: .leading, spacing: 12) {
-                                ForEach(brief.sources) { source in
-                                    DisclosureGroup(isExpanded: Binding(
-                                        get: { expandedSources.contains(source.id) },
-                                        set: { if $0 { expandedSources.insert(source.id) } else { expandedSources.remove(source.id) } }
-                                    )) {
-                                        VStack(alignment: .leading, spacing: 10) {
-                                            Text(source.text).bodyText(13).textSelection(.enabled)
-                                            if let value = source.externalUrl, let url = URL(string: value) {
-                                                Text("External source. Check that it refers to the right person.")
-                                                    .metaText(Theme.inkSecondary)
-                                                Link("Open web source", destination: url)
-                                                    .accessibilityLabel("Open external source: \(source.label)")
-                                            }
-                                            if let id = source.meetingId {
-                                                Button("Open meeting") { onOpenMeeting(id) }.buttonStyle(.compact)
-                                            }
+                            if !brief.sources.isEmpty {
+                                Card {
+                                    ForEach(Array(brief.sources.enumerated()), id: \.element.id) { index, source in
+                                        if index > 0 {
+                                            Hairline().padding(.horizontal, 16)
                                         }
-                                        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
-                                    } label: {
-                                        Text(source.label).bodyText(14)
+                                        DisclosureGroup(isExpanded: Binding(
+                                            get: { expandedSources.contains(source.id) },
+                                            set: { if $0 { expandedSources.insert(source.id) } else { expandedSources.remove(source.id) } }
+                                        )) {
+                                            VStack(alignment: .leading, spacing: 10) {
+                                                Text(source.text).bodyText(13).textSelection(.enabled)
+                                                if let value = source.externalUrl, let url = URL(string: value) {
+                                                    Text("External source. Check that it refers to the right person.")
+                                                        .metaText(Theme.inkSecondary)
+                                                    Link("Open web source", destination: url)
+                                                        .accessibilityLabel("Open external source: \(source.label)")
+                                                }
+                                                if let id = source.meetingId {
+                                                    Button("Open meeting") { onOpenMeeting(id) }.buttonStyle(.compact)
+                                                }
+                                            }
+                                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                                        } label: {
+                                            Text(source.label).bodyText(14)
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 12)
+                                        .id(source.id)
                                     }
-                                    .id(source.id)
                                 }
                             }
                         } else if !store.briefLoading && store.briefError == nil {
@@ -245,20 +259,23 @@ struct MeetingBriefView: View {
     @ViewBuilder
     private func points(_ title: String, _ points: [MeetingBriefPoint], brief: MeetingBrief, proxy: ScrollViewProxy) -> some View {
         if !points.isEmpty {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(title).font(TypeScale.label(16))
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).titleText().accessibilityAddTraits(.isHeader)
                 ForEach(Array(points.enumerated()), id: \.offset) { _, point in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(point.text).bodyText().textSelection(.enabled)
-                        ForEach(point.sources, id: \.self) { id in
-                            if let source = brief.sources.first(where: { $0.id == id }) {
-                                Button(source.label) {
-                                    expandedSources.insert(id)
-                                    proxy.scrollTo(id, anchor: .top)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(point.text).bodyText().textSelection(.enabled)
+                            ForEach(point.sources, id: \.self) { id in
+                                if let source = brief.sources.first(where: { $0.id == id }) {
+                                    Button(source.label) {
+                                        expandedSources.insert(id)
+                                        proxy.scrollTo(id, anchor: .top)
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(TypeScale.label(12))
+                                    .accessibilityLabel("Read source: \(source.label)")
                                 }
-                                .buttonStyle(.link)
-                                .font(TypeScale.label(12))
-                                .accessibilityLabel("Read source: \(source.label)")
                             }
                         }
                     }

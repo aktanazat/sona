@@ -620,6 +620,7 @@ mod macos {
             notes: None,
             calendar_name: None,
             url: None,
+            location: None,
         })
     }
 
@@ -645,8 +646,9 @@ mod macos {
     fn enrich(event: &EKEvent, summary: &mut CalendarEventSummary) {
         enrich_participants(event, summary);
         // SAFETY: a plain property read on a live event.
-        let notes = unsafe { event.notes() };
+        let (notes, location) = unsafe { (event.notes(), event.location()) };
         summary.notes = event_text(notes.map(|notes| notes.to_string()));
+        summary.location = event_text(location.map(|location| location.to_string()));
     }
 
     /// Everything a row can show about who is coming and where the event lives.
@@ -718,6 +720,7 @@ mod tests {
             attendees: Vec::new(),
             notes: None,
             calendar_name: None,
+            location: None,
             url: None,
         }
     }

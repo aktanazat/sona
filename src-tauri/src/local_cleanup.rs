@@ -412,6 +412,7 @@ pub(crate) async fn infer(
     user: &str,
     original: &str,
 ) -> Result<String, String> {
+    let _activity = crate::planning::quiet::foreground_activity();
     let manager = manager(app)?;
     let result = infer_inner(app, &manager, model, system, user, original).await;
     {

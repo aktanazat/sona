@@ -248,29 +248,19 @@ struct PromptsView: View {
     }
 }
 
-/// The two tabs, as a line of labels with the live one underlined.
+/// The two tabs, as a segmented control.
 struct PromptTabBar: View {
     @Binding var tab: PromptTab
 
     var body: some View {
-        HStack(spacing: 24) {
+        Picker("Prompts", selection: $tab) {
             ForEach(PromptTab.allCases) { candidate in
-                Button { tab = candidate } label: {
-                    VStack(spacing: 8) {
-                        Text(candidate.label)
-                            .font(TypeScale.label())
-                            .foregroundStyle(candidate == tab ? Theme.ink : Theme.inkSecondary)
-                        Rectangle()
-                            .fill(candidate == tab ? Theme.ink : .clear)
-                            .frame(height: 2)
-                    }
-                    .fixedSize()
-                }
-                .buttonStyle(.plain)
+                Text(candidate.label).tag(candidate)
             }
-            Spacer()
         }
-        .overlay(alignment: .bottom) { Hairline() }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .fixedSize()
     }
 }
 
@@ -321,10 +311,10 @@ struct PromptRow: View {
                             .disabled(store.saving)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 16)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(alignment: .bottom) { Hairline() }
+                .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
             }
         }
     }
@@ -349,7 +339,7 @@ struct PromptRunRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(name ?? "Deleted prompt").headlineText()
+                Text(name ?? "Deleted prompt").bodyText()
                 Spacer(minLength: 12)
                 Text(promptRelativeTime(run.producedAtUtcMs)).metaText()
                 if let prompt = store.prompt(run.promptId) {
@@ -361,10 +351,10 @@ struct PromptRunRow: View {
             PromptRunBody(result: run.result)
             Text("\(run.modelId) · \(run.modelVersion)").metaText(Theme.inkDisabled)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 

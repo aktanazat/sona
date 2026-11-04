@@ -3,34 +3,50 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// The places in the sidebar, in the order it shows them.
+/// The places a window shows. Library opens from Home and Calendar from
+/// Projects, so the sidebar lists only the rest.
 enum Place: Int, CaseIterable, Identifiable {
-    case capture, library, meetings, people, scratchpad
+    case capture, library, meetings, people, scratchpad, projects, calendar
+
+    static let sidebar: [Place] = [.capture, .meetings, .people, .scratchpad, .projects]
 
     var id: Int { rawValue }
 
+    /// The sidebar row that stays lit while this place shows.
+    var parent: Place {
+        switch self {
+        case .library: .capture
+        case .calendar: .projects
+        case .capture, .meetings, .people, .scratchpad, .projects: self
+        }
+    }
+
     var title: String {
         switch self {
-        case .capture: "Capture"
+        case .capture: "Home"
         case .library: "Library"
         case .meetings: "Meetings"
         case .people: "People"
-        case .scratchpad: "Scratchpad"
+        case .scratchpad: "Notes"
+        case .projects: "Projects"
+        case .calendar: "Calendar"
         }
     }
 
     var icon: String {
         switch self {
-        case .capture: "mic"
-        case .library: "books.vertical"
-        case .meetings: "video"
-        case .people: "person.2"
-        case .scratchpad: "note.text"
+        case .capture: "house.fill"
+        case .library: "books.vertical.fill"
+        case .meetings: "video.fill"
+        case .people: "person.2.fill"
+        case .scratchpad: "square.and.pencil"
+        case .projects: "folder"
+        case .calendar: "calendar"
         }
     }
 }
 
-/// The tabs across the top of Settings, in the order the strip shows them.
+/// Settings' pages, in the order its list shows them.
 enum SettingsPlace: Int, CaseIterable, Identifiable {
     case essentials, dictation, models, modes, vocabulary, prompts, workflows, meetings
     case agents, sync, privacy, importing, documents, about, debug
@@ -117,6 +133,40 @@ struct DictationDurationWarningEvent: Decodable {
     let remainingSeconds: Int?
 }
 
+enum DictationDeliveryOutcome: String, Decodable {
+    case pasted, sent
+}
+
+struct DictationDeliveryEvent: Decodable {
+    let outcome: DictationDeliveryOutcome
+}
+
+enum PillFeedback: Equatable {
+    case delivered(DictationDeliveryOutcome)
+    case failed
+
+    var label: String {
+        switch self {
+        case .delivered(.pasted): "Pasted"
+        case .delivered(.sent): "Sent"
+        case .failed: "Couldn't paste"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .delivered(.pasted): "checkmark"
+        case .delivered(.sent): "arrow.up.right"
+        case .failed: "exclamationmark"
+        }
+    }
+}
+
+struct PillPresentation: Equatable {
+    let capture: CaptureState
+    let feedback: PillFeedback?
+}
+
 extension CoreEvent {
     static let recordingError = "recording-error"
     static let pasteError = "paste-error"
@@ -130,6 +180,7 @@ extension CoreEvent {
     /// what shows it.
     static let commandAnswered = "command-mode://answered"
     static let showMainWindow = "show-main-window"
+    static let dictationDelivery = "dictation-delivery"
 }
 
 /// Everything the windows share. One instance, on the main actor, handed to
@@ -187,6 +238,9 @@ final class AppModel {
     /// has said so; nil the rest of the time. The pill shows it, on its own
     /// if it has to.
     private(set) var pillWarningSeconds: Int?
+    private(set) var pillFeedback: PillFeedback?
+    // The panel fades after capture ends; its content changes only on the next show.
+    private(set) var pillPresentation = PillPresentation(capture: .idle, feedback: nil)
     /// Bumped when the pill's hour away is over, so the pill is placed again.
     private var pillReturned = 0
 
@@ -201,8 +255,10 @@ final class AppModel {
     let live: MeetingLiveStore
     let meetingSettings: MeetingSettingsStore
     let prep: MeetingPrepStore
+    let personPhotos: PersonPhotoStore
     let people: PeopleStore
     let scratchpad: ScratchpadStore
+    let projects: ProjectsStore
     let modes: ModesStore
     let providers: ProvidersStore
     let vocabulary: VocabularyStore
@@ -223,7 +279,15 @@ final class AppModel {
 
     @ObservationIgnored let core = Core()
     @ObservationIgnored private lazy var pill = FloatingPanel(HUDPill().environment(self))
-    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel())
+    @ObservationIgnored private lazy var consent = FloatingPanel(consentPanel(), arrival: .slide)
+    @ObservationIgnored private lazy var quietReviewScheduler = QuietReviewScheduler(store: projects) { [weak self] in
+        guard let self, ready, !coreStopped, !coreRestarting, onboarding.step == .done,
+              capture == .idle, !live.starting, live.pending == nil, live.live == nil, live.active == nil,
+              !recorder.hasCapture, !recorder.selectionPending, sheet != .recorder,
+              meetingSettings.settingsRead, meetingSettings.settings.localEngine == .appleIntelligence,
+              case .appleIntelligence(blocker: nil)? = meetingSettings.engineStatus else { return false }
+        return true
+    }
     /// What the pill showed when it was last placed.
     @ObservationIgnored private var pillCapture = CaptureState.idle
     /// The wait for the end of the pill's hour away, and the time it ends.
@@ -231,6 +295,7 @@ final class AppModel {
     @ObservationIgnored private var pillReturnAt: Int64?
     /// The ended hide this shell last asked the core to clear.
     @ObservationIgnored private var pillClearedAt: Int64?
+    @ObservationIgnored private var feedbackDismissal: Task<Void, Never>?
     /// Presents the main window, as the scene's `openWindow` does. Only a
     /// view reaches that action, and the window stays closed at launch, so
     /// the menu bar mark hands it over when it first appears. Observed, so a
@@ -247,8 +312,11 @@ final class AppModel {
         live = MeetingLiveStore(core: core)
         meetingSettings = MeetingSettingsStore(core: core)
         prep = MeetingPrepStore(core: core)
-        people = PeopleStore(core: core)
+        let photos = PersonPhotoStore(core: core)
+        personPhotos = photos
+        people = PeopleStore(core: core, photos: photos)
         scratchpad = ScratchpadStore(core: core)
+        projects = ProjectsStore(core: core)
         modes = ModesStore(core: core)
         providers = ProvidersStore(core: core)
         vocabulary = VocabularyStore(core: core)
@@ -276,7 +344,7 @@ final class AppModel {
             CoreEvent.modelDeleted, CoreEvent.recordingError, CoreEvent.pasteError, CoreEvent.rewriteSkipped,
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
-            CoreEvent.commandAnswered, CoreEvent.showMainWindow,
+            CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
@@ -303,6 +371,11 @@ final class AppModel {
         actions.append(PaletteAction(id: "go-settings", group: .navigation, title: "Settings") { [weak self] in
             self?.showSettings(.essentials)
         })
+        for page in [SettingsPlace.modes, .vocabulary, .models] {
+            actions.append(PaletteAction(id: "go-settings-\(page.rawValue)", group: .navigation, title: page.title) { [weak self] in
+                self?.showSettings(page)
+            })
+        }
         if let title = captureActionTitle {
             actions.append(PaletteAction(id: "toggle-recording", group: .actions, title: title) { [weak self] in
                 self?.toggleCapture()
@@ -382,6 +455,18 @@ final class AppModel {
         go(.meetings)
     }
 
+    /// A past moment the live screen recalled, open on its meeting's page.
+    /// The recording keeps going: the live notes are saved first, and the
+    /// meetings page's recording row leads back.
+    func openRecalled(_ match: MeetingRecallMatch) {
+        Task {
+            guard await live.flushLiveNotes() else { return }
+            live.closeLive()
+            meetings.open(match.sessionId, segmentId: match.segmentId)
+            go(.meetings)
+        }
+    }
+
     /// One kept dictation, open in the library: the words the notice is about.
     func openDictation(_ id: Int64) {
         library.reveal(id)
@@ -391,6 +476,47 @@ final class AppModel {
     func openPerson(_ id: String) {
         people.openPerson(id)
         go(.people)
+    }
+
+    var plannerPeople: [PlanningPersonChoice] {
+        (people.entries ?? [])
+            .map { PlanningPersonChoice(id: $0.person.id, name: $0.person.displayName) }
+            .sorted {
+                let order = $0.name.localizedStandardCompare($1.name)
+                return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+            }
+    }
+
+    func openProject(_ id: String) {
+        projects.open(id)
+        go(.projects)
+    }
+
+    func openPlanningEvidence(_ evidence: PlanningEvidenceLink) {
+        guard evidence.available else { return }
+        switch evidence.sourceKind {
+        case .meeting:
+            meetings.open(
+                evidence.sourceId,
+                atMilliseconds: evidence.atMs.flatMap(UInt64.init(exactly:)),
+                noteId: evidence.meetingNoteId
+            )
+            go(.meetings)
+        case .note:
+            open(link: "sona://note/\(evidence.sourceId)")
+        case .loop:
+            open(link: "sona://loop/\(evidence.sourceId)")
+        }
+    }
+
+    func discussProject(_ project: PlanningProject) {
+        chat.openAsk(draft: "About project “\(project.title)”: ")
+        sheet = .chat
+    }
+
+    func planWithSona() {
+        chat.openPlanner()
+        sheet = .chat
     }
 
     /// A `sona://` link: the core resolves it and answers with a navigation
@@ -447,6 +573,12 @@ final class AppModel {
             go(.people)
         case let .dictation(historyId):
             openDictation(historyId)
+        case let .note(id, versionId):
+            Task { await scratchpad.open(id: id, versionId: versionId) }
+            go(.scratchpad)
+        case let .subject(id):
+            Task { await scratchpad.openSubject(id: id) }
+            go(.scratchpad)
         case let .search(question):
             paletteSeed = question
             paletteShown = true
@@ -498,6 +630,7 @@ final class AppModel {
 
     func cancelCapture() {
         call { try await self.core.request("cancel_operation") }
+        clearPillFeedback()
     }
 
     func dismissNotice() {
@@ -507,10 +640,42 @@ final class AppModel {
     private func setCapture(_ state: CaptureState) {
         capture = state
         if case .recording = state {
+            clearPillFeedback()
             meter.start()
         } else {
             meter.stop()
         }
+        if case .idle = state {
+            dismissPillFeedbackAfterDelay()
+        }
+    }
+
+    private func showPillFeedback(_ feedback: PillFeedback) {
+        guard settings.settings.overlayStyle != .none else { return }
+        if case .recording = capture { return }
+        feedbackDismissal?.cancel()
+        feedbackDismissal = nil
+        pillFeedback = feedback
+        if case .idle = capture {
+            dismissPillFeedbackAfterDelay()
+        }
+    }
+
+    private func dismissPillFeedbackAfterDelay() {
+        guard let feedback = pillFeedback else { return }
+        feedbackDismissal?.cancel()
+        feedbackDismissal = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(feedback == .failed ? 2200 : 900))
+            guard !Task.isCancelled else { return }
+            self?.pillFeedback = nil
+            self?.feedbackDismissal = nil
+        }
+    }
+
+    private func clearPillFeedback() {
+        feedbackDismissal?.cancel()
+        feedbackDismissal = nil
+        pillFeedback = nil
     }
 
     // MARK: Models
@@ -536,7 +701,7 @@ final class AppModel {
     func rescanModels() {
         call {
             try await self.core.request("rescan_local_models")
-            try await self.loadModels()
+            await self.loadModels()
         }
     }
 
@@ -596,6 +761,8 @@ final class AppModel {
         track { [weak self] in self?.syncPill() }
         track { [weak self] in self?.syncConsent() }
         track { [weak self] in self?.syncNavigation() }
+        track { [weak self] in self?.quietReviewScheduler.update() }
+        track { [weak self] in self?.holdPlaybackWhileCapturing() }
         openPendingURLs()
     }
 
@@ -609,6 +776,7 @@ final class AppModel {
         Task { await live.start() }
         Task { await meetings.start() }
         Task { await meetingSettings.start() }
+        Task { await projects.start() }
         Task { await people.start() }
         Task { await vocabulary.start() }
         Task { await prompts.start() }
@@ -631,6 +799,7 @@ final class AppModel {
     private func coreClosed() {
         coreStopped = true
         liveText = ""
+        clearPillFeedback()
         setCapture(.idle)
     }
 
@@ -644,6 +813,14 @@ final class AppModel {
             await start()
             coreRestarting = false
         }
+    }
+
+    func pauseQuietReview() {
+        quietReviewScheduler.setPaused(true)
+    }
+
+    func resumeQuietReview() {
+        quietReviewScheduler.setPaused(false)
     }
 
     private func showWhatsNew() async {
@@ -667,9 +844,16 @@ final class AppModel {
 
     /// Re-runs `apply` every time something it read changes.
     private func track(_ apply: @escaping @MainActor () -> Void) {
-        withObservationTracking(apply) {
+        withObservationTracking(apply) { [weak self] in
             Task { @MainActor [weak self] in self?.track(apply) }
         }
+    }
+
+    /// Sound played while a meeting captures lands in its call track and its
+    /// microphone, so both players hold until the capture ends.
+    private func holdPlaybackWhileCapturing() {
+        meetings.audio.hold(live.capturing)
+        library.hold(live.capturing)
     }
 
     /// The catalog and which model is current. A failed read keeps the last
@@ -710,31 +894,31 @@ final class AppModel {
 
     // MARK: Floating panels
 
-    /// While recording, the sound at the overlay's edge unless the overlay is
-    /// off; idle, the mode pill at its own edge when it is on and not put
-    /// away for the hour. One panel, moved between the two. No pill while
-    /// the core is stopped: it would offer a recording nothing can make. The
-    /// last minute of a dictation shows whatever the overlay style, and even
-    /// during the hour away: a dictation about to end is worth one line. The
-    /// pill draws its own state; a change of it floats the panel afresh on
-    /// the screen the pointer is on, as each dictation always has, and a
-    /// settings read leaves it in place. Only the idle pill can be dragged
-    /// to another edge: the recording one stands where the overlay does.
     private func syncPill() {
         let record = settings.settings
-        let anew = capture != pillCapture
+        if record.overlayStyle == .none, pillFeedback != nil {
+            clearPillFeedback()
+        }
+        let anew: Bool
+        switch (pillCapture, capture) {
+        case (.recording, .recording): anew = false
+        case (_, .recording): anew = true
+        default: anew = false
+        }
         pillCapture = capture
         _ = pillReturned
         pill.dockable = false
         if coreStopped {
             pill.hide()
-        } else if capture != .idle {
+        } else if capture != .idle || pillFeedback != nil {
             if record.overlayStyle == .none, pillWarningSeconds == nil {
                 pill.hide()
             } else {
+                pillPresentation = PillPresentation(capture: capture, feedback: pillFeedback)
                 pill.show(at: .edge(HudPillEdge(record.overlayPosition)), anew: anew)
             }
         } else if record.hudPillEnabled, !pillAway(record) {
+            pillPresentation = PillPresentation(capture: .idle, feedback: nil)
             pill.dockable = true
             pill.show(at: .edge(record.hudPillPosition), anew: anew)
         } else {
@@ -786,13 +970,13 @@ final class AppModel {
 
     /// The consent panel: an offer to record, the recording in progress, a
     /// prep or wrap card. The view reads the store and draws its own surface;
-    /// this only floats it at the top right of the screen the pointer is on
-    /// when a card appears, as the Tauri window did, and leaves it there.
+    /// this only places it on the screen the pointer is on: a card at the top
+    /// right, a recording flush against the right edge.
     private func syncConsent() {
-        if live.card == nil {
-            consent.hide()
+        if let card = live.card {
+            consent.show(at: card.docksAtEdge ? .flushRight : .topTrailing)
         } else {
-            consent.show(at: .topTrailing)
+            consent.hide()
         }
     }
 
@@ -810,7 +994,6 @@ final class AppModel {
                 return draft.body
             }
         )
-        .padding(8)
         .environment(self)
     }
 
@@ -925,6 +1108,7 @@ final class AppModel {
                         ? "The words could not be pasted into the app in front. Focus a text field and try again."
                         : "The words could not be pasted into the app in front. They are kept in the Library.",
                     dictation: event.historyId)
+                showPillFeedback(.failed)
             case CoreEvent.rewriteSkipped:
                 let event: RewriteSkippedEvent = try Core.payload(line)
                 if let text = event.outcome.skippedText {
@@ -940,6 +1124,9 @@ final class AppModel {
                 sheet = .chat
             case CoreEvent.showMainWindow:
                 reveal()
+            case CoreEvent.dictationDelivery:
+                let event: DictationDeliveryEvent = try Core.payload(line)
+                showPillFeedback(.delivered(event.outcome))
             default:
                 break
             }

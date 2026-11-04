@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// People, one person, one organization: three screens behind one rail entry.
@@ -9,6 +10,7 @@ struct PeopleScreen: View {
     let store: PeopleStore
     /// Opens the meeting a line was said in. Every ledger row is a way into one.
     var openMeeting: (String) -> Void = { _ in }
+    var openContribution: ((String, UInt64) -> Void)?
     /// Adds context about this person. The import surface owns the file
     /// picker and the command behind it; a person's page owns the verb.
     var ingestDocument: () -> Void = {}
@@ -20,27 +22,29 @@ struct PeopleScreen: View {
     var openVocabulary: (() -> Void)?
 
     var body: some View {
-        Page {
-            switch store.route {
-            case .list:
+        switch store.route {
+        case .list:
+            Page {
                 PeopleListView(store: store, openMeeting: openMeeting, openVocabulary: openVocabulary)
-            case .person:
-                PersonView(
-                    store: store,
-                    openMeeting: openMeeting,
-                    ingestDocument: ingestDocument,
-                    deleteDocument: deleteDocument)
-            case .organization:
-                OrganizationView(store: store, openMeeting: openMeeting)
             }
+        case .person:
+            PersonView(
+                store: store,
+                openMeeting: openMeeting,
+                openContribution: openContribution,
+                ingestDocument: ingestDocument,
+                deleteDocument: deleteDocument)
+        case .organization:
+            OrganizationView(store: store, openMeeting: openMeeting)
         }
     }
 }
 
 // MARK: - The list
 
-/// Everybody Sona knows, the organizations they are at, what is still open
-/// across all of them, and the words it keeps hearing and cannot spell.
+/// Everybody Sona knows: the numbers first, then what still needs you, the
+/// people, the companies they are at, and the words Sona keeps hearing and
+/// cannot spell.
 struct PeopleListView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
@@ -53,32 +57,36 @@ struct PeopleListView: View {
             if store.listFailed {
                 Card {
                     CardRow {
-                        Text("Couldn't load people.").bodyText(15, Theme.inkSecondary)
+                        Text("Couldn't load people.").bodyText(14, Theme.inkSecondary)
                     } trailing: {
                         Button("Retry") { store.reload() }.buttonStyle(.compact)
                     }
                 }
-            } else if let entries = store.entries {
-                if entries.isEmpty {
-                    Card {
-                        CardRow {
-                            Text("People from your meetings appear here.").bodyText(15, Theme.inkSecondary)
-                        }
-                    }
-                } else {
-                    PeopleCompaniesSection(store: store)
-                    Card {
-                        ForEach(entries) { entry in
-                            PersonListRow(entry: entry) { store.openPerson(entry.person.id) }
-                        }
-                    }
-                }
+                .padding(.bottom, 28)
+            } else if store.entries?.isEmpty == true {
+                Card { CardLine("People from your meetings appear here.") }
+                    .padding(.bottom, 28)
             } else {
-                Card {
-                    CardRow { Text("Loading…").bodyText(15, Theme.inkSecondary) }
+                PeopleListStats(entries: store.entries, companies: store.companies)
+                    .padding(.bottom, 28)
+                PeopleInboxSection(store: store, openMeeting: openMeeting)
+                PageSection("Everyone") {
+                    if let entries = store.entries {
+                        Card {
+                            LazyVStack(spacing: 0) {
+                                ForEach(entries) { entry in
+                                    PersonListRow(entry: entry, photoRevision: store.photoRevision) {
+                                        store.openPerson(entry.person.id)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        PeopleRowsPlaceholder(rows: 5)
+                    }
                 }
+                PeopleCompaniesSection(store: store)
             }
-            PeopleInboxSection(store: store, openMeeting: openMeeting)
             PeopleCandidatesSection(store: store, openVocabulary: openVocabulary)
         }
     }
@@ -90,6 +98,30 @@ struct PeopleListView: View {
     }
 }
 
+/// The people in four numbers. Until the list answers, each tile holds its
+/// place with nothing in it.
+struct PeopleListStats: View {
+    let entries: [PersonListEntry]?
+    let companies: [CompanySummary]?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            NumberTile(entries.map { "\($0.count)" } ?? " ", label: "People")
+            NumberTile(companies.map { "\($0.count)" } ?? " ", label: "Companies")
+            NumberTile(entries.map { "\(Self.metThisWeek($0))" } ?? " ", label: "Met this week")
+            NumberTile(entries.map { "\($0.reduce(0) { $0 + $1.suggestedCount })" } ?? " ", label: "To confirm")
+        }
+    }
+
+    private static func metThisWeek(_ entries: [PersonListEntry], now: Date = .now) -> Int {
+        let start = now.addingTimeInterval(-7 * 86_400)
+        return entries.filter { entry in
+            let last = entry.lastMeeting?.at ?? entry.lastMeetingAtUtcMs.map(PeopleFormat.date)
+            return last.map { $0 >= start } ?? false
+        }.count
+    }
+}
+
 /// The companies the people are at, newest meeting first, each with what its
 /// page holds, counted. A company is the people whose calendar addresses
 /// share a work domain, so a row opens the same page a person's header does.
@@ -97,112 +129,179 @@ struct PeopleCompaniesSection: View {
     let store: PeopleStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Companies").sectionLabel()
-            Card {
-                if store.companiesFailed {
+        PageSection("Companies") {
+            if store.companiesFailed {
+                Card {
                     CardRow {
-                        Text("Couldn't load companies.").bodyText(15, Theme.inkSecondary)
+                        Text("Couldn't load companies.").bodyText(14, Theme.inkSecondary)
                     } trailing: {
                         Button("Retry") { store.reload() }.buttonStyle(.compact)
                     }
-                } else if let companies = store.companies {
+                }
+            } else if let companies = store.companies {
+                Card {
                     if companies.isEmpty {
-                        CardRow {
-                            Text("Companies appear once people from a work address join your meetings.")
-                                .bodyText(15, Theme.inkSecondary)
-                        }
+                        CardLine("Companies appear once people from a work address join your meetings.")
                     } else {
-                        ForEach(companies) { company in
-                            CompanyRow(company: company) { store.openOrganization(company.slug) }
+                        LazyVStack(spacing: 0) {
+                            ForEach(companies) { company in
+                                CompanyRow(company: company) { store.openOrganization(company.slug) }
+                            }
                         }
                     }
-                } else {
-                    CardRow { Text("Loading…").bodyText(15, Theme.inkSecondary) }
                 }
+            } else {
+                PeopleRowsPlaceholder(rows: 2)
             }
         }
-        .padding(.bottom, 20)
     }
 }
 
-/// One company, one row, read like a person's: the name, then its people,
-/// its meetings and how long ago the last one was.
+/// One company, one row, read like a person's: its mark, the name and how
+/// long ago you last met anybody there, and its people and meetings counted
+/// on the right.
 struct CompanyRow: View {
     let company: CompanySummary
     let open: () -> Void
 
     var body: some View {
         CardRow(action: open) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(company.name).font(TypeScale.label()).foregroundStyle(Theme.ink).lineLimit(1)
-                Text(facts).metaText().monospacedDigit().lineLimit(1)
+            HStack(spacing: 12) {
+                CompanyMark(name: company.name, size: 36)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(company.name).headlineText().lineLimit(1)
+                    Text(lastMet).metaText().monospacedDigit().lineLimit(1)
+                }
             }
         } trailing: {
-            HStack(spacing: 10) {
+            HStack(alignment: .center, spacing: 16) {
                 if company.openLoopsCount > 0 {
                     Chip(PeopleModel.openItems(company.openLoopsCount))
                 }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.inkTertiary)
+                PeopleCount(value: company.peopleCount, unit: company.peopleCount == 1 ? "person" : "people")
+                PeopleCount(value: company.meetingsCount, unit: company.meetingsCount == 1 ? "meeting" : "meetings")
+                PeopleChevron()
             }
         }
     }
 
-    private var facts: String {
-        var parts = [
-            PeopleModel.people(Int(company.peopleCount)),
-            PeopleModel.meetings(company.meetingsCount),
-        ]
-        if let last = company.lastMeetingAtUtcMs {
-            parts.append("Last met \(PeopleFormat.elapsed(PeopleFormat.date(last)))")
-        }
-        return parts.joined(separator: " · ")
+    private var lastMet: String {
+        company.lastMeetingAtUtcMs.map { "Last met \(PeopleFormat.elapsed(PeopleFormat.date($0)))" }
+            ?? "No meetings yet"
     }
 }
 
-/// One person, one row: the name, and one line of relationship facts under it
-/// — where they are, how many meetings you have had, how long ago the last one
-/// was. The elapsed phrasing is what somebody scans a list of people for; the
+/// One person, one row: the face, the name, where they are and how long ago
+/// you last met, and the meetings you have had, counted on the right. The
 /// exact date is on the person's own page, which is what the row opens.
 struct PersonListRow: View {
     let entry: PersonListEntry
+    var photoRevision: UInt64 = 0
     let open: () -> Void
 
     var body: some View {
         CardRow(action: open) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entry.person.displayName).font(TypeScale.label()).foregroundStyle(Theme.ink).lineLimit(1)
-                Text(facts).metaText().monospacedDigit().lineLimit(1)
+            HStack(spacing: 12) {
+                PersonPortrait(personId: entry.person.id, name: entry.person.displayName, size: 36, revision: photoRevision)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(entry.person.displayName).headlineText().lineLimit(1)
+                    if !facts.isEmpty {
+                        Text(facts).metaText().monospacedDigit().lineLimit(1)
+                    }
+                }
             }
         } trailing: {
-            HStack(spacing: 10) {
+            HStack(alignment: .center, spacing: 16) {
                 if entry.suggestedCount > 0 {
                     Chip("\(entry.suggestedCount) to confirm")
                 }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.inkTertiary)
+                PeopleCount(value: entry.confirmedCount, unit: entry.confirmedCount == 1 ? "meeting" : "meetings")
+                PeopleChevron()
             }
         }
     }
 
-    /// One line, in the order it is read: the place, the count, then how long
-    /// ago. Interpuncts join it rather than separating cells, because it is a
-    /// sentence about a person and not a table of them.
+    /// The place, then how long ago, joined as a sentence about a person
+    /// rather than cells of a table.
     private var facts: String {
         var parts: [String] = []
         if let organization = entry.person.organization {
             parts.append(organization)
         }
-        parts.append(PeopleModel.meetings(entry.confirmedCount))
         if let last = entry.lastMeeting {
             parts.append("Last met \(PeopleFormat.elapsed(last.at))")
         } else if let last = entry.lastMeetingAtUtcMs {
             parts.append("Last met \(PeopleFormat.elapsed(PeopleFormat.date(last)))")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// A count at the end of a row, the number over its noun.
+struct PeopleCount: View {
+    let value: UInt64
+    let unit: String
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            Text("\(value)").font(TypeScale.stat).foregroundStyle(Theme.ink).monospacedDigit()
+            Text(unit).metaText()
+        }
+        .frame(minWidth: 52, alignment: .trailing)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PeopleChevron: View {
+    var body: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Theme.inkTertiary)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A company's mark: its first letter on a rounded tile, the square twin of
+/// a person's initials.
+struct CompanyMark: View {
+    let name: String
+    let size: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+        Text(name.first.map { String($0).uppercased() } ?? "")
+            .font(.system(size: size * 0.4, weight: .semibold))
+            .foregroundStyle(Theme.inkSecondary)
+            .frame(width: size, height: size)
+            .background(Theme.inset, in: shape)
+            .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+            .accessibilityHidden(true)
+    }
+}
+
+/// Where the rows will be, while they are read: the same height, with a
+/// circle where each face goes.
+struct PeopleRowsPlaceholder: View {
+    var rows = 5
+
+    var body: some View {
+        Card {
+            ForEach(0..<rows, id: \.self) { index in
+                HStack(spacing: 12) {
+                    Circle().fill(Theme.inset).frame(width: 36, height: 36)
+                    VStack(alignment: .leading, spacing: 7) {
+                        PlaceholderBar(width: index.isMultiple(of: 2) ? 150 : 120, height: 10)
+                        PlaceholderBar(width: 200, height: 8)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading")
     }
 }
 
@@ -288,11 +387,12 @@ struct PeopleCandidatesSection: View {
 
 // MARK: - One person
 
-/// A person's page, in the three lines every document page in the app uses:
-/// the way back, the name, and one quiet line — where they are, and when you
-/// last met.
+/// A person's page: a pinned bar with the way back and the verbs, the face
+/// and the name the way Contacts heads a card, the person in numbers, the
+/// contact, and the tabs.
 ///
-/// Every verb is in the one menu. Rename opens the title as a field, which
+/// Every verb is in the one menu, and attaching a contact also has a button
+/// in the head while none is attached. Rename opens the title as a field, which
 /// commits on Enter or on leaving it and reverts on Escape; there is no Save,
 /// because a rename is one value with a receipt behind it. The two verbs that
 /// write a section — the relationship paragraph, and an imported document —
@@ -304,6 +404,7 @@ struct PeopleCandidatesSection: View {
 struct PersonView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
+    var openContribution: ((String, UInt64) -> Void)?
     var ingestDocument: () -> Void = {}
     var deleteDocument: ((String) -> Void)?
 
@@ -334,34 +435,43 @@ struct PersonView: View {
     @State private var renaming = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            BackLink(title: "People") { store.toList() }
-            if let detail = store.detail {
-                PersonHeaderView(
-                    store: store,
-                    detail: detail,
-                    renaming: $renaming,
-                    prompt: $prompt,
-                    ingestDocument: ingestDocument)
+        Page(back: PageBack("People") { store.toList() }, title: header?.displayName) {
+            VStack(alignment: .leading, spacing: 0) {
+                if let person = header {
+                    PersonHero(
+                        store: store,
+                        person: person,
+                        contact: store.detail?.contact,
+                        renaming: $renaming,
+                        chooseContact: store.detail == nil ? nil : { store.chooseContact() })
+                } else if !store.detailFailed {
+                    PersonHeroPlaceholder()
+                }
                 ErrorNote(store.error)
-                PersonSections(
-                    store: store,
-                    detail: detail,
-                    prompt: $prompt,
-                    openMeeting: openMeeting,
-                    deleteDocument: deleteDocument)
-            } else {
-                PageTitle("People", subtitle: store.detailFailed ? "This person could not be read" : "Loading…")
-                ErrorNote(store.error)
-                if store.detailFailed {
+                if store.detail == nil, store.detailFailed {
                     Card {
                         CardRow {
-                            Text("Couldn't load this person.").bodyText(15, Theme.inkSecondary)
+                            Text("Couldn't load this person.").bodyText(14, Theme.inkSecondary)
                         } trailing: {
                             Button("Retry") { store.reload() }.buttonStyle(.compact)
                         }
                     }
+                } else if case let .person(personId) = store.route {
+                    PersonSections(
+                        store: store,
+                        personId: personId,
+                        detail: store.detail,
+                        prompt: $prompt,
+                        openMeeting: openMeeting,
+                        openContribution: openContribution,
+                        deleteDocument: deleteDocument)
+                    .id(personId)
                 }
+            }
+        } actions: {
+            if store.detail != nil {
+                PersonMenu(store: store, renaming: $renaming, prompt: $prompt, ingestDocument: ingestDocument)
+                    .background(PersonContactPickerAnchor(picker: store.contactPicker))
             }
         }
         .sheet(item: $prompt) { prompt in
@@ -384,66 +494,38 @@ struct PersonView: View {
         }
     }
 
+    /// The person as far as the page knows them: the detail once it is read,
+    /// and the list's row until then, so the face and the name are up from
+    /// the first frame.
+    private var header: Person? {
+        guard case let .person(personId) = store.route else { return nil }
+        if let person = store.detail?.person, person.id == personId { return person }
+        return store.entries?.first { $0.person.id == personId }?.person
+    }
+
     private var voiceConflictPresented: Binding<Bool> {
         Binding(get: { store.voiceConflict != nil }, set: { if !$0 { store.dismissVoiceConflict() } })
     }
 }
 
-/// The way back, the name, the one quiet line, and the menu every verb lives in.
-struct PersonHeaderView: View {
+/// The round ⋯ button every verb on a person's page lives in.
+struct PersonMenu: View {
     let store: PeopleStore
-    let detail: PersonDetail
     @Binding var renaming: Bool
     @Binding var prompt: PersonView.Prompt?
     var ingestDocument: () -> Void = {}
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                if renaming {
-                    PersonNameField(
-                        name: detail.person.displayName,
-                        commit: { store.rename(to: $0) },
-                        close: { renaming = false })
-                } else {
-                    Text(detail.person.displayName).titleText().lineLimit(1)
-                }
-                facts
-            }
-            Spacer(minLength: 16)
-            menu
-        }
-        .padding(.bottom, 20)
-    }
-
-    /// The organization is the one word on the line that goes somewhere: it
-    /// has a page of its own, and this is the only place its name appears.
-    @ViewBuilder
-    private var facts: some View {
-        let lastMet = PeopleModel.lastConfirmed(detail.links)
-        if detail.person.organization != nil || lastMet != nil {
-            HStack(spacing: 0) {
-                if let organization = detail.person.organization {
-                    Button { store.openOrganization(organization) } label: {
-                        Text(organization).underline()
-                    }
-                    .buttonStyle(.quiet)
-                    if lastMet != nil {
-                        Text(" · ").metaText()
-                    }
-                }
-                if let lastMet {
-                    Text("Last met \(PeopleFormat.moment(lastMet))").metaText().monospacedDigit()
-                }
-            }
-        }
-    }
-
-    private var menu: some View {
         Menu {
             Button("Rename") { renaming = true }
             Button("Regenerate") { store.regenerateSummary() }
             Button("Import document", action: ingestDocument)
+            Button("Choose photo") { store.choosePhotoSource() }
+            Button("Remove photo") { store.removeAvatar() }
+            Button(store.detail?.contact == nil ? "Attach contact…" : "Replace contact…") { store.chooseContact() }
+            if store.detail?.contact != nil {
+                Button("Remove contact") { store.removeContact() }
+            }
             Divider()
             Button("Merge") { prompt = .merge }
                 .disabled((store.entries?.count ?? 0) < 2)
@@ -457,13 +539,19 @@ struct PersonHeaderView: View {
             Button("Delete person") { prompt = .delete }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Theme.inkSecondary)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.ink)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
+        .frame(width: 28, height: 28)
+        .background(Theme.surface, in: Circle())
+        .overlay(Circle().strokeBorder(Theme.border, lineWidth: 1))
+        .contentShape(Circle())
         .disabled(store.busy)
+        .help("Person options")
         .accessibilityLabel("Person options")
     }
 }
@@ -481,12 +569,12 @@ struct PersonNameField: View {
     var body: some View {
         TextField("Person name", text: $draft)
             .textFieldStyle(.plain)
-            .font(TypeScale.title)
+            .font(TypeScale.hero)
             .foregroundStyle(Theme.ink)
             .focused($focused)
             .frame(maxWidth: 360)
             .padding(.horizontal, 10)
-            .frame(height: 32)
+            .frame(height: 40)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
             .onAppear {
@@ -509,42 +597,101 @@ struct PersonNameField: View {
     }
 }
 
-/// The paragraph first, when there is one: who this person is to you. Then
-/// what the page is for — what is still open between you, in both directions —
-/// and only then the archive it came out of: the meetings, the shape they make,
-/// the files, and last of all how Sona connected this person to any of it.
-/// Provenance is the line a reader checks once, so it reads last.
-///
-/// Every one of these draws nothing when it holds nothing: an empty person is
-/// a name and a menu, not eight labelled absences.
+/// Everything under the head of a person's page: the numbers, the contact,
+/// and the tabs. It owns the two reads the numbers and the tabs share, so a
+/// tab switch never reads again and the numbers never wait on a tab. A tile
+/// opens its tab and brings the tabs into view. The tiles stand from the
+/// first frame and fill in place as the reads land.
 struct PersonSections: View {
     let store: PeopleStore
-    let detail: PersonDetail
+    let personId: String
+    let detail: PersonDetail?
     @Binding var prompt: PersonView.Prompt?
     var openMeeting: (String) -> Void = { _ in }
+    var openContribution: ((String, UInt64) -> Void)?
     var deleteDocument: ((String) -> Void)?
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var memory: PersonMemoryStore?
+    @State private var work: PersonWorkStore?
+    @State private var tab: PersonPageTab = .history
+
+    private struct LoadKey: Equatable {
+        let personId: String
+        let revision: UInt64
+    }
+
+    private static let tabsAnchor = "person.tabs"
 
     var body: some View {
-        PersonSummaryView(summary: detail.person.summary, outcome: store.summaryOutcome)
-        BriefingView(row: store.briefing)
-        PersonLedgerView(
-            label: "Open loops",
-            rows: detail.openLoops.map(PersonLedgerRow.init),
-            personName: detail.person.displayName,
-            openMeeting: openMeeting)
-        PersonLedgerView(
-            label: "Commitments",
-            rows: detail.commitments.map(PersonLedgerRow.init),
-            personName: detail.person.displayName,
-            openMeeting: openMeeting)
-        PersonMeetingsView(store: store, links: detail.links, prompt: $prompt, openMeeting: openMeeting)
-        PersonCadenceView(links: detail.links, talkSharePermille: detail.talkShareAvgPermille)
-        PersonDocumentsView(
-            documents: detail.documents,
-            busy: store.busy,
-            prompt: $prompt,
-            deletable: deleteDocument != nil)
-        PersonEvidenceView(person: detail.person, links: detail.links)
+        ScrollViewReader { scroll in
+            VStack(alignment: .leading, spacing: 0) {
+                PersonStats(
+                    figures: detail.map { PersonFigures(detail: $0, memory: memory, work: work) } ?? PersonFigures(),
+                    show: { show($0, filter: $1, scroll: scroll) },
+                    openMeeting: openMeeting)
+                .equatable()
+                .padding(.bottom, 28)
+                if let detail {
+                    if let contact = detail.contact {
+                        PersonContactSection(card: contact, person: detail.person)
+                    }
+                    PersonReelSection(personId: personId, revision: store.detailRevision)
+                    PersonContinuityView(
+                        personId: personId,
+                        memory: memory,
+                        work: work,
+                        openLoops: detail.openLoops,
+                        tab: $tab,
+                        openMeeting: openMeeting,
+                        openContribution: openContribution
+                    ) {
+                        PersonSummaryView(summary: detail.person.summary, outcome: store.summaryOutcome)
+                        TranscriptCorrectionsView(core: store.core, personId: personId) { sessionId, segmentId in
+                            model.meetings.playContribution(sessionId: sessionId, segmentId: segmentId)
+                        }
+                        ConversationAudioBar(audio: model.meetings.audio)
+                        PersonMeetingsView(store: store, links: detail.links, prompt: $prompt, openMeeting: openMeeting)
+                        PersonDocumentsView(
+                            documents: detail.documents,
+                            busy: store.busy,
+                            prompt: $prompt,
+                            deletable: deleteDocument != nil)
+                        PersonEvidenceView(person: detail.person, links: detail.links)
+                    }
+                    .id(Self.tabsAnchor)
+                }
+            }
+        }
+        .task(id: loadKey) {
+            guard loadKey != nil else { return }
+            let memory = self.memory ?? PersonMemoryStore(core: store.core)
+            self.memory = memory
+            await memory.load(personId)
+        }
+        .task(id: loadKey) {
+            guard loadKey != nil else { return }
+            let work = self.work ?? PersonWorkStore(core: store.core)
+            self.work = work
+            await work.load(personId)
+        }
+        .onDisappear {
+            memory?.stop()
+            work?.stop()
+        }
+    }
+
+    /// Nil until the person is read: the tabs' reads wait for the page's.
+    private var loadKey: LoadKey? {
+        detail.map { _ in LoadKey(personId: personId, revision: store.detailRevision) }
+    }
+
+    private func show(_ next: PersonPageTab, filter: PersonHistoryFilter?, scroll: ScrollViewProxy) {
+        if let filter { memory?.filter = filter }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+            tab = next
+            scroll.scrollTo(Self.tabsAnchor, anchor: .top)
+        }
     }
 }
 
@@ -561,149 +708,17 @@ struct PersonSummaryView: View {
         if summary != nil || outcome?.note != nil {
             PageSection("About") {
                 Card {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if let summary {
-                            Text(summary.text).bodyText(16)
-                            Text("Written by \(summary.modelId) on \(PeopleFormat.moment(PeopleFormat.date(summary.generatedAtUtcMs)))")
-                                .metaText()
-                                .monospacedDigit()
-                        }
-                        if let note = outcome?.note {
-                            Text(note).metaText(Theme.live)
-                        }
-                    }
-                    .padding(12)
-                }
-            }
-        }
-    }
-}
-
-/// What to walk into a room knowing: how often you have met, and the one thing
-/// still open in each direction.
-///
-/// What you owe comes first — it is the thing a reader can act on in the next
-/// thirty seconds — and an overdue handoff is marked, because "still open" and
-/// "still open after two weeks" are different sentences to walk in with.
-struct BriefingView: View {
-    let row: BriefingRow?
-
-    var body: some View {
-        if let row {
-            PageSection("Brief") {
-                Card {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(relationship(row)).bodyText(14).monospacedDigit()
-                        if let owed = BriefingView.owed(row) {
-                            Text("You owe: \(owed.text)").metaText(Theme.inkSecondary).lineLimit(2)
-                        }
-                        if let awaited = BriefingView.awaited(row) {
-                            Text(
-                                awaited.stale
-                                    ? "Overdue with \(row.displayName): \(awaited.text)"
-                                    : "Waiting on \(row.displayName): \(awaited.text)"
-                            )
-                            .metaText(awaited.stale ? Theme.live : Theme.inkSecondary)
-                            .lineLimit(2)
-                        }
-                    }
-                    .padding(12)
-                }
-            }
-        }
-    }
-
-    private func relationship(_ row: BriefingRow) -> String {
-        let met = row.meetingsCount == 1
-            ? "You have met \(row.displayName) once"
-            : "You have met \(row.displayName) \(row.meetingsCount) times"
-        guard let last = row.last else { return met }
-        return "\(met) · last \(PeopleFormat.moment(last.at))"
-    }
-
-    /// Only what is still outstanding: the core keeps a done or dropped
-    /// commitment for the relationship's history, and the brief is the two
-    /// lines a reader acts on in the next thirty seconds.
-    private static func rows(_ row: BriefingRow) -> [PersonLedgerRow] {
-        (row.openLoops.map(PersonLedgerRow.init) + row.commitments.map(PersonLedgerRow.init))
-            .filter { $0.status.outstanding }
-            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    }
-
-    static func owed(_ row: BriefingRow) -> PersonLedgerRow? {
-        rows(row).mine.first
-    }
-
-    /// The overdue one if there is one, because that is the sentence worth the
-    /// line.
-    static func awaited(_ row: BriefingRow) -> PersonLedgerRow? {
-        let waiting = rows(row).waitingOn
-        return waiting.first { $0.stale } ?? waiting.first
-    }
-}
-
-/// One ledger, in two groups: what you owe, and what they do.
-///
-/// Two groups inside one section, not two sections: "I owe" and "waiting on
-/// them" are the same register read from opposite ends. A group with nothing in
-/// it says nothing, and with both empty there is no section at all — a heading
-/// over the sentence "nothing is still open" is a row spent saying the row has
-/// nothing to say.
-struct PersonLedgerView: View {
-    let label: String
-    let rows: [PersonLedgerRow]
-    let personName: String
-    var openMeeting: (String) -> Void = { _ in }
-
-    var body: some View {
-        let mine = rows.mine
-        let waitingOn = rows.waitingOn
-        if !mine.isEmpty || !waitingOn.isEmpty {
-            PageSection(label) {
-                Card {
-                    if !mine.isEmpty {
-                        PersonLedgerGroup(heading: "I owe", rows: mine, openMeeting: openMeeting)
-                    }
-                    if !waitingOn.isEmpty {
-                        PersonLedgerGroup(
-                            heading: "Waiting on \(personName)", rows: waitingOn, openMeeting: openMeeting)
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct PersonLedgerGroup: View {
-    let heading: String
-    let rows: [PersonLedgerRow]
-    var openMeeting: (String) -> Void = { _ in }
-
-    var body: some View {
-        Text(heading)
-            .metaText(Theme.inkSecondary)
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline() }
-        ForEach(rows) { row in
-            CardRow(action: row.meetingId.isEmpty ? nil : { openMeeting(row.meetingId) }) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(row.text).bodyText(14)
-                    HStack(spacing: 12) {
-                        Text(row.title).metaText().lineLimit(1)
-                        Text(PeopleFormat.moment(row.at)).metaText().monospacedDigit()
-                        // "Open" under a heading that reads "Open loops" is
-                        // the heading said twice.
-                        if let contradiction = row.status.contradiction {
-                            Text(contradiction).metaText(Theme.inkSecondary)
-                        }
-                        if row.stale {
-                            Text("Overdue").metaText(Theme.live)
-                        }
-                        if let carried = row.carriedNote {
-                            Text(carried).metaText().monospacedDigit()
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let summary {
+                                Text(summary.text).bodyText(14)
+                                Text("AI interpretation · \(summary.modelId) · \(PeopleFormat.moment(PeopleFormat.date(summary.generatedAtUtcMs)))")
+                                    .metaText()
+                                    .monospacedDigit()
+                            }
+                            if let note = outcome?.note {
+                                Text(note).metaText(Theme.live)
+                            }
                         }
                     }
                 }
@@ -711,6 +726,7 @@ struct PersonLedgerGroup: View {
         }
     }
 }
+
 
 /// Every meeting linked to this person, and the one word that asks the reader
 /// for a decision. Where a link came from is the page's evidence section; what
@@ -767,61 +783,6 @@ struct PersonMeetingsView: View {
     }
 }
 
-/// Six months of confirmed meetings, and the share of the talking they carried.
-/// A bare number over a chart labelled "Meeting cadence" reads as a cadence,
-/// which it is not: it is how many meetings the bars are drawn from.
-struct PersonCadenceView: View {
-    let links: [PersonMeetingLink]
-    let talkSharePermille: UInt32?
-
-    var body: some View {
-        let confirmed = PeopleModel.confirmed(links)
-        if !confirmed.isEmpty {
-            PageSection("Meeting cadence") {
-                Card {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text(PeopleModel.meetings(UInt64(confirmed.count)))
-                            .font(TypeScale.stat)
-                            .foregroundStyle(Theme.ink)
-                            .monospacedDigit()
-                            .tracking(-0.4)
-                        PersonCadenceBars(values: PeopleModel.cadence(links))
-                        if let talkSharePermille {
-                            HStack(spacing: 6) {
-                                Text("Talk share").metaText(Theme.inkSecondary)
-                                Text(PeopleFormat.talkShare(talkSharePermille)).metaText(Theme.ink).monospacedDigit()
-                            }
-                        }
-                    }
-                    .padding(12)
-                }
-            }
-        }
-    }
-}
-
-/// Six bars, oldest first. A month with no meeting in it keeps its place and
-/// draws the track, because the gap is the fact.
-struct PersonCadenceBars: View {
-    let values: [Double]
-
-    var body: some View {
-        let peak = max(values.max() ?? 0, 1)
-        HStack(alignment: .bottom, spacing: 8) {
-            ForEach(Array(values.enumerated()), id: \.offset) { _, value in
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(value > 0 ? Theme.accent : Theme.selection)
-                        .frame(height: max(3, 64 * value / peak))
-                }
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .frame(height: 64)
-        .accessibilityLabel("Meetings by month: \(values.map { "\(Int($0))" }.joined(separator: ", "))")
-    }
-}
 
 /// The documents imported about this person. Nothing imported, nothing here:
 /// the verb that imports the first one is in the page's menu, so this section
@@ -875,12 +836,13 @@ struct PersonEvidenceView: View {
         if !lines.isEmpty {
             PageSection("Why Sona links this person") {
                 Card {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(lines, id: \.self) { line in
-                            Text(line).metaText().monospacedDigit()
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(lines, id: \.self) { line in
+                                Text(line).metaText().monospacedDigit()
+                            }
                         }
                     }
-                    .padding(12)
                 }
             }
         }
@@ -1013,6 +975,7 @@ struct PeopleSheet<Content: View, Footer: View>: View {
         .padding(24)
         .frame(width: 440)
         .background(Theme.page)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
     }
 }
 
@@ -1305,98 +1268,113 @@ struct LinkPickerSheet: View {
 
 // MARK: - One organization
 
-/// One organization, read across its people.
-///
-/// The same three sections a person's page has, in the same order — who, what
-/// you met about, what is still open — because an organization is not a
-/// different kind of noun here, it is a set of people. It owns no write:
-/// everything that could change is one row away, on the person it belongs to.
+/// One organization, read across its people: who is there, what you met
+/// about, and what is still open. It owns no write: everything that could
+/// change is one row away, on the person it belongs to.
 struct OrganizationView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            BackLink(title: "People") { store.toList() }
-            if let detail = store.organization {
-                PageTitle(detail.name, subtitle: PeopleModel.people(detail.people.count))
-                ErrorNote(store.error)
-                PageSection("People here") {
-                    Card {
-                        if detail.people.isEmpty {
-                            CardRow { Text("Nobody here yet.").bodyText(15, Theme.inkSecondary) }
-                        } else {
-                            ForEach(detail.people) { entry in
-                                CardRow(action: { store.openPerson(entry.person.id) }) {
-                                    Text(entry.person.displayName)
-                                        .font(TypeScale.label())
-                                        .foregroundStyle(Theme.ink)
-                                        .lineLimit(1)
-                                } trailing: {
-                                    HStack(spacing: 10) {
-                                        Text(PeopleModel.meetings(entry.confirmedCount))
+        Page(back: PageBack("People") { store.toList() }, title: store.organization?.name) {
+            VStack(alignment: .leading, spacing: 0) {
+                if let detail = store.organization {
+                    HStack(alignment: .center, spacing: 20) {
+                        CompanyMark(name: detail.name, size: 84)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(detail.name)
+                                .heroText()
+                                .lineLimit(2)
+                                .accessibilityAddTraits(.isHeader)
+                                .pageHeadline()
+                            Text(PeopleModel.people(detail.people.count)).bodyText(14, Theme.inkSecondary)
+                        }
+                    }
+                    .frame(minHeight: 84)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
+                    ErrorNote(store.error)
+                    stats(detail)
+                        .padding(.bottom, 28)
+                    PageSection("People here") {
+                        Card {
+                            if detail.people.isEmpty {
+                                CardLine("Nobody here yet.")
+                            } else {
+                                ForEach(detail.people) { entry in
+                                    PersonListRow(entry: entry, photoRevision: store.photoRevision) {
+                                        store.openPerson(entry.person.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    PageSection("Recent meetings") {
+                        Card {
+                            if detail.recentMeetings.isEmpty {
+                                CardLine("No linked meetings.")
+                            } else {
+                                ForEach(detail.recentMeetings) { meeting in
+                                    CardRow(action: { openMeeting(meeting.id) }) {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(meeting.title)
+                                                .font(TypeScale.label())
+                                                .foregroundStyle(Theme.ink)
+                                                .lineLimit(1)
+                                            Text(
+                                                meeting.headline.map { "\($0) · \(PeopleFormat.moment(meeting.at))" }
+                                                    ?? PeopleFormat.moment(meeting.at)
+                                            )
                                             .metaText()
                                             .monospacedDigit()
-                                        Image(systemName: "chevron.right")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundStyle(Theme.inkTertiary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                PageSection("Recent meetings") {
-                    Card {
-                        if detail.recentMeetings.isEmpty {
-                            CardRow { Text("No linked meetings.").bodyText(15, Theme.inkSecondary) }
-                        } else {
-                            ForEach(detail.recentMeetings) { meeting in
-                                CardRow(action: { openMeeting(meeting.id) }) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(meeting.title)
-                                            .font(TypeScale.label())
-                                            .foregroundStyle(Theme.ink)
                                             .lineLimit(1)
-                                        Text(
-                                            meeting.headline.map { "\($0) · \(PeopleFormat.moment(meeting.at))" }
-                                                ?? PeopleFormat.moment(meeting.at)
-                                        )
-                                        .metaText()
-                                        .monospacedDigit()
-                                        .lineLimit(1)
+                                        }
+                                    } trailing: {
+                                        PeopleChevron()
                                     }
                                 }
                             }
                         }
                     }
-                }
-                PageSection("Open loops") {
-                    Card {
-                        if detail.openLoops.isEmpty {
-                            CardRow { Text("Nothing is still open.").bodyText(15, Theme.inkSecondary) }
-                        } else {
-                            ForEach(detail.openLoops) { loop in
-                                PersonLoopRow(loop: loop, openMeeting: openMeeting)
+                    PageSection("Still open") {
+                        Card {
+                            if detail.openLoops.isEmpty {
+                                CardLine("Nothing is still open.")
+                            } else {
+                                ForEach(detail.openLoops) { loop in
+                                    PersonLoopRow(loop: loop, openMeeting: openMeeting)
+                                }
                             }
                         }
                     }
-                }
-            } else {
-                PageTitle(
-                    "Organizations",
-                    subtitle: store.organizationFailed ? "This organization could not be read" : "Loading…")
-                ErrorNote(store.error)
-                if store.organizationFailed {
+                } else if store.organizationFailed {
+                    ErrorNote(store.error)
                     Card {
                         CardRow {
-                            Text("Couldn't load this organization.").bodyText(15, Theme.inkSecondary)
+                            Text("Couldn't load this organization.").bodyText(14, Theme.inkSecondary)
                         } trailing: {
                             Button("Retry") { store.reload() }.buttonStyle(.compact)
                         }
                     }
+                } else {
+                    PersonHeroPlaceholder(square: true)
                 }
             }
+        }
+    }
+
+    /// The organization in four numbers. Its meetings are counted once each
+    /// on the companies list, so that is where the count comes from.
+    private func stats(_ detail: OrganizationDetail) -> some View {
+        let meetings = store.companies?.first { $0.name == detail.name }?.meetingsCount
+        let since = detail.recentMeetings.map(\.at).max().map { PeopleFormat.since($0) }
+        return HStack(spacing: 10) {
+            NumberTile("\(detail.people.count)", label: "People")
+            NumberTile(meetings.map { "\($0)" } ?? "—", label: "Meetings",
+                       tone: meetings == nil ? Theme.inkTertiary : Theme.ink)
+            NumberTile("\(detail.openLoops.count)", label: "Still open")
+            NumberTile(since?.value ?? "—", label: "Last met", unit: since?.unit,
+                       tone: since == nil ? Theme.inkTertiary : Theme.ink)
         }
     }
 }
@@ -1468,9 +1446,7 @@ struct VoiceIdentitySection: View {
         PageSection("Speakers") {
             Card {
                 if !store.loaded {
-                    CardRow {
-                        Text("Reading speakers…").bodyText(14, Theme.inkSecondary)
-                    }
+                    CardLine("Reading speakers…")
                 } else if store.speakers.isEmpty, let error = store.error {
                     CardRow {
                         Text(error).bodyText(14, Theme.inkSecondary)
@@ -1479,11 +1455,16 @@ struct VoiceIdentitySection: View {
                             .buttonStyle(.compact)
                     }
                 } else if store.speakers.isEmpty {
-                    CardRow {
-                        Text("Speakers show up here once the transcript is ready.")
-                            .bodyText(14, Theme.inkSecondary)
-                    }
+                    CardLine("Speakers show up here once the transcript is ready.")
                 } else {
+                    ForEach(store.suggestions) { suggestion in
+                        VoiceSuggestionRow(
+                            suggestion: suggestion,
+                            speakerName: store.speaker(suggestion.speakerId)?.displayName ?? "This speaker",
+                            busy: store.busy,
+                            confirm: { store.confirm(suggestion) },
+                            reject: { store.ask(.label(suggestion.speakerId)) })
+                    }
                     if !store.unresolved.isEmpty {
                         CardRow {
                             Text(
@@ -1491,7 +1472,7 @@ struct VoiceIdentitySection: View {
                                     ? "1 speaker to label"
                                     : "\(store.unresolved.count) speakers to label"
                             )
-                            .bodyText(15)
+                            .bodyText(14)
                             .monospacedDigit()
                         } trailing: {
                             Button("Label speaker") { store.askNext() }
@@ -1532,6 +1513,44 @@ struct VoiceIdentitySection: View {
     }
 }
 
+/// A waiting speaker whose voice matches the one you named as somebody in
+/// other meetings. Confirm names the speaker; "Not them" asks who it is
+/// instead, where another person or "unknown" answers it. Nothing is named
+/// until one of those is pressed.
+struct VoiceSuggestionRow: View {
+    let suggestion: VoiceSpeakerSuggestion
+    let speakerName: String
+    let busy: Bool
+    let confirm: () -> Void
+    let reject: () -> Void
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        CardRow {
+            HStack(spacing: 12) {
+                PersonPortrait(
+                    personId: suggestion.personId,
+                    name: suggestion.displayName,
+                    size: 28,
+                    revision: model.people.photoRevision)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(speakerName) sounds like \(suggestion.displayName)").bodyText(14)
+                    Text("Matches the voice you named \(suggestion.displayName) in other meetings").metaText()
+                }
+            }
+        } trailing: {
+            HStack(spacing: 8) {
+                Button("Not them", action: reject)
+                    .buttonStyle(.quiet)
+                    .disabled(busy)
+                Button("Confirm", action: confirm)
+                    .buttonStyle(.compact)
+                    .disabled(busy)
+            }
+        }
+    }
+}
+
 /// One meeting's speakers on its review page: the store is built once per
 /// page and re-read whenever the page moves to another meeting.
 struct MeetingVoiceIdentitySection: View {
@@ -1540,7 +1559,7 @@ struct MeetingVoiceIdentitySection: View {
     @State private var store: VoiceIdentityStore?
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             if let store {
                 VoiceIdentitySection(store: store)
             }
@@ -1624,10 +1643,15 @@ struct VoiceIdentitySheet: View {
                 InputField(prompt: "Name", text: $name)
             }
         }
-        Toggle(isOn: $remember) {
-            Text("Remember this voice on this Mac").bodyText(14)
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $remember) {
+                Text("Name this voice automatically in later meetings").bodyText(14)
+            }
+            .toggleStyle(.checkbox)
+            Text("Sona keeps a fingerprint of each voice on this Mac to suggest names. It is deleted with the meeting.")
+                .metaText(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .toggleStyle(.checkbox)
     }
 
     @ViewBuilder

@@ -600,6 +600,7 @@ impl MicrophoneCaptureLease {
     }
 
     fn try_acquire(&self, owner: CaptureOwner) -> Option<CaptureLeaseToken> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let mut held = lock_recover(&self.token);
         if held.is_some() {
             return None;
@@ -1160,6 +1161,14 @@ impl AudioRecordingManager {
             }
             started.elapsed()
         };
+
+        if !crate::audio_toolkit::audio::microphone_authorized() {
+            debug!(
+                "mic prewarm: vad_load={:?}, device probe skipped without microphone access",
+                vad_elapsed
+            );
+            return;
+        }
 
         let _span = crate::launch_trace::span("mic_prewarm");
         let settings = get_settings(&self.app_handle);

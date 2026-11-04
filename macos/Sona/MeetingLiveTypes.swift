@@ -242,6 +242,8 @@ struct MeetingStartFacts: Identifiable {
     var endUtcMs: Int64?
     var calendarName: String?
     var appName: String?
+    /// The app the meeting is running in, when an app raised it.
+    var appBundleId: String?
     var attendeeCount: Int?
     var participants: [MeetingStartParticipant] = []
     var description: String?
@@ -283,6 +285,7 @@ struct MeetingStartFacts: Identifiable {
         title = suggestion.title
         origin = .app
         appName = suggestion.provider.label
+        appBundleId = suggestion.appBundleId
     }
 
     /// A prompt still waiting: its own title, and the app when it names one.
@@ -291,6 +294,7 @@ struct MeetingStartFacts: Identifiable {
         title = prompt.title
         origin = prompt.prompt.isCalendar ? .calendar : .app
         appName = prompt.prompt.appName
+        appBundleId = prompt.prompt.bundleId
     }
 
     /// An upcoming calendar row, as the week-ahead list reads it.
@@ -629,19 +633,12 @@ struct DetectionBriefingRow: Decodable, Identifiable {
     let displayName: String
     let meetingsCount: Int
     let last: DetectionBriefingLastMeeting?
-    let openLoops: [DetectionBriefingLoop]
+    /// Everything this person owes you, uncut.
+    let waitingOnCount: Int
+    /// Every open item from meetings with this person, either way, uncut.
+    let openLoopCount: Int
 
     var id: MeetingPersonId { personId }
-}
-
-/// `PersonOpenLoop`, as a briefing row carries it.
-struct DetectionBriefingLoop: Decodable, Identifiable {
-    let loopId: MeetingLoopId
-    let meetingId: MeetingSessionId
-    /// The words as the ledger recorded them.
-    let text: String
-
-    var id: MeetingLoopId { loopId }
 }
 
 /// `DetectionCountdown`: the event about to start, and what it is about.
@@ -743,6 +740,17 @@ enum DetectionPromptKind: Decodable {
         }
     }
 
+    /// The application this prompt names, by bundle id.
+    var bundleId: String? {
+        switch self {
+        case let .appMeeting(bundleId, _), let .appHuddle(bundleId, _),
+             let .browserCall(bundleId, _), let .appCall(bundleId, _):
+            bundleId
+        case .calendarEvent, .unknownMicSource:
+            nil
+        }
+    }
+
     /// `promptTitle` in DetectionListeners.tsx: total by construction, because
     /// the card this titles carries a Record button and an untitled offer to
     /// record is not an offer.
@@ -789,7 +797,6 @@ struct DetectionPromptEvent: Decodable, Identifiable {
     /// The English copy, exactly as the notification shows it.
     let notificationTitle: String
     let delivery: DetectionPromptDelivery
-    /// Rendered only after the panel acknowledged its first delivery.
     let showIntroduction: Bool
     /// What this prompt's series remembers about announcing itself.
     let announceInChat: Bool
@@ -845,6 +852,8 @@ struct RitualParticipant: Decodable {
     let name: String
     let meetingsCount: Int
     let organization: String?
+    /// The person the attendee's address belongs to, when Sona knows them.
+    let personId: String?
 
     /// "Aktan · 6 meetings · 99 Point".
     var line: String {

@@ -1,9 +1,12 @@
 use crate::analytics::DashboardTrendRequest;
+use crate::managers::history::HistoryManager;
 use crate::meeting::analytics::{
     KeywordTracker, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
     MeetingLiveHelp, MeetingLiveHelpKind, MeetingProvisionalTranscript, MeetingUserNotes,
 };
+use crate::meeting::call_silence::MeetingCallSilence;
 use crate::meeting::clock::host_monotonic_now_ns;
+use crate::meeting::detection::calendar::CalendarAccess;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
 use crate::meeting::series_types::{
@@ -12,16 +15,21 @@ use crate::meeting::series_types::{
     MeetingSeriesRemoteRoster, MeetingSeriesTemplateSetRequest,
 };
 use crate::meeting::session::{
-    ImportRecordingRequest, MeetingActionItemDoneRequest, MeetingConsentPanelSessionState,
-    MeetingConsentPanelStartRequest, MeetingMutationRequest, MeetingMutationResult,
-    MeetingNoteCreateRequest, MeetingNoteDeleteRequest, MeetingNoteUpdateRequest,
-    MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest, MeetingReenhanceRequest,
-    MeetingRemovalResult, MeetingSegmentEditRequest, MeetingSessionManager,
-    MeetingSpeakerMergeRequest, MeetingSpeakerRenameRequest, MeetingStartRequest, MeetingStopCause,
-    MeetingStopSurface, MeetingTitleSetRequest, MeetingUserNotesSaveRequest,
+    map_store_error, ImportRecordingRequest, MeetingActionItemDoneRequest,
+    MeetingConsentPanelSessionState, MeetingConsentPanelStartRequest, MeetingMutationRequest,
+    MeetingMutationResult, MeetingNoteCreateRequest, MeetingNoteDeleteRequest,
+    MeetingNoteUpdateRequest, MeetingPreflightCreateRequest, MeetingPreflightRefreshRequest,
+    MeetingReenhanceRequest, MeetingRemovalResult, MeetingSegmentEditRequest,
+    MeetingSessionManager, MeetingSpeakerMergeRequest, MeetingSpeakerRenameRequest,
+    MeetingStartRequest, MeetingStopCause, MeetingStopSurface, MeetingTitleSetRequest,
+    MeetingUserNotesSaveRequest,
+};
+use crate::meeting::store::today::{
+    HomeToday, TodayCount, TodayMeetings, TodayPerson, TodayStoreCounts,
 };
 use crate::meeting::suggestions::MeetingSuggestion;
 use crate::meeting::types::*;
+use crate::meeting::upcoming_types::MeetingUpcomingRow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
@@ -32,6 +40,71 @@ pub fn meeting_suggestions_list(
     manager: State<'_, Arc<MeetingSessionManager>>,
 ) -> Vec<MeetingSuggestion> {
     manager.suggestions_list(host_monotonic_now_ns())
+}
+
+/// Home's Today strip in one round trip: today's meetings, what is still
+/// processing, speakers nobody named, promises no project holds, and what the
+/// user owes. Each count answers on its own, and one whose source cannot be
+/// read says so rather than reading as zero.
+#[tauri::command]
+#[specta::specta]
+pub async fn home_today(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    detection: State<'_, Arc<DetectionRuntime>>,
+    history: State<'_, Arc<HistoryManager>>,
+) -> Result<HomeToday, MeetingCommandError> {
+    let meetings =
+        match crate::commands::upcoming::meeting_upcoming_events(manager.clone(), detection, 0)
+            .await
+        {
+            Ok(events) if events.access == CalendarAccess::Authorized => TodayCount::Available {
+                value: today_meetings(&events.rows),
+            },
+            Ok(events) => {
+                log::info!("home_today: calendar access is {:?}", events.access);
+                TodayCount::Unavailable
+            }
+            Err(error) => TodayCount::read("meetings", Err(error)),
+        };
+    let untracked = TodayCount::read(
+        "untracked",
+        crate::planning::untracked::tally(&history, &manager).await,
+    );
+    let counts = match manager.store().await {
+        Ok(store) => store.today_counts(chrono::Local::now().date_naive()),
+        Err(error) => {
+            log::warn!("home_today: meeting store unavailable: {error:?}");
+            TodayStoreCounts::UNAVAILABLE
+        }
+    };
+    Ok(HomeToday {
+        meetings,
+        processing: counts.processing,
+        unknown_speakers: counts.unknown_speakers,
+        untracked,
+        owed: counts.owed,
+    })
+}
+
+/// How many events today holds, and the first four distinct confirmed people
+/// in them other than the user.
+fn today_meetings(rows: &[MeetingUpcomingRow]) -> TodayMeetings {
+    let mut people: Vec<TodayPerson> = Vec::new();
+    for attendee in rows.iter().flat_map(|row| &row.attendees) {
+        let Some(person_id) = attendee.person_id.filter(|_| !attendee.is_self) else {
+            continue;
+        };
+        if people.len() < 4 && people.iter().all(|person| person.person_id != person_id) {
+            people.push(TodayPerson {
+                person_id,
+                name: attendee.name.clone(),
+            });
+        }
+    }
+    TodayMeetings {
+        count: u32::try_from(rows.len()).unwrap_or(u32::MAX),
+        people,
+    }
 }
 
 /// A start that names a calendar occurrence carries the occurrence in. The
@@ -436,6 +509,22 @@ pub async fn meeting_search(
     manager.search(request).await
 }
 
+/// The spoken lines a palette query matches, for hearing them again. A query
+/// under two letters matches nothing.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_said_search(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<SaidMoment>, MeetingCommandError> {
+    let store = manager.store().await?;
+    tauri::async_runtime::spawn_blocking(move || store.said_search(&query, limit.unwrap_or(4)))
+        .await
+        .map_err(|_| MeetingCommandError::StorageUnavailable)?
+        .map_err(map_store_error)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_title_set(
@@ -740,6 +829,33 @@ pub fn meeting_live_transcript(
     session_id: MeetingSessionId,
 ) -> MeetingProvisionalTranscript {
     manager.provisional_transcript(session_id)
+}
+
+/// Past lines the running capture's last minute of words were already said
+/// in, for the live screen's recall cards. `Unavailable` when the store could
+/// not be read, never an empty list standing in for one.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_live_recall(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<MeetingLiveRecall, ()> {
+    Ok(manager.live_recall(session_id).await)
+}
+
+/// Whether the running call's sound has gone while the person talks, for
+/// the live screen and the recording strip. Never stops the recording.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn meeting_call_silence(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> MeetingCallSilence {
+    MeetingCallSilence {
+        silent_ms: manager
+            .call_silent_ns(session_id)
+            .map(|silent| silent / 1_000_000),
+    }
 }
 
 /// What one calendar series has decided — template, digest inclusion, and

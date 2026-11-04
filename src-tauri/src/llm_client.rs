@@ -516,6 +516,7 @@ pub(crate) async fn send_loopback_chat_completion(
     timeout: Duration,
     json_response: bool,
 ) -> Result<LoopbackChatCompletion, LoopbackChatCompletionError> {
+    let _activity = crate::planning::quiet::foreground_activity();
     if endpoint.is_remote() {
         return Err(LoopbackChatCompletionError::Failed);
     }
@@ -597,6 +598,7 @@ pub(crate) async fn warm_up_chat_completion(
     prompt: String,
     disable_reasoning: bool,
 ) -> Result<(), ChatCompletionFailure> {
+    let _activity = crate::planning::quiet::foreground_activity();
     if endpoint.is_remote() {
         return Err(ChatCompletionFailure::Unanswered(
             "A warm-up only goes to a local endpoint".to_string(),
@@ -667,6 +669,7 @@ pub(crate) async fn probe_loopback_models(
 pub(crate) async fn send_chat_completion_with_schema(
     input: ChatCompletionInput<'_>,
 ) -> Result<Option<String>, ChatCompletionFailure> {
+    let _activity = crate::planning::quiet::foreground_activity();
     match input.provider.execution_protocol() {
         PostProcessExecutionProtocol::OpenAiChatCompletions => {
             send_openai_chat_completion_with_schema(input).await

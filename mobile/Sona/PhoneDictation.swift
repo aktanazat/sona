@@ -27,11 +27,12 @@ private final class DictationAudioSink {
         writeError = nil
     }
 
-    func append(_ buffer: AVAudioPCMBuffer) {
+    func append(_ buffer: AVAudioPCMBuffer) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         request?.append(buffer)
         do { try writer?.append(buffer) } catch { writeError = error }
+        return request != nil
     }
 
     func finish() throws -> CapturedAudio? {
@@ -54,13 +55,16 @@ private final class DictationAudioSink {
 @MainActor
 final class PhoneDictation: ObservableObject {
     enum Phase { case idle, authorizing, listening, finishing }
-    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var phase: Phase = .idle {
+        didSet { if phase != .listening { meter.reset() } }
+    }
     @Published var text = ""
     @Published private(set) var notice: String?
     @Published private(set) var warmUntil: Date?
     var onEnded: ((DictationCapture) -> Void)?
     var onStateChanged: (() -> Void)?
     @Published var profile = DictationProfile.empty
+    let meter = InputLevelMeter()
 
     var isBusy: Bool { phase != .idle }
     var insertableText: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -210,7 +214,15 @@ final class PhoneDictation: ObservableObject {
             let format = input.inputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw CaptureError.unsupportedFormat }
             let sink = self.sink
-            input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in sink.append(buffer) }
+            let meter = self.meter
+            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+                guard sink.append(buffer) else { return }
+                let level = InputLevelMeter.level(of: buffer)
+                Task { @MainActor in
+                    guard self?.phase == .listening else { return }
+                    meter.push(level)
+                }
+            }
             self.engine = engine
             engine.prepare()
             try engine.start()

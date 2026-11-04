@@ -17,9 +17,12 @@ use crate::meeting::people_types::{
     PersonSplitRequest, PersonSplitTarget, PersonSummary, VoiceProfileMergeResolution,
 };
 use crate::meeting::store::documents::bump_document_revision_in;
+use crate::meeting::store::transcript_corrections::{
+    merge_person_corrections_in, prepare_person_merge_in,
+};
 use crate::meeting::store::voice_identity::{
-    merge_voice_profiles_in, remove_source_person_voice_evidence_for_sessions_in,
-    remove_voice_person_evidence_in,
+    forget_person_voiceprints_in, merge_voice_profiles_in,
+    remove_source_person_voice_evidence_for_sessions_in, remove_voice_person_evidence_in,
 };
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
@@ -80,6 +83,7 @@ impl MeetingStore {
         require_people_revision_in(&transaction, expected_revision)?;
         let source = person_by_id_in(&transaction, source_id)?;
         let mut target = person_by_id_in(&transaction, target_id)?;
+        prepare_person_merge_in(&transaction, source_id, target_id)?;
         merge_unique_case_insensitive(
             &mut target.aliases,
             std::iter::once(source.display_name).chain(source.aliases),
@@ -109,6 +113,32 @@ impl MeetingStore {
             target_id,
             voice_profile_resolution,
             now_utc_ms,
+        )?;
+        transaction.execute(
+            "UPDATE meeting_voice_speaker_resolutions SET resolved_person_id = ?1
+              WHERE resolved_person_id = ?2 AND is_current = 1",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
+        merge_person_corrections_in(&transaction, source_id, target_id)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO person_avatars (person_id, png, updated_at_utc_ms, provenance_json, original)
+             SELECT ?1, png, updated_at_utc_ms, provenance_json, original
+               FROM person_avatars WHERE person_id = ?2",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO person_contact_cards (person_id, card_json, updated_at_utc_ms)
+             SELECT ?1, card_json, updated_at_utc_ms
+               FROM person_contact_cards WHERE person_id = ?2",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
+        transaction.execute(
+            "UPDATE person_merge_redirects SET target_person_id = ?1 WHERE target_person_id = ?2",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
+        transaction.execute(
+            "INSERT INTO person_merge_redirects (source_person_id, target_person_id) VALUES (?1, ?2)",
+            params![source_id.uuid().to_string(), target_id.uuid().to_string()],
         )?;
         transaction.execute(
             "DELETE FROM persons WHERE id = ?1",
@@ -325,6 +355,7 @@ impl MeetingStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_people_revision_in(&transaction, expected_revision)?;
         person_by_id_in(&transaction, person_id)?;
+        forget_person_voiceprints_in(&transaction, person_id)?;
         remove_voice_person_evidence_in(&transaction, person_id)?;
         let removed = transaction.execute(
             "DELETE FROM persons WHERE id = ?1",

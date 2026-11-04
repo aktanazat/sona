@@ -153,7 +153,7 @@ struct WorkflowRunRow: View {
                         .metaText(Theme.inkDisabled)
                     if let failure = receipt.failureText {
                         Text(failure)
-                            .font(TypeScale.body(13))
+                            .font(TypeScale.body(12))
                             .foregroundStyle(Theme.live)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -219,10 +219,10 @@ struct WorkflowWeek: View {
             }
             .accessibilityElement(children: .combine)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 
     private func height(_ runs: Int) -> CGFloat {

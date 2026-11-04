@@ -18,7 +18,6 @@ struct RecorderSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Hairline()
             if store.error != nil {
                 ErrorNote(store.error)
                     .padding(.horizontal, 24)
@@ -51,13 +50,14 @@ struct RecorderSheet: View {
     /// phase in words with the live dot while recording.
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text("Record screen").headlineText()
+            Text("Record screen").titleText().accessibilityAddTraits(.isHeader)
             Spacer(minLength: 12)
             if store.hasCapture {
                 HStack(spacing: 8) {
                     Text("Elapsed").metaText()
                     Text(store.elapsed.clock)
-                        .font(TypeScale.mono(13))
+                        .font(TypeScale.body(13))
+                        .monospacedDigit()
                         .foregroundStyle(Theme.ink)
                 }
             }
@@ -71,7 +71,7 @@ struct RecorderSheet: View {
             }
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .padding(.top, 20)
     }
 
     // MARK: - Body
@@ -149,7 +149,7 @@ struct RecorderSheet: View {
             CardRow {
                 Text(store.snapshot.outputName ?? "Recording saved").bodyText()
             } trailing: {
-                Text(savedFacts).font(TypeScale.mono(13)).foregroundStyle(Theme.inkSecondary)
+                Text(savedFacts).metaText(Theme.inkSecondary).monospacedDigit()
             }
             droppedFrames
             if store.state.revealFailed, let note = store.revealNote {
@@ -171,7 +171,7 @@ struct RecorderSheet: View {
             CardRow {
                 Text("Dropped frames").bodyText()
             } trailing: {
-                Text("\(store.droppedFrames)").font(TypeScale.mono(13)).foregroundStyle(Theme.live)
+                Text("\(store.droppedFrames)").metaText(Theme.live).monospacedDigit()
             }
         }
     }
@@ -179,7 +179,7 @@ struct RecorderSheet: View {
     private func panel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         Card(content: content)
             .padding(.horizontal, 24)
-            .padding(.top, 20)
+            .padding(.top, 16)
             .padding(.bottom, 4)
     }
 
@@ -317,16 +317,13 @@ struct RecorderSheet: View {
     }
 
     private func bar<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(spacing: 0) {
-            Hairline()
-            HStack(spacing: 10) {
-                Spacer(minLength: 0)
-                content()
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            content()
         }
+        .padding(.horizontal, 24)
         .padding(.top, 20)
+        .padding(.bottom, 20)
     }
 
     private func close() {
@@ -346,7 +343,7 @@ private struct RecorderDeviceRow: View {
     var body: some View {
         CardRow {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).bodyText(15, devices.isEmpty ? Theme.inkDisabled : Theme.ink)
+                Text(title).bodyText(14, devices.isEmpty ? Theme.inkDisabled : Theme.ink)
                 if let fact {
                     Text(fact).metaText()
                 }
@@ -385,8 +382,8 @@ private struct RecorderDeviceRow: View {
     }
 }
 
-/// A sentence the reader has to act on: a permission to grant in bronze, a
-/// failure in live red.
+/// A sentence the reader has to act on: a permission to grant in the accent,
+/// a failure in live red.
 private struct RecorderNotice: View {
     let text: String
     let tone: Color
@@ -396,8 +393,8 @@ private struct RecorderNotice: View {
             Text(text).font(TypeScale.body(14)).foregroundStyle(tone)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .overlay(alignment: .bottom) { Hairline() }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }

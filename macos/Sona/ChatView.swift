@@ -23,107 +23,180 @@ struct ChatView: View {
     @State private var following = true
     /// Which ends of the thread have more beyond them, so only those fade.
     @State private var edges = ChatEdges()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        let opening = isOpening
         VStack(spacing: 0) {
             header
-            Hairline()
-            scrollback
-            footer
+            if store.isPlanning {
+                Hairline()
+                PlannerAgentView(chat: store, onClose: onClose)
+            } else {
+                Hairline().opacity(!opening && edges.above ? 1 : 0)
+                if opening {
+                    openingHead
+                } else {
+                    scrollback
+                }
+                footer(opening)
+                if opening {
+                    openingFoot
+                    Spacer(minLength: 0).frame(maxHeight: 64)
+                }
+            }
         }
-        .frame(width: 480, height: 640)
+        .frame(width: 560, height: 620)
         .background(Theme.page)
         .clipShape(RoundedRectangle(cornerRadius: Theme.radiusDialog))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: opening)
         .onExitCommand(perform: onClose)
-        .task { await store.start() }
+        .task(id: store.isPlanning) {
+            if store.isPlanning { store.planner.activate() }
+            else { await store.start() }
+        }
         .onDisappear {
             store.stopVoice()
+            store.planner.deactivate()
             store.cancelScreenshotSelection()
         }
     }
 
-    // MARK: - Head
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
-            }
-            .buttonStyle(.quiet)
-            .help("Close chat")
-
-            ChatModelPicker(store: store, openSettings: openSettings)
-
-            Spacer(minLength: 8)
-
-            menu
-        }
-        .padding(.horizontal, 16)
-        .frame(height: 48)
-        .background(Theme.surface)
+    /// Nothing has been said yet, so the field sits in the middle of the
+    /// sheet under its question instead of at the foot of an empty page.
+    private var isOpening: Bool {
+        store.conversation.isEmpty && store.turn == nil && store.proposal == nil
     }
 
-    private var menu: some View {
-        Menu {
-            Button("New chat") { store.newChat() }
-                .disabled(store.busy || store.running)
+    // MARK: - Head
 
-            Menu("Recent chats") { history }
+    /// Sona's mark, who answers, and the ways out of this chat: an earlier
+    /// one, a new one, or closing the sheet.
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image("Mark")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18, height: 18)
+                .foregroundStyle(Theme.ink)
+                .accessibilityHidden(true)
 
-            Divider()
-
-            Picker("Who answers", selection: workspace) {
-                ForEach(AgentPanelWorkspace.allCases) { scope in
-                    Text(scope.title).tag(scope)
+            Picker("Mode", selection: workspace) {
+                ForEach(ChatSheetMode.allCases) { scope in
+                    Text(scope.rawValue).tag(scope)
                 }
             }
-            .pickerStyle(.inline)
-            .disabled(store.running)
-        } label: {
-            Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold))
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .disabled(store.planner.phase == .accepting || (!store.isPlanning && store.running))
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 4) {
+                if !store.isPlanning { history }
+
+                Button {
+                    if store.isPlanning { store.planner.reset() }
+                    else { store.newChat() }
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .buttonStyle(ChatGlyphButton())
+                .disabled(store.isPlanning ? store.planner.busy : store.busy || store.running)
+                .help(store.isPlanning ? "New plan" : "New chat")
+                .accessibilityLabel(store.isPlanning ? "New plan" : "New chat")
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(ChatGlyphButton())
+                .help("Close chat")
+                .accessibilityLabel("Close chat")
+            }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .foregroundStyle(Theme.inkSecondary)
-        .help("Chat with the Sona agent")
+        .padding(.leading, 24)
+        .padding(.trailing, 16)
+        .frame(height: 52)
     }
 
     /// The conversations the core remembers, newest first. A checkmark marks
     /// the one on screen, which is what a menu of one choice is for.
-    @ViewBuilder
     private var history: some View {
-        if store.history.isEmpty {
-            Text("Chats you start appear here.")
-        } else {
-            Picker("", selection: conversation) {
-                ForEach(store.history) { summary in
-                    Text(summary.title).tag(summary.conversationId)
+        Menu {
+            if store.history.isEmpty {
+                Text("No chats yet")
+            } else {
+                Picker("Recent chats", selection: conversation) {
+                    ForEach(store.history) { summary in
+                        Text(summary.title).tag(summary.conversationId)
+                    }
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                .disabled(store.busy || store.running)
             }
-            .pickerStyle(.inline)
-            .labelsHidden()
-            .disabled(store.busy || store.running)
+        } label: {
+            Label("Recent chats", systemImage: "clock.arrow.circlepath")
+                .labelStyle(.iconOnly)
+                .font(.system(size: 13, weight: .regular))
+                .frame(width: 28, height: 28)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .modifier(ChatMenuGlyph())
+        .help("Recent chats")
+        .accessibilityLabel("Recent chats")
     }
 
     // MARK: - Body
 
+    /// An empty chat's question, standing on the field. Before the first
+    /// status the sheet does not know which question it is, so a spinner
+    /// holds the place.
+    private var openingHead: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            if store.phase == .loading {
+                ProgressView().controlSize(.small)
+            } else {
+                ChatEmptyState(workspace: store.workspace)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
+    }
+
+    /// The questions an empty chat offers, under the field they would fill.
+    private var openingFoot: some View {
+        VStack(spacing: 0) {
+            ChatOpeningSuggestions(store: store)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+    }
+
     private var scrollback: some View {
         ScrollView {
-            content
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
-                .padding(.bottom, 20)
+            ChatScrollback(store: store)
+                .padding(.horizontal, 24)
+                .padding(.top, 20)
+                .padding(.bottom, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.never)
-        /* A chat opens on its newest line, and a short one sits down on the
-         * composer. A line that arrives later keeps the view on the bottom
-         * only when the reader was already there: scrolled up to an earlier
-         * answer, the page holds still under them instead of being pushed. */
+        /* A chat opens on its newest line, and a short one reads from the top
+         * down, as a page does. A line that arrives later keeps the view on
+         * the bottom only when the reader was already there: scrolled up to
+         * an earlier answer, the page holds still under them instead of
+         * being pushed. */
         .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(.bottom, for: .alignment)
+        .defaultScrollAnchor(.top, for: .alignment)
         .defaultScrollAnchor(following ? UnitPoint.bottom : .top, for: .sizeChanges)
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 24
@@ -143,29 +216,25 @@ struct ChatView: View {
         .frame(maxHeight: .infinity)
     }
 
-    @ViewBuilder
-    private var content: some View {
-        if store.phase == .loading {
-            ProgressView()
-                .controlSize(.small)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 48)
-        } else if store.conversation.isEmpty, store.turn == nil, store.proposal == nil {
-            ChatEmptyState(workspace: store.workspace)
-                .padding(.top, 48)
-                .padding(.bottom, 8)
-        } else {
-            ChatScrollback(store: store)
-        }
-    }
-
     // MARK: - Foot
 
+    /// What the reader should know before asking, then the field. In an
+    /// empty chat both sit under the question in the middle of the sheet;
+    /// once something has been said they rest at its foot.
+    private func footer(_ opening: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            notices
+            ChatComposer(store: store, onClose: onClose, openSettings: openSettings)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, opening ? 0 : 8)
+        .padding(.bottom, opening ? 0 : 24)
+    }
+
     @ViewBuilder
-    private var footer: some View {
+    private var notices: some View {
         if let notice = store.phase.notice {
-            Hairline()
-            HStack(spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(notice)
                     .metaText(Theme.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -177,12 +246,9 @@ struct ChatView: View {
                     Button("Settings", action: openSettings).buttonStyle(.quiet)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
         }
 
         if store.consentNeeded, store.phase == .ready {
-            Hairline()
             VStack(alignment: .leading, spacing: 8) {
                 Text(
                     "Sona answers about your recordings once you turn on meeting intelligence. "
@@ -195,61 +261,24 @@ struct ChatView: View {
                     .buttonStyle(.compact)
                     .disabled(store.busy)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
         }
 
         if pendingRequests > 0 {
-            Hairline()
-            CardRow(action: openRequests) {
-                HStack(spacing: 10) {
-                    Image(systemName: "tray.full")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Theme.inkSecondary)
-                    Text("Replies waiting for you").bodyText(14)
-                }
-            } trailing: {
-                Chip("\(pendingRequests)")
-            }
+            ChatRequestsRow(count: pendingRequests, action: openRequests)
         }
 
         if store.unsaved {
-            Hairline()
             Text("This chat couldn't be saved. It stays here until you close it, but won't be in History.")
                 .metaText(Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
         }
 
-        if store.error != nil {
-            Hairline()
-            ErrorNote(store.error)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-        }
-        if let screenshot = store.screenshot {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(screenshot.name).metaText(Theme.inkSecondary).lineLimit(1)
-                    Spacer()
-                    Button("Remove") { store.removeScreenshot() }
-                        .buttonStyle(.quiet)
-                        .disabled(store.busy)
-                        .accessibilityLabel("Remove screenshot")
-                }
-                Image(nsImage: screenshot.image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: 150)
-                    .overlay(Rectangle().strokeBorder(Theme.border, lineWidth: 1))
-                    .accessibilityLabel("Screenshot to share with your next question")
-                Text("Sent to your selected model when you press Send. Add it again for follow-up questions.")
-                    .metaText(Theme.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+        if let error = store.error {
+            Text(error)
+                .font(TypeScale.body(13))
+                .foregroundStyle(Theme.live)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
 
         /* The microphone gets a line while it is in use. Where the audio goes
@@ -259,12 +288,12 @@ struct ChatView: View {
             Text(line)
                 .metaText(Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
         }
+
         if store.workspace == .sonaChat, let folder = store.folderScope {
-            HStack(spacing: 12) {
-                Text("Only meetings in “\(folder.name)”").metaText(Theme.accent)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Only meetings in “\(folder.name)”")
+                    .metaText(Theme.accent)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button("Remove") { store.clearFolderScope() }
@@ -272,20 +301,101 @@ struct ChatView: View {
                     .disabled(store.busy || store.running)
                     .accessibilityLabel("Ask across all meetings")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
         }
-        ChatComposer(store: store, onClose: onClose)
     }
 
     // MARK: - Bindings
 
-    private var workspace: Binding<AgentPanelWorkspace> {
-        Binding(get: { store.workspace }, set: { store.workspace = $0 })
+    private var workspace: Binding<ChatSheetMode> {
+        Binding(get: {
+            store.isPlanning ? .plan : store.workspace == .sonaChat ? .ask : .configure
+        }, set: { mode in
+            switch mode {
+            case .plan: store.openPlanner()
+            case .ask: store.leavePlanner(workspace: .sonaChat)
+            case .configure: store.leavePlanner(workspace: .sonaConfig)
+            }
+        })
     }
 
     private var conversation: Binding<String> {
         Binding(get: { store.conversationId ?? "" }, set: { store.open($0) })
+    }
+}
+
+private enum ChatSheetMode: String, CaseIterable, Identifiable {
+    case ask = "Ask"
+    case configure = "Configure"
+    case plan = "Plan"
+    var id: String { rawValue }
+}
+
+/// Replies other agents are waiting on, as one row that opens them.
+private struct ChatRequestsRow: View {
+    let count: Int
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .accessibilityHidden(true)
+                Text("Replies waiting for you").bodyText(13)
+                Spacer(minLength: 8)
+                Chip("\(count)")
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .background(
+                hovering ? Theme.inset : Theme.surface,
+                in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.radiusControl)
+                    .strokeBorder(Theme.border, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// Three questions for an empty chat, drawn from what the other pages
+/// already read: the next event on the calendar, the newest meeting, and
+/// the newest meeting with a promise still open. Nothing is asked of the
+/// core for them.
+private struct ChatOpeningSuggestions: View {
+    let store: ChatStore
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let offered = suggestions
+        VStack(alignment: .leading, spacing: 0) {
+            if !offered.isEmpty {
+                ChatSuggestionPills(suggestions: offered) { store.ask($0) }
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(ChatMotion.arrival(reduceMotion), value: offered)
+    }
+
+    private var suggestions: [String] {
+        guard store.offersSuggestions else { return [] }
+        let now = Int64(Date.now.timeIntervalSince1970 * 1000)
+        let next = model.overview.upcoming?.rows
+            .filter { $0.startUtcMs > now }
+            .min { $0.startUtcMs < $1.startUtcMs }
+        let latest = model.meetings.entries.max { $0.createdAtUtcMs < $1.createdAtUtcMs }
+        var open: FeedOpenLoop?
+        if case let .loaded(loops) = model.overview.openLoops {
+            open = loops.max { $0.atUtcMs < $1.atUtcMs }
+        }
+        return ChatSuggestions.pick(next: next?.title, latest: latest?.title, open: open?.title)
     }
 }
 
@@ -298,10 +408,13 @@ private struct ChatScrollback: View {
         let rows = store.rows
         let cardIndex = store.proposalRowIndex
         let retry = store.retryMessage
+        let entries = ChatEntry.list(rows, work: store.workRowIndex, turn: store.turn, retry: retry)
+        let first = entries.first?.id
 
-        LazyVStack(alignment: .leading, spacing: 16) {
-            ForEach(ChatEntry.list(rows, work: store.workRowIndex, turn: store.turn, retry: retry)) { entry in
+        LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(entries) { entry in
                 view(for: entry, cardIndex: cardIndex, retry: retry)
+                    .padding(.top, entry.id == first ? 0 : entry.gap)
                     .modifier(ChatEntrance())
             }
 
@@ -310,22 +423,26 @@ private struct ChatScrollback: View {
              * of three reads as three choices rather than one block. */
             ForEach(store.turn?.actions ?? []) { action in
                 ChatActionCard(store: store, action: action)
+                    .padding(.top, 12)
                     .modifier(ChatEntrance())
             }
 
             // A proposal with no row of its own is drawn rather than dropped.
             if cardIndex == -1, let proposal = store.proposal {
                 ChatProposalCard(store: store, proposal: proposal)
+                    .padding(.top, entries.isEmpty ? 0 : 16)
                     .modifier(ChatEntrance())
             }
             if let proposal = store.proposal, !proposal.rationale.isEmpty {
                 ChatAnswer(message: proposal.rationale, landed: nil, store: store)
                     .equatable()
+                    .padding(.top, 16)
                     .modifier(ChatEntrance())
             }
             if let question = store.proposal?.followUpQuestion {
                 ChatAnswer(message: question, landed: nil, store: store)
                     .equatable()
+                    .padding(.top, 16)
                     .modifier(ChatEntrance())
             }
         }
@@ -373,6 +490,16 @@ private enum ChatEntry: Identifiable {
         case let .row(_, row): row.id
         case let .outcome(row, _): row.id + "\u{1F}outcome"
         case let .work(turn): "work\u{1F}" + turn.turnId
+        }
+    }
+
+    /// The space above this entry. A question opens a new exchange, so it
+    /// stands apart; the work and the answer under it stay close to it.
+    var gap: CGFloat {
+        switch self {
+        case let .row(_, row): row.turn.role == .user ? 28 : 16
+        case .work: 12
+        case .outcome: 6
         }
     }
 
@@ -441,12 +568,12 @@ private struct ChatProposalCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Theme.ink)
-                .frame(width: 30, height: 30)
-                .background(Theme.inset, in: RoundedRectangle(cornerRadius: 8))
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 16, height: 20)
+                .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 /* Wraps rather than truncates: this sentence is the whole of
                  * what the assistant said, and a press on Apply under half a
                  * sentence is a press on something nobody was shown. The
@@ -482,11 +609,12 @@ private struct ChatProposalCard: View {
                 Text(proposal.state.label).metaText(Theme.inkSecondary)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusPanel)
+            RoundedRectangle(cornerRadius: Theme.radiusCard)
                 .strokeBorder(Theme.border, lineWidth: 1))
     }
 }
@@ -504,7 +632,7 @@ private struct ChatActionCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(action.action.line(naming: store.people))
                     .bodyText(14)
                     .fixedSize(horizontal: false, vertical: true)
@@ -546,108 +674,79 @@ private struct ChatActionCard: View {
                 Text("Not confirmed").metaText(Theme.inkSecondary)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusPanel)
+            RoundedRectangle(cornerRadius: Theme.radiusCard)
                 .strokeBorder(Theme.border, lineWidth: 1))
         .sheet(isPresented: $reviewing) { ChatActionReview(store: store, card: action) }
     }
 }
 
-/// The composer, pinned under the thread as Halcyon's is: the questions an
-/// empty chat offers, then the field in its well with the attach and voice
-/// controls tucked inside it, and the one round button beside it, which is
-/// Send until a question is on its way and Stop from then until the turn is
-/// over.
+/// The composer: one rounded well with room for two lines before the field
+/// grows, and a toolbar under the field. In Ask the toolbar starts with the
+/// screenshot menu; then comes the model, and at the far end the microphone
+/// in Ask and the one round button, which is Send until a question is on
+/// its way and Stop from then until the turn is over. A screenshot the next
+/// question carries sits at the top of the well.
 private struct ChatComposer: View {
     let store: ChatStore
     let onClose: () -> Void
-    /// Where the suggestions come from: the calendar, the meetings and the
-    /// open promises the other pages already read.
-    @Environment(AppModel.self) private var model
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let openSettings: () -> Void
+    @State private var fieldFocused = false
 
     var body: some View {
-        let offered = suggestions
-        VStack(alignment: .leading, spacing: 10) {
-            if !offered.isEmpty {
-                ChatSuggestionPills(suggestions: offered) { store.ask($0) }
-                    .transition(.opacity)
+        VStack(alignment: .leading, spacing: 0) {
+            if let screenshot = store.screenshot {
+                attachment(screenshot)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                well
-                if store.running || store.sending {
-                    ChatRoundButton(
-                        symbol: "stop.fill", help: "Stop", isEnabled: !store.stopping,
-                        action: { store.stop() })
-                } else {
-                    ChatRoundButton(
-                        symbol: "arrow.up", help: "Send", isEnabled: store.canSend,
-                        action: { store.send() })
-                }
-            }
+            field
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+            toolbar
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 16)
-        .animation(ChatMotion.arrival(reduceMotion), value: offered)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.radiusCard)
+                .strokeBorder(fieldFocused ? Theme.inkDisabled : Theme.border, lineWidth: 1)
+                .animation(.easeOut(duration: 0.12), value: fieldFocused)
+                .allowsHitTesting(false))
     }
 
-    /// Three questions for an empty chat, drawn from what the other pages
-    /// already read: the next event on the calendar, the newest meeting, and
-    /// the newest meeting with a promise still open. Nothing is asked of the
-    /// core for them.
-    private var suggestions: [String] {
-        guard store.offersSuggestions else { return [] }
-        let now = Int64(Date.now.timeIntervalSince1970 * 1000)
-        let next = model.overview.upcoming?.rows
-            .filter { $0.startUtcMs > now }
-            .min { $0.startUtcMs < $1.startUtcMs }
-        let latest = model.meetings.entries.max { $0.createdAtUtcMs < $1.createdAtUtcMs }
-        var open: FeedOpenLoop?
-        if case let .loaded(loops) = model.overview.openLoops {
-            open = loops.max { $0.atUtcMs < $1.atUtcMs }
+    private var field: some View {
+        ZStack(alignment: .topLeading) {
+            if store.draft.isEmpty {
+                Text(store.workspace.prompt)
+                    .bodyText(14, Theme.inkTertiary)
+                    .padding(.top, 4)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+            ChatComposerField(
+                text: Binding(get: { store.draft }, set: { store.editDraft($0) }),
+                label: store.workspace.prompt,
+                isEnabled: store.phase != .loading && store.phase != .disabled && !store.savingModel,
+                send: { store.send() },
+                escape: onClose,
+                focusChanged: { fieldFocused = $0 })
         }
-        return ChatSuggestions.pick(next: next?.title, latest: latest?.title, open: open?.title)
     }
 
-    /// The field, and in Ask the image and voice controls at its trailing
-    /// edge, quiet until they are pressed.
-    private var well: some View {
-        HStack(alignment: .bottom, spacing: 4) {
-            ZStack(alignment: .topLeading) {
-                if store.draft.isEmpty {
-                    Text(store.workspace.prompt)
-                        .font(TypeScale.body(14))
-                        .foregroundStyle(Theme.inkTertiary)
-                        .padding(.top, 4)
-                        .allowsHitTesting(false)
-                }
-                ChatComposerField(
-                    text: Binding(get: { store.draft }, set: { store.editDraft($0) }),
-                    label: store.workspace.prompt,
-                    isEnabled: store.phase != .loading && store.phase != .disabled && !store.savingModel,
-                    send: { store.send() },
-                    escape: onClose)
-            }
+    private var toolbar: some View {
+        HStack(spacing: 4) {
             if store.workspace == .sonaChat {
-                Menu {
-                    Button("Use a window…") { store.chooseScreenshot(window: true) }
-                    Button("Choose screenshot…") { store.chooseScreenshot(window: false) }
-                } label: {
-                    Image(systemName: "photo.badge.plus")
-                        .font(.system(size: 13))
-                        .frame(width: 24, height: 24)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .foregroundStyle(Theme.inkSecondary)
-                .disabled(!store.canAttachScreenshot)
-                .help("Attach a screenshot")
-                .accessibilityLabel("Attach a screenshot")
+                attach
+            }
+            ChatModelPicker(store: store, openSettings: openSettings)
+            Spacer(minLength: 8)
+            if store.workspace == .sonaChat {
                 ChatWellButton(
                     symbol: store.voiceActive ? "waveform" : "mic",
                     help: store.voiceActive ? "End voice conversation" : "Start voice conversation",
@@ -656,19 +755,82 @@ private struct ChatComposer: View {
                     isEnabled: store.voiceActive || store.canStartVoice,
                     action: { if store.voiceActive { store.stopVoice() } else { store.startVoice() } })
             }
+            if store.running || store.sending {
+                ChatRoundButton(
+                    symbol: "stop.fill", help: "Stop", isEnabled: !store.stopping,
+                    action: { store.stop() })
+            } else {
+                ChatRoundButton(
+                    symbol: "arrow.up", help: "Send", isEnabled: store.canSend,
+                    action: { store.send() })
+            }
         }
-        .padding(.leading, 14)
-        .padding(.trailing, store.workspace == .sonaChat ? 8 : 14)
-        .padding(.vertical, 7)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.radiusCard)
-                .strokeBorder(Theme.border, lineWidth: 1))
+        .frame(height: 28)
+    }
+
+    private var attach: some View {
+        Menu {
+            Button("Use a window…") { store.chooseScreenshot(window: true) }
+            Button("Choose screenshot…") { store.chooseScreenshot(window: false) }
+        } label: {
+            Label("Attach a screenshot", systemImage: "plus")
+                .labelStyle(.iconOnly)
+                .font(.system(size: 13, weight: .regular))
+                .frame(width: 28, height: 28)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .modifier(ChatMenuGlyph())
+        .disabled(!store.canAttachScreenshot)
+        .help("Attach a screenshot")
+        .accessibilityLabel("Attach a screenshot")
+    }
+
+    /// The screenshot the next question carries: the image in its own shape,
+    /// small enough to leave the field its room, where it goes, and Remove.
+    private func attachment(_ screenshot: ChatScreenshotDraft) -> some View {
+        let size = Self.thumbnail(screenshot.image.size)
+        return HStack(alignment: .top, spacing: 12) {
+            Image(nsImage: screenshot.image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size.width, height: size.height)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusControl))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusControl)
+                        .strokeBorder(Theme.border, lineWidth: 1))
+                .accessibilityLabel("Screenshot to share with your next question")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(screenshot.name)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Sent to your selected model when you press Send. Add it again for follow-up questions.")
+                    .metaText(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Remove") { store.removeScreenshot() }
+                    .buttonStyle(.quiet)
+                    .disabled(store.busy)
+                    .accessibilityLabel("Remove screenshot")
+                    .padding(.top, 4)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The image's own proportions, no wider than 160 points and no taller
+    /// than 96, and never drawn larger than it is.
+    private static func thumbnail(_ size: CGSize) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return CGSize(width: 160, height: 96) }
+        let scale = min(160 / size.width, 96 / size.height, 1)
+        return CGSize(width: size.width * scale, height: size.height * scale)
     }
 }
 
-/// Send and Stop: one 32-point circle beside the well, filled with ink while
-/// it can be pressed, as Halcyon's send is.
+/// Send and Stop: one round button at the end of the toolbar, in full ink
+/// while it can be pressed.
 private struct ChatRoundButton: View {
     let symbol: String
     let help: String
@@ -680,8 +842,9 @@ private struct ChatRoundButton: View {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(isEnabled ? Theme.onInvert : Theme.inkDisabled)
-                .frame(width: 32, height: 32)
-                .background(isEnabled ? Theme.invert : Theme.selection, in: Circle())
+                .frame(width: 28, height: 28)
+                .background(isEnabled ? Theme.invert : Theme.control, in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
@@ -690,8 +853,8 @@ private struct ChatRoundButton: View {
     }
 }
 
-/// A control inside the well: a glyph in quiet ink with no fill of its own,
-/// full ink while what it starts is running.
+/// A control in the toolbar that starts something, full ink while what it
+/// started is running.
 private struct ChatWellButton: View {
     let symbol: String
     let help: String
@@ -705,16 +868,51 @@ private struct ChatWellButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: isOn ? .semibold : .regular))
-                .foregroundStyle(isEnabled ? (isOn ? Theme.ink : Theme.inkSecondary) : Theme.inkDisabled)
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ChatGlyphButton(isOn: isOn))
         .disabled(!isEnabled)
         .help(help + ". " + note)
         .accessibilityLabel(help)
         .accessibilityHint(note)
+    }
+}
+
+/// A glyph in the header or the toolbar: quiet ink on nothing, a soft wash
+/// under the pointer, and full ink while what it started is running.
+private struct ChatGlyphButton: ButtonStyle {
+    var isOn = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: isOn ? .semibold : .regular))
+            .foregroundStyle(isEnabled ? (isOn || hovering ? Theme.ink : Theme.inkSecondary) : Theme.inkDisabled)
+            .frame(width: 28, height: 28)
+            .background(
+                configuration.isPressed ? Theme.selection : (isEnabled && hovering ? Theme.wash : Color.clear),
+                in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// The same glyph for a control that opens a menu. A menu draws its own
+/// button, so the look is given from outside it.
+private struct ChatMenuGlyph: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        let lit = isEnabled && hovering
+        content
+            .tint(lit ? Theme.ink : Theme.inkSecondary)
+            .foregroundStyle(lit ? Theme.ink : Theme.inkSecondary)
+            .background(lit ? Theme.wash : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: lit)
     }
 }
 
@@ -734,15 +932,21 @@ private struct ChatComposerField: NSViewRepresentable {
     let isEnabled: Bool
     let send: () -> Void
     let escape: () -> Void
+    /// Whether the caret is in the field, for the well's outline.
+    let focusChanged: (Bool) -> Void
 
     /// Where React's composer stopped growing, which is about six lines.
     private static let maxHeight: CGFloat = 120
     private static let inset: CGFloat = 4
     private static let font = NSFont.systemFont(ofSize: 14)
+    /// Two lines, so an empty field already reads as somewhere to write and
+    /// a click anywhere in them lands in the text.
+    private static let minHeight = height("\n", 1000)
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
-        let view = NSTextView()
+        let view = ChatComposerTextView()
+        view.focusChanged = focusChanged
         view.delegate = context.coordinator
         view.isRichText = false
         view.allowsUndo = true
@@ -753,6 +957,7 @@ private struct ChatComposerField: NSViewRepresentable {
         view.textContainerInset = NSSize(width: 0, height: Self.inset)
         view.isVerticallyResizable = true
         view.isHorizontallyResizable = false
+        view.minSize = NSSize(width: 0, height: Self.minHeight)
         view.autoresizingMask = [.width]
         view.textContainer?.widthTracksTextView = true
         view.textContainer?.lineFragmentPadding = 0
@@ -781,10 +986,11 @@ private struct ChatComposerField: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let view = scroll.documentView as? NSTextView else { return }
+        guard let view = scroll.documentView as? ChatComposerTextView else { return }
         context.coordinator.text = $text
         context.coordinator.send = send
         context.coordinator.escape = escape
+        view.focusChanged = focusChanged
         if view.string != text {
             view.string = text
         }
@@ -798,7 +1004,7 @@ private struct ChatComposerField: NSViewRepresentable {
     ) -> CGSize? {
         let width = proposal.width ?? 240
         let wanted = Self.height(text, width)
-        return CGSize(width: width, height: min(max(wanted, 21), Self.maxHeight))
+        return CGSize(width: width, height: min(max(wanted, Self.minHeight), Self.maxHeight))
     }
 
     func makeCoordinator() -> ChatComposerCoordinator {
@@ -815,6 +1021,30 @@ private struct ChatComposerField: NSViewRepresentable {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font])
         return ceil(bounds.height) + inset * 2
+    }
+}
+
+/// The composer's text view, reporting when it takes and gives up the caret.
+private final class ChatComposerTextView: NSTextView {
+    var focusChanged: (Bool) -> Void = { _ in }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { report(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { report(false) }
+        return resigned
+    }
+
+    /// The caret is first given from inside `updateNSView`, where SwiftUI
+    /// state may not change, so the report waits for the next turn.
+    private func report(_ focused: Bool) {
+        let focusChanged = focusChanged
+        DispatchQueue.main.async { focusChanged(focused) }
     }
 }
 
@@ -839,13 +1069,12 @@ private final class ChatComposerCoordinator: NSObject, NSTextViewDelegate {
     }
 
     func textView(_ view: NSTextView, doCommandBy command: Selector) -> Bool {
+        // AppKit also uses insertNewline: for Shift-Return.
         switch command {
-        case Self.newline:
+        case Self.newline where NSApp.currentEvent?.modifierFlags.contains(.shift) != true:
             send()
             return true
-        case Self.lineBreak:
-            /* Shift-Return's own command inserts a line separator, which is
-             * not a newline anywhere this text is read again. */
+        case Self.newline, Self.lineBreak:
             view.insertText("\n", replacementRange: view.selectedRange())
             return true
         /* Escape reaches a text view as `complete:` — AppKit's word

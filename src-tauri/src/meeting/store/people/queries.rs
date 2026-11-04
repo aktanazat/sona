@@ -1,14 +1,16 @@
 mod artifacts;
 
 use self::artifacts::{
-    all_open_loops_in, document_summaries_in, facts_for_person_in, meeting_summary_in,
-    person_meeting_headline_from_json, talk_share_average_in, PersonFacts,
+    all_open_loops_in, confirmed_totals_in, document_summaries_in, facts_for_person_in,
+    meeting_summary_in, person_meeting_headline_from_json, talk_share_average_in, PersonFacts,
 };
+use super::contact_cards::contact_card_in;
 use super::{
     all_people_in, normalized_email, people_revision_in, person_by_id_in, person_from_row,
     SCHEMA_VERSION,
 };
 use crate::meeting::detection::machine::{CalendarAttendee, CalendarEventSummary};
+use crate::meeting::loop_types::MeetingLoopDirection;
 use crate::meeting::people_types::{
     organization_slug, CompaniesListResult, CompanySummary, MeetingPeopleContextResult,
     MeetingPersonContextRow, OpenLoopsInboxResult, OrganizationDetail, OrganizationDetailResult,
@@ -44,6 +46,18 @@ impl MeetingStore {
         let result = person_detail_in(&transaction, person_id)?;
         transaction.commit()?;
         Ok(result)
+    }
+
+    /// When the corpus's first meeting began, or none when it holds no
+    /// meetings: before it, Sona was not recording, so no week there has a
+    /// count of its own.
+    pub(crate) fn earliest_meeting_utc_ms(&self) -> Result<Option<i64>, StoreError> {
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "SELECT MIN(COALESCE(started_at_utc_ms, created_at_utc_ms)) FROM meeting_sessions",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub(crate) fn person_context(
@@ -214,26 +228,33 @@ impl MeetingStore {
         meeting_id: MeetingSessionId,
     ) -> Result<Vec<PersonId>, StoreError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT p.id
-               FROM meeting_person_links l
-               JOIN persons p ON p.id = l.person_id
-              WHERE l.meeting_id = ?1 AND l.confidence = 'confirmed'
-              ORDER BY p.display_name COLLATE NOCASE, p.id",
-        )?;
-        let ids = statement
-            .query_map([meeting_id.uuid().to_string()], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.into_iter()
-            .map(|id| {
-                Uuid::parse_str(&id)
-                    .map(PersonId)
-                    .map_err(|_| StoreError::Corrupt)
-            })
-            .collect()
+        confirmed_person_ids_in(&connection, meeting_id)
     }
+}
+
+pub(in crate::meeting::store) fn confirmed_person_ids_in(
+    connection: &Connection,
+    meeting_id: MeetingSessionId,
+) -> Result<Vec<PersonId>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT p.id
+           FROM meeting_person_links l
+           JOIN persons p ON p.id = l.person_id
+          WHERE l.meeting_id = ?1 AND l.confidence = 'confirmed'
+          ORDER BY p.display_name COLLATE NOCASE, p.id",
+    )?;
+    let ids = statement
+        .query_map([meeting_id.uuid().to_string()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.into_iter()
+        .map(|id| {
+            Uuid::parse_str(&id)
+                .map(PersonId)
+                .map_err(|_| StoreError::Corrupt)
+        })
+        .collect()
 }
 
 fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreError> {
@@ -349,6 +370,8 @@ fn person_detail_in(
     let links = links_for_person_in(connection, person_id)?;
     let documents = document_summaries_in(connection, person_id)?;
     let talk_share_avg_permille = talk_share_average_in(connection, &person)?;
+    let (recorded_ms, ledger_outcomes) = confirmed_totals_in(connection, person_id)?;
+    let contact = contact_card_in(connection, person_id)?;
     Ok(PersonDetailResult {
         schema_version: SCHEMA_VERSION,
         revision,
@@ -358,7 +381,10 @@ fn person_detail_in(
             open_loops: facts.open_loops,
             commitments: facts.commitments,
             talk_share_avg_permille,
+            recorded_ms,
+            ledger_outcomes,
             documents,
+            contact,
         },
     })
 }
@@ -669,6 +695,16 @@ fn context_for_ids_in(
             });
         let meetings_count =
             u64::try_from(facts.meetings.len()).map_err(|_| StoreError::Corrupt)?;
+        let waiting_on_count = u64::try_from(
+            facts
+                .open_loops
+                .iter()
+                .filter(|open| open.direction == MeetingLoopDirection::WaitingOn)
+                .count(),
+        )
+        .map_err(|_| StoreError::Corrupt)?;
+        let open_loop_count =
+            u64::try_from(facts.open_loops.len()).map_err(|_| StoreError::Corrupt)?;
         facts.open_loops.truncate(3);
         facts.commitments.truncate(3);
         rows.push(PersonBriefingRow {
@@ -677,6 +713,8 @@ fn context_for_ids_in(
             meetings_count,
             last,
             open_loops: facts.open_loops,
+            waiting_on_count,
+            open_loop_count,
             commitments: facts.commitments,
         });
     }

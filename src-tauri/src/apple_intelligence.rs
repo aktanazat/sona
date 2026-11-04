@@ -149,6 +149,7 @@ pub async fn process_text_with_system_prompt_async(
         max_tokens,
         ResponseShape::Text,
         None,
+        None,
     )
     .await
 }
@@ -159,7 +160,14 @@ async fn generate(
     max_tokens: i32,
     response_shape: ResponseShape,
     json_schema: Option<&str>,
+    cancellation: Option<&crate::planning::quiet::Cancellation>,
 ) -> GenerationResult {
+    let _foreground = cancellation
+        .is_none()
+        .then(crate::planning::quiet::foreground_activity);
+    if cancellation.is_some_and(|signal| signal.is_cancelled()) {
+        return Err("Apple Intelligence generation cancelled".to_string());
+    }
     let system_cstr = CString::new(system_prompt).map_err(|error| error.to_string())?;
     let user_cstr = CString::new(user_content).map_err(|error| error.to_string())?;
     let schema_cstr = json_schema
@@ -196,7 +204,15 @@ async fn generate(
             generation_completed,
         )
     };
-    await_generation(receiver, tokio::time::sleep(GENERATION_DEADLINE)).await
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err("Apple Intelligence generation cancelled".to_string()),
+            result = await_generation(receiver, tokio::time::sleep(GENERATION_DEADLINE)) => result,
+        }
+    } else {
+        await_generation(receiver, tokio::time::sleep(GENERATION_DEADLINE)).await
+    }
 }
 
 pub(crate) fn process_with_response_shape(
@@ -212,6 +228,25 @@ pub(crate) fn process_with_response_shape(
         max_tokens,
         response_shape,
         json_schema,
+        None,
+    ))
+}
+
+pub(crate) fn process_with_response_shape_cancellable(
+    system_prompt: &str,
+    user_content: &str,
+    max_tokens: i32,
+    response_shape: ResponseShape,
+    json_schema: Option<&str>,
+    cancellation: &crate::planning::quiet::Cancellation,
+) -> GenerationResult {
+    tauri::async_runtime::block_on(generate(
+        system_prompt,
+        user_content,
+        max_tokens,
+        response_shape,
+        json_schema,
+        Some(cancellation),
     ))
 }
 

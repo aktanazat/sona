@@ -507,7 +507,7 @@ fn reminder_items(
 /// commitments read out of one long segment can take each other's day. The
 /// upgrade path is a due field on the ledger's own commitment, which is a ledger
 /// schema and prompt change, not more matching here.
-fn due_day_for(
+pub(crate) fn due_day_for(
     row: &MeetingLoopRow,
     action_items: &[MeetingActionItem],
     meeting_day: NaiveDate,
@@ -580,7 +580,7 @@ fn next_weekday(from: NaiveDate, weekday: chrono::Weekday) -> Option<NaiveDate> 
 /// The local calendar day one instant fell on. Reminders are dated in the
 /// operator's own day, not in UTC: a meeting at 23:30 that promises something
 /// "tomorrow" means the day after the one they lived through.
-fn local_day(at_utc_ms: i64) -> NaiveDate {
+pub(crate) fn local_day(at_utc_ms: i64) -> NaiveDate {
     DateTime::<Utc>::from_timestamp_millis(at_utc_ms)
         .map_or_else(Local::now, |instant| instant.with_timezone(&Local))
         .date_naive()

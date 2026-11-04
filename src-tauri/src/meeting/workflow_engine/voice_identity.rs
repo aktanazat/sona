@@ -1,11 +1,15 @@
-use super::{map_store_error, now_utc_ms};
+use super::{map_store_error, now_utc_ms, MEETING_EVENT_SCHEMA_VERSION};
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyRequest, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus, VoiceSpeakerIdentityResult,
+    VoiceProfileStatus, VoiceSpeakerIdentityResult, VoiceSpeakerSuggestion,
 };
-use crate::meeting::types::{MeetingCommandError, MeetingSessionId, SpeakerId};
+use crate::meeting::transcript_correction_types::TranscriptCorrectionChangedSession;
+use crate::meeting::types::{
+    MeetingCommandError, MeetingEventPayload, MeetingSessionId, SpeakerId,
+};
+use tauri::Emitter;
 
 /// The ids and fences one enrollment needs, as one value. Three adjacent
 /// `u64` fences read the same positionally, so callers name them instead.
@@ -30,19 +34,52 @@ impl MeetingSessionManager {
             .map_err(map_store_error)
     }
 
+    pub(crate) async fn voice_speaker_suggestions(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<VoiceSpeakerSuggestion>, MeetingCommandError> {
+        self.store()
+            .await?
+            .voice_speaker_suggestions(session_id)
+            .map_err(map_store_error)
+    }
+
     pub(crate) async fn identify_voice_speaker(
         &self,
         request: MeetingSpeakerIdentifyRequest,
     ) -> Result<VoiceSpeakerIdentityResult, MeetingCommandError> {
-        let result = self
-            .store()
-            .await?
-            .identify_speaker(request)
+        let store = self.store().await?;
+        let before = store
+            .transcript_correction_identity_snapshot(request.session_id, &[request.speaker_id])
             .map_err(map_store_error)?;
+        let result = store.identify_speaker(request).map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?,
+        );
         if let Some(revision) = result.receipt.new_revision {
             self.emit_artifact_changed(result.receipt.session_id.clone(), revision);
         }
         Ok(result)
+    }
+
+    pub(crate) fn emit_transcript_correction_changes(
+        &self,
+        changed_sessions: impl IntoIterator<Item = TranscriptCorrectionChangedSession>,
+    ) {
+        if let Some(app) = self.app_handle() {
+            for session in changed_sessions {
+                let _ = app.emit(
+                    "meeting:transcript-changed",
+                    MeetingEventPayload {
+                        event_schema_version: MEETING_EVENT_SCHEMA_VERSION,
+                        session_id: Some(session.session_id),
+                        revision: session.revision,
+                    },
+                );
+            }
+        }
     }
 
     pub(crate) async fn enroll_voice_profile(
@@ -68,7 +105,10 @@ impl MeetingSessionManager {
             .embed_voice_enrollment_evidence(&store, evidence)
             .await
             .map_err(map_store_error)?;
-        store
+        let before = store
+            .transcript_correction_people_snapshot(&[person_id])
+            .map_err(map_store_error)?;
+        let status = store
             .commit_voice_profile_enrollment(VoiceProfileEnrollmentRequest {
                 person_id,
                 expected_meeting_revision,
@@ -80,7 +120,13 @@ impl MeetingSessionManager {
                 embedding,
                 committed_at_utc_ms: now_utc_ms(),
             })
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?,
+        );
+        Ok(status)
     }
 
     pub(crate) async fn remove_voice_profile(
@@ -88,9 +134,18 @@ impl MeetingSessionManager {
         person_id: PersonId,
         expected_people_revision: u64,
     ) -> Result<VoiceProfileStatus, MeetingCommandError> {
-        self.store()
-            .await?
+        let store = self.store().await?;
+        let before = store
+            .transcript_correction_people_snapshot(&[person_id])
+            .map_err(map_store_error)?;
+        let status = store
             .remove_voice_profile(person_id, expected_people_revision)
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?,
+        );
+        Ok(status)
     }
 }

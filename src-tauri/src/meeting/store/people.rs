@@ -1,3 +1,7 @@
+mod avatars;
+mod contact_cards;
+mod continuity;
+mod contributions;
 mod mutations;
 mod queries;
 mod vocabulary;
@@ -6,10 +10,11 @@ pub(super) use mutations::{
     derive_calendar_links_in, derive_speaker_link_in, derive_title_links_in,
     link_document_mentions_in, recompute_organizations_in, upsert_link_in,
 };
-pub(super) use queries::{calendar_context_in, continuity_summary_in};
+pub(super) use queries::{calendar_context_in, confirmed_person_ids_in, continuity_summary_in};
 pub(super) use vocabulary::vocabulary_candidates_in;
 
-use super::StoreError;
+use super::{MeetingStore, StoreError};
+use crate::meeting::loop_types::{MeetingLoopDirection, MeetingLoopRow};
 use crate::meeting::people_types::{Person, PersonId, PersonSummary};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -72,6 +77,46 @@ pub(super) fn all_people_in(connection: &Connection) -> Result<Vec<Person>, Stor
         .query_map([], person_from_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(people)
+}
+impl MeetingStore {
+    pub(crate) fn resolve_person_source(
+        &self,
+        source_id: PersonId,
+    ) -> Result<Option<Person>, StoreError> {
+        let connection = self.connection()?;
+        let target: Option<String> = connection
+            .query_row(
+                "SELECT target_person_id FROM person_merge_redirects WHERE source_person_id = ?1",
+                [source_id.uuid().to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let resolved = target
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt)?
+            .map(PersonId)
+            .unwrap_or(source_id);
+        match person_by_id_in(&connection, resolved) {
+            Ok(person) => Ok(Some(person)),
+            Err(StoreError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn person_source_ids(&self, person_id: PersonId) -> Result<Vec<String>, StoreError> {
+        let connection = self.connection()?;
+        let mut source_ids = vec![person_id.uuid().to_string()];
+        let mut statement = connection.prepare(
+            "SELECT source_person_id FROM person_merge_redirects WHERE target_person_id = ?1",
+        )?;
+        let merged = statement.query_map([person_id.uuid().to_string()], |row| {
+            row.get::<_, String>(0)
+        })?;
+        source_ids.extend(merged.collect::<rusqlite::Result<Vec<_>>>()?);
+        Ok(source_ids)
+    }
 }
 
 fn person_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Person> {
@@ -139,6 +184,25 @@ pub(super) fn identity_names(person: &Person) -> impl Iterator<Item = &str> {
 pub(super) fn owner_matches(person: &Person, owner: &str) -> bool {
     let owner = normalized(owner);
     !owner.is_empty() && identity_names(person).any(|name| normalized(name) == owner)
+}
+
+/// Whether a loop belongs with this person. Something they owe needs them
+/// named on it: an explicit assignment, or the name the ledger read off the
+/// transcript. Something the user owes belongs because it was raised in a
+/// meeting with them, with no name needed, since the user is never a
+/// `Person`. A row attributed to some third party, or to nobody, is neither.
+pub(super) fn loop_concerns_person(person: &Person, row: &MeetingLoopRow) -> bool {
+    match row.direction {
+        MeetingLoopDirection::Mine => true,
+        MeetingLoopDirection::WaitingOn => match row.owner_person_id {
+            Some(owner) => owner == person.id,
+            None => row
+                .owner_text
+                .as_deref()
+                .is_some_and(|owner| owner_matches(person, owner)),
+        },
+        MeetingLoopDirection::Unattributed => false,
+    }
 }
 
 pub(super) fn exact_phrase_mentioned(text: &str, phrase: &str) -> bool {

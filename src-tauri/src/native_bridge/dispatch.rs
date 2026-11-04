@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 38] = [
+pub(super) const TYPED_EVENTS: [&str; 40] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -39,6 +39,7 @@ pub(super) const TYPED_EVENTS: [&str; 38] = [
     crate::meeting::types::MeetingRemovedEvent::NAME,
     crate::cloud_sync::types::CloudSyncChangedEvent::NAME,
     crate::meeting::types::MeetingNavigationRequestedEvent::NAME,
+    crate::meeting::types::MeetingProcessingProgressEvent::NAME,
     crate::meeting::snapshots::MeetingSnapshotChangedEvent::NAME,
     crate::meeting::detection::DetectionPromptEvent::NAME,
     crate::meeting::detection::DetectionPromptRetractedEvent::NAME,
@@ -50,6 +51,7 @@ pub(super) const TYPED_EVENTS: [&str; 38] = [
     crate::tray::TrayCopyFailedEvent::NAME,
     crate::query::QueryLinkRequestedEvent::NAME,
     crate::scratchpad::ScratchpadChangedEvent::NAME,
+    crate::planning::PlanningChangedEvent::NAME,
 ];
 
 pub(super) async fn call(
@@ -2044,6 +2046,15 @@ pub(super) async fn call(
             })
             .await?
         }
+        "complete_notes_onboarding" => {
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                reply(crate::commands::onboarding::complete_notes_onboarding(
+                    handle.clone(),
+                ))
+            })
+            .await?
+        }
         "get_local_cleanup_status" => {
             reply(crate::commands::local_cleanup::get_local_cleanup_status(app.clone()).await)
         }
@@ -2288,6 +2299,140 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::voice_identity::voice_remove_profile(app.state(), request).await)
         }
+        "conversation_context" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_context::conversation_context(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_context_update" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::conversation_context::conversation_context_update(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_list" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_list(
+                    app.state(),
+                    person_id,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_review" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_review(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_teach" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_teach(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_update" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_update(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_correction_remove" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_correction_remove(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
+        }
+        "transcript_relisten_offer" => {
+            let mut args = Args::parse(params)?;
+            let fix = args.take("fix")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_relisten_offer(
+                    app.state(),
+                    fix,
+                )
+                .await,
+            )
+        }
+        "transcript_relisten_decide" => {
+            let mut args = Args::parse(params)?;
+            let decision = args.take("decision")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_relisten_decide(
+                    app.clone(),
+                    app.state(),
+                    decision,
+                )
+                .await,
+            )
+        }
+        "person_contributions" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            let offset = args.take("offset")?;
+            let limit = args.take("limit")?;
+            reply(
+                crate::commands::person_content::person_contributions(
+                    app.state(),
+                    person_id,
+                    offset,
+                    limit,
+                )
+                .await,
+            )
+        }
+        "person_avatar" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(crate::commands::person_content::person_avatar(app.state(), person_id).await)
+        }
+        "person_avatar_set" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::person_content::person_avatar_set(app.state(), request).await)
+        }
+        "person_contact_set" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::person_content::person_contact_set(app.state(), request).await)
+        }
         "get_history_stats" => {
             reply(crate::commands::history::get_history_stats(app.clone(), app.state()).await)
         }
@@ -2425,6 +2570,9 @@ pub(super) async fn call(
             })
             .await?
         }
+        "privacy_inventory" => {
+            encode_plain(crate::commands::privacy::privacy_inventory(app.clone()).await)
+        }
         "meeting_suggestions_list" => {
             let handle = app.clone();
             on_main_thread(app, move || {
@@ -2433,6 +2581,9 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "home_today" => {
+            reply(crate::commands::meeting::home_today(app.state(), app.state(), app.state()).await)
         }
         "meeting_preflight_create" => {
             let mut args = Args::parse(params)?;
@@ -2637,6 +2788,12 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
             reply(crate::commands::meeting::meeting_search(app.state(), request).await)
+        }
+        "meeting_said_search" => {
+            let mut args = Args::parse(params)?;
+            let query = args.take("query")?;
+            let limit = args.take("limit")?;
+            reply(crate::commands::meeting::meeting_said_search(app.state(), query, limit).await)
         }
         "meeting_title_set" => {
             let mut args = Args::parse(params)?;
@@ -2877,6 +3034,23 @@ pub(super) async fn call(
             })
             .await?
         }
+        "meeting_live_recall" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::meeting::meeting_live_recall(app.state(), session_id).await)
+        }
+        "meeting_call_silence" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                encode_plain(crate::commands::meeting::meeting_call_silence(
+                    handle.state(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
         "meeting_series_template_get" => {
             let mut args = Args::parse(params)?;
             let series_key = args.take("seriesKey")?;
@@ -3007,6 +3181,15 @@ pub(super) async fn call(
             let person_id = args.take("personId")?;
             reply(crate::commands::people::person_detail(app.state(), person_id).await)
         }
+        "person_memory" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            let since_utc_ms = args.take("sinceUtcMs")?;
+            reply(
+                crate::meeting::person_memory::person_memory(app.clone(), person_id, since_utc_ms)
+                    .await,
+            )
+        }
         "organization_detail" => {
             let mut args = Args::parse(params)?;
             let slug = args.take("slug")?;
@@ -3108,6 +3291,99 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
             reply(crate::commands::followup::meeting_follow_up_mail(app.state(), request).await)
+        }
+        "person_avatar_source" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::commands::portrait_source::person_avatar_source(app.state(), person_id)
+                    .await,
+            )
+        }
+        "conversation_audio_clip" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let segment_id = args.take("segmentId")?;
+            let start_offset_ns = args.take("startOffsetNs")?;
+            let end_offset_ns = args.take("endOffsetNs")?;
+            reply(
+                crate::commands::conversation_review::conversation_audio_clip(
+                    app.clone(),
+                    app.state(),
+                    session_id,
+                    segment_id,
+                    start_offset_ns,
+                    end_offset_ns,
+                )
+                .await,
+            )
+        }
+        "conversation_audio_retained" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_review::conversation_audio_retained(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_reel_for_person" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::commands::conversation_review::conversation_reel_for_person(
+                    app.state(),
+                    person_id,
+                )
+                .await,
+            )
+        }
+        "conversation_reel_for_loop" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            reply(
+                crate::commands::conversation_review::conversation_reel_for_loop(
+                    app.state(),
+                    loop_id,
+                )
+                .await,
+            )
+        }
+        "conversation_place_review" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_review::conversation_place_review(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_bookmarks" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::conversation_review::conversation_bookmarks(
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_bookmark_create" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(
+                crate::commands::conversation_review::conversation_bookmark_create(
+                    app.clone(),
+                    app.state(),
+                    request,
+                )
+                .await,
+            )
         }
         "meeting_prep_preferences_get" => {
             let handle = app.clone();
@@ -3237,6 +3513,38 @@ pub(super) async fn call(
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
             reply(crate::commands::documents::doc_delete(app.state(), request).await)
+        }
+        "phone_thought_source_get" => {
+            let mut args = Args::parse(params)?;
+            let note_id = args.take("noteId")?;
+            let object_id = args.take("objectId")?;
+            let revision_id = args.take("revisionId")?;
+            reply(
+                crate::commands::cloud_sync::phone_thought_source_get(
+                    app.state(),
+                    note_id,
+                    object_id,
+                    revision_id,
+                )
+                .await,
+            )
+        }
+        "phone_thought_photo_get" => {
+            let mut args = Args::parse(params)?;
+            let note_id = args.take("noteId")?;
+            let object_id = args.take("objectId")?;
+            let revision_id = args.take("revisionId")?;
+            let index = args.take("index")?;
+            reply(
+                crate::commands::cloud_sync::phone_thought_photo_get(
+                    app.state(),
+                    note_id,
+                    object_id,
+                    revision_id,
+                    index,
+                )
+                .await,
+            )
         }
         "cloud_sync_overview_get" => {
             reply(crate::commands::cloud_sync::cloud_sync_overview_get(app.state()).await)
@@ -3602,6 +3910,15 @@ pub(super) async fn call(
             })
             .await?
         }
+        "scratchpad_recent" => {
+            let mut args = Args::parse(params)?;
+            let limit = args.take("limit")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::scratchpad_recent(handle.state(), limit))
+            })
+            .await?
+        }
         "scratchpad_get" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
@@ -3655,15 +3972,10 @@ pub(super) async fn call(
         "scratchpad_delete" => {
             let mut args = Args::parse(params)?;
             let id = args.take("id")?;
-            let handle = app.clone();
-            off_main_thread(move || {
-                reply(crate::scratchpad::scratchpad_delete(
-                    handle.clone(),
-                    handle.state(),
-                    id,
-                ))
-            })
-            .await?
+            reply(
+                crate::scratchpad::scratchpad_delete(app.clone(), app.state(), app.state(), id)
+                    .await,
+            )
         }
         "scratchpad_versions" => {
             let mut args = Args::parse(params)?;
@@ -3685,6 +3997,563 @@ pub(super) async fn call(
                     handle.state(),
                     id,
                     version_id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_capture_passage" => {
+            let mut args = Args::parse(params)?;
+            let meeting_id = args.take("meetingId")?;
+            let segment_id = args.take("segmentId")?;
+            let excerpt = args.take("excerpt")?;
+            let person_id = args.take("personId")?;
+            let body = args.take("body")?;
+            reply(
+                crate::scratchpad::passages::scratchpad_capture_passage(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    meeting_id,
+                    segment_id,
+                    excerpt,
+                    person_id,
+                    body,
+                )
+                .await,
+            )
+        }
+        "scratchpad_review_candidates" => {
+            let mut args = Args::parse(params)?;
+            let period = args.take("period")?;
+            reply(
+                crate::scratchpad::review::scratchpad_review_candidates(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    period,
+                )
+                .await,
+            )
+        }
+        "scratchpad_review_sources" => {
+            let mut args = Args::parse(params)?;
+            let sources = args.take("sources")?;
+            reply(
+                crate::scratchpad::review::scratchpad_review_sources(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    sources,
+                )
+                .await,
+            )
+        }
+        "scratchpad_prepare_synthesis" => {
+            let mut args = Args::parse(params)?;
+            let sources = args.take("sources")?;
+            reply(
+                crate::scratchpad::synthesis::scratchpad_prepare_synthesis(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    sources,
+                )
+                .await,
+            )
+        }
+        "scratchpad_accept_synthesis" => {
+            let mut args = Args::parse(params)?;
+            let draft = args.take("draft")?;
+            reply(
+                crate::scratchpad::synthesis::scratchpad_accept_synthesis(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    draft,
+                )
+                .await,
+            )
+        }
+        "scratchpad_subjects" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subjects(
+                    handle.state(),
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject(
+                    handle.state(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject_create" => {
+            let mut args = Args::parse(params)?;
+            let title = args.take("title")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject_create(
+                    handle.state(),
+                    title,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject_note" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let note_id = args.take("noteId")?;
+            let action = args.take("action")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject_note(
+                    handle.state(),
+                    id,
+                    note_id,
+                    action,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_subject_delete" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::scratchpad::subjects::scratchpad_subject_delete(
+                    handle.state(),
+                    id,
+                ))
+            })
+            .await?
+        }
+        "scratchpad_memory" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            reply(crate::scratchpad::links::scratchpad_memory(app.state(), app.state(), id).await)
+        }
+        "scratchpad_link" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let source = args.take("source")?;
+            reply(
+                crate::scratchpad::links::scratchpad_link(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    id,
+                    source,
+                )
+                .await,
+            )
+        }
+        "scratchpad_unlink" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let source = args.take("source")?;
+            reply(
+                crate::scratchpad::links::scratchpad_unlink(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    id,
+                    source,
+                )
+                .await,
+            )
+        }
+        "scratchpad_synthesize" => {
+            let mut args = Args::parse(params)?;
+            let sources = args.take("sources")?;
+            reply(
+                crate::scratchpad::synthesis::scratchpad_synthesize(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    sources,
+                )
+                .await,
+            )
+        }
+        "scratchpad_source_evidence" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let source = args.take("source")?;
+            reply(
+                crate::scratchpad::evidence::scratchpad_source_evidence(
+                    app.state(),
+                    app.state(),
+                    id,
+                    source,
+                )
+                .await,
+            )
+        }
+        "planning_projects" => {
+            let handle = app.clone();
+            off_main_thread(move || reply(crate::planning::planning_projects(handle.state())))
+                .await?
+        }
+        "planning_project" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            reply(crate::planning::planning_project(app.state(), app.state(), id).await)
+        }
+        "planning_create_project" => {
+            let mut args = Args::parse(params)?;
+            let title = args.take("title")?;
+            let description = args.take("description")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::planning_create_project(
+                    handle.clone(),
+                    handle.state(),
+                    title,
+                    description,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_create_milestone" => {
+            let mut args = Args::parse(params)?;
+            let project_id = args.take("projectId")?;
+            let title = args.take("title")?;
+            let due_at_ms = args.take("dueAtMs")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::planning_create_milestone(
+                    handle.clone(),
+                    handle.state(),
+                    project_id,
+                    title,
+                    due_at_ms,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_create_task" => {
+            let mut args = Args::parse(params)?;
+            let input = args.take("input")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::planning_create_task(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    input,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_update_project" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let expected_revision = args.take("expectedRevision")?;
+            let status = args.take("status")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::planning_update_project(
+                    handle.clone(),
+                    handle.state(),
+                    id,
+                    expected_revision,
+                    status,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_update_milestone" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let expected_revision = args.take("expectedRevision")?;
+            let status = args.take("status")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::planning_update_milestone(
+                    handle.clone(),
+                    handle.state(),
+                    id,
+                    expected_revision,
+                    status,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_update_task" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let expected_revision = args.take("expectedRevision")?;
+            let status = args.take("status")?;
+            let owner_is_self = args.take("ownerIsSelf")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::planning_update_task(
+                    app.clone(),
+                    app.state(),
+                    id,
+                    expected_revision,
+                    status,
+                    owner_is_self,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_link_source" => {
+            let mut args = Args::parse(params)?;
+            let target_kind = args.take("targetKind")?;
+            let target_id = args.take("targetId")?;
+            let source_kind = args.take("sourceKind")?;
+            let source_id = args.take("sourceId")?;
+            let at_ms = args.take("atMs")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::planning_link_source(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    target_kind,
+                    target_id,
+                    source_kind,
+                    source_id,
+                    at_ms,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_calendar" => {
+            let mut args = Args::parse(params)?;
+            let start_ms = args.take("startMs")?;
+            let end_ms = args.take("endMs")?;
+            reply(
+                crate::planning::planning_calendar(app.state(), app.state(), start_ms, end_ms)
+                    .await,
+            )
+        }
+        "planning_prepare" => {
+            let mut args = Args::parse(params)?;
+            let goal = args.take("goal")?;
+            let selected_sources = args.take("selectedSources")?;
+            reply(
+                crate::planning::planning_prepare(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    goal,
+                    selected_sources,
+                )
+                .await,
+            )
+        }
+        "planning_revise" => {
+            let mut args = Args::parse(params)?;
+            let draft = args.take("draft")?;
+            let requests = args.take("requests")?;
+            reply(
+                crate::planning::planning_revise(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    draft,
+                    requests,
+                )
+                .await,
+            )
+        }
+        "planning_accept" => {
+            let mut args = Args::parse(params)?;
+            let draft = args.take("draft")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::planning_accept(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    draft,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_person_work" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::planning::person::planning_person_work(app.state(), app.state(), person_id)
+                    .await,
+            )
+        }
+        "meeting_untracked_actions" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::planning::untracked::meeting_untracked_actions(
+                    app.state(),
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "planning_track_action" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            let project_id = args.take("projectId")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::untracked::planning_track_action(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    loop_id,
+                    project_id,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_dismiss_action" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::untracked::planning_dismiss_action(
+                    handle.state(),
+                    loop_id,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_restore_action" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::untracked::planning_restore_action(
+                    handle.state(),
+                    loop_id,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_suggestions" => reply(
+            crate::planning::suggestions::planning_suggestions(app.state(), app.state()).await,
+        ),
+        "planning_generate_suggestions" => {
+            let mut args = Args::parse(params)?;
+            let project_id = args.take("projectId")?;
+            let selected_sources = args.take("selectedSources")?;
+            reply(
+                crate::planning::suggestions::planning_generate_suggestions(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    project_id,
+                    selected_sources,
+                )
+                .await,
+            )
+        }
+        "planning_decline_suggestion" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let expected_revision = args.take("expectedRevision")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::suggestions::planning_decline_suggestion(
+                    handle.state(),
+                    id,
+                    expected_revision,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
+        "planning_accept_suggestion" => {
+            let mut args = Args::parse(params)?;
+            let id = args.take("id")?;
+            let expected_revision = args.take("expectedRevision")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::suggestions::planning_accept_suggestion(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    id,
+                    expected_revision,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_quiet_review_set" => {
+            let mut args = Args::parse(params)?;
+            let project_id = args.take("projectId")?;
+            let enabled = args.take("enabled")?;
+            let selected_sources = args.take("selectedSources")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::quiet::planning_quiet_review_set(
+                    handle.clone(),
+                    handle.state(),
+                    project_id,
+                    enabled,
+                    selected_sources,
+                ))
+            })
+            .await?
+        }
+        "planning_quiet_review_grants" => {
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::quiet::planning_quiet_review_grants(
+                    handle.state(),
+                ))
+            })
+            .await?
+        }
+        "planning_quiet_review_run" => {
+            let mut args = Args::parse(params)?;
+            let project_id = args.take("projectId")?;
+            reply(
+                crate::planning::quiet::planning_quiet_review_run(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    project_id,
+                )
+                .await,
+            )
+        }
+        "planning_quiet_review_cancel" => {
+            let mut args = Args::parse(params)?;
+            let project_id = args.take("projectId")?;
+            off_main_thread(move || {
+                reply(crate::planning::quiet::planning_quiet_review_cancel(
+                    project_id,
                 ))
             })
             .await?

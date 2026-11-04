@@ -1,5 +1,7 @@
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::transcription::TranscriptionManager;
+use crate::meeting::session::MeetingSessionManager;
+use crate::recorder::ScreenRecorderManager;
 use crate::shortcut;
 use crate::TranscriptionCoordinator;
 use log::info;
@@ -101,6 +103,19 @@ pub fn cancel_current_operation(app: &AppHandle) {
     }
 
     info!("Operation cancellation completed - returned to idle state");
+}
+
+/// Whether anything is recording: dictation, a held microphone, a meeting or
+/// the screen. Planner approval asks while holding the meeting and history
+/// databases, so this never waits on the meeting lifecycle actor.
+pub fn capture_running(app: &AppHandle) -> bool {
+    let audio = app.state::<Arc<AudioRecordingManager>>();
+    let meetings = app.state::<Arc<MeetingSessionManager>>();
+    let screen = app.state::<Arc<ScreenRecorderManager>>();
+    audio.is_recording()
+        || audio.capture_lease_is_active()
+        || meetings.is_capture_active()
+        || screen.is_capture_active()
 }
 
 /// Check if using the Wayland display server protocol

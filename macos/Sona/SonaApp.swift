@@ -60,6 +60,7 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
+        model.pauseQuietReview()
         Task {
             repeat {
                 guard await model.live.flushLiveNotes() else {
@@ -88,6 +89,7 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication, place: Place, message: String, detail: String?
     ) {
         terminationPending = false
+        model.resumeQuietReview()
         sender.reply(toApplicationShouldTerminate: false)
         model.sheet = nil
         model.paletteShown = false
@@ -104,6 +106,7 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        model.pauseQuietReview()
         model.core.shutdown()
     }
 }

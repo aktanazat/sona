@@ -994,7 +994,9 @@ private struct MeetingSettingsNote: View {
 
     var body: some View {
         CardRow {
-            Text(text).bodyText(14, tone)
+            Text(text)
+                .metaText(tone)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -1048,7 +1050,7 @@ private struct MeetingSettingsField: View {
                 if !isFocused { commit() }
             }
             .padding(.horizontal, 12)
-            .frame(width: width, height: 36)
+            .frame(width: width, height: 32)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
             .disabled(disabled)

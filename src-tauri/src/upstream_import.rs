@@ -306,6 +306,7 @@ pub async fn import_legacy_app(
     secrets: State<'_, Arc<SecretManager>>,
     selection: UpstreamImportSelection,
 ) -> Result<UpstreamImportResult, UpstreamImportError> {
+    let _activity = crate::planning::quiet::foreground_activity();
     validate_selection(&selection)?;
     let paths = import_paths(&app)?;
     require_upstream_closed()?;
@@ -338,7 +339,9 @@ pub async fn import_legacy_app(
         let source_recordings = paths.source_recordings.clone();
         let destination_recordings = paths.destination_recordings.clone();
         let progress_app = app.clone();
+        let activity = crate::planning::quiet::foreground_activity();
         tokio::task::spawn_blocking(move || {
+            let _activity = activity;
             import_history(
                 &history_manager,
                 &progress_app,

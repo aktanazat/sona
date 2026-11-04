@@ -2,6 +2,7 @@ use super::analytics::{
     merge_turns, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp, MeetingLiveHelp,
     MeetingLiveHelpKind, MeetingNotesTemplate, MeetingProvisionalTranscript, MeetingUserNotes,
 };
+use super::call_silence::{CaptureAudibility, TrackMeter};
 use super::capture::{MeetingCaptureSource, PacketLaneReadError, PacketLaneReader, PacketSink};
 use super::clock::host_monotonic_now_ns;
 use super::detection::machine::CalendarEventSummary;
@@ -25,7 +26,7 @@ use super::people_types::{
 use super::processing::{
     write_relationship_summary, LiveTranscript, LiveTranscriptWorker, MeetingProcessingService,
     MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
-    LIVE_HELP_QUESTION_MAX_CHARS,
+    LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
 use super::store::{
     InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting, SegmentEdit,
@@ -510,12 +511,34 @@ pub struct MeetingSessionManager {
     recovery_launch: Uuid,
     processing: Arc<MeetingProcessingService>,
     keep_awake: Mutex<MeetingKeepAwake>,
+    capture_active: Arc<AtomicBool>,
     actor: Mutex<ActorState>,
 }
 
 struct ActorState {
     active: Option<ActiveCapture>,
     tray_session_id: Option<MeetingSessionId>,
+}
+
+struct CaptureLease {
+    active: Arc<AtomicBool>,
+}
+
+impl CaptureLease {
+    fn acquire(active: &Arc<AtomicBool>) -> Result<Self, MeetingCommandError> {
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| MeetingCommandError::CaptureLeaseBusy)?;
+        Ok(Self {
+            active: Arc::clone(active),
+        })
+    }
+}
+
+impl Drop for CaptureLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
 }
 
 struct ActiveCapture {
@@ -526,6 +549,10 @@ struct ActiveCapture {
     /// ends a capture — stop, discard, delete — already does.
     live: LiveTranscriptWorker,
     call_names: Option<super::call_speakers::CallNameSampler>,
+    /// The level of each track, for the warning that the call went silent.
+    audibility: Arc<CaptureAudibility>,
+    // Released last so idle cannot precede source and live-worker teardown.
+    _capture_lease: CaptureLease,
 }
 
 struct ActiveSource {
@@ -582,6 +609,7 @@ impl MeetingSessionManager {
             recovery_launch: Uuid::new_v4(),
             processing,
             keep_awake: Mutex::new(MeetingKeepAwake::new()),
+            capture_active: Arc::new(AtomicBool::new(false)),
             actor: Mutex::new(ActorState {
                 active: None,
                 tray_session_id: None,
@@ -604,7 +632,7 @@ impl MeetingSessionManager {
     /// it — see [`super::prompts`]. Read-only: the slots inside it are set from
     /// here and from launch, and a second setter would be a second answer to
     /// which engine this app has.
-    pub(super) fn processing(&self) -> &MeetingProcessingService {
+    pub(crate) fn processing(&self) -> &MeetingProcessingService {
         &self.processing
     }
 
@@ -910,6 +938,10 @@ impl MeetingSessionManager {
         let mut purged = 0;
         let mut failed = 0;
         for session_id in due_transcripts {
+            let before = store
+                .transcript_correction_source_snapshot(session_id)
+                .inspect_err(|error| log::warn!("Correction source snapshot failed: {error:?}"))
+                .ok();
             match store.purge_transcript_at(session_id, now_utc_ms) {
                 Ok(Some(change)) => {
                     purged += 1;
@@ -919,6 +951,12 @@ impl MeetingSessionManager {
                 }
                 Ok(None) => continue,
                 Err(_) => failed += 1,
+            }
+            if let Some(before) = before {
+                match store.transcript_correction_projection_changes(before) {
+                    Ok(changed) => self.emit_transcript_correction_changes(changed),
+                    Err(error) => log::warn!("Correction source publication failed: {error:?}"),
+                }
             }
             // The transaction may have committed before removing audio failed.
             // Readers must see the deletion even while its bytes await cleanup.
@@ -1639,6 +1677,7 @@ impl MeetingSessionManager {
         request: MeetingStartRequest,
         provenance: MeetingConsentProvenance,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let store = self.store().await?;
         if let Some(receipt) = store
             .operation_receipt(request.operation_id)
@@ -1647,9 +1686,7 @@ impl MeetingSessionManager {
             return self.result_for_receipt(store, receipt, request.session_id);
         }
         let mut actor = self.actor_lock();
-        if actor.active.is_some() {
-            return Err(MeetingCommandError::CaptureLeaseBusy);
-        }
+        let capture_lease = CaptureLease::acquire(&self.capture_active)?;
         let preflight = store
             .preflight_snapshot(request.session_id)
             .map_err(map_store_error)?;
@@ -1761,6 +1798,7 @@ impl MeetingSessionManager {
                     })
                     .collect::<Vec<_>>()
             });
+        let audibility = CaptureAudibility::new();
         for (source_kind, track_id, source, lane_reader, report) in started {
             store
                 .create_track(TrackCreation {
@@ -1776,7 +1814,13 @@ impl MeetingSessionManager {
             let writer = store
                 .open_track_writer(request.session_id, track_id, plan.storage.clone())
                 .map_err(map_store_error)?;
-            let worker = TrackWorker::start(Arc::clone(&store), writer, lane_reader, report);
+            let worker = TrackWorker::start(
+                Arc::clone(&store),
+                writer,
+                lane_reader,
+                report,
+                audibility.meter(source_kind),
+            );
             active_sources.insert(
                 source_kind,
                 ActiveSource {
@@ -1851,11 +1895,13 @@ impl MeetingSessionManager {
             session_id: request.session_id,
             sources: active_sources,
             call_names: None,
+            audibility,
             live: LiveTranscriptWorker::start(
                 Arc::clone(&self.processing),
                 Arc::clone(&store),
                 request.session_id,
             ),
+            _capture_lease: capture_lease,
         });
         actor.tray_session_id = None;
         drop(actor);
@@ -2291,6 +2337,7 @@ impl MeetingSessionManager {
         request: ImportRecordingRequest,
         notes: Option<&str>,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let media = validate_media_path(&request.path).map_err(|error| {
             log::warn!("Meeting import refused {}: {error}", request.path.display());
             MeetingCommandError::ImportUnreadable
@@ -2355,6 +2402,7 @@ impl MeetingSessionManager {
         &self,
         path: PathBuf,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let parsed = read_transcript_export(&path).map_err(|error| {
             log::warn!(
                 "Meeting transcript import refused {}: {}",
@@ -2689,6 +2737,10 @@ impl MeetingSessionManager {
         cause: DeletionCause,
     ) -> Result<MeetingRemovalResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_source_snapshot(request.session_id)
+            .inspect_err(|error| log::warn!("Correction source snapshot failed: {error:?}"))
+            .ok();
         let (receipt, job_id) = store
             .reserve_deletion(
                 request.operation_id,
@@ -2744,6 +2796,12 @@ impl MeetingSessionManager {
             }
         }
         let people_revision = store.finish_deletion(job_id).map_err(map_store_error)?;
+        if let Some(before) = before {
+            match store.transcript_correction_projection_changes(before) {
+                Ok(changed) => self.emit_transcript_correction_changes(changed),
+                Err(error) => log::warn!("Correction source publication failed: {error:?}"),
+            }
+        }
         if let Some(people_revision) = people_revision {
             self.emit_artifact_changed(Some(request.session_id), people_revision);
         }
@@ -3309,6 +3367,9 @@ impl MeetingSessionManager {
         request: MeetingSpeakerRenameRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_identity_snapshot(request.session_id, &[request.speaker_id])
+            .map_err(map_store_error)?;
         let display_name = request.display_name.clone();
         let operation_id = request.operation_id;
         let session_id = request.session_id;
@@ -3322,6 +3383,13 @@ impl MeetingSessionManager {
                 request.display_name,
             )
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
         let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         if result.receipt.result == OperationResult::Committed {
@@ -3335,6 +3403,12 @@ impl MeetingSessionManager {
         request: MeetingSpeakerMergeRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_identity_snapshot(
+                request.session_id,
+                &[request.source_speaker_id, request.target_speaker_id],
+            )
+            .map_err(map_store_error)?;
         let receipt = store
             .merge_speaker(
                 request.operation_id,
@@ -3345,6 +3419,13 @@ impl MeetingSessionManager {
                 request.target_speaker_id,
             )
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
         let result = self.result_for_receipt(store, receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         Ok(result)
@@ -3355,6 +3436,9 @@ impl MeetingSessionManager {
         request: MeetingSegmentEditRequest,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         let store = self.store().await?;
+        let before = store
+            .transcript_correction_source_snapshot(request.session_id)
+            .map_err(map_store_error)?;
         let receipt = store
             .edit_segment(SegmentEdit {
                 mutation: StoreMutation {
@@ -3370,6 +3454,13 @@ impl MeetingSessionManager {
                 removed: request.removed,
             })
             .map_err(map_store_error)?;
+        self.emit_transcript_correction_changes(
+            store
+                .transcript_correction_projection_changes(before)
+                .map_err(map_store_error)?
+                .into_iter()
+                .filter(|session| session.session_id != request.session_id),
+        );
         let result = self.result_for_receipt(store, receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
         Ok(result)
@@ -3920,6 +4011,31 @@ impl MeetingSessionManager {
             })
     }
 
+    /// The past lines the running capture's last minute of words were
+    /// already said in, for the live screen's recall cards. A meeting that
+    /// is not capturing has no words to recall from, so no matches; a store
+    /// that cannot be read is `Unavailable`. The read runs off the async
+    /// workers and asks no model anything.
+    pub async fn live_recall(&self, session_id: MeetingSessionId) -> MeetingLiveRecall {
+        let Some(live) = self.live_transcript(session_id) else {
+            return MeetingLiveRecall::Available {
+                matches: Vec::new(),
+            };
+        };
+        let recent = live.recent_lines(LIVE_RECALL_WINDOW_NS);
+        let Ok(store) = self.store().await else {
+            return MeetingLiveRecall::Unavailable;
+        };
+        match tauri::async_runtime::spawn_blocking(move || {
+            store.live_recall(session_id, &recent, &mut live.recall_memory())
+        })
+        .await
+        {
+            Ok(Ok(matches)) => MeetingLiveRecall::Available { matches },
+            Ok(Err(_)) | Err(_) => MeetingLiveRecall::Unavailable,
+        }
+    }
+
     /// The provisional transcript of the capture that is running now, when the
     /// running capture is this meeting's.
     ///
@@ -3934,6 +4050,16 @@ impl MeetingSessionManager {
             .as_ref()
             .filter(|active| active.session_id == session_id)
             .map(|active| active.live.transcript())
+    }
+
+    /// How long the call's sound has been gone while the person talks,
+    /// when the running capture is this meeting's and that is the case.
+    pub fn call_silent_ns(&self, session_id: MeetingSessionId) -> Option<u64> {
+        self.actor_lock()
+            .active
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+            .and_then(|active| active.audibility.call_silent_ns())
     }
 
     fn default_notes_template(&self) -> NotesTemplateChoice {
@@ -4046,6 +4172,7 @@ impl MeetingSessionManager {
         &self,
         bundle: super::cloud_bundle::CloudMeetingBundleV1,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
+        let _activity = crate::planning::quiet::foreground_activity();
         let store = self.cloud_store().await?;
         let session_id = bundle.import_into_store(&store).map_err(map_store_error)?;
         let snapshot = store
@@ -4055,9 +4182,9 @@ impl MeetingSessionManager {
         Ok(snapshot)
     }
 
-    /// Reports whether the lifecycle actor currently owns a live capture lease.
+    /// Reports capture ownership through startup, pause and teardown without locking the actor.
     pub(crate) fn is_capture_active(&self) -> bool {
-        self.actor_lock().active.is_some()
+        self.capture_active.load(Ordering::Acquire)
     }
 
     /// Mount the encrypted meeting store, or hand back the mount that already
@@ -4340,11 +4467,13 @@ impl TrackWorker {
         writer: MeetingTrackWriter,
         reader: PacketLaneReader,
         report: SourceStartReport,
+        meter: TrackMeter,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let handle =
-            thread::spawn(move || run_track_worker(store, writer, reader, report, worker_stop));
+        let handle = thread::spawn(move || {
+            run_track_worker(store, writer, reader, report, meter, worker_stop)
+        });
         Self {
             stop,
             handle: Some(handle),
@@ -4366,6 +4495,7 @@ fn run_track_worker(
     mut writer: MeetingTrackWriter,
     mut reader: PacketLaneReader,
     report: SourceStartReport,
+    mut meter: TrackMeter,
     stop: Arc<AtomicBool>,
 ) -> Result<(), StoreError> {
     let mut bridges = HashMap::new();
@@ -4403,6 +4533,7 @@ fn run_track_worker(
                     .copied();
                 if let Some(bridge) = bridge {
                     let _ = writer.accept_with_bridge(packet, &samples, bridge)?;
+                    meter.feed(&samples, packet.sample_rate_hz, packet.channels);
                 } else {
                     store.record_gap(&SourceGap {
                         track_id: packet.track_id,
@@ -4594,7 +4725,7 @@ fn map_secret_error(error: SecretResolveError) -> MeetingCommandError {
     }
 }
 
-fn map_store_error(error: StoreError) -> MeetingCommandError {
+pub(crate) fn map_store_error(error: StoreError) -> MeetingCommandError {
     match error {
         StoreError::NotFound | StoreError::PersonNotFound | StoreError::SpeakerNotFound => {
             MeetingCommandError::NotFound
@@ -4613,6 +4744,9 @@ fn map_store_error(error: StoreError) -> MeetingCommandError {
         StoreError::ProfileModelIncompatible => MeetingCommandError::ProfileModelIncompatible,
         StoreError::ProfileMergeResolutionRequired => {
             MeetingCommandError::ProfileMergeResolutionRequired
+        }
+        StoreError::TranscriptCorrectionConflict => {
+            MeetingCommandError::TranscriptCorrectionConflict
         }
         StoreError::EncryptionUnavailable
         | StoreError::StorageUnavailable
@@ -4998,6 +5132,35 @@ pub(crate) mod tests {
             lane: Arc::new(Mutex::new(None)),
         }));
         (directory, manager, starts, aborts)
+    }
+
+    #[test]
+    fn capture_status_reads_ownership_while_the_lifecycle_actor_is_locked() {
+        let (_directory, manager) = manager_with(Arc::new(NoCaptureSources));
+        let manager = Arc::new(manager);
+        let actor = manager.actor_lock();
+        let lease = CaptureLease::acquire(&manager.capture_active).expect("startup owns capture");
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = Arc::clone(&manager);
+        let worker = thread::spawn(move || send.send(reader.is_capture_active()));
+        let status = receive.recv_timeout(Duration::from_secs(1));
+        drop(actor);
+        worker
+            .join()
+            .expect("capture reader completed")
+            .expect("report capture");
+        assert_eq!(
+            status,
+            Ok(true),
+            "a planner callback cannot wait on the actor"
+        );
+        assert!(matches!(
+            CaptureLease::acquire(&manager.capture_active),
+            Err(MeetingCommandError::CaptureLeaseBusy)
+        ));
+        drop(lease);
+        assert!(!manager.is_capture_active());
+        assert!(CaptureLease::acquire(&manager.capture_active).is_ok());
     }
     fn review_ready_session(manager: &MeetingSessionManager) -> MeetingSessionSnapshot {
         tauri::async_runtime::block_on(async {
@@ -5466,6 +5629,7 @@ pub(crate) mod tests {
             attendees: Vec::new(),
             notes: None,
             calendar_name: None,
+            location: None,
             url: None,
         };
         let context = MeetingDetectionStartContext {
@@ -5704,6 +5868,7 @@ pub(crate) mod tests {
             attendees: Vec::new(),
             notes: Some("Review Q4".to_string()),
             calendar_name: Some("Work".to_string()),
+            location: None,
             url: Some("https://meet.example/roadmap".to_string()),
         };
         let request = MeetingPreflightCreateRequest {
@@ -6502,6 +6667,93 @@ pub(crate) mod tests {
         assert!(
             review.gaps.is_empty(),
             "a file has no dropped packets to report"
+        );
+    }
+
+    /// A run says which of its five stages it is in, in order and never
+    /// back, and ends by saying it is over. The first run on a Mac has
+    /// measured nothing here, so it shows no time left; what it measured is
+    /// what times the next one, and its notes carry what the run cost.
+    #[test]
+    fn a_run_reports_each_stage_in_order_and_leaves_a_receipt() {
+        let (files, manager) = importing_manager();
+        manager.processing.set_text_generators(
+            Arc::new(super::super::processing::tests::EchoingGenerator),
+            Arc::new(FixedGenerator {
+                available: false,
+                output: String::new(),
+            }),
+        );
+        let import = |name: &str| {
+            let path = files.path().join(name);
+            write_mono_wav(&path, 16_000);
+            tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
+                path,
+                title: None,
+                recorded_at_utc_ms: Some(1_700_000_000_000),
+                origin: RecordingOrigin::LocalFile,
+            }))
+            .expect("the recording imports")
+            .session_id
+        };
+
+        let first = import("first.wav");
+        let published = manager.processing.published_progress();
+        let (end, updates) = published.split_last().expect("the run reported");
+        assert_eq!(end.session_id, first);
+        assert_eq!(end.progress, None, "the run ends by saying it is over");
+        let updates: Vec<_> = updates
+            .iter()
+            .map(|payload| {
+                assert_eq!(payload.session_id, first);
+                payload.progress.clone().expect("only the last update ends")
+            })
+            .collect();
+        let stages: Vec<_> = updates.iter().map(|update| update.stage).collect();
+        assert!(
+            stages.windows(2).all(|pair| pair[0] <= pair[1]),
+            "a run never steps back a stage: {stages:?}"
+        );
+        let mut reported = stages.clone();
+        reported.dedup();
+        assert_eq!(reported, ProcessingStage::ALL, "every stage is reported");
+        assert!(
+            updates.iter().all(|update| update.eta_ms.is_none()),
+            "nothing has been measured on this Mac yet"
+        );
+
+        let review = tauri::async_runtime::block_on(manager.get(first))
+            .expect("the imported meeting is readable");
+        let receipt = review
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.state == MeetingArtifactState::Current)
+            .expect("the run wrote notes")
+            .receipt
+            .expect("the notes carry the run's receipt");
+        let listed = retained_meetings(&manager)
+            .into_iter()
+            .find(|meeting| meeting.session_id == first)
+            .expect("the meeting is listed");
+        assert_eq!(
+            listed.recorded_duration_ms,
+            i64::try_from(receipt.audio_ns / 1_000_000).ok(),
+            "the receipt counts the recording the way the list does"
+        );
+        assert_eq!(receipt.route, ProcessingRoute::Local);
+
+        let second = import("second.wav");
+        assert!(
+            manager
+                .processing
+                .published_progress()
+                .iter()
+                .filter(|payload| payload.session_id == second)
+                .any(|payload| payload
+                    .progress
+                    .as_ref()
+                    .is_some_and(|update| update.eta_ms.is_some())),
+            "the first run's stages time the second"
         );
     }
 

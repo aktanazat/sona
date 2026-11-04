@@ -31,13 +31,14 @@ use crate::meeting::types::{
 };
 use crate::meeting::workflow_types::WorkflowEventKind;
 use crate::query::external::{
-    loops_page, meeting_detail, meetings_page, people_page, resolve_loop,
+    loops_page, meeting_detail, meetings_page, people_page, person_stats, resolve_loop,
     transcript as transcript_of, AllowedRequest, ExternalConsent, ExternalErrorCode,
     ExternalLoopSide, ExternalLoopStatus, ExternalRequest, ExternalResponse,
     EXTERNAL_ACCESS_SETTING_PATH, EXTERNAL_MUTATIONS_SETTING_PATH,
 };
 use crate::query::{QueryEventsPage, QueryPageReason, QuerySearchPage, QUERY_SCHEMA_VERSION};
 use crate::secrets::{MemorySecretBackend, SecretManager};
+use chrono::TimeZone;
 use clap::Parser;
 use rusqlite::params;
 use serde_json::json;
@@ -147,7 +148,7 @@ fn meeting(store: &MeetingStore, title: &str, at_utc_ms: i64) -> MeetingSessionI
                 id, phase, revision, title, origin_kind, preflight_json,
                 created_at_utc_ms, started_at_utc_ms, processing_status,
                 retention_policy_json
-             ) VALUES (?1, 'review_ready', 0, ?2, 'manual', '{}', ?3, ?3,
+             ) VALUES (?1, 'review_ready', 0, ?2, '\"manual\"', '{}', ?3, ?3,
                        '{\"kind\":\"succeeded\"}', '{\"kind\":\"keep_forever\"}')",
             params![session_id.uuid().to_string(), title, at_utc_ms],
         )
@@ -492,6 +493,18 @@ fn one_meeting_comes_back_with_its_summary_and_every_row_it_left() {
             "phase": "review_ready",
             "started_at_utc_ms": NOW,
             "processing_status": {"kind": "succeeded"},
+            "context": {
+                "session_id": corpus.session_id.uuid(),
+                "revision": 0,
+                "kind": "unspecified",
+                "origin": "manual",
+                "application_bundle_ids": [],
+                "captured_microphone": false,
+                "captured_system_audio": false,
+                "calendar_name": null,
+                "calendar_location": null,
+                "location": null,
+            },
             "speakers": [ME],
             "summary": SUMMARY,
             "headline": HEADLINE,
@@ -574,6 +587,23 @@ fn a_transcript_comes_back_speaker_labeled() {
     let corpus = corpus();
 
     let lines = transcript_of(&corpus.store, corpus.session_id).unwrap();
+    let (segment_id, revision_id): (String, String) = corpus
+        .store
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT segment_id, transcript_revision_id FROM meeting_transcript_segments
+             WHERE transcript_revision_id = (
+                 SELECT current_transcript_revision_id FROM meeting_sessions WHERE id = ?1
+             )",
+            params![corpus.session_id.uuid().to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let passage_link = format!(
+        "sona://meeting/{}?atMs=0&segmentId={segment_id}",
+        corpus.session_id.uuid()
+    );
 
     assert_eq!(
         value(&lines),
@@ -587,6 +617,12 @@ fn a_transcript_comes_back_speaker_labeled() {
                 "start_ms": 0,
                 "end_ms": 1_500,
                 "text": SEGMENT,
+                "raw_text": SEGMENT,
+                "corrected_text": null,
+                "segment_id": segment_id,
+                "transcript_revision_id": revision_id,
+                "edit_revision": null,
+                "link": passage_link,
             }],
             "link": format!("sona://meeting/{}", corpus.session_id.uuid()),
         })
@@ -814,6 +850,85 @@ fn a_lookup_with_no_name_in_it_is_a_usage_error() {
     );
 }
 
+/// The figures an agent gets are the native person detail's own, read the way
+/// the person page reads them. Three confirmed meetings in three different
+/// weeks and one suggested one in a fourth: the suggested link is counted as
+/// suggested and nowhere else. Were it counted, the strip would show a fourth
+/// week and the four distinct days would produce a usual gap.
+#[test]
+fn person_stats_are_the_person_pages_numbers() {
+    const DAY: i64 = 24 * 60 * 60 * 1_000;
+    let corpus = corpus();
+    let third = meeting(&corpus.store, "Planning", NOW - 10 * DAY);
+    let suggested = meeting(&corpus.store, "Maybe Dana", NOW - 17 * DAY);
+    let connection = corpus.store.connection().unwrap();
+    for (session_id, confidence) in [
+        (corpus.session_id, "confirmed"),
+        (corpus.older_id, "confirmed"),
+        (third, "confirmed"),
+        (suggested, "suggested"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO meeting_person_links (
+                    meeting_id, person_id, source, confidence, created_at_utc_ms
+                 ) VALUES (?1, ?2, 'calendar', ?3, 1)",
+                params![
+                    session_id.uuid().to_string(),
+                    corpus.person_id.uuid().to_string(),
+                    confidence
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    let detail = corpus.store.person_detail(corpus.person_id).unwrap().detail;
+    let now = chrono::Local.timestamp_millis_opt(NOW).unwrap();
+
+    let stats = person_stats(&corpus.store, corpus.person_id, now).unwrap();
+
+    let mut weekly_counts = vec![None; 52];
+    weekly_counts[48..].copy_from_slice(&[Some(0), Some(1), Some(1), Some(1)]);
+    let outcomes = detail
+        .ledger_outcomes
+        .expect("the pricing review has a ledger");
+    assert_eq!(
+        value(&stats),
+        json!({
+            "schema_version": QUERY_SCHEMA_VERSION,
+            "person_id": corpus.person_id.uuid(),
+            "link": format!("sona://person/{}", corpus.person_id.uuid()),
+            "read_at_utc_ms": NOW,
+            "meetings": {"confirmed": 3, "suggested": 1},
+            "recorded_ms": detail.recorded_ms,
+            "last_met_utc_ms": NOW,
+            "talk_share_avg_permille": detail.talk_share_avg_permille,
+            "ledger_outcomes": {
+                "landed": outcomes.landed,
+                "open": outcomes.open,
+                "dropped": outcomes.dropped,
+            },
+            "open_loops": {"i_owe": 0, "owed_to_me": 1},
+            "weekly_counts": weekly_counts,
+            "usual_gap_days": null,
+        })
+    );
+    assert_eq!(
+        (outcomes.landed, outcomes.open, outcomes.dropped),
+        (0, 1, 0),
+        "one substantive thread, still open"
+    );
+}
+
+#[test]
+fn person_stats_for_an_id_the_corpus_does_not_hold_is_not_found() {
+    let corpus = corpus();
+
+    let refused = person_stats(&corpus.store, PersonId::new(), chrono::Local::now()).unwrap_err();
+
+    assert_eq!(refused.error, ExternalErrorCode::NotFound);
+}
+
 /// `--query` and `--events` are the plane's own pages. This surface adds a
 /// wrapper and nothing else, so the wrapper has to be invisible on the wire:
 /// what an agent parses is exactly what ⌘K and the panel agent already get.
@@ -983,6 +1098,7 @@ fn series_event(start_utc_ms: i64) -> CalendarEventSummary {
         attendees: Vec::new(),
         notes: None,
         calendar_name: None,
+        location: None,
         url: None,
     }
 }

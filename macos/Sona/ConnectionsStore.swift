@@ -21,6 +21,24 @@ enum SonaConnectionKind: String, CaseIterable, Codable, Identifiable {
         }
     }
     var webhook: Bool { self == .slackWebhook || self == .publicWebhook }
+    /// The service's own Mac app, for its icon. HubSpot, Attio and Affinity
+    /// ship no Mac app Sona can name.
+    var appBundleId: String? {
+        switch self {
+        case .slackWebhook, .slackBot: "com.tinyspeck.slackmacgap"
+        case .notionPage, .notionDatabase: "notion.id"
+        case .hubspot, .attioPerson, .attioCompany, .affinity, .publicWebhook: nil
+        }
+    }
+    /// What stands in for the service when its app is not installed.
+    var symbol: String {
+        switch self {
+        case .slackWebhook, .slackBot: "number"
+        case .notionPage, .notionDatabase: "doc.text"
+        case .hubspot, .attioPerson, .attioCompany, .affinity: "person.crop.rectangle.stack"
+        case .publicWebhook: "link"
+        }
+    }
     var targetLabel: String {
         switch self {
         case .slackBot: "Channel ID"

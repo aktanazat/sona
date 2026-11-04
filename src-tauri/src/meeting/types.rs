@@ -1,4 +1,5 @@
-use super::ledger::MeetingLedger;
+use super::ledger::{LedgerOutcomeCounts, MeetingLedger};
+use super::people_types::PersonId;
 use crate::analytics::DashboardTrendRange;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -421,6 +422,7 @@ pub enum MeetingCommandError {
     InsufficientEnrollmentEvidence,
     ProfileModelIncompatible,
     ProfileMergeResolutionRequired,
+    TranscriptCorrectionConflict,
     RemoteUnavailable,
     EngineFailure,
     /// The file offered for import is not a recording or transcript export
@@ -1038,8 +1040,17 @@ pub struct MeetingHistorySummary {
     /// the store assigned them.
     #[serde(default)]
     pub speaker_labels: Vec<String>,
+    /// The apps whose audio this meeting captured, from its frozen preflight.
+    /// Empty when the capture named no app.
+    #[serde(default)]
+    pub application_bundle_ids: Vec<String>,
     #[serde(default)]
     pub headline: MeetingHistoryHeadline,
+    /// Where the current ledger's substantive threads landed. `None` when
+    /// the meeting has no current ledger, which is not the same as a ledger
+    /// whose threads were all social.
+    #[serde(default)]
+    pub ledger_outcomes: Option<LedgerOutcomeCounts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -1281,6 +1292,11 @@ pub struct MeetingArtifactRevision {
     pub state: MeetingArtifactState,
     pub generated_at_utc_ms: i64,
     pub content: Option<GeneratedMeetingArtifacts>,
+    /// What the run that wrote this revision took. Absent for a revision no
+    /// measured run wrote: one written again by hand, or from a transcript
+    /// with no recorded audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ProcessingReceipt>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -1366,6 +1382,69 @@ pub struct MeetingSearchRequest {
     pub limit: Option<usize>,
 }
 
+/// One transcript line a palette search matched, for hearing it again.
+/// `person` comes only from a confirmed identification; `speaker_label` is
+/// the transcript's own label, absent for unknown or overlapping speech and
+/// when automatic voice matching may have written it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SaidMoment {
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+    pub meeting_title: String,
+    pub meeting_started_at_utc_ms: i64,
+    pub start_offset_ns: u64,
+    pub end_offset_ns: u64,
+    pub text: String,
+    pub speaker_label: Option<String>,
+    pub person: Option<SaidPerson>,
+    pub audio_retained: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct SaidPerson {
+    pub person_id: PersonId,
+    pub display_name: String,
+}
+
+/// What the live screen recalls from past meetings while a capture runs.
+/// `Unavailable` when the store could not be read: no match and no reading
+/// are different answers.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MeetingLiveRecall {
+    Available { matches: Vec<MeetingRecallMatch> },
+    Unavailable,
+}
+
+/// What became of a recalled line in its own meeting, in the order the live
+/// screen ranks them.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingRecallKind {
+    /// An open promise or question that cites the line.
+    StillOpen,
+    /// A decision that cites the line.
+    Decided,
+    SaidBefore,
+}
+
+/// One past line the words being said now were already said in. `person`
+/// comes only from a confirmed identification of the line's speaker.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingRecallMatch {
+    pub kind: MeetingRecallKind,
+    pub text: String,
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+    pub start_offset_ns: u64,
+    pub meeting_title: String,
+    pub meeting_started_at_utc_ms: i64,
+    pub app_bundle_id: Option<String>,
+    pub person: Option<SaidPerson>,
+    /// The words both meetings share, as the index matched them.
+    pub term: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingExportFormat {
@@ -1442,6 +1521,10 @@ pub struct MeetingNavigationPayload {
     pub destination: MeetingNavigationDestination,
     pub session_id: Option<MeetingSessionId>,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_milliseconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -1450,6 +1533,77 @@ pub struct MeetingNavigationRequestedEvent(pub MeetingNavigationPayload);
 
 impl tauri_specta::Event for MeetingNavigationRequestedEvent {
     const NAME: &'static str = "meeting:navigation-requested";
+}
+
+/// The five stages of processing a meeting, in the order they run.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Type,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingStage {
+    Audio,
+    Speech,
+    Speakers,
+    Notes,
+    People,
+}
+
+impl ProcessingStage {
+    pub const ALL: [Self; 5] = [
+        Self::Audio,
+        Self::Speech,
+        Self::Speakers,
+        Self::Notes,
+        Self::People,
+    ];
+}
+
+/// Where a running pipeline is, and how long the rest should take on this
+/// Mac.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct ProcessingProgress {
+    pub stage: ProcessingStage,
+    pub stage_fraction_permille: u16,
+    /// Absent for a meeting with no recorded audio, such as an imported
+    /// transcript.
+    pub audio_ns_total: Option<u64>,
+    pub started_at_utc_ms: i64,
+    /// Absent until this Mac has finished the stage under way at least once:
+    /// time left is measured here, never assumed.
+    pub eta_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingProcessingProgressPayload {
+    pub event_schema_version: u32,
+    pub session_id: MeetingSessionId,
+    /// Absent once the run is over, however it ended.
+    pub progress: Option<ProcessingProgress>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(transparent)]
+pub struct MeetingProcessingProgressEvent(pub MeetingProcessingProgressPayload);
+
+impl tauri_specta::Event for MeetingProcessingProgressEvent {
+    const NAME: &'static str = "meeting:processing-progress";
+}
+
+/// Where a meeting's notes were written.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessingRoute {
+    Local,
+    Relay,
+}
+
+/// What one finished run took: its wall time, the audio it read, and where
+/// its notes were written.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct ProcessingReceipt {
+    pub wall_ms: u64,
+    pub audio_ns: u64,
+    pub route: ProcessingRoute,
 }
 
 #[cfg(test)]

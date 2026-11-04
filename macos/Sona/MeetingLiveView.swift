@@ -15,6 +15,9 @@ struct MeetingLiveView: View {
     /// press that asks for the notes; a stop leaves `store.opened` set, which
     /// is the shell's cue.
     var onOpenReview: (MeetingSessionId) -> Void = { _ in }
+    /// A recalled past moment, opened on its meeting's page while the
+    /// recording keeps going.
+    var onOpenRecalled: (MeetingRecallMatch) -> Void = { _ in }
 
     @State private var noteOpen = false
     /// Set by the Add press; the sheet closes when the core has kept the note
@@ -23,6 +26,7 @@ struct MeetingLiveView: View {
     @State private var discardOpen = false
     @State private var highlightedLine: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(AppModel.self) private var model
 
     private var session: MeetingSessionSnapshot? { store.live?.session }
 
@@ -33,13 +37,27 @@ struct MeetingLiveView: View {
                     if geometry.size.width >= 820 {
                         VStack(alignment: .leading, spacing: 0) {
                             captureHeader(session)
-                            HStack(alignment: .top, spacing: 20) {
-                                ScrollView { transcript }
-                                    .scrollIndicators(.never)
-                                    .frame(maxWidth: .infinity)
+                            HStack(alignment: .top, spacing: 24) {
+                                // A jump's highlight reaches 8pt past the words,
+                                // and a scroll view clips at its own edge.
                                 ScrollView {
-                                    ownNotes
-                                    help(proxy)
+                                    transcript
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 8)
+                                }
+                                .scrollIndicators(.never)
+                                .padding(.horizontal, -8)
+                                .frame(maxWidth: .infinity)
+                                Rectangle()
+                                    .fill(Theme.hairline)
+                                    .frame(width: 1)
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        ownNotes
+                                        recalled
+                                        help(proxy)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .scrollIndicators(.never)
                                 .frame(width: 320)
@@ -47,12 +65,13 @@ struct MeetingLiveView: View {
                         }
                         .frame(maxWidth: Theme.contentMax, maxHeight: .infinity, alignment: .topLeading)
                         .padding(.horizontal, Theme.margin)
-                        .padding(.top, 24)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.top, 12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     } else {
                         Page {
                             captureHeader(session)
                             ownNotes
+                            recalled
                             help(proxy)
                             transcript
                         }
@@ -102,8 +121,11 @@ struct MeetingLiveView: View {
 
     @ViewBuilder
     private func header(_ session: MeetingSessionSnapshot) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(session.title).titleText().lineLimit(1)
+        HStack(alignment: .center, spacing: 12) {
+            Text(session.title)
+                .titleText()
+                .lineLimit(1)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 16)
             // The clock is the state while a capture is running, so the phase
             // word only appears when the state is not what the clock implies:
@@ -114,12 +136,24 @@ struct MeetingLiveView: View {
             // The store keeps the capture's clock; this counts on from it
             // every second while the capture runs, and stands still while
             // it is paused.
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 LiveDot(state: dot(session))
                 if let clock = store.clocks[session.sessionId] {
                     MeetingClockText(clock: clock, size: 13, color: Theme.ink)
                 }
             }
+            ConversationBookmarkButton(
+                isRecording: session.phase == .capturingRecording
+                    && store.pending == nil && store.clocks[session.sessionId] != nil,
+                saved: false,
+                action: { store.bookmark() })
+            ConversationTypedBookmarks(
+                isRecording: session.phase == .capturingRecording
+                    && store.pending == nil && store.clocks[session.sessionId] != nil,
+                counts: store.bookmarkCounts?.sessionId == session.sessionId
+                    ? store.bookmarkCounts?.counts : nil,
+                action: { store.bookmark($0) })
+            .task(id: session.sessionId) { await store.loadBookmarkCounts(session.sessionId) }
             if session.phase.isActive {
                 Button("Stop") { store.stop() }
                     .buttonStyle(.primary)
@@ -131,6 +165,7 @@ struct MeetingLiveView: View {
             }
             menu(session)
         }
+        .frame(minHeight: 30)
         .padding(.bottom, 20)
     }
 
@@ -162,12 +197,12 @@ struct MeetingLiveView: View {
                 .disabled(!session.allows(.discard) || store.pending != nil)
         } label: {
             Image(systemName: "ellipsis")
-                .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 28, height: 28)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.circle)
         .menuIndicator(.hidden)
         .fixedSize()
+        .help("More")
         .accessibilityLabel("More")
     }
 
@@ -176,10 +211,18 @@ struct MeetingLiveView: View {
     @ViewBuilder
     private var warnings: some View {
         if !store.warnings.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            Card {
                 ForEach(Array(store.warnings.enumerated()), id: \.offset) { _, warning in
-                    Text(warning.text)
-                        .bodyText(14, warning.urgent ? Theme.live : Theme.inkSecondary)
+                    CardRow {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 13))
+                                .foregroundStyle(warning.urgent ? Theme.live : Theme.inkSecondary)
+                                .accessibilityHidden(true)
+                            Text(warning.text)
+                                .bodyText(14, warning.urgent ? Theme.live : Theme.ink)
+                        }
+                    }
                 }
             }
             .padding(.bottom, 24)
@@ -196,7 +239,8 @@ struct MeetingLiveView: View {
                     ForEach(store.provisional) { segment in
                         line(
                             at: segment.startOffsetNs, segment.text,
-                            speaker: segment.speakerLabel, anchor: "live-\(segment.segmentId)")
+                            speaker: segment.speakerLabel, ink: ink(segment),
+                            anchor: "live-\(segment.segmentId)")
                     }
                     Text("Provisional words and speaker labels")
                         .metaText(Theme.inkSecondary)
@@ -210,7 +254,7 @@ struct MeetingLiveView: View {
                     ForEach(store.lines, id: \.base.segmentId) { segment in
                         line(
                             at: segment.base.startOffsetNs, segment.text,
-                            speaker: store.speakerLabel(segment),
+                            speaker: store.speakerLabel(segment), ink: ink(segment),
                             anchor: "stored-\(segment.base.segmentId)")
                     }
                 }
@@ -218,23 +262,49 @@ struct MeetingLiveView: View {
         }
     }
 
-    private func line(at offsetNs: Int64, _ text: String, speaker: String, anchor: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 20) {
-            Text(offsetNs.meetingOffsetClock)
-                .font(TypeScale.mono(12))
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 62, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 3) {
+    /// The voice in its color with the clock across from it, then the words.
+    private func line(
+        at offsetNs: Int64, _ text: String, speaker: String, ink: Color, anchor: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(speaker)
-                    .font(TypeScale.label(13))
-                    .foregroundStyle(Theme.inkSecondary)
-                Text(text).bodyText(14)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ink)
+                Spacer(minLength: 12)
+                Text(offsetNs.meetingOffsetClock)
+                    .font(TypeScale.body(12))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkTertiary)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(text).bodyText(14)
         }
+        .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(highlightedLine == anchor ? Theme.accentSoft : Color.clear)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            highlightedLine == anchor ? Theme.accentSoft : .clear,
+            in: RoundedRectangle(cornerRadius: Theme.radiusControl))
+        .padding(.horizontal, -8)
         .id(anchor)
+    }
+
+    private func ink(_ segment: TranscriptEffectiveSegment) -> Color {
+        switch segment.speakerAssignment {
+        case .localSpeaker, .systemSpeaker:
+            SpeakerInk.color(at: store.live?.speakers.firstIndex { $0.speakerId == segment.assignedSpeakerId })
+        case .unknown, .overlap:
+            SpeakerInk.color(at: nil)
+        }
+    }
+
+    /// The running pass numbers its speakers per source, so the source is
+    /// part of the color: the first voice on each source is a different one.
+    private func ink(_ segment: MeetingProvisionalSegment) -> Color {
+        guard case let .cluster(index) = segment.speaker,
+              let source = MeetingSourceKind.allCases.firstIndex(of: segment.sourceKind)
+        else { return SpeakerInk.color(at: nil) }
+        return SpeakerInk.color(at: Int(index) * MeetingSourceKind.allCases.count + source)
     }
 
     private func jump(to offset: Int64, using proxy: ScrollViewProxy) {
@@ -347,7 +417,7 @@ struct MeetingLiveView: View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(kind.label).bodyText(14)
+                    Text(kind.label).headlineText()
                     Spacer()
                     Button("Dismiss") { store.dismissLiveHelp() }.buttonStyle(.quiet)
                 }
@@ -361,15 +431,17 @@ struct MeetingLiveView: View {
                     }
                 } else if let error = store.helpError {
                     ErrorNote(error)
-                    Button("Try again") { store.retryLiveHelp() }.buttonStyle(.secondary)
+                    Button("Try again") { store.retryLiveHelp() }.buttonStyle(.compact)
                 } else if let answer = store.liveHelp {
                     if let label = answer.state.label {
                         Text(label).bodyText(13, Theme.inkSecondary)
-                        Button("Try again") { store.retryLiveHelp() }.buttonStyle(.secondary)
+                        Button("Try again") { store.retryLiveHelp() }.buttonStyle(.compact)
                     } else {
                         ForEach(Array(answer.items.enumerated()), id: \.offset) { _, item in
-                            VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("•").bodyText(14, Theme.inkSecondary).accessibilityHidden(true)
                                 Text(item.text).bodyText(14).textSelection(.enabled)
+                                Spacer(minLength: 8)
                                 Button(item.startOffsetNs.meetingOffsetClock) {
                                     jump(to: item.startOffsetNs, using: proxy)
                                 }
@@ -389,8 +461,87 @@ struct MeetingLiveView: View {
                     }
                 }
             }
-            .padding(14)
+            .padding(16)
         }
+    }
+
+    // MARK: What was said before
+
+    /// Past lines the call's words were already said in, newest on top. A
+    /// row opens its meeting at that moment; the recording keeps going.
+    @ViewBuilder
+    private var recalled: some View {
+        if let recall = store.shownRecall, recall.unavailable || !recall.cards.isEmpty {
+            PageSection("From past meetings") {
+                if recall.unavailable {
+                    Text("Past meetings can't be read right now.").metaText(Theme.inkTertiary)
+                }
+                if !recall.cards.isEmpty {
+                    Card {
+                        ForEach(recall.cards) { match in
+                            CardRow(action: { onOpenRecalled(match) }) {
+                                recalledLine(match)
+                            } trailing: {
+                                Button { store.dismissRecall(match) } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(Theme.inkTertiary)
+                                        .frame(width: 20, height: 20)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Dismiss")
+                            }
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                }
+            }
+            .animation(Motion.settle(reduced: reduceMotion), value: recall.cards.map(\.id))
+        }
+    }
+
+    private func recalledLine(_ match: MeetingRecallMatch) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(match.kind.label, systemImage: match.kind.symbol)
+                .metaText(Theme.inkSecondary)
+            Text(recalledQuote(match))
+                .bodyText(14)
+                .lineLimit(4)
+                .fixedSize(horizontal: false, vertical: true)
+            if let person = match.person {
+                HStack(spacing: 6) {
+                    PersonPortrait(
+                        personId: person.personId, name: person.displayName, size: 18,
+                        revision: model.people.photoRevision)
+                    Text(person.displayName).metaText(Theme.inkSecondary).lineLimit(1)
+                }
+            }
+            AppLabel(bundleId: match.appBundleId, size: 14) {
+                HStack(spacing: 0) {
+                    Text(match.meetingTitle).lineLimit(1)
+                    Text(" · \(match.meetingStartedAtUtcMs.meetingDate.short)").fixedSize()
+                }
+                .metaText()
+            }
+        }
+    }
+
+    /// The past line in quotes, the words both meetings share marked where
+    /// a word starts.
+    private func recalledQuote(_ match: MeetingRecallMatch) -> AttributedString {
+        var line = AttributedString("“\(match.text)”")
+        var cursor = line.startIndex
+        while cursor < line.endIndex,
+              let found = line[cursor...].range(
+                  of: match.term, options: [.caseInsensitive, .diacriticInsensitive]) {
+            if line.characters[..<found.lowerBound].last.map({ !$0.isLetter && !$0.isNumber }) ?? true {
+                line[found].backgroundColor = Theme.accentSoft
+                line[found].foregroundColor = Theme.accent
+            }
+            cursor = found.upperBound
+        }
+        return line
     }
 
     // MARK: A note about this moment
@@ -400,7 +551,7 @@ struct MeetingLiveView: View {
     /// the words; a refusal is read here, over the draft, not behind it.
     private var note: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Note for this moment").headlineText()
+            Text("Note for this moment").titleText().accessibilityAddTraits(.isHeader)
             InputField(
                 prompt: "Write a note for this moment",
                 text: Binding(get: { store.noteBody }, set: { store.setNote($0) }))
@@ -418,7 +569,7 @@ struct MeetingLiveView: View {
                         || store.pending != nil)
             }
         }
-        .padding(28)
+        .padding(24)
         .frame(width: 420)
         .background(Theme.page)
         .onChange(of: store.pending) { _, pending in
@@ -475,11 +626,17 @@ private extension MeetingSessionSnapshot {
 
 // MARK: - The consent panel
 
-/// The floating panel, which is the card: one surface at the panel radius,
-/// 340 wide as the Tauri window was, with exactly one card's rows on it.
-/// `ConsentPanel.tsx` decides which in one order — a recording ritual, then
-/// the session it is recording, then an offer, then prep, then wrap — and
-/// the store computes it, so this view only draws what it is handed.
+extension MeetingConsentCard {
+    /// A recording docks against the right edge of the screen; an offer, a
+    /// prep and a wrap float at the top right.
+    var docksAtEdge: Bool {
+        switch self {
+        case .active, .recording: true
+        case .prompt, .prep, .wrap: false
+        }
+    }
+}
+
 struct MeetingConsentPanelView: View {
     let store: MeetingLiveStore
 
@@ -491,74 +648,378 @@ struct MeetingConsentPanelView: View {
     /// read. Unwired, the copy button is not drawn at all.
     var followUp: ((MeetingSessionId) async throws -> String)?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The window slides; a card changing for another only crossfades.
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            switch store.card {
-            case let .prompt(prompt):
-                DetectionPromptView(store: store, prompt: prompt)
-            case let .active(state):
-                MeetingConsentActiveCard(store: store, state: state)
-            case let .recording(event, card):
-                RitualRecordingView(store: store, event: event, card: card)
-            case let .prep(event, card):
-                RitualPrepView(store: store, event: event, card: card, onOpenBrief: onOpenBrief)
-            case let .wrap(event, card):
-                RitualWrapView(
-                    store: store, event: event, card: card,
-                    onOpenNotes: onOpenNotes, followUp: followUp)
-            case .none:
-                EmptyView()
+        ZStack(alignment: .trailing) {
+            if let card = store.card {
+                surface(card)
+                    .id(card.id)
+                    .transition(.opacity)
             }
-            ErrorNote(store.error)
         }
-        .padding(16)
-        .frame(width: 340)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusPanel))
-        .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Theme.border, lineWidth: 1))
+        .animation(Theme.Slide.animation(reduced: reduceMotion), value: store.card?.id)
+    }
+
+    @ViewBuilder private func surface(_ card: MeetingConsentCard) -> some View {
+        switch card {
+        case let .prompt(prompt):
+            PanelCard(store: store) { DetectionPromptView(store: store, prompt: prompt) }
+                .padding(8)
+        case let .active(state):
+            MeetingRecordingDock(store: store, recording: .panel(state))
+        case let .recording(event, recording):
+            MeetingRecordingDock(store: store, recording: .ritual(event, recording))
+        case let .prep(event, prep):
+            PanelCard(store: store) {
+                RitualPrepView(store: store, event: event, card: prep, onOpenBrief: onOpenBrief)
+            }
+            .padding(8)
+        case let .wrap(event, wrap):
+            PanelCard(store: store) {
+                RitualWrapView(
+                    store: store, event: event, card: wrap,
+                    onOpenNotes: onOpenNotes, followUp: followUp)
+            }
+            .padding(8)
+        }
     }
 }
 
-/// The offer itself: what would be recorded, the two standing answers, and the
-/// two presses. `showIntroduction` is the first offer on this Mac, which is
-/// the only time the panel explains itself.
+/// The panel's surface: its width, its inset, and a corner concentric with
+/// the corner of a button inside that inset.
+private enum PanelSurface {
+    static let width: CGFloat = 320
+    static let inset: CGFloat = 12
+    static let radius = Theme.radiusControl + inset
+}
+
+private extension View {
+    /// The panel's fill, hairline and shadow. Docked, the right side runs
+    /// flush into the screen's edge: only the left corners round, and the
+    /// hairline runs on past the edge.
+    func panelSurface(docked: Bool, radius: CGFloat = PanelSurface.radius) -> some View {
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: radius,
+            bottomLeadingRadius: radius,
+            bottomTrailingRadius: docked ? 0 : radius,
+            topTrailingRadius: docked ? 0 : radius,
+            style: .continuous)
+        return background(Theme.surface, in: shape)
+            .overlay(shape.strokeBorder(Theme.border, lineWidth: 1).padding(.trailing, docked ? -1 : 0))
+            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .contentShape(shape)
+    }
+}
+
+/// A card on the panel's surface, with the store's last error under it.
+private struct PanelCard<Content: View>: View {
+    let store: MeetingLiveStore
+    var docked = false
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content
+            if let error = store.error {
+                Text(error)
+                    .bodyText(12, Theme.live)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(PanelSurface.inset)
+        .frame(width: PanelSurface.width, alignment: .leading)
+        .panelSurface(docked: docked)
+    }
+}
+
+/// The recording a docked panel shows: one the panel started, or one Sona
+/// started by itself.
+private enum DockedRecording {
+    case panel(MeetingConsentPanelSessionState)
+    case ritual(RitualEvent, RitualRecordingCard)
+}
+
+/// A recording, docked flush against the right edge of the screen. At rest
+/// it is a strip: the dot, the word and the clock, read upright. The pointer
+/// on it pulls a drawer out with the title, the clock, a bookmark and Stop.
+/// A click opens the whole card, which stays until it is collapsed, or
+/// until the pointer leaves after a press in it.
+private struct MeetingRecordingDock: View {
+    let store: MeetingLiveStore
+    let recording: DockedRecording
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var drawer = Drawer.shut
+    /// Room for the drawer: made before the drawer comes out and given back
+    /// once it is in, each in an update of its own. Inside the drawer's
+    /// animation, SwiftUI would slide the strip across the room as it grows.
+    @State private var wide = false
+    /// The drawer that comes out once the room is made.
+    @State private var pending: Drawer?
+    @State private var shutting: Task<Void, Never>?
+    @State private var narrowing: Task<Void, Never>?
+    @State private var marked = false
+
+    private enum Drawer: Equatable {
+        case shut
+        /// Pulled out while the pointer is on it.
+        case peeking
+        /// Opened by a click. Once a press lands in it, the pointer leaving
+        /// shuts it.
+        case open(pressed: Bool)
+    }
+
+    /// The strip and the drawer share a height, so the drawer covers the
+    /// strip it comes out of and leaving one is leaving both.
+    private static let height: CGFloat = 152
+    private static let stripWidth: CGFloat = 32
+
+    /// The strip is hidden, never removed: SwiftUI draws a view on its way
+    /// out where it last sat, and the drawer comes out over it.
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Color.clear
+                .frame(width: wide ? PanelSurface.width : Self.stripWidth, height: Self.height)
+            strip
+                .opacity(drawer == .shut ? 1 : 0)
+                .allowsHitTesting(drawer == .shut)
+                .accessibilityHidden(drawer != .shut)
+            switch drawer {
+            case .shut:
+                EmptyView()
+            case .peeking:
+                peek.transition(reduceMotion ? .opacity : .asymmetric(
+                    insertion: .move(edge: .trailing),
+                    removal: .move(edge: .trailing).combined(with: .opacity)))
+            case .open:
+                open.transition(.asymmetric(
+                    insertion: .opacity,
+                    removal: reduceMotion ? .opacity : .move(edge: .trailing)))
+            }
+        }
+        .onGeometryChange(for: Bool.self) { $0.size.width > Self.stripWidth } action: { grown in
+            guard grown, let pending else { return }
+            self.pending = nil
+            drawer = pending
+        }
+        .onPointer(inside: pointer, press: press)
+        .animation(Theme.Slide.animation(reduced: reduceMotion), value: drawer)
+        .padding([.vertical, .leading], 8)
+    }
+
+    private var strip: some View {
+        VStack(spacing: 10) {
+            LiveDot(state: dot)
+            UprightText(word)
+                .font(TypeScale.label(12))
+                .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
+            if let clock {
+                UprightText { MeetingClockText(clock: clock, size: 11) }
+            }
+            if silent != nil {
+                Image(systemName: "speaker.slash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .accessibilityLabel("No sound from the call")
+            }
+        }
+        .frame(width: Self.stripWidth, height: Self.height)
+        .panelSurface(docked: true, radius: Self.stripWidth / 2)
+        .onTapGesture { pull(.open(pressed: false)) }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { pull(.open(pressed: false)) }
+    }
+
+    private var peek: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                LiveDot(state: dot)
+                Text(word)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(paused ? Theme.inkSecondary : Theme.ink)
+                Spacer(minLength: 8)
+                if let clock {
+                    MeetingClockText(clock: clock)
+                }
+            }
+            if let error = store.error {
+                Text(error).bodyText(12, Theme.live).lineLimit(3)
+            } else if let silent {
+                Text("No sound from the call for \(silent.clock) while you talk.")
+                    .bodyText(12, Theme.ink)
+                    .lineLimit(3)
+            } else {
+                AppLabel(bundleId: appBundleId, size: 14, announcesApp: session != nil) {
+                    Text(title)
+                        .font(TypeScale.label(13))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                Button(action: mark) {
+                    Image(systemName: marked ? "bookmark.fill" : "bookmark")
+                }
+                .buttonStyle(.circle)
+                .disabled(!canBookmark)
+                .help("Bookmark this moment")
+                .accessibilityLabel(marked ? "Bookmarked" : "Bookmark")
+                Spacer(minLength: 8)
+                Button("Stop", action: stop)
+                    .buttonStyle(.compact)
+                    .disabled(store.pending != nil)
+            }
+        }
+        .padding(PanelSurface.inset)
+        .frame(width: PanelSurface.width, height: Self.height, alignment: .topLeading)
+        .panelSurface(docked: true)
+        .onTapGesture { pull(.open(pressed: false)) }
+    }
+
+    private var open: some View {
+        PanelCard(store: store, docked: true) {
+            switch recording {
+            case let .panel(state):
+                MeetingConsentActiveCard(store: store, state: state, collapse: shut)
+            case let .ritual(event, card):
+                RitualRecordingView(store: store, event: event, card: card, collapse: shut)
+            }
+        }
+    }
+
+    private func pointer(_ inside: Bool) {
+        shutting?.cancel()
+        shutting = nil
+        if inside {
+            if drawer == .shut { pull(.peeking) }
+        } else if drawer == .peeking || drawer == .open(pressed: true) {
+            shutting = Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                if !Task.isCancelled { shut() }
+            }
+        }
+    }
+
+    private func press() {
+        if drawer == .open(pressed: false) { drawer = .open(pressed: true) }
+    }
+
+    private func pull(_ next: Drawer) {
+        narrowing?.cancel()
+        narrowing = nil
+        if wide {
+            drawer = next
+        } else {
+            pending = next
+            wide = true
+        }
+    }
+
+    private func shut() {
+        shutting?.cancel()
+        shutting = nil
+        pending = nil
+        drawer = .shut
+        narrowing?.cancel()
+        narrowing = Task {
+            try? await Task.sleep(for: .seconds(reduceMotion ? Theme.Slide.fade : Theme.Slide.duration))
+            if !Task.isCancelled { wide = false }
+        }
+    }
+
+    private func mark() {
+        Task {
+            guard await store.bookmarkFromPanel() else { return }
+            marked = true
+            try? await Task.sleep(for: .seconds(1.5))
+            marked = false
+        }
+    }
+
+    private func stop() {
+        switch recording {
+        case .panel: store.stopFromPanel()
+        case let .ritual(event, _): store.respond(event, action: .recordingStop)
+        }
+    }
+
+    private var sessionId: MeetingSessionId {
+        switch recording {
+        case let .panel(state): state.snapshot.sessionId
+        case let .ritual(_, card): card.sessionId
+        }
+    }
+
+    /// The session as the panel reads it, while it is this recording.
+    private var session: MeetingSessionSnapshot? {
+        guard let snapshot = store.active?.snapshot, snapshot.sessionId == sessionId else { return nil }
+        return snapshot
+    }
+
+    private var paused: Bool { session?.phase == .capturingPaused }
+    private var word: String { paused ? "Paused" : "Recording" }
+    private var dot: CaptureState { paused ? .idle : .recording(since: since) }
+    private var clock: MeetingCaptureClock? { store.clocks[sessionId] }
+    private var canBookmark: Bool { store.pending == nil && session?.phase == .capturingRecording }
+    private var silent: MeetingCallSilent? {
+        store.callSilent.flatMap { $0.sessionId == sessionId ? $0 : nil }
+    }
+
+    private var title: String {
+        switch recording {
+        case let .panel(state): state.snapshot.title
+        case let .ritual(_, card): session?.title ?? card.appName
+        }
+    }
+
+    /// The app an automatic recording started for. The panel's own capture
+    /// carries no app.
+    private var appBundleId: String? {
+        switch recording {
+        case .panel: nil
+        case let .ritual(_, card): card.bundleId
+        }
+    }
+
+    private var since: Date {
+        switch recording {
+        case let .panel(state): state.snapshot.captureStart
+        case let .ritual(_, card): card.startedAtUtcMs.meetingDate
+        }
+    }
+}
+
+/// The offer: what would be recorded, the standing answers that go with
+/// the press, and the two presses. The notice box is drawn only while the
+/// recording notice is on in Settings, because only then can it be ticked;
+/// its line says where the notice goes, which is what decides the tick.
 struct DetectionPromptView: View {
     let store: MeetingLiveStore
     let prompt: DetectionPromptEvent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(prompt.prompt.consentTitle).headlineText()
-            Text(
-                prompt.showIntroduction
-                    ? "Sona records on this Mac and keeps you in control."
-                    : "Audio stays on this Mac. Nothing joins the call."
-            )
-            .bodyText(13, Theme.inkSecondary)
-            if let brief = store.seriesBrief {
-                Text(brief).bodyText(13, Theme.inkSecondary)
-            }
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                if prompt.prompt.isCalendar {
-                    Toggle(
-                        "Always record this meeting",
-                        isOn: Binding(
-                            get: { store.alwaysRecordSeries(prompt) },
-                            set: { store.setAlwaysRecordSeries($0, for: prompt) }))
+                AppLabel(bundleId: prompt.prompt.bundleId, size: 18, announcesApp: prompt.prompt.appName == nil) {
+                    Text(prompt.prompt.consentTitle)
+                        .headlineText()
+                        .lineLimit(3)
                 }
-                Toggle(
-                    "Post a recording notice",
-                    isOn: Binding(
-                        get: { store.announceInChat(prompt) },
-                        set: { store.setAnnounceInChat($0, for: prompt) }))
-                .disabled(store.settings?.meetingDisclosureEnabled != true)
-                if store.announceInChat(prompt) {
-                    Text("Sent only to an identified empty meeting chat. Otherwise, copy it yourself.")
-                        .metaText(Theme.inkTertiary)
-                        .padding(.leading, 20)
+                Text(
+                    prompt.showIntroduction
+                        ? "Sona records on this Mac and keeps you in control."
+                        : "Audio stays on this Mac. Nothing joins the call."
+                )
+                .metaText(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                if let brief = store.seriesBrief {
+                    Text(brief).bodyText(13, Theme.inkSecondary).lineLimit(2)
                 }
             }
-            .toggleStyle(.checkbox)
-            .font(TypeScale.body(13))
+            choices
             HStack(spacing: 8) {
                 Spacer()
                 Button("Ignore") { store.answer(prompt, accepted: false) }
@@ -570,16 +1031,49 @@ struct DetectionPromptView: View {
             }
         }
     }
+
+    /// The standing answers. Only a calendar offer can record its series
+    /// from now on.
+    @ViewBuilder private var choices: some View {
+        let noticeEnabled = store.settings?.meetingDisclosureEnabled == true
+        if prompt.prompt.isCalendar || noticeEnabled {
+            VStack(alignment: .leading, spacing: 4) {
+                if prompt.prompt.isCalendar {
+                    Toggle(
+                        "Always record this meeting",
+                        isOn: Binding(
+                            get: { store.alwaysRecordSeries(prompt) },
+                            set: { store.setAlwaysRecordSeries($0, for: prompt) }))
+                }
+                if noticeEnabled {
+                    Toggle(
+                        "Post a recording notice",
+                        isOn: Binding(
+                            get: { store.announceInChat(prompt) },
+                            set: { store.setAnnounceInChat($0, for: prompt) }))
+                    if store.announceInChat(prompt) {
+                        Text("Sent only to an identified empty meeting chat. Otherwise, copy it yourself.")
+                            .metaText()
+                            .padding(.leading, 20)
+                    }
+                }
+            }
+            .toggleStyle(.checkbox)
+            .font(TypeScale.body(13))
+        }
+    }
 }
 
 /// The session the panel is watching, in one row: the dot, the word, the
-/// clock, and Stop. The dot carries the colour; the word beside it is plain
-/// ink. The title sits under the row, and so does the chat notice's outcome
-/// when the person asked for one, because it asks them to send it. Telling
-/// this series to stop recording itself waits behind the `…`.
+/// clock, Stop, and the `›` that tucks the card back into its strip. The
+/// dot carries the colour; the word beside it is plain ink. The title sits
+/// under the row, and so does the chat notice's outcome when the person
+/// asked for one, because it asks them to send it. Telling this series to
+/// stop recording itself waits behind the `…`.
 struct MeetingConsentActiveCard: View {
     let store: MeetingLiveStore
     let state: MeetingConsentPanelSessionState
+    let collapse: () -> Void
 
     var body: some View {
         let paused = state.snapshot.phase == .capturingPaused
@@ -602,11 +1096,12 @@ struct MeetingConsentActiveCard: View {
                             .disabled(store.pending != nil)
                     }
                 }
+                PanelCollapse(action: collapse)
             }
             Text(state.snapshot.title)
                 .font(TypeScale.label(13))
                 .foregroundStyle(Theme.inkSecondary)
-                .lineLimit(1)
+                .lineLimit(2)
             MeetingDisclosureStatus(store: store, disclosure: state.disclosure)
         }
     }
@@ -621,6 +1116,7 @@ struct RitualRecordingView: View {
     let store: MeetingLiveStore
     let event: RitualEvent
     let card: RitualRecordingCard
+    let collapse: () -> Void
 
     var body: some View {
         // The card is an event; the phase is the session's. Paused is the
@@ -646,11 +1142,14 @@ struct RitualRecordingView: View {
                     }
                     .disabled(store.pending != nil)
                 }
+                PanelCollapse(action: collapse)
             }
-            Text(card.appName)
-                .font(TypeScale.label(13))
-                .foregroundStyle(Theme.inkSecondary)
-                .lineLimit(1)
+            AppLabel(bundleId: card.bundleId, size: 14) {
+                Text(card.appName)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .lineLimit(1)
+            }
             if let active = store.active, active.snapshot.sessionId == card.sessionId {
                 MeetingDisclosureStatus(store: store, disclosure: active.disclosure)
             }
@@ -673,9 +1172,28 @@ private struct PanelMore<Items: View>: View {
                 .frame(width: 26, height: 30)
         }
         .menuStyle(.borderlessButton)
+        .tint(Theme.inkSecondary)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("More")
+    }
+}
+
+/// The `›` on a docked card: back into the strip at the screen's edge.
+private struct PanelCollapse: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 22, height: 30)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Collapse")
+        .accessibilityLabel("Collapse")
     }
 }
 
@@ -688,6 +1206,14 @@ struct RitualPrepView: View {
     var onOpenBrief: (String) -> Void = { _ in }
     @Environment(AppModel.self) private var model
     @State private var preview = BriefPreview.loading
+    /// Your last talks with the first participant whose recorded moments
+    /// have audio to play.
+    @State private var lastTime: LastTime?
+
+    private struct LastTime {
+        let name: String
+        let reel: ConversationReel
+    }
 
     /// What the card shows of the brief. Briefs are prepared ahead of time,
     /// so most cards read a saved one.
@@ -701,18 +1227,24 @@ struct RitualPrepView: View {
         max(0, Int((card.startUtcMs.meetingDate.timeIntervalSinceNow / 60).rounded()))
     }
 
+    private var reelKey: String { "prep:\(card.eventKey)" }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Prep").metaText(Theme.accent)
-            Text("\(card.title) — in \(minutes) \(minutes == 1 ? "minute" : "minutes")").bodyText(14)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(card.title) — in \(minutes) \(minutes == 1 ? "minute" : "minutes")")
+                    .headlineText()
+                Spacer(minLength: 8)
+                Text("Prep").metaText()
+            }
             if !card.headline.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(card.lastMeetingId == nil ? "Context:" : "Last time:").metaText()
                     Text(card.headline).bodyText(13, Theme.inkSecondary)
                 }
             }
             if card.mineOpenLoopCount > 0 {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("My open loops (\(card.mineOpenLoopCount))").metaText()
                     ForEach(Array(card.mineOpenLoops.prefix(2).enumerated()), id: \.offset) {
                         _, loop in
@@ -724,12 +1256,15 @@ struct RitualPrepView: View {
                 Text("Waiting on (\(card.waitingOnCount))").metaText()
             }
             if !card.participants.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Participants:").metaText()
                     ForEach(Array(card.participants.enumerated()), id: \.offset) { _, person in
                         Text(person.line).bodyText(13, Theme.inkSecondary)
                     }
                 }
+            }
+            if let lastTime {
+                lastTimeLine(lastTime)
             }
             briefSection
             HStack(spacing: 8) {
@@ -764,6 +1299,52 @@ struct RitualPrepView: View {
                 preview = .failed(error.localizedDescription)
             }
         }
+        .task(id: card.eventKey) {
+            lastTime = nil
+            for participant in card.participants {
+                guard let personId = participant.personId,
+                      let reel: ConversationReel = try? await model.core.request(
+                          "conversation_reel_for_person", ["personId": personId]),
+                      reel.moments.contains(where: \.said.audioRetained) else { continue }
+                guard !Task.isCancelled else { return }
+                lastTime = LastTime(name: participant.name, reel: reel)
+                return
+            }
+        }
+        .onDisappear {
+            if model.meetings.audio.reelKey == reelKey { model.meetings.audio.stop() }
+        }
+    }
+
+    /// "Your talks with Ada · 0:48": one press plays the moments.
+    private func lastTimeLine(_ lastTime: LastTime) -> some View {
+        let audio = model.meetings.audio
+        let sounding = audio.reelKey == reelKey
+        let total = lastTime.reel.moments.reduce(UInt64(0)) { $0 + $1.playableNs }
+        return VStack(alignment: .leading, spacing: 2) {
+            Button {
+                if sounding {
+                    audio.stop()
+                } else {
+                    audio.playReel(lastTime.reel.moments.map(\.clip), key: reelKey)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Your talks with \(lastTime.name) · \(Int64(clamping: total).meetingOffsetClock)")
+                    Image(systemName: sounding ? "stop.fill" : "play.fill")
+                        .font(.system(size: 10))
+                        .accessibilityHidden(true)
+                }
+            }
+            .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+            .disabled(audio.heldForRecording)
+            .accessibilityValue(sounding ? "Playing" : "")
+            if audio.heldForRecording {
+                Text(ConversationAudioPlayback.heldNotice).metaText()
+            } else if audio.failedReelKey == reelKey, let error = audio.error {
+                Text(error).metaText(error == ConversationAudioPlayback.heldNotice ? Theme.inkTertiary : Theme.live)
+            }
+        }
     }
 
     @ViewBuilder private var briefSection: some View {
@@ -773,7 +1354,7 @@ struct RitualPrepView: View {
         case let .ready(points) where points.isEmpty:
             Text("The brief has nothing to add yet.").metaText()
         case let .ready(points):
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("From the brief:").metaText()
                 ForEach(Array(points.prefix(2).enumerated()), id: \.offset) { _, point in
                     Text(point.text).bodyText(13, Theme.inkSecondary).lineLimit(2)
@@ -824,9 +1405,12 @@ struct RitualWrapView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Wrap").metaText(Theme.accent)
-            Text("\(card.title) — saved").bodyText(14)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(card.title) — saved").headlineText()
+                Spacer(minLength: 8)
+                Text("Wrap").metaText()
+            }
             if !card.headline.isEmpty {
                 Text(card.headline).bodyText(13, Theme.inkSecondary)
             }

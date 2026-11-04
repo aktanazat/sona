@@ -12,7 +12,7 @@ struct StartDictationIntent: AppIntent {
 
 struct RecordMeetingIntent: AppIntent {
     static var title: LocalizedStringResource = "Record a meeting"
-    static var description = IntentDescription("Open Sona and record a meeting on this iPhone.")
+    static var description = IntentDescription("Open Sona and record a meeting.")
     static var openAppWhenRun = true
 
     func perform() async throws -> some IntentResult & OpensIntent {

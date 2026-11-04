@@ -255,6 +255,17 @@ pub(crate) static MIGRATIONS: &[M] = &[
             DELETE FROM scratch_note_versions WHERE note_id = old.id;
         END;",
     ),
+    M::up(crate::scratchpad::links::MIGRATION),
+    M::up(crate::scratchpad::links::MEETING_REFERENCES_MIGRATION),
+    M::up(crate::scratchpad::RECENT_MIGRATION),
+    M::up(crate::scratchpad::passages::MIGRATION),
+    M::up(crate::scratchpad::synthesis::MIGRATION),
+    M::up(crate::scratchpad::subjects::MIGRATION),
+    M::up(crate::scratchpad::phone_import::MIGRATION),
+    M::up(crate::planning::MIGRATION),
+    M::up(crate::planning::QUIET_REVIEW_MIGRATION),
+    M::up(crate::planning::MEETING_NOTE_LINK_MIGRATION),
+    M::up(crate::planning::DISMISSED_LOOP_MIGRATION),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -887,7 +898,7 @@ impl HistoryManager {
     /// together still cost one credential-store round trip. What the guard
     /// buys is that a search in the app, where startup already resolved the
     /// key, pays one state lock and no migration check.
-    async fn ensure_storage_unlocked(&self) {
+    pub(crate) async fn ensure_storage_unlocked(&self) {
         if !self.storage.needs_resolution() {
             return;
         }
@@ -1381,7 +1392,12 @@ impl HistoryManager {
         }
         // After the announcement, so a listener already holds the row when the
         // sweep reports what it took from it.
-        self.cleanup_old_entries()?;
+        if let Err(error) = self.cleanup_old_entries() {
+            warn!(
+                "Retention sweep after saving entry {} failed: {error:#}",
+                entry.id
+            );
+        }
         // The one place dictation history is established as having moved, and so
         // the one place the local learning loops are woken. The call is
         // day-bucketed on the other side, so this is cheap per dictation.

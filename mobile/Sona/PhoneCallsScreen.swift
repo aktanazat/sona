@@ -114,35 +114,39 @@ struct PhoneCallsScreen: View {
         List {
             Section {
                 Toggle("calls.enable", isOn: $enabled)
-                Text("calls.privacy")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.textSecondary)
                 Button("calls.settings") { setup = true }
+            } footer: {
+                Text("calls.privacy")
+                    .foregroundStyle(Theme.textSecondary)
             }
-            .listRowBackground(Theme.background)
-            .listRowSeparatorTint(Theme.border)
+            .listRowBackground(Theme.surface)
             if enabled {
-                Section("calls.outgoing") {
-                    Text("calls.instructions").font(.footnote)
+                Section {
+                    Text("calls.instructions")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textSecondary)
                     TextField("calls.recipient", text: $target).keyboardType(.phonePad)
                     Toggle("calls.consent", isOn: $consent)
                     Button("calls.start") { confirm = true }
                         .disabled(!consent || calls.busy || target.isEmpty || model.recorder.isRecording || !model.consentAccepted)
                     if calls.busy { ProgressView() }
                     if let error = calls.error { Text(error).foregroundStyle(Theme.recording) }
+                } header: {
+                    Text("calls.outgoing")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .textCase(nil)
                 }
-                .textCase(nil)
-                .listRowBackground(Theme.background)
-                .listRowSeparatorTint(Theme.border)
-                Section("calls.history") {
+                .listRowBackground(Theme.surface)
+                Section {
                     if calls.calls.isEmpty { Text("calls.empty").foregroundStyle(Theme.textSecondary) }
                     ForEach(calls.calls) { call in
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text(call.target)
-                                .font(.body.weight(.medium))
+                                .font(.body.weight(.semibold))
                                 .foregroundStyle(Theme.textPrimary)
                             Text(call.date, style: .date)
-                                .font(.caption)
+                                .font(.footnote)
                                 .foregroundStyle(Theme.textTertiary)
                             Text(LocalizedStringKey("calls.status.\(call.status)"))
                                 .font(.footnote)
@@ -157,13 +161,16 @@ struct PhoneCallsScreen: View {
                         }.padding(.vertical, 4)
                     }
                     Button("calls.refresh") { Task { await calls.refresh() } }.disabled(calls.busy)
+                } header: {
+                    Text("calls.history")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .textCase(nil)
                 }
-                .textCase(nil)
-                .listRowBackground(Theme.background)
-                .listRowSeparatorTint(Theme.border)
+                .listRowBackground(Theme.surface)
             }
         }
-        .listStyle(.plain)
+        .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.background)
         .navigationTitle("calls.title")
@@ -190,12 +197,21 @@ private struct CallSetupScreen: View {
         NavigationStack {
             List {
                 Section {
-                    Text("calls.setupHelp").font(.footnote).foregroundStyle(Theme.textSecondary)
                     TextField("calls.account", text: $accountSID).textInputAutocapitalization(.never).autocorrectionDisabled()
                     SecureField(configured ? "calls.keepToken" : "calls.token", text: $token).textInputAutocapitalization(.never)
                     TextField("calls.from", text: $from).keyboardType(.phonePad)
                     TextField("calls.own", text: $own).keyboardType(.phonePad)
-                    Text("calls.retention").font(.footnote).foregroundStyle(Theme.textSecondary)
+                } header: {
+                    Text("calls.setupHelp")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textSecondary)
+                        .textCase(nil)
+                } footer: {
+                    Text("calls.retention")
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .listRowBackground(Theme.surface)
+                Section {
                     if let error { Text(error).foregroundStyle(Theme.recording) }
                     Button("calls.save") {
                         do {
@@ -215,15 +231,18 @@ private struct CallSetupScreen: View {
                         }
                     }
                 }
-                .listRowBackground(Theme.background)
-                .listRowSeparatorTint(Theme.border)
+                .listRowBackground(Theme.surface)
             }
-            .listStyle(.plain)
+            .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(Theme.background)
             .navigationTitle("calls.settings")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("library.done") { dismiss() } }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("library.done") { dismiss() }
+                }
+            }
             .task {
                 do {
                     if let account = try CallKeychain.load() {
@@ -232,5 +251,6 @@ private struct CallSetupScreen: View {
                 } catch { self.error = error.localizedDescription }
             }
         }
+        .tint(Theme.accent)
     }
 }

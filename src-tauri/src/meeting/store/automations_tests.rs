@@ -29,6 +29,7 @@ fn series_event(at_utc_ms: i64, title: &str) -> CalendarEventSummary {
         attendees: Vec::new(),
         notes: None,
         calendar_name: None,
+        location: None,
         url: None,
     }
 }

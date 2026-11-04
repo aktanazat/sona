@@ -1,0 +1,696 @@
+import SwiftUI
+
+/// The parts of a person's page below the numbers, one at a time.
+enum PersonPageTab: String, CaseIterable, Identifiable {
+    case history = "History"
+    case catchUp = "Before we talk"
+    case work = "Work"
+    case changes = "What changed"
+    case subjects = "Subjects"
+    case profile = "Profile"
+
+    var id: String { rawValue }
+}
+
+/// A person's page below the numbers: their history, what to know before you
+/// next talk, the work you share, what changed, your subjects, and the
+/// profile. The page owns the reads behind each tab, so moving between tabs
+/// never reads anything again.
+struct PersonContinuityView<Profile: View>: View {
+    let personId: String
+    let memory: PersonMemoryStore?
+    let work: PersonWorkStore?
+    /// What is still open between you, from the person's ledger.
+    let openLoops: [PersonOpenLoop]
+    @Binding var tab: PersonPageTab
+    let openMeeting: (String) -> Void
+    let openContribution: ((String, UInt64) -> Void)?
+    @ViewBuilder let profile: () -> Profile
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var comparisonDate = Calendar.current.date(byAdding: .day, value: -7, to: .now) ?? .now
+
+    private static var tabs: [SwitchItem<PersonPageTab>] {
+        PersonPageTab.allCases.map { SwitchItem(id: $0, title: $0.rawValue) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SegmentedSwitch(items: Self.tabs, selection: tab, select: show)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Person view")
+                .help("Switch views with Control–Option–1 through Control–Option–6")
+            VStack(alignment: .leading, spacing: 16) {
+                switch tab {
+                case .profile: profile()
+                case .work: workContent
+                default: memoryContent
+                }
+            }
+            .id(tab)
+            .transition(.asymmetric(insertion: .opacity, removal: .identity))
+        }
+        .background {
+            Group {
+                Button("History") { show(.history) }.keyboardShortcut("1", modifiers: [.control, .option])
+                Button("Before we talk") { show(.catchUp) }.keyboardShortcut("2", modifiers: [.control, .option])
+                Button("Work") { show(.work) }.keyboardShortcut("3", modifiers: [.control, .option])
+                Button("What changed") { show(.changes) }.keyboardShortcut("4", modifiers: [.control, .option])
+                Button("Subjects") { show(.subjects) }.keyboardShortcut("5", modifiers: [.control, .option])
+                Button("Profile") { show(.profile) }.keyboardShortcut("6", modifiers: [.control, .option])
+            }
+            .hidden()
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func show(_ next: PersonPageTab) {
+        guard next != tab else { return }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.14)) { tab = next }
+    }
+
+    @ViewBuilder
+    private var memoryContent: some View {
+        if let memory, let error = memory.error {
+            Card {
+                CardRow {
+                    Text(error).bodyText(14, Theme.inkSecondary)
+                } trailing: {
+                    Button("Retry") { memory.refresh() }.buttonStyle(.compact)
+                }
+            }
+        } else if let memory, let snapshot = memory.snapshot, snapshot.personId == personId {
+            content(snapshot, memory: memory)
+            DisclosureGroup("Evidence limits") {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(snapshot.limitations, id: \.self) { Text($0).metaText(Theme.inkSecondary) }
+                }
+                .padding(.top, 6)
+            }
+            .font(TypeScale.body(12))
+            .foregroundStyle(Theme.inkSecondary)
+        } else {
+            PersonRowsPlaceholder()
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> some View {
+        switch tab {
+        case .history:
+            history(snapshot, memory: memory)
+        case .catchUp:
+            catchUp(snapshot)
+        case .work:
+            workContent
+        case .changes:
+            changes(snapshot, memory: memory)
+        case .subjects:
+            subjects(snapshot)
+        case .profile:
+            profile()
+        }
+    }
+
+    private func history(_ snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                ForEach(PersonHistoryFilter.allCases) { filter in
+                    PersonFilterChip(
+                        title: filter.rawValue,
+                        count: count(filter, in: snapshot, memory: memory),
+                        on: memory.filter == filter
+                    ) { memory.filter = filter }
+                }
+                Spacer(minLength: 8)
+                Button { memory.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.quiet)
+                    .help("Refresh history")
+                    .accessibilityLabel("Refresh history")
+                    .disabled(memory.loading)
+            }
+            if memory.filteredTimeline.isEmpty {
+                Card { CardLine(emptyHistory(memory.filter)) }
+            } else {
+                Card {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(memory.filteredTimeline.prefix(memory.visibleCount)) { entry in
+                            PersonHistoryRow(entry: entry, open: open)
+                        }
+                        if memory.visibleCount < memory.filteredTimeline.count {
+                            Button("Show earlier") { memory.showMore() }
+                                .buttonStyle(.quiet)
+                                .padding(16)
+                        }
+                    }
+                }
+            }
+            if memory.filter == .contributions && snapshot.contributions.isEmpty && !snapshot.conversations.isEmpty {
+                Text("No voice is attributed to this person in these conversations.")
+                    .metaText(Theme.inkSecondary)
+            }
+        }
+    }
+
+    private func count(_ filter: PersonHistoryFilter, in snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> Int {
+        switch filter {
+        case .all: memory.timeline.count
+        case .conversations: snapshot.conversations.count
+        case .contributions: snapshot.contributions.count
+        case .notes: snapshot.notes.count
+        case .commitments: snapshot.commitments.count
+        }
+    }
+
+    private func catchUp(_ snapshot: PersonMemorySnapshot) -> some View {
+        let catchUp = snapshot.catchUp
+        let stillOpen = openLoops.filter(\.status.outstanding)
+        return VStack(alignment: .leading, spacing: 0) {
+            PageSection("Still open") {
+                Card {
+                    if stillOpen.isEmpty {
+                        CardLine("Nothing is still open.")
+                    } else {
+                        ForEach(stillOpen) { loop in
+                            PersonLoopRow(loop: loop, openMeeting: openMeeting)
+                        }
+                    }
+                }
+            }
+            PageSection("Last conversation") {
+                Card {
+                    if let last = catchUp.lastConversation {
+                        CardRow { PersonMemorySourceButton(source: last, open: self.open) }
+                    } else {
+                        CardLine("No confirmed conversation yet.")
+                    }
+                }
+            }
+            if !catchUp.contributionIds.isEmpty {
+                PageSection("Their words") {
+                    Card {
+                        ForEach(snapshot.contributions.filter { catchUp.contributionIds.contains($0.id) }) { row in
+                            CardRow { PersonMemoryContributionRow(row: row, open: self.open) }
+                        }
+                    }
+                }
+            }
+            let commitments = snapshot.commitments.filter { catchUp.commitmentIds.contains($0.id) }
+            PageSection("Recent open commitments") {
+                Card {
+                    if commitments.isEmpty {
+                        CardLine("No open commitments with retained evidence.")
+                    } else {
+                        ForEach(commitments) { row in
+                            CardRow { PersonMemoryCommitmentRow(row: row, open: self.open) }
+                        }
+                    }
+                }
+            }
+            let notes = snapshot.notes.filter { catchUp.noteIds.contains($0.id) }
+            if !notes.isEmpty {
+                PageSection("Related notes") {
+                    Card {
+                        ForEach(notes) { row in
+                            CardRow { PersonMemoryNoteRow(row: row, open: self.open) }
+                        }
+                    }
+                }
+            }
+            let changes = snapshot.changes.filter { catchUp.changeIds.contains($0.id) }
+            if !changes.isEmpty {
+                PageSection("Source differences") {
+                    ForEach(changes) { row in PersonMemoryChangeRow(row: row, open: self.open) }
+                }
+            }
+        }
+    }
+
+    private func changes(_ snapshot: PersonMemorySnapshot, memory: PersonMemoryStore) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                DatePicker("Since", selection: $comparisonDate, in: ...Date.now, displayedComponents: [.date])
+                    .datePickerStyle(.field)
+                    .fixedSize()
+                Button("Compare") { memory.compare(since: comparisonDate) }
+                    .buttonStyle(.compact)
+                    .disabled(memory.loading)
+            }
+            if let since = snapshot.sinceUtcMs {
+                Text("Since \(PeopleFormat.moment(PeopleFormat.date(since)))").metaText(Theme.inkSecondary)
+            }
+            if snapshot.changes.isEmpty {
+                Card { CardLine("No retained source differences for this period.") }
+            } else {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(snapshot.changes) { row in PersonMemoryChangeRow(row: row, open: open) }
+                }
+            }
+        }
+    }
+
+    private func subjects(_ snapshot: PersonMemorySnapshot) -> some View {
+        LazyVStack(alignment: .leading, spacing: 18) {
+            if snapshot.threads.isEmpty {
+                Card { CardLine("No linked subjects yet.") }
+            }
+            ForEach(snapshot.threads) { thread in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(thread.title).headlineText()
+                        Spacer(minLength: 0)
+                        if thread.origin == .explicitSubject {
+                            Button("Open subject") {
+                                if let url = URL(string: "sona://subject/\(thread.id.replacingOccurrences(of: "subject:", with: ""))") {
+                                    model.open(url: url)
+                                }
+                            }
+                            .buttonStyle(.quiet)
+                        }
+                    }
+                    Text(thread.origin == .explicitSubject ? "Linked subject" : "AI topic · matching labels")
+                        .metaText(Theme.inkSecondary)
+                    if thread.origin == .explicitSubject {
+                        ForEach(thread.sources) { source in PersonMemorySourceButton(source: source, open: open) }
+                    } else {
+                        DisclosureGroup("Source words") {
+                            ForEach(thread.evidence, id: \.source.id) { passage in
+                                PersonMemoryPassageView(passage: passage, open: open)
+                                    .padding(.vertical, 6)
+                            }
+                        }
+                        .font(TypeScale.body(12))
+                        .foregroundStyle(Theme.inkSecondary)
+                    }
+                }
+                Hairline()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var workContent: some View {
+        if let work, let error = work.error {
+            Card {
+                CardRow {
+                    Text(error).bodyText(14, Theme.inkSecondary)
+                } trailing: {
+                    Button("Retry") { work.refresh() }.buttonStyle(.compact)
+                }
+            }
+        } else if let work, let snapshot = work.snapshot, snapshot.personId == personId {
+            VStack(alignment: .leading, spacing: 0) {
+                switch snapshot.identityStatus {
+                case .unavailable:
+                    Card { CardLine("This person is no longer available.") }
+                case .merged:
+                    Card {
+                        CardRow {
+                            Text("This person was merged.").bodyText(14, Theme.inkSecondary)
+                        } trailing: {
+                            if let id = snapshot.canonicalPersonId {
+                                Button("Open current person") { model.openPerson(id) }.buttonStyle(.compact)
+                            }
+                        }
+                    }
+                case .available:
+                    selectedTasks(snapshot.tasks, refresh: work.refresh, loading: work.loading)
+                    linkedWorkConversations(snapshot.conversations)
+                }
+            }
+        } else {
+            PersonRowsPlaceholder(rows: 2)
+        }
+    }
+
+    private func selectedTasks(_ rows: [PersonWorkTask], refresh: @escaping () -> Void, loading: Bool) -> some View {
+        PageSection("Tasks you selected") {
+            Card {
+                if rows.isEmpty {
+                    CardLine("No tasks selected for this person.")
+                } else {
+                    ForEach(rows) { row in
+                        CardRow(action: { model.openProject(row.project.id) }) {
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                WorkStatusIcon(status: row.task.status, size: 12)
+                                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(row.task.title).bodyText(14)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text(taskFacts(row)).metaText().monospacedDigit().lineLimit(1)
+                                }
+                            }
+                        } trailing: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.inkTertiary)
+                                .accessibilityHidden(true)
+                        }
+                        .accessibilityLabel("\(row.task.title), \(row.task.status.label), private task selected by you. Open project \(row.project.title)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// "Launch · Beta milestone · In progress · Due 4 Nov".
+    private func taskFacts(_ row: PersonWorkTask) -> String {
+        [row.project.title, row.milestone?.title, row.task.status.label, row.task.dueAtMs.map { "Due \(PlanningFormat.date($0))" }]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+
+    private func linkedWorkConversations(_ rows: [PersonWorkConversation]) -> some View {
+        PageSection("Confirmed conversation context") {
+            Card {
+                if rows.isEmpty {
+                    CardLine("No confirmed conversations linked to projects.")
+                } else {
+                    ForEach(rows) { row in
+                        CardRow {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Button { openWorkConversation(row) } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Text(row.meetingTitle).font(TypeScale.body(14)).foregroundStyle(Theme.accent)
+                                            .lineLimit(1)
+                                        let moment = row.meetingStartedAtMs.map {
+                                            PeopleFormat.moment(PeopleFormat.date($0))
+                                        }
+                                        let detail = [moment, row.timestamp].compactMap { $0 }.joined(separator: " · ")
+                                        if !detail.isEmpty {
+                                            Text(detail).metaText().monospacedDigit().lineLimit(1).layoutPriority(1)
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.quiet)
+                                .accessibilityLabel("Open conversation \(row.meetingTitle)\(row.timestamp.map { " at \($0)" } ?? "")")
+                                HStack(spacing: 6) {
+                                    if row.targetKind != .project {
+                                        Text(row.targetTitle).metaText(Theme.inkSecondary).lineLimit(1)
+                                        Text("·").metaText()
+                                    }
+                                    Button { model.openProject(row.project.id) } label: {
+                                        Text("\(row.project.title) · \(row.project.status.label)")
+                                            .font(TypeScale.body(12))
+                                            .lineLimit(1)
+                                    }
+                                    .buttonStyle(QuietButton(color: Theme.accent))
+                                    .accessibilityLabel("Open project \(row.project.title)")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func openWorkConversation(_ row: PersonWorkConversation) {
+        if let atMs = row.atMs, let offset = UInt64(exactly: atMs), let openContribution {
+            openContribution(row.meetingId, offset)
+        } else {
+            openMeeting(row.meetingId)
+        }
+    }
+
+    private func open(_ source: PersonMemorySource) {
+        if let meetingId = source.meetingId {
+            if let offset = source.startOffsetNs, let openContribution {
+                openContribution(meetingId, offset / 1_000_000)
+            } else {
+                openMeeting(meetingId)
+            }
+        } else if let url = URL(string: source.link) {
+            model.open(url: url)
+        }
+    }
+
+    private func emptyHistory(_ filter: PersonHistoryFilter) -> String {
+        switch filter {
+        case .all: "No linked history yet."
+        case .conversations: "No linked conversations."
+        case .contributions: "No attributed words."
+        case .notes: "No related notes."
+        case .commitments: "No sourced commitments."
+        }
+    }
+}
+
+/// One way to narrow the history, with how many rows it keeps.
+private struct PersonFilterChip: View {
+    let title: String
+    let count: Int
+    let on: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title).foregroundStyle(on ? Theme.ink : Theme.inkSecondary)
+                Text("\(count)").foregroundStyle(Theme.inkTertiary).monospacedDigit()
+            }
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .background(on ? Theme.selection : hovering ? Theme.wash : .clear, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityLabel("\(title), \(count)")
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/// One line of a person's history: a mark for what kind it is, then the
+/// words and where they were said.
+struct PersonHistoryRow: View {
+    let entry: PersonHistoryEntry
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        CardRow {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 16)
+                    .accessibilityHidden(true)
+                Group {
+                    switch entry {
+                    case let .conversation(row):
+                        PersonMemoryConversationRow(row: row, open: open)
+                    case let .contribution(row):
+                        PersonMemoryContributionRow(row: row, open: open)
+                    case let .note(row):
+                        PersonMemoryNoteRow(row: row, open: open)
+                    case let .commitment(row):
+                        PersonMemoryCommitmentRow(row: row, open: open)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var icon: String {
+        switch entry {
+        case .conversation: "bubble.left.and.bubble.right"
+        case .contribution: "quote.opening"
+        case .note: "note.text"
+        case .commitment: "checkmark.circle"
+        }
+    }
+}
+
+/// Where something was said, on one line: the meeting, then the day and the
+/// moment in it. The line opens the meeting there.
+struct PersonMemorySourceButton: View {
+    let source: PersonMemorySource
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Button { open(source) } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(source.title).foregroundStyle(Theme.accent).lineLimit(1)
+                    Text([PeopleFormat.moment(source.at), source.timestamp].compactMap { $0 }.joined(separator: " · "))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                .font(TypeScale.body(12))
+            }
+            .buttonStyle(.quiet)
+            .accessibilityLabel("Open \(source.title)\(source.timestamp.map { " at \($0)" } ?? "")")
+            if source.transcriptAvailable == false {
+                Text("· Transcript unavailable").metaText().lineLimit(1)
+            } else if source.audioRetained == false {
+                Text("· Recording unavailable").metaText().lineLimit(1)
+            }
+        }
+    }
+}
+
+/// A conversation with this person: the meeting, and how sure the link is.
+struct PersonMemoryConversationRow: View {
+    let row: PersonMemoryConversation
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PersonMemorySourceButton(source: row.source, open: open)
+            if row.confidence == .suggested || (row.transcriptAvailable && row.attributedContributions == 0) {
+                HStack(spacing: 6) {
+                    if row.confidence == .suggested { Chip("Suggested link") }
+                    if row.transcriptAvailable && row.attributedContributions == 0 {
+                        Text("No attributed words").metaText()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct PersonMemoryPassageView: View {
+    let passage: PersonMemoryPassage
+    let open: (PersonMemorySource) -> Void
+    /// Off where every passage around it is this person's own.
+    var showsSpeaker = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if showsSpeaker {
+                Text(passage.speakerLabel).font(TypeScale.body(12)).foregroundStyle(Theme.inkSecondary)
+            }
+            Text(passage.correctedText ?? passage.rawText).bodyText(14).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if passage.correctedText != nil {
+                DisclosureGroup("Original transcript") {
+                    Text(passage.rawText).bodyText(13, Theme.inkSecondary).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(TypeScale.body(12))
+                .foregroundStyle(Theme.inkSecondary)
+            }
+            PersonMemorySourceButton(source: passage.source, open: open)
+        }
+    }
+}
+
+struct PersonMemoryContributionRow: View {
+    let row: PersonMemoryContribution
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if row.attribution == .recognized {
+                Chip("Recognized voice")
+            }
+            PersonMemoryPassageView(passage: row.passage, open: open, showsSpeaker: false)
+            if row.before != nil || row.after != nil {
+                DisclosureGroup("Surrounding dialogue") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if let before = row.before { PersonMemoryPassageView(passage: before, open: open) }
+                        PersonMemoryPassageView(passage: row.passage, open: open)
+                        if let after = row.after { PersonMemoryPassageView(passage: after, open: open) }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(TypeScale.body(12))
+                .foregroundStyle(Theme.inkSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct PersonMemoryNoteRow: View {
+    let row: PersonMemoryNote
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if row.includesAiSynthesis {
+                Chip("Includes AI synthesis")
+            }
+            Text(row.body).bodyText(14).lineLimit(5).textSelection(.enabled)
+            PersonMemorySourceButton(source: row.source, open: open)
+            if !row.directlyLinked, !row.relatedSources.isEmpty {
+                DisclosureGroup("From a linked conversation") {
+                    ForEach(row.relatedSources) { source in PersonMemorySourceButton(source: source, open: open) }
+                }
+                .font(TypeScale.body(12))
+                .foregroundStyle(Theme.inkSecondary)
+            }
+        }
+    }
+}
+
+struct PersonMemoryCommitmentRow: View {
+    let row: PersonMemoryCommitment
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(row.interpretation).bodyText(14).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(status) · \(relation) · AI interpretation").metaText().lineLimit(1)
+            DisclosureGroup("Evidence") {
+                ForEach(row.evidence, id: \.source.id) { passage in
+                    PersonMemoryPassageView(passage: passage, open: open).padding(.vertical, 6)
+                }
+            }
+            .font(TypeScale.body(12))
+            .foregroundStyle(Theme.inkSecondary)
+        }
+    }
+
+    private var relation: String {
+        switch row.relation {
+        case .explicitOwner: "Assigned to this person"
+        case .attributedSpeech: "From this person's words"
+        case .sharedConversation: "From a shared conversation"
+        }
+    }
+
+    private var status: String {
+        switch row.status {
+        case .open: "Open"
+        case .done: "Done"
+        case .dropped: "Dropped"
+        case .carried: "Carried forward"
+        }
+    }
+}
+
+struct PersonMemoryChangeRow: View {
+    let row: PersonMemoryChange
+    let open: (PersonMemorySource) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(row.title).headlineText()
+            Text(row.kind == .noteEdited ? "Note edited" : "Different wording · AI-matched topic, not a confirmed change")
+                .metaText(Theme.inkSecondary)
+            side(row.earlier, label: "Earlier")
+            side(row.later, label: "Later")
+            Hairline()
+        }
+    }
+
+    private func side(_ side: PersonMemoryComparisonSide, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(side.includesAiInterpretation
+                 ? "\(label) · includes AI interpretation"
+                 : side.source.kind == .transcript ? "\(label) · original transcript" : label)
+                .metaText(Theme.inkSecondary)
+            Text(side.text).bodyText(14).textSelection(.enabled)
+            PersonMemorySourceButton(source: side.source, open: open)
+        }
+    }
+}

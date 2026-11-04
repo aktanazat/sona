@@ -129,6 +129,87 @@ pub(crate) fn input_configuration_identity(name: &str) -> Option<[u64; 6]> {
     ])
 }
 
+/// Channels across a device's input streams, from its stream configuration
+/// alone. cpal's input checks build an input audio unit, which makes macOS ask
+/// for the microphone; this reads a property. `None` when CoreAudio refuses.
+pub(crate) fn input_channel_count(device_id: AudioObjectID) -> Option<u32> {
+    use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
+
+    let mut property = AudioObjectPropertyAddress {
+        mSelector: objc2_core_audio::kAudioDevicePropertyStreamConfiguration,
+        mScope: objc2_core_audio::kAudioObjectPropertyScopeInput,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut size: u32 = 0;
+    // SAFETY: `property` and `size` are live stack slots for this call.
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            device_id,
+            NonNull::from(&mut property),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let buffer_bytes = std::mem::size_of::<AudioBuffer>();
+    // Whole `AudioBuffer` slots give the variable-length list its alignment.
+    let empty = AudioBuffer {
+        mNumberChannels: 0,
+        mDataByteSize: 0,
+        mData: std::ptr::null_mut(),
+    };
+    let mut storage = vec![empty; usize::try_from(size).ok()?.div_ceil(buffer_bytes)];
+    let list = storage.as_mut_ptr().cast::<AudioBufferList>();
+    // `size` states the storage's byte length, and CoreAudio rewrites it with
+    // the bytes it filled.
+    // SAFETY: `storage` owns at least `size` bytes, aligned for the list.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&mut property),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::new(list)?.cast(),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let filled = usize::try_from(size).ok()?;
+    let header = std::mem::offset_of!(AudioBufferList, mBuffers);
+    if filled < header {
+        return None;
+    }
+    // SAFETY: CoreAudio filled the list's header.
+    let count = usize::try_from(unsafe { (*list).mNumberBuffers }).ok()?;
+    if header + count * buffer_bytes > filled {
+        return None;
+    }
+    // SAFETY: all `count` buffers lie within the bytes CoreAudio filled.
+    let buffers = unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::addr_of!((*list).mBuffers).cast::<AudioBuffer>(),
+            count,
+        )
+    };
+    buffers.iter().try_fold(0_u32, |total, buffer| {
+        total.checked_add(buffer.mNumberChannels)
+    })
+}
+
+/// The input channels of the first device with this name that has any: the
+/// device a by-name lookup in the input list resolves to.
+pub(crate) fn input_channel_count_named(name: &str) -> Option<u32> {
+    device_ids()?
+        .into_iter()
+        .filter(|id| device_name(*id).as_deref() == Some(name))
+        .find_map(|id| input_channel_count(id).filter(|channels| *channels > 0))
+}
+
 /// Whether a process outside Sona is playing sound right now.
 ///
 /// macOS 14.2 and later list the processes doing audio, each with its own
@@ -162,7 +243,7 @@ pub(crate) fn other_process_is_playing() -> Option<bool> {
 }
 
 /// Every device CoreAudio lists, or `None` when it refuses the query.
-fn device_ids() -> Option<Vec<AudioObjectID>> {
+pub(crate) fn device_ids() -> Option<Vec<AudioObjectID>> {
     let system = u32::try_from(kAudioObjectSystemObject).ok()?;
     object_list(system, kAudioHardwarePropertyDevices)
 }

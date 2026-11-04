@@ -2,7 +2,7 @@
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
-use crate::delivery::{self, DeliveryOutcome, DeliveryReceipt};
+use crate::delivery::{self, DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
 use crate::managers::audio::{AudioRecordingManager, InputLevel, RecordingStop};
 use crate::managers::history::{CaptureStatus, HistoryManager, NewRunReceipt};
 use crate::managers::model::ModelManager;
@@ -70,6 +70,31 @@ impl RecordingErrorEvent {
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct PasteErrorEvent {
     history_id: Option<i64>,
+}
+
+pub(crate) const DICTATION_DELIVERY_EVENT: &str = "dictation-delivery";
+
+/// `dictation-delivery`: where the words ended up once delivery returned,
+/// with no text and no history id. `pasted` is a write the operating system
+/// confirmed; `sent` is a paste or keystrokes Sona issued that nothing can
+/// acknowledge, which includes a backend that failed partway through.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum DictationDeliveryEvent {
+    Pasted,
+    Sent,
+}
+
+impl DictationDeliveryEvent {
+    /// Secure Event Input drops synthetic keys before an application sees them.
+    fn for_outcome(outcome: DeliveryOutcome) -> Option<Self> {
+        match outcome {
+            DeliveryOutcome::Delivered => Some(Self::Pasted),
+            DeliveryOutcome::DispatchedButUnconfirmed => Some(Self::Sent),
+            DeliveryOutcome::DispatchedUnderSecureInput
+            | DeliveryOutcome::DefinitelyNotDispatched => None,
+        }
+    }
 }
 
 /// `rewrite-skipped`: the mode asked for a rewrite and the words went out as
@@ -1257,6 +1282,10 @@ fn duration_ms(sample_count: usize) -> Option<u64> {
         .map(|samples| samples / u64::from(crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE))
 }
 
+fn recording_file_name(run: &RunPlan) -> String {
+    format!("sona-{}-{}.wav", chrono::Utc::now().timestamp(), run.run_id)
+}
+
 fn word_count(text: &str) -> Option<u64> {
     u64::try_from(text.split_whitespace().count()).ok()
 }
@@ -1278,7 +1307,7 @@ async fn persist_truncated_capture(
         let completed_pcm = share_completed_pcm(prefix_samples);
         let sample_count = completed_pcm.len();
         let duration_ms = duration_ms(sample_count);
-        let file_name = format!("sona-{}.wav", chrono::Utc::now().timestamp());
+        let file_name = recording_file_name(run);
         let wav_path = history.recordings_dir().join(&file_name);
         let wav_path_for_verify = wav_path.clone();
         let samples_for_wav = Arc::clone(&completed_pcm);
@@ -1328,13 +1357,33 @@ async fn persist_truncated_capture(
     );
 }
 
-/// Persist VAD-rejected microphone audio without sending it to an ASR engine.
-/// A silent recording can still be useful evidence when the user checks their
-/// input device, so History retains the verified WAV and an explicit receipt.
-fn remove_no_speech_wav(wav_path: &std::path::Path, reason: &str) {
+fn remove_recording(wav_path: &std::path::Path, reason: &str) {
     if let Err(error) = std::fs::remove_file(wav_path) {
         if error.kind() != std::io::ErrorKind::NotFound {
-            warn!("Could not remove {reason} no-speech WAV: {error}");
+            warn!("Could not remove {reason} recording: {error}");
+        }
+    }
+}
+
+struct UnclaimedRecording(Option<std::path::PathBuf>);
+
+impl UnclaimedRecording {
+    fn release(mut self) {
+        self.0 = None;
+    }
+
+    fn claimed_by(self, history_id: Option<i64>) -> Option<i64> {
+        if history_id.is_some() {
+            self.release();
+        }
+        history_id
+    }
+}
+
+impl Drop for UnclaimedRecording {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            remove_recording(path, "unclaimed");
         }
     }
 }
@@ -1352,6 +1401,9 @@ async fn rollback_cancelled_no_speech_history(
     }
 }
 
+/// Persist VAD-rejected microphone audio without sending it to an ASR engine.
+/// A silent recording can still be useful evidence when the user checks their
+/// input device, so History retains the verified WAV and an explicit receipt.
 async fn persist_no_speech_capture(
     history: &HistoryManager,
     recording: &AudioRecordingManager,
@@ -1362,7 +1414,7 @@ async fn persist_no_speech_capture(
 ) -> NoSpeechPersistence {
     let sample_count = samples.len();
     let duration_ms = duration_ms(sample_count);
-    let file_name = format!("sona-{}.wav", chrono::Utc::now().timestamp());
+    let file_name = recording_file_name(run);
     let wav_path = history.recordings_dir().join(&file_name);
     let wav_saved = if samples.is_empty() {
         false
@@ -1446,18 +1498,18 @@ async fn persist_no_speech_receipt(
     // A cancel can arrive while the blocking write or verification is pending.
     // Remove any partial file before reporting the terminal result.
     if recording.was_cancelled_since(cancel_generation) {
-        remove_no_speech_wav(&wav_path, "cancelled");
+        remove_recording(&wav_path, "cancelled no-speech");
         return NoSpeechPersistence::Cancelled;
     }
     if !wav_saved {
-        remove_no_speech_wav(&wav_path, "unverified");
+        remove_recording(&wav_path, "unverified no-speech");
         return NoSpeechPersistence::SaveFailed;
     }
 
     let Some(history_id) =
         PendingHistoryEntry::no_speech(file_name, run, duration_ms, true, level).save(history)
     else {
-        remove_no_speech_wav(&wav_path, "untracked");
+        remove_recording(&wav_path, "untracked no-speech");
         return if recording.was_cancelled_since(cancel_generation) {
             NoSpeechPersistence::Cancelled
         } else {
@@ -1949,8 +2001,9 @@ impl TranscribeAction {
                         let completed_pcm = share_completed_pcm(samples);
                         let sample_count = completed_pcm.len();
                         let duration_ms = duration_ms(sample_count);
-                        let file_name = format!("sona-{}.wav", chrono::Utc::now().timestamp());
+                        let file_name = recording_file_name(&run);
                         let wav_path = hm.recordings_dir().join(&file_name);
+                        let unclaimed = UnclaimedRecording(Some(wav_path.clone()));
                         let wav_path_for_verify = wav_path.clone();
                         let samples_for_wav = Arc::clone(&completed_pcm);
                         let wav_handle = tauri::async_runtime::spawn_blocking(move || {
@@ -2002,16 +2055,18 @@ impl TranscribeAction {
                             Ok(FrozenTranscript::HeldCloudUnavailable) => {
                                 // The complete PCM/WAV is retained, but no provider partial
                                 // or local substitute exists to paste or auto-submit.
-                                let history_id = PendingHistoryEntry::held_cloud_unavailable(
-                                    file_name,
-                                    &run,
-                                    CompletedCapture {
-                                        duration_ms,
-                                        has_audio: wav_saved,
-                                        level,
-                                    },
-                                )
-                                .save(&hm);
+                                let history_id = unclaimed.claimed_by(
+                                    PendingHistoryEntry::held_cloud_unavailable(
+                                        file_name,
+                                        &run,
+                                        CompletedCapture {
+                                            duration_ms,
+                                            has_audio: wav_saved,
+                                            level,
+                                        },
+                                    )
+                                    .save(&hm),
+                                );
                                 persist_delivery_attempt(
                                     &hm,
                                     history_id,
@@ -2050,6 +2105,7 @@ impl TranscribeAction {
                                     == CaptureVerdict::NoSpeech
                                 {
                                     debug!("Model confirmed the VAD-silent capture had no speech");
+                                    unclaimed.release();
                                     let persistence = persist_no_speech_receipt(
                                         &hm,
                                         &rm,
@@ -2120,7 +2176,7 @@ impl TranscribeAction {
                                 );
 
                                 if processed.final_text.is_empty() {
-                                    let history_id = history_entry.save(&hm);
+                                    let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     persist_delivery_attempt(
                                         &hm,
                                         history_id,
@@ -2133,7 +2189,7 @@ impl TranscribeAction {
                                     // Persist the text and content-free run receipt
                                     // before dispatch. The later delivery outcome is
                                     // an append-only child record.
-                                    let history_id = history_entry.save(&hm);
+                                    let history_id = unclaimed.claimed_by(history_entry.save(&hm));
                                     if let Some(event) = RewriteSkippedEvent::for_outcome(
                                         history_id,
                                         processed.rewrite,
@@ -2171,8 +2227,14 @@ impl TranscribeAction {
                                             final_text,
                                             &delivery_settings,
                                         );
-                                        if receipt.outcome
-                                            == DeliveryOutcome::DefinitelyNotDispatched
+                                        if let Some(event) =
+                                            DictationDeliveryEvent::for_outcome(receipt.outcome)
+                                        {
+                                            let _ = ah_clone.emit(DICTATION_DELIVERY_EVENT, event);
+                                        }
+                                        if receipt.method != DeliveryMethod::None
+                                            && receipt.outcome
+                                                == DeliveryOutcome::DefinitelyNotDispatched
                                         {
                                             let _ = ah_clone.emit(
                                                 "paste-error",
@@ -2222,17 +2284,19 @@ impl TranscribeAction {
                                     "transcription-error",
                                     TRANSCRIPTION_FAILURE_EVENT_MESSAGE,
                                 );
-                                let history_id = PendingHistoryEntry::failed(
-                                    file_name,
-                                    post_process,
-                                    &run,
-                                    CompletedCapture {
-                                        duration_ms,
-                                        has_audio: wav_saved,
-                                        level,
-                                    },
-                                )
-                                .save(&hm);
+                                let history_id = unclaimed.claimed_by(
+                                    PendingHistoryEntry::failed(
+                                        file_name,
+                                        post_process,
+                                        &run,
+                                        CompletedCapture {
+                                            duration_ms,
+                                            has_audio: wav_saved,
+                                            level,
+                                        },
+                                    )
+                                    .save(&hm),
+                                );
                                 persist_delivery_attempt(
                                     &hm,
                                     history_id,

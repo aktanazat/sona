@@ -55,7 +55,7 @@ struct CloudSyncView: View {
             Card {
                 CardRow {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(store.accountStatus.word).bodyText(15, store.accountStatus.tone)
+                        Text(store.accountStatus.word).bodyText(14, store.accountStatus.tone)
                         Text(store.service?.reason ?? "Reading this device's configuration…").metaText()
                     }
                 } trailing: {
@@ -75,7 +75,7 @@ struct CloudSyncView: View {
                 if let kind = store.overview?.terminalError {
                     CardRow {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Needs attention").bodyText(15, Theme.live)
+                            Text("Needs attention").bodyText(14, Theme.live)
                             Text(kind.guidance).metaText()
                         }
                     }
@@ -448,7 +448,7 @@ private struct CloudShareList: View {
                     .padding(.vertical, 8)
                     .accessibilityElement(children: .combine)
                     if share.id != shares.last?.id {
-                        Divider().overlay(Theme.hairline)
+                        Hairline()
                     }
                 }
             }
@@ -567,9 +567,9 @@ private struct PairingOfferCard: View {
                     .disabled(busy)
             }
         }
-        .padding(20)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
         .task(id: offer) {
             let text = offer.json
             payload = text
@@ -693,10 +693,10 @@ private struct CloudSyncBlock<Content: View>: View {
             }
             content()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -708,10 +708,10 @@ private struct CloudSyncTaskAction<Content: View>: View {
         HStack(spacing: 12) {
             content()
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .trailing)
-        .overlay(alignment: .bottom) { Hairline() }
+        .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -729,10 +729,10 @@ private struct CloudSyncNote: View {
         Text(text)
             .metaText(tone)
             .textSelection(.enabled)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .bottom) { Hairline() }
+            .overlay(alignment: .bottom) { Hairline().padding(.horizontal, 16) }
     }
 }
 
@@ -789,7 +789,7 @@ private struct CloudSyncSecretField: View {
             .font(TypeScale.body())
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, 12)
-            .frame(height: 36)
+            .frame(height: 32)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusControl).strokeBorder(Theme.border, lineWidth: 1))
     }

@@ -10,6 +10,17 @@
 //! command failure reaches the screen as one plain sentence; the SQLite
 //! message, which can name a path or a bound value, goes to the log.
 
+pub mod evidence;
+pub mod links;
+pub(crate) mod memory_index;
+pub mod passages;
+pub mod phone_import;
+pub mod review;
+pub mod subjects;
+pub mod synthesis;
+
+pub use links::ScratchNoteMemory;
+
 use crate::managers::history::HistoryManager;
 use anyhow::Result;
 use log::error;
@@ -23,6 +34,9 @@ use uuid::Uuid;
 
 /// How many saved states one note keeps. The oldest goes when a new one lands.
 pub const MAX_VERSIONS_PER_NOTE: usize = 50;
+
+pub const RECENT_MIGRATION: &str =
+    "CREATE INDEX scratch_notes_recent ON scratch_notes(updated_at_ms DESC, id);";
 
 /// Saves closer together than this fold into the newest version instead of
 /// each becoming one: an autosave fires after every pause in typing, and a
@@ -64,6 +78,7 @@ pub enum ScratchVersionKind {
     Edit,
     /// An earlier version put back.
     Restore,
+    Synthesis,
 }
 
 impl ScratchVersionKind {
@@ -71,12 +86,14 @@ impl ScratchVersionKind {
         match self {
             Self::Edit => "edit",
             Self::Restore => "restore",
+            Self::Synthesis => "synthesis",
         }
     }
 
     fn from_stored(value: &str) -> Self {
         match value {
             "restore" => Self::Restore,
+            "synthesis" => Self::Synthesis,
             _ => Self::Edit,
         }
     }
@@ -490,6 +507,103 @@ pub fn read_note(app: &AppHandle, id: &str) -> Result<Option<ScratchNote>, Strin
     .map_err(|error| failure_sentence(&history, error, "Your notes could not be read."))
 }
 
+pub(crate) fn read_note_with_sources(
+    history: &HistoryManager,
+    store: &crate::meeting::store::MeetingStore,
+    id: &str,
+) -> Result<Option<ScratchNoteMemory>, String> {
+    links::read_memory(history, Some(store), id)
+}
+
+pub(crate) fn read_versions(
+    history: &HistoryManager,
+    id: &str,
+) -> Result<Option<Vec<ScratchNoteVersion>>, String> {
+    run(history, |conn| {
+        if note_with_connection(conn, id)?.is_none() {
+            return Ok(None);
+        }
+        versions_with_connection(conn, id).map(Some)
+    })
+    .map_err(|error| failure_sentence(history, error, "The note's history could not be read."))
+}
+
+pub(crate) fn search_notes(
+    history: &HistoryManager,
+    query: &str,
+    before_ms: Option<i64>,
+    limit: usize,
+) -> Result<Vec<ScratchNote>, String> {
+    search_notes_after(history, query, before_ms, None, limit)
+}
+
+pub(crate) fn search_notes_after(
+    history: &HistoryManager,
+    query: &str,
+    before_ms: Option<i64>,
+    after_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ScratchNote>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    history
+        .with_connection(|conn| {
+            let words = query
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>();
+            let mut statement = conn.prepare(&format!(
+                "SELECT {NOTE_COLUMNS} FROM scratch_notes
+             WHERE (?1 IS NULL OR updated_at_ms <= ?1)
+               AND (?2 IS NULL OR updated_at_ms != ?1 OR id > ?2)
+             ORDER BY updated_at_ms DESC, id"
+            ))?;
+            let mut notes = Vec::new();
+            let mut rows = statement.query(params![before_ms, after_id])?;
+            while let Some(row) = rows.next()? {
+                let note = read_note_row(row)?;
+                let haystack = format!("{} {}", note.title, note.body).to_lowercase();
+                if words.iter().all(|word| haystack.contains(word)) {
+                    notes.push(note);
+                    if notes.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            Ok(notes)
+        })
+        .map_err(|_| "Notes could not be read.".to_string())
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ScratchNoteStatistics {
+    pub notes: u64,
+    pub pinned: u64,
+    pub saved_versions: u64,
+    pub characters: u64,
+}
+
+pub(crate) fn note_statistics(history: &HistoryManager) -> Result<ScratchNoteStatistics, String> {
+    history
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT count(*), coalesce(sum(pinned), 0), coalesce(sum(length(body)), 0),
+             (SELECT count(*) FROM scratch_note_versions) FROM scratch_notes",
+                [],
+                |row| {
+                    Ok(ScratchNoteStatistics {
+                        notes: row.get(0)?,
+                        pinned: row.get(1)?,
+                        characters: row.get(2)?,
+                        saved_versions: row.get(3)?,
+                    })
+                },
+            )?)
+        })
+        .map_err(|_| "Note statistics could not be read.".to_string())
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 pub fn scratchpad_list(
@@ -501,6 +615,26 @@ pub fn scratchpad_list(
             .map_err(ScratchpadError::Storage)
     })
     .map_err(|error| failure_sentence(&history, error, "Your notes could not be read."))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn scratchpad_recent(
+    history: State<'_, Arc<HistoryManager>>,
+    limit: Option<u32>,
+) -> Result<Vec<ScratchNote>, String> {
+    let limit = limit.unwrap_or(8).clamp(1, 100);
+    history
+        .with_connection(|conn| {
+            let mut statement = conn.prepare(&format!(
+                "SELECT {NOTE_COLUMNS} FROM scratch_notes ORDER BY updated_at_ms DESC, id LIMIT ?1"
+            ))?;
+            let notes = statement
+                .query_map(params![limit], read_note_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(notes)
+        })
+        .map_err(|_| "Your recent notes could not be read.".to_string())
 }
 
 #[tauri::command(async)]
@@ -562,15 +696,31 @@ pub fn scratchpad_set_pinned(
     Ok(note)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 #[specta::specta]
-pub fn scratchpad_delete(
+pub async fn scratchpad_delete(
     app: AppHandle,
     history: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<crate::meeting::session::MeetingSessionManager>>,
     id: String,
 ) -> Result<(), String> {
-    run(&history, |conn| delete_note_with_connection(conn, &id))
-        .map_err(|error| failure_sentence(&history, error, "The note could not be deleted."))?;
+    use crate::meeting::store::note_evidence::{NoteEvidenceError, NoteEvidenceRemoval};
+
+    let note_id = Uuid::parse_str(&id).map_err(|_| "This note no longer exists.".to_string())?;
+    let store = meetings
+        .store()
+        .await
+        .map_err(|_| "Conversations are still unlocking.".to_string())?;
+    store
+        .remove_note_evidence(NoteEvidenceRemoval::Note(note_id), || {
+            run(&history, |conn| delete_note_with_connection(conn, &id)).map_err(|error| {
+                failure_sentence(&history, error, "The note could not be deleted.")
+            })
+        })
+        .map_err(|error| match error {
+            NoteEvidenceError::Persist(error) => error,
+            NoteEvidenceError::Store(_) => "The note could not be deleted.".to_string(),
+        })?;
     emit_changed(&app, &id, true);
     Ok(())
 }
