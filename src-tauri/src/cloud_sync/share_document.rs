@@ -472,6 +472,7 @@ mod tests {
                 preflight_local_processing: None,
                 retention_deadline_utc_ms: None,
                 transcript_purged_at_utc_ms: None,
+                audio_purged_at_utc_ms: None,
                 allowed_actions: vec![AllowedMeetingAction::Export],
             },
             tracks: Vec::new(),

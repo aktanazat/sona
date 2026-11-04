@@ -714,10 +714,12 @@ pub struct MeetingRetentionSnapshot {
     pub revision: u64,
 }
 
-/// Independent of whole-meeting retention. The timestamp moves only when
-/// deletion is enabled or its horizon is shortened, preserving the seven-day notice.
+/// A deletion policy for one part of every meeting: its transcript, or its
+/// audio. Independent of whole-meeting retention. The timestamp moves only
+/// when deletion is enabled or its horizon is shortened, preserving the
+/// seven-day notice.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
-pub struct MeetingTranscriptRetentionSnapshot {
+pub struct MeetingPartRetentionSnapshot {
     pub policy: MeetingRetentionPolicy,
     pub revision: u64,
     pub changed_at_utc_ms: i64,
@@ -725,9 +727,9 @@ pub struct MeetingTranscriptRetentionSnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
-pub struct MeetingTranscriptRetentionMutationResult {
+pub struct MeetingPartRetentionMutationResult {
     pub receipt: OperationReceipt,
-    pub snapshot: MeetingTranscriptRetentionSnapshot,
+    pub snapshot: MeetingPartRetentionSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -784,6 +786,7 @@ pub enum MeetingCommandKind {
     Delete,
     RetentionSet,
     TranscriptRetentionSet,
+    AudioRetentionSet,
     RemoteCancel,
     LoopResolve,
     LoopReopen,
@@ -910,6 +913,10 @@ pub struct MeetingSessionSnapshot {
     pub retention_deadline_utc_ms: Option<i64>,
     #[serde(default)]
     pub transcript_purged_at_utc_ms: Option<i64>,
+    /// When the audio retention policy deleted this meeting's recording. The
+    /// words, notes and everything else stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_purged_at_utc_ms: Option<i64>,
     pub allowed_actions: Vec<AllowedMeetingAction>,
 }
 

@@ -91,6 +91,7 @@ pub async fn conversation_audio_retained(
         .session_snapshot(session_id)
         .map_err(map_store_error)?;
     Ok(session.transcript_purged_at_utc_ms.is_none()
+        && session.audio_purged_at_utc_ms.is_none()
         && session.phase != crate::meeting::types::MeetingPhase::Deleting)
 }
 

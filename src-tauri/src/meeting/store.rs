@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod artifact_trace_tests;
+mod audio_retention;
 pub(crate) mod automations;
 #[cfg(test)]
 mod automations_run_tests;
@@ -109,11 +110,11 @@ const MISSING_OFFSET: u64 = u64::MAX;
 
 /// How long a deleted meeting stays undoable.
 ///
-/// Thirty days, the same horizon as the default retention policy and the same
-/// one every desktop trash uses: long enough that "I deleted the wrong meeting"
-/// is recoverable after a holiday, short enough that deleting still means
-/// something. It is a constant rather than a setting because a bin whose depth
-/// is configurable is a second retention policy to explain.
+/// Thirty days, the horizon every desktop trash uses: long enough that "I
+/// deleted the wrong meeting" is recoverable after a holiday, short enough that
+/// deleting still means something. It is a constant rather than a setting
+/// because a bin whose depth is configurable is a second retention policy to
+/// explain.
 const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
 /// The three workflow tables, rebuilt around a widened allowed-value list.
@@ -1538,6 +1539,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/conversation_bookmark_kinds.sql")),
     M::up(include_str!("store/processing_speed.sql")),
     M::up(include_str!("store/transcript_relisten.sql")),
+    M::up(include_str!("store/audio_retention.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -2047,6 +2049,10 @@ struct LocalMeetingRestoreV2 {
     format_version: u8,
     meeting: cloud_bundle::CloudMeetingBundleV1,
     bookmarks: Vec<super::conversation_review::ConversationBookmark>,
+    /// Kept beside the bundle rather than in it: no cloud copy holds audio,
+    /// so only this Mac's undo needs to know it was deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_purged_at_utc_ms: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -4302,6 +4308,7 @@ impl MeetingStore {
             preflight_local_processing,
             retention_deadline_utc_ms: row.delete_after_utc_ms,
             transcript_purged_at_utc_ms: row.transcript_purged_at_utc_ms,
+            audio_purged_at_utc_ms: row.audio_purged_at_utc_ms,
             allowed_actions,
         })
     }
@@ -6344,6 +6351,7 @@ impl MeetingStore {
                     format_version: 2,
                     meeting: bundle,
                     bookmarks,
+                    audio_purged_at_utc_ms: current.audio_purged_at_utc_ms,
                 })
             }) {
                 Ok(bundle_json) => Some(bundle_json),
@@ -6591,13 +6599,16 @@ impl MeetingStore {
         if deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS) <= now_utc_ms {
             return Err(StoreError::NotFound);
         }
-        let (bundle, bookmarks) = match decode_json::<LocalMeetingRestore>(&bundle_json)? {
-            LocalMeetingRestore::V2(restore) if restore.format_version == 2 => {
-                (restore.meeting, restore.bookmarks)
-            }
-            LocalMeetingRestore::V2(_) => return Err(StoreError::Invalid),
-            LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new()),
-        };
+        let (bundle, bookmarks, audio_purged_at_utc_ms) =
+            match decode_json::<LocalMeetingRestore>(&bundle_json)? {
+                LocalMeetingRestore::V2(restore) if restore.format_version == 2 => (
+                    restore.meeting,
+                    restore.bookmarks,
+                    restore.audio_purged_at_utc_ms,
+                ),
+                LocalMeetingRestore::V2(_) => return Err(StoreError::Invalid),
+                LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new(), None),
+            };
         let session_id = bundle.session.session_id;
         {
             // Freeze deletion before moving files. A request already on the wire must
@@ -6627,6 +6638,13 @@ impl MeetingStore {
             fs::rename(&trash, &live)?;
         }
         self.import_cloud_meeting_bundle(&bundle)?;
+        if let Some(purged_at) = audio_purged_at_utc_ms {
+            self.connection()?.execute(
+                "UPDATE meeting_sessions SET audio_purged_at_utc_ms = ?2, audio_purge_pending = 1
+                 WHERE id = ?1",
+                params![id(session_id), purged_at],
+            )?;
+        }
         // The audio index is the one thing the bundle does not carry.
         self.repair_session_tracks(session_id)?;
         self.repair_session_snapshots(session_id)?;
@@ -7031,7 +7049,7 @@ impl MeetingStore {
     {
         {
             let connection = self.connection()?;
-            transcript_retention::require_retained_transcript_in(&connection, session_id)?;
+            audio_retention::require_retained_audio_in(&connection, session_id)?;
             let owner: String = connection.query_row(
                 "SELECT session_id FROM meeting_source_tracks WHERE track_id = ?1",
                 params![id(track_id)],
@@ -7171,9 +7189,8 @@ impl MeetingStore {
 
     fn repair_session_tracks(&self, session_id: MeetingSessionId) -> Result<(), StoreError> {
         let connection = self.connection()?;
-        if session_row(&connection, session_id)?
-            .transcript_purged_at_utc_ms
-            .is_some()
+        let session = session_row(&connection, session_id)?;
+        if session.transcript_purged_at_utc_ms.is_some() || session.audio_purged_at_utc_ms.is_some()
         {
             return Ok(());
         }
@@ -7585,6 +7602,7 @@ struct SessionRow {
     started_at_utc_ms: Option<i64>,
     delete_after_utc_ms: Option<i64>,
     transcript_purged_at_utc_ms: Option<i64>,
+    audio_purged_at_utc_ms: Option<i64>,
 }
 
 struct TrackRow {
@@ -7677,7 +7695,7 @@ fn session_row(
         .query_row(
             "SELECT phase, revision, title, preflight_json, processing_status,
                     retention_policy_json, started_at_utc_ms, delete_after_utc_ms,
-                    transcript_purged_at_utc_ms
+                    transcript_purged_at_utc_ms, audio_purged_at_utc_ms
              FROM meeting_sessions WHERE id = ?1",
             params![id(session_id)],
             |row| {
@@ -7693,6 +7711,7 @@ fn session_row(
                     started_at_utc_ms: row.get(6)?,
                     delete_after_utc_ms: row.get(7)?,
                     transcript_purged_at_utc_ms: row.get(8)?,
+                    audio_purged_at_utc_ms: row.get(9)?,
                 })
             },
         )

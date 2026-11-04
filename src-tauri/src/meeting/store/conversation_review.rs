@@ -31,7 +31,7 @@ impl MeetingStore {
     ) -> Result<ConversationAudioClip, StoreError> {
         let (track_id, contribution_start, contribution_end, tracks) = {
             let connection = self.connection()?;
-            super::transcript_retention::require_retained_transcript_in(&connection, session_id)?;
+            super::audio_retention::require_retained_audio_in(&connection, session_id)?;
             let session = session_row(&connection, session_id)?;
             if session.phase == MeetingPhase::Deleting {
                 return Err(StoreError::NotFound);
@@ -92,10 +92,7 @@ impl MeetingStore {
         {
             let descriptors = {
                 let connection = self.connection()?;
-                super::transcript_retention::require_retained_transcript_in(
-                    &connection,
-                    session_id,
-                )?;
+                super::audio_retention::require_retained_audio_in(&connection, session_id)?;
                 let mut query = connection.prepare(
                     "SELECT source_sequence, source_epoch, start_offset_ns, duration_ns,
                             frame_count, record_offset_bytes, record_bytes
@@ -150,7 +147,10 @@ impl MeetingStore {
                 mix_record(&record, start, end, &mut mixed, &mut coverage)?;
             }
         }
-        self.require_retained_transcript(session_id)?;
+        {
+            let connection = self.connection()?;
+            super::audio_retention::require_retained_audio_in(&connection, session_id)?;
+        }
         if (segment_id.is_some() && !(contribution_present || start >= contribution_end))
             || !coverage.iter().any(|count| *count > 0)
         {

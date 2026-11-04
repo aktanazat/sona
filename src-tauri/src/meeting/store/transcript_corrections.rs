@@ -743,6 +743,7 @@ pub(crate) fn audio_retained_in(
             JOIN meeting_track_records record ON record.track_id = segment.track_id
             WHERE segment.segment_id = ?1 AND session.id = ?2
               AND session.transcript_purged_at_utc_ms IS NULL AND session.phase != 'deleting'
+              AND session.audio_purged_at_utc_ms IS NULL
               AND record.start_offset_ns < segment.end_offset_ns
               AND record.start_offset_ns + record.duration_ns > segment.start_offset_ns
         )",

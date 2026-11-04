@@ -667,7 +667,7 @@ pub async fn meeting_retention_set(
 #[specta::specta]
 pub async fn meeting_transcript_retention_get(
     manager: State<'_, Arc<MeetingSessionManager>>,
-) -> Result<MeetingTranscriptRetentionSnapshot, MeetingCommandError> {
+) -> Result<MeetingPartRetentionSnapshot, MeetingCommandError> {
     manager.transcript_retention_get().await
 }
 
@@ -676,8 +676,25 @@ pub async fn meeting_transcript_retention_get(
 pub async fn meeting_transcript_retention_set(
     manager: State<'_, Arc<MeetingSessionManager>>,
     request: MeetingRetentionSetRequest,
-) -> Result<MeetingTranscriptRetentionMutationResult, MeetingCommandError> {
+) -> Result<MeetingPartRetentionMutationResult, MeetingCommandError> {
     manager.transcript_retention_set(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_audio_retention_get(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+) -> Result<MeetingPartRetentionSnapshot, MeetingCommandError> {
+    manager.audio_retention_get().await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_audio_retention_set(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: MeetingRetentionSetRequest,
+) -> Result<MeetingPartRetentionMutationResult, MeetingCommandError> {
+    manager.audio_retention_set(request).await
 }
 
 #[tauri::command]
