@@ -253,6 +253,7 @@ fn build_swift_capture_bridges() {
     build_capture_bridge("swift/meeting_snapshot.swift", "meeting_snapshot");
     build_capture_bridge("swift/call_chat.swift", "call_chat");
     build_capture_bridge("swift/call_roster.swift", "call_roster");
+    build_capture_bridge("swift/microphone_access.swift", "microphone_access");
     for framework in [
         "ScreenCaptureKit",
         "AVFoundation",

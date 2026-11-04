@@ -1162,6 +1162,14 @@ impl AudioRecordingManager {
             started.elapsed()
         };
 
+        if !crate::audio_toolkit::audio::microphone_authorized() {
+            debug!(
+                "mic prewarm: vad_load={:?}, device probe skipped without microphone access",
+                vad_elapsed
+            );
+            return;
+        }
+
         let _span = crate::launch_trace::span("mic_prewarm");
         let settings = get_settings(&self.app_handle);
         let resolve_started = Instant::now();

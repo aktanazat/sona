@@ -1093,10 +1093,21 @@ impl AudioRecorder {
         )
     }
 
+    /// cpal's config query builds an input audio unit, which makes macOS ask
+    /// for the microphone, so it runs only once access is already allowed.
     pub(crate) fn preferred_input_channel_count(
         cache: &InputConfigCache,
         device: &cpal::Device,
     ) -> Result<u16, Box<dyn std::error::Error>> {
+        if let Some(channels) = listed_input_channels(device) {
+            return Ok(channels);
+        }
+        if !super::microphone_authorized() {
+            return Err(Box::new(Error::new(
+                std::io::ErrorKind::NotFound,
+                "CoreAudio lists no input channels for this microphone",
+            )));
+        }
         let (name, identity) = device_configuration_key(device);
         Ok(cache
             .get_or_query_with_identity(&name, identity, || {
@@ -1253,6 +1264,18 @@ fn is_bluetooth_input(device_name: &str) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn is_bluetooth_input(_device_name: &str) -> bool {
     false
+}
+
+/// The input's channel count as CoreAudio's stream configuration lists it.
+#[cfg(target_os = "macos")]
+fn listed_input_channels(device: &Device) -> Option<u16> {
+    let channels = super::core_audio::input_channel_count_named(&device.name().ok()?)?;
+    u16::try_from(channels).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn listed_input_channels(_device: &Device) -> Option<u16> {
+    None
 }
 
 /// Plays silence to a Bluetooth headset for as long as its microphone is open.
