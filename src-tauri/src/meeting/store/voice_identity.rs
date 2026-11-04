@@ -1081,7 +1081,7 @@ impl MeetingStore {
 /// `Unknown speaker` for system audio nobody separated. Anything else was
 /// typed by a person or chosen by them, and automatic matching never
 /// overwrites it.
-fn is_generated_speaker_label(name: &str) -> bool {
+pub(in crate::meeting::store) fn is_generated_speaker_label(name: &str) -> bool {
     name == "Unknown speaker"
         || name.strip_prefix("Speaker ").is_some_and(|number| {
             !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())

@@ -1,4 +1,5 @@
 use super::transcript_corrections::{audio_retained_in, confirmed_person_for_speaker_in};
+use super::voice_identity::is_generated_speaker_label;
 use super::{
     canonical_speaker_ids, from_i64, id, meeting_fts_match_query, parse_uuid, search_projection,
     speaker_assignment_from_db, speakers_for_session, to_sql_error, MeetingStore, StoreError,
@@ -40,9 +41,10 @@ impl MeetingStore {
     /// The transcript lines a search matches, best match first, each with
     /// who said it and whether its audio is still on this Mac.
     ///
-    /// A person is named only from a confirmed identification. A speaker
-    /// label automatic voice matching may have written is left out, because
-    /// it can carry a guessed name.
+    /// A person is named only from a confirmed identification. Any other
+    /// label is shown only when the store generated it ("Speaker 2"), because
+    /// automatic voice matching writes names into labels and nothing records
+    /// that once the match is gone.
     pub(crate) fn said_search(
         &self,
         query: &str,
@@ -194,16 +196,11 @@ impl SessionVoices {
                 }),
             None => None,
         };
-        let matched_by_voice: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM voice_speaker_matches WHERE speaker_id = ?1)",
-            params![id(speaker_id)],
-            |row| row.get(0),
-        )?;
-        let label = if person.is_none() && matched_by_voice {
-            None
-        } else {
-            self.labels.get(&speaker_id).cloned()
-        };
+        let label = self
+            .labels
+            .get(&speaker_id)
+            .filter(|label| person.is_some() || is_generated_speaker_label(label))
+            .cloned();
         let voice = Voice { label, person };
         self.voices.insert(speaker_id, voice.clone());
         Ok(voice)
@@ -288,39 +285,30 @@ mod tests {
     }
 
     #[test]
-    fn said_lines_name_only_confirmed_speakers_and_hide_guessed_labels() -> Result<(), StoreError> {
+    fn said_lines_name_only_confirmed_speakers_and_generated_labels() -> Result<(), StoreError> {
         let (_directory, store) = store();
         let confirmed = SpeakerId::new();
         let guessed = SpeakerId::new();
+        let unnamed = SpeakerId::new();
         let noah = person(&store, "Noah Reyes", &[], &[]);
-        let ada = person(&store, "Ada Lovelace", &[], &[]);
         let session_id = meeting_with_lines(
             &store,
             &[
                 (confirmed, "Noah", "I will confirm the budget by Friday."),
                 (guessed, "Ada Lovelace", "The budget stays on this Mac."),
+                (unnamed, "Speaker 3", "The budget needs one more pass."),
             ],
         )?;
-        {
-            let connection = store.connection()?;
-            connection.execute(
-                "INSERT INTO meeting_voice_speaker_resolutions (
-                    operation_id, speaker_id, resolution_kind, resolved_person_id, is_current
-                 ) VALUES (?1, ?2, 'identified', ?3, 1)",
-                params![Uuid::new_v4().to_string(), id(confirmed), id(noah)],
-            )?;
-            connection.execute(
-                "INSERT INTO voice_speaker_matches (
-                    speaker_id, session_id, person_id, profile_revision, speaker_revision,
-                    matched_at_utc_ms
-                 ) VALUES (?1, ?2, ?3, 1, 0, 1)",
-                params![id(guessed), id(session_id), id(ada)],
-            )?;
-        }
+        store.connection()?.execute(
+            "INSERT INTO meeting_voice_speaker_resolutions (
+                operation_id, speaker_id, resolution_kind, resolved_person_id, is_current
+             ) VALUES (?1, ?2, 'identified', ?3, 1)",
+            params![Uuid::new_v4().to_string(), id(confirmed), id(noah)],
+        )?;
 
         let moments = store.said_search("budget", 4)?;
 
-        assert_eq!(moments.len(), 2);
+        assert_eq!(moments.len(), 3);
         let said_by_noah = moments
             .iter()
             .find(|moment| moment.text.contains("Friday"))
@@ -342,6 +330,11 @@ mod tests {
         assert_eq!(said_by_guess.person, None);
         assert_eq!(said_by_guess.speaker_label, None);
         assert!(!said_by_guess.audio_retained);
+        let said_by_unnamed = moments
+            .iter()
+            .find(|moment| moment.text.contains("pass"))
+            .ok_or(StoreError::Corrupt)?;
+        assert_eq!(said_by_unnamed.speaker_label.as_deref(), Some("Speaker 3"));
         Ok(())
     }
 }
