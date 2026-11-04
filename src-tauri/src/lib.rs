@@ -1722,6 +1722,7 @@ pub fn run(cli_args: CliArgs) {
             commands::history::history_storage_status,
             commands::privacy::privacy_inventory,
             commands::meeting::meeting_suggestions_list,
+            commands::meeting::home_today,
             commands::meeting::meeting_preflight_create,
             commands::meeting::meeting_preflight_refresh,
             commands::meeting::meeting_preflight_cancel,

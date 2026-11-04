@@ -49,6 +49,7 @@ mod series_tests;
 mod snapshots;
 #[cfg(test)]
 mod title_tests;
+pub(crate) mod today;
 pub(crate) mod transcript_corrections;
 mod transcript_retention;
 pub(crate) mod voice_identity;

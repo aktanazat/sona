@@ -66,6 +66,11 @@ struct CaptureScreen: View {
                     withAnimation(Motion.settle(reduced: reduceMotion)) {
                         proxy.scrollTo(OverviewView.needsYouAnchor, anchor: .top)
                     }
+                },
+                showUpcoming: {
+                    withAnimation(Motion.settle(reduced: reduceMotion)) {
+                        proxy.scrollTo(OverviewView.upcomingAnchor, anchor: .top)
+                    }
                 })
         }
     }

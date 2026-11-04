@@ -28,9 +28,9 @@ use crate::meeting::loop_types::{
 };
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
-    ArtifactCitation, GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId,
-    MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationActor, OperationReceipt,
-    SourceKind,
+    ArtifactCitation, GeneratedMeetingArtifacts, MeetingActionItem, MeetingCommandKind,
+    MeetingOperationId, MeetingPhase, MeetingReasonCode, MeetingSessionId, OperationActor,
+    OperationReceipt, SourceKind,
 };
 use crate::meeting::workflow_types::WorkflowId;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -370,6 +370,8 @@ pub(crate) struct MeetingLedgerRows {
     /// never started.
     pub at_utc_ms: i64,
     pub rows: Vec<MeetingLoopRow>,
+    /// The notes pass's action items, where a commitment's due day lives.
+    pub action_items: Vec<MeetingActionItem>,
 }
 
 /// One corpus-wide ledger read: the rows a reader may have, and the one fact
@@ -434,6 +436,7 @@ pub(crate) fn ledger_rows_in(
                 session_id,
                 ledger_loop_seeds(session_id, &ledger),
             )?,
+            action_items: content.action_items,
         });
     }
     Ok(walked)

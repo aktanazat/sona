@@ -1,10 +1,12 @@
 use crate::analytics::DashboardTrendRequest;
+use crate::managers::history::HistoryManager;
 use crate::meeting::analytics::{
     KeywordTracker, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
     MeetingLiveHelp, MeetingLiveHelpKind, MeetingProvisionalTranscript, MeetingUserNotes,
 };
 use crate::meeting::call_silence::MeetingCallSilence;
 use crate::meeting::clock::host_monotonic_now_ns;
+use crate::meeting::detection::calendar::CalendarAccess;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
 use crate::meeting::series_types::{
@@ -22,8 +24,12 @@ use crate::meeting::session::{
     MeetingStartRequest, MeetingStopCause, MeetingStopSurface, MeetingTitleSetRequest,
     MeetingUserNotesSaveRequest,
 };
+use crate::meeting::store::today::{
+    HomeToday, TodayCount, TodayMeetings, TodayPerson, TodayStoreCounts,
+};
 use crate::meeting::suggestions::MeetingSuggestion;
 use crate::meeting::types::*;
+use crate::meeting::upcoming_types::MeetingUpcomingRow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
@@ -34,6 +40,71 @@ pub fn meeting_suggestions_list(
     manager: State<'_, Arc<MeetingSessionManager>>,
 ) -> Vec<MeetingSuggestion> {
     manager.suggestions_list(host_monotonic_now_ns())
+}
+
+/// Home's Today strip in one round trip: today's meetings, what is still
+/// processing, speakers nobody named, promises no project holds, and what the
+/// user owes. Each count answers on its own, and one whose source cannot be
+/// read says so rather than reading as zero.
+#[tauri::command]
+#[specta::specta]
+pub async fn home_today(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    detection: State<'_, Arc<DetectionRuntime>>,
+    history: State<'_, Arc<HistoryManager>>,
+) -> Result<HomeToday, MeetingCommandError> {
+    let meetings =
+        match crate::commands::upcoming::meeting_upcoming_events(manager.clone(), detection, 0)
+            .await
+        {
+            Ok(events) if events.access == CalendarAccess::Authorized => TodayCount::Available {
+                value: today_meetings(&events.rows),
+            },
+            Ok(events) => {
+                log::info!("home_today: calendar access is {:?}", events.access);
+                TodayCount::Unavailable
+            }
+            Err(error) => TodayCount::read("meetings", Err(error)),
+        };
+    let untracked = TodayCount::read(
+        "untracked",
+        crate::planning::untracked::tally(&history, &manager).await,
+    );
+    let counts = match manager.store().await {
+        Ok(store) => store.today_counts(chrono::Local::now().date_naive()),
+        Err(error) => {
+            log::warn!("home_today: meeting store unavailable: {error:?}");
+            TodayStoreCounts::UNAVAILABLE
+        }
+    };
+    Ok(HomeToday {
+        meetings,
+        processing: counts.processing,
+        unknown_speakers: counts.unknown_speakers,
+        untracked,
+        owed: counts.owed,
+    })
+}
+
+/// How many events today holds, and the first four distinct confirmed people
+/// in them other than the user.
+fn today_meetings(rows: &[MeetingUpcomingRow]) -> TodayMeetings {
+    let mut people: Vec<TodayPerson> = Vec::new();
+    for attendee in rows.iter().flat_map(|row| &row.attendees) {
+        let Some(person_id) = attendee.person_id.filter(|_| !attendee.is_self) else {
+            continue;
+        };
+        if people.len() < 4 && people.iter().all(|person| person.person_id != person_id) {
+            people.push(TodayPerson {
+                person_id,
+                name: attendee.name.clone(),
+            });
+        }
+    }
+    TodayMeetings {
+        count: u32::try_from(rows.len()).unwrap_or(u32::MAX),
+        people,
+    }
 }
 
 /// A start that names a calendar occurrence carries the occurrence in. The

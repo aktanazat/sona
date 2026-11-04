@@ -41,6 +41,9 @@ final class OverviewStore {
     private(set) var recentMeetings: FeedState<MeetingHistorySummary> = .loading
     private(set) var recentNotes: FeedState<ScratchNote> = .loading
     private(set) var upcoming: OverviewUpcoming?
+    /// The Today strip. Absent until the first answer, so it never draws
+    /// counts it has not read.
+    private(set) var today: HomeToday?
     private(set) var modes: CaptureModeSnapshot?
     private(set) var update: OverviewUpdate?
     /// Whether the update check has come back at all.
@@ -64,6 +67,9 @@ final class OverviewStore {
     @ObservationIgnored private var recentGeneration = 0
     /// The sleep until the first upcoming event ends.
     @ObservationIgnored private var upcomingWake: Task<Void, Never>?
+    /// The Today read waiting out a burst of meeting events.
+    @ObservationIgnored private var todayRefresh: Task<Void, Never>?
+    @ObservationIgnored private var todayGeneration = 0
 
     init(core: Core) {
         self.core = core
@@ -96,18 +102,21 @@ final class OverviewStore {
         core.observe(CoreEvent.overviewMeetingArtifactChanged) { [weak self] _ in
             guard let self else { return }
             self.refreshFeed()
+            self.refreshToday()
             Task { await self.loadMeetingTrend() }
             Task { await self.loadSuggestions() }
             Task { await self.loadRecent() }
         }
         core.observe(CoreEvent.meetingSessionChanged) { [weak self] _ in
             guard let self else { return }
+            self.refreshToday()
             Task { await self.loadMeetingTrend() }
             Task { await self.loadRecent() }
         }
         core.observe(CoreEvent.overviewMeetingRemoved) { [weak self] _ in
             guard let self else { return }
             self.refreshFeed()
+            self.refreshToday()
             Task { await self.loadMeetingTrend() }
             Task { await self.loadRecent() }
         }
@@ -124,6 +133,7 @@ final class OverviewStore {
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: nil
         ) { [weak self] _ in
             Task { await self?.loadUpcoming() }
+            Task { await self?.refreshToday() }
         }
     }
 
@@ -139,6 +149,7 @@ final class OverviewStore {
             Task { await self.loadUpcoming() },
             Task { await self.checkUpdate() },
             Task { await self.loadRecent() },
+            Task { await self.loadToday() },
         ]
         refreshFeed()
         for read in reads {
@@ -241,6 +252,31 @@ final class OverviewStore {
                 openLoops = .failed
             }
         }
+    }
+
+    /// One Today read for a burst of meeting events: a finishing meeting
+    /// sends several in a row, and each would otherwise be its own round trip.
+    func refreshToday() {
+        todayRefresh?.cancel()
+        todayRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await self?.loadToday()
+        }
+    }
+
+    /// A refusal of the whole read is every count unreadable, never zero.
+    private func loadToday() async {
+        todayGeneration += 1
+        let generation = todayGeneration
+        let answer: HomeToday
+        do {
+            answer = try await core.request("home_today")
+        } catch {
+            answer = .unavailable
+        }
+        guard generation == todayGeneration else { return }
+        today = answer
     }
 
     /// The recent conversations and notes. A list keeps what it showed until

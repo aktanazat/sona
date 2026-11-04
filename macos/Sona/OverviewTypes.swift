@@ -579,6 +579,71 @@ struct FeedLimitParams: Encodable {
     let limit: Int
 }
 
+/// One Today count, or the fact that its source could not be read. An
+/// unreadable source is never shown as zero.
+enum TodayCount<Value: Decodable & Equatable>: Decodable, Equatable {
+    case available(Value)
+    case unavailable
+
+    /// The count, or nil when its source could not be read.
+    var value: Value? {
+        if case let .available(value) = self { value } else { nil }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(String.self, forKey: .state) {
+        case "available": self = .available(try container.decode(Value.self, forKey: .value))
+        case "unavailable": self = .unavailable
+        case let state:
+            throw DecodingError.dataCorruptedError(
+                forKey: .state, in: container, debugDescription: "unknown count state \(state)")
+        }
+    }
+}
+
+/// Home's Today strip, read in one round trip.
+struct HomeToday: Decodable, Equatable {
+    struct Person: Decodable, Equatable {
+        let personId: String
+        let name: String
+    }
+
+    struct Meetings: Decodable, Equatable {
+        let count: Int
+        /// Up to four confirmed people on today's calendar.
+        let people: [Person]
+    }
+
+    /// A count across finished meetings, and the newest meeting holding one.
+    struct Tally: Decodable, Equatable {
+        let count: Int
+        let meetingId: MeetingSessionId?
+    }
+
+    struct Owed: Decodable, Equatable {
+        let count: Int
+        let oldestAtUtcMs: Int64?
+        /// Past a day their meeting's notes named.
+        let late: Int
+    }
+
+    let meetings: TodayCount<Meetings>
+    let processing: TodayCount<Int>
+    let unknownSpeakers: TodayCount<Tally>
+    let untracked: TodayCount<Tally>
+    let owed: TodayCount<Owed>
+
+    static let unavailable = HomeToday(
+        meetings: .unavailable, processing: .unavailable, unknownSpeakers: .unavailable,
+        untracked: .unavailable, owed: .unavailable)
+}
+
 /// Wall-clock milliseconds, as the meeting store keeps them, and how long ago
 /// that was in words.
 enum FeedClock {

@@ -11,6 +11,7 @@ use super::types::{EvidenceSourceKind, EvidenceTargetKind, PlanningTask, Project
 use crate::managers::history::HistoryManager;
 use crate::meeting::loop_types::{MeetingLoopKind, MeetingLoopRow, MeetingLoopStatus};
 use crate::meeting::session::MeetingSessionManager;
+use crate::meeting::store::today::{finished_meeting_ids, TodayTally};
 use crate::meeting::store::{loops, StoreError};
 use crate::meeting::types::MeetingSessionId;
 use anyhow::Result as StorageResult;
@@ -124,11 +125,49 @@ pub fn planning_restore_action(
     })
 }
 
+/// Home's "not tracked" count: the commitments across finished meetings that
+/// still wait to be tracked, and the newest meeting holding one.
+pub(crate) async fn tally(
+    history: &HistoryManager,
+    meetings: &MeetingSessionManager,
+) -> Result<TodayTally, String> {
+    super::with_sources(history, meetings, |history, meetings| {
+        tally_in(history, meetings)
+    })
+    .await
+}
+
+fn tally_in(history: &Connection, meetings: &Connection) -> StorageResult<TodayTally> {
+    let finished = finished_meeting_ids(meetings)
+        .map_err(|_| anyhow::anyhow!("finished meetings could not be read"))?;
+    let mut tally = TodayTally::default();
+    for session_id in finished {
+        let waiting = untracked_in(history, meetings, session_id)?.len();
+        if waiting == 0 {
+            continue;
+        }
+        tally.count = tally.count.saturating_add(u32::try_from(waiting)?);
+        tally.meeting_id.get_or_insert(session_id);
+    }
+    Ok(tally)
+}
+
 fn read(
     history: &Connection,
     meetings: &Connection,
     session_id: MeetingSessionId,
 ) -> StorageResult<UntrackedActions> {
+    Ok(UntrackedActions {
+        actions: untracked_in(history, meetings, session_id)?,
+        projects: store::projects_by_activity(history)?,
+    })
+}
+
+fn untracked_in(
+    history: &Connection,
+    meetings: &Connection,
+    session_id: MeetingSessionId,
+) -> StorageResult<Vec<MeetingLoopRow>> {
     let loops = loops::loops_in(meetings, session_id).map_err(|error| match error {
         StoreError::NotFound => anyhow::Error::from(Refusal::NotFound),
         _ => anyhow::anyhow!("meeting loops could not be read"),
@@ -146,10 +185,7 @@ fn read(
             actions.push(row);
         }
     }
-    Ok(UntrackedActions {
-        actions,
-        projects: store::projects_by_activity(history)?,
-    })
+    Ok(actions)
 }
 
 #[derive(Serialize)]

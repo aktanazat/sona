@@ -1,16 +1,18 @@
 import AppKit
 import SwiftUI
 
-/// Home under the dictation card, read top to bottom: six widgets, each the
-/// head of a place; everything that asks the reader a question; what is
-/// coming; the newest conversations and notes; what Sona did without being
-/// asked; and the dictation numbers in full.
+/// Home under the dictation card, read top to bottom: today's counts, six
+/// widgets, each the head of a place; everything that asks the reader a
+/// question; what is coming; the newest conversations and notes; what Sona did
+/// without being asked; and the dictation numbers in full.
 ///
 /// The card above it — the state word, the chord, the record control and the
 /// mode — belongs to the capture screen.
 struct OverviewView: View {
     /// Where the commitments widget scrolls to.
     static let needsYouAnchor = "overview-needs-you"
+    /// Where the Today strip's meetings count scrolls to.
+    static let upcomingAnchor = "overview-upcoming"
 
     let store: OverviewStore
     /// Opens a retained meeting named by an open loop or a receipt.
@@ -22,19 +24,194 @@ struct OverviewView: View {
     var series: OverviewSeriesActions?
     /// Brings the needs-you list into view. The page owns the scroll.
     var showNeedsYou: () -> Void = {}
+    /// Brings the calendar ahead into view.
+    var showUpcoming: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ErrorNote(store.error)
+            if let today = store.today {
+                OverviewTodayStrip(today: today, showUpcoming: showUpcoming, showNeedsYou: showNeedsYou)
+            }
             OverviewWidgets(store: store, showNeedsYou: showNeedsYou)
             OverviewNeedsYou(store: store, openMeeting: openMeeting)
                 .id(Self.needsYouAnchor)
             OverviewUpcomingSection(store: store, series: series)
+                .id(Self.upcomingAnchor)
             OverviewConversations(store: store)
             FeedRecentView(store: store, openMeeting: openMeeting, seeAll: openRunLog)
             OverviewStatsCard(store: store)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Today
+
+/// One row across the top of Home: what today holds and what is waiting, each
+/// a count that opens its list. A zero is left out; a count whose source could
+/// not be read says so instead of reading as zero.
+struct OverviewTodayStrip: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let today: HomeToday
+    let showUpcoming: () -> Void
+    let showNeedsYou: () -> Void
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let counters = counters(context.date)
+            if !counters.isEmpty {
+                HStack(spacing: 0) {
+                    ForEach(Array(counters.enumerated()), id: \.element.id) { index, counter in
+                        if index > 0 {
+                            Rectangle().fill(Theme.border).frame(width: 1, height: 20)
+                        }
+                        TodayCounterView(counter: counter, revision: model.people.photoRevision)
+                            .transition(.opacity)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(4)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).strokeBorder(Theme.border, lineWidth: 1))
+                .animation(Motion.settle(reduced: reduceMotion), value: counters.map(\.id))
+                .padding(.bottom, 12)
+            }
+        }
+    }
+
+    private func counters(_ now: Date) -> [TodayCounter] {
+        let meetings = today.meetings.value
+        let speakers = today.unknownSpeakers.value
+        let untracked = today.untracked.value
+        let owed = today.owed.value
+        let counters = [
+            TodayCounter(
+                id: "meetings", value: meetings?.count, label: meetings?.count == 1 ? "meeting" : "meetings",
+                name: "Meetings today", unreadable: "Calendar unavailable",
+                faces: (meetings?.people ?? []).map { AvatarFace(kind: .person($0.personId), name: $0.name) },
+                action: showUpcoming),
+            TodayCounter(
+                id: "processing", value: today.processing.value, label: "processing",
+                name: "Meetings processing",
+                action: {
+                    model.meetings.closeReview()
+                    model.meetings.choose(status: .processing)
+                    model.go(.meetings)
+                }),
+            TodayCounter(
+                id: "speakers", value: speakers?.count, label: "unnamed", name: "Speakers not named",
+                action: speakers?.meetingId.map(review)),
+            TodayCounter(
+                id: "untracked", value: untracked?.count, label: "untracked", name: "Promises not in a project",
+                action: untracked?.meetingId.map(review)),
+            TodayCounter(
+                id: "owed", value: owed?.count, label: "owed", name: "Promises you owe",
+                detail: owed?.oldestAtUtcMs.map { Self.age(since: $0, now: now) },
+                late: owed?.late ?? 0,
+                action: showNeedsYou),
+        ]
+        return counters.filter { $0.value != 0 }
+    }
+
+    /// A meeting's review, where its speakers are named and its promises
+    /// tracked.
+    private func review(_ meetingId: MeetingSessionId) -> () -> Void {
+        {
+            model.openMeeting(meetingId)
+            model.meetings.choose(tab: .review)
+        }
+    }
+
+    private static func age(since milliseconds: Int64, now: Date) -> String {
+        let calendar = Calendar.current
+        let days = calendar.dateComponents(
+            [.day], from: calendar.startOfDay(for: FeedClock.date(milliseconds)),
+            to: calendar.startOfDay(for: now)).day ?? 0
+        return days < 1 ? "oldest today" : days == 1 ? "oldest 1 day" : "oldest \(days) days"
+    }
+}
+
+/// One count on the Today strip. `value` is absent when its source could not
+/// be read.
+private struct TodayCounter: Identifiable {
+    let id: String
+    let value: Int?
+    let label: String
+    /// What the count is, in words, for the tooltip and VoiceOver.
+    let name: String
+    var unreadable = "Can't be read right now"
+    var faces: [AvatarFace] = []
+    var detail: String?
+    var late = 0
+    let action: (() -> Void)?
+
+    var help: String { value == nil ? "\(name): \(unreadable.lowercased())" : name }
+
+    var spoken: String {
+        guard let value else { return help }
+        return ["\(name): \(value)", detail, late > 0 ? "\(late) late" : nil]
+            .compactMap { $0 }.joined(separator: ", ")
+    }
+}
+
+private struct TodayCounterView: View {
+    let counter: TodayCounter
+    let revision: UInt64
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if counter.value != nil, let action = counter.action {
+            Button(action: action) { content }
+                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
+                .help(counter.help)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(counter.spoken)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { action() }
+        } else {
+            content
+                .help(counter.help)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(counter.spoken)
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(counter.value.map { "\($0)" } ?? "–")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(counter.value == nil ? Theme.inkTertiary : Theme.ink)
+                    .monospacedDigit()
+                    .contentTransition(reduceMotion ? .opacity : .numericText())
+                Text(counter.label).font(TypeScale.body(12)).foregroundStyle(Theme.inkSecondary)
+                if let detail = counter.detail {
+                    Text(detail).metaText()
+                }
+                if counter.late > 0 {
+                    Text("\(counter.late) late")
+                        .font(TypeScale.body(12))
+                        .foregroundStyle(Theme.live)
+                        .monospacedDigit()
+                        .contentTransition(reduceMotion ? .opacity : .numericText())
+                }
+            }
+            .lineLimit(1)
+            .animation(Motion.settle(reduced: reduceMotion), value: counter.value)
+            .animation(Motion.settle(reduced: reduceMotion), value: counter.late)
+            if !counter.faces.isEmpty {
+                AvatarStack(faces: counter.faces, size: 18, limit: 4, revision: revision)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.wash.opacity(hovering ? 1 : 0), in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
@@ -56,7 +233,7 @@ struct OverviewWidgets: View {
                 today(now)
                 recorded(week)
                 dictated(week)
-                commitments(now)
+                commitments()
                 overdue(now)
                 peopleMet(week)
             }
@@ -64,6 +241,8 @@ struct OverviewWidgets: View {
         .padding(.bottom, 28)
     }
 
+    /// Today's minutes and the next event. How many meetings today holds
+    /// leads the Today strip, so it is not counted twice here.
     private func today(_ now: Date) -> some View {
         let calendar = Calendar.current
         let recorded: [MeetingHistorySummary] = if case let .loaded(entries) = store.recentMeetings {
@@ -81,17 +260,10 @@ struct OverviewWidgets: View {
             DayStripBlock(id: "ahead:\($0.eventKey)", start: FeedClock.date($0.startUtcMs),
                           end: FeedClock.date($0.endUtcMs), recorded: false)
         }
-        let count = recorded.count + ahead.count
-        var caption: [String] = []
-        if !recorded.isEmpty {
-            let seconds = recorded.compactMap(\.recordedDuration).reduce(0, +)
-            caption.append(seconds > 0 ? "\(Int((seconds / 60).rounded(.up))) min recorded" : "\(recorded.count) recorded")
-        }
-        if let next = ahead.min(by: { $0.startUtcMs < $1.startUtcMs }) {
-            caption.append("next \(FeedClock.date(next.startUtcMs).formatted(date: .omitted, time: .shortened))")
-        }
-        return WidgetTile("Today", icon: "calendar", value: "\(count)", unit: count == 1 ? "meeting" : "meetings",
-                          caption: caption.isEmpty ? nil : caption.joined(separator: " · "),
+        let seconds = recorded.compactMap(\.recordedDuration).reduce(0, +)
+        let next = ahead.min(by: { $0.startUtcMs < $1.startUtcMs })
+        return WidgetTile("Today", icon: "calendar", value: "\(Int((seconds / 60).rounded(.up)))", unit: "min recorded",
+                          caption: next.map { "next \(FeedClock.date($0.startUtcMs).formatted(date: .omitted, time: .shortened))" },
                           action: { model.go(.meetings) }) {
             DayStrip(blocks: blocks, now: now)
         }
@@ -130,28 +302,18 @@ struct OverviewWidgets: View {
         }
     }
 
-    /// Every open promise, split by who owes it, with how long the oldest of
-    /// yours has waited: the one to do first.
-    private func commitments(_ now: Date) -> some View {
+    /// Every open promise, split by who owes it, and the oldest of yours. How
+    /// many are yours and how long the oldest has waited lead the Today strip.
+    private func commitments() -> some View {
         let loops: [FeedOpenLoop]? = if case let .loaded(entries) = store.openLoops { entries } else { nil }
         let count = loops?.count ?? 0
         let complete = count < OverviewStore.openLoopLimit
         let mine = complete ? (loops ?? []).filter { $0.direction == .mine } : []
         let theirs = complete ? (loops ?? []).filter { $0.direction == .waitingOn }.count : 0
         let oldest = mine.min { $0.raisedAtUtcMs < $1.raisedAtUtcMs }
-        var caption: [String] = []
-        if !mine.isEmpty { caption.append("\(mine.count) yours") }
-        if let oldest {
-            let calendar = Calendar.current
-            let days = calendar.dateComponents(
-                [.day], from: calendar.startOfDay(for: FeedClock.date(oldest.raisedAtUtcMs)),
-                to: calendar.startOfDay(for: now)).day ?? 0
-            caption.append(days < 1 ? "oldest today" : days == 1 ? "oldest 1 day" : "oldest \(days) days")
-        }
         return WidgetTile("Commitments", icon: "checklist",
                           value: loops == nil ? "–" : complete ? "\(count)" : "\(count)+",
                           unit: "open",
-                          caption: caption.isEmpty ? nil : caption.joined(separator: " · "),
                           action: count == 0 ? nil : showNeedsYou) {
             if count > 0, complete {
                 VStack(alignment: .leading, spacing: 6) {

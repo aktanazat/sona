@@ -2559,6 +2559,9 @@ pub(super) async fn call(
             })
             .await?
         }
+        "home_today" => {
+            reply(crate::commands::meeting::home_today(app.state(), app.state(), app.state()).await)
+        }
         "meeting_preflight_create" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;
