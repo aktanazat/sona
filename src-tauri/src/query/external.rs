@@ -915,8 +915,10 @@ pub struct ExternalPersonStats {
     pub open_loops: ExternalPersonOpenLoops,
     /// Confirmed meetings in each of the last 52 local weeks, oldest first;
     /// the last entry is the week holding `read_at_utc_ms`. Weeks start on
-    /// Monday. A meeting dated after the read counts nowhere.
-    pub weekly_counts: Vec<u32>,
+    /// Monday. A meeting dated after the read counts nowhere. A week that
+    /// ended before the corpus's first meeting is null: Sona was not
+    /// recording then.
+    pub weekly_counts: Vec<Option<u32>>,
     /// The median gap in days between the distinct local days of confirmed
     /// meetings, an even sample rounding up. Null under four such days.
     pub usual_gap_days: Option<u32>,
@@ -2122,6 +2124,9 @@ pub(crate) fn person_stats(
         .iter()
         .filter(|open| open.direction == MeetingLoopDirection::Mine)
         .count();
+    let earliest = store
+        .earliest_meeting_utc_ms()
+        .map_err(person_read_error(person_id))?;
     Ok(ExternalPersonStats {
         schema_version: QUERY_SCHEMA_VERSION,
         person_id: person_id.uuid(),
@@ -2146,7 +2151,7 @@ pub(crate) fn person_stats(
             i_owe: row_count(i_owe),
             owed_to_me: row_count(outstanding.len() - i_owe),
         },
-        weekly_counts: weekly_counts(&confirmed, now.date_naive()),
+        weekly_counts: weekly_counts(&confirmed, earliest.and_then(local_day), now.date_naive()),
         usual_gap_days: usual_gap_days(&confirmed),
     })
 }
@@ -2166,9 +2171,20 @@ fn week_start(day: NaiveDate) -> NaiveDate {
     day - Days::new(u64::from(day.weekday().num_days_from_monday()))
 }
 
-fn weekly_counts(meetings_utc_ms: &[i64], today: NaiveDate) -> Vec<u32> {
-    let mut counts = vec![0; PERSON_STATS_WEEKS];
+fn weekly_counts(
+    meetings_utc_ms: &[i64],
+    first_day: Option<NaiveDate>,
+    today: NaiveDate,
+) -> Vec<Option<u32>> {
     let this_week = week_start(today);
+    let first_week = first_day.map(week_start);
+    let mut counts = (0..PERSON_STATS_WEEKS)
+        .map(|index| {
+            let weeks_back = u64::try_from(PERSON_STATS_WEEKS - 1 - index).unwrap_or(u64::MAX);
+            let week = this_week - Days::new(weeks_back.saturating_mul(7));
+            first_week.filter(|first| week >= *first).map(|_| 0)
+        })
+        .collect::<Vec<_>>();
     for day in meetings_utc_ms.iter().copied().filter_map(local_day) {
         let weeks_back = (this_week - week_start(day)).num_days() / 7;
         let slot = usize::try_from(weeks_back)
@@ -2176,7 +2192,7 @@ fn weekly_counts(meetings_utc_ms: &[i64], today: NaiveDate) -> Vec<u32> {
             .and_then(|back| (PERSON_STATS_WEEKS - 1).checked_sub(back))
             .and_then(|index| counts.get_mut(index));
         if let Some(count) = slot {
-            *count += 1;
+            *count = Some(count.unwrap_or(0) + 1);
         }
     }
     counts
@@ -2693,16 +2709,18 @@ fn last_met(last_utc_ms: i64, now_utc_ms: i64) -> String {
 }
 
 /// One block character per week, scaled to the busiest week; a week with no
-/// meeting is a middle dot.
-fn week_strip(counts: &[u32]) -> String {
+/// meeting is a middle dot and a week before the corpus began is blank.
+fn week_strip(counts: &[Option<u32>]) -> String {
     const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let most = u64::from(counts.iter().copied().max().unwrap_or(0));
+    let most = u64::from(counts.iter().flatten().copied().max().unwrap_or(0));
     counts
         .iter()
         .map(|&count| {
-            if count == 0 {
-                return '·';
-            }
+            let count = match count {
+                None => return ' ',
+                Some(0) => return '·',
+                Some(count) => count,
+            };
             let level = (u64::from(count) * 8).div_ceil(most);
             usize::try_from(level - 1)
                 .ok()

@@ -282,7 +282,8 @@ share of the talking), `ledger_outcomes` (`landed`, `open`, `dropped`) and
 `usual_gap_days` are null when the corpus cannot supply them, never zero.
 `open_loops` counts open and carried loops as `i_owe` and `owed_to_me`.
 `weekly_counts` has 52 confirmed-meeting counts, oldest first, by local week
-starting Monday; the last is the week holding `read_at_utc_ms`.
+starting Monday; the last is the week holding `read_at_utc_ms`. A week
+before the corpus's first meeting is null, since Sona was not recording then.
 `usual_gap_days` is the median gap between distinct meeting days and needs at
 least four. No transcript text, titles or names; read the person for those.
 

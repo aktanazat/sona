@@ -48,6 +48,18 @@ impl MeetingStore {
         Ok(result)
     }
 
+    /// When the corpus's first meeting began, or none when it holds no
+    /// meetings: before it, Sona was not recording, so no week there has a
+    /// count of its own.
+    pub(crate) fn earliest_meeting_utc_ms(&self) -> Result<Option<i64>, StoreError> {
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "SELECT MIN(COALESCE(started_at_utc_ms, created_at_utc_ms)) FROM meeting_sessions",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn person_context(
         &self,
         person_ids: &[PersonId],

@@ -887,8 +887,8 @@ fn person_stats_are_the_person_pages_numbers() {
 
     let stats = person_stats(&corpus.store, corpus.person_id, now).unwrap();
 
-    let mut weekly_counts = vec![0; 52];
-    weekly_counts[49..].copy_from_slice(&[1, 1, 1]);
+    let mut weekly_counts = vec![None; 52];
+    weekly_counts[48..].copy_from_slice(&[Some(0), Some(1), Some(1), Some(1)]);
     let outcomes = detail
         .ledger_outcomes
         .expect("the pricing review has a ledger");
