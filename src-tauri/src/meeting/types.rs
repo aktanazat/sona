@@ -1,4 +1,4 @@
-use super::ledger::MeetingLedger;
+use super::ledger::{LedgerOutcomeCounts, MeetingLedger};
 use crate::analytics::DashboardTrendRange;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -1041,6 +1041,11 @@ pub struct MeetingHistorySummary {
     pub speaker_labels: Vec<String>,
     #[serde(default)]
     pub headline: MeetingHistoryHeadline,
+    /// Where the current ledger's substantive threads landed. `None` when
+    /// the meeting has no current ledger, which is not the same as a ledger
+    /// whose threads were all social.
+    #[serde(default)]
+    pub ledger_outcomes: Option<LedgerOutcomeCounts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

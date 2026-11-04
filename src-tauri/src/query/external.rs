@@ -3344,6 +3344,7 @@ mod tests {
             sources: Vec::new(),
             speaker_labels: Vec::new(),
             headline: MeetingHistoryHeadline::None,
+            ledger_outcomes: None,
         });
 
         let value = serde_json::to_value(row).expect("meeting row serializes");

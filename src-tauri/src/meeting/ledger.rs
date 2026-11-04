@@ -80,6 +80,37 @@ pub enum LedgerOutcome {
     Dropped,
 }
 
+/// The outcome bar on a meeting's row: its substantive threads by where
+/// they landed, and how many of them were choices and owned next steps.
+/// Social and admin threads stay out, as they do from the landed count.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct LedgerOutcomeCounts {
+    pub landed: u32,
+    pub open: u32,
+    pub dropped: u32,
+    pub decided: u32,
+    pub actions: u32,
+}
+
+impl LedgerOutcomeCounts {
+    pub fn tally(threads: impl IntoIterator<Item = (LedgerThreadState, bool)>) -> Self {
+        let mut counts = Self::default();
+        for (state, _) in threads.into_iter().filter(|(_, substantive)| *substantive) {
+            match state.outcome() {
+                LedgerOutcome::Landed => counts.landed += 1,
+                LedgerOutcome::Open => counts.open += 1,
+                LedgerOutcome::Dropped => counts.dropped += 1,
+            }
+            match state {
+                LedgerThreadState::Decided | LedgerThreadState::Agreed => counts.decided += 1,
+                LedgerThreadState::Action => counts.actions += 1,
+                _ => {}
+            }
+        }
+        counts
+    }
+}
+
 impl LedgerThreadState {
     pub const fn outcome(self) -> LedgerOutcome {
         match self {

@@ -67,6 +67,7 @@ use super::analytics::{
 };
 use super::capture::SessionClock;
 use super::cloud_bundle;
+use super::ledger::{LedgerOutcomeCounts, LedgerThreadState};
 use super::template_types::{NotesTemplate, NotesTemplateChoice};
 use super::types::*;
 use crate::analytics::{local_days_start_utc_ms, DashboardTrendRequest, LocalCalendarRange};
@@ -4427,7 +4428,8 @@ impl MeetingStore {
                       WHERE w.session_id = m.id AND w.end_offset_ns IS NOT NULL),
                     json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.headline'),
                     json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.summary.text'),
-                    m.current_transcript_revision_id IS NOT NULL
+                    m.current_transcript_revision_id IS NOT NULL,
+                    json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads')
              FROM meeting_sessions m
              WHERE m.phase != 'deleting'
                AND (?1 IS NULL OR m.created_at_utc_ms < ?1)
@@ -4459,6 +4461,7 @@ impl MeetingStore {
                     ledger_headline: row.get::<_, Option<String>>(6)?,
                     summary_text: row.get::<_, Option<String>>(7)?,
                     has_transcript: row.get::<_, i64>(8)? != 0,
+                    ledger_threads: row.get::<_, Option<String>>(9)?,
                 })
             },
         )?;
@@ -4490,6 +4493,15 @@ impl MeetingStore {
                     row.summary_text.as_deref(),
                     row.has_transcript,
                 )?,
+                ledger_outcomes: row
+                    .ledger_threads
+                    .as_deref()
+                    .and_then(|threads| decode_json::<Vec<ListedLedgerThread>>(threads).ok())
+                    .map(|threads| {
+                        LedgerOutcomeCounts::tally(
+                            threads.into_iter().map(|thread| (thread.state, thread.substantive)),
+                        )
+                    }),
             });
         }
         let has_more = entries.len() > page_size;
@@ -8065,6 +8077,14 @@ struct ListedSessionRow {
     ledger_headline: Option<String>,
     summary_text: Option<String>,
     has_transcript: bool,
+    ledger_threads: Option<String>,
+}
+
+/// The two fields of a stored ledger thread the outcome bar counts.
+#[derive(serde::Deserialize)]
+struct ListedLedgerThread {
+    state: LedgerThreadState,
+    substantive: bool,
 }
 
 /// The stored state each list filter selects. `processing_status` holds the
@@ -12964,6 +12984,75 @@ mod tests {
         assert_eq!(headline(words), MeetingHistoryHeadline::Words { words: 5 });
         // Nothing generated and nothing transcribed is not a zero word count.
         assert_eq!(headline(silent), MeetingHistoryHeadline::None);
+    }
+
+    #[test]
+    fn listed_outcomes_count_the_current_ledgers_substantive_threads() {
+        let (_directory, store) = store();
+        let today = local_noon_ms(Local::now().date_naive());
+        let counted = list_session(
+            &store,
+            today,
+            MeetingPhase::ReviewReady,
+            r#"{"kind":"succeeded"}"#,
+            1_000,
+            &[],
+        );
+        list_artifact(&store, counted, "Summary.", Some("Pricing is open again."));
+        let thread = |state: &str, substantive: bool| {
+            serde_json::json!({
+                "topic": state, "state": state, "substantive": substantive, "owner": null,
+                "receipt": {"quote": "Quote.", "speaker": null, "t_ms": 0, "citations": []},
+            })
+        };
+        let threads = serde_json::json!([
+            thread("decided", true),
+            thread("agreed", true),
+            thread("action", true),
+            thread("closed", false),
+            thread("partial", true),
+            thread("unanswered", true),
+        ]);
+        store
+            .connection()
+            .expect("store connection")
+            .execute(
+                "UPDATE meeting_artifact_revisions
+                    SET content_json = json_set(content_json, '$.ledger.threads', json(?1))
+                  WHERE session_id = ?2",
+                params![threads.to_string(), id(counted)],
+            )
+            .expect("set ledger threads");
+        let unledgered = list_session(
+            &store,
+            today - 1,
+            MeetingPhase::ReviewReady,
+            r#"{"kind":"succeeded"}"#,
+            1_000,
+            &[],
+        );
+        list_artifact(&store, unledgered, "Summary without a ledger.", None);
+
+        let entries = listed(&store, &MeetingListFilter::default());
+        let outcomes = |session_id: MeetingSessionId| {
+            entries
+                .iter()
+                .find(|row| row.session_id == session_id)
+                .map(|row| row.ledger_outcomes)
+                .expect("listed session")
+        };
+        assert_eq!(
+            outcomes(counted),
+            Some(LedgerOutcomeCounts {
+                landed: 3,
+                open: 1,
+                dropped: 1,
+                decided: 2,
+                actions: 1,
+            })
+        );
+        // No ledger is no counts, not zero of each.
+        assert_eq!(outcomes(unledgered), None);
     }
 
     #[test]
