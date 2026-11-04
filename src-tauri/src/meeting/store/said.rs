@@ -3,6 +3,7 @@ use super::voice_identity::is_generated_speaker_label;
 use super::{
     canonical_speaker_ids, from_i64, id, meeting_fts_match_query, parse_uuid, search_projection,
     speaker_assignment_from_db, speakers_for_session, to_sql_error, MeetingStore, StoreError,
+    LOCAL_SPEAKER_LABEL,
 };
 use crate::meeting::types::{
     MeetingSessionId, SaidMoment, SaidPerson, SpeakerAssignmentKind, SpeakerId, TranscriptSegmentId,
@@ -42,9 +43,9 @@ impl MeetingStore {
     /// who said it and whether its audio is still on this Mac.
     ///
     /// A person is named only from a confirmed identification. Any other
-    /// label is shown only when the store generated it ("Speaker 2"), because
-    /// automatic voice matching writes names into labels and nothing records
-    /// that once the match is gone.
+    /// label is shown only when the store wrote it ("Speaker 2", "Local
+    /// speaker"), because automatic voice matching writes names into labels
+    /// and nothing records that once the match is gone.
     pub(crate) fn said_search(
         &self,
         query: &str,
@@ -199,7 +200,11 @@ impl SessionVoices {
         let label = self
             .labels
             .get(&speaker_id)
-            .filter(|label| person.is_some() || is_generated_speaker_label(label))
+            .filter(|label| {
+                person.is_some()
+                    || is_generated_speaker_label(label)
+                    || label.as_str() == LOCAL_SPEAKER_LABEL
+            })
             .cloned();
         let voice = Voice { label, person };
         self.voices.insert(speaker_id, voice.clone());
@@ -290,6 +295,7 @@ mod tests {
         let confirmed = SpeakerId::new();
         let guessed = SpeakerId::new();
         let unnamed = SpeakerId::new();
+        let local = SpeakerId::new();
         let noah = person(&store, "Noah Reyes", &[], &[]);
         let session_id = meeting_with_lines(
             &store,
@@ -297,6 +303,7 @@ mod tests {
                 (confirmed, "Noah", "I will confirm the budget by Friday."),
                 (guessed, "Ada Lovelace", "The budget stays on this Mac."),
                 (unnamed, "Speaker 3", "The budget needs one more pass."),
+                (local, "Local speaker", "I own the budget slides."),
             ],
         )?;
         store.connection()?.execute(
@@ -306,9 +313,9 @@ mod tests {
             params![Uuid::new_v4().to_string(), id(confirmed), id(noah)],
         )?;
 
-        let moments = store.said_search("budget", 4)?;
+        let moments = store.said_search("budget", 8)?;
 
-        assert_eq!(moments.len(), 3);
+        assert_eq!(moments.len(), 4);
         let said_by_noah = moments
             .iter()
             .find(|moment| moment.text.contains("Friday"))
@@ -335,6 +342,14 @@ mod tests {
             .find(|moment| moment.text.contains("pass"))
             .ok_or(StoreError::Corrupt)?;
         assert_eq!(said_by_unnamed.speaker_label.as_deref(), Some("Speaker 3"));
+        let said_by_local = moments
+            .iter()
+            .find(|moment| moment.text.contains("slides"))
+            .ok_or(StoreError::Corrupt)?;
+        assert_eq!(
+            said_by_local.speaker_label.as_deref(),
+            Some("Local speaker")
+        );
         Ok(())
     }
 }

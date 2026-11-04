@@ -8729,13 +8729,15 @@ fn notes_for_session(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+pub(in crate::meeting::store) const LOCAL_SPEAKER_LABEL: &str = "Local speaker";
+
 fn source_speaker_for(
     transaction: &Transaction<'_>,
     session_id: MeetingSessionId,
     source_kind: SourceKind,
 ) -> Result<SpeakerId, StoreError> {
     let display_name = match source_kind {
-        SourceKind::Microphone => "Local speaker",
+        SourceKind::Microphone => LOCAL_SPEAKER_LABEL,
         SourceKind::SystemAudio => "Unknown speaker",
     };
     named_speaker_for(transaction, session_id, source_kind, display_name)
