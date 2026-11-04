@@ -1039,6 +1039,10 @@ pub struct MeetingHistorySummary {
     /// the store assigned them.
     #[serde(default)]
     pub speaker_labels: Vec<String>,
+    /// The apps whose audio this meeting captured, from its frozen preflight.
+    /// Empty when the capture named no app.
+    #[serde(default)]
+    pub application_bundle_ids: Vec<String>,
     #[serde(default)]
     pub headline: MeetingHistoryHeadline,
     /// Where the current ledger's substantive threads landed. `None` when

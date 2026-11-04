@@ -4429,7 +4429,8 @@ impl MeetingStore {
                     json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.headline'),
                     json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.summary.text'),
                     m.current_transcript_revision_id IS NOT NULL,
-                    json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads')
+                    json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads'),
+                    m.preflight_json
              FROM meeting_sessions m
              WHERE m.phase != 'deleting'
                AND (?1 IS NULL OR m.created_at_utc_ms < ?1)
@@ -4462,6 +4463,7 @@ impl MeetingStore {
                     summary_text: row.get::<_, Option<String>>(7)?,
                     has_transcript: row.get::<_, i64>(8)? != 0,
                     ledger_threads: row.get::<_, Option<String>>(9)?,
+                    preflight_json: row.get::<_, String>(10)?,
                 })
             },
         )?;
@@ -4486,6 +4488,7 @@ impl MeetingStore {
                  * already the deduplicated microphone-then-system-audio run. */
                 sources: sources.iter().map(|source| source.source_kind).collect(),
                 speaker_labels: speaker_labels_for_session(&connection, session_id)?,
+                application_bundle_ids: context::application_bundle_ids(&row.preflight_json)?,
                 headline: row_headline(
                     &connection,
                     session_id,
@@ -8083,6 +8086,7 @@ struct ListedSessionRow {
     summary_text: Option<String>,
     has_transcript: bool,
     ledger_threads: Option<String>,
+    preflight_json: String,
 }
 
 /// The two fields of a stored ledger thread the outcome bar counts.

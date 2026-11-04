@@ -18,9 +18,13 @@ struct ConnectionsView: View {
                     else if store.connections.isEmpty { CardLine("No services connected. Your notes stay in Sona.") }
                     ForEach(store.connections) { connection in
                         CardRow {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(connection.name).bodyText()
-                                Text("\(connection.kind.title) · \(connection.enabled ? "On" : "Off")").metaText()
+                            HStack(spacing: 12) {
+                                AppMark(bundleId: connection.kind.appBundleId, fallback: connection.kind.symbol, size: 24)
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(connection.name).bodyText()
+                                    Text("\(connection.kind.title) · \(connection.enabled ? "On" : "Off")").metaText()
+                                }
                             }
                         } trailing: {
                             HStack(spacing: 8) {

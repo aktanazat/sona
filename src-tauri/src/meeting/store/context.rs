@@ -57,6 +57,22 @@ impl MeetingStore {
     }
 }
 
+/// The apps whose audio this conversation captured, as frozen into its
+/// preflight. Empty when the preflight names none.
+pub(super) fn application_bundle_ids(preflight_json: &str) -> Result<Vec<String>, StoreError> {
+    let preflight: serde_json::Value = decode_json(preflight_json)?;
+    Ok(preflight
+        .get("frozen_system_audio_application_bundle_ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 pub(super) fn context_in(
     connection: &Connection,
     session_id: MeetingSessionId,
@@ -71,17 +87,7 @@ pub(super) fn context_in(
         |row| row.get(0),
     )?;
     let origin: MeetingOrigin = decode_json(&origin)?;
-    let preflight: serde_json::Value = decode_json(&session.preflight_json)?;
-    let application_bundle_ids: Vec<String> = preflight
-        .get("frozen_system_audio_application_bundle_ids")
-        .and_then(serde_json::Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
+    let application_bundle_ids = application_bundle_ids(&session.preflight_json)?;
     let (captured_microphone, captured_system_audio): (bool, bool) = if origin
         == MeetingOrigin::Import
     {

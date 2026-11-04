@@ -3343,6 +3343,7 @@ mod tests {
             recorded_duration_ms: Some(18_453),
             sources: Vec::new(),
             speaker_labels: Vec::new(),
+            application_bundle_ids: Vec::new(),
             headline: MeetingHistoryHeadline::None,
             ledger_outcomes: None,
         });

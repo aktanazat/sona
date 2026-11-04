@@ -223,7 +223,9 @@ struct MeetingStartPreviewCard: View {
         Card {
             CardRow(action: { open.toggle() }) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(facts.heading).headlineText()
+                    AppLabel(bundleId: facts.appBundleId, announcesApp: !headingNamesApp) {
+                        Text(facts.heading).headlineText()
+                    }
                     if let line = summary {
                         Text(line).metaText()
                     }
@@ -303,6 +305,12 @@ struct MeetingStartPreviewCard: View {
             }
         }
         .task { await model.meetingSettings.templates.loadIfNeeded() }
+    }
+
+    /// Whether the heading already says the app the icon beside it shows.
+    private var headingNamesApp: Bool {
+        guard let app = facts.appBundleId.flatMap(InstalledApp.find) else { return true }
+        return facts.heading.localizedCaseInsensitiveContains(app.name)
     }
 
     /// The one line under the title: when it is, and how many people.

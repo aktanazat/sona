@@ -759,10 +759,12 @@ private struct MeetingRecordingDock: View {
                     .bodyText(12, Theme.ink)
                     .lineLimit(3)
             } else {
-                Text(title)
-                    .font(TypeScale.label(13))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .lineLimit(2)
+                AppLabel(bundleId: appBundleId, size: 14, announcesApp: session != nil) {
+                    Text(title)
+                        .font(TypeScale.label(13))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .lineLimit(2)
+                }
             }
             Spacer(minLength: 0)
             HStack(spacing: 8) {
@@ -881,6 +883,15 @@ private struct MeetingRecordingDock: View {
         }
     }
 
+    /// The app an automatic recording started for. The panel's own capture
+    /// carries no app.
+    private var appBundleId: String? {
+        switch recording {
+        case .panel: nil
+        case let .ritual(_, card): card.bundleId
+        }
+    }
+
     private var since: Date {
         switch recording {
         case let .panel(state): state.snapshot.captureStart
@@ -900,9 +911,11 @@ struct DetectionPromptView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(prompt.prompt.consentTitle)
-                    .headlineText()
-                    .lineLimit(3)
+                AppLabel(bundleId: prompt.prompt.bundleId, size: 18, announcesApp: prompt.prompt.appName == nil) {
+                    Text(prompt.prompt.consentTitle)
+                        .headlineText()
+                        .lineLimit(3)
+                }
                 Text(
                     prompt.showIntroduction
                         ? "Sona records on this Mac and keeps you in control."
@@ -1039,10 +1052,12 @@ struct RitualRecordingView: View {
                 }
                 PanelCollapse(action: collapse)
             }
-            Text(card.appName)
-                .font(TypeScale.label(13))
-                .foregroundStyle(Theme.inkSecondary)
-                .lineLimit(1)
+            AppLabel(bundleId: card.bundleId, size: 14) {
+                Text(card.appName)
+                    .font(TypeScale.label(13))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .lineLimit(1)
+            }
             if let active = store.active, active.snapshot.sessionId == card.sessionId {
                 MeetingDisclosureStatus(store: store, disclosure: active.disclosure)
             }

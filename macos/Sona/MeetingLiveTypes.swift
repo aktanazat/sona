@@ -242,6 +242,8 @@ struct MeetingStartFacts: Identifiable {
     var endUtcMs: Int64?
     var calendarName: String?
     var appName: String?
+    /// The app the meeting is running in, when an app raised it.
+    var appBundleId: String?
     var attendeeCount: Int?
     var participants: [MeetingStartParticipant] = []
     var description: String?
@@ -283,6 +285,7 @@ struct MeetingStartFacts: Identifiable {
         title = suggestion.title
         origin = .app
         appName = suggestion.provider.label
+        appBundleId = suggestion.appBundleId
     }
 
     /// A prompt still waiting: its own title, and the app when it names one.
@@ -291,6 +294,7 @@ struct MeetingStartFacts: Identifiable {
         title = prompt.title
         origin = prompt.prompt.isCalendar ? .calendar : .app
         appName = prompt.prompt.appName
+        appBundleId = prompt.prompt.bundleId
     }
 
     /// An upcoming calendar row, as the week-ahead list reads it.
@@ -738,6 +742,17 @@ enum DetectionPromptKind: Decodable {
         case let .appMeeting(_, name), let .appHuddle(_, name),
              let .browserCall(_, name), let .appCall(_, name):
             name.trimmingCharacters(in: .whitespaces).isEmpty ? nil : name
+        case .calendarEvent, .unknownMicSource:
+            nil
+        }
+    }
+
+    /// The application this prompt names, by bundle id.
+    var bundleId: String? {
+        switch self {
+        case let .appMeeting(bundleId, _), let .appHuddle(bundleId, _),
+             let .browserCall(bundleId, _), let .appCall(bundleId, _):
+            bundleId
         case .calendarEvent, .unknownMicSource:
             nil
         }

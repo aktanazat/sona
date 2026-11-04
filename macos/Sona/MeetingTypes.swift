@@ -1139,6 +1139,8 @@ struct MeetingHistorySummary: Decodable, Identifiable {
     let recordedDurationMs: Int64?
     let sources: [MeetingSourceKind]?
     let speakerLabels: [String]?
+    /// The apps whose audio this meeting captured. Empty when it named none.
+    let applicationBundleIds: [String]
     let headline: MeetingHistoryHeadline?
     let ledgerOutcomes: LedgerOutcomeCounts?
 

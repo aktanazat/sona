@@ -57,12 +57,7 @@ private struct ConversationContext: Decodable {
     var source: String {
         var parts: [String] = []
         if !applicationBundleIds.isEmpty {
-            let names = applicationBundleIds.map { id in
-                guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id),
-                      let bundle = Bundle(url: url) else { return id }
-                return bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
-                    ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? id
-            }
+            let names = applicationBundleIds.map { InstalledApp.find($0)?.name ?? $0 }
             parts.append("Audio route: \(names.joined(separator: ", "))")
         }
         if origin == "import" {
@@ -89,9 +84,18 @@ struct ConversationContextView: View {
         VStack(alignment: .leading, spacing: 12) {
             if let context {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Label(context.kind.label, systemImage: context.kind.symbol)
-                        .font(TypeScale.body(13))
-                        .foregroundStyle(Theme.inkSecondary)
+                    Label {
+                        Text(context.kind.label)
+                    } icon: {
+                        if let app = context.applicationBundleIds.first {
+                            AppMark(bundleId: app, fallback: context.kind.symbol, size: 15)
+                                .accessibilityHidden(true)
+                        } else {
+                            Image(systemName: context.kind.symbol)
+                        }
+                    }
+                    .font(TypeScale.body(13))
+                    .foregroundStyle(Theme.inkSecondary)
                     if !context.source.isEmpty {
                         Text(context.source).metaText().lineLimit(2)
                     }

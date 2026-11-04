@@ -662,7 +662,9 @@ struct MeetingsRow: View {
             CardRow(action: open) {
                 VStack(alignment: .leading, spacing: 4) {
                     let facts = self.facts
-                    Text(entry.title).headlineText()
+                    AppLabel(bundleId: entry.applicationBundleIds.first, announcesApp: true) {
+                        Text(entry.title).headlineText()
+                    }
                     if let headline = entry.headlineText {
                         Text(headline).bodyText(14, Theme.inkSecondary).lineLimit(2)
                     }
