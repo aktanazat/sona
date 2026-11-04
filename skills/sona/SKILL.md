@@ -19,7 +19,7 @@ A denied request exits `1` and prints a JSON refusal on stderr:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "error": "consent_required",
   "message": "…",
   "settings_path": "…"
@@ -157,7 +157,7 @@ A note result is:
 
 ```text
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "memory": {
     "note": {"id": str, "title": str, "body": str, "pinned": bool,
              "created_at_ms": int, "updated_at_ms": int},
@@ -262,10 +262,17 @@ does not turn otherwise available totals into zero.
 
 ## Reading other results
 
-Every current payload carries `schema_version:4`. Existing verb fields remain
+Every current payload carries `schema_version:5`. Existing verb fields remain
 available. Search rows contain `kind`, `id`, `title`, `snippet`, `when_utc_ms` and
 `link`; `kind` can now be `note` as well as `meeting`, `dictation`, `person` or
 `loop`. Dictation ids are digit strings, not meeting uuids.
+
+`--project` carries `pulse`, the numbers the project page leads with: `done`,
+`open`, `overdue`, a nullable `next_due_at_ms` (today or later only),
+`meetings_last_7_days`, `owners` (`person_id`, `open_tasks`, most first) and
+per-milestone `meetings` with `last_meeting_at_ms`. Canceled tasks count
+nowhere. Work due today is open, not overdue, until its local day ends. Owners
+are person ids only; read the person to learn a name.
 
 - Meetings, people, upcoming events and notes return `has_more`. Narrow a
   request or raise its limit when there are more rows.

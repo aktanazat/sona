@@ -354,7 +354,7 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "sona_project",
     title: "Read a Sona personal project",
     description:
-      "Read one saved personal project with its description, milestones, tasks, states, revisions and exact source references. Owner and source availability are resolved live by the native planner. Unavailable sources have available:false, no title and no link. Nullable due dates are saved values, not inferred deadlines. Owners are explicit personal-plan assignments, not team membership. Requires external access; no writes, notifications or provider calls.",
+      "Read one saved personal project with its description, its pulse (done, open and overdue task counts, next due date, meetings in the last 7 days, and person ids owning open work), milestones, tasks, states, revisions and exact source references. Owner and source availability are resolved live by the native planner. Unavailable sources have available:false, no title and no link. Nullable due dates are saved values, not inferred deadlines. Owners are explicit personal-plan assignments, not team membership. Requires external access; no writes, notifications or provider calls.",
     inputSchema: {
       type: "object",
       properties: { project_id: PROJECT_ID },

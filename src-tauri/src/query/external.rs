@@ -1006,9 +1006,36 @@ pub struct ExternalPlanningEvidence {
 pub struct ExternalProjectDetail {
     pub schema_version: u32,
     pub project: ExternalProject,
+    pub pulse: ExternalProjectPulse,
     pub milestones: Vec<ExternalMilestone>,
     pub tasks: Vec<ExternalPlanningTask>,
     pub evidence: Vec<ExternalPlanningEvidence>,
+}
+
+/// The numbers the project page leads with, read in the same pass as the
+/// detail. Canceled tasks count nowhere; work is overdue once its due day ends.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalProjectPulse {
+    pub done: u32,
+    pub open: u32,
+    pub overdue: u32,
+    pub next_due_at_ms: Option<i64>,
+    pub meetings_last_7_days: u32,
+    pub owners: Vec<ExternalProjectOwner>,
+    pub milestones: Vec<ExternalMilestonePulse>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalProjectOwner {
+    pub person_id: String,
+    pub open_tasks: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ExternalMilestonePulse {
+    pub milestone_id: String,
+    pub meetings: u32,
+    pub last_meeting_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2090,6 +2117,32 @@ fn project_detail(detail: planning::ProjectDetail) -> ExternalProjectDetail {
             created_at_ms: detail.project.created_at_ms,
             updated_at_ms: detail.project.updated_at_ms,
         },
+        pulse: ExternalProjectPulse {
+            done: detail.pulse.done,
+            open: detail.pulse.open,
+            overdue: detail.pulse.overdue,
+            next_due_at_ms: detail.pulse.next_due_at_ms,
+            meetings_last_7_days: detail.pulse.meetings_this_week,
+            owners: detail
+                .pulse
+                .owners
+                .into_iter()
+                .map(|owner| ExternalProjectOwner {
+                    person_id: owner.person_id,
+                    open_tasks: owner.open_tasks,
+                })
+                .collect(),
+            milestones: detail
+                .pulse
+                .milestones
+                .into_iter()
+                .map(|milestone| ExternalMilestonePulse {
+                    milestone_id: milestone.milestone_id,
+                    meetings: milestone.meetings,
+                    last_meeting_at_ms: milestone.last_meeting_at_ms,
+                })
+                .collect(),
+        },
         milestones: detail
             .milestones
             .into_iter()
@@ -2835,6 +2888,27 @@ fn text_response(response: &ExternalResponse) -> String {
             if let Some(description) = &project.description {
                 let _ = writeln!(text, "{description}\n");
             }
+            let pulse = &detail.pulse;
+            let _ = writeln!(
+                text,
+                "pulse: {} open, {} overdue, {} done{}\nmeetings in the last 7 days: {}",
+                pulse.open,
+                pulse.overdue,
+                pulse.done,
+                pulse
+                    .next_due_at_ms
+                    .map(|due| format!(", next due {}", local_time(due)))
+                    .unwrap_or_default(),
+                pulse.meetings_last_7_days
+            );
+            for owner in &pulse.owners {
+                let _ = writeln!(
+                    text,
+                    "owner: sona://person/{} ({} open)",
+                    owner.person_id, owner.open_tasks
+                );
+            }
+            text.push('\n');
             for milestone in &detail.milestones {
                 let _ = writeln!(
                     text,
