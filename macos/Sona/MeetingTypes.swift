@@ -1276,6 +1276,37 @@ struct MeetingSearchResult: Decodable {
     let entries: [MeetingSearchHit]
 }
 
+/// `SaidMoment`: one transcript line `meeting_said_search` matched. `person`
+/// comes only from a confirmed identification; `speakerLabel` is the
+/// transcript's own label and never brings a face.
+struct SaidMoment: Decodable, Identifiable {
+    let sessionId: MeetingSessionId
+    let segmentId: TranscriptSegmentId
+    let meetingTitle: String
+    let meetingStartedAtUtcMs: Int64
+    let startOffsetNs: UInt64
+    let endOffsetNs: UInt64
+    let text: String
+    let speakerLabel: String?
+    let person: SaidPerson?
+    let audioRetained: Bool
+
+    var id: TranscriptSegmentId { segmentId }
+    var meetingStarted: Date { meetingStartedAtUtcMs.meetingDate }
+    /// Who said it: the confirmed person, else the transcript's label.
+    var speaker: String? { person?.displayName ?? speakerLabel }
+    /// The meeting opened at this line, as the transcript's copied link.
+    var link: String {
+        "sona://meeting/\(sessionId)?atMs=\(startOffsetNs / 1_000_000)&segmentId=\(segmentId)"
+    }
+}
+
+/// `SaidPerson`.
+struct SaidPerson: Decodable {
+    let personId: MeetingPersonId
+    let displayName: String
+}
+
 /// The meetings a person deleted and can still get back.
 struct MeetingTrashEntry: Decodable, Identifiable {
     let jobId: MeetingDeletionJobId

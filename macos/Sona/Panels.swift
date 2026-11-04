@@ -830,6 +830,8 @@ struct PaletteAction: Identifiable {
 private enum PaletteRow: Identifiable {
     case action(PaletteAction)
     case hit(QueryRow)
+    /// A line someone said: return plays it, ⌘return opens its meeting there.
+    case heard(SaidMoment)
     /// The next page of the same question, when the plane said there is one.
     case more
     case ask(String)
@@ -838,10 +840,20 @@ private enum PaletteRow: Identifiable {
         switch self {
         case let .action(action): "action:\(action.id)"
         case let .hit(hit): "hit:\(hit.link)"
+        case let .heard(moment): "heard:\(moment.id)"
         case .more: "more"
         case .ask: "ask"
         }
     }
+}
+
+/// Where the shared player stands for one heard line.
+private enum Listening {
+    case idle
+    case loading
+    /// How far through the clip, from 0 to 1.
+    case playing(Double)
+    case failed(String)
 }
 
 /// What the plane has said about the text in the field. The rows shown are
@@ -876,23 +888,33 @@ private enum Lookup {
     }
 }
 
-/// ⌘K. A floating panel: one field, the places and verbs that match, then the
-/// meetings, people, dictations and loops the query plane found, and the ask
-/// row when the agent is allowed to hear the question. The corpus rows are
-/// never filtered by the letters typed: the plane matched them, sometimes by
-/// meaning, and a title need not share one letter with the question.
+/// ⌘K. A floating panel: one field, the places and verbs that match, the
+/// lines said in meetings that match, then the meetings, people, dictations
+/// and loops the query plane found, and the ask row when the agent is allowed
+/// to hear the question. The corpus rows are never filtered by the letters
+/// typed: the plane matched them, sometimes by meaning, and a title need not
+/// share one letter with the question.
 struct CommandPalette: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var lookup = Lookup.none
     @State private var selection = 0
     @State private var search: Task<Void, Never>?
+    /// The lines said that match the settled question; empty when none did
+    /// or the search for them failed.
+    @State private var heard: [SaidMoment] = []
+    /// The line this palette last asked to hear: its failure shows on that
+    /// row, and closing the palette stops only that playback.
+    @State private var hearing: TranscriptSegmentId?
     @FocusState private var focused: Bool
 
     /// A single letter matches half the corpus, so it is not a query yet.
     private static let minimumQuery = 2
     /// One page: the newest dozen that matched. Recency orders the plane.
     private static let limit: Int64 = 12
+    /// The few lines whose words matched best: enough to find the moment,
+    /// few enough that the meetings stay in view.
+    private static let heardLimit = 4
     private static let kinds: [(kind: QueryRowKind, label: String)] = [
         (.meeting, "Meetings"), (.person, "People"), (.note, "Notes"),
         (.dictation, "Dictations"), (.loop, "Loops"),
@@ -917,6 +939,9 @@ struct CommandPalette: View {
                         .onSubmit { runSelected() }
                         .onKeyPress(.upArrow) { move(-1); return .handled }
                         .onKeyPress(.downArrow) { move(1); return .handled }
+                        .onKeyPress(.return, phases: .down) { press in
+                            press.modifiers.contains(.command) ? openSelected() : .ignored
+                        }
                     if case .pending = lookup {
                         ProgressView().controlSize(.small)
                     }
@@ -937,9 +962,11 @@ struct CommandPalette: View {
                                     .padding(.bottom, 4)
                                 ForEach(section.rows) { row in
                                     let index = section.live ? rows.firstIndex { $0.id == row.id } ?? 0 : -1
-                                    PaletteRowView(row: row, selected: index == selection) {
+                                    PaletteRowView(row: row, selected: index == selection, marks: marks, asked: hearing) {
                                         selection = index
                                         run(row)
+                                    } open: {
+                                        open(row)
                                     }
                                     .id(row.id)
                                     .opacity(section.live ? 1 : 0.4)
@@ -995,11 +1022,22 @@ struct CommandPalette: View {
                 selection = 0
                 schedule(text)
             }
-            .onDisappear { search?.cancel() }
+            .onDisappear {
+                search?.cancel()
+                if let hearing, model.meetings.audio.segmentId == hearing {
+                    model.meetings.audio.stop()
+                }
+            }
         }
     }
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
+
+    /// The words of the query as the spoken-line search splits them, for
+    /// marking in the lines it found.
+    private var marks: [String] {
+        trimmed.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
 
     private var actions: [PaletteAction] {
         let all = model.paletteActions
@@ -1007,9 +1045,9 @@ struct CommandPalette: View {
         return all.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
     }
 
-    /// The sections in the order the list shows them: places, verbs, then the
-    /// plane's rows by kind, then the one ask row. A section is live when its
-    /// rows answer the question in the field now.
+    /// The sections in the order the list shows them: places, verbs, the lines
+    /// said that match, then the plane's rows by kind, then the one ask row. A
+    /// section is live when its rows answer the question in the field now.
     private var sections: [(label: String, rows: [PaletteRow], live: Bool)] {
         var sections: [(label: String, rows: [PaletteRow], live: Bool)] = []
         let navigation = actions.filter { $0.group == .navigation }.map(PaletteRow.action)
@@ -1018,6 +1056,7 @@ struct CommandPalette: View {
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
         let hits = lookup.earlier
         let live = if case .pending = lookup { false } else { true }
+        if !heard.isEmpty { sections.append(("Heard", heard.map(PaletteRow.heard), live)) }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
             if !rows.isEmpty { sections.append((label, rows, live)) }
@@ -1081,7 +1120,12 @@ struct CommandPalette: View {
             KeyCap("↓")
             Text("Select").metaText(Theme.inkSecondary).padding(.trailing, 10)
             KeyCap("↩")
-            Text("Open").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            Text(returnVerb).metaText(Theme.inkSecondary).padding(.trailing, 10)
+            if selectedMoment?.audioRetained == true {
+                KeyCap("⌘")
+                KeyCap("↩")
+                Text("Open").metaText(Theme.inkSecondary).padding(.trailing, 10)
+            }
             KeyCap("esc")
             Text("Close").metaText(Theme.inkSecondary)
         }
@@ -1106,37 +1150,96 @@ struct CommandPalette: View {
             loadMore()
             return
         }
+        if case let .heard(moment) = row, moment.audioRetained {
+            hear(moment)
+            return
+        }
+        open(row)
+    }
+
+    /// Closes the palette and goes where the row points: a heard line opens
+    /// its meeting at the moment it was said.
+    private func open(_ row: PaletteRow) {
         model.paletteShown = false
         switch row {
         case let .action(action): action.run()
         case let .hit(hit): model.open(link: hit.link)
+        case let .heard(moment): model.open(link: moment.link)
         case let .ask(question): model.ask(question)
         case .more: break
         }
     }
 
+    /// ⌘return on a heard line: its meeting, at the moment it was said.
+    private func openSelected() -> KeyPress.Result {
+        guard let selectedMoment else { return .ignored }
+        open(.heard(selectedMoment))
+        return .handled
+    }
+
+    /// Return on a heard line whose audio is kept: plays it from the moment
+    /// it was said, or stops it when it is the line already playing. The
+    /// palette stays open, so the next line is one arrow away.
+    private func hear(_ moment: SaidMoment) {
+        if sounding(moment) {
+            model.meetings.audio.stop()
+            return
+        }
+        hearing = moment.segmentId
+        model.meetings.audio.play(
+            sessionId: moment.sessionId, segmentId: moment.segmentId, startOffsetNs: moment.startOffsetNs)
+    }
+
+    /// The line is the one the shared player is loading or playing now.
+    private func sounding(_ moment: SaidMoment) -> Bool {
+        let audio = model.meetings.audio
+        return audio.segmentId == moment.segmentId && (audio.loading || audio.playing)
+    }
+
+    /// The heard line under the selection, when that is where it is.
+    private var selectedMoment: SaidMoment? {
+        guard rows.indices.contains(selection), case let .heard(moment) = rows[selection] else { return nil }
+        return moment
+    }
+
+    /// What return does to the selected row: a heard line with its audio kept
+    /// plays or stops, every other row opens.
+    private var returnVerb: String {
+        guard let selectedMoment, selectedMoment.audioRetained else { return "Open" }
+        return sounding(selectedMoment) ? "Stop" : "Play"
+    }
+
     /// Long enough to swallow a typed word, short enough to feel like the list
-    /// is keeping up: 150 ms after the last keystroke, one page from the plane.
-    /// `now` skips the pause for a retry the reader asked for by hand.
+    /// is keeping up: 150 ms after the last keystroke, one page from the plane
+    /// and the few lines said that match, asked together. `now` skips the
+    /// pause for a retry the reader asked for by hand.
     private func schedule(_ text: String, now: Bool = false) {
         search?.cancel()
         let query = text.trimmingCharacters(in: .whitespaces)
         guard query.count >= Self.minimumQuery else {
             lookup = .none
+            heard = []
             return
         }
         lookup = .pending(earlier: lookup.earlier)
+        let core = model.core
+        let request: [String: JSONValue] = ["query": .string(query), "limit": .number(Double(Self.heardLimit))]
         search = Task {
             if !now {
                 try? await Task.sleep(for: .milliseconds(150))
             }
             guard !Task.isCancelled else { return }
+            async let said: [SaidMoment] = core.request("meeting_said_search", request)
             do {
                 let page = try await ask(query, after: nil)
+                let moments = (try? await said) ?? []
                 guard !Task.isCancelled else { return }
+                heard = moments
                 lookup = .answered(.init(rows: page.entries, next: page.nextCursor, reason: page.reason))
             } catch {
+                let moments = (try? await said) ?? []
                 guard !Task.isCancelled else { return }
+                heard = moments
                 lookup = .failed(Self.sentence(for: error))
             }
         }
@@ -1195,17 +1298,21 @@ struct CommandPalette: View {
 private struct PaletteRowView: View {
     let row: PaletteRow
     let selected: Bool
+    /// The query's words, marked where a heard line has a word they start.
+    var marks: [String] = []
+    /// The line the palette last asked to hear: a failure shows on that row.
+    var asked: TranscriptSegmentId?
     let action: () -> Void
+    /// A heard line's meeting at that moment, for VoiceOver.
+    var open: () -> Void = {}
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
+        let button = Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .frame(width: 20)
-                    .accessibilityHidden(true)
+                leading
                 switch row {
                 case let .action(action):
                     Text(action.title).bodyText()
@@ -1221,12 +1328,21 @@ private struct PaletteRowView: View {
                         }
                         .metaText()
                     }
+                case let .heard(moment):
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(quote(moment.text)).bodyText().lineLimit(2)
+                        progress
+                        Text(meta(moment)).metaText().lineLimit(1)
+                    }
                 case .more:
                     Text("Show more results").bodyText(14, Theme.inkSecondary)
                 case let .ask(question):
                     Text("Ask Sona: \(question)").bodyText()
                 }
                 Spacer(minLength: 0)
+                if case let .heard(moment) = row {
+                    state(moment)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -1237,6 +1353,148 @@ private struct PaletteRowView: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        if case let .heard(moment) = row {
+            button
+                .accessibilityLabel(spoken(moment))
+                .accessibilityValue(status(moment))
+                .accessibilityAction(named: "Open meeting", open)
+        } else {
+            button
+        }
+    }
+
+    /// Where the shared player stands for this row's line. Read here rather
+    /// than in the palette, so a playing clip's ticks redraw one row.
+    private var listening: Listening {
+        guard case let .heard(moment) = row else { return .idle }
+        let audio = model.meetings.audio
+        if audio.segmentId == moment.segmentId {
+            if audio.loading { return .loading }
+            if audio.playing { return .playing(audio.duration > 0 ? audio.position / audio.duration : 0) }
+            return .idle
+        }
+        if asked == moment.segmentId, audio.sessionId == nil, let error = audio.error {
+            return .failed(error)
+        }
+        return .idle
+    }
+
+    /// The row's picture: a heard line shows the face of the person it was
+    /// confirmed as, and only that.
+    @ViewBuilder
+    private var leading: some View {
+        if case let .heard(moment) = row {
+            if let person = moment.person {
+                PersonPortrait(
+                    personId: person.personId, name: person.displayName, size: 28, revision: model.people.photoRevision)
+            } else {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(Theme.inset, in: Circle())
+                    .accessibilityHidden(true)
+            }
+        } else {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .regular))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// How far the playing line has got, under its words. The track stays in
+    /// place, empty, while the line is not playing, so the row keeps its height.
+    private var progress: some View {
+        let played: Double? = if case let .playing(fraction) = listening { min(max(fraction, 0), 1) } else { nil }
+        return Capsule()
+            .fill(Theme.hairline)
+            .overlay(alignment: .leading) {
+                GeometryReader { proxy in
+                    Capsule().fill(Theme.accent).frame(width: proxy.size.width * (played ?? 0))
+                }
+            }
+            .frame(height: 2)
+            .opacity(played == nil ? 0 : 1)
+            .animation(reduceMotion ? nil : .linear(duration: 0.1), value: played)
+            .accessibilityHidden(true)
+    }
+
+    /// The end of a heard line: what return will do, or what came of the
+    /// last try.
+    @ViewBuilder
+    private func state(_ moment: SaidMoment) -> some View {
+        if !moment.audioRetained {
+            Text("Audio not kept").metaText()
+        } else {
+            switch listening {
+            case .idle:
+                glyph("play.fill")
+            case .loading:
+                ProgressView().controlSize(.small).frame(width: 20)
+            case .playing:
+                glyph("stop.fill")
+            case let .failed(reason):
+                Text(reason)
+                    .metaText(Theme.live)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(2)
+                    .frame(maxWidth: 180, alignment: .trailing)
+            }
+        }
+    }
+
+    private func glyph(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 11, weight: .regular))
+            .foregroundStyle(Theme.inkSecondary)
+            .frame(width: 20)
+            .accessibilityHidden(true)
+    }
+
+    /// The line in quotes, each word the query starts marked the way the
+    /// transcript marks a search: the line matched by word prefix, ignoring
+    /// case and accents.
+    private func quote(_ text: String) -> AttributedString {
+        var line = AttributedString("“\(text)”")
+        for mark in marks {
+            var cursor = line.startIndex
+            while cursor < line.endIndex,
+                  let found = line[cursor...].range(of: mark, options: [.caseInsensitive, .diacriticInsensitive]) {
+                if line.characters[..<found.lowerBound].last.map({ !$0.isLetter && !$0.isNumber }) ?? true {
+                    line[found].backgroundColor = Theme.accentSoft
+                    line[found].foregroundColor = Theme.accent
+                }
+                cursor = found.upperBound
+            }
+        }
+        return line
+    }
+
+    /// Who said it, in which meeting, on which day.
+    private func meta(_ moment: SaidMoment) -> String {
+        [moment.speaker, moment.meetingTitle, moment.meetingStarted.relativeDay]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+
+    private func spoken(_ moment: SaidMoment) -> String {
+        let said = moment.speaker.map { "\($0) said: \(moment.text)" } ?? moment.text
+        return [said, moment.meetingTitle, moment.meetingStarted.relativeDay]
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
+    private func status(_ moment: SaidMoment) -> String {
+        guard moment.audioRetained else { return "Audio not kept" }
+        switch listening {
+        case .idle: return ""
+        case .loading: return "Loading"
+        case .playing: return "Playing"
+        case let .failed(reason): return reason
+        }
     }
 
     private var fill: Color {
@@ -1269,6 +1527,7 @@ private struct PaletteRowView: View {
             case .loop: "arrow.triangle.2.circlepath"
             case .receipt: "doc.text"
             }
+        case .heard: "waveform"
         case .more: "ellipsis"
         case .ask: "bubble.left"
         }
