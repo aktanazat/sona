@@ -626,10 +626,13 @@ struct ToggleRow: View {
 struct Stat: View {
     let label: String
     let value: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(value).font(TypeScale.stat).foregroundStyle(Theme.ink).monospacedDigit()
+                .contentTransition(reduceMotion ? .opacity : .numericText())
+                .animation(Motion.settle(reduced: reduceMotion), value: value)
             Text(label).metaText(Theme.inkSecondary)
         }
         .padding(.vertical, 8)

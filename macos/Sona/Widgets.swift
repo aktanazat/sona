@@ -13,6 +13,7 @@ struct NumberTile: View {
     let label: String
     var unit: String?
     var tone: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(_ value: String, label: String, unit: String? = nil, tone: Color = Theme.ink) {
         self.value = value
@@ -28,12 +29,13 @@ struct NumberTile: View {
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(tone)
                     .monospacedDigit()
-                    .contentTransition(.numericText())
+                    .contentTransition(reduceMotion ? .opacity : .numericText())
                 if let unit {
                     Text(unit).font(TypeScale.body(12)).foregroundStyle(Theme.inkTertiary)
                 }
             }
             .lineLimit(1)
+            .animation(Motion.settle(reduced: reduceMotion), value: value)
             Text(label).metaText(Theme.inkSecondary).lineLimit(1)
         }
         .padding(.horizontal, 14)
@@ -60,6 +62,7 @@ struct WidgetTile<Visual: View>: View {
     let action: (() -> Void)?
     let visual: Visual
     @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(_ title: String, icon: String, value: String, unit: String? = nil, caption: String? = nil,
          tone: Color = Theme.ink, action: (() -> Void)?, @ViewBuilder visual: () -> Visual) {
@@ -116,12 +119,13 @@ struct WidgetTile<Visual: View>: View {
                     .tracking(-0.3)
                     .foregroundStyle(tone)
                     .monospacedDigit()
-                    .contentTransition(.numericText())
+                    .contentTransition(reduceMotion ? .opacity : .numericText())
                 if let unit {
                     Text(unit).font(TypeScale.body(12)).foregroundStyle(Theme.inkTertiary)
                 }
             }
             .lineLimit(1)
+            .animation(Motion.settle(reduced: reduceMotion), value: value)
             .padding(.top, 8)
             Text(caption ?? " ")
                 .metaText()
@@ -747,9 +751,10 @@ struct Avatar: View {
         case .me:
             Image(systemName: "person.fill")
                 .font(.system(size: size * 0.5))
-                .foregroundStyle(Theme.inkSecondary)
+                .foregroundStyle(.white)
                 .frame(width: size, height: size)
-                .background(Theme.control, in: Circle())
+                .background { MonogramFill(color: Theme.accentFill) }
+                .clipShape(Circle())
                 .help(face.name)
                 .accessibilityLabel(face.name)
         case let .person(id):
@@ -770,6 +775,7 @@ struct AvatarStack: View {
     var size: CGFloat = 20
     var limit = 3
     let revision: UInt64
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: -size / 4) {
@@ -777,11 +783,15 @@ struct AvatarStack: View {
                 Avatar(face: face, size: size, revision: revision)
                     .padding(1.5)
                     .background(Theme.surface, in: Circle())
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.scale(scale: 0.6).combined(with: .opacity))
             }
             if faces.count > limit {
                 Text("+\(faces.count - limit)")
                     .font(.system(size: max(9, size * 0.42), weight: .semibold))
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .contentTransition(reduceMotion ? .opacity : .numericText())
                     .foregroundStyle(Theme.inkSecondary)
                     .frame(width: size, height: size)
                     .background(Theme.inset, in: Circle())
@@ -789,6 +799,7 @@ struct AvatarStack: View {
                     .background(Theme.surface, in: Circle())
             }
         }
+        .animation(Motion.settle(reduced: reduceMotion), value: faces)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(faces.map(\.name).joined(separator: ", "))
     }
