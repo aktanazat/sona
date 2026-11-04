@@ -49,9 +49,9 @@ struct Card<Content: View>: View {
 /// A row in a card: leading content, trailing meta or controls, a hairline
 /// underneath. With an action it is a button to every input: the pointer
 /// clicks it, keyboard navigation tabs to it and presses it with space or
-/// return, and VoiceOver presses it as one. It stays a plain stack rather
-/// than a `Button` so the controls a row may carry in `trailing` keep their
-/// own clicks.
+/// return, and VoiceOver reads it as one element whose press is the row's,
+/// with the controls it carries listed as its other actions. It stays a
+/// plain stack rather than a `Button` so those controls keep their own clicks.
 struct CardRow<Leading: View, Trailing: View>: View {
     let leading: Leading
     let trailing: Trailing
@@ -70,6 +70,17 @@ struct CardRow<Leading: View, Trailing: View>: View {
     }
 
     var body: some View {
+        if let action {
+            row
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { action() }
+        } else {
+            row
+        }
+    }
+
+    private var row: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             leading
             Spacer(minLength: 12)
@@ -91,8 +102,6 @@ struct CardRow<Leading: View, Trailing: View>: View {
         .focused($focused)
         .onKeyPress(.space) { press() }
         .onKeyPress(.return) { press() }
-        .accessibilityAddTraits(action != nil ? .isButton : [])
-        .accessibilityAction { action?() }
     }
 
     /// Space or return on the row itself. A control the row carries keeps
