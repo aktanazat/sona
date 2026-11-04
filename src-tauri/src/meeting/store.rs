@@ -3313,15 +3313,7 @@ impl MeetingStore {
 
     pub fn default_retention_policy(&self) -> Result<(MeetingRetentionPolicy, u64), StoreError> {
         let connection = self.connection()?;
-        let (policy, revision): (String, i64) = connection.query_row(
-            "SELECT policy_json, revision FROM meeting_retention_policy WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        Ok((
-            decode_json(&policy)?,
-            u64::try_from(revision).map_err(|_| StoreError::Corrupt)?,
-        ))
+        default_retention_policy_in(&connection)
     }
     pub fn session_retention_policy(
         &self,
@@ -10698,6 +10690,22 @@ fn export_cloud_meeting_bundle_in(
     })
 }
 
+fn default_retention_policy_in(
+    connection: &Connection,
+) -> Result<(MeetingRetentionPolicy, u64), StoreError> {
+    let (policy, revision): (String, i64) = connection.query_row(
+        "SELECT policy_json, revision FROM meeting_retention_policy WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((
+        decode_json(&policy)?,
+        u64::try_from(revision).map_err(|_| StoreError::Corrupt)?,
+    ))
+}
+
+/// A meeting from another Mac or back from the trash follows this Mac's
+/// whole-meeting setting, counted from its end, not the deadline it carries.
 fn import_cloud_meeting_bundle_in(
     transaction: &Transaction<'_>,
     bundle: &cloud_bundle::CloudMeetingBundleV1,
@@ -10711,6 +10719,13 @@ fn import_cloud_meeting_bundle_in(
     if exists {
         return Err(StoreError::Conflict);
     }
+    let (retention_policy, _) = default_retention_policy_in(transaction)?;
+    let delete_after_utc_ms = match (bundle.session.phase, bundle.session.ended_at_utc_ms) {
+        (MeetingPhase::ReviewReady, Some(ended_at)) => {
+            retention_policy.delete_after_utc_ms(ended_at)
+        }
+        _ => None,
+    };
     transaction.execute(
         "INSERT INTO meeting_sessions (
             id, phase, revision, title, origin_kind, preflight_json, created_at_utc_ms,
@@ -10733,8 +10748,8 @@ fn import_cloud_meeting_bundle_in(
             bundle.session.ended_at_utc_ms,
             bundle.session.recovered_at_utc_ms,
             encode_json(&bundle.session.processing_status)?,
-            encode_json(&bundle.session.retention_policy)?,
-            bundle.session.delete_after_utc_ms,
+            encode_json(&retention_policy)?,
+            delete_after_utc_ms,
             diarization_status_to_db(bundle.session.diarization_status),
             bundle.session.diarization_model_id,
             bundle.session.diarization_model_version,
@@ -13959,6 +13974,139 @@ mod tests {
             store.restore_trashed_meeting(job_id, 20),
             Err(StoreError::NotFound),
             "a discard is final"
+        );
+    }
+
+    const DAY_MS: i64 = 86_400_000;
+
+    /// A meeting's whole-meeting setting, and how long after its end it goes.
+    fn whole_meeting_retention(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+    ) -> (MeetingRetentionPolicy, Option<i64>) {
+        let (policy, after_end): (String, Option<i64>) = store
+            .connection()
+            .expect("store connection")
+            .query_row(
+                "SELECT retention_policy_json, delete_after_utc_ms - ended_at_utc_ms
+                 FROM meeting_sessions WHERE id = ?1",
+                params![id(session_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("meeting retention");
+        (decode_json(&policy).expect("retention policy"), after_end)
+    }
+
+    /// A finished meeting stamped the way the old 30-day default stamped it.
+    fn old_thirty_day_meeting(store: &MeetingStore) -> (MeetingSessionId, u64) {
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(store, session_id);
+        store
+            .connection()
+            .expect("store connection")
+            .execute(
+                "UPDATE meeting_sessions
+                    SET retention_policy_json = '{\"kind\":\"delete_after_days\",\"days\":30}',
+                        delete_after_utc_ms = ended_at_utc_ms + ?2
+                  WHERE id = ?1",
+                params![id(session_id), 30 * DAY_MS],
+            )
+            .expect("old default stamp");
+        (session_id, revision)
+    }
+
+    fn keep_meetings_thirty_days(store: &MeetingStore) {
+        let (_policy, revision) = store.default_retention_policy().expect("current setting");
+        store
+            .set_default_retention_policy(
+                MeetingOperationId::new(),
+                1,
+                revision,
+                &MeetingRetentionPolicy::DeleteAfterDays { days: 30 },
+            )
+            .expect("thirty-day setting");
+    }
+
+    fn trash(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        revision: u64,
+    ) -> MeetingDeletionJobId {
+        let (_receipt, job_id) = store
+            .reserve_deletion(
+                MeetingOperationId::new(),
+                10,
+                session_id,
+                revision,
+                DeletionCause::User,
+            )
+            .expect("reserve deletion");
+        store.finish_deletion(job_id).expect("finish deletion");
+        job_id
+    }
+
+    #[test]
+    fn a_meeting_from_another_mac_follows_this_macs_whole_meeting_setting() {
+        let (_other_directory, other_mac) = store();
+        let (_directory, this_mac) = store();
+        let (stamped, _) = old_thirty_day_meeting(&other_mac);
+        let unstamped = MeetingSessionId::new();
+        review_ready_session(&other_mac, unstamped);
+        let arrive = |session_id| {
+            cloud_bundle::CloudMeetingBundleV1::export_from_store(&other_mac, session_id)
+                .expect("export bundle")
+                .import_into_store(&this_mac)
+                .expect("import bundle")
+        };
+
+        arrive(stamped);
+        assert_eq!(
+            whole_meeting_retention(&this_mac, stamped),
+            (MeetingRetentionPolicy::Forever, None),
+            "a Mac that keeps meetings drops the date one arrives with"
+        );
+
+        keep_meetings_thirty_days(&this_mac);
+        arrive(unstamped);
+        assert_eq!(
+            whole_meeting_retention(&this_mac, unstamped),
+            (
+                MeetingRetentionPolicy::DeleteAfterDays { days: 30 },
+                Some(30 * DAY_MS)
+            ),
+            "a Mac that deletes after 30 days counts them from the meeting's end"
+        );
+    }
+
+    #[test]
+    fn a_restored_meeting_follows_this_macs_whole_meeting_setting() {
+        let (_directory, this_mac) = store();
+        let (stamped, revision) = old_thirty_day_meeting(&this_mac);
+        let stamped_job = trash(&this_mac, stamped, revision);
+        let unstamped = MeetingSessionId::new();
+        let revision = review_ready_session(&this_mac, unstamped);
+        let unstamped_job = trash(&this_mac, unstamped, revision);
+
+        this_mac
+            .restore_trashed_meeting(stamped_job, 20)
+            .expect("restore");
+        assert_eq!(
+            whole_meeting_retention(&this_mac, stamped),
+            (MeetingRetentionPolicy::Forever, None),
+            "the date it was deleted with does not come back"
+        );
+
+        keep_meetings_thirty_days(&this_mac);
+        this_mac
+            .restore_trashed_meeting(unstamped_job, 20)
+            .expect("restore");
+        assert_eq!(
+            whole_meeting_retention(&this_mac, unstamped),
+            (
+                MeetingRetentionPolicy::DeleteAfterDays { days: 30 },
+                Some(30 * DAY_MS)
+            ),
+            "a Mac that deletes after 30 days counts them from the meeting's end"
         );
     }
 
