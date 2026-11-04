@@ -436,13 +436,16 @@ struct MeetingStartCountdownView: View {
             PageSection("Starting soon") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("Starts in \(max(0, countdown.secondsToStart))s")
+                        Text("Starts in \(Self.remaining(countdown.secondsToStart))")
                             .font(TypeScale.body(13))
                             .monospacedDigit()
                             .foregroundStyle(Theme.ink)
                         if let brief = store.seriesBrief {
                             Text(brief).metaText()
                         }
+                    }
+                    if !countdown.briefing.isEmpty {
+                        BriefingFaces(rows: countdown.briefing)
                     }
                     MeetingStartPreviewCard(
                         facts: MeetingStartFacts(event: countdown.event),
@@ -481,6 +484,58 @@ struct MeetingStartCountdownView: View {
         return access == .authorized
             ? "Notifies you at the start"
             : "Shown in Sona only: notifications are off"
+    }
+
+    private static func remaining(_ seconds: Int) -> String {
+        let seconds = max(0, seconds)
+        return seconds < 60 ? "\(seconds) s" : "\((seconds + 59) / 60) min"
+    }
+}
+
+/// The people on the invite Sona already knows by their calendar address:
+/// their face, when you last met, and what is open each way. Anyone else on
+/// the invite stays a count on the card below, never a guessed face.
+private struct BriefingFaces: View {
+    @Environment(AppModel.self) private var model
+    let rows: [DetectionBriefingRow]
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ForEach(rows.prefix(6)) { row in
+                Button { model.openPerson(row.personId) } label: { face(row) }
+                    .buttonStyle(.plain)
+                    .help("Open \(row.displayName)")
+            }
+        }
+    }
+
+    private func face(_ row: DetectionBriefingRow) -> some View {
+        let mine = row.openLoops.filter { $0.direction == .mine }.count
+        let theirs = row.openLoops.filter { $0.direction == .waitingOn }.count
+        return VStack(spacing: 3) {
+            PersonPortrait(
+                personId: row.personId, name: row.displayName, size: 40, revision: model.people.photoRevision)
+                .padding(.bottom, 3)
+            Text(row.displayName.split(separator: " ").first.map(String.init) ?? row.displayName)
+                .bodyText(12)
+                .lineLimit(1)
+            Text(lastMet(row)).metaText().monospacedDigit().lineLimit(1)
+            if mine > 0 {
+                Text("I owe \(mine)").metaText(Theme.accent).monospacedDigit()
+            }
+            if theirs > 0 {
+                Text("They owe \(theirs)").metaText().monospacedDigit()
+            }
+        }
+        .frame(width: 76)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    private func lastMet(_ row: DetectionBriefingRow) -> String {
+        guard let last = row.last else { return "First meeting" }
+        let since = PeopleFormat.since(PeopleFormat.date(last.atUtcMs))
+        return [since.value, since.unit].compactMap { $0 }.joined(separator: " ")
     }
 }
 
