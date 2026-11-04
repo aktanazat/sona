@@ -8,10 +8,10 @@ mod automations_tests;
 mod call_speakers;
 mod connections;
 mod context;
-mod conversation_review;
-mod custom_templates;
 #[cfg(test)]
 mod conversation_bookmark_tests;
+mod conversation_review;
+mod custom_templates;
 #[cfg(test)]
 mod custom_templates_tests;
 pub(crate) mod digest;
