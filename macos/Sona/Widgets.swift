@@ -302,6 +302,46 @@ struct ProgressRing: View {
     }
 }
 
+/// A run of steps as one ring cut into equal ticks, clockwise from the top:
+/// the finished ones full, the one under way tinted and filled as far as it
+/// has gone, the rest faint.
+struct StepRing: View {
+    let steps: Int
+    /// The step under way, counted from zero.
+    let current: Int
+    /// How far through the step under way, from 0 to 1.
+    let fraction: Double
+    var size: CGFloat = 16
+    var lineWidth: CGFloat = 2.5
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<steps, id: \.self) { step in
+                let span = 1 / Double(max(steps, 1))
+                let start = Double(step) * span + span * 0.15
+                let end = Double(step + 1) * span - span * 0.15
+                Circle().inset(by: lineWidth / 2)
+                    .trim(from: start, to: end)
+                    .stroke(step == current ? Theme.accent.opacity(0.3) : Theme.inkDisabled.opacity(0.45), lineWidth: lineWidth)
+                Circle().inset(by: lineWidth / 2)
+                    .trim(from: start, to: start + (end - start) * filled(step))
+                    .stroke(Theme.accent, lineWidth: lineWidth)
+            }
+        }
+        .rotationEffect(.degrees(-90))
+        .frame(width: size, height: size)
+        .animation(Motion.settle(reduced: reduceMotion), value: current)
+        .animation(Motion.settle(reduced: reduceMotion), value: fraction)
+        .accessibilityHidden(true)
+    }
+
+    private func filled(_ step: Int) -> Double {
+        if step < current { return 1 }
+        return step == current ? min(max(fraction, 0), 1) : 0
+    }
+}
+
 // MARK: - Charts
 
 /// One day of a week chart.

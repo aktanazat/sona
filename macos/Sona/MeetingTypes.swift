@@ -46,6 +46,7 @@ extension CoreEvent {
     static let meetingRemoved = "meeting:removed"
     static let meetingNavigationRequested = "meeting:navigation-requested"
     static let meetingSourceHealthChanged = "meeting:source-health-changed"
+    static let meetingProcessingProgress = "meeting:processing-progress"
 }
 
 /// The payload every `meeting:*` event but navigation carries.
@@ -68,6 +69,105 @@ struct MeetingNavigationPayload: Decodable {
     let revision: Int
     let atMilliseconds: UInt64?
     let segmentId: String?
+}
+
+// MARK: - Processing progress
+
+/// `ProcessingStage`: the five steps of processing a meeting, in the order
+/// they run.
+enum MeetingProcessingStage: String, Decodable, CaseIterable {
+    case audio
+    case speech
+    case speakers
+    case notes
+    case people
+
+    var ordinal: Int {
+        switch self {
+        case .audio: 0
+        case .speech: 1
+        case .speakers: 2
+        case .notes: 3
+        case .people: 4
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .audio: "Reading the audio"
+        case .speech: "Transcribing"
+        case .speakers: "Separating speakers"
+        case .notes: "Writing the notes"
+        case .people: "Updating people"
+        }
+    }
+}
+
+/// `ProcessingProgress`.
+struct MeetingProcessingProgress: Decodable, Equatable {
+    let stage: MeetingProcessingStage
+    let stageFractionPermille: Int
+    let audioNsTotal: UInt64?
+    let startedAtUtcMs: Int64
+    /// Nil until this Mac has finished the step once: no guess stands in
+    /// for a measurement.
+    let etaMs: UInt64?
+
+    var stageFraction: Double { Double(min(max(stageFractionPermille, 0), 1000)) / 1000 }
+}
+
+/// `MeetingProcessingProgressPayload`. No progress means the run is over,
+/// however it ended.
+struct MeetingProcessingProgressPayload: Decodable {
+    let eventSchemaVersion: Int
+    let sessionId: MeetingSessionId
+    let progress: MeetingProcessingProgress?
+}
+
+/// One progress update and when it arrived, so the time left counts down
+/// between updates without asking the core.
+struct MeetingProcessingUpdate: Equatable {
+    let progress: MeetingProcessingProgress
+    let receivedAt: Date
+
+    /// "Transcribing · 2:10 left", or the step alone when there is no time
+    /// to show or the time shown has run out.
+    func line(at now: Date) -> String {
+        guard let left = left(at: now) else { return progress.stage.label }
+        return "\(progress.stage.label) · \(left.clock) left"
+    }
+
+    func left(at now: Date) -> TimeInterval? {
+        guard let etaMs = progress.etaMs else { return nil }
+        let left = (TimeInterval(etaMs) / 1000 - now.timeIntervalSince(receivedAt)).rounded(.up)
+        return left >= 1 ? left : nil
+    }
+}
+
+/// `ProcessingRoute`: where the notes were written.
+enum MeetingProcessingRoute: String, Decodable {
+    case local
+    case relay
+}
+
+/// `ProcessingReceipt`: what one finished run took.
+struct MeetingProcessingReceipt: Decodable {
+    let wallMs: UInt64
+    let audioNs: UInt64
+    let route: MeetingProcessingRoute
+
+    /// "41 min in 2:31 · 16× · on this Mac".
+    var line: String {
+        let audio = TimeInterval(audioNs) / 1_000_000_000
+        let wall = TimeInterval(wallMs) / 1000
+        let factor = audio / max(wall, 0.001)
+        let speed = factor >= 10 ? "\(Int(factor.rounded()))×" : String(format: "%.1f×", factor)
+        let place = switch route {
+        case .local: "on this Mac"
+        case .relay: "on your server"
+        }
+        return "\(audio.spoken) in \(wall.clock) · \(speed) · \(place)"
+    }
 }
 
 // MARK: - Session state
@@ -927,6 +1027,7 @@ struct MeetingArtifactRevision: Decodable, Identifiable {
     let state: MeetingArtifactState
     let generatedAtUtcMs: Int64
     let content: MeetingGeneratedArtifacts?
+    let receipt: MeetingProcessingReceipt?
 
     var id: MeetingArtifactId { artifactId }
 

@@ -601,6 +601,7 @@ struct MeetingsFeed: View {
                         ForEach(group.items) { entry in
                             MeetingsRow(
                                 entry: entry,
+                                processing: store.processingUpdate(entry.sessionId, phase: entry.phase),
                                 open: { store.open(entry.sessionId) },
                                 openOutcome: { store.open(entry.sessionId, outcome: $0) },
                                 export: { store.export(entry.sessionId, format: $0) },
@@ -650,6 +651,7 @@ struct MeetingsGroupHeading: View {
 /// deletion.
 struct MeetingsRow: View {
     let entry: MeetingHistorySummary
+    let processing: MeetingProcessingUpdate?
     let open: () -> Void
     let openOutcome: (LedgerOutcome) -> Void
     let export: (MeetingExportFormat) -> Void
@@ -667,6 +669,10 @@ struct MeetingsRow: View {
                     }
                     if let headline = entry.headlineText {
                         Text(headline).bodyText(14, Theme.inkSecondary).lineLimit(2)
+                    }
+                    if let processing {
+                        MeetingProcessingLine(update: processing)
+                            .padding(.top, 2)
                     }
                     if entry.attention != nil || !facts.isEmpty {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -737,6 +743,39 @@ struct MeetingsRow: View {
             parts.append(speakers.joined(separator: ", "))
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// A processing meeting's ring and the step it is on: "Transcribing · 2:10
+/// left". The time counts down between updates, and there is none until this
+/// Mac has finished that step once.
+struct MeetingProcessingLine: View {
+    let update: MeetingProcessingUpdate
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 6) {
+            StepRing(
+                steps: MeetingProcessingStage.allCases.count,
+                current: update.progress.stage.ordinal,
+                fraction: update.progress.stageFraction
+            )
+            if update.progress.etaMs == nil {
+                line(at: update.receivedAt)
+            } else {
+                TimelineView(.periodic(from: update.receivedAt, by: 1)) { context in
+                    line(at: context.date)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func line(at now: Date) -> some View {
+        Text(update.line(at: now))
+            .font(TypeScale.label(12))
+            .monospacedDigit()
+            .foregroundStyle(Theme.inkSecondary)
+            .lineLimit(1)
     }
 }
 

@@ -190,6 +190,9 @@ struct MeetingReviewHeader: View {
                     .frame(height: 32)
             }
             Text(facts).metaText(Theme.inkSecondary)
+            if update == nil, let receipt = snapshot.currentArtifact?.receipt {
+                Text(receipt.line).metaText(Theme.inkTertiary)
+            }
             status
         }
         .padding(.bottom, 24)
@@ -315,8 +318,8 @@ struct MeetingReviewHeader: View {
     }
 
     /// At most one line under the facts: what the core refused, else a remote
-    /// run that has not stopped, else what became of the notes and the
-    /// voices. Each carries the one thing to do about it.
+    /// run that has not stopped, else the run under way, else what became of
+    /// the notes and the voices. Each carries the one thing to do about it.
     @ViewBuilder
     private var status: some View {
         if let error = store.error {
@@ -336,6 +339,8 @@ struct MeetingReviewHeader: View {
                         .disabled(store.busy)
                 }
             }
+        } else if let update {
+            MeetingProcessingLine(update: update)
         } else if let standing {
             statusLine(standing) {
                 if processing.offersSettings {
@@ -363,6 +368,10 @@ struct MeetingReviewHeader: View {
     }
 
     private var processing: MeetingProcessingStatus { snapshot.session.processingStatus }
+
+    private var update: MeetingProcessingUpdate? {
+        store.processingUpdate(snapshot.session.sessionId, phase: snapshot.session.phase)
+    }
 
     /// "Notes failed: the model did not answer · Separating speakers
     /// failed · 12 lines have no speaker yet". Only the failure's own word

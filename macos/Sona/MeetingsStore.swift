@@ -259,6 +259,9 @@ final class MeetingsStore {
     private(set) var listError: String?
     private(set) var trend: MeetingTrendProjection?
     private(set) var trendRange: MeetingTrendRange = .days30
+    /// Each running meeting's latest progress. The core says when a run is
+    /// over, whatever its outcome, and that removes the entry.
+    private(set) var processing: [MeetingSessionId: MeetingProcessingUpdate] = [:]
 
     /// The cursor stack: one `created_at_utc_ms` per page walked back through.
     private var cursors: [Int64] = []
@@ -391,6 +394,12 @@ final class MeetingsStore {
                 self?.sessionChanged(line)
             }
         }
+        core.observe(CoreEvent.meetingProcessingProgress) { [weak self] line in
+            guard let self, let payload: MeetingProcessingProgressPayload = try? Core.payload(line) else { return }
+            self.processing[payload.sessionId] = payload.progress.map {
+                MeetingProcessingUpdate(progress: $0, receivedAt: Date())
+            }
+        }
         core.observe(CoreEvent.meetingRemoved) { [weak self] line in
             guard let self else { return }
             let payload: MeetingEventPayload? = try? Core.payload(line)
@@ -440,6 +449,14 @@ final class MeetingsStore {
             guard !Task.isCancelled else { return }
             await self?.refreshSnapshot()
         }
+    }
+
+    /// The progress a meeting shows. Every step before the people runs while
+    /// the meeting is still processing, so an update from one of those steps
+    /// on a meeting that has moved on is from a run that ended unheard.
+    func processingUpdate(_ sessionId: MeetingSessionId, phase: MeetingPhase) -> MeetingProcessingUpdate? {
+        guard let update = processing[sessionId] else { return nil }
+        return phase == .processing || update.progress.stage == .people ? update : nil
     }
 
     /// Coalesces a burst of events into one list read.
