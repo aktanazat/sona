@@ -56,9 +56,10 @@ struct PersonReelSection: View {
     }
 }
 
-/// A reel's moments as chips, oldest on the left, and the one control that
+/// A reel's moments top to bottom, oldest first, and the one control that
 /// plays them in order through the shared player. Space plays or pauses,
-/// the arrows move between moments, and return opens the meeting there.
+/// the up and down arrows move between moments, and return opens the
+/// meeting there.
 struct ConversationReelView: View {
     /// Which reel this is to the shared player.
     let key: String
@@ -66,19 +67,26 @@ struct ConversationReelView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focused: Bool
-    /// The chip return opens while the reel is not playing.
+    /// The moment return opens while the reel is not playing.
     @State private var selected = 0
 
+    private static let rowPadding: CGFloat = 8
+    private static let faceSize: CGFloat = 28
+    private static let faceGap: CGFloat = 10
+    /// Where a row's words start, so the days between rows line up with them.
+    private static let textInset = rowPadding + faceSize + faceGap
+
     private var audio: ConversationAudioPlayback { model.meetings.audio }
-    /// The chip the player is on, while the reel is this one.
+    /// The moment the player is on, while the reel is this one.
     private var current: Int? { audio.reelKey == key ? audio.reelIndex : nil }
     private var playable: Int { moments.filter(\.said.audioRetained).count }
 
     var body: some View {
         Card {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 10) {
                 header
-                chips
+                timeline
+                    .padding(.horizontal, -Self.rowPadding)
             }
             .padding(16)
         }
@@ -89,9 +97,12 @@ struct ConversationReelView: View {
         .focusable(interactions: .activate)
         .focused($focused)
         .onKeyPress(.space) { playOrPause(); return .handled }
-        .onKeyPress(.leftArrow) { step(forward: false); return .handled }
-        .onKeyPress(.rightArrow) { step(forward: true); return .handled }
+        .onKeyPress(.upArrow) { step(forward: false); return .handled }
+        .onKeyPress(.downArrow) { step(forward: true); return .handled }
         .onKeyPress(.return) { openMeeting(); return .handled }
+        .onChange(of: current) { _, index in
+            if let index, moments.indices.contains(index) { selected = index }
+        }
     }
 
     private var header: some View {
@@ -112,57 +123,48 @@ struct ConversationReelView: View {
         }
     }
 
-    private var chips: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 12) {
-                    ForEach(Array(moments.enumerated()), id: \.element.id) { index, moment in
-                        if index > 0, let gap = gap(from: moments[index - 1], to: moment) {
-                            Text(gap)
-                                .metaText()
-                                .fixedSize()
-                                .padding(.top, 16)
-                                .accessibilityHidden(true)
-                        }
-                        chip(moment, at: index).id(moment.id)
-                    }
+    /// One row per moment, with the days between two meetings on a line of
+    /// its own.
+    private var timeline: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(moments.enumerated()), id: \.element.id) { index, moment in
+                if index > 0, let gap = gap(from: moments[index - 1], to: moment) {
+                    Text(gap)
+                        .metaText()
+                        .padding(.leading, Self.textInset)
+                        .padding(.vertical, 4)
+                        .accessibilityHidden(true)
                 }
-                .padding(.vertical, 2)
-            }
-            .scrollIndicators(.never)
-            .onChange(of: current) { _, index in
-                guard let index, moments.indices.contains(index) else { return }
-                selected = index
-                withAnimation(Motion.settle(reduced: reduceMotion)) { proxy.scrollTo(moments[index].id) }
+                row(moment, at: index)
             }
         }
     }
 
-    private func chip(_ moment: ReelMoment, at index: Int) -> some View {
+    private func row(_ moment: ReelMoment, at index: Int) -> some View {
         let now = current == index
         return Button { audio.playReel(moments.map(\.clip), key: key, from: index) } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    face(moment.said)
-                    VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .top, spacing: Self.faceGap) {
+                face(moment.said)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if let speaker = moment.said.speaker {
                             Text(speaker).bodyText(13).lineLimit(1)
                         }
                         Text("\(moment.said.meetingStarted.short) · \(moment.kind.word)").metaText().lineLimit(1)
                     }
+                    Text("“\(moment.said.text)”")
+                        .bodyText(13, Theme.inkSecondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    if moment.said.audioRetained {
+                        track(index).padding(.top, 2)
+                    } else {
+                        Text("Audio not kept").metaText()
+                    }
                 }
-                Text("“\(moment.said.text)”")
-                    .bodyText(13, Theme.inkSecondary)
-                    .lineLimit(2, reservesSpace: true)
-                    .multilineTextAlignment(.leading)
-                if moment.said.audioRetained {
-                    track(index)
-                } else {
-                    Text("Audio not kept").metaText()
-                }
+                Spacer(minLength: 0)
             }
-            .padding(10)
-            .frame(width: 208, alignment: .topLeading)
+            .padding(Self.rowPadding)
             .background(now ? Theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: Theme.radiusControl))
             .overlay {
                 RoundedRectangle(cornerRadius: Theme.radiusControl)
@@ -185,18 +187,19 @@ struct ConversationReelView: View {
     private func face(_ said: SaidMoment) -> some View {
         if let person = said.person {
             PersonPortrait(
-                personId: person.personId, name: person.displayName, size: 28, revision: model.people.photoRevision)
+                personId: person.personId, name: person.displayName, size: Self.faceSize,
+                revision: model.people.photoRevision)
         } else {
             Image(systemName: "waveform")
                 .font(.system(size: 12, weight: .regular))
                 .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 28, height: 28)
+                .frame(width: Self.faceSize, height: Self.faceSize)
                 .background(Theme.inset, in: Circle())
                 .accessibilityHidden(true)
         }
     }
 
-    /// How far the reel has got through this chip: full behind the one
+    /// How far the reel has got through this moment: full behind the one
     /// playing, filling on it, empty ahead of it.
     private func track(_ index: Int) -> some View {
         let played: Double = if let current {
@@ -212,7 +215,7 @@ struct ConversationReelView: View {
                     Capsule().fill(Theme.accent).frame(width: proxy.size.width * played)
                 }
             }
-            .frame(height: 2)
+            .frame(width: 180, height: 2)
             .animation(reduceMotion ? nil : .linear(duration: 0.1), value: played)
             .accessibilityHidden(true)
     }

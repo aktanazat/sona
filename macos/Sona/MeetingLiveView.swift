@@ -1311,7 +1311,7 @@ struct RitualPrepView: View {
         }
     }
 
-    /// "Last time, in Ada's words · 0:48": one press plays the moments.
+    /// "In Ada's words · 0:48": one press plays the moments.
     private func lastTimeLine(_ lastTime: LastTime) -> some View {
         let audio = model.meetings.audio
         let key = "prep:\(card.eventKey)"
@@ -1326,7 +1326,7 @@ struct RitualPrepView: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Text("Last time, in \(lastTime.name)’s words · \(Int64(clamping: total).meetingOffsetClock)")
+                    Text("In \(lastTime.name)’s words · \(Int64(clamping: total).meetingOffsetClock)")
                     Image(systemName: sounding ? "stop.fill" : "play.fill")
                         .font(.system(size: 10))
                         .accessibilityHidden(true)
