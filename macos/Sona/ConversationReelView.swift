@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// "In their words" on a person's page: what they promised, decided and
-/// asked in their last talks, read from the core when the page opens. No
-/// moments, no section.
+/// "From your talks" on a person's page: what was promised, decided and
+/// asked in your last talks with them, read from the core when the page
+/// opens. No moments, no section. Leaving the page stops its reel.
 struct PersonReelSection: View {
     let personId: String
     /// The page's revision: a new one reads the reel again.
@@ -21,6 +21,8 @@ struct PersonReelSection: View {
         let revision: UInt64
     }
 
+    private var key: String { "person:\(personId)" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             switch read {
@@ -28,15 +30,15 @@ struct PersonReelSection: View {
                 EmptyView()
             case let .ready(reel):
                 if !reel.moments.isEmpty {
-                    PageSection("In their words") {
-                        ConversationReelView(key: "person:\(personId)", moments: reel.moments)
+                    PageSection("From your talks") {
+                        ConversationReelView(key: key, moments: reel.moments)
                     }
                 }
             case .failed:
-                PageSection("In their words") {
+                PageSection("From your talks") {
                     Card {
                         CardRow {
-                            Text("Their recorded moments could not be read.").bodyText(14, Theme.inkSecondary)
+                            Text("The recorded moments could not be read.").bodyText(14, Theme.inkSecondary)
                         } trailing: {
                             Button("Retry") { Task { await load() } }.buttonStyle(.compact)
                         }
@@ -45,6 +47,9 @@ struct PersonReelSection: View {
             }
         }
         .task(id: ReadKey(personId: personId, revision: revision)) { await load() }
+        .onDisappear {
+            if model.meetings.audio.reelKey == key { model.meetings.audio.stop() }
+        }
     }
 
     private func load() async {
@@ -67,7 +72,8 @@ struct ConversationReelView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focused: Bool
-    /// The moment return opens while the reel is not playing.
+    /// The moment return opens and Play starts from while the reel is not
+    /// playing, back to the first once it stops.
     @State private var selected = 0
 
     private static let rowPadding: CGFloat = 8
@@ -101,8 +107,13 @@ struct ConversationReelView: View {
         .onKeyPress(.downArrow) { step(forward: true); return .handled }
         .onKeyPress(.return) { openMeeting(); return .handled }
         .onChange(of: current) { _, index in
-            if let index, moments.indices.contains(index) { selected = index }
+            guard let index else {
+                selected = 0
+                return
+            }
+            if moments.indices.contains(index) { selected = index }
         }
+        .onChange(of: moments.count) { _, count in selected = min(selected, max(count - 1, 0)) }
     }
 
     private var header: some View {

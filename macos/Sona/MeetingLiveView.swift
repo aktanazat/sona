@@ -1206,8 +1206,8 @@ struct RitualPrepView: View {
     var onOpenBrief: (String) -> Void = { _ in }
     @Environment(AppModel.self) private var model
     @State private var preview = BriefPreview.loading
-    /// A participant's recorded moments from your last talks, when one of
-    /// them has audio to play.
+    /// Your last talks with the first participant whose recorded moments
+    /// have audio to play.
     @State private var lastTime: LastTime?
 
     private struct LastTime {
@@ -1226,6 +1226,8 @@ struct RitualPrepView: View {
     private var minutes: Int {
         max(0, Int((card.startUtcMs.meetingDate.timeIntervalSinceNow / 60).rounded()))
     }
+
+    private var reelKey: String { "prep:\(card.eventKey)" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1309,24 +1311,26 @@ struct RitualPrepView: View {
                 return
             }
         }
+        .onDisappear {
+            if model.meetings.audio.reelKey == reelKey { model.meetings.audio.stop() }
+        }
     }
 
-    /// "In Ada's words · 0:48": one press plays the moments.
+    /// "Your talks with Ada · 0:48": one press plays the moments.
     private func lastTimeLine(_ lastTime: LastTime) -> some View {
         let audio = model.meetings.audio
-        let key = "prep:\(card.eventKey)"
-        let sounding = audio.reelKey == key
+        let sounding = audio.reelKey == reelKey
         let total = lastTime.reel.moments.reduce(UInt64(0)) { $0 + $1.playableNs }
         return VStack(alignment: .leading, spacing: 2) {
             Button {
                 if sounding {
                     audio.stop()
                 } else {
-                    audio.playReel(lastTime.reel.moments.map(\.clip), key: key)
+                    audio.playReel(lastTime.reel.moments.map(\.clip), key: reelKey)
                 }
             } label: {
                 HStack(spacing: 6) {
-                    Text("In \(lastTime.name)’s words · \(Int64(clamping: total).meetingOffsetClock)")
+                    Text("Your talks with \(lastTime.name) · \(Int64(clamping: total).meetingOffsetClock)")
                     Image(systemName: sounding ? "stop.fill" : "play.fill")
                         .font(.system(size: 10))
                         .accessibilityHidden(true)
@@ -1337,7 +1341,7 @@ struct RitualPrepView: View {
             .accessibilityValue(sounding ? "Playing" : "")
             if audio.heldForRecording {
                 Text(ConversationAudioPlayback.heldNotice).metaText()
-            } else if audio.failedReelKey == key, let error = audio.error {
+            } else if audio.failedReelKey == reelKey, let error = audio.error {
                 Text(error).metaText(error == ConversationAudioPlayback.heldNotice ? Theme.inkTertiary : Theme.live)
             }
         }

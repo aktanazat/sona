@@ -118,12 +118,17 @@ final class ConversationAudioPlayback {
     }
 
     /// Plays the clips one after another from `index`, passing over any whose
-    /// audio is gone, and stops after the last.
+    /// audio is gone, and stops after the last. Nothing kept from `index` on
+    /// fails, so the place that asked says so.
     func playReel(_ clips: [ReelClip], key: String, from index: Int = 0) {
         stop()
         reelKey = key
         reelClips = clips
-        playClip(at: playable(from: index, step: 1))
+        guard let first = playable(from: index, step: 1) else {
+            fail("Audio not kept.")
+            return
+        }
+        playClip(at: first)
     }
 
     /// Reads a reel, then plays it. The read counts as loading, and a read

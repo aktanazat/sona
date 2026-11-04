@@ -833,7 +833,7 @@ private enum PaletteRow: Identifiable {
     /// A line someone said: return plays it, ⌘return opens its meeting there.
     case heard(SaidMoment)
     /// Every heard line with its audio kept, oldest first, one after another.
-    case playAll(Int)
+    case playAll
     /// The next page of the same question, when the plane said there is one.
     case more
     case ask(String)
@@ -1068,7 +1068,7 @@ struct CommandPalette: View {
         if !heard.isEmpty {
             let playable = heard.filter(\.audioRetained).count
             let lines = heard.map(PaletteRow.heard)
-            sections.append(("Heard", playable > 1 ? lines + [.playAll(playable)] : lines, live))
+            sections.append(("Heard", playable > 1 ? lines + [.playAll] : lines, live))
         }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
@@ -1369,8 +1369,8 @@ private struct PaletteRowView: View {
                         progress
                         Text(meta(moment)).metaText().lineLimit(1)
                     }
-                case let .playAll(count):
-                    Text("Play all \(count)").bodyText()
+                case .playAll:
+                    Text("Play all, oldest first").bodyText()
                 case .more:
                     Text("Show more results").bodyText(14, Theme.inkSecondary)
                 case let .ask(question):
