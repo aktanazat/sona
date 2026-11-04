@@ -1371,8 +1371,13 @@ final class MeetingsStore {
     }
 
     func mergeSpeaker(_ source: SpeakerId, into target: SpeakerId) {
-        if transcriptSpeaker == source { transcriptSpeaker = target }
-        mutate("Merging the speakers", "meeting_speaker_merge") { session in
+        mutate(
+            "Merging the speakers", "meeting_speaker_merge",
+            then: {
+                guard self.receipt?.refusal == nil, self.transcriptSpeaker == source else { return }
+                self.transcriptSpeaker = target
+            }
+        ) { session in
             MeetingRequest.speakerMerge(
                 session.sessionId, revision: session.revision, source: source, target: target)
         }
