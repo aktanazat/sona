@@ -16,6 +16,8 @@ use crate::meeting::types::{
     MeetingPhase, MeetingSessionId, OperationActor, OperationReceipt, SourceTrackId, SpeakerId,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use specta::Type;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 const EMBEDDING_BYTES: usize = SPEAKER_EMBEDDING_DIMENSIONS * size_of::<f32>();
@@ -214,6 +216,13 @@ pub(crate) struct MeetingSpeakerIdentifyRequest {
 pub(crate) struct VoiceSpeakerIdentityResult {
     pub receipt: OperationReceipt,
     pub resolved_person_id: Option<PersonId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct VoiceSpeakerSuggestion {
+    pub speaker_id: SpeakerId,
+    pub person_id: PersonId,
+    pub display_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -548,42 +557,13 @@ impl MeetingStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_voice_people_revision_in(&transaction, expected_people_revision)?;
         require_voice_person_in(&transaction, person_id)?;
+        forget_person_voiceprints_in(&transaction, person_id)?;
         let change = remove_voice_person_evidence_in(&transaction, person_id)?;
         if change.people_changed() {
             bump_people_revision_in(&transaction)?;
         }
         transaction.commit()?;
         Ok(VoiceProfileStatus::Unenrolled)
-    }
-
-    pub(crate) fn has_compatible_local_voice_profiles(
-        &self,
-        model: SpeakerEmbeddingModelKey,
-    ) -> Result<bool, StoreError> {
-        require_expected_model(model)?;
-        let connection = self.connection()?;
-        let exists: i64 = connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM voice_profiles
-                 WHERE model_id = ?1 AND model_revision = ?2 AND model_sha256 = ?3
-                   AND embedding_dimensions = ?4 AND sample_rate_hz = ?5 AND feature_bins = ?6
-                   AND feature_pipeline_revision = ?7 AND normalization = ?8
-                   AND sample_count > 0
-             )",
-            params![
-                model.model_id,
-                model.model_revision,
-                model.model_sha256,
-                i64::try_from(model.embedding_dimensions)
-                    .map_err(|_| StoreError::VoiceInvariant)?,
-                i64::from(model.sample_rate_hz),
-                i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
-                model.feature_pipeline_revision,
-                model.normalization,
-            ],
-            |row| row.get(0),
-        )?;
-        Ok(exists != 0)
     }
 
     pub(crate) fn active_voice_speaker_revision(
@@ -651,6 +631,162 @@ impl MeetingStore {
         })
         .collect()
     }
+
+    /// Remember this run's voice for each diarized speaker, replacing what an
+    /// earlier run kept for the same speaker. A speaker merged away or from
+    /// another meeting is skipped.
+    pub(crate) fn store_speaker_voiceprints(
+        &self,
+        session_id: MeetingSessionId,
+        model: SpeakerEmbeddingModelKey,
+        voiceprints: &[(SpeakerId, SpeakerEmbedding)],
+        created_at_utc_ms: i64,
+    ) -> Result<(), StoreError> {
+        require_expected_model(model)?;
+        let embedding_dimensions =
+            i64::try_from(model.embedding_dimensions).map_err(|_| StoreError::VoiceInvariant)?;
+        let feature_bins =
+            i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (speaker_id, embedding) in voiceprints {
+            transaction.execute(
+                "INSERT INTO meeting_speaker_voiceprints (
+                    speaker_id, session_id, model_id, model_revision, model_sha256,
+                    embedding_dimensions, sample_rate_hz, feature_bins,
+                    feature_pipeline_revision, normalization, embedding, created_at_utc_ms
+                 )
+                 SELECT speaker_id, session_id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+                   FROM meeting_speakers
+                  WHERE speaker_id = ?1 AND session_id = ?2 AND merged_into_speaker_id IS NULL
+                 ON CONFLICT(speaker_id) DO UPDATE SET
+                    model_id = excluded.model_id,
+                    model_revision = excluded.model_revision,
+                    model_sha256 = excluded.model_sha256,
+                    embedding_dimensions = excluded.embedding_dimensions,
+                    sample_rate_hz = excluded.sample_rate_hz,
+                    feature_bins = excluded.feature_bins,
+                    feature_pipeline_revision = excluded.feature_pipeline_revision,
+                    normalization = excluded.normalization,
+                    embedding = excluded.embedding,
+                    created_at_utc_ms = excluded.created_at_utc_ms",
+                params![
+                    id(*speaker_id),
+                    id(session_id),
+                    model.model_id,
+                    model.model_revision,
+                    model.model_sha256,
+                    embedding_dimensions,
+                    i64::from(model.sample_rate_hz),
+                    feature_bins,
+                    model.feature_pipeline_revision,
+                    model.normalization,
+                    embedding_blob(embedding),
+                    created_at_utc_ms,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// For each speaker still waiting for a name, the one person whose
+    /// confirmed voices from any meeting it matches. Nothing is written: the
+    /// speaker is named only when the user confirms through `identify_speaker`.
+    pub(crate) fn voice_speaker_suggestions(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<VoiceSpeakerSuggestion>, StoreError> {
+        let unresolved = self.unresolved_active_voice_speaker_ids(session_id)?;
+        if unresolved.is_empty() {
+            return Ok(Vec::new());
+        }
+        let model = wespeaker_embedding_model_key();
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT voiceprint.speaker_id, person.id, person.display_name, voiceprint.embedding
+               FROM meeting_speaker_voiceprints voiceprint
+               JOIN meeting_speakers speaker
+                 ON speaker.speaker_id = voiceprint.speaker_id
+                AND speaker.merged_into_speaker_id IS NULL
+               LEFT JOIN meeting_voice_speaker_resolutions resolution
+                 ON resolution.speaker_id = voiceprint.speaker_id
+                AND resolution.is_current = 1
+                AND resolution.resolution_kind = 'identified'
+               LEFT JOIN persons person ON person.id = resolution.resolved_person_id
+              WHERE voiceprint.model_id = ?2 AND voiceprint.model_revision = ?3
+                AND voiceprint.model_sha256 = ?4 AND voiceprint.embedding_dimensions = ?5
+                AND voiceprint.sample_rate_hz = ?6 AND voiceprint.feature_bins = ?7
+                AND voiceprint.feature_pipeline_revision = ?8 AND voiceprint.normalization = ?9
+                AND (person.id IS NOT NULL OR voiceprint.session_id = ?1)
+              ORDER BY person.id, voiceprint.speaker_id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                id(session_id),
+                model.model_id,
+                model.model_revision,
+                model.model_sha256,
+                i64::try_from(model.embedding_dimensions)
+                    .map_err(|_| StoreError::VoiceInvariant)?,
+                i64::from(model.sample_rate_hz),
+                i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
+                model.feature_pipeline_revision,
+                model.normalization,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )?;
+        let mut people: Vec<(PersonId, String, Vec<SpeakerEmbedding>)> = Vec::new();
+        let mut waiting = Vec::new();
+        for row in rows {
+            let (speaker_id, person_id, display_name, embedding) = row?;
+            let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
+            let embedding = embedding_from_blob(&embedding)?;
+            match person_id.zip(display_name) {
+                Some((person_id, display_name)) => {
+                    let person_id = PersonId::from_uuid(parse_uuid(&person_id)?);
+                    match people.last_mut() {
+                        Some((last, _, voices)) if *last == person_id => voices.push(embedding),
+                        _ => people.push((person_id, display_name, vec![embedding])),
+                    }
+                }
+                None if unresolved.contains(&speaker_id) => waiting.push((speaker_id, embedding)),
+                None => {}
+            }
+        }
+        let exemplars = people
+            .into_iter()
+            .filter_map(|(person_id, display_name, voices)| {
+                mean_embedding(&voices).map(|centroid| (person_id, display_name, centroid))
+            })
+            .collect::<Vec<_>>();
+        Ok(waiting
+            .into_iter()
+            .filter_map(|(speaker_id, embedding)| {
+                let index = match_speaker_profile(
+                    &embedding,
+                    exemplars
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (_, _, centroid))| (index, centroid)),
+                )?;
+                let (person_id, display_name, _) = &exemplars[index];
+                Some(VoiceSpeakerSuggestion {
+                    speaker_id,
+                    person_id: *person_id,
+                    display_name: display_name.clone(),
+                })
+            })
+            .collect())
+    }
+
     /// Match entirely inside SQLCipher and return only a revision-fenced target.
     pub(crate) fn match_local_voice_profile(
         &self,
@@ -878,6 +1014,7 @@ impl MeetingStore {
         };
         clear_automatic_match_for_speaker_in(&transaction, request.speaker_id)?;
         let profiles_changed = if remove_samples {
+            forget_speaker_voiceprint_in(&transaction, request.speaker_id)?;
             remove_profile_samples_for_speaker_in(&transaction, request.speaker_id)?
         } else {
             false
@@ -1019,6 +1156,52 @@ pub(in crate::meeting::store) fn clear_automatic_matches_for_speakers_in(
     Ok(changed != 0)
 }
 
+/// The merged speaker keeps its own voice, or takes the source's when it had
+/// none.
+pub(in crate::meeting::store) fn merge_speaker_voiceprint_in(
+    transaction: &Transaction<'_>,
+    source_speaker_id: SpeakerId,
+    target_speaker_id: SpeakerId,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "UPDATE OR IGNORE meeting_speaker_voiceprints SET speaker_id = ?2 WHERE speaker_id = ?1",
+        params![id(source_speaker_id), id(target_speaker_id)],
+    )?;
+    forget_speaker_voiceprint_in(transaction, source_speaker_id)
+}
+
+fn forget_speaker_voiceprint_in(
+    transaction: &Transaction<'_>,
+    speaker_id: SpeakerId,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "DELETE FROM meeting_speaker_voiceprints WHERE speaker_id = ?1",
+        params![id(speaker_id)],
+    )?;
+    Ok(())
+}
+
+/// Every remembered voice attributed to the person: speakers the user named
+/// as them and speakers their enrolled profile matched. Runs before the
+/// matches themselves are removed.
+pub(in crate::meeting::store) fn forget_person_voiceprints_in(
+    transaction: &Transaction<'_>,
+    person_id: PersonId,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "DELETE FROM meeting_speaker_voiceprints
+          WHERE speaker_id IN (
+                SELECT speaker_id FROM meeting_voice_speaker_resolutions
+                 WHERE is_current = 1 AND resolution_kind = 'identified'
+                   AND resolved_person_id = ?1
+                UNION
+                SELECT speaker_id FROM voice_speaker_matches WHERE person_id = ?1
+          )",
+        params![id(person_id)],
+    )?;
+    Ok(())
+}
+
 pub(in crate::meeting::store) fn remove_profile_samples_for_speaker_in(
     transaction: &Transaction<'_>,
     speaker_id: SpeakerId,
@@ -1052,6 +1235,10 @@ pub(in crate::meeting::store) fn purge_session_voice_evidence_in(
     };
     transaction.execute(
         "DELETE FROM voice_speaker_matches WHERE session_id = ?1",
+        params![id(session_id)],
+    )?;
+    transaction.execute(
+        "DELETE FROM meeting_speaker_voiceprints WHERE session_id = ?1",
         params![id(session_id)],
     )?;
     Ok(VoiceEvidenceChange { profiles_changed })
@@ -1605,9 +1792,10 @@ fn require_profile_model(
 }
 
 /// One model key, four readers: this conversion plus `require_profile_model`,
-/// the SQL predicate in `has_compatible_local_voice_profiles`, and the SQL
-/// predicate inside `unresolved_active_voice_speaker_ids`. Adding a field to
-/// `SpeakerEmbeddingModelKey` means changing all four and the migration.
+/// and the SQL predicates inside `unresolved_active_voice_speaker_ids` and
+/// `voice_speaker_suggestions`. Adding a field to `SpeakerEmbeddingModelKey`
+/// means changing all four, both writers (`insert_profile_in` and
+/// `store_speaker_voiceprints`) and both tables' migrations.
 impl From<SpeakerEmbeddingModelKey> for VoiceProfileModelStatus {
     fn from(value: SpeakerEmbeddingModelKey) -> Self {
         Self {
@@ -1714,21 +1902,11 @@ fn recompute_profile_in(
         )?;
         return Ok(());
     }
-    let mut sums = [0.0_f32; SPEAKER_EMBEDDING_DIMENSIONS];
-    for sample in &samples {
-        let embedding = embedding_from_blob(sample)?;
-        for (sum, value) in sums.iter_mut().zip(embedding.as_slice()) {
-            *sum += *value;
-        }
-    }
-    let norm = sums.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if !norm.is_finite() || norm <= f32::EPSILON {
-        return Err(StoreError::VoiceInvariant);
-    }
-    let centroid: [f32; SPEAKER_EMBEDDING_DIMENSIONS] =
-        std::array::from_fn(|index| sums[index] / norm);
-    let centroid =
-        SpeakerEmbedding::from_normalized_slice(&centroid).ok_or(StoreError::VoiceInvariant)?;
+    let embeddings = samples
+        .iter()
+        .map(|sample| embedding_from_blob(sample))
+        .collect::<Result<Vec<_>, _>>()?;
+    let centroid = mean_embedding(&embeddings).ok_or(StoreError::VoiceInvariant)?;
     transaction.execute(
         "UPDATE voice_profiles
             SET centroid = ?1, sample_count = ?2, profile_revision = ?3, updated_at_utc_ms = ?4
@@ -1742,6 +1920,24 @@ fn recompute_profile_in(
         ],
     )?;
     Ok(())
+}
+
+fn mean_embedding<'a>(
+    embeddings: impl IntoIterator<Item = &'a SpeakerEmbedding>,
+) -> Option<SpeakerEmbedding> {
+    let mut sums = [0.0_f32; SPEAKER_EMBEDDING_DIMENSIONS];
+    for embedding in embeddings {
+        for (sum, value) in sums.iter_mut().zip(embedding.as_slice()) {
+            *sum += *value;
+        }
+    }
+    let norm = sums.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return None;
+    }
+    let centroid: [f32; SPEAKER_EMBEDDING_DIMENSIONS] =
+        std::array::from_fn(|index| sums[index] / norm);
+    SpeakerEmbedding::from_normalized_slice(&centroid)
 }
 
 fn sample_profile_people_in<const N: usize>(

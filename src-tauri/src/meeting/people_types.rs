@@ -200,6 +200,7 @@ pub struct PersonDetail {
     pub commitments: Vec<PersonCommitment>,
     pub talk_share_avg_permille: Option<u32>,
     pub documents: Vec<DocumentSummary>,
+    pub contact: Option<PersonContactCard>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -492,6 +493,45 @@ pub struct PersonAvatarSetRequest {
 pub struct PersonAvatarSourceResult {
     pub original_base64: Option<String>,
     pub provenance: Option<PersonPhotoProvenance>,
+}
+
+/// The fields the user kept from a macOS contact they picked for this person.
+/// Only an explicit pick writes one; a name match never does.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactCard {
+    /// The contact's name as Contacts shows it.
+    pub name: String,
+    pub emails: Vec<PersonContactValue>,
+    pub phones: Vec<PersonContactValue>,
+    pub organization: Option<String>,
+    pub job_title: Option<String>,
+    /// Each address formatted as Contacts formats it, one line per row.
+    pub addresses: Vec<PersonContactValue>,
+    /// `http` or `https` only.
+    pub urls: Vec<PersonContactValue>,
+    pub birthday: Option<PersonContactBirthday>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactValue {
+    /// Contacts' label for the value, already localized: "work", "mobile".
+    pub label: Option<String>,
+    pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactBirthday {
+    pub month: u8,
+    pub day: u8,
+    pub year: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonContactSetRequest {
+    pub person_id: PersonId,
+    pub expected_revision: u64,
+    /// `None` detaches the card.
+    pub contact: Option<PersonContactCard>,
 }
 
 #[cfg(test)]

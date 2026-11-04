@@ -75,6 +75,7 @@ mod dictation_profile;
 
 #[path = "memory_index.rs"]
 mod memory_index;
+pub(crate) use memory_index::phone_snapshot_published_at;
 
 #[path = "note_shares.rs"]
 mod note_shares;
@@ -202,7 +203,7 @@ impl BackgroundScanGate {
 /// with credential storage. The background scan gates on this and so does
 /// every error the UI shows, so a sync that is deliberately off cannot report
 /// a failure it is not trying to reach.
-fn sync_requested(settings: &CloudSyncSettings, portable_mode: bool) -> bool {
+pub(crate) fn sync_requested(settings: &CloudSyncSettings, portable_mode: bool) -> bool {
     settings.enabled
         && settings.has_current_consent()
         && !settings.paused

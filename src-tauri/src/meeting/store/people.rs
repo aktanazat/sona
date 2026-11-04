@@ -1,4 +1,5 @@
 mod avatars;
+mod contact_cards;
 mod continuity;
 mod contributions;
 mod mutations;

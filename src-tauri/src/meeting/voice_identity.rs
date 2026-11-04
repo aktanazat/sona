@@ -70,10 +70,9 @@ pub(crate) const fn identity_source_allowed(
 pub(crate) fn automatic_identity_mode(
     origin: MeetingOrigin,
     source_kind: SourceKind,
-    has_compatible_profiles: bool,
     engine: DiarizationEngineKind,
 ) -> Option<AutoIdentityMode> {
-    if !identity_source_allowed(origin, source_kind) || !has_compatible_profiles {
+    if !identity_source_allowed(origin, source_kind) {
         return None;
     }
     Some(match engine {
@@ -647,21 +646,19 @@ mod tests {
     }
 
     #[test]
-    fn automatic_matching_requires_compatible_profiles_and_excludes_imports() {
+    fn every_allowed_meeting_collects_voices_and_imports_never_do() {
         assert_eq!(
             automatic_identity_mode(
                 MeetingOrigin::Manual,
                 SourceKind::SystemAudio,
-                false,
                 DiarizationEngineKind::Sortformer,
             ),
-            None
+            Some(AutoIdentityMode::EmbedSortformerCandidates)
         );
         assert_eq!(
             automatic_identity_mode(
                 MeetingOrigin::Import,
                 SourceKind::Microphone,
-                true,
                 DiarizationEngineKind::WeSpeaker,
             ),
             None
@@ -670,7 +667,6 @@ mod tests {
             automatic_identity_mode(
                 MeetingOrigin::Manual,
                 SourceKind::Microphone,
-                true,
                 DiarizationEngineKind::WeSpeaker,
             ),
             Some(AutoIdentityMode::ReuseWeSpeakerWindows)

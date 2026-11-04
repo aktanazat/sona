@@ -21,6 +21,7 @@ pub mod people;
 pub mod person_content;
 pub mod persona;
 pub mod portrait_source;
+pub mod privacy;
 pub mod prompts;
 pub mod query;
 pub mod recorder;

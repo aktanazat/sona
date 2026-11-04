@@ -303,6 +303,26 @@ fn transcript_retention_policy_in(
     })
 }
 
+/// How many transcripts still held would be past the policy's cutoff at
+/// `at_utc_ms`: the meetings the sweep will have purged by then.
+pub(super) fn retained_transcripts_due_by_in(
+    connection: &Connection,
+    at_utc_ms: i64,
+) -> Result<u64, StoreError> {
+    let policy = transcript_retention_policy_in(connection)?;
+    let Some(cutoff) = transcript_cutoff(&policy, at_utc_ms) else {
+        return Ok(0);
+    };
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM meeting_sessions
+         WHERE phase IN ('review_ready', 'recovery_required')
+           AND transcript_purged_at_utc_ms IS NULL AND ended_at_utc_ms <= ?1",
+        params![cutoff],
+        |row| row.get(0),
+    )?;
+    from_i64(count)
+}
+
 fn transcript_cutoff(policy: &MeetingTranscriptRetentionSnapshot, now: i64) -> Option<i64> {
     if now < policy.deletion_begins_at_utc_ms? {
         return None;

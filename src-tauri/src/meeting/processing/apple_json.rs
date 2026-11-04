@@ -130,7 +130,7 @@ pub(super) use scoped::{generate, generate_json, generate_json_cancellable};
 mod scoped {
     use super::super::{
         LedgerFirmness, RawActionItem, RawCitedText, RawLedgerReceipt, RawLedgerStance,
-        RawLedgerThread, RawOutlineTopic, ReplyShape, MAX_SUMMARY_LINES,
+        RawLedgerThread, RawOutlineTopic, ReplyShape,
     };
     use super::*;
     use serde::ser::{SerializeMap, SerializeSeq};
@@ -145,6 +145,11 @@ mod scoped {
     static LEDGER: LazyLock<RootSchema> = LazyLock::new(root_schema::<NativeLedgerRegistersWire>);
     static LEDGER_NARRATIVE: LazyLock<RootSchema> =
         LazyLock::new(root_schema::<NativeLedgerNarrative>);
+
+    /// The on-device model repeats a summary line until the schema's bound
+    /// stops it; each repeat costs decode time and is then dropped as a
+    /// duplicate.
+    const NATIVE_SUMMARY_LINES: usize = 5;
 
     #[derive(Default, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
@@ -165,7 +170,7 @@ mod scoped {
     #[serde(deny_unknown_fields)]
     struct NativeNarrativeReply {
         #[schemars(
-            length(min = 1, max = "MAX_SUMMARY_LINES"),
+            length(min = 1, max = "NATIVE_SUMMARY_LINES"),
             description = "Distinct concise summary lines, using final outcomes rather than superseded deadlines. Summarize a repeated subject once, not once per citation."
         )]
         summary: Vec<RawCitedText>,

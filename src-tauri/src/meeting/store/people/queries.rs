@@ -4,6 +4,7 @@ use self::artifacts::{
     all_open_loops_in, document_summaries_in, facts_for_person_in, meeting_summary_in,
     person_meeting_headline_from_json, talk_share_average_in, PersonFacts,
 };
+use super::contact_cards::contact_card_in;
 use super::{
     all_people_in, normalized_email, people_revision_in, person_by_id_in, person_from_row,
     SCHEMA_VERSION,
@@ -349,6 +350,7 @@ fn person_detail_in(
     let links = links_for_person_in(connection, person_id)?;
     let documents = document_summaries_in(connection, person_id)?;
     let talk_share_avg_permille = talk_share_average_in(connection, &person)?;
+    let contact = contact_card_in(connection, person_id)?;
     Ok(PersonDetailResult {
         schema_version: SCHEMA_VERSION,
         revision,
@@ -359,6 +361,7 @@ fn person_detail_in(
             commitments: facts.commitments,
             talk_share_avg_permille,
             documents,
+            contact,
         },
     })
 }

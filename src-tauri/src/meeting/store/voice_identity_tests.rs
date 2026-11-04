@@ -2,7 +2,7 @@ use super::encode_json;
 use super::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyDisposition, MeetingSpeakerIdentifyRequest,
     MeetingSpeakerIdentifyTarget, VoiceEnrollmentEvidence, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus,
+    VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
 use super::workflow_core_tests::{meeting, person, store};
 use super::*;
@@ -17,7 +17,7 @@ use crate::meeting::transcript_correction_types::{
     TranscriptCorrectionUpdateRequest,
 };
 use crate::meeting::types::{
-    MeetingDiarizationGenerationId, MeetingOperationId, MeetingOrigin, SourceTrackId,
+    DeletionCause, MeetingDiarizationGenerationId, MeetingOperationId, MeetingOrigin, SourceTrackId,
 };
 use crate::secrets::SecretManager;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -53,10 +53,14 @@ fn people_revision(store: &MeetingStore) -> u64 {
     // PANIC: the schema's nonnegative revision invariant permits this conversion.
     u64::try_from(revision).expect("nonnegative people revision")
 }
-fn unit_embedding() -> Result<SpeakerEmbedding, StoreError> {
+fn voice(axis: usize) -> Result<SpeakerEmbedding, StoreError> {
     let mut values = [0.0_f32; SPEAKER_EMBEDDING_DIMENSIONS];
-    values[0] = 1.0;
+    values[axis] = 1.0;
     SpeakerEmbedding::from_normalized_slice(&values).ok_or(StoreError::VoiceInvariant)
+}
+
+fn unit_embedding() -> Result<SpeakerEmbedding, StoreError> {
+    voice(0)
 }
 
 /// The one recording a session has: its microphone track and the diarization
@@ -525,15 +529,6 @@ fn manual_voice_resolutions_remain_resolved_after_the_encrypted_store_reopens() 
         .is_empty());
 }
 #[test]
-fn no_voice_profile_disables_automatic_identity() {
-    let (_directory, store) = store();
-
-    assert!(!store
-        .has_compatible_local_voice_profiles(wespeaker_embedding_model_key())
-        .expect("query local voice profiles"));
-}
-
-#[test]
 fn enrollment_accepts_the_current_manual_resolution_once() -> Result<(), StoreError> {
     let (_directory, store) = store();
     let session_id = meeting(&store, "Voice", 1);
@@ -663,14 +658,18 @@ fn removing_a_voice_profile_deletes_the_retained_samples_and_stops_matching(
     let person_id = person(&store, "Ada Lovelace", &[], &[]);
     enroll(&store, session_id, speaker_id, person_id)?;
     assert_eq!(profile_sample_count(&store, person_id)?, 1);
-    assert!(store.has_compatible_local_voice_profiles(wespeaker_embedding_model_key())?);
+    assert!(store
+        .match_local_voice_profile(&unit_embedding()?, wespeaker_embedding_model_key())?
+        .is_some());
 
     let status = store.remove_voice_profile(person_id, people_revision(&store))?;
 
     assert_eq!(status, VoiceProfileStatus::Unenrolled);
     assert_eq!(profile_count(&store, person_id)?, 0);
     assert_eq!(profile_sample_count(&store, person_id)?, 0);
-    assert!(!store.has_compatible_local_voice_profiles(wespeaker_embedding_model_key())?);
+    assert!(store
+        .match_local_voice_profile(&unit_embedding()?, wespeaker_embedding_model_key())?
+        .is_none());
     Ok(())
 }
 
@@ -1056,7 +1055,6 @@ fn matching_refuses_a_profile_from_another_model_revision() -> Result<(), StoreE
     let embedding = unit_embedding()?;
     insert_compatible_profile(&store, person_id, &embedding)?;
     let model = wespeaker_embedding_model_key();
-    assert!(store.has_compatible_local_voice_profiles(model)?);
     assert!(store
         .match_local_voice_profile(&embedding, model)?
         .is_some());
@@ -1068,7 +1066,6 @@ fn matching_refuses_a_profile_from_another_model_revision() -> Result<(), StoreE
         params![id(person_id)],
     )?;
 
-    assert!(!store.has_compatible_local_voice_profiles(model)?);
     assert!(store
         .match_local_voice_profile(&embedding, model)?
         .is_none());
@@ -1465,5 +1462,180 @@ fn merging_identical_phrases_keeps_supported_evidence_instead_of_an_inactive_cop
         future.segments[0].corrected_text,
         "future Sona contribution"
     );
+    Ok(())
+}
+
+fn keep_voices(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    voices: &[(SpeakerId, usize)],
+) -> Result<(), StoreError> {
+    let voices = voices
+        .iter()
+        .map(|(speaker_id, axis)| Ok((*speaker_id, voice(*axis)?)))
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    store.store_speaker_voiceprints(session_id, wespeaker_embedding_model_key(), &voices, 1)
+}
+
+/// The axis of the one voice kept for a speaker, if any.
+fn kept_voice(store: &MeetingStore, speaker_id: SpeakerId) -> Result<Option<usize>, StoreError> {
+    let blob: Option<Vec<u8>> = store
+        .connection()?
+        .query_row(
+            "SELECT embedding FROM meeting_speaker_voiceprints WHERE speaker_id = ?1",
+            params![id(speaker_id)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(blob.and_then(|blob| {
+        blob.chunks_exact(4)
+            .position(|value| value == 1.0_f32.to_le_bytes())
+    }))
+}
+
+#[test]
+fn a_voice_named_in_one_meeting_is_suggested_in_the_next_and_applied_only_on_confirm(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let first = meeting(&store, "First", 1);
+    let named = SpeakerId::new();
+    insert_speaker(&store, first, named);
+    keep_voices(&store, first, &[(named, 0)])?;
+    label_existing(&store, first, named, ada, meeting_revision(&store, first)?)?;
+
+    let second = meeting(&store, "Second", 2);
+    let same_voice = SpeakerId::new();
+    let other_voice = SpeakerId::new();
+    insert_speaker(&store, second, same_voice);
+    insert_speaker(&store, second, other_voice);
+    keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
+
+    assert_eq!(
+        store.voice_speaker_suggestions(second)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: same_voice,
+            person_id: ada,
+            display_name: "Ada Lovelace".to_owned(),
+        }]
+    );
+    let second_revision = meeting_revision(&store, second)?;
+    assert!(store
+        .unresolved_active_voice_speaker_ids(second)?
+        .contains(&same_voice));
+    let (display_name, links): (String, i64) = store.connection()?.query_row(
+        "SELECT speaker.display_name,
+                (SELECT COUNT(*) FROM meeting_person_links WHERE meeting_id = speaker.session_id)
+           FROM meeting_speakers speaker WHERE speaker.speaker_id = ?1",
+        params![id(same_voice)],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!((display_name.as_str(), links), ("Speaker", 0));
+
+    label_existing(&store, second, same_voice, ada, second_revision)?;
+    assert!(store.voice_speaker_suggestions(second)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_kept_voice_is_forgotten_with_its_speaker_its_person_or_its_meeting() -> Result<(), StoreError>
+{
+    let (_directory, store) = store();
+    let ada = person(&store, "Ada Lovelace", &[], &[]);
+    let grace = person(&store, "Grace Hopper", &[], &[]);
+    let session_id = meeting(&store, "Voice", 1);
+    let unknown = SpeakerId::new();
+    let corrected = SpeakerId::new();
+    let named = SpeakerId::new();
+    let kept = SpeakerId::new();
+    for speaker_id in [unknown, corrected, named, kept] {
+        insert_speaker(&store, session_id, speaker_id);
+    }
+    keep_voices(
+        &store,
+        session_id,
+        &[(unknown, 0), (corrected, 1), (named, 2), (kept, 3)],
+    )?;
+    for (speaker_id, person_id) in [(corrected, ada), (named, ada), (kept, grace)] {
+        label_existing(
+            &store,
+            session_id,
+            speaker_id,
+            person_id,
+            meeting_revision(&store, session_id)?,
+        )?;
+    }
+    for (speaker_id, disposition) in [
+        (unknown, MeetingSpeakerIdentifyDisposition::MarkUnknown),
+        (
+            corrected,
+            MeetingSpeakerIdentifyDisposition::CorrectTo {
+                target: MeetingSpeakerIdentifyTarget::Existing(grace),
+            },
+        ),
+    ] {
+        store.identify_speaker(MeetingSpeakerIdentifyRequest {
+            operation_id: MeetingOperationId::new(),
+            requested_at_utc_ms: 3,
+            session_id,
+            expected_meeting_revision: meeting_revision(&store, session_id)?,
+            expected_people_revision: people_revision(&store),
+            speaker_id,
+            disposition,
+        })?;
+    }
+    assert_eq!(kept_voice(&store, unknown)?, None);
+    assert_eq!(kept_voice(&store, corrected)?, None);
+    assert_eq!(kept_voice(&store, named)?, Some(2));
+
+    store.remove_voice_profile(ada, people_revision(&store))?;
+    assert_eq!(kept_voice(&store, named)?, None);
+    assert_eq!(kept_voice(&store, kept)?, Some(3));
+
+    let (_, job_id) = store.reserve_deletion(
+        MeetingOperationId::new(),
+        4,
+        session_id,
+        meeting_revision(&store, session_id)?,
+        DeletionCause::User,
+    )?;
+    store.finish_deletion(job_id)?;
+    assert_eq!(kept_voice(&store, kept)?, None);
+    Ok(())
+}
+
+#[test]
+fn merging_speakers_keeps_the_target_voice_or_takes_the_source_one() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = meeting(&store, "Voice", 1);
+    let source = SpeakerId::new();
+    let silent_target = SpeakerId::new();
+    let voiced_source = SpeakerId::new();
+    let voiced_target = SpeakerId::new();
+    for speaker_id in [source, silent_target, voiced_source, voiced_target] {
+        insert_speaker(&store, session_id, speaker_id);
+    }
+    keep_voices(
+        &store,
+        session_id,
+        &[(source, 0), (voiced_source, 1), (voiced_target, 2)],
+    )?;
+    for (from, into) in [(source, silent_target), (voiced_source, voiced_target)] {
+        store.merge_speaker(
+            MeetingOperationId::new(),
+            2,
+            session_id,
+            meeting_revision(&store, session_id)?,
+            from,
+            into,
+        )?;
+    }
+    assert_eq!(kept_voice(&store, silent_target)?, Some(0));
+    assert_eq!(kept_voice(&store, voiced_target)?, Some(2));
+    assert_eq!(kept_voice(&store, source)?, None);
+    assert_eq!(kept_voice(&store, voiced_source)?, None);
+
+    keep_voices(&store, session_id, &[(source, 5)])?;
+    assert_eq!(kept_voice(&store, source)?, None);
     Ok(())
 }

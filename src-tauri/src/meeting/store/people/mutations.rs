@@ -21,8 +21,8 @@ use crate::meeting::store::transcript_corrections::{
     merge_person_corrections_in, prepare_person_merge_in,
 };
 use crate::meeting::store::voice_identity::{
-    merge_voice_profiles_in, remove_source_person_voice_evidence_for_sessions_in,
-    remove_voice_person_evidence_in,
+    forget_person_voiceprints_in, merge_voice_profiles_in,
+    remove_source_person_voice_evidence_for_sessions_in, remove_voice_person_evidence_in,
 };
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
@@ -124,6 +124,12 @@ impl MeetingStore {
             "INSERT OR IGNORE INTO person_avatars (person_id, png, updated_at_utc_ms, provenance_json, original)
              SELECT ?1, png, updated_at_utc_ms, provenance_json, original
                FROM person_avatars WHERE person_id = ?2",
+            params![target_id.uuid().to_string(), source_id.uuid().to_string()],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO person_contact_cards (person_id, card_json, updated_at_utc_ms)
+             SELECT ?1, card_json, updated_at_utc_ms
+               FROM person_contact_cards WHERE person_id = ?2",
             params![target_id.uuid().to_string(), source_id.uuid().to_string()],
         )?;
         transaction.execute(
@@ -349,6 +355,7 @@ impl MeetingStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_people_revision_in(&transaction, expected_revision)?;
         person_by_id_in(&transaction, person_id)?;
+        forget_person_voiceprints_in(&transaction, person_id)?;
         remove_voice_person_evidence_in(&transaction, person_id)?;
         let removed = transaction.execute(
             "DELETE FROM persons WHERE id = ?1",

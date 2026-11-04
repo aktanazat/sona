@@ -3,7 +3,7 @@ use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::voice_identity::{
     ExplicitVoiceConsent, MeetingSpeakerIdentifyRequest, VoiceProfileEnrollmentRequest,
-    VoiceProfileStatus, VoiceSpeakerIdentityResult,
+    VoiceProfileStatus, VoiceSpeakerIdentityResult, VoiceSpeakerSuggestion,
 };
 use crate::meeting::transcript_correction_types::TranscriptCorrectionChangedSession;
 use crate::meeting::types::{
@@ -31,6 +31,16 @@ impl MeetingSessionManager {
         self.store()
             .await?
             .unresolved_active_voice_speaker_ids(session_id)
+            .map_err(map_store_error)
+    }
+
+    pub(crate) async fn voice_speaker_suggestions(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<VoiceSpeakerSuggestion>, MeetingCommandError> {
+        self.store()
+            .await?
+            .voice_speaker_suggestions(session_id)
             .map_err(map_store_error)
     }
 

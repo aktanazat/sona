@@ -1,5 +1,6 @@
 use crate::meeting::people_types::{
-    PersonAvatarResult, PersonAvatarSetRequest, PersonContributionsResult, PersonId,
+    PeopleMutationResult, PersonAvatarResult, PersonAvatarSetRequest, PersonContactSetRequest,
+    PersonContributionsResult, PersonId,
 };
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::MeetingCommandError;
@@ -33,4 +34,13 @@ pub async fn person_avatar_set(
     request: PersonAvatarSetRequest,
 ) -> Result<PersonAvatarResult, MeetingCommandError> {
     manager.person_avatar_set(request).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn person_contact_set(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    request: PersonContactSetRequest,
+) -> Result<PeopleMutationResult, MeetingCommandError> {
+    manager.person_contact_set(request).await
 }

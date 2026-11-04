@@ -2404,6 +2404,11 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::person_content::person_avatar_set(app.state(), request).await)
         }
+        "person_contact_set" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::person_content::person_contact_set(app.state(), request).await)
+        }
         "get_history_stats" => {
             reply(crate::commands::history::get_history_stats(app.clone(), app.state()).await)
         }
@@ -2540,6 +2545,9 @@ pub(super) async fn call(
                 ))
             })
             .await?
+        }
+        "privacy_inventory" => {
+            encode_plain(crate::commands::privacy::privacy_inventory(app.clone()).await)
         }
         "meeting_suggestions_list" => {
             let handle = app.clone();

@@ -11,8 +11,13 @@ use crate::managers::history::HistoryManager;
 use crate::meeting::store::memory_index::MemoryIndexRecords;
 use crate::scratchpad::memory_index::{notes_in_snapshot, MemoryNote};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, os::unix::fs::PermissionsExt, path::Path, sync::Arc};
-use tauri::Manager;
+use std::{
+    fs, io,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
 
 const SOURCE_FORMAT: &str = "sona-memory-index-v1";
@@ -36,6 +41,27 @@ struct IndexState {
     completed_digest: Option<String>,
     completed_produced_at_utc_ms: Option<i64>,
     pending: Option<PendingIndex>,
+}
+
+fn phone_sync_directory(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
+    Ok(app.path().app_data_dir()?.join("phone-sync"))
+}
+
+/// When this Mac last finished publishing the phone's memory index; `None`
+/// when it never has. Reads only the local state file, not the vault.
+pub(crate) fn phone_snapshot_published_at(app: &AppHandle) -> io::Result<Option<i64>> {
+    #[derive(Deserialize)]
+    struct Published {
+        completed_produced_at_utc_ms: Option<i64>,
+    }
+    let directory = phone_sync_directory(app).map_err(io::Error::other)?;
+    match fs::read(directory.join(CACHE_FILE)) {
+        Ok(bytes) => serde_json::from_slice::<Published>(&bytes)
+            .map(|state| state.completed_produced_at_utc_ms)
+            .map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Sealed payloads include their nonces; retries never reseal a revision.
@@ -172,12 +198,7 @@ pub(super) async fn sync(
     runtime: &CloudSyncRuntime,
     access: &CloudAccess,
 ) -> Result<(), CloudRuntimeError> {
-    let directory = runtime
-        .app
-        .path()
-        .app_data_dir()
-        .map_err(|_| CloudRuntimeError::File)?
-        .join("phone-sync");
+    let directory = phone_sync_directory(&runtime.app).map_err(|_| CloudRuntimeError::File)?;
     fs::create_dir_all(&directory).map_err(|_| CloudRuntimeError::File)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(|_| CloudRuntimeError::File)?;

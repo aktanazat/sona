@@ -1,5 +1,6 @@
 use super::people_types::{
-    PersonAvatarResult, PersonAvatarSetRequest, PersonContributionsResult, PersonId,
+    PeopleMutationResult, PersonAvatarResult, PersonAvatarSetRequest, PersonContactSetRequest,
+    PersonContributionsResult, PersonId,
 };
 use super::session::MeetingSessionManager;
 use super::types::MeetingCommandError;
@@ -36,6 +37,19 @@ impl MeetingSessionManager {
             .store()
             .await?
             .set_person_avatar(request, now_utc_ms())
+            .map_err(map_store_error)?;
+        self.emit_artifact_changed(None, result.revision);
+        Ok(result)
+    }
+
+    pub async fn person_contact_set(
+        &self,
+        request: PersonContactSetRequest,
+    ) -> Result<PeopleMutationResult, MeetingCommandError> {
+        let result = self
+            .store()
+            .await?
+            .set_person_contact_card(request, now_utc_ms())
             .map_err(map_store_error)?;
         self.emit_artifact_changed(None, result.revision);
         Ok(result)

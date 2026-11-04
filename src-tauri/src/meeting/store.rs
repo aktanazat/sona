@@ -33,6 +33,7 @@ pub(crate) mod note_evidence;
 mod note_evidence_tests;
 mod people;
 mod prep;
+pub(crate) mod privacy_inventory;
 pub(crate) mod prompts;
 pub(crate) mod query_plane;
 #[cfg(test)]
@@ -1522,6 +1523,8 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/transcript_correction_context.sql")),
     M::up(include_str!("store/conversation_review.sql")),
     M::up(include_str!("store/people/merge_redirects.sql")),
+    M::up(include_str!("store/people/contact_cards.sql")),
+    M::up(include_str!("store/speaker_voiceprints.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -5085,6 +5088,11 @@ impl MeetingStore {
                     return Err(StoreError::NotFound);
                 }
                 voice_identity::clear_automatic_matches_for_speakers_in(
+                    transaction,
+                    source_speaker_id,
+                    target_speaker_id,
+                )?;
+                voice_identity::merge_speaker_voiceprint_in(
                     transaction,
                     source_speaker_id,
                     target_speaker_id,

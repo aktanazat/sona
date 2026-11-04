@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::machine::PromptKind;
 use super::DetectionPromptDelivery;
@@ -444,13 +444,19 @@ pub trait ConsentPromptSurface: Send + Sync {
 }
 
 pub struct ConsentPromptPresenter {
-    app: AppHandle,
+    /// The native shell draws the panel from the emitted event and acks it;
+    /// a missed ack inside `PANEL_ACK_WINDOW` falls back to a notification.
+    native_shell: bool,
     native: Arc<dyn PromptPresenter>,
 }
 
 impl ConsentPromptPresenter {
     pub fn new(app: AppHandle, native: Arc<dyn PromptPresenter>) -> Self {
-        Self { app, native }
+        let native_shell = app.state::<crate::cli::CliArgs>().native_socket.is_some();
+        Self {
+            native_shell,
+            native,
+        }
     }
 }
 
@@ -463,13 +469,11 @@ impl ConsentPromptSurface for ConsentPromptPresenter {
         self.native.request_access()
     }
 
-    fn show_panel(&self, layout: ConsentPanelLayout) -> bool {
-        crate::meeting::consent_panel::show(&self.app, layout)
+    fn show_panel(&self, _layout: ConsentPanelLayout) -> bool {
+        self.native_shell
     }
 
-    fn hide_panel(&self) {
-        crate::meeting::consent_panel::hide(&self.app);
-    }
+    fn hide_panel(&self) {}
 
     fn present_fallback(&self, prompt_id: &str, prompt: &PromptKind) -> DetectionPromptDelivery {
         if self.native.present(prompt_id, prompt) {
