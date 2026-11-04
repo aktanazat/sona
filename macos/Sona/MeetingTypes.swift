@@ -1642,6 +1642,22 @@ struct MeetingLoopMutationResult: Decodable {
     let loops: MeetingLoopsResult
 }
 
+/// `UntrackedActions`: the meeting's open commitments that no planner work
+/// cites and nobody set aside, with the projects still taking work, the one
+/// worked in most recently first.
+struct MeetingUntrackedActions: Decodable {
+    let actions: [MeetingLoopRow]
+    let projects: [PlanningProject]
+}
+
+/// The untracked-actions read: still out, refused in the core's words, or
+/// answered. A refusal is never an empty list.
+enum MeetingUntrackedActionsRead {
+    case reading
+    case unavailable(String)
+    case read(MeetingUntrackedActions)
+}
+
 // MARK: - People context
 
 /// `PersonLinkSource`.
@@ -2114,6 +2130,18 @@ enum MeetingRequest {
             "expected_revision": .number(Double(revision)),
             "owner_person_id": ownerPersonId.map { JSONValue.string($0) } ?? .null,
         ])
+    }
+
+    /// `planning_track_action`: one planner task for the commitment, owned by
+    /// the person using Sona.
+    static func trackAction(_ loopId: MeetingLoopId, projectId: String) -> [String: JSONValue] {
+        ["loopId": .string(loopId), "projectId": .string(projectId), "operationId": .string(operationId())]
+    }
+
+    /// `planning_dismiss_action`: the commitment is not work, so it stops
+    /// asking to be tracked.
+    static func dismissAction(_ loopId: MeetingLoopId) -> [String: JSONValue] {
+        ["loopId": .string(loopId), "operationId": .string(operationId())]
     }
 
     /// A trashed meeting by its deletion job: what a restore and a delete

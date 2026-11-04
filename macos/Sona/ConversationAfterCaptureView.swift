@@ -48,6 +48,7 @@ struct ConversationAfterCaptureView: View {
                 }
                 TranscriptCorrectionsView(core: core, sessionId: snapshot.session.sessionId,
                     onListenSource: { store.playContribution(sessionId: $0, segmentId: $1) })
+                UntrackedActionsSection(store: store)
             }
             PageSection("Takeaway") {
                 VStack(alignment: .leading, spacing: 12) {

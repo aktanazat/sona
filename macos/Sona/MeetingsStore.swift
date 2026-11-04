@@ -311,6 +311,9 @@ final class MeetingsStore {
     private(set) var analytics: MeetingAnalyticsSnapshot?
     private(set) var loops: [MeetingLoopRow]?
     private(set) var loopsBusy = false
+    /// The open meeting's commitments that nothing in the planner cites yet.
+    private(set) var untracked: MeetingUntrackedActionsRead = .reading
+    private(set) var untrackedBusy = false
     private(set) var people: [MeetingPersonContextRow] = []
     private(set) var transcriptQuery = ""
     /// The one voice the transcript is narrowed to, picked on the talk bar.
@@ -361,6 +364,7 @@ final class MeetingsStore {
     /// without the session's revision moving, so the generation counts too.
     @ObservationIgnored private var analyticsKey: String?
     @ObservationIgnored private var loopsKey: String?
+    @ObservationIgnored private var untrackedKey: String?
     /// The note revision the core acknowledged: what the next save expects.
     @ObservationIgnored private var savedNoteRevision = 0
     @ObservationIgnored private var jumpNonce = 0
@@ -392,6 +396,10 @@ final class MeetingsStore {
             }
             self.reloadListSoon()
             Task { await self.loadFolders() }
+        }
+        core.observe("planning-changed-event") { [weak self] _ in
+            guard let self, self.openSessionId != nil else { return }
+            Task { await self.reloadUntracked() }
         }
         // A preflight is the live store's gate, not a page to read; opening it
         // here would put an empty review in front of the consent.
@@ -928,6 +936,8 @@ final class MeetingsStore {
         analyticsKey = nil
         loops = nil
         loopsKey = nil
+        untracked = .reading
+        untrackedKey = nil
         people = []
         receipt = nil
         chosenTab = if outcome != nil { .ledger } else if noteId != nil { .review } else { nil }
@@ -1019,6 +1029,7 @@ final class MeetingsStore {
             settleTab(next)
             await loadAnalytics(next)
             await loadLoops(next)
+            await loadUntracked(next)
         } catch {
             guard isOpen(sessionId) else { return }
             if (error as? CoreError)?.remote(as: MeetingCommandError.self) == .notFound {
@@ -1628,7 +1639,74 @@ final class MeetingsStore {
                 self.error = reason(error)
                 await reloadLoops()
             }
+            await reloadUntracked()
         }
+    }
+
+    // MARK: - Commitments not in the planner yet
+
+    private func loadUntracked(_ snapshot: MeetingReviewSnapshot) async {
+        guard untrackedKey != MeetingsStore.key(snapshot) else { return }
+        untrackedKey = MeetingsStore.key(snapshot)
+        await reloadUntracked()
+    }
+
+    private func reloadUntracked() async {
+        guard let sessionId = openSessionId else { return }
+        do {
+            let read: MeetingUntrackedActions = try await core.request(
+                "meeting_untracked_actions", MeetingRequest.session(sessionId))
+            guard isOpen(sessionId) else { return }
+            untracked = .read(read)
+        } catch {
+            guard isOpen(sessionId) else { return }
+            untracked = .unavailable(reason(error))
+        }
+    }
+
+    /// Read the commitments again after a read that failed.
+    func retryUntracked() {
+        untracked = .reading
+        Task { await reloadUntracked() }
+    }
+
+    /// One planner task for the commitment, in the project picked. The row
+    /// leaves and the toast names where it went.
+    func track(_ action: MeetingLoopRow, in project: PlanningProject) {
+        Task {
+            untrackedBusy = true
+            defer { untrackedBusy = false }
+            do {
+                let _: PlanningTask = try await core.request(
+                    "planning_track_action", MeetingRequest.trackAction(action.loopId, projectId: project.id))
+                drop(action)
+                notice = "Tracked in \(project.title)."
+            } catch {
+                self.error = reason(error)
+                await reloadUntracked()
+            }
+        }
+    }
+
+    /// The commitment is not work, so it stops asking to be tracked.
+    func setAside(_ action: MeetingLoopRow) {
+        Task {
+            untrackedBusy = true
+            defer { untrackedBusy = false }
+            do {
+                try await core.request("planning_dismiss_action", MeetingRequest.dismissAction(action.loopId))
+                drop(action)
+            } catch {
+                self.error = reason(error)
+                await reloadUntracked()
+            }
+        }
+    }
+
+    private func drop(_ action: MeetingLoopRow) {
+        guard case let .read(read) = untracked else { return }
+        untracked = .read(MeetingUntrackedActions(
+            actions: read.actions.filter { $0.loopId != action.loopId }, projects: read.projects))
     }
 
     // MARK: - People in the room
