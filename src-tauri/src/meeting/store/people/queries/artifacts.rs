@@ -1,13 +1,11 @@
 use crate::meeting::analytics::MeetingAnalytics;
 use crate::meeting::ledger::LedgerOutcomeCounts;
-use crate::meeting::loop_types::{
-    waiting_on_is_stale, MeetingLoopDirection, MeetingLoopId, MeetingLoopKind,
-};
+use crate::meeting::loop_types::{waiting_on_is_stale, MeetingLoopId, MeetingLoopKind};
 use crate::meeting::people_types::{
     Person, PersonCommitment, PersonId, PersonMeetingHeadline, PersonMeetingSummary, PersonOpenLoop,
 };
 use crate::meeting::store::loops::{ledger_loop_seeds, ledger_rows_in, rows_from_seeds_in};
-use crate::meeting::store::people::{all_people_in, owner_matches};
+use crate::meeting::store::people::{all_people_in, loop_concerns_person, owner_matches};
 use crate::meeting::store::{listed_outcomes, utc_now_ms, StoreError, CURRENT_ARTIFACT_CONTENT};
 use crate::meeting::types::{GeneratedMeetingArtifacts, MeetingSessionId};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -124,24 +122,7 @@ pub(super) fn facts_for_person_in(
             ledger_loop_seeds(meeting_id, &ledger),
         )?;
         for row in loop_rows {
-            // Two ways a row belongs on this page. Something this person owes
-            // needs them named on it: an explicit assignment, or the name the
-            // ledger read off the transcript. Something the user owes belongs
-            // here because it was raised in a meeting with them — no name
-            // needed, since the user is never a `Person`. A row attributed to
-            // some third party, or to nobody, is neither.
-            let relevant = match row.direction {
-                MeetingLoopDirection::Mine => true,
-                MeetingLoopDirection::WaitingOn => match row.owner_person_id {
-                    Some(owner) => owner == person.id,
-                    None => row
-                        .owner_text
-                        .as_deref()
-                        .is_some_and(|owner| owner_matches(person, owner)),
-                },
-                MeetingLoopDirection::Unattributed => false,
-            };
-            if !relevant {
+            if !loop_concerns_person(person, &row) {
                 continue;
             }
             let waiting_on_stale = waiting_on_is_stale(

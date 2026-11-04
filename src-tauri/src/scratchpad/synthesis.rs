@@ -6,7 +6,6 @@ use super::{
     derive_title, emit_changed, failure_sentence, now_ms, record_version, run, ScratchNote,
     ScratchVersionKind,
 };
-use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::meeting::processing::{
     evidence_budget, MeetingTextGenerationError, MeetingTextGenerator, ReplyShape,
@@ -15,14 +14,13 @@ use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::store::note_evidence::{NoteEvidenceError, NoteEvidenceInput};
 use crate::meeting::store::{MeetingStore, StoreError};
 use crate::meeting::types::MeetingSessionId;
-use crate::recorder::ScreenRecorderManager;
 use rusqlite::params;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 pub const MIGRATION: &str = "CREATE TABLE scratch_note_origins (
@@ -90,17 +88,8 @@ pub enum ScratchReviewAuthorship {
     ExplicitNote,
 }
 
-// Planner approval calls this while holding the meeting and history databases,
-// so capture checks must not acquire the meeting lifecycle actor.
 pub(crate) fn require_idle(app: &AppHandle) -> Result<(), String> {
-    let audio = app.state::<Arc<AudioRecordingManager>>();
-    let meetings = app.state::<Arc<MeetingSessionManager>>();
-    let screen = app.state::<Arc<ScreenRecorderManager>>();
-    if audio.is_recording()
-        || audio.capture_lease_is_active()
-        || meetings.is_capture_active()
-        || screen.is_capture_active()
-    {
+    if crate::utils::capture_running(app) {
         return Err("Memory review is paused while recording.".to_string());
     }
     Ok(())

@@ -14,6 +14,7 @@ pub(super) use queries::{calendar_context_in, confirmed_person_ids_in, continuit
 pub(super) use vocabulary::vocabulary_candidates_in;
 
 use super::{MeetingStore, StoreError};
+use crate::meeting::loop_types::{MeetingLoopDirection, MeetingLoopRow};
 use crate::meeting::people_types::{Person, PersonId, PersonSummary};
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -183,6 +184,25 @@ pub(super) fn identity_names(person: &Person) -> impl Iterator<Item = &str> {
 pub(super) fn owner_matches(person: &Person, owner: &str) -> bool {
     let owner = normalized(owner);
     !owner.is_empty() && identity_names(person).any(|name| normalized(name) == owner)
+}
+
+/// Whether a loop belongs with this person. Something they owe needs them
+/// named on it: an explicit assignment, or the name the ledger read off the
+/// transcript. Something the user owes belongs because it was raised in a
+/// meeting with them, with no name needed, since the user is never a
+/// `Person`. A row attributed to some third party, or to nobody, is neither.
+pub(super) fn loop_concerns_person(person: &Person, row: &MeetingLoopRow) -> bool {
+    match row.direction {
+        MeetingLoopDirection::Mine => true,
+        MeetingLoopDirection::WaitingOn => match row.owner_person_id {
+            Some(owner) => owner == person.id,
+            None => row
+                .owner_text
+                .as_deref()
+                .is_some_and(|owner| owner_matches(person, owner)),
+        },
+        MeetingLoopDirection::Unattributed => false,
+    }
 }
 
 pub(super) fn exact_phrase_mentioned(text: &str, phrase: &str) -> bool {
