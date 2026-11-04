@@ -1047,8 +1047,12 @@ struct MeetingAnalyticsStrip: View {
     private func longestRun(_ talk: MeetingTalkMetrics) -> some View {
         let who = talk.longestMonologueSpeakerId.map { store.speakerName($0) }
         let stat = Stat(label: who.map { "Longest run · \($0)" } ?? "Longest run", value: talk.longestMonologueNs.meetingTalkDuration)
-        if let start = talk.longestMonologueStartNs.map({ UInt64(clamping: $0) }), store.canPlayAtOffset(start) {
-            Button { store.playAtOffset(start) } label: { stat }
+        if let start = talk.longestMonologueStartNs, let speaker = talk.longestMonologueSpeakerId,
+           let segmentId = store.segmentStarting(at: start, speaker: speaker), store.canPlay(segmentId) {
+            Button {
+                store.jumpTo(segmentId)
+                store.playContribution(segmentId)
+            } label: { stat }
                 .buttonStyle(.plain)
                 .help("Play it from the start")
         } else {

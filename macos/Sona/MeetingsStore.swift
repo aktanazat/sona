@@ -1273,6 +1273,14 @@ final class MeetingsStore {
         return result
     }
 
+    /// The segment where this speaker's turn starts at this moment: a
+    /// previous turn still finishing there is not the one asked for.
+    func segmentStarting(at offset: Int64, speaker: SpeakerId) -> TranscriptSegmentId? {
+        snapshot?.transcript.first {
+            !$0.removed && $0.base.startOffsetNs == offset && $0.assignedSpeakerId == speaker
+        }?.base.segmentId
+    }
+
     private func openSource(atMilliseconds: UInt64?, segmentId: TranscriptSegmentId?) {
         let conversion = atMilliseconds?.multipliedReportingOverflow(by: 1_000_000)
         guard conversion?.overflow != true else {
@@ -1324,10 +1332,6 @@ final class MeetingsStore {
     func playBookmark(_ offset: UInt64) {
         guard let sessionId = openSessionId, canPlayBookmark(offset) else { return }
         audio.playBookmark(sessionId: sessionId, offset: offset)
-    }
-
-    func canPlayAtOffset(_ offset: UInt64) -> Bool {
-        segment(at: offset).map { canPlay($0.base.segmentId) } ?? false
     }
 
     func playAtOffset(_ offset: UInt64) {

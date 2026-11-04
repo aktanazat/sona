@@ -949,7 +949,8 @@ enum PeopleModel {
         let gaps = zip(days, days.dropFirst())
             .compactMap { calendar.dateComponents([.day], from: $0, to: $1).day }
             .sorted()
-        return gaps[gaps.count / 2]
+        let middle = gaps.count / 2
+        return gaps.count.isMultiple(of: 2) ? (gaps[middle - 1] + gaps[middle] + 1) / 2 : gaps[middle]
     }
 
     /// "1 open item", "3 open items".

@@ -276,13 +276,15 @@ struct PersonStats: View, Equatable {
     }
 
     /// Threads that landed out of every substantive thread, with no action:
-    /// no list of them exists across meetings to open.
+    /// no list of them exists across meetings to open. Meetings whose threads
+    /// were all small talk have nothing to count, which is not zero landed.
     private var landed: some View {
         let total = figures.outcomes.map { $0.landed + $0.open + $0.dropped } ?? 0
+        let outcomes = total > 0 ? figures.outcomes : nil
         return NumberTile(
-            figures.outcomes.map { "\($0.landed)" } ?? (figures.meetings == nil ? " " : "—"),
-            label: "Landed", unit: total > 0 ? "of \(total)" : nil,
-            tone: figures.outcomes == nil ? Theme.inkTertiary : Theme.ink)
+            outcomes.map { "\($0.landed)" } ?? (figures.meetings == nil ? " " : "—"),
+            label: "Landed", unit: outcomes == nil ? nil : "of \(total)",
+            tone: outcomes == nil ? Theme.inkTertiary : Theme.ink)
     }
 
     /// "45 min", "2.5 h", "12 h".
