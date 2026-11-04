@@ -6,7 +6,7 @@ use super::{
     MeetingStore, StoreError,
 };
 use crate::meeting::store::{
-    context::application_bundle_ids, decode_json, insert_segment_edit_in, meeting_fts_match_query,
+    context::application_bundle_ids, decode_json, insert_segment_edit_in,
     rebuild_search_documents_in, search_projection, speaker_assignment_from_db, to_sql_error,
     StoreMutation,
 };
@@ -32,13 +32,14 @@ const CLIP_LEAD_NS: u64 = 1_000_000_000;
 /// Which other uses of the misheard words a fix may change.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Reach {
-    /// Words no dictionary holds, such as a misheard name: every whole use
-    /// in the same letter case.
+    /// Capitalized words no dictionary holds, such as a misheard name: every
+    /// whole use in the same letter case.
     Everywhere,
     /// Everyday words corrected to someone's name: only a capitalized use
     /// inside a sentence, where the capital marks a name.
     InsideSentences,
-    /// Everyday words corrected to anything else: no other line.
+    /// Everyday words corrected to anything else, and words the dictionary
+    /// cannot judge: no other line.
     Nowhere,
 }
 
@@ -292,15 +293,23 @@ fn fixed_at_in(connection: &Connection, fix: &TranscriptRelistenFix) -> Result<i
         .ok_or(StoreError::NotFound)
 }
 
+/// How far `fix` may reach. The transcriber capitalizes the names it
+/// mishears; a word in lower case, a number, or a contraction such as
+/// "can't" means something different in every line, and the word list
+/// holds neither numbers nor contractions.
 fn reach_in(connection: &Connection, fix: &TranscriptRelistenFix) -> Result<Reach, StoreError> {
-    if !everyday(&fix.original_phrase)? {
+    let original = fix.original_phrase.as_str();
+    if !original.chars().any(char::is_uppercase)
+        || original
+            .chars()
+            .any(|character| character.is_numeric() || matches!(character, '\'' | '\u{2019}'))
+    {
+        return Ok(Reach::Nowhere);
+    }
+    if !everyday(original)? {
         return Ok(Reach::Everywhere);
     }
-    let capitalized = fix
-        .original_phrase
-        .chars()
-        .next()
-        .is_some_and(char::is_uppercase);
+    let capitalized = original.chars().next().is_some_and(char::is_uppercase);
     Ok(
         if capitalized && known_name_in(connection, &fix.replacement_phrase)? {
             Reach::InsideSentences
@@ -406,6 +415,9 @@ fn replaced(text: &str, spots: &[Range<usize>], replacement: &str) -> String {
         .collect()
 }
 
+/// The lines of other meetings whose words include `fix`'s misheard phrase
+/// in its exact letter case, newest meeting first, without the ones already
+/// decided for it.
 fn candidates_in(
     connection: &Connection,
     fix: &TranscriptRelistenFix,
@@ -414,7 +426,7 @@ fn candidates_in(
     if reach == Reach::Nowhere {
         return Ok(Vec::new());
     }
-    let Some(match_query) = meeting_fts_match_query(&fix.original_phrase) else {
+    let Some(match_query) = phrase_query(&fix.original_phrase) else {
         return Ok(Vec::new());
     };
     let mut statement = connection.prepare(
@@ -439,6 +451,7 @@ fn candidates_in(
             AND d.session_id != ?2
             AND m.phase IN ('review_ready', 'recovery_required')
             AND m.transcript_purged_at_utc_ms IS NULL
+            AND instr(d.content, ?3) > 0
             AND NOT EXISTS (
                 SELECT 1 FROM transcript_relisten_decisions decision
                  WHERE decision.segment_id = s.segment_id
@@ -477,6 +490,16 @@ fn candidates_in(
         },
     )?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// The full-text phrase that finds `phrase`'s words together and in order,
+/// in any letter case, and never a longer word that starts with them.
+/// Nothing when `phrase` holds no word.
+fn phrase_query(phrase: &str) -> Option<String> {
+    phrase
+        .chars()
+        .any(char::is_alphanumeric)
+        .then(|| format!("\"{}\"", phrase.replace('"', "\"\"")))
 }
 
 fn line_in(
@@ -708,7 +731,7 @@ mod tests {
             &store,
             2_000,
             &[
-                "Ask Mira about the budget.",
+                "Ask Mira about the Miracles deck.",
                 "Miracles happen when the deck ships.",
             ],
         )?;
@@ -771,7 +794,7 @@ mod tests {
                     misheard: true
                 },
                 TranscriptRelistenPiece {
-                    text: " about the budget.".to_owned(),
+                    text: " about the Miracles deck.".to_owned(),
                     misheard: false
                 },
             ]
@@ -810,8 +833,8 @@ mod tests {
             lines_of(&store, middle)?,
             vec![
                 (
-                    "Ask Mira about the budget.".to_owned(),
-                    Some("Ask Meera about the budget.".to_owned())
+                    "Ask Mira about the Miracles deck.".to_owned(),
+                    Some("Ask Meera about the Miracles deck.".to_owned())
                 ),
                 ("Miracles happen when the deck ships.".to_owned(), None),
             ]
@@ -829,6 +852,82 @@ mod tests {
         assert_eq!(
             provenance,
             (id(newest), id(newest_lines[0]), fixed_at_utc_ms)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contractions_numbers_and_lower_case_words_stay_in_their_line() -> Result<(), StoreError> {
+        let (_directory, store) = store();
+        meeting(
+            &store,
+            1_000,
+            &[
+                "We can't ship on Friday.",
+                "Can't we ship on Friday?",
+                "The call moved to 3:15 today.",
+                "The budget is $15,000 this quarter.",
+                "We need 15 seats.",
+                "The pricing looks right.",
+                "Q3 closed above plan.",
+            ],
+        )?;
+        let edits = [
+            (
+                "We can't ship it yet.",
+                "We can ship it yet.",
+                "can't",
+                "can",
+            ),
+            ("Can't ship it yet.", "Can ship it yet.", "Can't", "Can"),
+            (
+                "Book 15 seats for the offsite.",
+                "Book 50 seats for the offsite.",
+                "15",
+                "50",
+            ),
+            (
+                "Send it to pricing today.",
+                "Send it to Priya today.",
+                "pricing",
+                "Priya",
+            ),
+            ("Plan the Q3 offsite.", "Plan the Q4 offsite.", "Q3", "Q4"),
+        ];
+        let (newest, newest_lines) = meeting(&store, 2_000, &edits.map(|(heard, ..)| heard))?;
+        let mut offered = Vec::new();
+        for (revision, ((_, edited, original, replacement), segment_id)) in
+            edits.into_iter().zip(newest_lines).enumerate()
+        {
+            store.edit_segment(SegmentEdit {
+                mutation: StoreMutation {
+                    operation_id: MeetingOperationId::new(),
+                    actor: OperationActor::User,
+                    requested_at_utc_ms: 2_000,
+                    session_id: newest,
+                    expected_revision: u64::try_from(revision).map_err(|_| StoreError::Invalid)?,
+                    command: MeetingCommandKind::SegmentEdit,
+                },
+                segment_id,
+                replacement_text: edited.to_owned(),
+                removed: false,
+            })?;
+            let TranscriptRelistenOffer::Available { total, lines, .. } = store
+                .transcript_relisten_offer(&TranscriptRelistenFix {
+                    session_id: newest,
+                    segment_id,
+                    original_phrase: original.to_owned(),
+                    replacement_phrase: replacement.to_owned(),
+                })?
+            else {
+                return Err(StoreError::Unavailable);
+            };
+            offered.push((original, total, lines.len()));
+        }
+
+        assert_eq!(
+            offered,
+            edits.map(|(_, _, original, _)| (original, 0, 0)).to_vec()
         );
         Ok(())
     }
