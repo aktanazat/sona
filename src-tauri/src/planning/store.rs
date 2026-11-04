@@ -33,6 +33,7 @@ pub(crate) enum Refusal {
     ExistingCommitment,
     CaptureActive,
     SourceChanged,
+    AlreadyTracked,
 }
 
 impl fmt::Display for Refusal {
@@ -48,6 +49,7 @@ impl fmt::Display for Refusal {
             Self::ExistingCommitment => "existing meeting work must be linked, not duplicated",
             Self::CaptureActive => "planning is paused while recording",
             Self::SourceChanged => "source changed during review",
+            Self::AlreadyTracked => "loop is already tracked as planner work",
         })
     }
 }
@@ -249,6 +251,22 @@ pub(crate) fn projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
             next_due_at_ms: row.get(9)?,
         })
     })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Projects still taking work, the one worked in most recently first: a task
+/// or milestone that moved counts as much as the project's own row.
+pub(crate) fn projects_by_activity(conn: &Connection) -> Result<Vec<Project>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM planning_projects p
+         WHERE p.status != 'completed'
+         ORDER BY max(
+             p.updated_at_ms,
+             coalesce((SELECT max(t.updated_at_ms) FROM planning_tasks t WHERE t.project_id = p.id), 0),
+             coalesce((SELECT max(m.updated_at_ms) FROM planning_milestones m WHERE m.project_id = p.id), 0)
+         ) DESC, p.id"
+    ))?;
+    let rows = statement.query_map([], read_project)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

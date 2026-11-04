@@ -9,9 +9,12 @@ mod sources;
 pub(crate) mod store;
 pub(crate) mod suggestions;
 mod types;
+pub(crate) mod untracked;
 
 pub use proposal::{PlanningDraft, PlanningSourceRef};
-pub use schema::{MEETING_NOTE_LINK_MIGRATION, MIGRATION, QUIET_REVIEW_MIGRATION};
+pub use schema::{
+    DISMISSED_LOOP_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION, QUIET_REVIEW_MIGRATION,
+};
 pub use types::{
     EvidenceLink, EvidenceSourceKind, EvidenceTargetKind, Milestone, PlanningCalendarPage,
     PlanningTask, Project, ProjectDetail, ProjectStatus, ProjectSummary, TaskStatus,
@@ -56,6 +59,7 @@ fn failure(error: anyhow::Error) -> String {
         }
         Some(store::Refusal::CaptureActive) => "Planning is paused while recording.",
         Some(store::Refusal::SourceChanged) => "A source changed. Prepare the plan again.",
+        Some(store::Refusal::AlreadyTracked) => "This action is already tracked.",
         None => {
             log::error!("Planning database operation failed");
             "Plans could not be saved or read. Try again."

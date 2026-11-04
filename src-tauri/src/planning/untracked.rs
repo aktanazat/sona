@@ -1,0 +1,426 @@
+//! Meeting commitments nobody has put in the planner yet, and the two answers
+//! a person gives one: track it as a task, or say it is not work.
+
+use super::sources;
+use super::store::{self, Refusal};
+use super::types::{EvidenceSourceKind, EvidenceTargetKind, PlanningTask, Project};
+use crate::managers::history::HistoryManager;
+use crate::meeting::loop_types::{MeetingLoopKind, MeetingLoopRow, MeetingLoopStatus};
+use crate::meeting::session::MeetingSessionManager;
+use crate::meeting::store::{loops, StoreError};
+use crate::meeting::types::MeetingSessionId;
+use anyhow::Result as StorageResult;
+use rusqlite::{params, Connection};
+use serde::Serialize;
+use specta::Type;
+use std::sync::Arc;
+use tauri::{AppHandle, State};
+
+/// Live planner work cites the loop: a task or milestone that was not
+/// canceled, or a project. An accepted plan links a commitment it found to a
+/// project or milestone instead of copying it into a task, so those count.
+const TRACKED: &str = "SELECT EXISTS(
+    SELECT 1 FROM planning_evidence_links l
+    WHERE l.source_kind = 'loop' AND l.source_id = ?1 AND CASE l.target_kind
+        WHEN 'task' THEN EXISTS(
+            SELECT 1 FROM planning_tasks t WHERE t.id = l.target_id AND t.status != 'canceled')
+        WHEN 'milestone' THEN EXISTS(
+            SELECT 1 FROM planning_milestones m WHERE m.id = l.target_id AND m.status != 'canceled')
+        ELSE EXISTS(SELECT 1 FROM planning_projects p WHERE p.id = l.target_id)
+    END
+)";
+
+const DISMISSED: &str = "SELECT EXISTS(SELECT 1 FROM planning_dismissed_loops WHERE loop_id = ?1)";
+
+/// One meeting's open commitments that no live planner work cites and the
+/// person has not set aside, with the projects still taking work, the one
+/// worked in most recently first.
+#[derive(Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UntrackedActions {
+    pub actions: Vec<MeetingLoopRow>,
+    pub projects: Vec<Project>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_untracked_actions(
+    history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<UntrackedActions, String> {
+    super::with_sources(&history_state, &meetings, |history, meetings| {
+        read(history, meetings, session_id)
+    })
+    .await
+}
+
+/// Makes a task in the chosen project for a meeting commitment, owned by the
+/// person using Sona and citing the commitment, unless planner work already
+/// tracks it.
+#[tauri::command]
+#[specta::specta]
+pub async fn planning_track_action(
+    app: AppHandle,
+    history_state: State<'_, Arc<HistoryManager>>,
+    meetings: State<'_, Arc<MeetingSessionManager>>,
+    loop_id: String,
+    project_id: String,
+    operation_id: String,
+) -> Result<PlanningTask, String> {
+    let task = super::with_sources(&history_state, &meetings, |history, meetings| {
+        track(
+            history,
+            meetings,
+            &loop_id,
+            &project_id,
+            &operation_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    })
+    .await?;
+    super::changed(&app, task.project_id.clone());
+    Ok(task)
+}
+
+/// Remembers that a meeting commitment is not work, so it stops asking to be
+/// tracked. The meeting's own record of the commitment stays as it was.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn planning_dismiss_action(
+    history_state: State<'_, Arc<HistoryManager>>,
+    loop_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    super::history(&history_state, |conn| {
+        dismiss(
+            conn,
+            &loop_id,
+            &operation_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    })
+}
+
+fn read(
+    history: &Connection,
+    meetings: &Connection,
+    session_id: MeetingSessionId,
+) -> StorageResult<UntrackedActions> {
+    let loops = loops::loops_in(meetings, session_id).map_err(|error| match error {
+        StoreError::NotFound => anyhow::Error::from(Refusal::NotFound),
+        _ => anyhow::anyhow!("meeting loops could not be read"),
+    })?;
+    let mut actions = Vec::new();
+    for row in loops.rows {
+        if row.kind != MeetingLoopKind::Commitment || row.status != MeetingLoopStatus::Open {
+            continue;
+        }
+        let lineage = lineage(meetings, row.loop_id.as_str())?;
+        if !any(history, TRACKED, &lineage)? && !any(history, DISMISSED, &lineage)? {
+            actions.push(row);
+        }
+    }
+    Ok(UntrackedActions {
+        actions,
+        projects: store::projects_by_activity(history)?,
+    })
+}
+
+#[derive(Serialize)]
+struct TrackRequest<'a> {
+    loop_id: &'a str,
+    project_id: &'a str,
+}
+
+fn track(
+    history: &mut Connection,
+    meetings: &Connection,
+    loop_id: &str,
+    project_id: &str,
+    operation_id: &str,
+    now_ms: i64,
+) -> StorageResult<PlanningTask> {
+    let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
+    let project_id = store::uuid(project_id)?;
+    let request = TrackRequest {
+        loop_id: &loop_id,
+        project_id: &project_id,
+    };
+    store::mutate(
+        history,
+        operation_id,
+        "track_loop",
+        &request,
+        now_ms,
+        |tx| {
+            if any(tx, TRACKED, &lineage(meetings, &loop_id)?)? {
+                return Err(Refusal::AlreadyTracked.into());
+            }
+            let title = sources::require_loop(tx, meetings, &loop_id)?;
+            let task = store::insert_task(
+                tx,
+                &store::TaskDraft {
+                    project_id: &project_id,
+                    milestone_id: None,
+                    title: &title,
+                    details: None,
+                    due_at_ms: None,
+                    owner_person_id: None,
+                    owner_is_self: true,
+                },
+                now_ms,
+                |_| Err(Refusal::OwnerUnavailable.into()),
+            )?;
+            store::insert_link(
+                tx,
+                &store::SourceLinkDraft {
+                    target_kind: EvidenceTargetKind::Task,
+                    target_id: &task.id,
+                    source_kind: EvidenceSourceKind::Loop,
+                    source_id: &loop_id,
+                    at_ms: None,
+                    meeting_note_id: None,
+                },
+                now_ms,
+            )?;
+            Ok(task)
+        },
+    )
+}
+
+fn dismiss(
+    history: &mut Connection,
+    loop_id: &str,
+    operation_id: &str,
+    now_ms: i64,
+) -> StorageResult<()> {
+    let loop_id = sources::canonical_source_id(EvidenceSourceKind::Loop, loop_id)?;
+    store::mutate(
+        history,
+        operation_id,
+        "dismiss_loop",
+        &loop_id,
+        now_ms,
+        |tx| {
+            tx.execute(
+                "INSERT INTO planning_dismissed_loops (loop_id, dismissed_at_ms) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+                params![loop_id, now_ms],
+            )?;
+            Ok(())
+        },
+    )
+}
+
+/// A loop and every earlier occurrence carried forward into it, so a
+/// commitment tracked or set aside in one meeting stays answered in the next.
+fn lineage(meetings: &Connection, loop_id: &str) -> StorageResult<Vec<String>> {
+    let mut statement = meetings.prepare_cached(
+        "WITH RECURSIVE lineage(loop_id) AS (
+             SELECT ?1
+             UNION
+             SELECT s.loop_id FROM meeting_loop_states s
+             JOIN lineage l ON s.carried_into_loop_id = l.loop_id
+         )
+         SELECT loop_id FROM lineage",
+    )?;
+    let ids = statement.query_map([loop_id], |row| row.get(0))?;
+    Ok(ids.collect::<rusqlite::Result<_>>()?)
+}
+
+fn any(history: &Connection, query: &str, lineage: &[String]) -> StorageResult<bool> {
+    let mut statement = history.prepare_cached(query)?;
+    for id in lineage {
+        if statement.query_row([id], |row| row.get(0))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meeting::ledger::{
+        LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, MeetingLedger,
+    };
+    use crate::meeting::store::workflow_core_tests;
+    use crate::meeting::types::{
+        ArtifactCitation, CitedArtifactText, GeneratedMeetingArtifacts, TranscriptSegmentId,
+    };
+    use crate::planning::{
+        DISMISSED_LOOP_MIGRATION, MEETING_NOTE_LINK_MIGRATION, MIGRATION, QUIET_REVIEW_MIGRATION,
+    };
+    use uuid::Uuid;
+
+    const AT: i64 = 1_700_000_000_000;
+
+    fn promise(what: &str, segment_id: TranscriptSegmentId) -> LedgerCommitment {
+        LedgerCommitment {
+            who: "Dana".to_string(),
+            what: what.to_string(),
+            firmness: LedgerFirmness::Firm,
+            receipt: LedgerReceipt {
+                quote: "I will send the outline and book the venue".to_string(),
+                speaker: Some("Dana".to_string()),
+                t_ms: 0,
+                citations: vec![ArtifactCitation {
+                    segment_id,
+                    start_offset_ns: 0,
+                    end_offset_ns: 1,
+                }],
+            },
+        }
+    }
+
+    fn texts(untracked: &UntrackedActions) -> Vec<&str> {
+        untracked
+            .actions
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn an_action_is_tracked_once_and_one_set_aside_stops_asking() {
+        let (_directory, meetings) = workflow_core_tests::store();
+        let session_id = workflow_core_tests::meeting(&meetings, "Launch sync", AT);
+        workflow_core_tests::transcript(
+            &meetings,
+            session_id,
+            "I will send the outline and book the venue",
+        );
+        meetings
+            .with_planning_snapshot(|connection| {
+                let (transcript_id, segment_id): (String, String) = connection.query_row(
+                    "SELECT s.transcript_revision_id, s.segment_id FROM meeting_transcript_segments s
+                     JOIN meeting_sessions m ON m.current_transcript_revision_id = s.transcript_revision_id
+                     WHERE m.id = ?1",
+                    [session_id.uuid().to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let segment_id = TranscriptSegmentId::from_uuid(
+                    Uuid::parse_str(&segment_id).expect("saved transcript segment id"),
+                );
+                let artifacts = GeneratedMeetingArtifacts {
+                    summary: CitedArtifactText {
+                        text: "Two promises".to_string(),
+                        citations: Vec::new(),
+                    },
+                    summary_trace: Vec::new(),
+                    outline: Vec::new(),
+                    decisions: Vec::new(),
+                    action_items: Vec::new(),
+                    key_questions: Vec::new(),
+                    risks: Vec::new(),
+                    follow_up_draft: CitedArtifactText {
+                        text: String::new(),
+                        citations: Vec::new(),
+                    },
+                    ledger: Some(MeetingLedger {
+                        headline: "Two promises".to_string(),
+                        threads: Vec::new(),
+                        open_loops: Vec::new(),
+                        commitments: vec![
+                            promise("Send the outline", segment_id),
+                            promise("Book the venue", segment_id),
+                        ],
+                        stances: Vec::new(),
+                        caveats: Vec::new(),
+                        receipts: LedgerReceiptState::Verified,
+                    }),
+                    ledger_failure: None,
+                };
+                let artifact_id = Uuid::new_v4().to_string();
+                connection.execute(
+                    "INSERT INTO meeting_artifact_revisions (
+                        artifact_id, session_id, transcript_revision_id, input_revision,
+                        template_id, template_version, generation_key, state,
+                        content_json, generated_at_utc_ms
+                    ) VALUES (?1, ?2, ?3, 0, 'test', 1, ?4, 'current', ?5, ?6)",
+                    params![
+                        artifact_id,
+                        session_id.uuid().to_string(),
+                        transcript_id,
+                        format!("test-{artifact_id}"),
+                        serde_json::to_string(&artifacts).expect("encode the ledger"),
+                        AT
+                    ],
+                )?;
+                Ok(())
+            })
+            .expect("save a ledger with two cited promises");
+
+        let mut history = Connection::open_in_memory().expect("history");
+        for migration in [
+            MIGRATION,
+            QUIET_REVIEW_MIGRATION,
+            MEETING_NOTE_LINK_MIGRATION,
+            DISMISSED_LOOP_MIGRATION,
+        ] {
+            history
+                .execute_batch(migration)
+                .expect("planning migration");
+        }
+        let project = store::insert_project(&history, "Launch", None, AT).expect("project");
+
+        meetings
+            .with_planning_snapshot(|connection| {
+                let untracked = read(&history, connection, session_id).expect("first read");
+                assert_eq!(texts(&untracked), ["Send the outline", "Book the venue"]);
+                assert_eq!(untracked.projects, [project.clone()]);
+                let outline = untracked.actions[0].loop_id.as_str();
+                let venue = untracked.actions[1].loop_id.as_str();
+
+                let task = track(
+                    &mut history,
+                    connection,
+                    outline,
+                    &project.id,
+                    &Uuid::new_v4().to_string(),
+                    AT,
+                )
+                .expect("track the outline");
+                assert_eq!(task.title, "Send the outline");
+                assert!(task.owner_is_self);
+                let saved = store::records(&history, &project.id).expect("saved records");
+                assert!(saved.evidence.iter().any(|link| link.target_id == task.id
+                    && link.source_kind == EvidenceSourceKind::Loop
+                    && link.source_id == outline));
+                assert_eq!(
+                    texts(&read(&history, connection, session_id).expect("second read")),
+                    ["Book the venue"]
+                );
+
+                let twice = track(
+                    &mut history,
+                    connection,
+                    outline,
+                    &project.id,
+                    &Uuid::new_v4().to_string(),
+                    AT,
+                )
+                .expect_err("a second task for the same promise");
+                assert_eq!(
+                    twice.downcast_ref::<Refusal>(),
+                    Some(&Refusal::AlreadyTracked)
+                );
+                assert_eq!(
+                    store::records(&history, &project.id)
+                        .expect("records after refusal")
+                        .tasks
+                        .len(),
+                    1
+                );
+
+                dismiss(&mut history, venue, &Uuid::new_v4().to_string(), AT)
+                    .expect("set the venue aside");
+                assert!(read(&history, connection, session_id)
+                    .expect("third read")
+                    .actions
+                    .is_empty());
+                Ok(())
+            })
+            .expect("read the encrypted meeting snapshot");
+    }
+}

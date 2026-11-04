@@ -118,3 +118,9 @@ DROP INDEX planning_evidence_identity;
 CREATE UNIQUE INDEX planning_evidence_identity ON planning_evidence_links(
     target_kind, target_id, source_kind, source_id, coalesce(at_ms, -1), coalesce(meeting_note_id, '')
 );";
+
+pub const DISMISSED_LOOP_MIGRATION: &str = "CREATE TABLE planning_dismissed_loops (
+    loop_id TEXT PRIMARY KEY NOT NULL,
+    dismissed_at_ms INTEGER NOT NULL
+);
+CREATE INDEX planning_evidence_source ON planning_evidence_links(source_kind, source_id);";

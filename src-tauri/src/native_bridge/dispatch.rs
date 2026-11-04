@@ -4344,6 +4344,49 @@ pub(super) async fn call(
                     .await,
             )
         }
+        "meeting_untracked_actions" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::planning::untracked::meeting_untracked_actions(
+                    app.state(),
+                    app.state(),
+                    session_id,
+                )
+                .await,
+            )
+        }
+        "planning_track_action" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            let project_id = args.take("projectId")?;
+            let operation_id = args.take("operationId")?;
+            reply(
+                crate::planning::untracked::planning_track_action(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    loop_id,
+                    project_id,
+                    operation_id,
+                )
+                .await,
+            )
+        }
+        "planning_dismiss_action" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            let operation_id = args.take("operationId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                reply(crate::planning::untracked::planning_dismiss_action(
+                    handle.state(),
+                    loop_id,
+                    operation_id,
+                ))
+            })
+            .await?
+        }
         "planning_suggestions" => reply(
             crate::planning::suggestions::planning_suggestions(app.state(), app.state()).await,
         ),

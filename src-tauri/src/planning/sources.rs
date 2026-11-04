@@ -174,6 +174,23 @@ pub(crate) fn require_source(
         .ok_or_else(|| Refusal::SourceUnavailable.into())
 }
 
+/// The words of a meeting loop whose receipt is still retained.
+pub(crate) fn require_loop(
+    history: &Connection,
+    meetings: &Connection,
+    id: &str,
+) -> Result<String> {
+    source_title(
+        history,
+        Some(meetings),
+        EvidenceSourceKind::Loop,
+        id,
+        None,
+        None,
+    )?
+    .ok_or_else(|| Refusal::SourceUnavailable.into())
+}
+
 pub(crate) fn require_meeting_note(
     history: &Connection,
     meetings: &Connection,
