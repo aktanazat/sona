@@ -838,6 +838,20 @@ fn context_degrades_to_counts_and_adds_ledger_facts_when_present() {
 }
 
 #[test]
+fn briefing_counts_everything_owed_before_cutting_the_list() {
+    let (_directory, store) = store();
+    let person_id = person(&store, "Alice Doe", &[], &[]);
+    for at in 1..=4 {
+        let meeting_id = meeting(&store, "Weekly", at);
+        link(&store, meeting_id, person_id, "manual", "confirmed");
+        artifact(&store, meeting_id, "Open work");
+    }
+    let row = store.person_context(&[person_id]).unwrap().rows.remove(0);
+    assert_eq!(row.open_loops.len(), 3);
+    assert_eq!(row.waiting_on_count, 4);
+}
+
+#[test]
 fn inbox_omits_loops_after_their_meeting_is_deleted() {
     let (_directory, store) = store();
     let meeting_id = meeting(&store, "Inbox", 1);

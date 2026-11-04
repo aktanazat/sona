@@ -3019,6 +3019,7 @@ mod tests {
                     meetings_count: 3,
                     last: None,
                     open_loops: Vec::new(),
+                    waiting_on_count: 0,
                     commitments: Vec::new(),
                 }]
             } else {

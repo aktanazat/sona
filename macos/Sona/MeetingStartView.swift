@@ -493,8 +493,8 @@ struct MeetingStartCountdownView: View {
 }
 
 /// The people on the invite Sona already knows by their calendar address:
-/// their face, when you last met, and what is open each way. Anyone else on
-/// the invite stays a count on the card below, never a guessed face.
+/// their face, when you last met, and what they owe you. Anyone else on the
+/// invite stays a count on the card below, never a guessed face.
 private struct BriefingFaces: View {
     @Environment(AppModel.self) private var model
     let rows: [DetectionBriefingRow]
@@ -510,9 +510,7 @@ private struct BriefingFaces: View {
     }
 
     private func face(_ row: DetectionBriefingRow) -> some View {
-        let mine = row.openLoops.filter { $0.direction == .mine }.count
-        let theirs = row.openLoops.filter { $0.direction == .waitingOn }.count
-        return VStack(spacing: 3) {
+        VStack(spacing: 3) {
             PersonPortrait(
                 personId: row.personId, name: row.displayName, size: 40, revision: model.people.photoRevision)
                 .padding(.bottom, 3)
@@ -520,11 +518,8 @@ private struct BriefingFaces: View {
                 .bodyText(12)
                 .lineLimit(1)
             Text(lastMet(row)).metaText().monospacedDigit().lineLimit(1)
-            if mine > 0 {
-                Text("I owe \(mine)").metaText(Theme.accent).monospacedDigit()
-            }
-            if theirs > 0 {
-                Text("They owe \(theirs)").metaText().monospacedDigit()
+            if row.waitingOnCount > 0 {
+                Text("Owes you \(row.waitingOnCount)").metaText(Theme.accent).monospacedDigit()
             }
         }
         .frame(width: 76)
@@ -533,7 +528,7 @@ private struct BriefingFaces: View {
     }
 
     private func lastMet(_ row: DetectionBriefingRow) -> String {
-        guard let last = row.last else { return "First meeting" }
+        guard let last = row.last else { return "No meetings recorded" }
         let since = PeopleFormat.since(PeopleFormat.date(last.atUtcMs))
         return [since.value, since.unit].compactMap { $0 }.joined(separator: " ")
     }

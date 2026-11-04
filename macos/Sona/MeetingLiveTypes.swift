@@ -634,6 +634,8 @@ struct DetectionBriefingRow: Decodable, Identifiable {
     let meetingsCount: Int
     let last: DetectionBriefingLastMeeting?
     let openLoops: [DetectionBriefingLoop]
+    /// Everything this person owes you, counted before `openLoops` is cut.
+    let waitingOnCount: Int
 
     var id: MeetingPersonId { personId }
 }
@@ -644,7 +646,6 @@ struct DetectionBriefingLoop: Decodable, Identifiable {
     let meetingId: MeetingSessionId
     /// The words as the ledger recorded them.
     let text: String
-    let direction: PersonLoopDirection
 
     var id: MeetingLoopId { loopId }
 }

@@ -10,6 +10,7 @@ use super::{
     SCHEMA_VERSION,
 };
 use crate::meeting::detection::machine::{CalendarAttendee, CalendarEventSummary};
+use crate::meeting::loop_types::MeetingLoopDirection;
 use crate::meeting::people_types::{
     organization_slug, CompaniesListResult, CompanySummary, MeetingPeopleContextResult,
     MeetingPersonContextRow, OpenLoopsInboxResult, OrganizationDetail, OrganizationDetailResult,
@@ -675,6 +676,14 @@ fn context_for_ids_in(
             });
         let meetings_count =
             u64::try_from(facts.meetings.len()).map_err(|_| StoreError::Corrupt)?;
+        let waiting_on_count = u64::try_from(
+            facts
+                .open_loops
+                .iter()
+                .filter(|open| open.direction == MeetingLoopDirection::WaitingOn)
+                .count(),
+        )
+        .map_err(|_| StoreError::Corrupt)?;
         facts.open_loops.truncate(3);
         facts.commitments.truncate(3);
         rows.push(PersonBriefingRow {
@@ -683,6 +692,7 @@ fn context_for_ids_in(
             meetings_count,
             last,
             open_loops: facts.open_loops,
+            waiting_on_count,
             commitments: facts.commitments,
         });
     }
