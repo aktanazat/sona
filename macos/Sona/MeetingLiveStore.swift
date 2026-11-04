@@ -73,6 +73,20 @@ struct MeetingLiveWarning {
     let urgent: Bool
 }
 
+/// `MeetingCallSilence`: how long the running call has had no sound while
+/// the person talked. Nil while the call can be heard.
+struct MeetingCallSilence: Decodable {
+    let silentMs: UInt64?
+}
+
+/// The call of one recording, silent for this long while the person talks.
+struct MeetingCallSilent: Equatable {
+    let sessionId: MeetingSessionId
+    let silentMs: UInt64
+
+    var clock: String { (Int64(clamping: silentMs) * 1_000_000).meetingOffsetClock }
+}
+
 /// A capture's clock, as every surface counts it. The core reports how far
 /// the capture has durably written, which trails the recording by however
 /// full the current chunk is, so each read implies a start a little late,
@@ -245,6 +259,10 @@ final class MeetingLiveStore {
     /// unless two captures overlap. Only `anchorClocks` writes it, on every
     /// read of `live` or `active`, so each surface counts the same seconds.
     private(set) var clocks: [MeetingSessionId: MeetingCaptureClock] = [:]
+    /// The recording whose call has gone silent while the person talks, read
+    /// once a second while a capture records. Nil while the call is heard.
+    private(set) var callSilent: MeetingCallSilent?
+    @ObservationIgnored private var silenceWatch: (sessionId: MeetingSessionId, task: Task<Void, Never>)?
     /// The word for what is in flight, which disables the controls that would
     /// contradict it.
     private(set) var pending: String?
@@ -1528,6 +1546,32 @@ final class MeetingLiveStore {
         }
         next = next.filter { shown.contains($0.key) }
         if next != clocks { clocks = next }
+        let recording = [live?.session, active?.snapshot]
+            .compactMap { $0 }
+            .first { $0.phase == .capturingRecording }
+        watchSilence(recording?.sessionId)
+    }
+
+    /// Asks the core about the call's sound once a second while `sessionId`
+    /// records, and lets it go when nothing does.
+    private func watchSilence(_ sessionId: MeetingSessionId?) {
+        guard silenceWatch?.sessionId != sessionId else { return }
+        silenceWatch?.task.cancel()
+        silenceWatch = nil
+        if callSilent != nil { callSilent = nil }
+        guard let sessionId else { return }
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self else { return }
+                let reading: MeetingCallSilence? = try? await self.core.request(
+                    "meeting_call_silence", MeetingRequest.session(sessionId))
+                guard !Task.isCancelled, self.silenceWatch?.sessionId == sessionId else { return }
+                let next = reading?.silentMs.map { MeetingCallSilent(sessionId: sessionId, silentMs: $0) }
+                if next != self.callSilent { self.callSilent = next }
+            }
+        }
+        silenceWatch = (sessionId, task)
     }
 
     /// The two lines the live screen has to say, in the order it says them:
@@ -1540,6 +1584,12 @@ final class MeetingLiveStore {
         }
         if let audio = audioWarning(session) {
             lines.append(audio)
+        }
+        if let silent = callSilent, silent.sessionId == session.sessionId {
+            lines.append(MeetingLiveWarning(
+                text: "No sound from the call for \(silent.clock) while you talk. "
+                    + "Check that the call is still playing on this Mac.",
+                urgent: false))
         }
         return lines
     }

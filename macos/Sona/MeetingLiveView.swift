@@ -725,6 +725,12 @@ private struct MeetingRecordingDock: View {
             if let clock {
                 UprightText { MeetingClockText(clock: clock, size: 11) }
             }
+            if silent != nil {
+                Image(systemName: "speaker.slash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.ink)
+                    .accessibilityLabel("No sound from the call")
+            }
         }
         .frame(width: Self.stripWidth, height: Self.height)
         .panelSurface(docked: true, radius: Self.stripWidth / 2)
@@ -748,6 +754,10 @@ private struct MeetingRecordingDock: View {
             }
             if let error = store.error {
                 Text(error).bodyText(12, Theme.live).lineLimit(3)
+            } else if let silent {
+                Text("No sound from the call for \(silent.clock) while you talk.")
+                    .bodyText(12, Theme.ink)
+                    .lineLimit(3)
             } else {
                 Text(title)
                     .font(TypeScale.label(13))
@@ -860,6 +870,9 @@ private struct MeetingRecordingDock: View {
     private var dot: CaptureState { paused ? .idle : .recording(since: since) }
     private var clock: MeetingCaptureClock? { store.clocks[sessionId] }
     private var canBookmark: Bool { store.pending == nil && session?.phase == .capturingRecording }
+    private var silent: MeetingCallSilent? {
+        store.callSilent.flatMap { $0.sessionId == sessionId ? $0 : nil }
+    }
 
     private var title: String {
         switch recording {
