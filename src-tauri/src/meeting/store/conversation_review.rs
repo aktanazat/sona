@@ -5,8 +5,8 @@ use super::{
 };
 use crate::meeting::context::ConversationLocation;
 use crate::meeting::conversation_review::{
-    ConversationAudioClip, ConversationBookmark, ConversationBookmarkRequest,
-    ConversationPlaceReview, ConversationPlaceSession,
+    ConversationAudioClip, ConversationBookmark, ConversationBookmarkKind,
+    ConversationBookmarkRequest, ConversationPlaceReview, ConversationPlaceSession,
 };
 use crate::meeting::types::{MeetingPhase, MeetingSessionId, SourceTrackId, TranscriptSegmentId};
 use base64::Engine;
@@ -197,18 +197,19 @@ impl MeetingStore {
         )?;
         let created_at = utc_now_ms();
         transaction.execute(
-            "INSERT INTO conversation_bookmarks(bookmark_id, session_id, start_offset_ns, label, created_at_utc_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(bookmark_id) DO NOTHING",
-            params![request.bookmark_id, id(request.session_id), to_i64(request.start_offset_ns)?, label, created_at],
+            "INSERT INTO conversation_bookmarks(bookmark_id, session_id, start_offset_ns, label, kind, created_at_utc_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(bookmark_id) DO NOTHING",
+            params![request.bookmark_id, id(request.session_id), to_i64(request.start_offset_ns)?, label, request.kind.as_str(), created_at],
         )?;
         let saved = transaction.query_row(
-            "SELECT session_id, start_offset_ns, label, created_at_utc_ms FROM conversation_bookmarks WHERE bookmark_id = ?1",
+            "SELECT session_id, start_offset_ns, label, kind, created_at_utc_ms FROM conversation_bookmarks WHERE bookmark_id = ?1",
             params![request.bookmark_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
-                row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?)),
+                row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?)),
         )?;
         if saved.0 != id(request.session_id)
             || from_i64(saved.1)? != request.start_offset_ns
             || saved.2 != label
+            || saved.3 != request.kind.as_str()
         {
             return Err(StoreError::Conflict);
         }
@@ -218,7 +219,8 @@ impl MeetingStore {
             session_id: request.session_id,
             start_offset_ns: request.start_offset_ns,
             label,
-            created_at_utc_ms: saved.3,
+            kind: request.kind,
+            created_at_utc_ms: saved.4,
         })
     }
 
@@ -272,7 +274,7 @@ pub(super) fn export_bookmarks_in(
         return Err(StoreError::NotFound);
     }
     let mut query = connection.prepare(
-        "SELECT bookmark_id, start_offset_ns, label, created_at_utc_ms
+        "SELECT bookmark_id, start_offset_ns, label, kind, created_at_utc_ms
          FROM conversation_bookmarks WHERE session_id = ?1 ORDER BY start_offset_ns, bookmark_id",
     )?;
     let rows = query
@@ -281,7 +283,8 @@ pub(super) fn export_bookmarks_in(
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, Option<String>>(2)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -292,7 +295,8 @@ pub(super) fn export_bookmarks_in(
                 session_id,
                 start_offset_ns: from_i64(row.1)?,
                 label: row.2,
-                created_at_utc_ms: row.3,
+                kind: ConversationBookmarkKind::parse(&row.3).ok_or(StoreError::Corrupt)?,
+                created_at_utc_ms: row.4,
             })
         })
         .collect()
@@ -321,9 +325,9 @@ pub(super) fn import_bookmarks_in(
     }
     for bookmark in bookmarks {
         connection.execute(
-            "INSERT INTO conversation_bookmarks(bookmark_id, session_id, start_offset_ns, label, created_at_utc_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![bookmark.bookmark_id, id(session_id), to_i64(bookmark.start_offset_ns)?, bookmark.label, bookmark.created_at_utc_ms],
+            "INSERT INTO conversation_bookmarks(bookmark_id, session_id, start_offset_ns, label, kind, created_at_utc_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![bookmark.bookmark_id, id(session_id), to_i64(bookmark.start_offset_ns)?, bookmark.label, bookmark.kind.as_str(), bookmark.created_at_utc_ms],
         )?;
     }
     Ok(())

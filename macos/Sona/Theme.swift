@@ -27,6 +27,7 @@ enum Theme {
     static let onInvert = dynamic(light: 0xFFFFFF, dark: 0x1D1D1F)
 
     static let live = dynamic(light: 0xD7362E, dark: 0xFF6961)
+    static let markTodo = dynamic(light: 0x1F8A4C, dark: 0x4CC38A)
 
     static let tileHome = Color(nsColor: NSColor(hex: 0xF0703C, alpha: 1))
     static let tilePlace = Color(nsColor: NSColor(hex: 0x3E8BF7, alpha: 1))

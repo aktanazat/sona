@@ -259,6 +259,13 @@ final class MeetingLiveStore {
     /// unless two captures overlap. Only `anchorClocks` writes it, on every
     /// read of `live` or `active`, so each surface counts the same seconds.
     private(set) var clocks: [MeetingSessionId: MeetingCaptureClock] = [:]
+    /// The typed bookmarks the live recording holds, by kind.
+    private(set) var bookmarkCounts: BookmarkCounts?
+
+    struct BookmarkCounts: Equatable {
+        let sessionId: MeetingSessionId
+        var counts: [ConversationBookmarkKind: Int]
+    }
     /// The recording whose call has gone silent while the person talks, read
     /// once a second while a capture records. Nil while the call is heard.
     private(set) var callSilent: MeetingCallSilent?
@@ -1299,20 +1306,31 @@ final class MeetingLiveStore {
         }
     }
 
-    func bookmark() {
+    func bookmark(_ kind: ConversationBookmarkKind = .mark) {
         guard let session = live?.session else { return }
-        Task { await bookmark(session) }
+        Task { await bookmark(session, kind: kind) }
     }
 
     /// The docked panel's bookmark, on the session the panel reads. True
     /// once it is saved.
     func bookmarkFromPanel() async -> Bool {
         guard let session = active?.snapshot else { return false }
-        return await bookmark(session)
+        return await bookmark(session, kind: .mark)
+    }
+
+    /// How many of each typed bookmark the recording holds, read once when
+    /// the recording window shows it; nil while unread or unreadable.
+    func loadBookmarkCounts(_ sessionId: MeetingSessionId) async {
+        guard bookmarkCounts?.sessionId != sessionId else { return }
+        let read: [ConversationBookmark]? = try? await core.request(
+            "conversation_bookmarks", ["sessionId": sessionId])
+        guard let read, live?.session.sessionId == sessionId else { return }
+        bookmarkCounts = BookmarkCounts(
+            sessionId: sessionId, counts: Dictionary(grouping: read, by: \.kind).mapValues(\.count))
     }
 
     @discardableResult
-    private func bookmark(_ session: MeetingSessionSnapshot) async -> Bool {
+    private func bookmark(_ session: MeetingSessionSnapshot, kind: ConversationBookmarkKind) async -> Bool {
         guard pending == nil, session.phase == .capturingRecording else { return false }
         guard let clock = clocks[session.sessionId] else {
             error = "Capture time is unavailable."
@@ -1328,8 +1346,15 @@ final class MeetingLiveStore {
                     bookmarkId: bookmarkId,
                     sessionId: session.sessionId,
                     startOffsetNs: UInt64(moment),
-                    label: nil)))
-            self.notice = "Bookmarked at \(moment.meetingOffsetClock)."
+                    label: nil,
+                    kind: kind)))
+            self.notice = kind == .mark
+                ? "Bookmarked at \(moment.meetingOffsetClock)."
+                : "\(kind.label) marked at \(moment.meetingOffsetClock)."
+            if var counts = self.bookmarkCounts, counts.sessionId == session.sessionId {
+                counts.counts[kind, default: 0] += 1
+                self.bookmarkCounts = counts
+            }
             saved = true
         }
         return saved

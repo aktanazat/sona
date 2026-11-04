@@ -29,12 +29,47 @@ pub struct ConversationPlaceReview {
     pub sessions: Vec<ConversationPlaceSession>,
 }
 
+/// What a bookmark marks, as the person pressing it said. A decision mark is
+/// their note, not a ledger decision, and a to-do mark makes no task.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationBookmarkKind {
+    #[default]
+    Mark,
+    Decision,
+    Question,
+    Todo,
+}
+
+impl ConversationBookmarkKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Mark => "mark",
+            Self::Decision => "decision",
+            Self::Question => "question",
+            Self::Todo => "todo",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mark" => Some(Self::Mark),
+            "decision" => Some(Self::Decision),
+            "question" => Some(Self::Question),
+            "todo" => Some(Self::Todo),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
 pub struct ConversationBookmark {
     pub bookmark_id: String,
     pub session_id: MeetingSessionId,
     pub start_offset_ns: u64,
     pub label: Option<String>,
+    #[serde(default)]
+    pub kind: ConversationBookmarkKind,
     pub created_at_utc_ms: i64,
 }
 
@@ -45,4 +80,6 @@ pub struct ConversationBookmarkRequest {
     pub session_id: MeetingSessionId,
     pub start_offset_ns: u64,
     pub label: Option<String>,
+    #[serde(default)]
+    pub kind: ConversationBookmarkKind,
 }

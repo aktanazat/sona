@@ -18,6 +18,42 @@ struct ConversationBookmarkButton: View {
     }
 }
 
+/// Three bookmarks of a kind, each with how many this recording holds. The
+/// count rolls up when one lands; with the counts unread it shows none,
+/// never a zero.
+struct ConversationTypedBookmarks: View {
+    let isRecording: Bool
+    let counts: [ConversationBookmarkKind: Int]?
+    let action: (ConversationBookmarkKind) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(ConversationBookmarkKind.typed.enumerated()), id: \.element) { index, kind in
+                let key = Character("\(index + 1)")
+                Button { action(kind) } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: kind.symbol).foregroundStyle(kind.color)
+                        if let count = counts?[kind, default: 0] {
+                            Text("\(count)")
+                                .monospacedDigit()
+                                .contentTransition(.numericText(value: Double(count)))
+                        }
+                    }
+                    .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0.3),
+                               value: counts?[kind, default: 0])
+                }
+                .buttonStyle(.quiet)
+                .disabled(!isRecording)
+                .keyboardShortcut(KeyEquivalent(key), modifiers: [.control, .option])
+                .accessibilityLabel("Mark a \(kind.label.lowercased())")
+                .accessibilityValue(counts.map { "\($0[kind, default: 0])" } ?? "")
+                .help("Mark a \(kind.label.lowercased()) (⌃⌥\(key))")
+            }
+        }
+    }
+}
+
 private enum ConversationCaptureIntent: String, Codable, CaseIterable, Identifiable {
     case unspecified, huddle
     case onlineCall = "online_call"

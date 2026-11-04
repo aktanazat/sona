@@ -11,6 +11,8 @@ mod context;
 mod conversation_review;
 mod custom_templates;
 #[cfg(test)]
+mod conversation_bookmark_tests;
+#[cfg(test)]
 mod custom_templates_tests;
 pub(crate) mod digest;
 mod documents;
@@ -1527,6 +1529,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/people/merge_redirects.sql")),
     M::up(include_str!("store/people/contact_cards.sql")),
     M::up(include_str!("store/speaker_voiceprints.sql")),
+    M::up(include_str!("store/conversation_bookmark_kinds.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

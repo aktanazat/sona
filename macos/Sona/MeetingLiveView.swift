@@ -141,6 +141,13 @@ struct MeetingLiveView: View {
                     && store.pending == nil && store.clocks[session.sessionId] != nil,
                 saved: false,
                 action: { store.bookmark() })
+            ConversationTypedBookmarks(
+                isRecording: session.phase == .capturingRecording
+                    && store.pending == nil && store.clocks[session.sessionId] != nil,
+                counts: store.bookmarkCounts?.sessionId == session.sessionId
+                    ? store.bookmarkCounts?.counts : nil,
+                action: { store.bookmark($0) })
+            .task(id: session.sessionId) { await store.loadBookmarkCounts(session.sessionId) }
             if session.phase.isActive {
                 Button("Stop") { store.stop() }
                     .buttonStyle(.primary)
