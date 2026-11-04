@@ -633,21 +633,12 @@ struct DetectionBriefingRow: Decodable, Identifiable {
     let displayName: String
     let meetingsCount: Int
     let last: DetectionBriefingLastMeeting?
-    let openLoops: [DetectionBriefingLoop]
-    /// Everything this person owes you, counted before `openLoops` is cut.
+    /// Everything this person owes you, uncut.
     let waitingOnCount: Int
+    /// Every open item from meetings with this person, either way, uncut.
+    let openLoopCount: Int
 
     var id: MeetingPersonId { personId }
-}
-
-/// `PersonOpenLoop`, as a briefing row carries it.
-struct DetectionBriefingLoop: Decodable, Identifiable {
-    let loopId: MeetingLoopId
-    let meetingId: MeetingSessionId
-    /// The words as the ledger recorded them.
-    let text: String
-
-    var id: MeetingLoopId { loopId }
 }
 
 /// `DetectionCountdown`: the event about to start, and what it is about.

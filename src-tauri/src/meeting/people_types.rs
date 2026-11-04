@@ -311,6 +311,9 @@ pub struct PersonBriefingRow {
     /// Everything this person owes the user, counted before `open_loops` is
     /// cut to the first few.
     pub waiting_on_count: u64,
+    /// Every open item from meetings with this person, either way, counted
+    /// before `open_loops` is cut.
+    pub open_loop_count: u64,
     pub commitments: Vec<PersonCommitment>,
 }
 

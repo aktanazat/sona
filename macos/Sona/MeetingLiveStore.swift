@@ -1467,7 +1467,7 @@ final class MeetingLiveStore {
         guard let prompt = prompts.last, let eventKey = prompt.prompt.eventKey,
               let countdown, countdown.event.eventKey == eventKey,
               let person = countdown.briefing.first else { return nil }
-        let loops = countdown.briefing.reduce(0) { $0 + $1.openLoops.count }
+        let loops = person.openLoopCount
         let nth = person.meetingsCount + 1
         let loopWord = loops == 1 ? "1 open loop" : "\(loops) open loops"
         return "Meeting \(nth) with \(person.displayName) · \(loopWord)"

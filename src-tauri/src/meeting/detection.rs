@@ -3020,6 +3020,7 @@ mod tests {
                     last: None,
                     open_loops: Vec::new(),
                     waiting_on_count: 0,
+                    open_loop_count: 0,
                     commitments: Vec::new(),
                 }]
             } else {

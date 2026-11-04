@@ -684,6 +684,8 @@ fn context_for_ids_in(
                 .count(),
         )
         .map_err(|_| StoreError::Corrupt)?;
+        let open_loop_count =
+            u64::try_from(facts.open_loops.len()).map_err(|_| StoreError::Corrupt)?;
         facts.open_loops.truncate(3);
         facts.commitments.truncate(3);
         rows.push(PersonBriefingRow {
@@ -693,6 +695,7 @@ fn context_for_ids_in(
             last,
             open_loops: facts.open_loops,
             waiting_on_count,
+            open_loop_count,
             commitments: facts.commitments,
         });
     }

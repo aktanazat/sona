@@ -849,6 +849,7 @@ fn briefing_counts_everything_owed_before_cutting_the_list() {
     let row = store.person_context(&[person_id]).unwrap().rows.remove(0);
     assert_eq!(row.open_loops.len(), 3);
     assert_eq!(row.waiting_on_count, 4);
+    assert_eq!(row.open_loop_count, 4);
 }
 
 #[test]
