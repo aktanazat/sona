@@ -576,6 +576,13 @@ struct TranscriptPane: View {
             if !store.transcriptDeleted && !store.elsewhereHits.isEmpty {
                 elsewhere
             }
+            if let speaker = store.transcriptSpeaker {
+                HStack(spacing: 10) {
+                    Text("Only \(store.speakerName(speaker))").metaText(Theme.inkSecondary)
+                    Button("Show everyone") { store.showOnly(speaker: nil) }
+                        .buttonStyle(QuietButton(color: Theme.accent))
+                }
+            }
             turns
             if !store.transcriptDeleted && !store.gapRuns.isEmpty {
                 gaps
@@ -951,30 +958,31 @@ struct MeetingPeopleBand: View {
     }
 }
 
-/// Who talked, for how long, and how the room handed over: the numbers this
-/// meeting can say something with, in one strip, then a thin bar a voice.
+/// Who talked and how the room handed over: one bar of everyone's share of
+/// the talk, where a voice's name narrows the transcript to its words, and
+/// the numbers this meeting can say something with.
 struct MeetingAnalyticsStrip: View {
     let store: MeetingsStore
 
     var body: some View {
         if let talk = store.talk {
             Card {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .top, spacing: 16) {
-                        Stat(label: "Longest run", value: talk.longestMonologueNs.meetingTalkDuration)
-                        if let patience = store.patience {
-                            Stat(label: "Patience", value: patience)
-                        }
-                        if let handovers = store.handovers {
-                            Stat(label: "Handovers in \(talk.turnCount) turns", value: "\(handovers)")
+                VStack(alignment: .leading, spacing: 14) {
+                    let slices = TalkSlice.fold(store.talkShares)
+                    if !slices.isEmpty {
+                        TalkShareBar(slices: slices, color: color)
+                        ChatFlowRow(spacing: 14) {
+                            ForEach(slices) { legend($0) }
                         }
                     }
-                    let shares = store.talkShares
-                    if !shares.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(shares) { share in
-                                bar(share)
-                            }
+                    HStack(alignment: .top, spacing: 16) {
+                        Stat(label: "Turns", value: "\(talk.turnCount)")
+                        if let handovers = store.handovers {
+                            Stat(label: "Handovers", value: "\(handovers)")
+                        }
+                        longestRun(talk)
+                        if let patience = store.patience {
+                            Stat(label: "Patience", value: patience)
                         }
                     }
                 }
@@ -1001,30 +1009,113 @@ struct MeetingAnalyticsStrip: View {
         }
     }
 
-    /// One voice on one line: the name, a thin bar of its share, the share,
-    /// and the time it held.
-    private func bar(_ share: SpeakerTalkShare) -> some View {
-        HStack(spacing: 12) {
-            Text(store.speakerName(share.speakerId))
-                .font(TypeScale.body(13))
-                .foregroundStyle(Theme.inkSecondary)
-                .lineLimit(1)
-                .frame(width: 120, alignment: .leading)
-            Meter(fraction: Double(share.sharePermille) / 1000)
-                .frame(maxWidth: 360)
-            Text(share.sharePermille.meetingTalkShare)
+    private func color(_ slice: TalkSlice) -> Color {
+        switch slice {
+        case let .voice(share):
+            SpeakerInk.color(at: store.snapshot?.speakers.firstIndex { $0.speakerId == share.speakerId })
+        case .others:
+            Theme.inkTertiary
+        }
+    }
+
+    /// A voice's name and share, a press that reads only its words. The
+    /// folded voices have no one transcript to narrow to.
+    @ViewBuilder
+    private func legend(_ slice: TalkSlice) -> some View {
+        let label = HStack(spacing: 6) {
+            Circle().fill(color(slice)).frame(width: 7, height: 7)
+            Text(slice.name(store)).font(TypeScale.body(13)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+            Text(slice.permille.meetingTalkShare)
                 .font(TypeScale.label(13))
                 .monospacedDigit()
                 .foregroundStyle(Theme.ink)
-                .frame(width: 40, alignment: .trailing)
-            Text(share.speakingNs.meetingTalkDuration)
-                .font(TypeScale.body(13))
-                .monospacedDigit()
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 56, alignment: .trailing)
         }
-        .help(share.turnCount == 1 ? "1 turn" : "\(share.turnCount) turns")
-        .accessibilityElement(children: .combine)
+        switch slice {
+        case let .voice(share):
+            Button { store.showOnly(speaker: share.speakerId) } label: { label }
+                .buttonStyle(.plain)
+                .help("\(share.speakingNs.meetingTalkDuration) in \(share.turnCount == 1 ? "1 turn" : "\(share.turnCount) turns")")
+                .accessibilityElement(children: .combine)
+                .accessibilityHint("Show only these words in the transcript")
+        case .others:
+            label.accessibilityElement(children: .combine)
+        }
+    }
+
+    /// The longest run and who held it, a press that plays it from its start.
+    @ViewBuilder
+    private func longestRun(_ talk: MeetingTalkMetrics) -> some View {
+        let who = talk.longestMonologueSpeakerId.map { store.speakerName($0) }
+        let stat = Stat(label: who.map { "Longest run · \($0)" } ?? "Longest run", value: talk.longestMonologueNs.meetingTalkDuration)
+        if let start = talk.longestMonologueStartNs.map({ UInt64(clamping: $0) }), store.canPlayAtOffset(start) {
+            Button { store.playAtOffset(start) } label: { stat }
+                .buttonStyle(.plain)
+                .help("Play it from the start")
+        } else {
+            stat
+        }
+    }
+}
+
+/// One part of the talk bar: a voice, or the voices too small to draw.
+private enum TalkSlice: Identifiable {
+    case voice(SpeakerTalkShare)
+    case others(permille: Int)
+
+    /// A voice under one part in fifty would draw thinner than the gap
+    /// beside it, so those fold into one part at the end.
+    private static let foldPermille = 20
+
+    /// The shares come apportioned to add up to 1000; folding only sums them.
+    static func fold(_ shares: [SpeakerTalkShare]) -> [TalkSlice] {
+        let voices = shares.filter { $0.sharePermille >= foldPermille }.map(TalkSlice.voice)
+        let folded = shares.filter { $0.sharePermille < foldPermille }.reduce(0) { $0 + $1.sharePermille }
+        return folded > 0 ? voices + [.others(permille: folded)] : voices
+    }
+
+    var id: String {
+        switch self {
+        case let .voice(share): share.speakerId
+        case .others: "others"
+        }
+    }
+
+    var permille: Int {
+        switch self {
+        case let .voice(share): share.sharePermille
+        case let .others(permille): permille
+        }
+    }
+
+    @MainActor
+    func name(_ store: MeetingsStore) -> String {
+        switch self {
+        case let .voice(share): store.speakerName(share.speakerId)
+        case .others: "Others"
+        }
+    }
+}
+
+/// Every voice's share of the talk, end to end in one bar.
+private struct TalkShareBar: View {
+    let slices: [TalkSlice]
+    let color: (TalkSlice) -> Color
+
+    private static let gap: CGFloat = 2
+
+    var body: some View {
+        GeometryReader { proxy in
+            let room = proxy.size.width - Self.gap * CGFloat(max(slices.count - 1, 0))
+            HStack(spacing: Self.gap) {
+                ForEach(slices) { slice in
+                    Capsule()
+                        .fill(color(slice))
+                        .frame(width: max(room * CGFloat(slice.permille) / 1000, 0))
+                }
+            }
+        }
+        .frame(height: 8)
+        .accessibilityHidden(true)
     }
 }
 

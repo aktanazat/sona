@@ -313,6 +313,8 @@ final class MeetingsStore {
     private(set) var loopsBusy = false
     private(set) var people: [MeetingPersonContextRow] = []
     private(set) var transcriptQuery = ""
+    /// The one voice the transcript is narrowed to, picked on the talk bar.
+    private(set) var transcriptSpeaker: SpeakerId?
     private(set) var searchHits: [MeetingSearchHit]?
     private(set) var jump: SegmentJump?
     private(set) var focusedNoteId: MeetingNoteId?
@@ -933,6 +935,7 @@ final class MeetingsStore {
         ledgerOutcome = outcome
         focusedNoteId = noteId
         transcriptQuery = ""
+        transcriptSpeaker = nil
         searchHits = nil
         jump = nil
         originalWording = false
@@ -1008,6 +1011,7 @@ final class MeetingsStore {
                 audio.stop()
                 transcriptTask?.cancel()
                 transcriptQuery = ""
+                transcriptSpeaker = nil
                 searchHits = nil
                 jump = nil
             }
@@ -1101,9 +1105,10 @@ final class MeetingsStore {
             openSegments = []
         }
         for segment in snapshot.transcript {
-            let keep = needle.isEmpty
-                || hits.contains(segment.base.segmentId)
-                || displayedText(segment).lowercased().contains(needle)
+            let keep = (transcriptSpeaker == nil || segment.assignedSpeakerId == transcriptSpeaker)
+                && (needle.isEmpty
+                    || hits.contains(segment.base.segmentId)
+                    || displayedText(segment).lowercased().contains(needle))
             guard keep else {
                 close()
                 continue
@@ -1197,6 +1202,7 @@ final class MeetingsStore {
         chosenTab = .transcript
         tab = .transcript
         transcriptQuery = ""
+        transcriptSpeaker = nil
         searchHits = nil
         jumpNonce += 1
         jump = SegmentJump(segmentId: segmentId, nonce: jumpNonce)
@@ -1210,6 +1216,14 @@ final class MeetingsStore {
 
     func canJumpTo(_ segmentId: TranscriptSegmentId) -> Bool {
         !transcriptDeleted && (snapshot?.transcript.contains { $0.base.segmentId == segmentId } ?? false)
+    }
+
+    /// Narrows the transcript to one voice and shows it, or lets it go.
+    func showOnly(speaker: SpeakerId?) {
+        transcriptSpeaker = speaker
+        guard speaker != nil else { return }
+        chosenTab = .transcript
+        tab = .transcript
     }
 
     func citationAction(_ segmentId: TranscriptSegmentId) -> (() -> Void)? {

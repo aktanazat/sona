@@ -1392,6 +1392,7 @@ struct MeetingTalkMetrics: Decodable {
     let speakers: [SpeakerTalkShare]
     let longestMonologueNs: Int64
     let longestMonologueSpeakerId: SpeakerId?
+    let longestMonologueStartNs: Int64?
     let medianSwitchGapMs: Int64?
 }
 
