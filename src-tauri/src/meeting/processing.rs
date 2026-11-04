@@ -1439,9 +1439,9 @@ impl MeetingProcessingService {
                             session_id,
                             generator.as_ref(),
                             &cancelled,
-                        );
+                        )
                     }));
-                    if refreshed.is_ok() {
+                    if refreshed.unwrap_or(false) {
                         progress.stage_did_work();
                     }
                 }
@@ -2592,21 +2592,24 @@ impl MeetingProcessingService {
     /// trade the thing a reader came for against the thing they did not.
     ///
     /// The write lands per person rather than at the end, so a run interrupted
-    /// halfway leaves the paragraphs it did produce.
+    /// halfway leaves the paragraphs it did produce. True when it ran to the
+    /// end and wrote at least one paragraph: the only runs whose time says
+    /// how long this step takes.
     fn refresh_relationship_summaries(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
         generator: &dyn MeetingTextGenerator,
         cancelled: &AtomicBool,
-    ) {
+    ) -> bool {
         let person_ids = match store.person_ids_for_meeting(session_id) {
             Ok(person_ids) => person_ids,
             Err(error) => {
                 log::warn!("No relationship summaries for {session_id:?}: {error:?}");
-                return;
+                return false;
             }
         };
+        let mut wrote = false;
         for person_id in person_ids
             .into_iter()
             .take(MAX_RELATIONSHIP_SUMMARIES_PER_ARTIFACT)
@@ -2614,7 +2617,7 @@ impl MeetingProcessingService {
             if cancelled.load(Ordering::Acquire)
                 || store.require_retained_transcript(session_id).is_err()
             {
-                return;
+                return false;
             }
             match write_relationship_summary_guarded(
                 store,
@@ -2622,11 +2625,13 @@ impl MeetingProcessingService {
                 generator,
                 Some((session_id, cancelled)),
             ) {
-                Ok(PersonSummaryOutcome::Written | PersonSummaryOutcome::NoEvidence) => {}
+                Ok(PersonSummaryOutcome::Written) => wrote = true,
+                Ok(PersonSummaryOutcome::NoEvidence) => {}
                 Ok(outcome) => log::warn!("Could not summarize {person_id:?}: {outcome:?}"),
                 Err(error) => log::warn!("Could not summarize {person_id:?}: {error:?}"),
             }
         }
+        wrote && !cancelled.load(Ordering::Acquire)
     }
 
     /// The template a meeting uses when the user has not chosen one. Reading

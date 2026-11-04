@@ -10540,7 +10540,15 @@ fn export_cloud_meeting_bundle_in(
         })
         .collect::<Result<Vec<_>, StoreError>>()?;
 
-    let artifact_revisions = artifact_revisions_for_session(connection, session_id)?;
+    // A receipt describes this Mac's run ("on this Mac"), which is false on
+    // whatever Mac or recipient reads the bundle.
+    let artifact_revisions = artifact_revisions_for_session(connection, session_id)?
+        .into_iter()
+        .map(|revision| MeetingArtifactRevision {
+            receipt: None,
+            ..revision
+        })
+        .collect::<Vec<_>>();
     let questions = question_history_for_session(connection, session_id)?;
     let mut statement = connection.prepare(
         "SELECT generation_id, transcript_revision_id, input_revision, model_id, model_version,

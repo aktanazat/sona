@@ -430,8 +430,10 @@ final class MeetingsStore {
         }
     }
 
-    /// The first load: a page of meetings, the trend over them, and the folders.
+    /// The first load: a page of meetings, the trend over them, and the
+    /// folders. Progress heard from a core that has since gone is dropped.
     func start() async {
+        processing = [:]
         await loadPage()
         await loadTrend()
         await loadFolders()
