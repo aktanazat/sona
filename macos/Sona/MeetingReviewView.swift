@@ -1838,6 +1838,9 @@ struct LoopRowView: View {
                     if let instead = row.instead, !instead.isEmpty {
                         Text("What happened instead: \(instead)").metaText()
                     }
+                    if store.audio.failedReelKey == receiptsKey, let error = store.audio.error {
+                        Text(error).metaText(error == ConversationAudioPlayback.heldNotice ? Theme.inkSecondary : Theme.live)
+                    }
                 }
             }
         } trailing: {
@@ -1857,7 +1860,39 @@ struct LoopRowView: View {
                         .buttonStyle(QuietButton(color: Theme.accent))
                         .disabled(!store.canJumpTo(citation.segmentId))
                 }
+                if hasReceipts {
+                    receipts
+                }
             }
+        }
+    }
+
+    private var receiptsKey: String { "loop:\(row.loopId)" }
+
+    /// A promise worth hearing through: it was carried between meetings or
+    /// read from more than one line.
+    private var hasReceipts: Bool {
+        row.carriedSinceAtUtcMs != nil || row.carriedIntoLoopId != nil || row.citations.count > 1
+    }
+
+    /// "Play receipts": the promise and every later mention of it, oldest
+    /// first, across the meetings it was carried through.
+    @ViewBuilder
+    private var receipts: some View {
+        let audio = store.audio
+        if audio.reelKey == receiptsKey {
+            if let index = audio.reelIndex {
+                Text("\(index + 1) of \(audio.reelClips.count)").metaText()
+            }
+            Button("Stop") { audio.stop() }
+                .buttonStyle(QuietButton(color: Theme.accent))
+        } else {
+            Button("Play receipts") {
+                audio.playReel(reading: "conversation_reel_for_loop", ["loopId": .string(row.loopId)], key: receiptsKey)
+            }
+            .buttonStyle(QuietButton(color: Theme.accent))
+            .disabled(audio.heldForRecording)
+            .help(audio.heldForRecording ? ConversationAudioPlayback.heldNotice : "")
         }
     }
 

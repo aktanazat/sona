@@ -13,6 +13,14 @@ struct ConversationAudioClip: Decodable {
     let wavBase64: String
 }
 
+/// One stretch a reel plays: a line, and the window to hear it in. An open
+/// end plays the line the way its own row does.
+struct ReelClip {
+    let said: SaidMoment
+    var startOffsetNs: UInt64?
+    var endOffsetNs: UInt64?
+}
+
 @MainActor
 @Observable
 final class ConversationAudioPlayback {
@@ -33,8 +41,18 @@ final class ConversationAudioPlayback {
     @ObservationIgnored private var request: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+    /// The reel being heard: what asked for it, its clips in order, and the
+    /// one playing now. Empty while a single line plays.
+    private(set) var reelKey: String?
+    private(set) var reelClips: [ReelClip] = []
+    private(set) var reelIndex: Int?
+    /// How fast reels play, 1 or 1.5. A single line always plays at 1.
+    private(set) var reelRate: Float = 1
+    /// The reel that was playing when playback failed, so the place that
+    /// started it can say why.
+    private(set) var failedReelKey: String?
 
-    private static let heldNotice = "Plays after the recording ends."
+    static let heldNotice = "Plays after the recording ends."
 
     init(core: Core) {
         self.core = core
@@ -64,6 +82,24 @@ final class ConversationAudioPlayback {
     }
 
     func stop() {
+        endClip()
+        reelKey = nil
+        reelClips = []
+        reelIndex = nil
+        error = nil
+        failedReelKey = nil
+    }
+
+    /// Stops everything, a reel included, and says why.
+    private func fail(_ reason: String) {
+        let key = reelKey
+        stop()
+        error = reason
+        failedReelKey = key
+    }
+
+    /// Ends the clip that is loading or playing and leaves any reel in place.
+    private func endClip() {
         generation += 1
         request?.cancel()
         request = nil
@@ -79,7 +115,78 @@ final class ConversationAudioPlayback {
         position = 0
         duration = 0
         startOffsetNs = 0
+    }
+
+    /// Plays the clips one after another from `index`, passing over any whose
+    /// audio is gone, and stops after the last.
+    func playReel(_ clips: [ReelClip], key: String, from index: Int = 0) {
+        stop()
+        reelKey = key
+        reelClips = clips
+        playClip(at: playable(from: index, step: 1))
+    }
+
+    /// Reads a reel, then plays it. The read counts as loading, and a read
+    /// that fails says so where the player speaks.
+    func playReel(reading command: String, _ arguments: [String: JSONValue], key: String) {
+        stop()
+        reelKey = key
+        loading = true
+        let expected = generation
+        request = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let reel: ConversationReel = try await core.request(command, arguments)
+                guard expected == generation, !Task.isCancelled else { return }
+                playReel(reel.moments.map(\.clip), key: key)
+            } catch {
+                guard expected == generation, !Task.isCancelled else { return }
+                fail("The recorded moments could not be read.")
+            }
+        }
+    }
+
+    /// The next playable clip, or the one before. Back from the first starts
+    /// it again; there is nothing after the last.
+    func stepReel(forward: Bool) {
+        guard let reelIndex else { return }
+        let target = forward
+            ? playable(from: reelIndex + 1, step: 1)
+            : playable(from: reelIndex - 1, step: -1) ?? reelIndex
+        guard let target else { return }
+        playClip(at: target)
+    }
+
+    /// Switches reels between 1× and 1.5×, the clip playing now included.
+    func toggleReelRate() {
+        reelRate = reelRate == 1 ? 1.5 : 1
+        if reelKey != nil { player?.rate = reelRate }
+    }
+
+    /// The first clip from `index` on, moving by `step`, whose audio is kept.
+    private func playable(from index: Int, step: Int) -> Int? {
+        var index = index
+        while reelClips.indices.contains(index) {
+            if reelClips[index].said.audioRetained { return index }
+            index += step
+        }
+        return nil
+    }
+
+    /// Plays one clip of the reel; none left ends the reel.
+    private func playClip(at index: Int?) {
+        guard let index else {
+            stop()
+            return
+        }
+        endClip()
         error = nil
+        let said = reelClips[index].said
+        reelIndex = index
+        sessionId = said.sessionId
+        segmentId = said.segmentId
+        load(sessionId: said.sessionId, segmentId: said.segmentId,
+             offset: reelClips[index].startOffsetNs, end: reelClips[index].endOffsetNs)
     }
 
     /// Holds playback while a meeting captures, stopping what is playing, and
@@ -89,8 +196,7 @@ final class ConversationAudioPlayback {
         heldForRecording = capturing
         if capturing {
             if sessionId != nil || loading {
-                stop()
-                error = Self.heldNotice
+                fail(Self.heldNotice)
             }
         } else if error == Self.heldNotice {
             error = nil
@@ -100,8 +206,7 @@ final class ConversationAudioPlayback {
     /// Stops and says why when a meeting is capturing.
     private func refusedWhileHeld() -> Bool {
         guard heldForRecording else { return false }
-        stop()
-        error = Self.heldNotice
+        fail(Self.heldNotice)
         return true
     }
 
@@ -119,13 +224,12 @@ final class ConversationAudioPlayback {
                 do {
                     let retained: Bool = try await core.request("conversation_audio_retained", ["sessionId": sessionId])
                     guard expected == generation, !Task.isCancelled else { return }
-                    guard retained else { stop(); error = "Recording is no longer retained."; return }
+                    guard retained else { fail("Recording is no longer retained."); return }
                     if player.currentTime >= player.duration { player.currentTime = 0 }
                     resume()
                 } catch {
                     guard expected == generation else { return }
-                    stop()
-                    self.error = "Recording could not be read."
+                    fail("Recording could not be read.")
                 }
             }
         }
@@ -137,7 +241,7 @@ final class ConversationAudioPlayback {
         position = player.currentTime
     }
 
-    private func load(sessionId: String, segmentId: String?, offset: UInt64?) {
+    private func load(sessionId: String, segmentId: String?, offset: UInt64?, end: UInt64? = nil) {
         guard !refusedWhileHeld() else { return }
         loading = true
         let expected = generation
@@ -147,6 +251,7 @@ final class ConversationAudioPlayback {
                 let result: ConversationAudioClip = try await core.request("conversation_audio_clip", [
                     "sessionId": JSONValue.string(sessionId), "segmentId": segmentId.map { .string($0) } ?? .null,
                     "startOffsetNs": offset.map { .number(Double($0)) } ?? .null,
+                    "endOffsetNs": end.map { .number(Double($0)) } ?? .null,
                 ])
                 guard expected == generation, !Task.isCancelled else { return }
                 guard result.sessionId == sessionId, result.segmentId == segmentId,
@@ -154,10 +259,14 @@ final class ConversationAudioPlayback {
                     throw CocoaError(.fileReadCorruptFile)
                 }
                 let made = try AVAudioPlayer(data: data)
+                if reelKey != nil {
+                    made.enableRate = true
+                    made.rate = reelRate
+                }
                 made.prepareToPlay()
                 let retained: Bool = try await core.request("conversation_audio_retained", ["sessionId": sessionId])
                 guard expected == generation, !Task.isCancelled else { return }
-                guard retained else { stop(); error = "Recording is no longer retained."; return }
+                guard retained else { fail("Recording is no longer retained."); return }
                 player = made
                 clip = result
                 startOffsetNs = result.startOffsetNs
@@ -167,9 +276,9 @@ final class ConversationAudioPlayback {
                 resume()
             } catch {
                 guard expected == generation, !Task.isCancelled else { return }
-                stop()
-                self.error = (error as? CoreError)?.remote(as: MeetingCommandError.self)?.label
-                    ?? "Recording could not be played."
+                let refusal = (error as? CoreError)?.remote(as: MeetingCommandError.self)
+                fail(refusal == .captureLeaseBusy
+                    ? Self.heldNotice : refusal?.label ?? "Recording could not be played.")
             }
         }
     }
@@ -177,8 +286,7 @@ final class ConversationAudioPlayback {
     private func resume() {
         guard !refusedWhileHeld() else { return }
         guard let player, player.play() else {
-            stop()
-            error = "Audio output is unavailable."
+            fail("Audio output is unavailable.")
             return
         }
         playing = true
@@ -195,18 +303,19 @@ final class ConversationAudioPlayback {
                     do {
                         let retained: Bool = try await core.request("conversation_audio_retained", ["sessionId": sessionId])
                         guard !Task.isCancelled, expected == generation else { return }
-                        if !retained { stop(); error = "Recording is no longer retained."; return }
+                        if !retained { fail("Recording is no longer retained."); return }
                     } catch {
                         guard expected == generation else { return }
-                        stop()
-                        self.error = "Recording could not be read."
+                        fail("Recording could not be read.")
                         return
                     }
                 }
                 if !player.isPlaying {
                     playing = false
                     position = duration
-                    if let next = clip?.nextOffsetNs, let sessionId {
+                    if let reelIndex {
+                        playClip(at: playable(from: reelIndex + 1, step: 1))
+                    } else if let next = clip?.nextOffsetNs, let sessionId {
                         load(sessionId: sessionId, segmentId: segmentId, offset: next)
                     }
                     return

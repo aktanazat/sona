@@ -852,6 +852,8 @@ struct RitualParticipant: Decodable {
     let name: String
     let meetingsCount: Int
     let organization: String?
+    /// The person the attendee's address belongs to, when Sona knows them.
+    let personId: String?
 
     /// "Aktan · 6 meetings · 99 Point".
     var line: String {

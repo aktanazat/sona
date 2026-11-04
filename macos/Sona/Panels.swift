@@ -832,15 +832,21 @@ private enum PaletteRow: Identifiable {
     case hit(QueryRow)
     /// A line someone said: return plays it, ⌘return opens its meeting there.
     case heard(SaidMoment)
+    /// Every heard line with its audio kept, oldest first, one after another.
+    case playAll(Int)
     /// The next page of the same question, when the plane said there is one.
     case more
     case ask(String)
+
+    /// Which reel "Play all" is to the shared player.
+    static let playAllKey = "palette"
 
     var id: String {
         switch self {
         case let .action(action): "action:\(action.id)"
         case let .hit(hit): "hit:\(hit.link)"
         case let .heard(moment): "heard:\(moment.id)"
+        case .playAll: "play-all"
         case .more: "more"
         case .ask: "ask"
         }
@@ -1024,8 +1030,11 @@ struct CommandPalette: View {
             }
             .onDisappear {
                 search?.cancel()
-                if let hearing, model.meetings.audio.segmentId == hearing {
-                    model.meetings.audio.stop()
+                let audio = model.meetings.audio
+                if let hearing, audio.segmentId == hearing {
+                    audio.stop()
+                } else if audio.reelKey == PaletteRow.playAllKey {
+                    audio.stop()
                 }
             }
         }
@@ -1056,7 +1065,11 @@ struct CommandPalette: View {
         if !verbs.isEmpty { sections.append(("Actions", verbs, true)) }
         let hits = lookup.earlier
         let live = if case .pending = lookup { false } else { true }
-        if !heard.isEmpty { sections.append(("Heard", heard.map(PaletteRow.heard), live)) }
+        if !heard.isEmpty {
+            let playable = heard.filter(\.audioRetained).count
+            let lines = heard.map(PaletteRow.heard)
+            sections.append(("Heard", playable > 1 ? lines + [.playAll(playable)] : lines, live))
+        }
         for (kind, label) in Self.kinds {
             let rows = hits.filter { $0.kind == kind }.map(PaletteRow.hit)
             if !rows.isEmpty { sections.append((label, rows, live)) }
@@ -1150,6 +1163,10 @@ struct CommandPalette: View {
             loadMore()
             return
         }
+        if case .playAll = row {
+            playAll()
+            return
+        }
         if case let .heard(moment) = row, moment.audioRetained {
             hear(moment)
             return
@@ -1166,7 +1183,7 @@ struct CommandPalette: View {
         case let .hit(hit): model.open(link: hit.link)
         case let .heard(moment): model.open(link: moment.link)
         case let .ask(question): model.ask(question)
-        case .more: break
+        case .more, .playAll: break
         }
     }
 
@@ -1190,6 +1207,21 @@ struct CommandPalette: View {
             sessionId: moment.sessionId, segmentId: moment.segmentId, startOffsetNs: moment.startOffsetNs)
     }
 
+    /// "Play all": every heard line with its audio kept, oldest first, each
+    /// the way its own row plays it. Pressed again, it stops.
+    private func playAll() {
+        let audio = model.meetings.audio
+        if audio.reelKey == PaletteRow.playAllKey {
+            audio.stop()
+            return
+        }
+        hearing = nil
+        let clips = heard
+            .sorted { ($0.meetingStartedAtUtcMs, $0.startOffsetNs) < ($1.meetingStartedAtUtcMs, $1.startOffsetNs) }
+            .map { ReelClip(said: $0, startOffsetNs: $0.startOffsetNs) }
+        audio.playReel(clips, key: PaletteRow.playAllKey)
+    }
+
     /// The line is the one the shared player is loading or playing now.
     private func sounding(_ moment: SaidMoment) -> Bool {
         let audio = model.meetings.audio
@@ -1203,8 +1235,11 @@ struct CommandPalette: View {
     }
 
     /// What return does to the selected row: a heard line with its audio kept
-    /// plays or stops, every other row opens.
+    /// plays or stops, as does "Play all"; every other row opens.
     private var returnVerb: String {
+        if rows.indices.contains(selection), case .playAll = rows[selection] {
+            return model.meetings.audio.reelKey == PaletteRow.playAllKey ? "Stop" : "Play"
+        }
         guard let selectedMoment, selectedMoment.audioRetained else { return "Open" }
         return sounding(selectedMoment) ? "Stop" : "Play"
     }
@@ -1334,6 +1369,8 @@ private struct PaletteRowView: View {
                         progress
                         Text(meta(moment)).metaText().lineLimit(1)
                     }
+                case let .playAll(count):
+                    Text("Play all \(count)").bodyText()
                 case .more:
                     Text("Show more results").bodyText(14, Theme.inkSecondary)
                 case let .ask(question):
@@ -1342,6 +1379,17 @@ private struct PaletteRowView: View {
                 Spacer(minLength: 0)
                 if case let .heard(moment) = row {
                     state(moment)
+                } else if case .playAll = row {
+                    if model.meetings.audio.reelKey == PaletteRow.playAllKey {
+                        glyph("stop.fill")
+                    } else if model.meetings.audio.failedReelKey == PaletteRow.playAllKey,
+                              let error = model.meetings.audio.error {
+                        Text(error)
+                            .metaText(error == ConversationAudioPlayback.heldNotice ? Theme.inkSecondary : Theme.live)
+                            .multilineTextAlignment(.trailing)
+                            .lineLimit(2)
+                            .frame(maxWidth: 180, alignment: .trailing)
+                    }
                 }
             }
             .padding(.horizontal, 12)
@@ -1528,6 +1576,7 @@ private struct PaletteRowView: View {
             case .receipt: "doc.text"
             }
         case .heard: "waveform"
+        case .playAll: "play.circle"
         case .more: "ellipsis"
         case .ask: "bubble.left"
         }

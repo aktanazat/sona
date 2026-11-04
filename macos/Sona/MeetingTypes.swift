@@ -1408,6 +1408,44 @@ struct SaidPerson: Decodable, Equatable {
     let displayName: String
 }
 
+/// `ReelMomentKind`.
+enum ReelMomentKind: String, Decodable {
+    case promise, decision, question, line
+
+    /// What the moment was, beside its day: "Promised".
+    var word: String {
+        switch self {
+        case .promise: "Promised"
+        case .decision: "Decided"
+        case .question: "Asked"
+        case .line: "Said"
+        }
+    }
+}
+
+/// `ReelMoment`: one recorded moment of a reel, and the stretch of its
+/// meeting the core chose to play for it.
+struct ReelMoment: Decodable, Identifiable {
+    let said: SaidMoment
+    let kind: ReelMomentKind
+    let direction: MeetingLoopDirection?
+    let status: MeetingLoopStatus?
+    let playStartOffsetNs: UInt64
+    let playEndOffsetNs: UInt64
+
+    var id: TranscriptSegmentId { said.segmentId }
+    var clip: ReelClip { ReelClip(said: said, startOffsetNs: playStartOffsetNs, endOffsetNs: playEndOffsetNs) }
+    /// How long it plays: nothing when its audio is gone.
+    var playableNs: UInt64 {
+        said.audioRetained && playEndOffsetNs > playStartOffsetNs ? playEndOffsetNs - playStartOffsetNs : 0
+    }
+}
+
+/// `ConversationReel`: oldest first.
+struct ConversationReel: Decodable {
+    let moments: [ReelMoment]
+}
+
 /// `MeetingLiveRecall`: past lines the running capture's last minute was
 /// already said in. A store that could not be read is its own answer, never
 /// an empty list.

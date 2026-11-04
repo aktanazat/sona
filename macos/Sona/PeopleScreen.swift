@@ -636,6 +636,7 @@ struct PersonSections: View {
                     if let contact = detail.contact {
                         PersonContactSection(card: contact, person: detail.person)
                     }
+                    PersonReelSection(personId: personId, revision: store.detailRevision)
                     PersonContinuityView(
                         personId: personId,
                         memory: memory,
