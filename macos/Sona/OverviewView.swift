@@ -245,11 +245,12 @@ struct OverviewWidgets: View {
     /// leads the Today strip, so it is not counted twice here.
     private func today(_ now: Date) -> some View {
         let calendar = Calendar.current
-        let recorded: [MeetingHistorySummary] = if case let .loaded(entries) = store.recentMeetings {
+        let loaded: [MeetingHistorySummary]? = if case let .loaded(entries) = store.recentMeetings {
             entries.filter { calendar.isDate($0.date, inSameDayAs: now) }
         } else {
-            []
+            nil
         }
+        let recorded = loaded ?? []
         let ahead = (store.upcoming?.rows ?? []).filter {
             calendar.isDate(FeedClock.date($0.startUtcMs), inSameDayAs: now) && FeedClock.date($0.endUtcMs) > now
         }
@@ -261,8 +262,11 @@ struct OverviewWidgets: View {
                           end: FeedClock.date($0.endUtcMs), recorded: false)
         }
         let seconds = recorded.compactMap(\.recordedDuration).reduce(0, +)
+        let countOnly = seconds == 0 && !recorded.isEmpty
+        let value = loaded == nil ? "–" : countOnly ? "\(recorded.count)" : "\(Int((seconds / 60).rounded(.up)))"
+        let unit = countOnly ? "recorded" : "min recorded"
         let next = ahead.min(by: { $0.startUtcMs < $1.startUtcMs })
-        return WidgetTile("Today", icon: "calendar", value: "\(Int((seconds / 60).rounded(.up)))", unit: "min recorded",
+        return WidgetTile("Today", icon: "calendar", value: value, unit: unit,
                           caption: next.map { "next \(FeedClock.date($0.startUtcMs).formatted(date: .omitted, time: .shortened))" },
                           action: { model.go(.meetings) }) {
             DayStrip(blocks: blocks, now: now)
