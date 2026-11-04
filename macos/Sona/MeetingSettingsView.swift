@@ -834,7 +834,7 @@ private struct MeetingTranscriptRetentionRows: View {
         Group {
             if let snapshot = store.transcriptRetention {
                 ChoiceRow(
-                    title: "Recordings and transcripts",
+                    title: "Keep transcripts",
                     detail: store.transcriptRetentionSaving ? "Saving…" : snapshot.detail,
                     choices: MeetingTranscriptRetentionSnapshot.choices,
                     label: MeetingTranscriptRetentionSnapshot.label,
@@ -849,7 +849,7 @@ private struct MeetingTranscriptRetentionRows: View {
                         }))
                 .disabled(store.transcriptRetentionSaving || store.transcriptRetentionLoading)
             } else if store.transcriptRetentionLoading || store.transcriptRetentionNote == nil {
-                MeetingSettingsNote("Reading the recording retention setting…")
+                MeetingSettingsNote("Reading the transcript setting…")
             }
             if let note = store.transcriptRetentionNote {
                 ActionRow(
@@ -859,7 +859,7 @@ private struct MeetingTranscriptRetentionRows: View {
                     action: { Task { await store.loadTranscriptRetention() } })
             }
         }
-        .confirmationDialog("Delete older recordings and transcripts?", isPresented: Binding(
+        .confirmationDialog("Delete older transcripts and audio?", isPresented: Binding(
             get: { pending != nil },
             set: { if !$0 { pending = nil } })) {
                 if let policy = pending {

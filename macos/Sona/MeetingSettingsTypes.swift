@@ -250,7 +250,7 @@ struct MeetingTranscriptRetentionSnapshot: Decodable {
 
     static func label(_ policy: MeetingRetentionPolicy) -> String {
         switch policy {
-        case .forever: "Keep until I delete them"
+        case .forever: "Forever"
         case .deleteAfter(days: 1): "1 day"
         case .deleteAfter(days: 7): "1 week"
         case .deleteAfter(days: 180): "6 months"
@@ -261,12 +261,12 @@ struct MeetingTranscriptRetentionSnapshot: Decodable {
 
     var detail: String {
         guard case let .deleteAfter(days) = policy, let begins = deletionBeginsAtUtcMs else {
-            return "Keep transcripts. Deleting a whole meeting still removes everything."
+            return "Transcripts stay until the whole meeting is deleted."
         }
         let date = Date(timeIntervalSince1970: Double(begins) / 1_000)
             .formatted(.dateTime.month(.abbreviated).day())
         let age = days == 1 ? "1 day" : "\(days) days"
-        return "Transcripts older than \(age) are deleted from \(date). Deletes recordings and transcripts on this Mac. Notes stay. Links you already shared keep what they showed."
+        return "Transcripts and audio older than \(age) are deleted from \(date). Notes stay."
     }
 }
 

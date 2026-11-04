@@ -814,7 +814,7 @@ private struct MeetingSettingsSessionParam: Encodable {
             transcriptRetention = try await core.request("meeting_transcript_retention_get")
             transcriptRetentionNote = nil
         } catch {
-            transcriptRetentionNote = Self.sentence(error, "Couldn't read the recording retention setting.")
+            transcriptRetentionNote = Self.sentence(error, "Couldn't read the transcript setting.")
         }
     }
 
@@ -834,7 +834,7 @@ private struct MeetingSettingsSessionParam: Encodable {
                 transcriptRetentionNote = "This setting changed in another window. Choose again."
             }
         } catch {
-            transcriptRetentionNote = Self.sentence(error, "Couldn't save the recording retention setting. Try again.")
+            transcriptRetentionNote = Self.sentence(error, "Couldn't save the transcript setting. Try again.")
         }
     }
 
