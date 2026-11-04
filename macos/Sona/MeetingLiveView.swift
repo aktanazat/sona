@@ -15,6 +15,9 @@ struct MeetingLiveView: View {
     /// press that asks for the notes; a stop leaves `store.opened` set, which
     /// is the shell's cue.
     var onOpenReview: (MeetingSessionId) -> Void = { _ in }
+    /// A recalled past moment, opened on its meeting's page while the
+    /// recording keeps going.
+    var onOpenRecalled: (MeetingRecallMatch) -> Void = { _ in }
 
     @State private var noteOpen = false
     /// Set by the Add press; the sheet closes when the core has kept the note
@@ -23,6 +26,7 @@ struct MeetingLiveView: View {
     @State private var discardOpen = false
     @State private var highlightedLine: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(AppModel.self) private var model
 
     private var session: MeetingSessionSnapshot? { store.live?.session }
 
@@ -50,6 +54,7 @@ struct MeetingLiveView: View {
                                 ScrollView {
                                     VStack(alignment: .leading, spacing: 0) {
                                         ownNotes
+                                        recalled
                                         help(proxy)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -66,6 +71,7 @@ struct MeetingLiveView: View {
                         Page {
                             captureHeader(session)
                             ownNotes
+                            recalled
                             help(proxy)
                             transcript
                         }
@@ -457,6 +463,85 @@ struct MeetingLiveView: View {
             }
             .padding(16)
         }
+    }
+
+    // MARK: What was said before
+
+    /// Past lines the call's words were already said in, newest on top. A
+    /// row opens its meeting at that moment; the recording keeps going.
+    @ViewBuilder
+    private var recalled: some View {
+        if let recall = store.shownRecall, recall.unavailable || !recall.cards.isEmpty {
+            PageSection("From past meetings") {
+                if recall.unavailable {
+                    Text("Past meetings can't be read right now.").metaText(Theme.inkTertiary)
+                }
+                if !recall.cards.isEmpty {
+                    Card {
+                        ForEach(recall.cards) { match in
+                            CardRow(action: { onOpenRecalled(match) }) {
+                                recalledLine(match)
+                            } trailing: {
+                                Button { store.dismissRecall(match) } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(Theme.inkTertiary)
+                                        .frame(width: 20, height: 20)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Dismiss")
+                            }
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                }
+            }
+            .animation(Motion.settle(reduced: reduceMotion), value: recall.cards.map(\.id))
+        }
+    }
+
+    private func recalledLine(_ match: MeetingRecallMatch) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(match.kind.label, systemImage: match.kind.symbol)
+                .metaText(Theme.inkSecondary)
+            Text(recalledQuote(match))
+                .bodyText(14)
+                .lineLimit(4)
+                .fixedSize(horizontal: false, vertical: true)
+            if let person = match.person {
+                HStack(spacing: 6) {
+                    PersonPortrait(
+                        personId: person.personId, name: person.displayName, size: 18,
+                        revision: model.people.photoRevision)
+                    Text(person.displayName).metaText(Theme.inkSecondary).lineLimit(1)
+                }
+            }
+            AppLabel(bundleId: match.appBundleId, size: 14) {
+                HStack(spacing: 0) {
+                    Text(match.meetingTitle).lineLimit(1)
+                    Text(" · \(match.meetingStartedAtUtcMs.meetingDate.short)").fixedSize()
+                }
+                .metaText()
+            }
+        }
+    }
+
+    /// The past line in quotes, the words both meetings share marked where
+    /// a word starts.
+    private func recalledQuote(_ match: MeetingRecallMatch) -> AttributedString {
+        var line = AttributedString("“\(match.text)”")
+        var cursor = line.startIndex
+        while cursor < line.endIndex,
+              let found = line[cursor...].range(
+                  of: match.term, options: [.caseInsensitive, .diacriticInsensitive]) {
+            if line.characters[..<found.lowerBound].last.map({ !$0.isLetter && !$0.isNumber }) ?? true {
+                line[found].backgroundColor = Theme.accentSoft
+                line[found].foregroundColor = Theme.accent
+            }
+            cursor = found.upperBound
+        }
+        return line
     }
 
     // MARK: A note about this moment

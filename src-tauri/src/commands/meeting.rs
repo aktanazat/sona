@@ -831,6 +831,18 @@ pub fn meeting_live_transcript(
     manager.provisional_transcript(session_id)
 }
 
+/// Past lines the running capture's last minute of words were already said
+/// in, for the live screen's recall cards. `Unavailable` when the store could
+/// not be read, never an empty list standing in for one.
+#[tauri::command]
+#[specta::specta]
+pub async fn meeting_live_recall(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> Result<MeetingLiveRecall, ()> {
+    Ok(manager.live_recall(session_id).await)
+}
+
 /// Whether the running call's sound has gone while the person talks, for
 /// the live screen and the recording strip. Never stops the recording.
 #[tauri::command(async)]

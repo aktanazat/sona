@@ -228,26 +228,33 @@ impl MeetingStore {
         meeting_id: MeetingSessionId,
     ) -> Result<Vec<PersonId>, StoreError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT p.id
-               FROM meeting_person_links l
-               JOIN persons p ON p.id = l.person_id
-              WHERE l.meeting_id = ?1 AND l.confidence = 'confirmed'
-              ORDER BY p.display_name COLLATE NOCASE, p.id",
-        )?;
-        let ids = statement
-            .query_map([meeting_id.uuid().to_string()], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        ids.into_iter()
-            .map(|id| {
-                Uuid::parse_str(&id)
-                    .map(PersonId)
-                    .map_err(|_| StoreError::Corrupt)
-            })
-            .collect()
+        confirmed_person_ids_in(&connection, meeting_id)
     }
+}
+
+pub(in crate::meeting::store) fn confirmed_person_ids_in(
+    connection: &Connection,
+    meeting_id: MeetingSessionId,
+) -> Result<Vec<PersonId>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT p.id
+           FROM meeting_person_links l
+           JOIN persons p ON p.id = l.person_id
+          WHERE l.meeting_id = ?1 AND l.confidence = 'confirmed'
+          ORDER BY p.display_name COLLATE NOCASE, p.id",
+    )?;
+    let ids = statement
+        .query_map([meeting_id.uuid().to_string()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.into_iter()
+        .map(|id| {
+            Uuid::parse_str(&id)
+                .map(PersonId)
+                .map_err(|_| StoreError::Corrupt)
+        })
+        .collect()
 }
 
 fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreError> {

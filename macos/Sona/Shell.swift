@@ -223,7 +223,7 @@ struct MeetingsPlace: View {
         let live = model.live
         let meetings = model.meetings
         if live.live != nil {
-            MeetingLiveView(store: live, onOpenReview: model.openMeeting)
+            MeetingLiveView(store: live, onOpenReview: model.openMeeting, onOpenRecalled: model.openRecalled)
         } else if live.gate != nil {
             MeetingStartGateView(store: live)
         } else if meetings.openSessionId != nil {

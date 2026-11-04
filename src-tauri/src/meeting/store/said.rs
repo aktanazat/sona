@@ -14,25 +14,25 @@ use std::collections::HashMap;
 
 const SAID_MOMENTS_MAX: usize = 8;
 
-struct MatchedLine {
-    session_id: MeetingSessionId,
-    segment_id: TranscriptSegmentId,
-    text: String,
-    meeting_title: String,
-    meeting_started_at_utc_ms: i64,
-    start_offset_ns: u64,
+pub(super) struct MatchedLine {
+    pub(super) session_id: MeetingSessionId,
+    pub(super) segment_id: TranscriptSegmentId,
+    pub(super) text: String,
+    pub(super) meeting_title: String,
+    pub(super) meeting_started_at_utc_ms: i64,
+    pub(super) start_offset_ns: u64,
     end_offset_ns: u64,
-    speaker_id: SpeakerId,
-    assignment: SpeakerAssignmentKind,
+    pub(super) speaker_id: SpeakerId,
+    pub(super) assignment: SpeakerAssignmentKind,
 }
 
 #[derive(Clone, Default)]
-struct Voice {
+pub(super) struct Voice {
     label: Option<String>,
-    person: Option<SaidPerson>,
+    pub(super) person: Option<SaidPerson>,
 }
 
-struct SessionVoices {
+pub(super) struct SessionVoices {
     canonical: HashMap<SpeakerId, SpeakerId>,
     labels: HashMap<SpeakerId, String>,
     voices: HashMap<SpeakerId, Voice>,
@@ -59,7 +59,12 @@ impl MeetingStore {
         };
         let mut connection = self.connection()?;
         search_projection::refresh_in(&mut connection)?;
-        let lines = matched_lines_in(&connection, &match_query, limit.clamp(1, SAID_MOMENTS_MAX))?;
+        let lines = matched_lines_in(
+            &connection,
+            &match_query,
+            limit.clamp(1, SAID_MOMENTS_MAX),
+            None,
+        )?;
         let mut sessions = HashMap::new();
         let mut moments = Vec::with_capacity(lines.len());
         for line in lines {
@@ -93,10 +98,13 @@ impl MeetingStore {
     }
 }
 
-fn matched_lines_in(
+/// The transcript lines `match_query` finds, best match first, outside the
+/// `except` meeting when one is named.
+pub(super) fn matched_lines_in(
     connection: &Connection,
     match_query: &str,
     limit: usize,
+    except: Option<MeetingSessionId>,
 ) -> Result<Vec<MatchedLine>, StoreError> {
     let mut statement = connection.prepare(
         "SELECT d.session_id, d.entity_id, snippet(meeting_search_fts, 0, '', '', '…', 24),
@@ -118,13 +126,15 @@ fn matched_lines_in(
           WHERE meeting_search_fts MATCH ?1
             AND d.entity_kind = 'segment'
             AND m.phase != 'deleting'
+            AND (?3 IS NULL OR d.session_id != ?3)
           ORDER BY bm25(meeting_search_fts), m.created_at_utc_ms DESC
           LIMIT ?2",
     )?;
     let rows = statement.query_map(
         params![
             match_query,
-            i64::try_from(limit).map_err(|_| StoreError::Invalid)?
+            i64::try_from(limit).map_err(|_| StoreError::Invalid)?,
+            except.map(id)
         ],
         |row| {
             Ok(MatchedLine {
@@ -151,7 +161,10 @@ fn matched_lines_in(
 }
 
 impl SessionVoices {
-    fn read_in(connection: &Connection, session_id: MeetingSessionId) -> Result<Self, StoreError> {
+    pub(super) fn read_in(
+        connection: &Connection,
+        session_id: MeetingSessionId,
+    ) -> Result<Self, StoreError> {
         Ok(Self {
             canonical: canonical_speaker_ids(connection, session_id)?,
             labels: speakers_for_session(connection, session_id)?
@@ -162,7 +175,7 @@ impl SessionVoices {
         })
     }
 
-    fn voice_in(
+    pub(super) fn voice_in(
         &mut self,
         connection: &Connection,
         session_id: MeetingSessionId,

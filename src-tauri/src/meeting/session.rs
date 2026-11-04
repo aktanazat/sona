@@ -26,7 +26,7 @@ use super::people_types::{
 use super::processing::{
     write_relationship_summary, LiveTranscript, LiveTranscriptWorker, MeetingProcessingService,
     MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
-    LIVE_HELP_QUESTION_MAX_CHARS,
+    LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
 use super::store::{
     InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting, SegmentEdit,
@@ -4009,6 +4009,29 @@ impl MeetingSessionManager {
                 session_id,
                 segments: Vec::new(),
             })
+    }
+
+    /// The past lines the running capture's last minute of words were
+    /// already said in, for the live screen's recall cards. A meeting that
+    /// is not capturing has no words to recall from, so no matches; a store
+    /// that cannot be read is `Unavailable`. The read runs off the async
+    /// workers and asks no model anything.
+    pub async fn live_recall(&self, session_id: MeetingSessionId) -> MeetingLiveRecall {
+        let Some(live) = self.live_transcript(session_id) else {
+            return MeetingLiveRecall::Available {
+                matches: Vec::new(),
+            };
+        };
+        let recent = live.recent_lines(LIVE_RECALL_WINDOW_NS);
+        let Ok(store) = self.store().await else {
+            return MeetingLiveRecall::Unavailable;
+        };
+        match tauri::async_runtime::spawn_blocking(move || store.live_recall(session_id, &recent))
+            .await
+        {
+            Ok(Ok(matches)) => MeetingLiveRecall::Available { matches },
+            Ok(Err(_)) | Err(_) => MeetingLiveRecall::Unavailable,
+        }
     }
 
     /// The provisional transcript of the capture that is running now, when the

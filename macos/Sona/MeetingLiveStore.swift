@@ -253,7 +253,9 @@ final class MeetingLiveStore {
     /// The words recognized so far by the pass that runs during capture.
     /// Separate from `live.transcript`, which is the stored reading and is
     /// empty until the meeting stops.
-    private(set) var provisional: [MeetingProvisionalSegment] = []
+    private(set) var provisional: [MeetingProvisionalSegment] = [] {
+        didSet { scheduleRecall() }
+    }
     /// The clock of each capture a surface shows, by session: the live
     /// screen's, the panel's, and a ritual card's, which are one session
     /// unless two captures overlap. Only `anchorClocks` writes it, on every
@@ -274,6 +276,24 @@ final class MeetingLiveStore {
     /// or the panel's. Sound played meanwhile would land in its call track
     /// and its microphone, so the shared player holds while this is set.
     private(set) var capturing = false
+
+    /// Past lines the live words were already said in, newest on top, for
+    /// the recording they came from. Kept when the screen closes, so a card
+    /// put away stays away for the whole recording.
+    private(set) var recall: Recall?
+    @ObservationIgnored private var recallAsked:
+        (sessionId: MeetingSessionId, lines: Int, at: ContinuousClock.Instant)?
+    @ObservationIgnored private var recallTask: Task<Void, Never>?
+    private static let recallSpacing: Duration = .seconds(15)
+    private static let recallShown = 3
+
+    struct Recall: Equatable {
+        let sessionId: MeetingSessionId
+        var cards: [MeetingRecallMatch] = []
+        var dismissed: Set<String> = []
+        /// The last read could not reach past meetings.
+        var unavailable = false
+    }
     /// The word for what is in flight, which disables the controls that would
     /// contradict it.
     private(set) var pending: String?
@@ -1029,9 +1049,71 @@ final class MeetingLiveStore {
         notesError = nil
         dismissLiveHelp()
         helpQuestion = ""
+        recallTask?.cancel()
+        recallTask = nil
         live = nil
         provisional = []
         noteBody = ""
+    }
+
+    // MARK: - Recall, while it runs
+
+    /// The recall the live screen shows: the one for the capture it stands on.
+    var shownRecall: Recall? {
+        guard let recall, recall.sessionId == live?.session.sessionId else { return nil }
+        return recall
+    }
+
+    /// Puts a recall card away for the rest of its recording.
+    func dismissRecall(_ match: MeetingRecallMatch) {
+        guard var next = recall else { return }
+        next.dismissed.insert(match.id)
+        next.cards.removeAll { $0.id == match.id }
+        recall = next
+    }
+
+    /// Asks what the live words were already said in once they have grown,
+    /// while the live screen's capture records, and no sooner than
+    /// `recallSpacing` after the last ask.
+    private func scheduleRecall() {
+        guard recallTask == nil, let session = live?.session,
+              session.phase == .capturingRecording else { return }
+        let sessionId = session.sessionId
+        let asked = recallAsked?.sessionId == sessionId ? recallAsked : nil
+        guard provisional.count > asked?.lines ?? 0 else { return }
+        let wait = asked.map { max(.zero, Self.recallSpacing - $0.at.duration(to: .now)) } ?? .zero
+        recallTask = Task { [weak self] in
+            do { try await Task.sleep(for: wait) } catch { return }
+            guard let self else { return }
+            await self.askRecall(sessionId)
+            guard !Task.isCancelled else { return }
+            self.recallTask = nil
+            self.scheduleRecall()
+        }
+    }
+
+    /// One ask. New matches go on top in the core's order; a card already
+    /// shown or put away is not shown again. A read that fails keeps the
+    /// cards and says past meetings could not be read.
+    private func askRecall(_ sessionId: MeetingSessionId) async {
+        recallAsked = (sessionId: sessionId, lines: provisional.count, at: .now)
+        let answer: MeetingLiveRecall
+        do {
+            answer = try await core.request("meeting_live_recall", MeetingRequest.session(sessionId))
+        } catch {
+            answer = .unavailable
+        }
+        var next = recall.flatMap { $0.sessionId == sessionId ? $0 : nil } ?? Recall(sessionId: sessionId)
+        switch answer {
+        case let .available(matches):
+            let known = next.dismissed.union(next.cards.map(\.id))
+            let fresh = matches.filter { !known.contains($0.id) }
+            next.cards = Array((fresh + next.cards).prefix(Self.recallShown))
+            next.unavailable = false
+        case .unavailable:
+            next.unavailable = true
+        }
+        if next != recall { recall = next }
     }
 
     func pause() {

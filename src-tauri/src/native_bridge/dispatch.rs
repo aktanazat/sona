@@ -3011,6 +3011,11 @@ pub(super) async fn call(
             })
             .await?
         }
+        "meeting_live_recall" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::meeting::meeting_live_recall(app.state(), session_id).await)
+        }
         "meeting_call_silence" => {
             let mut args = Args::parse(params)?;
             let session_id = args.take("sessionId")?;

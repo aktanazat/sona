@@ -3412,6 +3412,26 @@ impl LiveTranscript {
         }
         evidence
     }
+
+    /// The words of the lines that end within `window_ns` of the newest
+    /// line's end: what the call is about right now. Copies only those.
+    pub(crate) fn recent_lines(&self, window_ns: u64) -> Vec<String> {
+        let segments = self
+            .segments
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cutoff = segments
+            .iter()
+            .map(|segment| segment.end_offset_ns)
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(window_ns);
+        segments
+            .iter()
+            .filter(|segment| segment.end_offset_ns >= cutoff)
+            .map(|segment| segment.text.clone())
+            .collect()
+    }
 }
 
 /// The background pass over one running capture, and the transcript it fills.
@@ -4734,6 +4754,8 @@ fn catch_up_prompt() -> String {
 const MAX_LIVE_HELP_EVIDENCE_BYTES: usize = 32 * 1024;
 /// "What did I miss?" reads the lines that end within this long of the newest.
 const LIVE_HELP_RECENT_WINDOW_NS: u64 = 5 * 60 * 1_000_000_000;
+/// Recall reads the lines that end within this long of the newest.
+pub(crate) const LIVE_RECALL_WINDOW_NS: u64 = 60 * 1_000_000_000;
 /// A few short cited points, never a document.
 const LIVE_HELP_MAX_TOKENS: i32 = 800;
 /// The longest point live help shows, in characters.

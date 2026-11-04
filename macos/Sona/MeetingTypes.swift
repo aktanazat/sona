@@ -1403,9 +1403,75 @@ struct SaidMoment: Decodable, Identifiable {
 }
 
 /// `SaidPerson`.
-struct SaidPerson: Decodable {
+struct SaidPerson: Decodable, Equatable {
     let personId: MeetingPersonId
     let displayName: String
+}
+
+/// `MeetingLiveRecall`: past lines the running capture's last minute was
+/// already said in. A store that could not be read is its own answer, never
+/// an empty list.
+enum MeetingLiveRecall: Decodable {
+    case available([MeetingRecallMatch])
+    case unavailable
+
+    private enum Key: String, CodingKey {
+        case status, matches
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        let status = try container.decode(String.self, forKey: .status)
+        switch status {
+        case "available":
+            self = .available(try container.decode([MeetingRecallMatch].self, forKey: .matches))
+        case "unavailable":
+            self = .unavailable
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .status, in: container, debugDescription: "unknown recall status \(status)")
+        }
+    }
+}
+
+/// `MeetingRecallKind`: what became of a recalled line in its own meeting.
+enum MeetingRecallKind: String, Decodable {
+    case stillOpen = "still_open"
+    case decided
+    case saidBefore = "said_before"
+
+    var label: String {
+        switch self {
+        case .stillOpen: "Still open"
+        case .decided: "Decided"
+        case .saidBefore: "Said before"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .stillOpen: "circle.dashed"
+        case .decided: "checkmark.seal"
+        case .saidBefore: "quote.opening"
+        }
+    }
+}
+
+/// `MeetingRecallMatch`: one past line the words being said now were already
+/// said in. `person` comes only from a confirmed identification.
+struct MeetingRecallMatch: Decodable, Equatable, Identifiable {
+    let kind: MeetingRecallKind
+    let text: String
+    let sessionId: MeetingSessionId
+    let segmentId: TranscriptSegmentId
+    let startOffsetNs: UInt64
+    let meetingTitle: String
+    let meetingStartedAtUtcMs: Int64
+    let appBundleId: String?
+    let person: SaidPerson?
+    let term: String
+
+    var id: String { "\(sessionId):\(segmentId)" }
 }
 
 /// The meetings a person deleted and can still get back.

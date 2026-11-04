@@ -1790,6 +1790,7 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_catch_up,
             commands::meeting::meeting_live_help,
             commands::meeting::meeting_live_transcript,
+            commands::meeting::meeting_live_recall,
             commands::meeting::meeting_call_silence,
             commands::meeting::meeting_series_template_get,
             commands::meeting::meeting_series_template_for_session,

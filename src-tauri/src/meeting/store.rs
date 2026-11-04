@@ -39,6 +39,7 @@ pub(crate) mod privacy_inventory;
 pub(crate) mod processing_speed;
 pub(crate) mod prompts;
 pub(crate) mod query_plane;
+mod recall;
 #[cfg(test)]
 mod remote_intelligence_tests;
 mod said;

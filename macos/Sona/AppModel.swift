@@ -455,6 +455,18 @@ final class AppModel {
         go(.meetings)
     }
 
+    /// A past moment the live screen recalled, open on its meeting's page.
+    /// The recording keeps going: the live notes are saved first, and the
+    /// meetings page's recording row leads back.
+    func openRecalled(_ match: MeetingRecallMatch) {
+        Task {
+            guard await live.flushLiveNotes() else { return }
+            live.closeLive()
+            meetings.open(match.sessionId, segmentId: match.segmentId)
+            go(.meetings)
+        }
+    }
+
     /// One kept dictation, open in the library: the words the notice is about.
     func openDictation(_ id: Int64) {
         library.reveal(id)

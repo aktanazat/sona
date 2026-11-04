@@ -1406,6 +1406,45 @@ pub struct SaidPerson {
     pub display_name: String,
 }
 
+/// What the live screen recalls from past meetings while a capture runs.
+/// `Unavailable` when the store could not be read: no match and no reading
+/// are different answers.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MeetingLiveRecall {
+    Available { matches: Vec<MeetingRecallMatch> },
+    Unavailable,
+}
+
+/// What became of a recalled line in its own meeting, in the order the live
+/// screen ranks them.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingRecallKind {
+    /// An open promise or question that cites the line.
+    StillOpen,
+    /// A decision that cites the line.
+    Decided,
+    SaidBefore,
+}
+
+/// One past line the words being said now were already said in. `person`
+/// comes only from a confirmed identification of the line's speaker.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct MeetingRecallMatch {
+    pub kind: MeetingRecallKind,
+    pub text: String,
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+    pub start_offset_ns: u64,
+    pub meeting_title: String,
+    pub meeting_started_at_utc_ms: i64,
+    pub app_bundle_id: Option<String>,
+    pub person: Option<SaidPerson>,
+    /// The words both meetings share, as the index matched them.
+    pub term: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingExportFormat {

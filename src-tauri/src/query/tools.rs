@@ -124,7 +124,7 @@ const PERSON_MEETINGS: usize = 8;
 /// English words that carry no topic, plus the fragments splitting on
 /// apostrophes leaves behind and the sounds a dictation makes while thinking.
 /// Sorted, so membership is a binary search; a test holds the order.
-const STOPWORDS: [&str; 145] = [
+pub(crate) const STOPWORDS: [&str; 145] = [
     "about", "above", "after", "again", "all", "also", "am", "an", "and", "any", "are", "aren",
     "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but",
     "by", "can", "could", "couldn", "did", "didn", "do", "does", "doesn", "doing", "don", "down",
