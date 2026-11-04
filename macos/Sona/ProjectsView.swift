@@ -38,6 +38,7 @@ struct ProjectsView: View {
     @State private var reviewProject: PlanningProject?
     @State private var cursor: String?
     @State private var collapsed: Set<PlanningProjectStatus> = []
+    @State private var ownerFilter: String?
     @FocusState private var keysFocused: Bool
 
     var body: some View {
@@ -54,6 +55,10 @@ struct ProjectsView: View {
         .task { await store.start() }
         .task(id: store.selectedProjectId) {
             if let id = store.selectedProjectId { await store.loadDetail(id) }
+        }
+        .onChange(of: store.selectedProjectId) { _, _ in ownerFilter = nil }
+        .onChange(of: store.detail?.pulse.owners) { _, owners in
+            if let id = ownerFilter, !(owners ?? []).contains(where: { $0.personId == id }) { ownerFilter = nil }
         }
         .sheet(item: $creation) { target in
             PlanningCreateSheet(target: target, store: store, people: people, peopleUnavailable: peopleUnavailable)
@@ -311,7 +316,7 @@ struct ProjectsView: View {
             Spacer(minLength: 12)
             AvatarStack(faces: store.details[summary.id].map(owners) ?? [], size: 18, revision: photoRevision)
                 .frame(width: 62, alignment: .trailing)
-            dueLabel(summary.nextDueAtMs, overdue: summary.nextDueAtMs.map { $0 < now } ?? false)
+            dueLabel(summary.nextDueAtMs, overdue: PlanningDue.isPast(summary.nextDueAtMs, at: now))
                 .frame(width: 58, alignment: .trailing)
             ProjectProgressRing(done: summary.completedTaskCount, total: total)
                 .frame(width: 58, alignment: .trailing)
@@ -416,7 +421,7 @@ struct ProjectsView: View {
     private func projectContent(_ detail: PlanningProjectDetail) -> some View {
         let now = now
         return VStack(alignment: .leading, spacing: 0) {
-            header(detail, now: now)
+            header(detail)
                 .padding(.top, 6)
                 .padding(.bottom, 20)
             if let error = store.mutationError {
@@ -426,8 +431,11 @@ struct ProjectsView: View {
                 }
                 .padding(.bottom, 20)
             }
-            numbers(detail, now: now)
-                .padding(.bottom, 28)
+            VStack(alignment: .leading, spacing: 12) {
+                numbers(detail.pulse, now: now)
+                ownerFaces(detail.pulse)
+            }
+            .padding(.bottom, 28)
             if let series = detail.burnUp(until: .now) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Progress").sectionLabel().accessibilityAddTraits(.isHeader)
@@ -457,21 +465,22 @@ struct ProjectsView: View {
         .onAppear { keysFocused = true }
     }
 
-    private func header(_ detail: PlanningProjectDetail, now: Int64) -> some View {
-        let fraction = detail.countedTaskCount > 0
-            ? Double(detail.completedTaskCount) / Double(detail.countedTaskCount) : 0
+    private func header(_ detail: PlanningProjectDetail) -> some View {
+        let pulse = detail.pulse
+        let counted = pulse.done + pulse.open
+        let fraction = counted > 0 ? Double(pulse.done) / Double(counted) : 0
         let project = detail.project
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
                 ZStack {
                     ProgressRing(fraction: fraction, size: 52, lineWidth: 4.5)
-                    Text(ProgressRing.percent(fraction))
+                    Text(counted > 0 ? ProgressRing.percent(fraction) : "—")
                         .font(TypeScale.label(12).weight(.semibold))
                         .monospacedDigit()
-                        .foregroundStyle(Theme.ink)
+                        .foregroundStyle(counted > 0 ? Theme.ink : Theme.inkTertiary)
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(ProgressRing.percent(fraction)) of tasks done")
+                .accessibilityLabel(counted > 0 ? "Progress, \(pulse.done) of \(counted) done" : "Progress, no tasks")
                 VStack(alignment: .leading, spacing: 8) {
                     Text(project.title).heroText()
                         .fixedSize(horizontal: false, vertical: true)
@@ -496,12 +505,6 @@ struct ProjectsView: View {
                             .background(Theme.control, in: Capsule())
                         }
                         Text("Started \(PlanningFormat.day(project.createdAtMs))").metaText()
-                        if let due = nextDue(detail) {
-                            let late = due < now
-                            Text("Next due \(PlanningFormat.day(due))")
-                                .metaText(late ? Theme.live : Theme.inkTertiary)
-                                .help(PlanningFormat.date(due))
-                        }
                     }
                 }
             }
@@ -513,21 +516,87 @@ struct ProjectsView: View {
         }
     }
 
-    private func nextDue(_ detail: PlanningProjectDetail) -> Int64? {
-        (detail.tasks.filter { $0.status.isOpen }.compactMap(\.dueAtMs)
-            + detail.milestones.filter { $0.status.isOpen }.compactMap(\.dueAtMs)).min()
+    private func numbers(_ pulse: PlanningProjectPulse, now: Int64) -> some View {
+        HStack(spacing: 10) {
+            NumberTile("\(pulse.open)", label: "Open")
+            NumberTile("\(pulse.overdue)", label: "Overdue", tone: pulse.overdue > 0 ? Theme.live : Theme.ink)
+            if let due = pulse.nextDueAtMs {
+                NumberTile(PlanningFormat.dueDay(due, now: now), label: "Next due")
+                    .help(PlanningFormat.date(due))
+            } else {
+                NumberTile("—", label: "Next due", tone: Theme.inkTertiary)
+                    .accessibilityRepresentation { Text("No next due date") }
+            }
+            NumberTile("\(pulse.meetingsThisWeek)", label: "Meetings this week")
+        }
     }
 
-    private func numbers(_ detail: PlanningProjectDetail, now: Int64) -> some View {
-        let overdue = detail.overdueTaskCount(at: now)
-        let milestonesDone = detail.milestones.filter { $0.status == .done }.count
-        return HStack(spacing: 10) {
-            NumberTile("\(detail.completedTaskCount)", label: "Tasks done")
-            NumberTile("\(detail.openTaskCount)", label: "Open")
-            NumberTile("\(overdue)", label: "Overdue", tone: overdue > 0 ? Theme.live : Theme.ink)
-            NumberTile("\(milestonesDone)", label: "Milestones done", unit: "of \(detail.milestones.count)")
-            NumberTile("\(sourceGroups(detail).count)", label: "Sources")
+    @ViewBuilder
+    private func ownerFaces(_ pulse: PlanningProjectPulse) -> some View {
+        if peopleUnavailable, !pulse.owners.isEmpty {
+            Text("People unavailable.").metaText()
+        } else if !pulse.owners.isEmpty {
+            let active = activeOwner(pulse)?.id
+            ChatFlowRow(spacing: 6) {
+                ForEach(pulse.owners, id: \.personId) { owner in
+                    ownerFace(owner, active: active == owner.personId)
+                }
+            }
         }
+    }
+
+    @ViewBuilder
+    private func ownerFace(_ owner: PlanningOwnerCount, active: Bool) -> some View {
+        let tasks = owner.openTasks == 1 ? "task" : "tasks"
+        if let person = people.first(where: { $0.id == owner.personId }) {
+            Button {
+                withAnimation(Motion.settle(reduced: reduceMotion)) {
+                    ownerFilter = active ? nil : owner.personId
+                }
+            } label: {
+                faceChip(count: owner.openTasks, selected: active) {
+                    Avatar(face: AvatarFace(kind: .person(owner.personId), name: person.name), size: 20,
+                           revision: photoRevision)
+                }
+            }
+            .buttonStyle(.plain)
+            .help(active ? "Show all tasks" : "Show \(person.name)'s open \(tasks)")
+            .accessibilityLabel("Show \(person.name)'s \(owner.openTasks) \(tasks)")
+            .accessibilityAddTraits(active ? .isSelected : [])
+        } else {
+            faceChip(count: owner.openTasks, selected: false) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.inkTertiary)
+                    .frame(width: 20, height: 20)
+            }
+            .help("Person unavailable")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Person unavailable, \(owner.openTasks) open \(tasks)")
+        }
+    }
+
+    private func faceChip<Face: View>(count: Int, selected: Bool, @ViewBuilder face: () -> Face) -> some View {
+        HStack(spacing: 5) {
+            face()
+            Text("\(count)")
+                .font(TypeScale.label(12.5))
+                .monospacedDigit()
+                .foregroundStyle(selected ? Theme.ink : Theme.inkSecondary)
+        }
+        .padding(.leading, 3)
+        .padding(.trailing, 10)
+        .frame(height: 26)
+        .background(selected ? Theme.selection : Color.clear, in: Capsule())
+        .overlay(Capsule().strokeBorder(selected ? Color.clear : Theme.border, lineWidth: 1))
+        .contentShape(Capsule())
+    }
+
+    private func activeOwner(_ pulse: PlanningProjectPulse) -> PlanningPersonChoice? {
+        guard let id = ownerFilter, !peopleUnavailable, pulse.owners.contains(where: { $0.personId == id }) else {
+            return nil
+        }
+        return people.first { $0.id == id }
     }
 
     private func sectionHeader<Action: View>(_ title: String, count: Int,
@@ -586,6 +655,9 @@ struct ProjectsView: View {
             }
             Text(milestone.title).bodyText(13.5).lineLimit(1).help(milestone.title)
             Spacer(minLength: 12)
+            if let heat = detail.pulse.milestones.first(where: { $0.milestoneId == milestone.id }) {
+                heatLabel(heat, now: now)
+            }
             if !scoped.isEmpty {
                 Text("\(done)/\(scoped.count) tasks").metaText().monospacedDigit()
             }
@@ -596,18 +668,43 @@ struct ProjectsView: View {
         }
     }
 
+    private func heatLabel(_ heat: PlanningMilestonePulse, now: Int64) -> some View {
+        let days = max(0, PlanningFormat.days(from: heat.lastMeetingAtMs, to: now))
+        let meetings = heat.meetings == 1 ? "1 meeting" : "\(heat.meetings) meetings"
+        let latest = days == 0 ? "today" : "\(days) d"
+        let ago = days == 0 ? "today" : days == 1 ? "1 day ago" : "\(days) days ago"
+        return Text("\(meetings) · \(latest)")
+            .metaText()
+            .monospacedDigit()
+            .lineLimit(1)
+            .help("Last meeting \(PlanningFormat.date(heat.lastMeetingAtMs))")
+            .accessibilityLabel("\(meetings), latest \(ago)")
+    }
+
     private func tasks(_ detail: PlanningProjectDetail, now: Int64) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("Tasks", count: detail.tasks.count) {
+        let person = activeOwner(detail.pulse)
+        let shown = person.map { person in detail.tasks.filter { $0.ownerPersonId == person.id && $0.status.isOpen } }
+            ?? detail.tasks
+        return VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Tasks", count: shown.count) {
+                if person != nil {
+                    Button("Show all") {
+                        withAnimation(Motion.settle(reduced: reduceMotion)) { ownerFilter = nil }
+                    }
+                    .buttonStyle(.quiet)
+                }
                 Button("Add task", systemImage: "plus") {
                     creation = .task(detail.project.id, detail.milestones)
                 }
                 .buttonStyle(.quiet)
                 .disabled(store.mutating)
             }
+            if let person {
+                Text("Showing \(person.name)'s open tasks.").metaText()
+            }
             Card(material: material) {
                 if detail.tasks.isEmpty { CardLine("No tasks yet.") }
-                ForEach(TaskListRow.rows(detail.tasks)) { row in
+                ForEach(TaskListRow.rows(shown)) { row in
                     switch row {
                     case let .group(status, count):
                         GroupHeader(title: status.label, count: count) {
@@ -997,7 +1094,7 @@ private struct BoardCard: View {
                     Text(PlanningFormat.day(due))
                         .font(TypeScale.label(12))
                         .monospacedDigit()
-                        .foregroundStyle(due < now ? Theme.live : Theme.inkSecondary)
+                        .foregroundStyle(PlanningDue.isPast(due, at: now) ? Theme.live : Theme.inkSecondary)
                         .help(PlanningFormat.date(due))
                 }
                 if !faces.isEmpty { AvatarStack(faces: faces, size: 18, revision: revision) }
@@ -1609,6 +1706,22 @@ enum PlanningFormat {
         return Calendar.current.isDate(date, equalTo: .now, toGranularity: .year)
             ? date.formatted(.dateTime.month(.abbreviated).day())
             : date.formatted(.dateTime.month(.abbreviated).day().year())
+    }
+    /// Local calendar days from one moment to another, negative when `end` comes first.
+    static func days(from start: Int64, to end: Int64) -> Int {
+        let calendar = Calendar.current
+        return calendar.dateComponents([.day], from: calendar.startOfDay(for: moment(start)),
+                                       to: calendar.startOfDay(for: moment(end))).day ?? 0
+    }
+    /// "Today", "Tomorrow", or "In 3 days" within the week ahead, then the day.
+    static func dueDay(_ milliseconds: Int64, now: Int64) -> String {
+        let ahead = days(from: now, to: milliseconds)
+        return switch ahead {
+        case 0: "Today"
+        case 1: "Tomorrow"
+        case 2...6: "In \(ahead) days"
+        default: day(milliseconds)
+        }
     }
     static func passage(_ milliseconds: Int64) -> String {
         let seconds = max(0, milliseconds / 1000)

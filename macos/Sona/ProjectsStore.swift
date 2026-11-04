@@ -91,15 +91,34 @@ struct PlanningProjectSummary: Decodable, Identifiable, Equatable {
     var id: String { project.id }
 }
 
+struct PlanningOwnerCount: Decodable, Equatable {
+    let personId: String
+    let openTasks: Int
+}
+
+struct PlanningMilestonePulse: Decodable, Equatable {
+    let milestoneId: String
+    let meetings: Int
+    let lastMeetingAtMs: Int64
+}
+
+/// A project at a glance as of the moment its page was read.
+struct PlanningProjectPulse: Decodable, Equatable {
+    let done: Int
+    let open: Int
+    let overdue: Int
+    let nextDueAtMs: Int64?
+    let meetingsThisWeek: Int
+    let owners: [PlanningOwnerCount]
+    let milestones: [PlanningMilestonePulse]
+}
+
 struct PlanningProjectDetail: Decodable, Equatable {
     let project: PlanningProject
     let milestones: [PlanningMilestone]
     let tasks: [PlanningTask]
     let evidence: [PlanningEvidenceLink]
-
-    var completedTaskCount: Int { tasks.filter { $0.status == .done }.count }
-    var openTaskCount: Int { tasks.filter { $0.status.isOpen }.count }
-    var countedTaskCount: Int { completedTaskCount + openTaskCount }
+    let pulse: PlanningProjectPulse
 }
 
 /// What the projects list is narrowed to.
@@ -118,8 +137,17 @@ extension PlanningProject {
     }
 }
 
+/// Work is overdue once its due day has ended, the rule the project pulse counts by.
+enum PlanningDue {
+    static func isPast(_ due: Int64?, at now: Int64) -> Bool {
+        guard let due else { return false }
+        let today = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: Double(now) / 1000))
+        return Double(due) / 1000 < today.timeIntervalSince1970
+    }
+}
+
 extension PlanningMilestone {
-    func isOverdue(at now: Int64) -> Bool { status.isOpen && (dueAtMs ?? .max) < now }
+    func isOverdue(at now: Int64) -> Bool { status.isOpen && PlanningDue.isPast(dueAtMs, at: now) }
 
     func with(status: PlanningWorkStatus, at now: Int64) -> PlanningMilestone {
         PlanningMilestone(id: id, projectId: projectId, title: title, dueAtMs: dueAtMs, status: status,
@@ -128,7 +156,7 @@ extension PlanningMilestone {
 }
 
 extension PlanningTask {
-    func isOverdue(at now: Int64) -> Bool { status.isOpen && (dueAtMs ?? .max) < now }
+    func isOverdue(at now: Int64) -> Bool { status.isOpen && PlanningDue.isPast(dueAtMs, at: now) }
 
     func with(status: PlanningWorkStatus, at now: Int64) -> PlanningTask {
         PlanningTask(id: id, projectId: projectId, milestoneId: milestoneId, title: title, details: details,
@@ -140,17 +168,17 @@ extension PlanningTask {
 
 extension PlanningProjectDetail {
     func replacing(project: PlanningProject) -> PlanningProjectDetail {
-        PlanningProjectDetail(project: project, milestones: milestones, tasks: tasks, evidence: evidence)
+        PlanningProjectDetail(project: project, milestones: milestones, tasks: tasks, evidence: evidence, pulse: pulse)
     }
 
     func replacing(milestone: PlanningMilestone) -> PlanningProjectDetail {
         PlanningProjectDetail(project: project, milestones: milestones.map { $0.id == milestone.id ? milestone : $0 },
-                              tasks: tasks, evidence: evidence)
+                              tasks: tasks, evidence: evidence, pulse: pulse)
     }
 
     func replacing(task: PlanningTask) -> PlanningProjectDetail {
         PlanningProjectDetail(project: project, milestones: milestones,
-                              tasks: tasks.map { $0.id == task.id ? task : $0 }, evidence: evidence)
+                              tasks: tasks.map { $0.id == task.id ? task : $0 }, evidence: evidence, pulse: pulse)
     }
 
     func overdueTaskCount(at now: Int64) -> Int { tasks.filter { $0.isOverdue(at: now) }.count }
