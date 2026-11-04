@@ -197,7 +197,7 @@ private final class TranscriptCorrectionsStore {
             }
             if let scope { await load(scope) }
             if let fix = RelistenFix.between(sessionId: review.sessionId, segmentId: segment.segmentId,
-                                             captured: segment.rawText, saved: text) {
+                                             shown: segment.correctedText, saved: text) {
                 relisten.check(fix)
             } else {
                 relisten.clear()

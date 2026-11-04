@@ -10,13 +10,13 @@ struct RelistenFix: Equatable {
     let original: String
     let replacement: String
 
-    /// The one run of at most three words that differs between what the
-    /// transcriber wrote and the saved line, without the punctuation both
+    /// The one run of at most three words that differs between the line as
+    /// its editor showed it and the saved line, without the punctuation both
     /// share. Nothing when the edit only added or removed words, or changed
     /// more than a short run.
     static func between(sessionId: MeetingSessionId, segmentId: TranscriptSegmentId,
-                        captured: String, saved: String) -> RelistenFix? {
-        let before = captured.split(whereSeparator: \.isWhitespace)
+                        shown: String, saved: String) -> RelistenFix? {
+        let before = shown.split(whereSeparator: \.isWhitespace)
         let after = saved.split(whereSeparator: \.isWhitespace)
         var lead = 0
         while lead < before.count, lead < after.count, before[lead] == after[lead] { lead += 1 }

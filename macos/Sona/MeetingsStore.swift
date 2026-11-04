@@ -1425,7 +1425,7 @@ final class MeetingsStore {
         let segmentId = segment.base.segmentId
         let fix = removed ? nil : snapshot.flatMap {
             RelistenFix.between(sessionId: $0.session.sessionId, segmentId: segmentId,
-                                captured: segment.base.text, saved: text)
+                                shown: segment.text, saved: text)
         }
         mutate(removed ? "Removing the line" : "Correcting the line", "meeting_segment_edit", then: {
             guard self.receipt?.refusal == nil else { return }
