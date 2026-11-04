@@ -1534,6 +1534,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/speaker_voiceprints.sql")),
     M::up(include_str!("store/conversation_bookmark_kinds.sql")),
     M::up(include_str!("store/processing_speed.sql")),
+    M::up(include_str!("store/transcript_relisten.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -5132,28 +5133,12 @@ impl MeetingStore {
         } = edit;
         let session_id = mutation.session_id;
         self.edit_session(mutation, "segment_edited", |transaction| {
-            let segment_exists: Option<i64> = transaction
-                .query_row(
-                    "SELECT 1 FROM meeting_transcript_segments s
-                     JOIN meeting_transcript_revisions r ON r.transcript_revision_id = s.transcript_revision_id
-                     WHERE s.segment_id = ?1 AND r.session_id = ?2",
-                    params![id(segment_id), id(session_id)],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if segment_exists.is_none() {
-                return Err(StoreError::NotFound);
-            }
-            let sequence: i64 = transaction.query_row(
-                "SELECT COALESCE(MAX(edit_sequence), -1) + 1 FROM meeting_segment_edits WHERE segment_id = ?1",
-                params![id(segment_id)],
-                |row| row.get(0),
-            )?;
-            transaction.execute(
-                "INSERT INTO meeting_segment_edits (
-                    segment_id, edit_sequence, replacement_text, removed, operator_at_utc_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id(segment_id), sequence, replacement_text, bool_to_i64(removed), utc_now_ms()],
+            insert_segment_edit_in(
+                transaction,
+                session_id,
+                segment_id,
+                &replacement_text,
+                removed,
             )?;
             mark_artifacts_out_of_date(transaction, session_id)?;
             rebuild_search_documents_in(transaction, session_id)
@@ -8969,6 +8954,41 @@ fn diarization_snapshot_for_session(
         generation_id,
         assigned_segment_count: from_i64(assigned_segment_count)?,
     })
+}
+
+/// Adds the next edit of one line of `session_id`, and returns its place in
+/// that line's sequence.
+fn insert_segment_edit_in(
+    transaction: &Transaction<'_>,
+    session_id: MeetingSessionId,
+    segment_id: TranscriptSegmentId,
+    replacement_text: &str,
+    removed: bool,
+) -> Result<i64, StoreError> {
+    let segment_exists: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM meeting_transcript_segments s
+             JOIN meeting_transcript_revisions r ON r.transcript_revision_id = s.transcript_revision_id
+             WHERE s.segment_id = ?1 AND r.session_id = ?2",
+            params![id(segment_id), id(session_id)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if segment_exists.is_none() {
+        return Err(StoreError::NotFound);
+    }
+    let sequence: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(edit_sequence), -1) + 1 FROM meeting_segment_edits WHERE segment_id = ?1",
+        params![id(segment_id)],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO meeting_segment_edits (
+            segment_id, edit_sequence, replacement_text, removed, operator_at_utc_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id(segment_id), sequence, replacement_text, bool_to_i64(removed), utc_now_ms()],
+    )?;
+    Ok(sequence)
 }
 
 fn mark_artifacts_out_of_date(

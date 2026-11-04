@@ -1702,6 +1702,8 @@ pub fn run(cli_args: CliArgs) {
             commands::transcript_corrections::transcript_correction_teach,
             commands::transcript_corrections::transcript_correction_update,
             commands::transcript_corrections::transcript_correction_remove,
+            commands::transcript_corrections::transcript_relisten_offer,
+            commands::transcript_corrections::transcript_relisten_decide,
             commands::person_content::person_contributions,
             commands::person_content::person_avatar,
             commands::person_content::person_avatar_set,

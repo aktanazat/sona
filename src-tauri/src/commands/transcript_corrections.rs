@@ -1,9 +1,11 @@
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::{map_store_error, MeetingSessionManager};
 use crate::meeting::transcript_correction_types::{
-    TranscriptCorrectionList, TranscriptCorrectionMutationResult,
-    TranscriptCorrectionRemoveRequest, TranscriptCorrectionReview,
-    TranscriptCorrectionTeachRequest, TranscriptCorrectionUpdateRequest,
+    TranscriptCorrectionChangedSession, TranscriptCorrectionList,
+    TranscriptCorrectionMutationResult, TranscriptCorrectionRemoveRequest,
+    TranscriptCorrectionReview, TranscriptCorrectionTeachRequest,
+    TranscriptCorrectionUpdateRequest, TranscriptRelistenDecision, TranscriptRelistenFix,
+    TranscriptRelistenOffer, TranscriptRelistenResult,
 };
 use crate::meeting::types::{MeetingCommandError, MeetingEventPayload, MeetingSessionId};
 use std::sync::Arc;
@@ -47,7 +49,7 @@ pub async fn transcript_correction_teach(
         .await?
         .teach_transcript_correction(request)
         .map_err(map_store_error)?;
-    emit_changes(&app, &result);
+    emit_changes(&app, &result.changed_sessions);
     Ok(result)
 }
 
@@ -63,7 +65,7 @@ pub async fn transcript_correction_update(
         .await?
         .update_transcript_correction(request)
         .map_err(map_store_error)?;
-    emit_changes(&app, &result);
+    emit_changes(&app, &result.changed_sessions);
     Ok(result)
 }
 
@@ -79,12 +81,42 @@ pub async fn transcript_correction_remove(
         .await?
         .remove_transcript_correction(request)
         .map_err(map_store_error)?;
-    emit_changes(&app, &result);
+    emit_changes(&app, &result.changed_sessions);
     Ok(result)
 }
 
-fn emit_changes(app: &AppHandle, result: &TranscriptCorrectionMutationResult) {
-    for session in &result.changed_sessions {
+#[tauri::command]
+#[specta::specta]
+pub async fn transcript_relisten_offer(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    fix: TranscriptRelistenFix,
+) -> Result<TranscriptRelistenOffer, MeetingCommandError> {
+    let Ok(store) = manager.store().await else {
+        return Ok(TranscriptRelistenOffer::Unavailable);
+    };
+    store
+        .transcript_relisten_offer(&fix)
+        .map_err(map_store_error)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn transcript_relisten_decide(
+    app: AppHandle,
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    decision: TranscriptRelistenDecision,
+) -> Result<TranscriptRelistenResult, MeetingCommandError> {
+    let result = manager
+        .store()
+        .await?
+        .decide_transcript_relisten(decision)
+        .map_err(map_store_error)?;
+    emit_changes(&app, &result.changed_sessions);
+    Ok(result)
+}
+
+fn emit_changes(app: &AppHandle, changed_sessions: &[TranscriptCorrectionChangedSession]) {
+    for session in changed_sessions {
         let _ = app.emit(
             "meeting:transcript-changed",
             MeetingEventPayload {

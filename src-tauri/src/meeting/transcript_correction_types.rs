@@ -1,5 +1,5 @@
 use super::people_types::PersonId;
-use super::types::{MeetingSessionId, SpeakerId, TranscriptSegmentId};
+use super::types::{MeetingSessionId, SaidPerson, SpeakerId, TranscriptSegmentId};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
@@ -128,4 +128,77 @@ pub struct TranscriptCorrectionChangedSession {
 pub struct TranscriptCorrectionMutationResult {
     pub corrections: TranscriptCorrectionList,
     pub changed_sessions: Vec<TranscriptCorrectionChangedSession>,
+}
+
+/// One fix the owner made in one line, to offer in other meetings: the words
+/// the transcriber wrote, the words he chose, and the line he chose them in.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptRelistenFix {
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+    pub original_phrase: String,
+    pub replacement_phrase: String,
+}
+
+/// A stretch of a line, and whether it is the misheard words.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct TranscriptRelistenPiece {
+    pub text: String,
+    pub misheard: bool,
+}
+
+/// A line in another meeting that still reads the way the fix corrected.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct TranscriptRelistenLine {
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+    pub meeting_title: String,
+    pub meeting_started_at_utc_ms: i64,
+    pub app_bundle_id: Option<String>,
+    /// The line as it reads now, with the misheard words marked.
+    pub pieces: Vec<TranscriptRelistenPiece>,
+    /// Who said it, only when that voice is a confirmed person.
+    pub person: Option<SaidPerson>,
+    pub audio_retained: bool,
+    /// Where two seconds around the first misheard words begin, estimated
+    /// from where they fall in the line.
+    pub clip_start_offset_ns: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TranscriptRelistenOffer {
+    Available {
+        fixed_at_utc_ms: i64,
+        /// Every line that qualifies; `lines` holds the newest of them.
+        total: u32,
+        /// Whether every such line is in a meeting that began before the
+        /// fixed one.
+        all_older: bool,
+        lines: Vec<TranscriptRelistenLine>,
+    },
+    /// The store could not be read, so nothing is known about other meetings.
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptRelistenTarget {
+    pub session_id: MeetingSessionId,
+    pub segment_id: TranscriptSegmentId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptRelistenDecision {
+    pub fix: TranscriptRelistenFix,
+    pub accept: Vec<TranscriptRelistenTarget>,
+    pub skip: Vec<TranscriptRelistenTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct TranscriptRelistenResult {
+    pub changed_sessions: Vec<TranscriptCorrectionChangedSession>,
+    pub offer: TranscriptRelistenOffer,
 }

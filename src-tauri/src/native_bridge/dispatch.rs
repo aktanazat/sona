@@ -2380,6 +2380,29 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "transcript_relisten_offer" => {
+            let mut args = Args::parse(params)?;
+            let fix = args.take("fix")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_relisten_offer(
+                    app.state(),
+                    fix,
+                )
+                .await,
+            )
+        }
+        "transcript_relisten_decide" => {
+            let mut args = Args::parse(params)?;
+            let decision = args.take("decision")?;
+            reply(
+                crate::commands::transcript_corrections::transcript_relisten_decide(
+                    app.clone(),
+                    app.state(),
+                    decision,
+                )
+                .await,
+            )
+        }
         "person_contributions" => {
             let mut args = Args::parse(params)?;
             let person_id = args.take("personId")?;
