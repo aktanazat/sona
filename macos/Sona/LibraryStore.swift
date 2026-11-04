@@ -94,6 +94,9 @@ final class LibraryStore {
 
     /// The last thing the core could not do, shown until the next success.
     private(set) var error: String?
+    /// A meeting is capturing. Sound played now would land in its call track
+    /// and its microphone, so nothing plays until the capture ends.
+    private(set) var heldForRecording = false
 
     @ObservationIgnored private let core: Core
     @ObservationIgnored private var pageRequest = 0
@@ -461,6 +464,7 @@ final class LibraryStore {
     /// core in bounded chunks and are handed to one player; a second row
     /// takes the player from the first.
     func togglePlayback(for id: Int64) {
+        guard !heldForRecording else { return }
         if playingId == id, let player {
             if player.isPlaying {
                 player.pause()
@@ -504,6 +508,13 @@ final class LibraryStore {
         let time = min(max(fraction, 0), 1) * duration
         player.currentTime = time
         position = time
+    }
+
+    /// Holds playback while a meeting captures, stopping what is playing.
+    func hold(_ capturing: Bool) {
+        guard capturing != heldForRecording else { return }
+        heldForRecording = capturing
+        if capturing { stopPlayback() }
     }
 
     func stopPlayback() {

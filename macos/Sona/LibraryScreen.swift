@@ -672,13 +672,14 @@ private struct PlaybackBar: View {
             Button { store.togglePlayback(for: id) } label: {
                 Image(systemName: active && store.playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(loading ? Theme.inkDisabled : Theme.ink)
+                    .foregroundStyle(loading || store.heldForRecording ? Theme.inkDisabled : Theme.ink)
                     .frame(width: 28, height: 28)
                     .background(Theme.control, in: Circle())
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .disabled(loading)
+            .disabled(loading || store.heldForRecording)
+            .help(store.heldForRecording ? "Plays after the recording ends." : "")
 
             PlaybackScrubber(fraction: fraction, total: total) { store.seek($0) }
 

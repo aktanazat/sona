@@ -850,9 +850,10 @@ final class AppModel {
     }
 
     /// Sound played while a meeting captures lands in its call track and its
-    /// microphone, so the shared player holds until the capture ends.
+    /// microphone, so both players hold until the capture ends.
     private func holdPlaybackWhileCapturing() {
         meetings.audio.hold(live.capturing)
+        library.hold(live.capturing)
     }
 
     /// The catalog and which model is current. A failed read keeps the last
