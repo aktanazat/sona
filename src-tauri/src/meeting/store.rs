@@ -5188,8 +5188,21 @@ impl MeetingStore {
         let connection = self.connection()?;
         let tracks = track_snapshots(&connection, session_id)?;
         let gaps = gaps_for_session(&connection, session_id)?;
-        let speakers = speakers_for_session(&connection, session_id)?;
-        let transcript = effective_segments_for_session(&connection, session_id)?;
+        let canonical_ids = canonical_speaker_ids(&connection, session_id)?;
+        let speakers = speakers_for_session(&connection, session_id)?
+            .into_iter()
+            .filter(|speaker| {
+                canonical_ids
+                    .get(&speaker.speaker_id)
+                    .is_none_or(|canonical| *canonical == speaker.speaker_id)
+            })
+            .collect();
+        let mut transcript = effective_segments_for_session(&connection, session_id)?;
+        for segment in &mut transcript {
+            if let Some(canonical) = canonical_ids.get(&segment.assigned_speaker_id) {
+                segment.assigned_speaker_id = *canonical;
+            }
+        }
         let notes = notes_for_session(&connection, session_id)?;
         let artifacts = artifact_revisions_for_session(&connection, session_id)?;
         let questions = question_history_for_session(&connection, session_id)?;
@@ -14623,6 +14636,20 @@ mod tests {
             Some("Canonical speaker")
         );
         assert!(!names.contains_key(&source));
+        let snapshot = store.review_snapshot(session_id).expect("review snapshot");
+        assert!(!snapshot.transcript.is_empty());
+        assert!(snapshot
+            .transcript
+            .iter()
+            .all(|segment| segment.assigned_speaker_id == target));
+        assert!(snapshot
+            .speakers
+            .iter()
+            .all(|speaker| speaker.speaker_id != source));
+        assert!(snapshot
+            .speakers
+            .iter()
+            .any(|speaker| speaker.speaker_id == target));
 
         let transcript = segments
             .iter()
