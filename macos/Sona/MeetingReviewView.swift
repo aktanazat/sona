@@ -959,8 +959,9 @@ struct MeetingPeopleBand: View {
 }
 
 /// Who talked and how the room handed over: one bar of everyone's share of
-/// the talk, where a voice's name narrows the transcript to its words, and
-/// the numbers this meeting can say something with.
+/// the talk, where a voice's name narrows the transcript to its words, a
+/// timeline of when each voice spoke, and the numbers this meeting can say
+/// something with.
 struct MeetingAnalyticsStrip: View {
     let store: MeetingsStore
 
@@ -974,6 +975,7 @@ struct MeetingAnalyticsStrip: View {
                         ChatFlowRow(spacing: 14) {
                             ForEach(slices) { legend($0) }
                         }
+                        TalkTimeline(store: store, talk: talk, slices: slices, color: color)
                     }
                     HStack(alignment: .top, spacing: 16) {
                         Stat(label: "Turns", value: "\(talk.turnCount)")
@@ -1120,6 +1122,209 @@ private struct TalkShareBar: View {
         }
         .frame(height: 8)
         .accessibilityHidden(true)
+    }
+}
+
+/// The transcript laid out for the timeline: each line in the lane of its
+/// part of the talk bar, and the turns a press can open. A voice the bar
+/// folds into Others shares the Others lane; a line from no voice on the
+/// bar is left out, as the bar leaves it out.
+private struct TalkRibbon {
+    struct Mark {
+        let lane: Int
+        let startNs: Int64
+        let endNs: Int64
+    }
+
+    struct Turn: Identifiable {
+        let lane: Int
+        let speakerId: SpeakerId
+        let startNs: Int64
+        var endNs: Int64
+        let segmentId: TranscriptSegmentId
+
+        var id: TranscriptSegmentId { segmentId }
+    }
+
+    let lanes: [SpeakerId: Int]
+    let marks: [Mark]
+    let turns: [Turn]
+    /// Where the last line that still reads ends: the right edge.
+    let endNs: Int64
+
+    init(transcript: [TranscriptEffectiveSegment], shares: [SpeakerTalkShare], slices: [TalkSlice]) {
+        var lanes: [SpeakerId: Int] = [:]
+        var othersLane: Int?
+        for (index, slice) in slices.enumerated() {
+            switch slice {
+            case let .voice(share): lanes[share.speakerId] = index
+            case .others: othersLane = index
+            }
+        }
+        if let othersLane {
+            for share in shares where lanes[share.speakerId] == nil {
+                lanes[share.speakerId] = othersLane
+            }
+        }
+        let spoken = transcript
+            .filter { !$0.removed }
+            .sorted { $0.base.startOffsetNs < $1.base.startOffsetNs }
+        var marks: [Mark] = []
+        var turns: [Turn] = []
+        var lastSpeaker: SpeakerId?
+        for segment in spoken {
+            let speaker = segment.assignedSpeakerId
+            defer { lastSpeaker = speaker }
+            guard let lane = lanes[speaker] else { continue }
+            let start = max(0, segment.base.startOffsetNs)
+            let end = max(start, segment.base.endOffsetNs)
+            marks.append(Mark(lane: lane, startNs: start, endNs: end))
+            if lastSpeaker == speaker, let last = turns.indices.last {
+                turns[last].endNs = max(turns[last].endNs, end)
+            } else {
+                turns.append(Turn(lane: lane, speakerId: speaker, startNs: start, endNs: end,
+                                  segmentId: segment.base.segmentId))
+            }
+        }
+        self.lanes = lanes
+        self.marks = marks
+        self.turns = turns
+        endNs = spoken.map { $0.base.endOffsetNs }.max() ?? 0
+    }
+}
+
+/// When each voice spoke, where the bar above says how much: one lane per
+/// part of the bar, the meeting left to right from its start to its last
+/// word, and the longest run outlined. A press opens that turn in the
+/// transcript.
+private struct TalkTimeline: View {
+    let store: MeetingsStore
+    let talk: MeetingTalkMetrics
+    let slices: [TalkSlice]
+    let color: (TalkSlice) -> Color
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var shown = false
+
+    private static let laneHeight: CGFloat = 7
+    private static let laneGap: CGFloat = 3
+    private static let axisGap: CGFloat = 5
+    private static let tick: CGFloat = 3
+    private static let narrowestBar: CGFloat = 1.5
+    private static let narrowestPress: CGFloat = 6
+
+    var body: some View {
+        let ribbon = TalkRibbon(
+            transcript: store.snapshot?.transcript ?? [], shares: store.talkShares, slices: slices)
+        if ribbon.marks.count >= 2, ribbon.endNs > 0 {
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { proxy in
+                    plot(ribbon, size: proxy.size)
+                }
+                .frame(height: Self.lanesHeight(slices.count) + Self.axisGap + Self.tick + 1)
+                ZStack {
+                    Text((ribbon.endNs / 2).meetingOffsetClock)
+                    HStack {
+                        Text(Int64(0).meetingOffsetClock)
+                        Spacer(minLength: 8)
+                        Text(ribbon.endNs.meetingOffsetClock)
+                    }
+                }
+                .metaText()
+                .monospacedDigit()
+            }
+            .opacity(shown || reduceMotion ? 1 : 0)
+            .onAppear {
+                guard !shown else { return }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) { shown = true }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Who spoke when")
+            .accessibilityValue(summary(ribbon))
+        }
+    }
+
+    private func plot(_ ribbon: TalkRibbon, size: CGSize) -> some View {
+        let scale = size.width / CGFloat(ribbon.endNs)
+        let inks = slices.map(color)
+        let axis = Self.lanesHeight(slices.count) + Self.axisGap + 0.5
+        let longest = longestRun(ribbon, scale: scale)
+        return ZStack(alignment: .topLeading) {
+            Canvas { context, canvas in
+                for mark in ribbon.marks {
+                    let rect = Self.bar(mark.lane, from: mark.startNs, to: mark.endNs, scale: scale,
+                                        narrowest: Self.narrowestBar)
+                    context.fill(Path(roundedRect: rect, cornerRadius: min(2, rect.width / 2)),
+                                 with: .color(inks[mark.lane]))
+                }
+                if let longest {
+                    context.stroke(Path(roundedRect: longest.insetBy(dx: -2, dy: -2), cornerRadius: 3.5),
+                                   with: .color(Theme.inkSecondary), lineWidth: 1)
+                }
+                var rule = Path()
+                rule.move(to: CGPoint(x: 0, y: axis))
+                rule.addLine(to: CGPoint(x: canvas.width, y: axis))
+                for x in [0.5, canvas.width / 2, canvas.width - 0.5] {
+                    rule.move(to: CGPoint(x: x, y: axis))
+                    rule.addLine(to: CGPoint(x: x, y: axis + Self.tick))
+                }
+                context.stroke(rule, with: .color(Theme.border), lineWidth: 1)
+            }
+            ForEach(ribbon.turns) { turn in
+                press(turn, scale: scale, width: size.width)
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    /// A turn's press: its lane's height and gap, never narrower than a
+    /// pointer can land on, held inside the plot.
+    private func press(_ turn: TalkRibbon.Turn, scale: CGFloat, width: CGFloat) -> some View {
+        let drawn = Self.bar(turn.lane, from: turn.startNs, to: turn.endNs, scale: scale, narrowest: 0)
+        let wide = max(drawn.width, Self.narrowestPress)
+        let x = min(max(drawn.midX - wide / 2, 0), max(width - wide, 0))
+        return Color.clear
+            .frame(width: wide, height: Self.laneHeight + Self.laneGap)
+            .contentShape(Rectangle())
+            .onTapGesture { store.jumpTo(turn.segmentId) }
+            .help("\(store.speakerName(turn.speakerId)) · \(turn.startNs.meetingOffsetClock) – \(turn.endNs.meetingOffsetClock)")
+            .offset(x: x, y: drawn.minY - Self.laneGap / 2)
+    }
+
+    private func longestRun(_ ribbon: TalkRibbon, scale: CGFloat) -> CGRect? {
+        guard let start = talk.longestMonologueStartNs, let speaker = talk.longestMonologueSpeakerId,
+              talk.longestMonologueNs > 0, let lane = ribbon.lanes[speaker] else { return nil }
+        return Self.bar(lane, from: start, to: start + talk.longestMonologueNs, scale: scale,
+                        narrowest: Self.narrowestBar)
+    }
+
+    /// Each lane as a screen reader hears it: who, how many turns the core
+    /// counted, and when they first and last spoke.
+    private func summary(_ ribbon: TalkRibbon) -> String {
+        slices.enumerated().map { lane, slice -> String in
+            let count = store.talkShares
+                .filter { ribbon.lanes[$0.speakerId] == lane }
+                .reduce(0) { $0 + $1.turnCount }
+            var line = "\(slice.name(store)), \(count == 1 ? "1 turn" : "\(count) turns")"
+            let turns = ribbon.turns.filter { $0.lane == lane }
+            if let first = turns.first, let last = turns.last {
+                line += first.id == last.id
+                    ? ", at \(first.startNs.meetingOffsetClock)"
+                    : ", first at \(first.startNs.meetingOffsetClock), last at \(last.startNs.meetingOffsetClock)"
+            }
+            return line
+        }
+        .joined(separator: ". ")
+    }
+
+    private static func lanesHeight(_ count: Int) -> CGFloat {
+        CGFloat(count) * laneHeight + CGFloat(max(count - 1, 0)) * laneGap
+    }
+
+    private static func bar(_ lane: Int, from start: Int64, to end: Int64, scale: CGFloat,
+                            narrowest: CGFloat) -> CGRect {
+        CGRect(x: CGFloat(start) * scale, y: CGFloat(lane) * (laneHeight + laneGap),
+               width: max(CGFloat(end - start) * scale, narrowest), height: laneHeight)
     }
 }
 
