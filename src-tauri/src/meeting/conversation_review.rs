@@ -1,5 +1,6 @@
 use super::context::ConversationLocation;
-use super::types::{MeetingSessionId, TranscriptSegmentId};
+use super::loop_types::{MeetingLoopDirection, MeetingLoopStatus};
+use super::types::{MeetingSessionId, SaidMoment, TranscriptSegmentId};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -12,6 +13,38 @@ pub struct ConversationAudioClip {
     pub contribution_offset_ns: u64,
     pub next_offset_ns: Option<u64>,
     pub wav_base64: String,
+}
+
+/// What a reel moment is: a promise, a decision, a question, or one of the
+/// person's own lines when their meetings held too little else.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ReelMomentKind {
+    Promise,
+    Decision,
+    Question,
+    Line,
+}
+
+/// One recorded moment of a reel. A promise or a question carries which way
+/// it points and where it stands now. The play offsets bound what is heard:
+/// from just before the line to just after it, never longer than a reel
+/// gives one moment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct ReelMoment {
+    pub said: SaidMoment,
+    pub kind: ReelMomentKind,
+    pub direction: Option<MeetingLoopDirection>,
+    pub status: Option<MeetingLoopStatus>,
+    pub play_start_offset_ns: u64,
+    pub play_end_offset_ns: u64,
+}
+
+/// The recorded moments behind a person or a promise, oldest first. A moment
+/// whose audio is gone stays listed with `audio_retained` false.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct ConversationReel {
+    pub moments: Vec<ReelMoment>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]

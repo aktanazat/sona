@@ -815,6 +815,56 @@ pub(crate) fn carried_since_in(
     Ok(earliest)
 }
 
+/// Every occurrence of this loop, oldest first: the carry chain walked back to
+/// its root and forward to the occurrence still live. Read from the stored
+/// links like [`carried_since_in`], and bounded the same way.
+pub(crate) fn carry_chain_in(
+    connection: &Connection,
+    loop_id: &MeetingLoopId,
+) -> Result<Vec<MeetingLoopId>, StoreError> {
+    let mut chain = Vec::new();
+    let mut current = loop_id.clone();
+    for _ in 0..MAX_CARRY_CHAIN {
+        let predecessor: Option<String> = connection
+            .query_row(
+                "SELECT loop_id FROM meeting_loop_states WHERE carried_into_loop_id = ?1",
+                params![current.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(predecessor) = predecessor.map(MeetingLoopId) else {
+            break;
+        };
+        if predecessor == *loop_id || chain.contains(&predecessor) {
+            break;
+        }
+        chain.push(predecessor.clone());
+        current = predecessor;
+    }
+    chain.reverse();
+    chain.push(loop_id.clone());
+    let mut current = loop_id.clone();
+    for _ in 0..MAX_CARRY_CHAIN {
+        let successor: Option<String> = connection
+            .query_row(
+                "SELECT carried_into_loop_id FROM meeting_loop_states WHERE loop_id = ?1",
+                params![current.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(successor) = successor.map(MeetingLoopId) else {
+            break;
+        };
+        if chain.contains(&successor) {
+            break;
+        }
+        chain.push(successor.clone());
+        current = successor;
+    }
+    Ok(chain)
+}
+
 /// Who the operation that closed this row was run by, off the receipt it
 /// already points at.
 ///

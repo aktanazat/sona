@@ -83,6 +83,17 @@ fn person(store: &MeetingStore, name: &str) -> PersonId {
 /// artifact revision.
 fn ledger_meeting(store: &MeetingStore, at_utc_ms: i64) -> MeetingSessionId {
     let session_id = meeting(store, "Pricing review", at_utc_ms);
+    file_ledger(store, session_id, ledger());
+    session_id
+}
+
+/// Stores `ledger` as the meeting's current artifact revision, read off a
+/// transcript revision of its own.
+pub(super) fn file_ledger(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    ledger: MeetingLedger,
+) {
     let revision_id = Uuid::new_v4();
     let artifact_id = Uuid::new_v4();
     let content = GeneratedMeetingArtifacts {
@@ -100,7 +111,7 @@ fn ledger_meeting(store: &MeetingStore, at_utc_ms: i64) -> MeetingSessionId {
             text: String::new(),
             citations: Vec::new(),
         },
-        ledger: Some(ledger()),
+        ledger: Some(ledger),
         ledger_failure: None,
     };
     let connection = store.connection().unwrap();
@@ -129,8 +140,6 @@ fn ledger_meeting(store: &MeetingStore, at_utc_ms: i64) -> MeetingSessionId {
             ],
         )
         .unwrap();
-    drop(connection);
-    session_id
 }
 
 /// The first occurrence of a weekly series, in review, with its ledger stored.
@@ -149,7 +158,7 @@ fn series_meeting_with_ledger(store: &MeetingStore, at_utc_ms: i64) -> MeetingSe
     session_id
 }
 
-fn series_event(start_utc_ms: i64) -> CalendarEventSummary {
+pub(super) fn series_event(start_utc_ms: i64) -> CalendarEventSummary {
     CalendarEventSummary {
         event_key: format!("{SERIES_KEY}#{start_utc_ms}"),
         series_key: SERIES_KEY.to_string(),

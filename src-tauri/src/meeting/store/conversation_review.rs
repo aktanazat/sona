@@ -19,11 +19,15 @@ const SURROUNDING_NS: u64 = 4 * NS_PER_SECOND;
 const CLIP_NS: u64 = 45 * NS_PER_SECOND;
 
 impl MeetingStore {
+    /// A stretch of one conversation's audio, at most `CLIP_NS` long. Around a
+    /// contribution it runs from `start_offset_ns`, or `SURROUNDING_NS` before
+    /// it, to `end_offset_ns`, or `SURROUNDING_NS` past it.
     pub(crate) fn conversation_audio_clip(
         &self,
         session_id: MeetingSessionId,
         segment_id: Option<TranscriptSegmentId>,
         start_offset_ns: Option<u64>,
+        end_offset_ns: Option<u64>,
     ) -> Result<ConversationAudioClip, StoreError> {
         let (track_id, contribution_start, contribution_end, tracks) = {
             let connection = self.connection()?;
@@ -62,10 +66,12 @@ impl MeetingStore {
             .filter_map(|track| track.last_offset_ns)
             .max()
             .ok_or(StoreError::NotFound)?;
-        let through = if segment_id.is_some() {
-            contribution_end.saturating_add(SURROUNDING_NS).min(latest)
-        } else {
-            latest
+        let through = match end_offset_ns {
+            Some(end) => end.min(latest),
+            None if segment_id.is_some() => {
+                contribution_end.saturating_add(SURROUNDING_NS).min(latest)
+            }
+            None => latest,
         };
         let start = start_offset_ns.unwrap_or(earliest);
         if start < earliest || start >= through {

@@ -50,7 +50,7 @@ use tauri_specta::Event as _;
 use uuid::Uuid;
 
 use crate::meeting::consent_panel::ConsentPanelLayout;
-use crate::meeting::people_types::PersonBriefingRow;
+use crate::meeting::people_types::{PersonBriefingRow, PersonId};
 use crate::meeting::session::{MeetingSessionManager, MeetingTitleSetRequest};
 use crate::meeting::types::{
     MeetingArtifactState, MeetingNavigationDestination, MeetingOperationId, MeetingPhase,
@@ -135,6 +135,7 @@ pub struct MeetingPrepParticipant {
     pub name: String,
     pub meetings_count: u64,
     pub organization: Option<String>,
+    pub person_id: Option<PersonId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -1475,6 +1476,7 @@ impl DetectionRuntime {
                     organization: person_id
                         .and_then(|person_id| organizations.get(person_id))
                         .cloned(),
+                    person_id: person_id.copied(),
                 })
             })
             .collect();
@@ -3186,6 +3188,7 @@ mod tests {
                 name: "Morgan".to_string(),
                 meetings_count: 3,
                 organization: Some("Northstar".to_string()),
+                person_id: None,
             }],
             can_record_when_starts: true,
         }

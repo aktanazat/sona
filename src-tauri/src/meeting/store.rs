@@ -40,6 +40,9 @@ pub(crate) mod processing_speed;
 pub(crate) mod prompts;
 pub(crate) mod query_plane;
 pub(crate) mod recall;
+mod reel;
+#[cfg(test)]
+mod reel_tests;
 #[cfg(test)]
 mod remote_intelligence_tests;
 mod said;
@@ -14255,6 +14258,106 @@ mod tests {
             .close_open_capture_window(session_id, 1_000_000_000, "stopped")
             .expect("close capture window");
         session_id
+    }
+
+    /// A reel plays each moment from just before its line to just after it.
+    /// A clip asked to end there stops there; one asked for no end runs on
+    /// past the line.
+    #[test]
+    fn a_clip_with_an_end_plays_exactly_that_window() {
+        use base64::Engine as _;
+
+        let (_directory, store) = store();
+        let (session_id, track_id, storage) = microphone_track(&store, test_bridge());
+        let mut writer = store
+            .open_track_writer(session_id, track_id, storage)
+            .expect("track writer");
+        let samples = vec![0.25; usize::try_from(TEST_PACKET_FRAMES).unwrap()];
+        for sequence in 0..282 {
+            let offset_ns = i64::try_from(sequence).unwrap() * test_packet_duration_ns();
+            writer
+                .accept(
+                    captured_packet(track_id, sequence, Some(offset_ns)),
+                    &samples,
+                )
+                .expect("accept packet");
+        }
+        writer.seal().expect("seal track");
+        let revision_id = TranscriptRevisionId::new();
+        let speaker_id = SpeakerId::new();
+        let segment_id = TranscriptSegmentId::new();
+        let connection = store.connection().expect("store connection");
+        connection
+            .execute(
+                "INSERT INTO meeting_transcript_revisions (
+                    transcript_revision_id, session_id, engine_id, destination_json,
+                    source_set_json, language, state, created_at_utc_ms, completed_at_utc_ms
+                 ) VALUES (?1, ?2, 'test', '{}', '[]', 'en', 'completed', 1, 1)",
+                params![id(revision_id), id(session_id)],
+            )
+            .expect("insert transcript revision");
+        connection
+            .execute(
+                "INSERT INTO meeting_speakers (
+                    speaker_id, session_id, source_kind, display_name, revision
+                 ) VALUES (?1, ?2, 'microphone', 'Speaker 1', 0)",
+                params![id(speaker_id), id(session_id)],
+            )
+            .expect("insert speaker");
+        connection
+            .execute(
+                "INSERT INTO meeting_transcript_segments (
+                    segment_id, transcript_revision_id, track_id, ordinal, start_offset_ns,
+                    end_offset_ns, speaker_id, base_text
+                 ) VALUES (?1, ?2, ?3, 0, 1000000000, 2000000000, ?4, 'I will send it Friday.')",
+                params![
+                    id(segment_id),
+                    id(revision_id),
+                    id(track_id),
+                    id(speaker_id)
+                ],
+            )
+            .expect("insert segment");
+        connection
+            .execute(
+                "UPDATE meeting_sessions SET current_transcript_revision_id = ?1 WHERE id = ?2",
+                params![id(revision_id), id(session_id)],
+            )
+            .expect("set current transcript");
+        drop(connection);
+
+        let window = store
+            .conversation_audio_clip(
+                session_id,
+                Some(segment_id),
+                Some(400_000_000),
+                Some(2_400_000_000),
+            )
+            .expect("clip with an end");
+        let around = store
+            .conversation_audio_clip(session_id, Some(segment_id), None, None)
+            .expect("clip around the line");
+
+        assert_eq!(
+            (
+                window.start_offset_ns,
+                window.end_offset_ns,
+                window.next_offset_ns
+            ),
+            (400_000_000, 2_400_000_000, None)
+        );
+        let wav = base64::engine::general_purpose::STANDARD
+            .decode(&window.wav_base64)
+            .expect("clip audio");
+        assert_eq!(
+            wav.len(),
+            44 + 2 * 32_000,
+            "two seconds of 16-bit mono at 16 kHz"
+        );
+        assert!(
+            around.end_offset_ns > 2_400_000_000,
+            "without an end the clip runs on past the line"
+        );
     }
 
     /// Every system-audio track in the owner's store held `starting` forever,

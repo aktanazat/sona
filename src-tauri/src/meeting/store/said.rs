@@ -28,7 +28,7 @@ pub(super) struct MatchedLine {
 
 #[derive(Clone, Default)]
 pub(super) struct Voice {
-    label: Option<String>,
+    pub(super) label: Option<String>,
     pub(super) person: Option<SaidPerson>,
 }
 

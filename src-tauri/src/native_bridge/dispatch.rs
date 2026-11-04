@@ -3305,12 +3305,15 @@ pub(super) async fn call(
             let session_id = args.take("sessionId")?;
             let segment_id = args.take("segmentId")?;
             let start_offset_ns = args.take("startOffsetNs")?;
+            let end_offset_ns = args.take("endOffsetNs")?;
             reply(
                 crate::commands::conversation_review::conversation_audio_clip(
+                    app.clone(),
                     app.state(),
                     session_id,
                     segment_id,
                     start_offset_ns,
+                    end_offset_ns,
                 )
                 .await,
             )
@@ -3322,6 +3325,28 @@ pub(super) async fn call(
                 crate::commands::conversation_review::conversation_audio_retained(
                     app.state(),
                     session_id,
+                )
+                .await,
+            )
+        }
+        "conversation_reel_for_person" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(
+                crate::commands::conversation_review::conversation_reel_for_person(
+                    app.state(),
+                    person_id,
+                )
+                .await,
+            )
+        }
+        "conversation_reel_for_loop" => {
+            let mut args = Args::parse(params)?;
+            let loop_id = args.take("loopId")?;
+            reply(
+                crate::commands::conversation_review::conversation_reel_for_loop(
+                    app.state(),
+                    loop_id,
                 )
                 .await,
             )

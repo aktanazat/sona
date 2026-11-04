@@ -1834,6 +1834,8 @@ pub fn run(cli_args: CliArgs) {
             commands::portrait_source::person_avatar_source,
             commands::conversation_review::conversation_audio_clip,
             commands::conversation_review::conversation_audio_retained,
+            commands::conversation_review::conversation_reel_for_person,
+            commands::conversation_review::conversation_reel_for_loop,
             commands::conversation_review::conversation_place_review,
             commands::conversation_review::conversation_bookmarks,
             commands::conversation_review::conversation_bookmark_create,

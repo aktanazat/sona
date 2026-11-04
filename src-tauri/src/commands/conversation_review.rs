@@ -1,7 +1,9 @@
 use crate::meeting::conversation_review::{
     ConversationAudioClip, ConversationBookmark, ConversationBookmarkRequest,
-    ConversationPlaceReview,
+    ConversationPlaceReview, ConversationReel,
 };
+use crate::meeting::loop_types::MeetingLoopId;
+use crate::meeting::people_types::PersonId;
 use crate::meeting::session::{map_store_error, MeetingSessionManager};
 use crate::meeting::types::{
     MeetingCommandError, MeetingEventPayload, MeetingSessionId, TranscriptSegmentId,
@@ -12,18 +14,70 @@ use tauri::{AppHandle, Emitter, State};
 #[tauri::command]
 #[specta::specta]
 pub async fn conversation_audio_clip(
+    app: AppHandle,
     manager: State<'_, Arc<MeetingSessionManager>>,
     session_id: MeetingSessionId,
     segment_id: Option<TranscriptSegmentId>,
     start_offset_ns: Option<u64>,
+    end_offset_ns: Option<u64>,
 ) -> Result<ConversationAudioClip, MeetingCommandError> {
+    audio_clip(
+        crate::utils::capture_running(&app),
+        &manager,
+        session_id,
+        segment_id,
+        start_offset_ns,
+        end_offset_ns,
+    )
+    .await
+}
+
+/// Nothing plays while anything records: heard aloud, the clip would be
+/// recorded again.
+async fn audio_clip(
+    capturing: bool,
+    manager: &MeetingSessionManager,
+    session_id: MeetingSessionId,
+    segment_id: Option<TranscriptSegmentId>,
+    start_offset_ns: Option<u64>,
+    end_offset_ns: Option<u64>,
+) -> Result<ConversationAudioClip, MeetingCommandError> {
+    if capturing {
+        return Err(MeetingCommandError::CaptureLeaseBusy);
+    }
     let store = manager.store().await?;
     tauri::async_runtime::spawn_blocking(move || {
-        store.conversation_audio_clip(session_id, segment_id, start_offset_ns)
+        store.conversation_audio_clip(session_id, segment_id, start_offset_ns, end_offset_ns)
     })
     .await
     .map_err(|_| MeetingCommandError::StorageUnavailable)?
     .map_err(map_store_error)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_reel_for_person(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    person_id: PersonId,
+) -> Result<ConversationReel, MeetingCommandError> {
+    let store = manager.store().await?;
+    tauri::async_runtime::spawn_blocking(move || store.conversation_reel_for_person(person_id))
+        .await
+        .map_err(|_| MeetingCommandError::StorageUnavailable)?
+        .map_err(map_store_error)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn conversation_reel_for_loop(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    loop_id: MeetingLoopId,
+) -> Result<ConversationReel, MeetingCommandError> {
+    let store = manager.store().await?;
+    tauri::async_runtime::spawn_blocking(move || store.conversation_reel_for_loop(&loop_id))
+        .await
+        .map_err(|_| MeetingCommandError::StorageUnavailable)?
+        .map_err(map_store_error)
 }
 
 #[tauri::command]
@@ -89,4 +143,44 @@ pub async fn conversation_bookmark_create(
         },
     );
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::audio_clip;
+    use crate::meeting::session::{MeetingSessionManager, NoCaptureSources};
+    use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
+    use crate::secrets::{MemorySecretBackend, SecretManager};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// The refusal is what answers while anything records; the same request
+    /// with nothing recording goes on to the store, which knows no such talk.
+    #[test]
+    fn a_clip_is_refused_while_anything_records() {
+        let directory = TempDir::new().unwrap();
+        let manager = MeetingSessionManager::with_parts(
+            None,
+            Some(directory.path().join("meetings")),
+            Arc::new(SecretManager::with_backend(Arc::new(
+                MemorySecretBackend::new(),
+            ))),
+            Arc::new(NoCaptureSources),
+        );
+        let session_id = MeetingSessionId::new();
+        let clip = |capturing| {
+            tauri::async_runtime::block_on(audio_clip(
+                capturing,
+                &manager,
+                session_id,
+                None,
+                Some(0),
+                None,
+            ))
+            .err()
+        };
+
+        assert_eq!(clip(true), Some(MeetingCommandError::CaptureLeaseBusy));
+        assert_eq!(clip(false), Some(MeetingCommandError::NotFound));
+    }
 }
