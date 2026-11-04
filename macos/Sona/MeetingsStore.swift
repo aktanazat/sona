@@ -304,6 +304,8 @@ final class MeetingsStore {
     private(set) var reviewFailure: String?
     private(set) var tab: MeetingReviewTab = .transcript
     private(set) var chosenTab: MeetingReviewTab?
+    /// The part of the ledger's outcome bar picked, which narrows its threads.
+    private(set) var ledgerOutcome: LedgerOutcome?
     private(set) var receipt: MeetingOperationReceipt?
     private(set) var pending: String?
     private(set) var analytics: MeetingAnalyticsSnapshot?
@@ -913,7 +915,8 @@ final class MeetingsStore {
         _ sessionId: MeetingSessionId,
         atMilliseconds: UInt64? = nil,
         segmentId: TranscriptSegmentId? = nil,
-        noteId: MeetingNoteId? = nil
+        noteId: MeetingNoteId? = nil,
+        outcome: LedgerOutcome? = nil
     ) {
         leaveOpenMeeting()
         openSessionId = sessionId
@@ -925,8 +928,9 @@ final class MeetingsStore {
         loopsKey = nil
         people = []
         receipt = nil
-        chosenTab = noteId == nil ? nil : .review
-        tab = noteId == nil ? .transcript : .review
+        chosenTab = if outcome != nil { .ledger } else if noteId != nil { .review } else { nil }
+        tab = chosenTab ?? .transcript
+        ledgerOutcome = outcome
         focusedNoteId = noteId
         transcriptQuery = ""
         searchHits = nil
@@ -984,6 +988,10 @@ final class MeetingsStore {
     func choose(tab: MeetingReviewTab) {
         chosenTab = tab
         self.tab = tab
+    }
+
+    func pick(outcome: LedgerOutcome?) {
+        ledgerOutcome = outcome
     }
 
     /// `meeting_get`. A meeting that is no longer there closes the page; a

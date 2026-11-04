@@ -602,6 +602,7 @@ struct MeetingsFeed: View {
                             MeetingsRow(
                                 entry: entry,
                                 open: { store.open(entry.sessionId) },
+                                openOutcome: { store.open(entry.sessionId, outcome: $0) },
                                 export: { store.export(entry.sessionId, format: $0) },
                                 ledger: { store.exportLedger(entry.sessionId) },
                                 file: { store.openFiling(entry.sessionId, title: entry.title) },
@@ -650,6 +651,7 @@ struct MeetingsGroupHeading: View {
 struct MeetingsRow: View {
     let entry: MeetingHistorySummary
     let open: () -> Void
+    let openOutcome: (LedgerOutcome) -> Void
     let export: (MeetingExportFormat) -> Void
     let ledger: () -> Void
     let file: () -> Void
@@ -673,6 +675,15 @@ struct MeetingsRow: View {
                             }
                             if !facts.isEmpty {
                                 Text(facts).metaText().lineLimit(1)
+                            }
+                        }
+                        .padding(.top, 2)
+                    }
+                    if let outcomes = entry.ledgerOutcomes, outcomes.total > 0 {
+                        HStack(alignment: .center, spacing: 10) {
+                            OutcomeBar(counts: outcomes) { $0.map(openOutcome) }
+                            if let choices = outcomes.choices {
+                                Text(choices).metaText().lineLimit(1)
                             }
                         }
                         .padding(.top, 2)

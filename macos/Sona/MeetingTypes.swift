@@ -773,6 +773,54 @@ enum LedgerOutcome: String, CaseIterable {
     }
 }
 
+/// `LedgerOutcomeCounts`: a ledger's substantive threads by where they
+/// landed, and how many were choices and owned next steps. The review
+/// counts its open ledger with the same rule the core uses for a row.
+struct LedgerOutcomeCounts: Decodable, Equatable {
+    let landed: Int
+    let open: Int
+    let dropped: Int
+    let decided: Int
+    let actions: Int
+
+    init(landed: Int, open: Int, dropped: Int, decided: Int, actions: Int) {
+        self.landed = landed
+        self.open = open
+        self.dropped = dropped
+        self.decided = decided
+        self.actions = actions
+    }
+
+    init(_ ledger: MeetingLedger) {
+        let states = ledger.threads.filter(\.substantive).map(\.state)
+        self.init(
+            landed: states.count { $0.outcome == .landed },
+            open: states.count { $0.outcome == .open },
+            dropped: states.count { $0.outcome == .dropped },
+            decided: states.count { $0 == .decided || $0 == .agreed },
+            actions: states.count { $0 == .action })
+    }
+
+    var total: Int { landed + open + dropped }
+
+    func count(_ outcome: LedgerOutcome) -> Int {
+        switch outcome {
+        case .landed: landed
+        case .open: open
+        case .dropped: dropped
+        }
+    }
+
+    /// "2 decisions · 1 action", leaving out a count that is zero. Nil when
+    /// both are.
+    var choices: String? {
+        var parts: [String] = []
+        if decided > 0 { parts.append(decided == 1 ? "1 decision" : "\(decided) decisions") }
+        if actions > 0 { parts.append(actions == 1 ? "1 action" : "\(actions) actions") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
 /// The quote a ledger state was read from.
 struct LedgerReceipt: Decodable {
     let quote: String
@@ -1092,6 +1140,7 @@ struct MeetingHistorySummary: Decodable, Identifiable {
     let sources: [MeetingSourceKind]?
     let speakerLabels: [String]?
     let headline: MeetingHistoryHeadline?
+    let ledgerOutcomes: LedgerOutcomeCounts?
 
     var id: MeetingSessionId { sessionId }
     var date: Date { Date(timeIntervalSince1970: TimeInterval(createdAtUtcMs) / 1000) }

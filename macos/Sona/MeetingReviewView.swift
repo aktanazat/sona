@@ -1308,12 +1308,15 @@ struct LedgerPane: View {
     var body: some View {
         if let readable = snapshot.readableLedger {
             let ledger = readable.ledger
+            let counts = LedgerOutcomeCounts(ledger)
+            // A ledger written again may have nothing under the pick; it then reads as no pick.
+            let picked = store.ledgerOutcome.flatMap { counts.count($0) > 0 ? $0 : nil }
             VStack(alignment: .leading, spacing: 28) {
                 if readable.stale {
                     StaleNotesBand(store: store, what: "This ledger")
                 }
-                headline(ledger)
-                if !ledger.threads.isEmpty { threads(ledger) }
+                headline(ledger, counts: counts, picked: picked)
+                if !ledger.threads.isEmpty { threads(ledger, picked: picked) }
                 LoopList(store: store, kind: .loop, openPerson: openPerson)
                 LoopList(store: store, kind: .commitment, openPerson: openPerson)
                 if !ledger.stances.isEmpty { stances(ledger) }
@@ -1354,18 +1357,33 @@ struct LedgerPane: View {
         return "No ledger was written for this meeting."
     }
 
-    private func headline(_ ledger: MeetingLedger) -> some View {
+    private func headline(_ ledger: MeetingLedger, counts: LedgerOutcomeCounts, picked: LedgerOutcome?) -> some View {
         Card {
             CardRow {
-                Text(ledger.headline).font(TypeScale.headline).foregroundStyle(Theme.ink)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(ledger.headline).font(TypeScale.headline).foregroundStyle(Theme.ink)
+                    if counts.total > 0 {
+                        HStack(alignment: .center, spacing: 10) {
+                            OutcomeBar(counts: counts, selected: picked) { store.pick(outcome: $0) }
+                            if let choices = counts.choices {
+                                Text(choices).metaText()
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    private func threads(_ ledger: MeetingLedger) -> some View {
-        PageSection("Threads") {
+    /// Every thread, or only the substantive ones in the picked part of the
+    /// bar, which are the ones it counts.
+    private func threads(_ ledger: MeetingLedger, picked: LedgerOutcome?) -> some View {
+        let shown = ledger.threads.filter { thread in
+            picked.map { thread.substantive && thread.state.outcome == $0 } ?? true
+        }
+        return PageSection(picked.map { "Threads · \($0.label)" } ?? "Threads") {
             Card {
-                ForEach(Array(ledger.threads.enumerated()), id: \.offset) { _, thread in
+                ForEach(Array(shown.enumerated()), id: \.offset) { _, thread in
                     LedgerThreadRow(store: store, thread: thread)
                 }
             }

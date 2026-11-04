@@ -478,6 +478,67 @@ struct ShareBar: View {
     }
 }
 
+/// Where a meeting's threads landed: one bar in three parts, with each
+/// count written beside it so the split never rests on color alone. Given
+/// `select`, each count is a press that picks its part, and a second press
+/// on the picked part lets it go.
+struct OutcomeBar: View {
+    let counts: LedgerOutcomeCounts
+    var selected: LedgerOutcome?
+    var select: ((LedgerOutcome?) -> Void)?
+
+    private static let gap: CGFloat = 2
+
+    var body: some View {
+        HStack(spacing: 10) {
+            GeometryReader { proxy in
+                let room = proxy.size.width - Self.gap * CGFloat(max(present.count - 1, 0))
+                HStack(spacing: Self.gap) {
+                    ForEach(present, id: \.self) { outcome in
+                        Capsule()
+                            .fill(Self.tint(outcome))
+                            .opacity(selected == nil || selected == outcome ? 1 : 0.35)
+                            .frame(width: room * CGFloat(counts.count(outcome)) / CGFloat(max(counts.total, 1)))
+                    }
+                }
+            }
+            .frame(width: 96, height: 6)
+            .accessibilityHidden(true)
+            HStack(spacing: 10) {
+                ForEach(present, id: \.self) { outcome in legend(outcome) }
+            }
+        }
+    }
+
+    private var present: [LedgerOutcome] {
+        LedgerOutcome.allCases.filter { counts.count($0) > 0 }
+    }
+
+    @ViewBuilder
+    private func legend(_ outcome: LedgerOutcome) -> some View {
+        let text = Text("\(counts.count(outcome)) \(outcome.label)")
+            .font(TypeScale.label(12))
+            .monospacedDigit()
+            .foregroundStyle(selected == outcome ? Theme.ink : Theme.inkSecondary)
+        if let select {
+            Button { select(selected == outcome ? nil : outcome) } label: { text }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected == outcome ? .isSelected : [])
+                .accessibilityHint(selected == outcome ? "Show every thread" : "Show only these threads")
+        } else {
+            text
+        }
+    }
+
+    private static func tint(_ outcome: LedgerOutcome) -> Color {
+        switch outcome {
+        case .landed: Theme.accent
+        case .open: Theme.inkSecondary
+        case .dropped: Theme.inkTertiary
+        }
+    }
+}
+
 /// Work done against work in scope, over the life of a project. Both lines
 /// step: a task joins the scope when it is created, and counts as done from
 /// its last change once it is done.
