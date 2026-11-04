@@ -2,6 +2,7 @@ use super::analytics::{
     merge_turns, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp, MeetingLiveHelp,
     MeetingLiveHelpKind, MeetingNotesTemplate, MeetingProvisionalTranscript, MeetingUserNotes,
 };
+use super::call_silence::{CaptureAudibility, TrackMeter};
 use super::capture::{MeetingCaptureSource, PacketLaneReadError, PacketLaneReader, PacketSink};
 use super::clock::host_monotonic_now_ns;
 use super::detection::machine::CalendarEventSummary;
@@ -548,6 +549,8 @@ struct ActiveCapture {
     /// ends a capture — stop, discard, delete — already does.
     live: LiveTranscriptWorker,
     call_names: Option<super::call_speakers::CallNameSampler>,
+    /// The level of each track, for the warning that the call went silent.
+    audibility: Arc<CaptureAudibility>,
     // Released last so idle cannot precede source and live-worker teardown.
     _capture_lease: CaptureLease,
 }
@@ -1795,6 +1798,7 @@ impl MeetingSessionManager {
                     })
                     .collect::<Vec<_>>()
             });
+        let audibility = CaptureAudibility::new();
         for (source_kind, track_id, source, lane_reader, report) in started {
             store
                 .create_track(TrackCreation {
@@ -1810,7 +1814,13 @@ impl MeetingSessionManager {
             let writer = store
                 .open_track_writer(request.session_id, track_id, plan.storage.clone())
                 .map_err(map_store_error)?;
-            let worker = TrackWorker::start(Arc::clone(&store), writer, lane_reader, report);
+            let worker = TrackWorker::start(
+                Arc::clone(&store),
+                writer,
+                lane_reader,
+                report,
+                audibility.meter(source_kind),
+            );
             active_sources.insert(
                 source_kind,
                 ActiveSource {
@@ -1885,6 +1895,7 @@ impl MeetingSessionManager {
             session_id: request.session_id,
             sources: active_sources,
             call_names: None,
+            audibility,
             live: LiveTranscriptWorker::start(
                 Arc::clone(&self.processing),
                 Arc::clone(&store),
@@ -4016,6 +4027,16 @@ impl MeetingSessionManager {
             .map(|active| active.live.transcript())
     }
 
+    /// How long the call's sound has been gone while the person talks,
+    /// when the running capture is this meeting's and that is the case.
+    pub fn call_silent_ns(&self, session_id: MeetingSessionId) -> Option<u64> {
+        self.actor_lock()
+            .active
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+            .and_then(|active| active.audibility.call_silent_ns())
+    }
+
     fn default_notes_template(&self) -> NotesTemplateChoice {
         self.app
             .as_ref()
@@ -4421,11 +4442,13 @@ impl TrackWorker {
         writer: MeetingTrackWriter,
         reader: PacketLaneReader,
         report: SourceStartReport,
+        meter: TrackMeter,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let handle =
-            thread::spawn(move || run_track_worker(store, writer, reader, report, worker_stop));
+        let handle = thread::spawn(move || {
+            run_track_worker(store, writer, reader, report, meter, worker_stop)
+        });
         Self {
             stop,
             handle: Some(handle),
@@ -4447,6 +4470,7 @@ fn run_track_worker(
     mut writer: MeetingTrackWriter,
     mut reader: PacketLaneReader,
     report: SourceStartReport,
+    mut meter: TrackMeter,
     stop: Arc<AtomicBool>,
 ) -> Result<(), StoreError> {
     let mut bridges = HashMap::new();
@@ -4484,6 +4508,7 @@ fn run_track_worker(
                     .copied();
                 if let Some(bridge) = bridge {
                     let _ = writer.accept_with_bridge(packet, &samples, bridge)?;
+                    meter.feed(&samples, packet.sample_rate_hz, packet.channels);
                 } else {
                     store.record_gap(&SourceGap {
                         track_id: packet.track_id,

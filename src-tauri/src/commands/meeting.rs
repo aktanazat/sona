@@ -3,6 +3,7 @@ use crate::meeting::analytics::{
     KeywordTracker, MeetingActionItemState, MeetingAnalyticsSnapshot, MeetingCatchUp,
     MeetingLiveHelp, MeetingLiveHelpKind, MeetingProvisionalTranscript, MeetingUserNotes,
 };
+use crate::meeting::call_silence::MeetingCallSilence;
 use crate::meeting::clock::host_monotonic_now_ns;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::local_generator::{MeetingLocalEngineStatus, MeetingTextEngineChoice};
@@ -740,6 +741,21 @@ pub fn meeting_live_transcript(
     session_id: MeetingSessionId,
 ) -> MeetingProvisionalTranscript {
     manager.provisional_transcript(session_id)
+}
+
+/// Whether the running call's sound has gone while the person talks, for
+/// the live screen and the recording strip. Never stops the recording.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn meeting_call_silence(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    session_id: MeetingSessionId,
+) -> MeetingCallSilence {
+    MeetingCallSilence {
+        silent_ms: manager
+            .call_silent_ns(session_id)
+            .map(|silent| silent / 1_000_000),
+    }
 }
 
 /// What one calendar series has decided — template, digest inclusion, and

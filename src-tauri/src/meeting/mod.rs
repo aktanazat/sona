@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod automation_settings;
 pub mod automation_types;
 pub mod automations;
+pub mod call_silence;
 pub mod call_speakers;
 pub mod capture;
 pub mod clock;

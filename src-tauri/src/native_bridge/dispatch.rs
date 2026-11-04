@@ -3001,6 +3001,18 @@ pub(super) async fn call(
             })
             .await?
         }
+        "meeting_call_silence" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            off_main_thread(move || {
+                encode_plain(crate::commands::meeting::meeting_call_silence(
+                    handle.state(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
         "meeting_series_template_get" => {
             let mut args = Args::parse(params)?;
             let series_key = args.take("seriesKey")?;
