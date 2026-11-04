@@ -135,7 +135,9 @@ struct OverviewWidgets: View {
     private func commitments(_ now: Date) -> some View {
         let loops: [FeedOpenLoop]? = if case let .loaded(entries) = store.openLoops { entries } else { nil }
         let count = loops?.count ?? 0
-        let mine = (loops ?? []).filter { $0.direction == .mine }
+        let complete = count < OverviewStore.openLoopLimit
+        let mine = complete ? (loops ?? []).filter { $0.direction == .mine } : []
+        let theirs = complete ? (loops ?? []).filter { $0.direction == .waitingOn }.count : 0
         let oldest = mine.min { $0.raisedAtUtcMs < $1.raisedAtUtcMs }
         var caption: [String] = []
         if !mine.isEmpty { caption.append("\(mine.count) yours") }
@@ -147,13 +149,13 @@ struct OverviewWidgets: View {
             caption.append(days < 1 ? "oldest today" : days == 1 ? "oldest 1 day" : "oldest \(days) days")
         }
         return WidgetTile("Commitments", icon: "checklist",
-                          value: loops == nil ? "–" : count >= OverviewStore.openLoopLimit ? "\(count)+" : "\(count)",
+                          value: loops == nil ? "–" : complete ? "\(count)" : "\(count)+",
                           unit: "open",
                           caption: caption.isEmpty ? nil : caption.joined(separator: " · "),
                           action: count == 0 ? nil : showNeedsYou) {
-            if count > 0 {
+            if count > 0, complete {
                 VStack(alignment: .leading, spacing: 6) {
-                    PersonSplitBar(mine: mine.count, theirs: count - mine.count)
+                    PersonSplitBar(mine: mine.count, theirs: theirs)
                     if let oldest {
                         Text(oldest.text).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
                     }

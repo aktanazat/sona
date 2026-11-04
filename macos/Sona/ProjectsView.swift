@@ -527,7 +527,7 @@ struct ProjectsView: View {
                 NumberTile("—", label: "Next due", tone: Theme.inkTertiary)
                     .accessibilityRepresentation { Text("No next due date") }
             }
-            NumberTile("\(pulse.meetingsThisWeek)", label: "Meetings this week")
+            NumberTile("\(pulse.meetingsThisWeek)", label: "Meetings, last 7 days")
         }
     }
 

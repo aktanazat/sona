@@ -1203,9 +1203,6 @@ private struct TalkTimeline: View {
     let slices: [TalkSlice]
     let color: (TalkSlice) -> Color
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var shown = false
-
     private static let laneHeight: CGFloat = 7
     private static let laneGap: CGFloat = 3
     private static let axisGap: CGFloat = 5
@@ -1232,11 +1229,6 @@ private struct TalkTimeline: View {
                 }
                 .metaText()
                 .monospacedDigit()
-            }
-            .opacity(shown || reduceMotion ? 1 : 0)
-            .onAppear {
-                guard !shown else { return }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) { shown = true }
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Who spoke when")
