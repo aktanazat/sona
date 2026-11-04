@@ -7,7 +7,7 @@
 use super::context::application_bundle_ids;
 use super::loops::{current_ledger_in, ledger_loop_seeds, states_in};
 use super::people::confirmed_person_ids_in;
-use super::said::{matched_lines_in, SessionVoices};
+use super::said::{matched_lines_in, MatchedLine, SessionVoices};
 use super::{id, search_projection, MeetingStore, StoreError};
 use crate::meeting::ledger::LedgerThreadState;
 use crate::meeting::people_types::PersonId;
@@ -162,6 +162,21 @@ const SMALL_TALK: &[&str] = &[
     "yesterday",
 ];
 
+/// What a capture's recall checks have read from the store, kept as long as
+/// the capture. Each check's minute of words overlaps the last by most of
+/// it, so a check reads only the terms and meetings no earlier one did. Who
+/// is confirmed in the call is not kept: that can change mid-call.
+#[derive(Default)]
+pub(crate) struct RecallMemory {
+    /// The index's reach, counted once it holds any line.
+    corpus: Option<Reach>,
+    /// Each candidate's reach, by phrase.
+    reach: HashMap<String, Reach>,
+    /// The past lines each chosen term found, by phrase.
+    said: HashMap<String, Vec<MatchedLine>>,
+    meetings: HashMap<MeetingSessionId, PastMeeting>,
+}
+
 impl MeetingStore {
     /// The past lines outside `session_id` that its `recent` live words were
     /// already said in, at most three and one per meeting.
@@ -170,47 +185,59 @@ impl MeetingStore {
     /// this meeting first, then other open ones, then decisions, then plain
     /// lines. A person is named only from a confirmed identification of the
     /// line's speaker.
+    ///
+    /// The connection is taken for one read at a time rather than for the
+    /// whole check, so the capture's writes can get in between reads.
     pub(crate) fn live_recall(
         &self,
         session_id: MeetingSessionId,
         recent: &[String],
+        memory: &mut RecallMemory,
     ) -> Result<Vec<MeetingRecallMatch>, StoreError> {
         let candidates = candidate_terms(recent);
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let mut connection = self.connection()?;
-        search_projection::refresh_in(&mut connection)?;
-        let terms = distinctive_terms_in(&connection, session_id, candidates)?;
-        let attendees: HashSet<PersonId> = confirmed_person_ids_in(&connection, session_id)?
-            .into_iter()
-            .collect();
-        let mut meetings = HashMap::<MeetingSessionId, PastMeeting>::new();
+        {
+            let mut connection = self.connection()?;
+            search_projection::refresh_in(&mut connection)?;
+        }
+        let terms = self.distinctive_terms(session_id, candidates, memory)?;
+        let attendees: HashSet<PersonId> =
+            confirmed_person_ids_in(&*self.connection()?, session_id)?
+                .into_iter()
+                .collect();
+        let RecallMemory { said, meetings, .. } = memory;
         let mut found = Vec::new();
         for (term_rank, term) in terms.iter().enumerate() {
-            let lines =
-                matched_lines_in(&connection, &term.query(), LINES_PER_TERM, Some(session_id))?;
-            for (line_rank, line) in lines.into_iter().enumerate() {
+            let lines = match said.entry(term.phrase.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(matched_lines_in(
+                    &*self.connection()?,
+                    &term.query(),
+                    LINES_PER_TERM,
+                    Some(session_id),
+                )?),
+            };
+            for (line_rank, line) in lines.iter().enumerate() {
                 let meeting = match meetings.entry(line.session_id) {
                     Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => entry.insert(PastMeeting::read_in(
-                        &connection,
-                        line.session_id,
-                        &attendees,
-                    )?),
+                    Entry::Vacant(entry) => {
+                        entry.insert(PastMeeting::read_in(&*self.connection()?, line.session_id)?)
+                    }
                 };
                 let person = meeting
                     .voices
                     .voice_in(
-                        &connection,
+                        &*self.connection()?,
                         line.session_id,
                         line.speaker_id,
                         line.assignment,
                     )?
                     .person;
-                let (kind, owned_here) = meeting.kind_of(line.segment_id);
+                let (kind, owned_here) = meeting.kind_of(line.segment_id, &attendees);
                 let involves = owned_here
-                    || meeting.shares_people
+                    || meeting.shares_people_with(&attendees)
                     || person
                         .as_ref()
                         .is_some_and(|person| attendees.contains(&person.person_id));
@@ -220,11 +247,11 @@ impl MeetingStore {
                     line_rank,
                     recall: MeetingRecallMatch {
                         kind,
-                        text: line.text,
+                        text: line.text.clone(),
                         session_id: line.session_id,
                         segment_id: line.segment_id,
                         start_offset_ns: line.start_offset_ns,
-                        meeting_title: line.meeting_title,
+                        meeting_title: line.meeting_title.clone(),
                         meeting_started_at_utc_ms: line.meeting_started_at_utc_ms,
                         app_bundle_id: meeting.app_bundle_id.clone(),
                         person,
@@ -250,6 +277,58 @@ impl MeetingStore {
             .map(|found| found.recall)
             .collect())
     }
+
+    /// The few candidates past meetings said but do not say all the time:
+    /// pairs, then names and numbers, then the rarest, a pair over the words
+    /// inside it.
+    fn distinctive_terms(
+        &self,
+        session_id: MeetingSessionId,
+        candidates: Vec<Term>,
+        memory: &mut RecallMemory,
+    ) -> Result<Vec<Term>, StoreError> {
+        let corpus = match memory.corpus {
+            Some(corpus) => corpus,
+            None => corpus_in(&*self.connection()?, session_id)?,
+        };
+        if corpus.lines == 0 {
+            return Ok(Vec::new());
+        }
+        memory.corpus = Some(corpus);
+        let mut heard = Vec::new();
+        for term in candidates {
+            let reach = match memory.reach.entry(term.phrase.clone()) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => *entry.insert(reach_in(
+                    &*self.connection()?,
+                    session_id,
+                    &term,
+                    corpus.lines_cap(),
+                )?),
+            };
+            if reach.lines > 0 && !reach.common_in(&corpus) {
+                heard.push((reach.lines, term));
+            }
+        }
+        heard.sort_by_key(|(lines, term)| {
+            (
+                Reverse(term.pair),
+                Reverse(term.marked),
+                *lines,
+                Reverse(term.phrase.chars().count()),
+            )
+        });
+        let mut chosen: Vec<Term> = Vec::new();
+        for (_, term) in heard {
+            if chosen.len() == TERMS_MAX {
+                break;
+            }
+            if !chosen.iter().any(|pair| term.inside(pair)) {
+                chosen.push(term);
+            }
+        }
+        Ok(chosen)
+    }
 }
 
 /// One past line a term found, with what ranks it.
@@ -262,26 +341,22 @@ struct Found {
 }
 
 /// What one past meeting made of its lines, read once however many of them
-/// matched.
+/// match.
 struct PastMeeting {
-    /// Lines an open promise or question cites, each with whether one of
-    /// those is owned by someone confirmed in the live meeting.
-    open: HashMap<TranscriptSegmentId, bool>,
+    /// Lines an open promise or question cites, each with the people who
+    /// own one of those.
+    open: HashMap<TranscriptSegmentId, Vec<PersonId>>,
     /// Lines a decision cites.
     decided: HashSet<TranscriptSegmentId>,
-    /// Someone confirmed in this meeting is confirmed in the live one too.
-    shares_people: bool,
+    /// Everyone confirmed in this meeting.
+    people: Vec<PersonId>,
     app_bundle_id: Option<String>,
     voices: SessionVoices,
 }
 
 impl PastMeeting {
-    fn read_in(
-        connection: &Connection,
-        session_id: MeetingSessionId,
-        attendees: &HashSet<PersonId>,
-    ) -> Result<Self, StoreError> {
-        let mut open = HashMap::<TranscriptSegmentId, bool>::new();
+    fn read_in(connection: &Connection, session_id: MeetingSessionId) -> Result<Self, StoreError> {
+        let mut open = HashMap::<TranscriptSegmentId, Vec<PersonId>>::new();
         let mut decided = HashSet::new();
         if let Some(ledger) = current_ledger_in(connection, session_id)? {
             for thread in &ledger.threads {
@@ -304,11 +379,9 @@ impl PastMeeting {
                 if !state.is_none_or(|state| state.status.is_open()) {
                     continue;
                 }
-                let owned = state
-                    .and_then(|state| state.owner_person_id)
-                    .is_some_and(|person| attendees.contains(&person));
+                let owner = state.and_then(|state| state.owner_person_id);
                 for citation in seed.citations {
-                    *open.entry(citation.segment_id).or_default() |= owned;
+                    open.entry(citation.segment_id).or_default().extend(owner);
                 }
             }
         }
@@ -320,24 +393,34 @@ impl PastMeeting {
         Ok(Self {
             open,
             decided,
-            shares_people: confirmed_person_ids_in(connection, session_id)?
-                .iter()
-                .any(|person| attendees.contains(person)),
+            people: confirmed_person_ids_in(connection, session_id)?,
             app_bundle_id: application_bundle_ids(&preflight)?.into_iter().next(),
             voices: SessionVoices::read_in(connection, session_id)?,
         })
     }
 
     /// What became of `segment_id` here, and whether an open row citing it
-    /// is owned by someone confirmed in the live meeting.
-    fn kind_of(&self, segment_id: TranscriptSegmentId) -> (MeetingRecallKind, bool) {
-        if let Some(owned) = self.open.get(&segment_id) {
-            (MeetingRecallKind::StillOpen, *owned)
+    /// is owned by one of `attendees`.
+    fn kind_of(
+        &self,
+        segment_id: TranscriptSegmentId,
+        attendees: &HashSet<PersonId>,
+    ) -> (MeetingRecallKind, bool) {
+        if let Some(owners) = self.open.get(&segment_id) {
+            (
+                MeetingRecallKind::StillOpen,
+                owners.iter().any(|owner| attendees.contains(owner)),
+            )
         } else if self.decided.contains(&segment_id) {
             (MeetingRecallKind::Decided, false)
         } else {
             (MeetingRecallKind::SaidBefore, false)
         }
+    }
+
+    /// Whether someone confirmed here is one of `attendees`.
+    fn shares_people_with(&self, attendees: &HashSet<PersonId>) -> bool {
+        self.people.iter().any(|person| attendees.contains(person))
     }
 }
 
@@ -366,6 +449,7 @@ impl Term {
 }
 
 /// How far a term, or the whole index, reaches through past meetings.
+#[derive(Clone, Copy)]
 struct Reach {
     lines: usize,
     meetings: usize,
@@ -491,44 +575,6 @@ fn telling(word: &str, opens_sentence: bool) -> Option<Word> {
         || (capitalized && !opens_sentence)
         || (letters >= 2 && word.chars().all(char::is_uppercase));
     (letters >= 4 || (marked && letters >= 2)).then_some(Word { text, marked })
-}
-
-/// The few candidates past meetings said but do not say all the time: pairs,
-/// then names and numbers, then the rarest, a pair over the words inside it.
-fn distinctive_terms_in(
-    connection: &Connection,
-    session_id: MeetingSessionId,
-    candidates: Vec<Term>,
-) -> Result<Vec<Term>, StoreError> {
-    let corpus = corpus_in(connection, session_id)?;
-    if corpus.lines == 0 {
-        return Ok(Vec::new());
-    }
-    let mut heard = Vec::new();
-    for term in candidates {
-        let reach = reach_in(connection, session_id, &term, corpus.lines_cap())?;
-        if reach.lines > 0 && !reach.common_in(&corpus) {
-            heard.push((reach.lines, term));
-        }
-    }
-    heard.sort_by_key(|(lines, term)| {
-        (
-            Reverse(term.pair),
-            Reverse(term.marked),
-            *lines,
-            Reverse(term.phrase.chars().count()),
-        )
-    });
-    let mut chosen: Vec<Term> = Vec::new();
-    for (_, term) in heard {
-        if chosen.len() == TERMS_MAX {
-            break;
-        }
-        if !chosen.iter().any(|pair| term.inside(pair)) {
-            chosen.push(term);
-        }
-    }
-    Ok(chosen)
 }
 
 /// How many past lines, and meetings, the index holds outside `session_id`.
@@ -741,8 +787,11 @@ mod tests {
             None,
         )?;
 
-        let recalled =
-            store.live_recall(live, &["Did Dana send the pricing sheet yet?".to_owned()])?;
+        let recalled = store.live_recall(
+            live,
+            &["Did Dana send the pricing sheet yet?".to_owned()],
+            &mut RecallMemory::default(),
+        )?;
 
         let order: Vec<_> = recalled
             .iter()
@@ -766,6 +815,56 @@ mod tests {
             })
         );
         assert!(recalled[1..].iter().all(|recall| recall.person.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_check_that_reuses_the_capture_memory_still_sees_who_was_confirmed_since(
+    ) -> Result<(), StoreError> {
+        let (_directory, store) = store();
+        let dana = person(&store, "Dana Reyes", &[], &[]);
+        let ada = person(&store, "Ada Lovelace", &[], &[]);
+        let live = meeting(&store, "Pricing review", 4_000);
+        link(&store, live, dana, "calendar", "confirmed");
+        let older = meeting(&store, "Q3 planning", 1_000);
+        let said_by_dana = line(
+            &store,
+            older,
+            "Dana",
+            "I'll send the pricing sheet by Friday.",
+            Some(dana),
+        )?;
+        promise(
+            &store,
+            older,
+            "Dana Reyes",
+            "Send the pricing sheet",
+            said_by_dana,
+        );
+        let newer = meeting(&store, "Vendor call", 2_000);
+        let said_by_ada = line(&store, newer, "Ada", "I can take the pricing sheet.", None)?;
+        link(&store, newer, ada, "calendar", "confirmed");
+        promise(
+            &store,
+            newer,
+            "Ada Lovelace",
+            "Take the pricing sheet",
+            said_by_ada,
+        );
+        let recent = ["Did Dana send the pricing sheet yet?".to_owned()];
+        let mut memory = RecallMemory::default();
+        let mut check = || -> Result<Vec<MeetingSessionId>, StoreError> {
+            Ok(store
+                .live_recall(live, &recent, &mut memory)?
+                .iter()
+                .map(|recall| recall.session_id)
+                .collect())
+        };
+
+        assert_eq!(check()?, vec![older, newer]);
+        assert_eq!(check()?, vec![older, newer]);
+        link(&store, live, ada, "calendar", "confirmed");
+        assert_eq!(check()?, vec![newer, older]);
         Ok(())
     }
 }

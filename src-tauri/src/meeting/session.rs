@@ -4026,8 +4026,10 @@ impl MeetingSessionManager {
         let Ok(store) = self.store().await else {
             return MeetingLiveRecall::Unavailable;
         };
-        match tauri::async_runtime::spawn_blocking(move || store.live_recall(session_id, &recent))
-            .await
+        match tauri::async_runtime::spawn_blocking(move || {
+            store.live_recall(session_id, &recent, &mut live.recall_memory())
+        })
+        .await
         {
             Ok(Ok(matches)) => MeetingLiveRecall::Available { matches },
             Ok(Err(_)) | Err(_) => MeetingLiveRecall::Unavailable,

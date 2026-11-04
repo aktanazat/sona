@@ -31,6 +31,7 @@ use super::prompt_types::{
     PromptTargetRef, SavedPrompt,
 };
 use super::relay_generator::RelayTextGenerator;
+use super::store::recall::RecallMemory;
 use super::store::voice_identity::{
     DiarizationEvidenceKind, DiarizationEvidenceSpanInput, VoiceEnrollmentEvidence,
     VoiceEnrollmentRecord,
@@ -3273,6 +3274,8 @@ pub(crate) struct LiveTranscript {
     /// scheduled pass and a pass a catch-up runs for itself can never read the
     /// same records twice or interleave one utterance with another.
     cursors: Mutex<HashMap<SourceTrackId, LiveTrackCursor>>,
+    /// What this capture's recall checks have read from the store.
+    recall: Mutex<RecallMemory>,
 }
 
 impl LiveTranscript {
@@ -3280,6 +3283,7 @@ impl LiveTranscript {
         Self {
             segments: Mutex::new(Vec::new()),
             cursors: Mutex::new(HashMap::new()),
+            recall: Mutex::new(RecallMemory::default()),
         }
     }
 
@@ -3431,6 +3435,13 @@ impl LiveTranscript {
             .filter(|segment| segment.end_offset_ns >= cutoff)
             .map(|segment| segment.text.clone())
             .collect()
+    }
+
+    /// What this capture's recall checks have read from the store so far.
+    pub(crate) fn recall_memory(&self) -> MutexGuard<'_, RecallMemory> {
+        self.recall
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
