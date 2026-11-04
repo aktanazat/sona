@@ -56,7 +56,7 @@ struct OverviewWidgets: View {
                 today(now)
                 recorded(week)
                 dictated(week)
-                commitments
+                commitments(now)
                 overdue(now)
                 peopleMet(week)
             }
@@ -130,18 +130,33 @@ struct OverviewWidgets: View {
         }
     }
 
-    private var commitments: some View {
+    /// Every open promise, split by who owes it, with how long the oldest of
+    /// yours has waited: the one to do first.
+    private func commitments(_ now: Date) -> some View {
         let loops: [FeedOpenLoop]? = if case let .loaded(entries) = store.openLoops { entries } else { nil }
         let count = loops?.count ?? 0
-        let meetings = Set((loops ?? []).map(\.meetingId).filter { !$0.isEmpty }).count
+        let mine = (loops ?? []).filter { $0.direction == .mine }
+        let oldest = mine.min { $0.raisedAtUtcMs < $1.raisedAtUtcMs }
+        var caption: [String] = []
+        if !mine.isEmpty { caption.append("\(mine.count) yours") }
+        if let oldest {
+            let calendar = Calendar.current
+            let days = calendar.dateComponents(
+                [.day], from: calendar.startOfDay(for: FeedClock.date(oldest.raisedAtUtcMs)),
+                to: calendar.startOfDay(for: now)).day ?? 0
+            caption.append(days < 1 ? "oldest today" : days == 1 ? "oldest 1 day" : "oldest \(days) days")
+        }
         return WidgetTile("Commitments", icon: "checklist",
                           value: loops == nil ? "–" : count >= OverviewStore.openLoopLimit ? "\(count)+" : "\(count)",
                           unit: "open",
-                          caption: meetings == 0 ? nil : meetings == 1 ? "from 1 meeting" : "from \(meetings) meetings",
+                          caption: caption.isEmpty ? nil : caption.joined(separator: " · "),
                           action: count == 0 ? nil : showNeedsYou) {
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach((loops ?? []).prefix(2)) { loop in
-                    Text(loop.text).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+            if count > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    PersonSplitBar(mine: mine.count, theirs: count - mine.count)
+                    if let oldest {
+                        Text(oldest.text).font(TypeScale.body(11)).foregroundStyle(Theme.inkSecondary).lineLimit(1)
+                    }
                 }
             }
         }
@@ -408,9 +423,14 @@ private struct OverviewLoopRow: View {
         CardRow(action: loop.meetingId.isEmpty ? nil : { openMeeting(loop.meetingId) }) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(loop.text).bodyText(14)
-                Text("\(loop.title) · \(FeedClock.ago(loop.atUtcMs))").metaText().lineLimit(1)
+                Text(meta).metaText().lineLimit(1)
             }
         }
+    }
+
+    private var meta: String {
+        let base = "\(loop.title) · \(FeedClock.ago(loop.raisedAtUtcMs))"
+        return loop.waitingOnStale ? "\(base) · waiting over a week" : base
     }
 }
 

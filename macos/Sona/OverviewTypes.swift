@@ -560,8 +560,15 @@ struct FeedOpenLoop: Decodable, Identifiable {
     let title: String
     let atUtcMs: Int64
     let text: String
+    let direction: PersonLoopDirection
+    /// Somebody else has owed it for longer than a working week.
+    let waitingOnStale: Bool
+    let carriedSinceAtUtcMs: Int64?
 
     var id: String { loopId }
+    /// When it was first raised: a loop carried forward is as old as the
+    /// meeting that first raised it.
+    var raisedAtUtcMs: Int64 { carriedSinceAtUtcMs ?? atUtcMs }
 }
 
 struct FeedOpenLoops: Decodable {
