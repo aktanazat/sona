@@ -334,9 +334,9 @@ pub enum DeletionCause {
 
 /// One deleted meeting that can still be brought back.
 ///
-/// Not a stored shape: `expires_at_utc_ms` is derived from the deletion instant
-/// and the app's trash horizon, so the list and the sweep cannot disagree about
-/// when an undo runs out.
+/// Not a stored shape: `expires_at_utc_ms` is derived from the deletion instant,
+/// its cause and the app's trash horizon, so the list and the sweep cannot
+/// disagree about when an undo runs out.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MeetingTrashEntry {
@@ -346,7 +346,9 @@ pub struct MeetingTrashEntry {
     pub job_id: MeetingDeletionJobId,
     pub title: String,
     pub deleted_at_utc_ms: i64,
-    pub expires_at_utc_ms: i64,
+    /// `None` for a meeting a retention setting removed: it stays until someone
+    /// restores or deletes it.
+    pub expires_at_utc_ms: Option<i64>,
 }
 
 /// One recording notice. Posting is durably claimed before any external input.

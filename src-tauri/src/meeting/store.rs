@@ -117,6 +117,13 @@ const MISSING_OFFSET: u64 = u64::MAX;
 /// explain.
 const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
+/// When a trashed meeting's undo runs out. One a retention setting removed
+/// has no deadline: it stays until someone restores or deletes it.
+fn trash_expires_at(cause_json: &str, deleted_at_utc_ms: i64) -> Result<Option<i64>, StoreError> {
+    let by_retention = decode_json::<DeletionCause>(cause_json)? == DeletionCause::Retention;
+    Ok((!by_retention).then_some(deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS)))
+}
+
 /// The three workflow tables, rebuilt around a widened allowed-value list.
 ///
 /// SQLite cannot alter a `CHECK` constraint, and `workflow_runs` carries
@@ -6526,7 +6533,8 @@ impl MeetingStore {
         let mut statement = connection.prepare(
             "SELECT job_id, completed_at_utc_ms,
                     COALESCE(json_extract(restore_bundle_json, '$.meeting.session.title'),
-                             json_extract(restore_bundle_json, '$.session.title')) AS title
+                             json_extract(restore_bundle_json, '$.session.title')) AS title,
+                    cause
                FROM meeting_deletion_receipts
               WHERE restore_bundle_json IS NOT NULL AND trash_relative_path IS NOT NULL
               ORDER BY completed_at_utc_ms DESC, job_id DESC",
@@ -6535,19 +6543,25 @@ impl MeetingStore {
             .query_map([], |row| {
                 let job_id: String = row.get(0)?;
                 let deleted_at_utc_ms: i64 = row.get(1)?;
+                let cause: String = row.get(3)?;
                 Ok(MeetingTrashEntry {
                     job_id: MeetingDeletionJobId::from_uuid(
                         parse_uuid(&job_id).map_err(to_sql_error)?,
                     ),
                     title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     deleted_at_utc_ms,
-                    expires_at_utc_ms: deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS),
+                    expires_at_utc_ms: trash_expires_at(&cause, deleted_at_utc_ms)
+                        .map_err(to_sql_error)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries
             .into_iter()
-            .filter(|entry| entry.expires_at_utc_ms > now_utc_ms)
+            .filter(|entry| {
+                entry
+                    .expires_at_utc_ms
+                    .is_none_or(|expires| expires > now_utc_ms)
+            })
             .collect())
     }
 
@@ -6568,10 +6582,10 @@ impl MeetingStore {
         job_id: MeetingDeletionJobId,
         now_utc_ms: i64,
     ) -> Result<MeetingSessionId, StoreError> {
-        let (trash_relative_path, bundle_json, deleted_at_utc_ms) = self
+        let (trash_relative_path, bundle_json, deleted_at_utc_ms, cause) = self
             .connection()?
             .query_row(
-                "SELECT trash_relative_path, restore_bundle_json, completed_at_utc_ms
+                "SELECT trash_relative_path, restore_bundle_json, completed_at_utc_ms, cause
                    FROM meeting_deletion_receipts WHERE job_id = ?1",
                 params![id(job_id)],
                 |row| {
@@ -6579,6 +6593,7 @@ impl MeetingStore {
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -6588,7 +6603,8 @@ impl MeetingStore {
         else {
             return Err(StoreError::NotFound);
         };
-        if deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS) <= now_utc_ms {
+        if trash_expires_at(&cause, deleted_at_utc_ms)?.is_some_and(|expires| expires <= now_utc_ms)
+        {
             return Err(StoreError::NotFound);
         }
         let (bundle, bookmarks, audio_purged_at_utc_ms) =
@@ -6683,7 +6699,8 @@ impl MeetingStore {
     }
 
     /// Drop every trashed meeting past its thirty days, and forget what it
-    /// would have taken to restore it.
+    /// would have taken to restore it. One a retention setting removed is
+    /// passed over: it stays until someone restores or deletes it.
     ///
     /// The receipt row itself stays: it is the record that this meeting was
     /// deleted and when, and that record has no expiry. What expires is the
@@ -6695,11 +6712,15 @@ impl MeetingStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT job_id, trash_relative_path FROM meeting_deletion_receipts
-              WHERE trash_relative_path IS NOT NULL AND completed_at_utc_ms <= ?1",
+              WHERE trash_relative_path IS NOT NULL AND completed_at_utc_ms <= ?1
+                AND cause != ?2",
         )?;
         let expired = statement
             .query_map(
-                params![now_utc_ms.saturating_sub(TRASH_RETENTION_MS)],
+                params![
+                    now_utc_ms.saturating_sub(TRASH_RETENTION_MS),
+                    encode_json(&DeletionCause::Retention)?
+                ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -13835,8 +13856,8 @@ mod tests {
         assert_eq!(trashed[0].job_id, job_id);
         assert_eq!(trashed[0].title, "Design sync");
         assert_eq!(
-            trashed[0].deleted_at_utc_ms,
-            trashed[0].expires_at_utc_ms - TRASH_RETENTION_MS
+            trashed[0].expires_at_utc_ms,
+            Some(trashed[0].deleted_at_utc_ms + TRASH_RETENTION_MS)
         );
 
         let restored = store
@@ -14031,15 +14052,10 @@ mod tests {
         store: &MeetingStore,
         session_id: MeetingSessionId,
         revision: u64,
+        cause: DeletionCause,
     ) -> MeetingDeletionJobId {
         let (_receipt, job_id) = store
-            .reserve_deletion(
-                MeetingOperationId::new(),
-                10,
-                session_id,
-                revision,
-                DeletionCause::User,
-            )
+            .reserve_deletion(MeetingOperationId::new(), 10, session_id, revision, cause)
             .expect("reserve deletion");
         store.finish_deletion(job_id).expect("finish deletion");
         job_id
@@ -14082,10 +14098,10 @@ mod tests {
     fn a_restored_meeting_follows_this_macs_whole_meeting_setting() {
         let (_directory, this_mac) = store();
         let (stamped, revision) = old_thirty_day_meeting(&this_mac);
-        let stamped_job = trash(&this_mac, stamped, revision);
+        let stamped_job = trash(&this_mac, stamped, revision, DeletionCause::User);
         let unstamped = MeetingSessionId::new();
         let revision = review_ready_session(&this_mac, unstamped);
-        let unstamped_job = trash(&this_mac, unstamped, revision);
+        let unstamped_job = trash(&this_mac, unstamped, revision, DeletionCause::User);
 
         this_mac
             .restore_trashed_meeting(stamped_job, 20)
@@ -14107,6 +14123,27 @@ mod tests {
                 Some(30 * DAY_MS)
             ),
             "a Mac that deletes after 30 days counts them from the meeting's end"
+        );
+    }
+
+    /// A meeting a retention setting removed stays in the trash past the thirty
+    /// days a deleted meeting gets, until someone restores or deletes it.
+    #[test]
+    fn a_meeting_a_retention_setting_removed_stays_in_the_trash() {
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        let job_id = trash(&store, session_id, revision, DeletionCause::Retention);
+        let deleted_at = store.meeting_trash(20).expect("trash list")[0].deleted_at_utc_ms;
+        let a_year_later = deleted_at + 365 * DAY_MS;
+
+        assert_eq!(store.purge_expired_trash(a_year_later), Ok(0));
+        let listed = store.meeting_trash(a_year_later).expect("trash list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].expires_at_utc_ms, None);
+        assert_eq!(
+            store.restore_trashed_meeting(job_id, a_year_later),
+            Ok(session_id)
         );
     }
 
