@@ -23,14 +23,15 @@ SELECT 1,
        0,
        CAST(strftime('%s', 'now') AS INTEGER) * 1000
 FROM meeting_retention_policy WHERE singleton = 1;
+-- A store still at its first default gave every meeting it made that
+-- default, so a meeting with any other date came from another Mac.
 UPDATE meeting_sessions
 SET retention_policy_json = '{"kind":"forever"}', delete_after_utc_ms = NULL
-WHERE retention_policy_json = '{"kind":"delete_after_days","days":30}'
-  AND EXISTS (
+WHERE EXISTS (
     SELECT 1 FROM meeting_retention_policy
     WHERE singleton = 1 AND revision = 0
       AND policy_json = '{"kind":"delete_after_days","days":30}'
-  );
+);
 UPDATE meeting_retention_policy SET policy_json = '{"kind":"forever"}'
 WHERE singleton = 1 AND revision = 0
   AND policy_json = '{"kind":"delete_after_days","days":30}';

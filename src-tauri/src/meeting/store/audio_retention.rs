@@ -616,4 +616,16 @@ mod tests {
             vec![session_id]
         );
     }
+
+    #[test]
+    fn an_untouched_store_drops_the_date_a_meeting_brought_from_another_mac() {
+        let (migrations, mut connection, session_id) =
+            store_before_audio_retention(r#"{"kind":"delete_after_days","days":7}"#);
+        migrations.to_latest(&mut connection).unwrap();
+
+        assert_eq!(
+            session_retention(&connection, &session_id),
+            (FOREVER.to_owned(), None)
+        );
+    }
 }
