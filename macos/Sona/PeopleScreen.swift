@@ -17,15 +17,12 @@ struct PeopleScreen: View {
     /// Deletes an imported document, when the import surface is there to do
     /// it. Absent, the catalogue is a catalogue and nothing on it destroys.
     var deleteDocument: ((String) -> Void)?
-    /// Opens the word list, where a mined term is taught a spelling. The
-    /// vocabulary surface owns that write; absent, the row is not drawn.
-    var openVocabulary: (() -> Void)?
 
     var body: some View {
         switch store.route {
         case .list:
             Page {
-                PeopleListView(store: store, openMeeting: openMeeting, openVocabulary: openVocabulary)
+                PeopleListView(store: store, openMeeting: openMeeting)
             }
         case .person:
             PersonView(
@@ -43,12 +40,10 @@ struct PeopleScreen: View {
 // MARK: - The list
 
 /// Everybody Sona knows: the numbers first, then what still needs you, the
-/// people, the companies they are at, and the words Sona keeps hearing and
-/// cannot spell.
+/// people, and the companies they are at.
 struct PeopleListView: View {
     let store: PeopleStore
     var openMeeting: (String) -> Void = { _ in }
-    var openVocabulary: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -64,7 +59,7 @@ struct PeopleListView: View {
                 }
                 .padding(.bottom, 28)
             } else if store.entries?.isEmpty == true {
-                Card { CardLine("People from your meetings appear here.") }
+                Card { CardLine("Name a speaker in a meeting, or turn on your calendar, and they appear here.") }
                     .padding(.bottom, 28)
             } else {
                 PeopleListStats(entries: store.entries, companies: store.companies)
@@ -87,13 +82,12 @@ struct PeopleListView: View {
                 }
                 PeopleCompaniesSection(store: store)
             }
-            PeopleCandidatesSection(store: store, openVocabulary: openVocabulary)
         }
     }
 
     private var subtitle: String {
         guard let entries = store.entries else { return "Reading the people Sona knows" }
-        if entries.isEmpty { return "Nobody yet" }
+        if entries.isEmpty { return "The people you meet, what you talked about, and what you owe each other" }
         return PeopleModel.people(entries.count)
     }
 }
@@ -341,47 +335,6 @@ struct PersonLoopRow: View {
                 }
             }
         }
-    }
-}
-
-/// Terms Sona keeps hearing in meetings and does not know how to write.
-///
-/// Saying no is answered here: the store remembers the answer, so the term
-/// goes quiet on every surface that mines it and comes back on none of them.
-/// Teaching one is a write to the word list, which the vocabulary surface
-/// owns, so this row goes there rather than keeping a second copy of it.
-struct PeopleCandidatesSection: View {
-    let store: PeopleStore
-    var openVocabulary: (() -> Void)?
-
-    var body: some View {
-        if !store.candidates.isEmpty {
-            PageSection("Words from your meetings") {
-                Card {
-                    ForEach(store.candidates) { candidate in
-                        CardRow {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(candidate.text).bodyText(14)
-                                Text(mentions(candidate)).metaText().monospacedDigit()
-                            }
-                        } trailing: {
-                            Button("Dismiss") { store.dismissCandidate(candidate.text) }
-                                .buttonStyle(.compact)
-                        }
-                    }
-                    if let openVocabulary {
-                        CardRow(action: openVocabulary) {
-                            Text("Add one in Custom Words").bodyText(14, Theme.accent)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func mentions(_ candidate: PeopleVocabularyCandidate) -> String {
-        let heard = candidate.occurrences == 1 ? "1 mention" : "\(candidate.occurrences) mentions"
-        return "\(heard) · \(PeopleModel.meetings(candidate.meetingsCount))"
     }
 }
 

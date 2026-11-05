@@ -1,5 +1,21 @@
 import SwiftUI
 
+extension View {
+    /// A control floating over the page: the layer Liquid Glass is for, when
+    /// the glass material is chosen. Content underneath stays the standard
+    /// surface.
+    @ViewBuilder
+    func floatingControl(_ material: AppearanceMaterial) -> some View {
+        if material == .glass, #available(macOS 26.0, *) {
+            glassEffect(.regular, in: Capsule())
+        } else {
+            background(material == .glass ? AnyShapeStyle(.regularMaterial) : AnyShapeStyle(Theme.surface), in: Capsule())
+                .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+                .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+        }
+    }
+}
+
 /// One pixel of divider.
 struct Hairline: View {
     var body: some View {
@@ -16,16 +32,15 @@ struct Card<Content: View>: View {
         self.content = content()
     }
 
+    /// A card is content, so it never takes Liquid Glass, which Apple keeps
+    /// for the controls floating over content. The glass appearance gives a
+    /// card the standard translucent material instead.
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.radiusCard)
         if material == .glass {
-            if #available(macOS 26.0, *) {
-                cardContent.glassEffect(.regular, in: shape)
-            } else {
-                cardContent
-                    .background(.regularMaterial, in: shape)
-                    .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
-            }
+            cardContent
+                .background(.regularMaterial, in: shape)
+                .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
         } else {
             cardContent
                 .background(Theme.surface)
@@ -456,11 +471,15 @@ struct PageBack {
 /// goes back to, and its bar stays pinned below the window's title bar: in
 /// that strip the window takes a click as the start of a drag, so a back
 /// button that scrolled up into it stopped answering.
-struct Page<Content: View, Actions: View>: View {
+///
+/// `pinned` sits under that bar and never scrolls, so a page whose column
+/// changes under its own header and tabs keeps them where they are.
+struct Page<Content: View, Actions: View, Pinned: View>: View {
     let back: PageBack?
     let title: String?
     let content: Content
     let actions: Actions
+    let pinned: Pinned
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scroll = PageScroll()
@@ -470,15 +489,35 @@ struct Page<Content: View, Actions: View>: View {
         back: PageBack? = nil,
         title: String? = nil,
         @ViewBuilder content: () -> Content,
-        @ViewBuilder actions: () -> Actions
+        @ViewBuilder actions: () -> Actions,
+        @ViewBuilder pinned: () -> Pinned
     ) {
         self.back = back
         self.title = title
         self.content = content()
         self.actions = actions()
+        self.pinned = pinned()
     }
 
     var body: some View {
+        if #available(macOS 26.0, *) {
+            column
+                .safeAreaBar(edge: .top, spacing: 0) { chrome }
+                .scrollEdgeEffectStyle(.hard, for: .top)
+        } else {
+            column.safeAreaInset(edge: .top, spacing: 0) {
+                chrome
+                    .background {
+                        if back != nil { Theme.page.ignoresSafeArea(edges: .top) }
+                    }
+                    .overlay(alignment: .bottom) {
+                        Hairline().opacity(back != nil && scroll.scrolled ? 1 : 0)
+                    }
+            }
+        }
+    }
+
+    private var column: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 content
@@ -500,8 +539,15 @@ struct Page<Content: View, Actions: View>: View {
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) { scroll = next }
         }
         .onPreferenceChange(PageHeadlineKey.self) { headlineBottom = $0 }
-        .safeAreaInset(edge: .top, spacing: 0) {
+    }
+
+    private var chrome: some View {
+        VStack(alignment: .leading, spacing: 0) {
             if let back { bar(back) }
+            pinned
+                .frame(maxWidth: Theme.contentMax, alignment: .leading)
+                .padding(.horizontal, Theme.margin)
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -528,16 +574,34 @@ struct Page<Content: View, Actions: View>: View {
         .padding(.horizontal, Theme.margin)
         .frame(maxWidth: .infinity)
         .frame(height: 44)
-        .background { Theme.page.ignoresSafeArea(edges: .top) }
-        .overlay(alignment: .bottom) {
-            Hairline().opacity(scroll.scrolled ? 1 : 0)
-        }
+    }
+}
+
+extension Page where Pinned == EmptyView {
+    init(
+        back: PageBack? = nil,
+        title: String? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder actions: () -> Actions
+    ) {
+        self.init(back: back, title: title, content: content, actions: actions) { EmptyView() }
     }
 }
 
 extension Page where Actions == EmptyView {
+    init(
+        back: PageBack? = nil,
+        title: String? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder pinned: () -> Pinned
+    ) {
+        self.init(back: back, title: title, content: content, actions: { EmptyView() }, pinned: pinned)
+    }
+}
+
+extension Page where Actions == EmptyView, Pinned == EmptyView {
     init(back: PageBack? = nil, title: String? = nil, @ViewBuilder content: () -> Content) {
-        self.init(back: back, title: title, content: content) { EmptyView() }
+        self.init(back: back, title: title, content: content, actions: { EmptyView() }, pinned: { EmptyView() })
     }
 }
 

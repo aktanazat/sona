@@ -17,11 +17,8 @@ struct MeetingReviewView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            Page(back: PageBack("Meetings") { store.closeReview() }, title: store.snapshot?.session.title) {
+            Page(back: PageBack("Meetings") { store.closeReview() }) {
                 if let snapshot = store.snapshot {
-                    MeetingReviewHeader(
-                        store: store, snapshot: snapshot, delete: { confirmingDelete = true },
-                        openMeetingSettings: openMeetingSettings, askAgent: askAgent)
                     ConversationContextView(
                         sessionId: snapshot.session.sessionId, editable: store.editable,
                         partialRecording: snapshot.session.captureCompleteness == .partial)
@@ -29,8 +26,6 @@ struct MeetingReviewView: View {
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     ConversationBookmarksView(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
-                    ConversationAudioBar(audio: store.audio)
-                    MeetingReviewTabs(store: store)
                     pane(snapshot)
                 } else {
                     if let failure = store.reviewFailure {
@@ -41,8 +36,21 @@ struct MeetingReviewView: View {
                         Text("That meeting is no longer here.").bodyText(14, Theme.inkSecondary)
                     }
                 }
+            } pinned: {
+                if let snapshot = store.snapshot {
+                    MeetingReviewHeader(
+                        store: store, snapshot: snapshot, delete: { confirmingDelete = true },
+                        openMeetingSettings: openMeetingSettings, askAgent: askAgent)
+                    MeetingReviewTabs(store: store)
+                }
             }
-            .overlay(alignment: .bottom) { toast }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 12) {
+                    toast
+                    ConversationAudioBar(audio: store.audio, floating: model.about.material)
+                }
+                .padding(.bottom, 20)
+            }
             .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
             .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
             .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
@@ -72,7 +80,7 @@ struct MeetingReviewView: View {
     private var toast: some View {
         ZStack {
             if let notice = store.notice {
-                MeetingReviewToast(store: store, notice: notice)
+                MeetingReviewToast(store: store, notice: notice, material: model.about.material)
                     .transition(
                         reduceMotion
                             ? AnyTransition.opacity
@@ -80,7 +88,6 @@ struct MeetingReviewView: View {
             }
         }
         .frame(maxWidth: 560)
-        .padding(.bottom, 24)
         .animation(.easeOut(duration: 0.2), value: store.notice)
     }
 
@@ -131,6 +138,7 @@ struct MeetingReviewView: View {
 private struct MeetingReviewToast: View {
     let store: MeetingsStore
     let notice: String
+    let material: AppearanceMaterial
     @State private var hovering = false
 
     var body: some View {
@@ -150,9 +158,7 @@ private struct MeetingReviewToast: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(Theme.surface, in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
-        .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+        .floatingControl(material)
         .onHover { hovering = $0 }
         .task(id: hovering ? nil : notice) {
             guard !hovering else { return }
@@ -183,20 +189,28 @@ struct MeetingReviewHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
                 title
                 Spacer(minLength: 12)
                 actions
                     .fixedSize(horizontal: true, vertical: false)
-                    .frame(height: 32)
             }
-            Text(facts).metaText(Theme.inkSecondary)
-            if update == nil, let receipt = snapshot.currentArtifact?.receipt {
-                Text(receipt.line).metaText(Theme.inkTertiary)
+            .frame(height: 36)
+            HStack(spacing: 6) {
+                Text(facts).metaText(Theme.inkSecondary)
+                if update == nil, let receipt = snapshot.currentArtifact?.receipt {
+                    Text("·").metaText(Theme.inkTertiary)
+                    Text(receipt.line).metaText(Theme.inkTertiary).help(receipt.line)
+                }
             }
-            status
+            .lineLimit(1)
+            ZStack(alignment: .leading) {
+                Text(" ").metaText().hidden()
+                status
+            }
+            .lineLimit(1)
         }
-        .padding(.bottom, 24)
+        .padding(.bottom, 16)
     }
 
     @ViewBuilder
@@ -213,14 +227,14 @@ struct MeetingReviewHeader: View {
             Button { start() } label: {
                 Text(snapshot.session.title)
                     .heroText()
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .help(snapshot.session.title)
             .buttonStyle(.plain)
             .disabled(!store.editable)
             .accessibilityHint(store.editable ? "Edit the title" : "")
             .accessibilityAddTraits(.isHeader)
-            .pageHeadline()
         }
     }
 
@@ -369,6 +383,7 @@ struct MeetingReviewHeader: View {
             Text(text)
                 .metaText(color)
                 .textSelection(.enabled)
+                .help(String(text.characters))
             actions()
         }
     }
@@ -464,9 +479,9 @@ struct MeetingReviewHeader: View {
     }
 }
 
-/// The three readings as one segmented control, and the transcript's search
-/// at the end of the row. The row keeps one height on every tab, so
-/// switching never moves the page.
+/// The readings as one segmented control, and the transcript's search at the
+/// end of the row. The transcript's controls hold their place on every tab,
+/// so the row is one size wherever it is and switching never moves it.
 struct MeetingReviewTabs: View {
     let store: MeetingsStore
 
@@ -477,13 +492,13 @@ struct MeetingReviewTabs: View {
                 Spacer(minLength: 0)
                 transcriptControls
             }
+            .frame(height: 32)
             VStack(alignment: .leading, spacing: 12) {
                 navigation
                 transcriptControls
             }
         }
-        .frame(minHeight: 32, alignment: .top)
-        .padding(.bottom, 24)
+        .padding(.bottom, 12)
     }
 
     private var navigation: some View {
@@ -499,7 +514,8 @@ struct MeetingReviewTabs: View {
 
     @ViewBuilder
     private var transcriptControls: some View {
-        if store.tab == .transcript && !store.transcriptDeleted {
+        if !store.transcriptDeleted {
+            let shown = store.tab == .transcript
             HStack(spacing: 12) {
                 Picker("Wording", selection: Binding(
                     get: { store.originalWording }, set: { store.chooseOriginalWording($0) })) {
@@ -510,6 +526,10 @@ struct MeetingReviewTabs: View {
                 .fixedSize()
                 TranscriptSearchField(store: store)
             }
+            .frame(height: 32)
+            .opacity(shown ? 1 : 0)
+            .disabled(!shown)
+            .accessibilityHidden(!shown)
         }
     }
 

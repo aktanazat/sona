@@ -298,3 +298,44 @@ enum VocabularyDraft {
         return applied + localDrafts.filter { !appliedPairs.contains(pairKey($0)) }
     }
 }
+
+/// A name Sona keeps hearing in meetings that no spelling covers yet: a word
+/// capitalized where grammar does not ask for a capital.
+struct HeardWord: Decodable, Identifiable {
+    let text: String
+    let occurrences: UInt64
+    let meetingsCount: UInt64
+
+    var id: String { text }
+}
+
+struct HeardWords: Decodable {
+    let schemaVersion: UInt32
+    let revision: UInt64
+    let entries: [HeardWord]
+}
+
+/// An answer to one heard word. The core keeps it, so a dismissed word stays
+/// quiet on every surface that mines it.
+///
+/// The key is normalized where it lands and cannot be shown back to anybody,
+/// so the display form travels beside it.
+struct HeardWordDecision: Encodable {
+    let candidateKey: String
+    let status: String
+
+    private enum CodingKeys: String, CodingKey {
+        case loopKind = "loop_kind"
+        case candidateKey = "candidate_key"
+        case status
+        case displayText = "display_text"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode("vocabulary_term", forKey: .loopKind)
+        try container.encode(candidateKey, forKey: .candidateKey)
+        try container.encode(status, forKey: .status)
+        try container.encode(candidateKey, forKey: .displayText)
+    }
+}
