@@ -620,7 +620,10 @@ final class MeetingsStore {
 
     /// "Deleted 12 Mar · gone in 5 days", the deadline read as whole days.
     func expiry(of entry: MeetingTrashEntry) -> String {
-        let remaining = Double(entry.expiresAtUtcMs - Int64(Date().timeIntervalSince1970 * 1000))
+        guard let expiresAtUtcMs = entry.expiresAtUtcMs else {
+            return "Removed \(entry.deletedAt.short) by your retention setting · stays until you delete it"
+        }
+        let remaining = Double(expiresAtUtcMs - Int64(Date().timeIntervalSince1970 * 1000))
         let days = Int((remaining / Double(MeetingsStore.dayMs)).rounded(.up))
         let deleted = "Deleted \(entry.deletedAt.short)"
         if days <= 0 { return "\(deleted) · gone today" }

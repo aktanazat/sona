@@ -318,9 +318,10 @@ struct MeetingReviewHeader: View {
         "About “\(snapshot.session.title)” (sona://meeting/\(snapshot.session.sessionId)): "
     }
 
-    /// At most one line under the facts: what the core refused, else a remote
-    /// run that has not stopped, else the run under way, else what became of
-    /// the notes and the voices. Each carries the one thing to do about it.
+    /// At most one line under the facts: what the core refused, else a deleted
+    /// transcript, else a remote run that has not stopped, else the run under
+    /// way, else deleted audio, else what became of the notes and the voices.
+    /// Each carries the one thing to do about it.
     @ViewBuilder
     private var status: some View {
         if let error = store.error {
@@ -342,6 +343,10 @@ struct MeetingReviewHeader: View {
             }
         } else if let update {
             MeetingProcessingLine(update: update)
+        } else if store.audioDeleted {
+            statusLine(AttributedString("Audio deleted by your retention setting. Words and notes are kept.")) {
+                EmptyView()
+            }
         } else if let standing {
             statusLine(standing) {
                 if processing.offersSettings {

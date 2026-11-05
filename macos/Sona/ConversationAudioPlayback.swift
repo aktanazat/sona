@@ -282,6 +282,14 @@ final class ConversationAudioPlayback {
             } catch {
                 guard expected == generation, !Task.isCancelled else { return }
                 let refusal = (error as? CoreError)?.remote(as: MeetingCommandError.self)
+                if refusal == .notFound {
+                    let retained: Bool? = try? await core.request("conversation_audio_retained", ["sessionId": sessionId])
+                    guard expected == generation, !Task.isCancelled else { return }
+                    if retained == false {
+                        fail("Audio not kept.")
+                        return
+                    }
+                }
                 fail(refusal == .captureLeaseBusy
                     ? Self.heldNotice : refusal?.label ?? "Recording could not be played.")
             }

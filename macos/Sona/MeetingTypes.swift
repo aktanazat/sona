@@ -1520,11 +1520,12 @@ struct MeetingTrashEntry: Decodable, Identifiable {
     let jobId: MeetingDeletionJobId
     let title: String
     let deletedAtUtcMs: Int64
-    let expiresAtUtcMs: Int64
+    /// Nil for a meeting a retention setting removed: it stays until someone
+    /// restores or deletes it.
+    let expiresAtUtcMs: Int64?
 
     var id: MeetingDeletionJobId { jobId }
     var deletedAt: Date { Date(timeIntervalSince1970: TimeInterval(deletedAtUtcMs) / 1000) }
-    var expiresAt: Date { Date(timeIntervalSince1970: TimeInterval(expiresAtUtcMs) / 1000) }
 }
 
 // MARK: - Folders
