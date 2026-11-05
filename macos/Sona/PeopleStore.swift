@@ -53,8 +53,6 @@ final class PeopleStore {
 
     /// What is still open across everybody, newest first.
     private(set) var inbox: [PersonOpenLoop] = []
-    /// Terms Sona keeps hearing and cannot spell.
-    private(set) var candidates: [PeopleVocabularyCandidate] = []
     /// The meetings a manual link can reach, read a page at a time.
     private(set) var linkPicker = LinkPicker()
     /// Two saved voices from different models cannot be combined. The merge
@@ -144,8 +142,7 @@ final class PeopleStore {
             async let list: Void = loadList(stamp)
             async let companies: Void = loadCompanies(stamp)
             async let inbox: Void = loadInbox(stamp)
-            async let candidates: Void = loadCandidates(stamp)
-            _ = await (list, companies, inbox, candidates)
+            _ = await (list, companies, inbox)
         case let .person(personId):
             async let detail: Void = loadDetail(personId, stamp)
             async let list: Void = loadList(stamp)
@@ -227,28 +224,6 @@ final class PeopleStore {
         } catch {
             guard stamp == generation else { return }
             inbox = []
-        }
-    }
-
-    private func loadCandidates(_ stamp: UInt64) async {
-        do {
-            let result: PeopleVocabularyCandidates = try await core.request("vocabulary_candidates")
-            guard stamp == generation else { return }
-            candidates = result.entries
-        } catch {
-            guard stamp == generation else { return }
-            candidates = []
-        }
-    }
-
-    /// Answers one mined term with "no". The store remembers the answer, so
-    /// the re-read after it is what takes the row off the list — nothing here
-    /// removes it locally.
-    func dismissCandidate(_ text: String) {
-        act { [self] in
-            let decision = PeopleLearningDecision(candidateKey: text, status: "dismissed")
-            try await core.request("learning_decide", ["request": decision])
-            await loadCandidates(generation)
         }
     }
 

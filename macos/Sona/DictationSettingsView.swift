@@ -56,11 +56,7 @@ struct DictationSettingsView<DataRows: View>: View {
             }
             PageSection("Shortcuts and commands") {
                 Card {
-                    /// The cancel chord exists only when a tap-to-start binding
-                    /// can leave a recording running with nothing holding it.
-                    if !store.settings.pushToTalk {
-                        ShortcutCaptureRow(store: store, id: "cancel")
-                    }
+                    ShortcutCaptureRow(store: store, id: "cancel")
                     ToggleRow(
                         title: "Voice command mode",
                         detail: "Hold the command shortcut and say what to change about the text you have selected, or ask a question.",

@@ -177,13 +177,13 @@ struct CaptureScreen: View {
     private var hint: String {
         switch model.capture {
         case .idle:
-            let hold = model.settings.settings.pushToTalk ? "hold to talk" : "tap to toggle"
-            return "\(hold) · \(model.activeModel?.name ?? "No model")"
+            let start = model.settings.settings.pushToTalk ? "hold to talk, or tap for hands-free" : "tap to start and stop"
+            return "\(start) · \(model.activeModel?.name ?? "No model")"
         case .recording:
-            /* A shortcut hold ends when the keys go up; a toggle or the Start
-             * button ends with the shortcut again or Stop. The hint must not
-             * tell a toggle to release. */
-            let finish = model.settings.settings.pushToTalk ? "release to paste" : "press again or Stop to paste"
+            /* A hold ends when the keys go up; a tap, a toggle or the Start
+             * button ends with the shortcut again or Stop. Which one opened
+             * this recording is the core's to know, so the hint names both. */
+            let finish = model.settings.settings.pushToTalk ? "let go, or tap again, to paste" : "press again or Stop to paste"
             return "\(finish) · \(model.settings.settings.selectedMicrophone ?? "Default microphone")"
         case .working:
             return "the words land in the app in front"

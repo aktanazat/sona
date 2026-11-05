@@ -41,6 +41,12 @@ final class VocabularyStore {
     /// instead of an empty list that would look like "no samples".
     private(set) var samplesUnreadable = false
 
+    // MARK: Heard in meetings
+
+    /// Names Sona keeps hearing in meetings that no spelling covers yet. A
+    /// kept word becomes a spelling, which the core then leaves off this list.
+    private(set) var heardWords: [HeardWord] = []
+
     // MARK: State
 
     private(set) var loading = true
@@ -74,6 +80,42 @@ final class VocabularyStore {
         await loadSettings()
         await loadLists()
         await loadSamples()
+    }
+
+    /// Read on every visit: the list follows the meetings, not this page.
+    func loadHeardWords() async {
+        do {
+            let result: HeardWords = try await core.request("vocabulary_candidates")
+            heardWords = result.entries
+        } catch {
+            heardWords = []
+        }
+    }
+
+    /// Keeps a heard word as Sona already writes it. The spelling is the
+    /// write; the accepted answer is what meeting series learn from.
+    func keep(_ word: HeardWord) {
+        answer(word, "accepted") { [weak self] in
+            try await self?.learnSpelling(spoken: word.text.lowercased(), written: word.text)
+        }
+    }
+
+    /// Answers a heard word with "no". The core remembers the answer, so the
+    /// re-read is what takes the row away.
+    func dismiss(_ word: HeardWord) {
+        answer(word, "dismissed") {}
+    }
+
+    private func answer(_ word: HeardWord, _ status: String, first: @escaping () async throws -> Void) {
+        write({ [weak self] in
+            guard let self else { return }
+            try await first()
+            try await core.request(
+                "learning_decide", ["request": HeardWordDecision(candidateKey: word.text, status: status)])
+            await loadHeardWords()
+        }, retry: { [weak self] in
+            self?.answer(word, status, first: first)
+        })
     }
 
     // MARK: The merged list
@@ -323,25 +365,8 @@ final class VocabularyStore {
         }
         switch kind {
         case .vocabulary:
-            // The core's own single-pair upsert, which is what "learn this
-            // spelling" means everywhere else in the app.
             write({ [weak self] in
-                guard let self else {
-                    return
-                }
-                try await core.request(
-                    "add_vocabulary_correction",
-                    VocabularyCorrectionRequest(spoken: spoken, written: written, scope: .global)
-                )
-                // The upsert answers with the one pair it stored; the list is
-                // what the file now holds, in the file's own order.
-                let list: [VocabularyEntry] = try await core.request(
-                    "list_vocabulary_entries",
-                    VocabularyScopeRequest(scope: .global)
-                )
-                entries = VocabularyDraft.mergeAppliedCsv(entries, list)
-                syncedEntries = list
-                savedEntryCount = list.count
+                try await self?.learnSpelling(spoken: spoken, written: written)
             }, retry: { [weak self] in
                 self?.add(kind: kind, left: left, right: right)
             })
@@ -357,6 +382,24 @@ final class VocabularyStore {
                 try await core.request("upsert_snippet", SnippetRequest(snippet: draft))
             }
         }
+    }
+
+    /// The core's own single-pair upsert, which is what "learn this spelling"
+    /// means everywhere else in the app.
+    private func learnSpelling(spoken: String, written: String) async throws {
+        try await core.request(
+            "add_vocabulary_correction",
+            VocabularyCorrectionRequest(spoken: spoken, written: written, scope: .global)
+        )
+        // The upsert answers with the one pair it stored; the list is what the
+        // file now holds, in the file's own order.
+        let list: [VocabularyEntry] = try await core.request(
+            "list_vocabulary_entries",
+            VocabularyScopeRequest(scope: .global)
+        )
+        entries = VocabularyDraft.mergeAppliedCsv(entries, list)
+        syncedEntries = list
+        savedEntryCount = list.count
     }
 
     // MARK: The four switches

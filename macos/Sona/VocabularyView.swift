@@ -38,9 +38,11 @@ struct VocabularyView: View {
                     .padding(.bottom, 20)
             }
             switches
+            heardSection
             rulesSection
             samplesSection
         }
+        .task { await store.loadHeardWords() }
         .onChange(of: focus) { previous, _ in
             commit(previous)
         }
@@ -114,6 +116,42 @@ struct VocabularyView: View {
         }
         .disabled(store.busy)
         .padding(.bottom, 28)
+    }
+
+    // MARK: Heard in meetings
+
+    /// Names from meetings that no spelling covers yet. Keep teaches the
+    /// spelling as heard; Dismiss tells Sona to stop offering it.
+    @ViewBuilder
+    private var heardSection: some View {
+        if !store.heardWords.isEmpty {
+            PageSection("Heard in your meetings") {
+                Card {
+                    ForEach(store.heardWords) { word in
+                        CardRow {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(word.text).bodyText(14)
+                                Text(heard(word)).metaText().monospacedDigit()
+                            }
+                        } trailing: {
+                            HStack(spacing: 8) {
+                                Button("Dismiss") { store.dismiss(word) }
+                                    .buttonStyle(.quiet)
+                                Button("Keep spelling") { store.keep(word) }
+                                    .buttonStyle(.compact)
+                            }
+                            .disabled(store.busy)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func heard(_ word: HeardWord) -> String {
+        let times = word.occurrences == 1 ? "Heard once" : "Heard \(word.occurrences) times"
+        let meetings = word.meetingsCount == 1 ? "1 meeting" : "\(word.meetingsCount) meetings"
+        return "\(times) in \(meetings)"
     }
 
     // MARK: The merged rule list

@@ -20,7 +20,9 @@ struct EssentialsView<MeetingRows: View>: View {
                 ShortcutCaptureRow(store: store, id: "transcribe")
                 ToggleRow(
                     title: "Push to talk",
-                    detail: "Hold the shortcut to record, release to stop.",
+                    detail: store.settings.pushToTalk
+                        ? "Hold the shortcut to talk and let go to stop. For a long stretch, tap it once and talk hands-free, then tap it again to stop."
+                        : "Tap the shortcut to start, and tap it again to stop.",
                     isOn: Binding(
                         get: { store.settings.pushToTalk },
                         set: { value in Task { await store.setPushToTalk(value) } }

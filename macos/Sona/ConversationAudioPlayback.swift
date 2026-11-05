@@ -340,8 +340,26 @@ final class ConversationAudioPlayback {
 
 struct ConversationAudioBar: View {
     let audio: ConversationAudioPlayback
+    /// Over the page rather than in its column, in the window's material: the
+    /// meeting page floats the player at the foot of the window, so starting
+    /// one never moves the page.
+    var floating: AppearanceMaterial?
 
     var body: some View {
+        if audio.loading || audio.sessionId != nil || audio.error != nil {
+            if let floating {
+                row
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: 520)
+                    .floatingControl(floating)
+            } else {
+                row
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var row: some View {
         if audio.loading {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)

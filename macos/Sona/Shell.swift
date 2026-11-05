@@ -121,8 +121,7 @@ struct Shell: View {
                         model.go(.meetings)
                     },
                     ingestDocument: { model.showSettings(.importing) },
-                    deleteDocument: { id in Task { await model.documents.delete(id: id) } },
-                    openVocabulary: { model.showSettings(.vocabulary) })
+                    deleteDocument: { id in Task { await model.documents.delete(id: id) } })
             case .scratchpad:
                 ScratchpadView(store: model.scratchpad, share: { note in
                     Task {
@@ -449,10 +448,7 @@ struct Sidebar: View {
         .padding(.horizontal, 8)
         .frame(width: Theme.sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Theme.rail.ignoresSafeArea())
-        .overlay(alignment: .trailing) {
-            Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
-        }
+        .sidebarSurface(model.about.material)
     }
 
     /// The small live number beside a row: open tasks in active projects,
@@ -471,6 +467,29 @@ struct Sidebar: View {
 
     private var gap: some View {
         Spacer().frame(height: 14)
+    }
+}
+
+private extension View {
+    /// The sidebar is navigation, the layer Liquid Glass is for: with the
+    /// glass material on macOS 26 it floats as a glass pane inset from the
+    /// window's edges, the way the system's own split views draw theirs.
+    /// Otherwise it keeps the opaque rail.
+    @ViewBuilder
+    func sidebarSurface(_ material: AppearanceMaterial) -> some View {
+        if material == .glass, #available(macOS 26.0, *) {
+            background {
+                Color.clear
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(6)
+                    .ignoresSafeArea()
+            }
+        } else {
+            background(Theme.rail.ignoresSafeArea())
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
+                }
+        }
     }
 }
 

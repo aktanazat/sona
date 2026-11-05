@@ -342,47 +342,6 @@ struct PeopleOpenLoopsInbox: Decodable {
     let entries: [PersonOpenLoop]
 }
 
-/// A term Sona keeps hearing in meetings and does not know how to write.
-struct PeopleVocabularyCandidate: Decodable, Identifiable {
-    let text: String
-    let occurrences: UInt64
-    let meetingsCount: UInt64
-
-    var id: String { text }
-}
-
-struct PeopleVocabularyCandidates: Decodable {
-    let schemaVersion: UInt32
-    let revision: UInt64
-    let entries: [PeopleVocabularyCandidate]
-}
-
-/// An answer to one mined term. The store keeps it, not the page: the same
-/// decision silences the candidate on every surface that lists it, and the
-/// candidate list already arrives with answered terms taken out.
-///
-/// The key is normalized where it lands and cannot be shown back to anybody,
-/// so the display form travels beside it.
-struct PeopleLearningDecision: Encodable {
-    let candidateKey: String
-    let status: String
-
-    private enum CodingKeys: String, CodingKey {
-        case loopKind = "loop_kind"
-        case candidateKey = "candidate_key"
-        case status
-        case displayText = "display_text"
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode("vocabulary_term", forKey: .loopKind)
-        try container.encode(candidateKey, forKey: .candidateKey)
-        try container.encode(status, forKey: .status)
-        try container.encode(candidateKey, forKey: .displayText)
-    }
-}
-
 // MARK: - Briefing
 
 struct BriefingLastMeeting: Decodable {
