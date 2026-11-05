@@ -321,8 +321,8 @@ mod tests {
         let packs = notes_packs(&evidence, &scope, 700).expect("sectioned unicode turn");
         let mut recovered = String::new();
         for pack in packs {
-            assert!(pack.len() <= 700);
-            let value: Value = serde_json::from_str(&pack).expect("bounded pack JSON");
+            assert!(pack.as_ref().len() <= 700);
+            let value: Value = serde_json::from_str(pack.as_ref()).expect("bounded pack JSON");
             for item in value["transcript"].as_array().expect("transcript") {
                 assert_eq!(item["entity_id"], evidence.transcript[0].citation.entity_id);
                 recovered.push_str(item["text"].as_str().expect("turn text"));
@@ -669,8 +669,8 @@ mod tests {
             .expect("individual summary lines fit even when their joined display block does not");
         let mut cited_sources = Vec::new();
         for pack in packed {
-            assert!(pack.len() <= 2_000);
-            let input: Value = serde_json::from_str(&pack).expect("bounded evidence JSON");
+            assert!(pack.as_ref().len() <= 2_000);
+            let input: Value = serde_json::from_str(pack.as_ref()).expect("bounded evidence JSON");
             for fact in input["section_facts"].as_array().expect("section facts") {
                 if fact["kind"] == "summary" {
                     cited_sources.extend(citation_ids(&fact["value"]["citations"]));
@@ -800,6 +800,78 @@ mod tests {
             result,
             Err(ReadingError::Invalid(EngineFailureCause::EvidencePack))
         ));
+    }
+
+    /// Answers a part of one turn, and cuts off the reply to a part of more
+    /// turns the way Apple Intelligence cuts off a reply at its limit.
+    struct CutOffWhenDense;
+
+    impl MeetingTextGenerator for CutOffWhenDense {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "cut-off-when-dense"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            6_000
+        }
+        fn generate(
+            &self,
+            _: &str,
+            pack: &str,
+            _: i32,
+            _: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let input: Value = serde_json::from_str(pack).expect("bounded input");
+            let mut ids = Vec::new();
+            if let Some(turns) = input["transcript"].as_array() {
+                if turns.len() > 1 {
+                    return Err(MeetingTextGenerationError::ReplyNotStructured);
+                }
+                for turn in turns {
+                    ids.push(turn["entity_id"].as_str().expect("source id").to_string());
+                }
+            } else {
+                for fact in input["section_facts"].as_array().expect("section facts") {
+                    for id in citation_ids(&fact["value"]["citations"]) {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                }
+            }
+            let cited = json!({"text": "The team reviewed the dashboard.", "citations": ids});
+            Ok(json!({
+                "summary": [cited.clone()], "outline": [], "decisions": [],
+                "action_items": [], "key_questions": [], "risks": [],
+                "follow_up_draft": cited
+            })
+            .to_string())
+        }
+    }
+
+    #[test]
+    fn a_part_too_dense_for_one_reply_is_read_in_halves() {
+        let evidence = gradual_evidence();
+        let result = notes(&CutOffWhenDense, &evidence, "Read the meeting.", || Ok(()))
+            .expect("each half fits in one reply");
+        assert_eq!(
+            result
+                .summary
+                .citations
+                .iter()
+                .map(|citation| citation.segment_id.uuid().to_string())
+                .collect::<Vec<_>>(),
+            evidence
+                .transcript
+                .iter()
+                .map(|item| item.citation.entity_id.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     struct DenseSourceGenerator {

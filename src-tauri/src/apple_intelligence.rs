@@ -54,6 +54,9 @@ pub(crate) enum AppleFailureKind {
     UnsupportedLanguage,
     /// The bridge's own deadline ended the wait.
     TimedOut,
+    /// The model answered, but the app could not read or use the reply. The
+    /// message says why without quoting the reply.
+    UnusableReply,
     /// Anything else; the message is the only account of it.
     Other,
 }
@@ -85,6 +88,14 @@ impl AppleGenerationError {
         Self {
             pass: Some(pass),
             ..self
+        }
+    }
+
+    pub(crate) fn unusable_reply(message: String) -> Self {
+        Self {
+            kind: AppleFailureKind::UnusableReply,
+            message,
+            pass: None,
         }
     }
 }
