@@ -2532,35 +2532,33 @@ impl MeetingProcessingService {
             )) => {
                 return Ok(ArtifactGenerationOutcome::Unreachable);
             }
-            // The engine would not write structured notes about this meeting
-            // but may still write it up as plain text, which its content
-            // filter governs more loosely.
-            Err(complete_reading::ReadingError::Engine(
-                stop @ (MeetingTextGenerationError::SafetyBlocked
-                | MeetingTextGenerationError::Declined),
-            )) => match complete_reading::plain_notes(
-                generator.as_ref(),
-                &evidence,
-                &turn_speakers(&segments, &speaker_names),
-                &plain_notes_prompt(language),
-                checkpoint,
-            ) {
-                Ok(text) => {
-                    log::warn!("Meeting {session_id:?} got plain notes after {stop:?}");
-                    plain_artifacts(text, stop.into())
-                }
-                Err(complete_reading::ReadingError::Stopped(failure)) => return Err(failure),
-                Err(error) => {
-                    log::warn!("Meeting {session_id:?} got no plain notes either: {error:?}");
-                    record_failure();
-                    return Ok(ArtifactGenerationOutcome::Failed(stop.into()));
-                }
-            },
+            // The engine could not write structured notes about this meeting,
+            // for whatever reason, but may still write it up as plain text,
+            // which asks less of each reply and which its content filter
+            // governs more loosely.
             Err(error) => {
-                record_failure();
-                return Ok(ArtifactGenerationOutcome::Failed(reading_error_cause(
-                    error,
-                )));
+                let stop = reading_error_cause(error);
+                match complete_reading::plain_notes(
+                    generator.as_ref(),
+                    &evidence,
+                    &turn_speakers(&segments, &speaker_names),
+                    &plain_notes_prompt(language),
+                    checkpoint,
+                ) {
+                    Ok((text, left_out)) => {
+                        log::warn!("Meeting {session_id:?} got plain notes after {stop:?}");
+                        plain_artifacts(text, stop, left_out)
+                    }
+                    Err(complete_reading::ReadingError::Stopped(failure)) => return Err(failure),
+                    Err(complete_reading::ReadingError::Engine(
+                        MeetingTextGenerationError::Unreachable,
+                    )) => return Ok(ArtifactGenerationOutcome::Unreachable),
+                    Err(error) => {
+                        log::warn!("Meeting {session_id:?} got no plain notes either: {error:?}");
+                        record_failure();
+                        return Ok(ArtifactGenerationOutcome::Failed(stop));
+                    }
+                }
             }
         };
         // The ledger is a second reading of the same evidence, asked for
@@ -5330,6 +5328,7 @@ fn validate_artifact_output(
         ledger: None,
         ledger_failure: None,
         plain: false,
+        left_out: Vec::new(),
     })
 }
 
@@ -5597,7 +5596,11 @@ fn plain_notes_prompt(language: MeetingNotesLanguage) -> String {
 
 /// Plain notes as a revision: the summary holds them, and nothing claims a
 /// source, a decision or a ledger the engine did not write.
-fn plain_artifacts(text: String, stopped_by: EngineFailureCause) -> GeneratedMeetingArtifacts {
+fn plain_artifacts(
+    text: String,
+    stopped_by: EngineFailureCause,
+    left_out: Vec<LeftOutSpan>,
+) -> GeneratedMeetingArtifacts {
     let empty = || CitedArtifactText {
         text: String::new(),
         citations: Vec::new(),
@@ -5617,6 +5620,7 @@ fn plain_artifacts(text: String, stopped_by: EngineFailureCause) -> GeneratedMee
         ledger: None,
         ledger_failure: Some(stopped_by),
         plain: true,
+        left_out,
     }
 }
 
@@ -8018,6 +8022,65 @@ pub(crate) mod tests {
                 ReplyShape::PlainNotes
             ],
             "a stopped part is asked once more and then twice under short instructions, and an engine that refused the structured reading is asked for no ledger"
+        );
+    }
+
+    /// The work laptop's meeting: notes that cite lines the meeting does not
+    /// have, on every try, still end as plain notes rather than none.
+    #[test]
+    fn notes_the_transcript_never_backs_still_write_plain_notes() {
+        struct CitesNothingReal;
+        impl MeetingTextGenerator for CitesNothingReal {
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn model_id(&self) -> &'static str {
+                "cites-nothing-real"
+            }
+            fn model_version(&self) -> Cow<'static, str> {
+                Cow::Borrowed("1")
+            }
+            fn max_input_bytes(&self) -> usize {
+                usize::MAX
+            }
+            fn generate(
+                &self,
+                _system_prompt: &str,
+                _evidence: &str,
+                _max_tokens: i32,
+                shape: ReplyShape,
+            ) -> Result<String, MeetingTextGenerationError> {
+                Ok(match shape {
+                    ReplyShape::PlainNotes => "The fixture meeting had one sentence.".to_string(),
+                    _ => r#"{"summary":[{"text":"Pricing stayed open.","citations":["ffffffff"]}],
+                        "outline":[],"decisions":[],"action_items":[],"key_questions":[],
+                        "risks":[],"follow_up_draft":{"text":"","citations":[]}}"#
+                        .to_string(),
+                })
+            }
+        }
+        let fixture = artifact_store_fixture();
+        let outcome = MeetingProcessingService::new(None)
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                1,
+                GenerationIntent::Pipeline,
+                Some(Arc::new(CitesNothingReal)),
+            )
+            .expect("artifact generation");
+        let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
+            panic!("plain notes are written notes, not a failure");
+        };
+        let content = artifact.content.expect("plain notes");
+        assert!(content.plain);
+        assert_eq!(
+            content.summary.text,
+            "The fixture meeting had one sentence."
+        );
+        assert_eq!(
+            content.ledger_failure,
+            Some(EngineFailureCause::ReplyRejected)
         );
     }
 

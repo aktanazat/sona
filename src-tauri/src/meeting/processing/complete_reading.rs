@@ -38,11 +38,13 @@ pub(super) fn generate_part(
 }
 
 /// Rows joined into one request, keeping where each row sits so that a part
-/// can be read again in halves.
+/// can be read again in halves, and which transcript lines each row came
+/// from so that a part left out can be named.
 #[derive(Debug)]
 pub(super) struct Pack {
     text: String,
     rows: Vec<Range<usize>>,
+    sources: Vec<Range<usize>>,
 }
 
 impl AsRef<str> for Pack {
@@ -52,39 +54,66 @@ impl AsRef<str> for Pack {
 }
 
 impl Pack {
-    fn new<'a>(prefix: &str, suffix: &str, rows: impl IntoIterator<Item = &'a str>) -> Self {
+    fn new<'a>(
+        prefix: &str,
+        suffix: &str,
+        rows: impl IntoIterator<Item = (&'a str, Range<usize>)>,
+    ) -> Self {
         let mut pack = Self {
             text: String::from(prefix),
             rows: Vec::new(),
+            sources: Vec::new(),
         };
-        for row in rows {
-            pack.push(row);
+        for (row, sources) in rows {
+            pack.push(row, sources);
         }
         pack.text.push_str(suffix);
         pack
     }
 
-    fn push(&mut self, row: &str) {
+    fn push(&mut self, row: &str, sources: Range<usize>) {
         if !self.rows.is_empty() {
             self.text.push(',');
         }
         let start = self.text.len();
         self.text.push_str(row);
         self.rows.push(start..self.text.len());
+        self.sources.push(sources);
     }
 
     fn halves(&self) -> Option<[Self; 2]> {
-        let (first, second) = self.rows.split_at(self.rows.len() / 2);
+        let middle = self.rows.len() / 2;
+        let (first, second) = self.rows.split_at(middle);
         let (start, end) = (first.first()?.start, second.last()?.end);
         let (prefix, suffix) = (&self.text[..start], &self.text[end..]);
-        let rows = |rows: &[Range<usize>]| {
+        let (first_sources, second_sources) = self.sources.split_at(middle);
+        let rows = |rows: &[Range<usize>], sources: &[Range<usize>]| {
             Self::new(
                 prefix,
                 suffix,
-                rows.iter().map(|row| &self.text[row.clone()]),
+                rows.iter()
+                    .zip(sources)
+                    .map(|(row, sources)| (&self.text[row.clone()], sources.clone())),
             )
         };
-        Some([rows(first), rows(second)])
+        Some([rows(first, first_sources), rows(second, second_sources)])
+    }
+
+    /// The transcript lines this part was read from, first to last.
+    fn sources(&self) -> Range<usize> {
+        self.sources.iter().cloned().fold(0..0, span)
+    }
+}
+
+/// The transcript lines two pieces were read from together; an empty range
+/// is a piece read from none.
+fn span(all: Range<usize>, more: Range<usize>) -> Range<usize> {
+    if all.is_empty() {
+        more
+    } else if more.is_empty() {
+        all
+    } else {
+        all.start.min(more.start)..all.end.max(more.end)
     }
 }
 
@@ -95,24 +124,26 @@ impl Pack {
 const MAX_SPLITS: u32 = 2;
 
 /// A part read whole or, when its reply came back unusable, in halves, each
-/// half halved again while splits are left.
+/// half halved again while splits are left. A piece that still fails goes
+/// to `failed`, which either ends the reading or leaves that piece out.
 fn read_in_halves<T>(
     pack: &Pack,
     splits: u32,
     read: &impl Fn(&str) -> Result<T, ReadingError>,
+    failed: &mut impl FnMut(&Pack, ReadingError) -> Result<(), ReadingError>,
 ) -> Result<Vec<T>, ReadingError> {
-    match read(pack.as_ref()) {
-        Ok(section) => Ok(vec![section]),
-        Err(error) if splits > 0 && error.unusable() => match pack.halves() {
-            Some([first, second]) => {
-                let mut sections = read_in_halves(&first, splits - 1, read)?;
-                sections.extend(read_in_halves(&second, splits - 1, read)?);
-                Ok(sections)
-            }
-            None => Err(error),
-        },
-        Err(error) => Err(error),
+    let error = match read(pack.as_ref()) {
+        Ok(section) => return Ok(vec![section]),
+        Err(error) => error,
+    };
+    if splits > 0 && error.unusable() {
+        if let Some([first, second]) = pack.halves() {
+            let mut sections = read_in_halves(&first, splits - 1, read, failed)?;
+            sections.extend(read_in_halves(&second, splits - 1, read, failed)?);
+            return Ok(sections);
+        }
     }
+    failed(pack, error).map(|()| Vec::new())
 }
 
 #[derive(Debug)]
@@ -128,6 +159,15 @@ impl ReadingError {
             self,
             Self::Engine(MeetingTextGenerationError::ReplyNotStructured)
                 | Self::Invalid(EngineFailureCause::ReplyNotStructured)
+        )
+    }
+
+    /// Whether this ends the whole reading rather than one piece of it: the
+    /// run was cancelled, or the engine is gone for every later piece too.
+    fn ends_reading(&self) -> bool {
+        matches!(
+            self,
+            Self::Stopped(_) | Self::Engine(MeetingTextGenerationError::Unreachable)
         )
     }
 }
@@ -159,7 +199,7 @@ pub(super) fn evidence_digest(evidence: &ArtifactEvidence) -> Result<String, Run
 }
 
 fn packs(
-    rows: impl IntoIterator<Item = String>,
+    rows: impl IntoIterator<Item = (String, Range<usize>)>,
     prefix: &str,
     suffix: &str,
     budget: usize,
@@ -170,7 +210,7 @@ fn packs(
     }
     let mut result = Vec::new();
     let mut current = Pack::new(prefix, "", []);
-    for row in rows {
+    for (row, sources) in rows {
         if overhead.saturating_add(row.len()) > budget {
             return Err(EngineFailureCause::EvidencePack.into());
         }
@@ -186,7 +226,7 @@ fn packs(
             current.text.push_str(suffix);
             result.push(std::mem::replace(&mut current, Pack::new(prefix, "", [])));
         }
-        current.push(&row);
+        current.push(&row, sources);
     }
     if !current.rows.is_empty() {
         current.text.push_str(suffix);
@@ -216,7 +256,7 @@ fn transcript_rows(
         &str,
         Option<SourceOccurrences<'_, '_>>,
     ) -> Result<String, ReadingError>,
-) -> Result<Vec<String>, ReadingError> {
+) -> Result<Vec<(String, Range<usize>)>, ReadingError> {
     let evidence = scope.evidence();
     let mut rows = Vec::new();
     let mut start = 0;
@@ -244,7 +284,7 @@ fn transcript_rows(
                     }
                 }
                 if let Some((count, row)) = best {
-                    rows.push(row);
+                    rows.push((row, start..start + count));
                     start += count;
                     continue;
                 }
@@ -254,7 +294,7 @@ fn transcript_rows(
                 if rest.len() <= row_budget {
                     let whole = encode(item, rest, &item.citation.entity_id, None)?;
                     if whole.len() <= row_budget {
-                        rows.push(whole);
+                        rows.push((whole, start..start + 1));
                         break;
                     }
                 }
@@ -280,7 +320,7 @@ fn transcript_rows(
                     }
                 }
                 let (end, row) = best.ok_or(EngineFailureCause::EvidencePack)?;
-                rows.push(row);
+                rows.push((row, start..start + 1));
                 rest = &rest[end..];
             }
             start += 1;
@@ -464,7 +504,7 @@ impl<'a> NoteFacts<'a> {
         )
     }
 
-    fn rows(&self, scope: &SourceScope<'_>) -> Result<Vec<String>, ReadingError> {
+    fn rows(&self, scope: &SourceScope<'_>) -> Result<Vec<(String, Range<usize>)>, ReadingError> {
         #[derive(Serialize)]
         struct Outline<'a, 'source> {
             title: NoteFactText<'a, 'source>,
@@ -492,7 +532,12 @@ impl<'a> NoteFacts<'a> {
                     text,
                     citations: SourceIndexes(scope, &row.sources),
                 };
-                rows.push(match &row.value {
+                let sources = row
+                    .sources
+                    .iter()
+                    .chain(&row.detail_sources)
+                    .fold(0..0, |all, &index| span(all, index..index + 1));
+                let text = match &row.value {
                     NoteValue::Text(text) => fact(KINDS[kind], &cited(*text))?,
                     NoteValue::Outline(title, detail) => fact(
                         KINDS[kind],
@@ -512,15 +557,16 @@ impl<'a> NoteFacts<'a> {
                             due_text: *due_text,
                         },
                     )?,
-                });
+                };
+                rows.push((text, sources));
             }
         }
         Ok(rows)
     }
 }
 
-fn packed_bytes(input: &[impl AsRef<str>]) -> usize {
-    input.iter().map(|pack| pack.as_ref().len()).sum()
+fn packed_bytes(input: impl IntoIterator<Item = impl AsRef<str>>) -> usize {
+    input.into_iter().map(|pack| pack.as_ref().len()).sum()
 }
 
 #[cfg(test)]
@@ -528,15 +574,30 @@ fn notes_facts(
     summary: &[RawCitedText],
     section: &GeneratedMeetingArtifacts,
     scope: &SourceScope<'_>,
-) -> Result<Vec<String>, ReadingError> {
+) -> Result<Vec<(String, Range<usize>)>, ReadingError> {
     let mut facts = NoteFacts::default();
     facts.extend(summary, section, scope)?;
     facts.rows(scope)
 }
 
-/// One part's summary and checked notes, several of them when the part was
-/// read in halves. A part the full instructions could not get past the
-/// safety filter is read under the short ones.
+/// A piece of a reading that failed on every try, by the transcript lines
+/// it held.
+#[derive(Debug)]
+pub(super) struct LeftOut {
+    pub(super) sources: Range<usize>,
+    pub(super) error: ReadingError,
+}
+
+/// One part's notes: a summary and checked notes for each piece read, and
+/// the pieces that failed on every try.
+pub(super) struct NotesPart {
+    pub(super) sections: Vec<(Vec<RawCitedText>, GeneratedMeetingArtifacts)>,
+    pub(super) left_out: Vec<LeftOut>,
+}
+
+/// One part's notes, read in halves when a reply came back unusable. A
+/// piece the full instructions could not get past the safety filter is read
+/// under the short ones, and a piece that fails after that is left out.
 fn read_notes_part(
     generator: &dyn MeetingTextGenerator,
     instructions: &str,
@@ -545,7 +606,7 @@ fn read_notes_part(
     scope: &SourceScope<'_>,
     evidence: &ArtifactEvidence,
     check: &dyn Fn() -> Result<(), RunFailure>,
-) -> Result<Vec<(Vec<RawCitedText>, GeneratedMeetingArtifacts)>, ReadingError> {
+) -> Result<NotesPart, ReadingError> {
     let generate = |instructions: &str, text: &str| {
         generate_part(
             generator,
@@ -556,32 +617,99 @@ fn read_notes_part(
             check,
         )
     };
-    read_in_halves(pack, MAX_SPLITS, &|text| {
-        check().map_err(ReadingError::Stopped)?;
-        let output = match generate(instructions, text) {
-            Err(ReadingError::Engine(
-                MeetingTextGenerationError::SafetyBlocked | MeetingTextGenerationError::Declined,
-            )) => {
-                check().map_err(ReadingError::Stopped)?;
-                log::warn!(
-                    "A meeting notes part was stopped twice; reading it under short instructions"
-                );
-                generate(short, text)?
+    let mut left_out = Vec::new();
+    let sections = read_in_halves(
+        pack,
+        MAX_SPLITS,
+        &|text| {
+            check().map_err(ReadingError::Stopped)?;
+            let output = match generate(instructions, text) {
+                Err(ReadingError::Engine(
+                    MeetingTextGenerationError::SafetyBlocked
+                    | MeetingTextGenerationError::Declined,
+                )) => {
+                    check().map_err(ReadingError::Stopped)?;
+                    log::warn!(
+                        "A meeting notes part was stopped twice; reading it under short instructions"
+                    );
+                    generate(short, text)?
+                }
+                result => result?,
+            };
+            check().map_err(ReadingError::Stopped)?;
+            let mut raw = first_json_value::<RawArtifactOutput>(&output)
+                .map_err(|()| ReadingError::Invalid(EngineFailureCause::ReplyNotStructured))?;
+            scope
+                .restore_notes(&mut raw)
+                .map_err(|()| EngineFailureCause::ReplyRejected)?;
+            let content = validate_artifact_output(&raw, &evidence.transcript, &evidence.template)
+                .map_err(|()| EngineFailureCause::ReplyRejected)?;
+            Ok((raw.summary, content))
+        },
+        &mut |piece, error| {
+            if error.ends_reading() {
+                return Err(error);
             }
-            result => result?,
-        };
-        check().map_err(ReadingError::Stopped)?;
-        let mut raw = first_json_value::<RawArtifactOutput>(&output)
-            .map_err(|()| ReadingError::Invalid(EngineFailureCause::ReplyNotStructured))?;
-        scope
-            .restore_notes(&mut raw)
-            .map_err(|()| EngineFailureCause::ReplyRejected)?;
-        let content = validate_artifact_output(&raw, &evidence.transcript, &evidence.template)
-            .map_err(|()| EngineFailureCause::ReplyRejected)?;
-        Ok((raw.summary, content))
-    })
+            left_out.push(LeftOut {
+                sources: piece.sources(),
+                error,
+            });
+            Ok(())
+        },
+    )?;
+    Ok(NotesPart { sections, left_out })
 }
 
+/// The stretches a reading left out, in meeting order, with touching pieces
+/// that failed the same way joined into one.
+pub(super) fn left_out_spans(
+    evidence: &ArtifactEvidence,
+    mut pieces: Vec<LeftOut>,
+) -> Vec<LeftOutSpan> {
+    pieces.sort_by_key(|piece| piece.sources.start);
+    let mut joined: Vec<(Range<usize>, EngineFailureCause)> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let cause = reading_error_cause(piece.error);
+        match joined.last_mut() {
+            Some((sources, last)) if *last == cause && piece.sources.start <= sources.end => {
+                *sources = span(sources.clone(), piece.sources);
+            }
+            _ => joined.push((piece.sources, cause)),
+        }
+    }
+    joined
+        .into_iter()
+        .map(|(sources, cause)| {
+            let lines = evidence.transcript.get(sources).unwrap_or_default();
+            LeftOutSpan {
+                start_offset_ns: lines
+                    .iter()
+                    .filter_map(|line| line.citation.start_offset_ns)
+                    .min(),
+                end_offset_ns: lines
+                    .iter()
+                    .filter_map(|line| line.citation.end_offset_ns)
+                    .max(),
+                cause,
+            }
+        })
+        .collect()
+}
+
+/// The first piece a round left out, as the reason a round that read
+/// nothing ends the reading.
+fn first_left_out(left_out: Vec<LeftOut>, round_start: usize) -> ReadingError {
+    left_out.into_iter().nth(round_start).map_or_else(
+        || EngineFailureCause::EvidencePack.into(),
+        |piece| piece.error,
+    )
+}
+
+/// Notes of the whole meeting, written from every part that could be read.
+/// A part of the transcript that failed on every try is left out and named
+/// on the notes. A joining round reads facts gathered from all over the
+/// meeting, so a piece of it that fails names no stretch: it fails the
+/// notes, as does a first round in which no part could be read.
 pub(super) fn notes(
     generator: &dyn MeetingTextGenerator,
     evidence: &ArtifactEvidence,
@@ -597,11 +725,13 @@ pub(super) fn notes(
     )?;
     let mut instructions = Cow::Borrowed(prompt);
     let mut short = Cow::Borrowed(SHORT_NOTES_PROMPT);
+    let mut left_out = Vec::new();
     for round in 0..MAX_REDUCTION_ROUNDS {
         let input_count = input.len();
+        let round_start = left_out.len();
         let mut sections = Vec::with_capacity(input_count);
         for (index, pack) in input.iter().enumerate() {
-            let read = read_notes_part(
+            let part = read_notes_part(
                 generator,
                 &instructions,
                 &short,
@@ -618,10 +748,25 @@ pub(super) fn notes(
                 );
                 error
             })?;
-            sections.extend(read);
+            for piece in &part.left_out {
+                log::warn!(
+                    "Meeting notes left out a piece of part {} of {input_count} in round {}: {:?}",
+                    index + 1,
+                    round + 1,
+                    piece.error
+                );
+            }
+            sections.extend(part.sections);
+            left_out.extend(part.left_out);
+        }
+        if sections.is_empty() || (round > 0 && left_out.len() > round_start) {
+            return Err(first_left_out(left_out, round_start));
         }
         let sections = match <[_; 1]>::try_from(sections) {
-            Ok([(_, content)]) => return Ok(content),
+            Ok([(_, mut content)]) => {
+                content.left_out = left_out_spans(evidence, left_out);
+                return Ok(content);
+            }
             Err(sections) => sections,
         };
         let scope = &source_scope;
@@ -647,14 +792,16 @@ pub(super) fn notes(
 }
 
 /// Lines of plain text in packs of at most `budget` bytes, a line longer
-/// than that cut on a character boundary.
+/// than that cut on a character boundary, each pack with the transcript
+/// lines it holds.
 fn text_packs(
-    lines: impl IntoIterator<Item = String>,
+    lines: impl IntoIterator<Item = (String, Range<usize>)>,
     budget: usize,
-) -> Result<Vec<String>, ReadingError> {
+) -> Result<Vec<(String, Range<usize>)>, ReadingError> {
     let mut result = Vec::new();
     let mut current = String::new();
-    for line in lines {
+    let mut sources = 0..0;
+    for (line, from) in lines {
         let mut rest = line.as_str();
         while !rest.is_empty() {
             let mut end = rest.len().min(budget);
@@ -666,17 +813,21 @@ fn text_packs(
             }
             let (piece, tail) = rest.split_at(end);
             if !current.is_empty() && current.len() + 1 + piece.len() > budget {
-                result.push(std::mem::take(&mut current));
+                result.push((
+                    std::mem::take(&mut current),
+                    std::mem::replace(&mut sources, 0..0),
+                ));
             }
             if !current.is_empty() {
                 current.push('\n');
             }
             current.push_str(piece);
+            sources = span(sources, from.clone());
             rest = tail;
         }
     }
     if !current.is_empty() {
-        result.push(current);
+        result.push((current, sources));
     }
     if result.is_empty() {
         return Err(EngineFailureCause::EvidencePack.into());
@@ -684,33 +835,36 @@ fn text_packs(
     Ok(result)
 }
 
-/// Notes written as plain text, for a meeting whose structured notes the
-/// engine stopped: the transcript as speaker lines, each part's notes, then
-/// those notes joined until one reply holds them.
+/// Notes written as plain text, for a meeting whose structured notes could
+/// not be written: the transcript as speaker lines, each part's notes, then
+/// those notes joined until one reply holds them. A part of the transcript
+/// that fails is left out and named; a join that fails keeps the parts it
+/// was given, so once one part is read the meeting has notes.
 pub(super) fn plain_notes(
     generator: &dyn MeetingTextGenerator,
     evidence: &ArtifactEvidence,
     speakers: &HashMap<String, &str>,
     prompt: &str,
     check: impl Fn() -> Result<(), RunFailure>,
-) -> Result<String, ReadingError> {
-    let lines =
-        evidence
-            .transcript
-            .iter()
-            .map(|item| match speakers.get(&item.citation.entity_id) {
-                Some(name) => format!("{name}: {}", item.text),
-                None => item.text.clone(),
-            });
+) -> Result<(String, Vec<LeftOutSpan>), ReadingError> {
+    let lines = evidence.transcript.iter().enumerate().map(|(index, item)| {
+        let line = match speakers.get(&item.citation.entity_id) {
+            Some(name) => format!("{name}: {}", item.text),
+            None => item.text.clone(),
+        };
+        (line, index..index + 1)
+    });
     let mut input = text_packs(
         lines,
         evidence_budget(generator, prompt, ARTIFACT_MAX_TOKENS),
     )?;
     let mut instructions = Cow::Borrowed(prompt);
+    let mut left_out = Vec::new();
     for round in 0..MAX_REDUCTION_ROUNDS {
         let input_count = input.len();
+        let round_start = left_out.len();
         let mut parts = Vec::with_capacity(input_count);
-        for (index, pack) in input.iter().enumerate() {
+        for (index, (pack, sources)) in input.iter().enumerate() {
             check().map_err(ReadingError::Stopped)?;
             let reply = generator
                 .generate(
@@ -719,35 +873,58 @@ pub(super) fn plain_notes(
                     ARTIFACT_MAX_TOKENS,
                     ReplyShape::PlainNotes,
                 )
-                .map_err(|error| {
+                .map_err(ReadingError::Engine)
+                .and_then(|reply| match reply.trim() {
+                    "" => Err(EngineFailureCause::ReplyRejected.into()),
+                    reply => Ok(reply.to_string()),
+                });
+            check().map_err(ReadingError::Stopped)?;
+            match reply {
+                Ok(reply) => parts.push((reply, sources.clone())),
+                Err(error) if error.ends_reading() => return Err(error),
+                Err(error) if round > 0 => {
                     log::warn!(
-                        "Plain meeting notes stopped at part {} of {input_count} in round {}: {error:?}",
+                        "Plain meeting notes kept part {} of {input_count} in round {} unjoined: {error:?}",
                         index + 1,
                         round + 1
                     );
-                    ReadingError::Engine(error)
-                })?;
-            check().map_err(ReadingError::Stopped)?;
-            let reply = reply.trim();
-            if reply.is_empty() {
-                return Err(EngineFailureCause::ReplyRejected.into());
+                    parts.push((pack.clone(), sources.clone()));
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Plain meeting notes left out part {} of {input_count} in round {}: {error:?}",
+                        index + 1,
+                        round + 1
+                    );
+                    left_out.push(LeftOut {
+                        sources: sources.clone(),
+                        error,
+                    });
+                }
             }
-            if input_count == 1 {
-                return Ok(reply.to_string());
-            }
-            parts.push(reply.to_string());
         }
+        if parts.is_empty() {
+            return Err(first_left_out(left_out, round_start));
+        }
+        let parts = match <[_; 1]>::try_from(parts) {
+            Ok([(text, _)]) => return Ok((text, left_out_spans(evidence, left_out))),
+            Err(parts) => parts,
+        };
         instructions = Cow::Owned(format!("{prompt}{PLAIN_NOTES_JOIN}"));
         let next = text_packs(
             parts,
             evidence_budget(generator, &instructions, ARTIFACT_MAX_TOKENS),
         )?;
-        if round > 0 && packed_bytes(&next) >= packed_bytes(&input) {
-            return Err(EngineFailureCause::EvidencePack.into());
-        }
+        let bytes =
+            |packs: &[(String, Range<usize>)]| packed_bytes(packs.iter().map(|(text, _)| text));
+        let shrank = round == 0 || bytes(&next) < bytes(&input);
         input = next;
+        if !shrank {
+            break;
+        }
     }
-    Err(EngineFailureCause::EvidencePack.into())
+    let joined: Vec<String> = input.into_iter().map(|(text, _)| text).collect();
+    Ok((joined.join("\n\n"), left_out_spans(evidence, left_out)))
 }
 
 #[derive(Serialize)]
@@ -1158,9 +1335,12 @@ fn read_ledger_part(
     scope: &SourceScope<'_>,
     check: &dyn Fn() -> Result<(), RunFailure>,
 ) -> Result<Vec<MeetingLedger>, ReadingError> {
-    read_in_halves(pack, MAX_SPLITS, &|text| {
-        read_ledger_pack(generator, evidence, haystack, prompt, text, scope, check)
-    })
+    read_in_halves(
+        pack,
+        MAX_SPLITS,
+        &|text| read_ledger_pack(generator, evidence, haystack, prompt, text, scope, check),
+        &mut |_, error| Err(error),
+    )
 }
 
 pub(super) fn ledger(

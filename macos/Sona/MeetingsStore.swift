@@ -1469,9 +1469,35 @@ final class MeetingsStore {
     }
 
     func regenerate() {
-        mutate("Rewriting the notes", "meeting_artifacts_regenerate") { session in
-            MeetingRequest.wrap(MeetingRequest.mutation(session.sessionId, revision: session.revision))
+        guard let session = snapshot?.session else { return }
+        Task {
+            await act("Rewriting the notes") { try await self.requestRewrite(session) }
         }
+    }
+
+    /// Asks the core to write the notes again. A rewrite that wrote nothing
+    /// says why, read from the status the core wrote for the meeting that
+    /// was pressed, and whether its earlier notes stay.
+    private func requestRewrite(_ session: MeetingSessionSnapshot) async throws {
+        do {
+            let result: MeetingMutationResult = try await core.request(
+                "meeting_artifacts_regenerate",
+                MeetingRequest.wrap(MeetingRequest.mutation(session.sessionId, revision: session.revision))
+            )
+            receive(result.receipt)
+        } catch let failure as CoreError where failure.remote(as: MeetingCommandError.self) == .engineFailure {
+            let pressed: MeetingReviewSnapshot? = try? await core.request(
+                "meeting_get", MeetingRequest.session(session.sessionId))
+            let why = pressed?.session.processingStatus.cause?.label ?? "the model did not finish them"
+            let kept = pressed?.readableArtifact?.content != nil
+            let which = isOpen(session.sessionId) ? "" : " for \(session.title)"
+            error = "No new notes were written\(which) because \(why)."
+                + (kept ? " The earlier notes are still there." : "")
+            await refreshSnapshot()
+            return
+        }
+        await refreshSnapshot()
+        await loadPage()
     }
 
     func forgetQuestion(_ questionId: MeetingQuestionId) {
@@ -1920,13 +1946,7 @@ final class MeetingsStore {
             guard await persist(draft) != nil, isOpen(draft.sessionId) else { return }
             await act("Rewriting the notes") {
                 guard let session = self.snapshot?.session else { return }
-                let result: MeetingMutationResult = try await self.core.request(
-                    "meeting_artifacts_regenerate",
-                    MeetingRequest.wrap(MeetingRequest.mutation(session.sessionId, revision: session.revision))
-                )
-                self.receive(result.receipt)
-                await self.refreshSnapshot()
-                await self.loadPage()
+                try await self.requestRewrite(session)
             }
         }
     }

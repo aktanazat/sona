@@ -58,6 +58,7 @@ fn artifacts(
         ledger: None,
         ledger_failure: None,
         plain: false,
+        left_out: Vec::new(),
     }
 }
 
