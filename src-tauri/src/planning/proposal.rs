@@ -480,6 +480,18 @@ fn generate_plan(
                 MeetingTextGenerationError::Failed => {
                     "The local model could not prepare this plan. Try again."
                 }
+                MeetingTextGenerationError::SafetyBlocked => {
+                    "Apple Intelligence's safety filter blocked this plan."
+                }
+                MeetingTextGenerationError::Declined => {
+                    "The local model declined to prepare this plan."
+                }
+                MeetingTextGenerationError::ContextExceeded => {
+                    "These sources are too long for the local model. Choose fewer."
+                }
+                MeetingTextGenerationError::UnsupportedLanguage => {
+                    "The local model does not support this language."
+                }
             }
             .to_string()
         })?;

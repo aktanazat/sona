@@ -27,7 +27,8 @@ public func startAppleIntelligenceGeneration(
     let response = ResponsePointer.allocate(capacity: 1)
     response.initialize(to: AppleLLMResponse(
         response: nil, success: 0,
-        error_message: strdup("Apple Intelligence is not available in this build (SDK requirement not met).")
+        error_message: strdup("Apple Intelligence is not available in this build (SDK requirement not met)."),
+        failure_kind: APPLE_LLM_FAILURE_OTHER
     ))
     completion(requestID, response)
 }

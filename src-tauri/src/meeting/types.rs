@@ -242,6 +242,13 @@ pub enum EngineFailureCause {
     EvidencePack,
     /// The engine ran and returned nothing usable.
     ModelRefused,
+    /// The engine's safety filter stopped the run: Apple Intelligence's
+    /// guardrail, which a meeting that mentions violence or drugs can trip.
+    SafetyBlocked,
+    /// The model read the meeting and declined to write about it.
+    ModelDeclined,
+    /// The engine does not support the transcript's language.
+    UnsupportedLanguage,
     /// The engine's time limit ended the run while the model was still
     /// working: the relay's worker stopped it before it answered.
     TimedOut,
@@ -427,6 +434,13 @@ pub enum MeetingCommandError {
     TranscriptCorrectionConflict,
     RemoteUnavailable,
     EngineFailure,
+    /// Apple Intelligence's safety filter stopped the run. Trying again gives
+    /// the same answer.
+    SafetyBlocked,
+    /// The model read the meeting and declined to write about it.
+    ModelDeclined,
+    /// Apple Intelligence does not support the meeting's language.
+    UnsupportedLanguage,
     /// The file offered for import is not a recording or transcript export
     /// Sona can read. Every refusal reaching the operator says this, because
     /// they all have the same answer: choose a different file.

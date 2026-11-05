@@ -87,10 +87,10 @@ pub(super) fn complete(id: u64, result: GenerationResult) -> GenerationResult {
     let receipt = SdkReceipt::Complete {
         request_id: id,
         reply: result.as_ref().ok().map(String::as_str),
-        error: result.as_ref().err().map(String::as_str),
+        error: result.as_ref().err().map(|error| error.message.as_str()),
     };
     match append(&receipt) {
         Ok(()) => result,
-        Err(error) => Err(format!("Actual SDK completion receipt failed: {error}")),
+        Err(error) => Err(format!("Actual SDK completion receipt failed: {error}").into()),
     }
 }

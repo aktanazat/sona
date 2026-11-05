@@ -300,6 +300,9 @@ enum MeetingEngineFailureCause: String, Decodable {
     case voiceDetection = "voice_detection"
     case evidencePack = "evidence_pack"
     case modelRefused = "model_refused"
+    case safetyBlocked = "safety_blocked"
+    case modelDeclined = "model_declined"
+    case unsupportedLanguage = "unsupported_language"
     case timedOut = "timed_out"
     case replyNotStructured = "reply_not_structured"
     case replyRejected = "reply_rejected"
@@ -312,6 +315,9 @@ enum MeetingEngineFailureCause: String, Decodable {
         case .voiceDetection: "speech detection refused part of a track"
         case .evidencePack: "the transcript would not fit the model's prompt"
         case .modelRefused: "the model did not answer"
+        case .safetyBlocked: "Apple Intelligence's safety filter blocked this meeting"
+        case .modelDeclined: "Apple Intelligence declined to write about this meeting"
+        case .unsupportedLanguage: "Apple Intelligence does not support this meeting's language"
         case .timedOut: "the model ran out of time"
         case .replyNotStructured: "the model's reply was not the shape asked for"
         case .replyRejected: "the model cited a moment that is not in the transcript"
@@ -665,6 +671,9 @@ enum MeetingCommandError: String, Decodable {
     case transcriptCorrectionConflict = "transcript_correction_conflict"
     case remoteUnavailable = "remote_unavailable"
     case engineFailure = "engine_failure"
+    case safetyBlocked = "safety_blocked"
+    case modelDeclined = "model_declined"
+    case unsupportedLanguage = "unsupported_language"
     case importUnreadable = "import_unreadable"
 
     var label: String {
@@ -693,6 +702,9 @@ enum MeetingCommandError: String, Decodable {
             "These people learned different replacements for the same phrase. Edit or remove the conflicting learned phrase before merging."
         case .remoteUnavailable: "The remote engine was unavailable."
         case .engineFailure: "The engine failed while writing this."
+        case .safetyBlocked: "Apple Intelligence's safety filter blocked this meeting."
+        case .modelDeclined: "Apple Intelligence declined to write about this meeting."
+        case .unsupportedLanguage: "Apple Intelligence does not support this meeting's language."
         case .importUnreadable: "Sona cannot read that file. Choose a different one."
         }
     }
