@@ -35,6 +35,7 @@ typedef void (*AppleLLMCompletion)(uint64_t request_id, AppleLLMResponse* respon
 #define APPLE_LLM_RESPONSE_JSON 1
 #define APPLE_LLM_RESPONSE_MEETING_NOTES 2
 #define APPLE_LLM_RESPONSE_MEETING_LEDGER 3
+#define APPLE_LLM_RESPONSE_MEETING_PLAIN_NOTES 4
 void start_apple_intelligence_generation(uint64_t request_id, const char* system_prompt, const char* user_content, int max_tokens, int response_shape, const char* json_schema, AppleLLMCompletion completion);
 void cancel_apple_intelligence_generation(uint64_t request_id);
 void sona_quiet_review_interrupt(void);

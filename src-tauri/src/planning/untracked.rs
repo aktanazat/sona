@@ -414,6 +414,7 @@ mod tests {
                         receipts: LedgerReceiptState::Verified,
                     }),
                     ledger_failure: None,
+                    plain: false,
                 };
                 let artifact_id = Uuid::new_v4().to_string();
                 connection.execute(

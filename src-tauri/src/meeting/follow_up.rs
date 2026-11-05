@@ -354,6 +354,7 @@ mod tests {
             follow_up_draft: text(""),
             ledger: None,
             ledger_failure: None,
+            plain: false,
         }
     }
 

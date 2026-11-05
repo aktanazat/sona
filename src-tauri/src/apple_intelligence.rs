@@ -75,6 +75,18 @@ pub(crate) struct AppleGenerationError {
     pub kind: AppleFailureKind,
     /// The error's own text, for the log.
     pub message: String,
+    /// Which request of a meeting pass this was, when the pass makes more
+    /// than one.
+    pub pass: Option<&'static str>,
+}
+
+impl AppleGenerationError {
+    pub(crate) fn during(self, pass: &'static str) -> Self {
+        Self {
+            pass: Some(pass),
+            ..self
+        }
+    }
 }
 
 impl std::fmt::Display for AppleGenerationError {
@@ -88,6 +100,7 @@ impl From<String> for AppleGenerationError {
         Self {
             kind: AppleFailureKind::Other,
             message,
+            pass: None,
         }
     }
 }
@@ -112,13 +125,14 @@ pub(crate) enum ResponseShape {
     Json = 1,
     MeetingNotes = 2,
     MeetingLedger = 3,
+    MeetingPlainNotes = 4,
 }
 
 impl ResponseShape {
     fn deadline(self) -> Duration {
         const ONE_GENERATION: Duration = Duration::from_secs(30);
         match self {
-            Self::Text | Self::Json => ONE_GENERATION,
+            Self::Text | Self::Json | Self::MeetingPlainNotes => ONE_GENERATION,
             // A meeting pass the guardrails stop runs up to five generations.
             Self::MeetingNotes | Self::MeetingLedger => ONE_GENERATION.saturating_mul(5),
         }
@@ -184,6 +198,7 @@ extern "C" fn generation_completed(request_id: u64, response_ptr: *mut AppleLLMR
             Err(AppleGenerationError {
                 kind: AppleFailureKind::from_code(response.failure_kind),
                 message,
+                pass: None,
             })
         };
         // SAFETY: This callback is the sole owner of this Swift allocation, even after cancellation.
@@ -211,6 +226,7 @@ async fn await_generation(
         () = deadline => Err(AppleGenerationError {
             kind: AppleFailureKind::TimedOut,
             message: "Apple Intelligence generation timed out".to_string(),
+            pass: None,
         }),
     }
 }
@@ -348,6 +364,7 @@ mod tests {
         let refused = AppleGenerationError {
             kind: AppleFailureKind::Guardrail,
             message: "May contain unsafe content".to_string(),
+            pass: None,
         };
         sender.send(Err(refused.clone())).expect("live receiver");
         assert_eq!(

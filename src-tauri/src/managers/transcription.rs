@@ -16,7 +16,7 @@ use crate::modes::AsrPlan;
 use crate::modes::{CloudRunPlan, CloudSttProvider};
 use crate::settings::{
     get_settings, vocabulary_initial_prompt, ModelUnloadTimeout, OrtAcceleratorSetting,
-    TranscribeAcceleratorSetting,
+    TranscribeAcceleratorSetting, VocabularyEntry,
 };
 use crate::snippets::apply_snippets;
 use anyhow::Result;
@@ -2417,9 +2417,10 @@ impl TranscriptionManager {
                 match &mut engine {
                     LoadedEngine::TranscribeCpp(session) => {
                         // Only actual whisper-family sessions receive a decode
-                        // prompt. Its written forms still receive exact correction;
-                        // only fuzzy matching is skipped for prompted runs.
-                        let initial_prompt = model_is_whisper
+                        // prompt, and only for plans that ask for one. Its written
+                        // forms still receive exact correction; only fuzzy matching
+                        // is skipped for prompted runs.
+                        let initial_prompt = (model_is_whisper && asr.prompt_vocabulary)
                             .then(|| vocabulary_initial_prompt(&asr.custom_words))
                             .flatten();
                         vocabulary_prompt.clone_from(&initial_prompt);
@@ -2622,14 +2623,15 @@ impl TranscriptionManager {
 
         drop(engine_lease);
         // Prompted Whisper runs retain exact spoken-form correction, while
-        // non-Whisper runs use fuzzy correction because they receive no decode
-        // prompt. The post-processor owns that distinction for every engine.
+        // unprompted runs (non-Whisper engines and meetings) use fuzzy
+        // correction. The post-processor owns that distinction for every engine.
         //
         // Whether the model produced anything is read here, before the
         // post-processor runs, because filler removal and spoken edits can
         // empty a real transcript and the capture receipt must not read that as
         // a silent microphone.
-        let model_produced_text = model_heard_text(&result, vocabulary_prompt.as_deref());
+        let model_produced_text = model_heard_text(&result, vocabulary_prompt.as_deref())
+            && (asr.prompt_vocabulary || !repeats_only_vocabulary(&result, &asr.custom_words));
         let filtered_result = post_process_transcription_text(
             result,
             asr,
@@ -3315,16 +3317,33 @@ fn model_heard_text(text: &str, prompt: Option<&str>) -> bool {
 fn repeats_decode_prompt(text: &str, prompt: &str) -> bool {
     let mut spoken = 0;
     for (word, expected) in prompt_words(text).zip(prompt_words(prompt).cycle()) {
-        let same = word
-            .chars()
-            .flat_map(char::to_lowercase)
-            .eq(expected.chars().flat_map(char::to_lowercase));
-        if !same {
+        if !same_word(word, expected) {
             return false;
         }
         spoken += 1;
     }
     spoken > 0
+}
+
+/// Whether `text` has words and each one, ignoring case and punctuation, is
+/// a word of a spoken or written vocabulary form. An unprompted meeting
+/// chunk like this is the model hearing silence.
+pub(crate) fn repeats_only_vocabulary(text: &str, vocabulary: &[VocabularyEntry]) -> bool {
+    let mut words = prompt_words(text).peekable();
+    words.peek().is_some()
+        && words.all(|word| {
+            vocabulary
+                .iter()
+                .filter(|entry| entry.is_usable())
+                .flat_map(|entry| prompt_words(&entry.spoken).chain(prompt_words(&entry.written)))
+                .any(|form| same_word(word, form))
+        })
+}
+
+fn same_word(left: &str, right: &str) -> bool {
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .eq(right.chars().flat_map(char::to_lowercase))
 }
 
 struct TranscribeCppRunPlan {
@@ -3972,7 +3991,7 @@ mod tests {
             post_process_transcription_text(
                 "our company met north star yesterday.".to_string(),
                 &meeting,
-                true,
+                false,
                 &OutputLanguageEvidence::UserSelected("en".to_string()),
                 &languages(&["en"]),
             ),
@@ -5187,6 +5206,32 @@ mod tests {
                 model_heard_text(text, prompt),
                 heard,
                 "{text:?} prompted with {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_meeting_chunk_of_only_vocabulary_words_repeats_only_vocabulary() {
+        let vocabulary = [
+            VocabularyEntry {
+                spoken: "Sona".to_string(),
+                written: "Sona".to_string(),
+            },
+            VocabularyEntry {
+                spoken: "north star".to_string(),
+                written: "Northstar".to_string(),
+            },
+        ];
+        for (text, only_vocabulary) in [
+            ("Sona Sona", true),
+            ("Northstar, north star. sona", true),
+            ("Sona is ready.", false),
+            ("  ", false),
+        ] {
+            assert_eq!(
+                repeats_only_vocabulary(text, &vocabulary),
+                only_vocabulary,
+                "{text:?}"
             );
         }
     }

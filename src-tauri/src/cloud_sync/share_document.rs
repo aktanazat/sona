@@ -409,6 +409,7 @@ mod tests {
                 follow_up_draft: cited(""),
                 ledger: None,
                 ledger_failure: None,
+                plain: false,
             }),
             receipt: None,
         }

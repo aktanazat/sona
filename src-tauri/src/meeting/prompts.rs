@@ -867,6 +867,7 @@ mod tests {
                     },
                     ledger: None,
                     ledger_failure: None,
+                    plain: false,
                 }),
                 generated_at_utc_ms: NOW,
             })

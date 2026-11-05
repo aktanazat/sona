@@ -393,6 +393,9 @@ pub enum ReplyShape {
     Json,
     /// Prose, stored or shown as written.
     Prose,
+    /// Prose notes of a meeting whose structured notes were stopped, kept as
+    /// written.
+    PlainNotes,
     MeetingNotes,
     MeetingLedger,
     MemoryNote,
@@ -408,7 +411,7 @@ impl ReplyShape {
             | Self::MeetingLedger
             | Self::LedgerMerge
             | Self::MemoryNote => true,
-            Self::Prose => false,
+            Self::Prose | Self::PlainNotes => false,
         }
     }
 }
@@ -574,7 +577,8 @@ fn apple_generation_error(
 ) -> MeetingTextGenerationError {
     use crate::apple_intelligence::AppleFailureKind;
     log::warn!(
-        "Apple Intelligence did not write this pass ({:?}): {}",
+        "Apple Intelligence did not write {} ({:?}): {}",
+        error.pass.unwrap_or("this pass"),
         error.kind,
         error.message
     );
@@ -2437,13 +2441,17 @@ impl MeetingProcessingService {
         let transcript_revision_id = store
             .current_transcript_revision_id(session_id)
             .map_err(RunFailure::from)?;
-        let evidence = store
+        let settings = self.app.as_ref().map(crate::settings::get_settings);
+        let mut evidence = store
             .artifact_evidence(
                 session_id,
                 usize::MAX,
                 self.fallback_notes_template(store, session_id)?,
             )
             .map_err(RunFailure::from)?;
+        if let Some(settings) = &settings {
+            drop_vocabulary_echoes(&mut evidence, &settings.custom_words);
+        }
         if evidence.transcript.is_empty() {
             return Ok(ArtifactGenerationOutcome::NoSpeech);
         }
@@ -2452,16 +2460,11 @@ impl MeetingProcessingService {
         };
         let template = &evidence.template;
         let template_id = template.artifact_template_id();
-        let settings = self.app.as_ref().map(crate::settings::get_settings);
         let language = settings
             .as_ref()
             .map(|settings| settings.meeting_notes_language)
             .unwrap_or_default();
-        let mut system_prompt =
-            artifact_system_prompt(template, !evidence.user_notes.is_empty(), language);
-        if let Some(settings) = settings {
-            system_prompt.push_str(&settings.meeting_prep.about_me.prompt_context());
-        }
+        let system_prompt = notes_system_prompt(&evidence, settings.as_ref());
         let canonical_input = complete_reading::evidence_digest(&evidence)?;
         // The engine and the prompt are both part of what a generation *is*,
         // so both are hashed into the key beside the evidence and the
@@ -2509,6 +2512,12 @@ impl MeetingProcessingService {
             });
         };
         let checkpoint = || self.generation_checkpoint(store, session_id);
+        let segments = store
+            .analytics_segments(session_id)
+            .map_err(RunFailure::from)?;
+        let speaker_names = store
+            .speaker_display_names(session_id)
+            .map_err(RunFailure::from)?;
         let mut content = match complete_reading::notes(
             generator.as_ref(),
             &evidence,
@@ -2522,6 +2531,30 @@ impl MeetingProcessingService {
             )) => {
                 return Ok(ArtifactGenerationOutcome::Unreachable);
             }
+            // The engine would not write structured notes about this meeting
+            // but may still write it up as plain text, which its content
+            // filter governs more loosely.
+            Err(complete_reading::ReadingError::Engine(
+                stop @ (MeetingTextGenerationError::SafetyBlocked
+                | MeetingTextGenerationError::Declined),
+            )) => match complete_reading::plain_notes(
+                generator.as_ref(),
+                &evidence,
+                &turn_speakers(&segments, &speaker_names),
+                &plain_notes_prompt(language),
+                checkpoint,
+            ) {
+                Ok(text) => {
+                    log::warn!("Meeting {session_id:?} got plain notes after {stop:?}");
+                    plain_artifacts(text, stop.into())
+                }
+                Err(complete_reading::ReadingError::Stopped(failure)) => return Err(failure),
+                Err(error) => {
+                    log::warn!("Meeting {session_id:?} got no plain notes either: {error:?}");
+                    record_failure();
+                    return Ok(ArtifactGenerationOutcome::Failed(stop.into()));
+                }
+            },
             Err(error) => {
                 record_failure();
                 return Ok(ArtifactGenerationOutcome::Failed(reading_error_cause(
@@ -2537,25 +2570,22 @@ impl MeetingProcessingService {
         // second pass produces nothing, the part that refused is written on
         // the revision beside the notes: a ledger tab that says only "no
         // ledger" read, from the outside, exactly like a meeting that never
-        // asked for one.
-        let segments = store
-            .analytics_segments(session_id)
-            .map_err(RunFailure::from)?;
-        let speaker_names = store
-            .speaker_display_names(session_id)
-            .map_err(RunFailure::from)?;
-        match generate_ledger(
-            generator.as_ref(),
-            &evidence,
-            &segments,
-            &speaker_names,
-            session_id,
-            checkpoint,
-        ) {
-            Ok(ledger) => content.ledger = Some(ledger),
-            Err(cause) => {
-                log::warn!("Meeting {session_id:?} got notes but no ledger: {cause:?}");
-                content.ledger_failure = Some(cause);
+        // asked for one. Plain notes skip it: the engine has already refused
+        // the structured reading it needs.
+        if !content.plain {
+            match generate_ledger(
+                generator.as_ref(),
+                &evidence,
+                &segments,
+                &speaker_names,
+                session_id,
+                checkpoint,
+            ) {
+                Ok(ledger) => content.ledger = Some(ledger),
+                Err(cause) => {
+                    log::warn!("Meeting {session_id:?} got notes but no ledger: {cause:?}");
+                    content.ledger_failure = Some(cause);
+                }
             }
         }
         checkpoint()?;
@@ -5298,6 +5328,7 @@ fn validate_artifact_output(
         // evidence; see `generate_ledger`.
         ledger: None,
         ledger_failure: None,
+        plain: false,
     })
 }
 
@@ -5511,6 +5542,83 @@ fn ledger_system_prompt() -> String {
     )
 }
 
+/// Who said each turn, keyed by the uuid the evidence rows carry, so a pack
+/// can name a speaker without re-deriving the mapping per row.
+fn turn_speakers<'a>(
+    segments: &[AnalyticsSegment],
+    speaker_names: &'a HashMap<SpeakerId, String>,
+) -> HashMap<String, &'a str> {
+    segments
+        .iter()
+        .filter_map(|segment| {
+            let name = speaker_names.get(&segment.speaker_id)?;
+            Some((segment.segment_id.uuid().to_string(), name.as_str()))
+        })
+        .collect()
+}
+
+/// Leaves out of the notes' evidence every line that only repeats vocabulary
+/// words: what Whisper wrote during silence when its prompt held them.
+fn drop_vocabulary_echoes(
+    evidence: &mut ArtifactEvidence,
+    vocabulary: &[crate::settings::VocabularyEntry],
+) {
+    evidence.transcript.retain(|item| {
+        !crate::managers::transcription::repeats_only_vocabulary(&item.text, vocabulary)
+    });
+}
+
+/// The instructions the notes are written to, shaped by the user's notes
+/// language and the profile the user gave about themselves.
+fn notes_system_prompt(
+    evidence: &ArtifactEvidence,
+    settings: Option<&crate::settings::AppSettings>,
+) -> String {
+    let mut prompt = artifact_system_prompt(
+        &evidence.template,
+        !evidence.user_notes.is_empty(),
+        settings
+            .map(|settings| settings.meeting_notes_language)
+            .unwrap_or_default(),
+    );
+    if let Some(settings) = settings {
+        prompt.push_str(&settings.meeting_prep.about_me.prompt_context());
+    }
+    prompt
+}
+
+fn plain_notes_prompt(language: MeetingNotesLanguage) -> String {
+    format!(
+        "Write notes of this meeting transcript for someone who missed it. Begin with one sentence on what the meeting was about and where it landed. Then write one short line for each decision, each thing someone agreed to do, with who and by when if that was said, and each question left open. Use only what the transcript says and leave out small talk. Write plain sentences, one per line, with no headings, bullets or markdown.\n\n{}",
+        language.instruction()
+    )
+}
+
+/// Plain notes as a revision: the summary holds them, and nothing claims a
+/// source, a decision or a ledger the engine did not write.
+fn plain_artifacts(text: String, stopped_by: EngineFailureCause) -> GeneratedMeetingArtifacts {
+    let empty = || CitedArtifactText {
+        text: String::new(),
+        citations: Vec::new(),
+    };
+    GeneratedMeetingArtifacts {
+        summary: CitedArtifactText {
+            text,
+            citations: Vec::new(),
+        },
+        summary_trace: Vec::new(),
+        outline: Vec::new(),
+        decisions: Vec::new(),
+        action_items: Vec::new(),
+        key_questions: Vec::new(),
+        risks: Vec::new(),
+        follow_up_draft: empty(),
+        ledger: None,
+        ledger_failure: Some(stopped_by),
+        plain: true,
+    }
+}
+
 /// Read the conversation as a ledger, refuse to ship a receipt that is not in
 /// the transcript, and say on the ledger what the structural checks found.
 ///
@@ -5533,19 +5641,11 @@ pub(crate) fn generate_ledger(
     checkpoint: impl Fn() -> Result<(), RunFailure>,
 ) -> Result<MeetingLedger, EngineFailureCause> {
     let haystack = ledger::fold_haystack(evidence.transcript.iter().map(|item| item.text.as_str()));
-    // Who said each turn, keyed by the uuid the evidence rows carry, so the
-    // pack can name a speaker without re-deriving the mapping per row.
     let segment_speakers: HashMap<TranscriptSegmentId, SpeakerId> = segments
         .iter()
         .map(|segment| (segment.segment_id, segment.speaker_id))
         .collect();
-    let turn_speakers: HashMap<String, &str> = segments
-        .iter()
-        .filter_map(|segment| {
-            let name = speaker_names.get(&segment.speaker_id)?;
-            Some((segment.segment_id.uuid().to_string(), name.as_str()))
-        })
-        .collect();
+    let turn_speakers = turn_speakers(segments, speaker_names);
     let mut ledger =
         complete_reading::ledger(generator, evidence, &turn_speakers, &haystack, checkpoint)
             .map_err(reading_error_cause)?;
@@ -7819,6 +7919,7 @@ pub(crate) mod tests {
             EngineFailureCause::from(apple_generation_error(AppleGenerationError {
                 kind,
                 message: "Response may contain sensitive or unsafe content".to_string(),
+                pass: None,
             }))
         };
         assert_eq!(
@@ -7837,6 +7938,74 @@ pub(crate) mod tests {
             cause(AppleFailureKind::Other),
             EngineFailureCause::ModelRefused,
             "only a failure Apple did not explain reads as no answer"
+        );
+    }
+
+    /// The work laptop's meeting got no notes at all when Apple
+    /// Intelligence's safety filter stopped the structured pass, though the
+    /// same model wrote plain notes of it. That stop still leaves the meeting
+    /// readable notes, marked plain, and asks no ledger of the engine.
+    #[test]
+    fn a_safety_stop_on_structured_notes_still_writes_plain_notes() {
+        struct StructuredBlocked(std::sync::Mutex<Vec<ReplyShape>>);
+        impl MeetingTextGenerator for StructuredBlocked {
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn model_id(&self) -> &'static str {
+                "structured-blocked"
+            }
+            fn model_version(&self) -> Cow<'static, str> {
+                Cow::Borrowed("1")
+            }
+            fn max_input_bytes(&self) -> usize {
+                usize::MAX
+            }
+            fn generate(
+                &self,
+                _system_prompt: &str,
+                _evidence: &str,
+                _max_tokens: i32,
+                shape: ReplyShape,
+            ) -> Result<String, MeetingTextGenerationError> {
+                self.0.lock().expect("shapes").push(shape);
+                match shape {
+                    ReplyShape::PlainNotes => {
+                        Ok("The fixture meeting had one sentence.".to_string())
+                    }
+                    _ => Err(MeetingTextGenerationError::SafetyBlocked),
+                }
+            }
+        }
+        let fixture = artifact_store_fixture();
+        let generator = Arc::new(StructuredBlocked(std::sync::Mutex::default()));
+        let outcome = MeetingProcessingService::new(None)
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                1,
+                GenerationIntent::Pipeline,
+                Some(generator.clone()),
+            )
+            .expect("artifact generation");
+        let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
+            panic!("plain notes are written notes, not a failure");
+        };
+        let content = artifact.content.expect("plain notes");
+        assert!(content.plain);
+        assert_eq!(
+            content.summary.text,
+            "The fixture meeting had one sentence."
+        );
+        assert!(content.decisions.is_empty() && content.action_items.is_empty());
+        assert_eq!(
+            content.ledger_failure,
+            Some(EngineFailureCause::SafetyBlocked)
+        );
+        assert_eq!(
+            *generator.0.lock().expect("shapes"),
+            [ReplyShape::MeetingNotes, ReplyShape::PlainNotes],
+            "an engine that refused the structured reading is asked for no ledger"
         );
     }
 

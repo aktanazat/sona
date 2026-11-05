@@ -113,6 +113,7 @@ pub(super) fn file_ledger(
         },
         ledger: Some(ledger),
         ledger_failure: None,
+        plain: false,
     };
     let connection = store.connection().unwrap();
     connection

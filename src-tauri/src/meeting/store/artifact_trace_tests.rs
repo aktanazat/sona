@@ -57,6 +57,7 @@ fn artifacts(
         follow_up_draft: cited("Thanks all."),
         ledger: None,
         ledger_failure: None,
+        plain: false,
     }
 }
 

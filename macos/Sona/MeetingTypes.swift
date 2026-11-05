@@ -1023,6 +1023,9 @@ struct MeetingGeneratedArtifacts: Decodable {
     /// Why `ledger` is nil when the second pass was asked for it. Nil beside
     /// a nil ledger is a revision written before the core kept the reason.
     let ledgerFailure: MeetingEngineFailureCause?
+    /// Written as plain text because the engine stopped the structured
+    /// notes; nil in a revision written before plain notes existed.
+    let plain: Bool?
 }
 
 enum MeetingArtifactState: String, Decodable {

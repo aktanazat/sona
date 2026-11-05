@@ -17,6 +17,9 @@ struct ArtifactPane: View {
                 if artifact.state == .outOfDate {
                     StaleNotesBand(store: store, what: "These notes")
                 }
+                if content.plain == true {
+                    PlainNotesBand(stoppedBy: content.ledgerFailure)
+                }
                 if let outcome = notes.outcome {
                     section("Outcome") {
                         NoteLine(store: store, line: outcome, bulleted: false) {
@@ -142,6 +145,25 @@ struct ArtifactPane: View {
                 Button("Write it again") { store.regenerate() }
                     .buttonStyle(.quiet)
                     .disabled(store.busy)
+            }
+        }
+    }
+}
+
+/// Notes the engine would only write as plain text: no sections, nothing
+/// to press through to the transcript, and the reason.
+private struct PlainNotesBand: View {
+    let stoppedBy: MeetingEngineFailureCause?
+
+    var body: some View {
+        Card {
+            CardRow {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(stoppedBy.map { "Plain notes, written because \($0.label)." } ?? "Plain notes.")
+                        .bodyText()
+                    Text("They have no decisions, action items or links to the transcript.")
+                        .metaText(Theme.inkSecondary)
+                }
             }
         }
     }

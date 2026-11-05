@@ -409,6 +409,7 @@ mod tests {
             },
             ledger: Some(ledger),
             ledger_failure: None,
+            plain: false,
         };
         meetings
             .with_planning_snapshot(|connection| {
