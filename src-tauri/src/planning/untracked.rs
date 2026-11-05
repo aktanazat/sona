@@ -415,6 +415,7 @@ mod tests {
                     }),
                     ledger_failure: None,
                     plain: false,
+                    left_out: Vec::new(),
                 };
                 let artifact_id = Uuid::new_v4().to_string();
                 connection.execute(

@@ -410,6 +410,7 @@ mod tests {
             ledger: Some(ledger),
             ledger_failure: None,
             plain: false,
+            left_out: Vec::new(),
         };
         meetings
             .with_planning_snapshot(|connection| {

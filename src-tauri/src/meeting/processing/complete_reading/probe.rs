@@ -218,6 +218,37 @@ fn compare(witness: &Witness, prompt: &str, profile: &str, pack: &str, failed: b
     }
 }
 
+/// A meeting offset as h:mm:ss, `?` for a line with no time.
+fn clock(offset_ns: Option<u64>) -> String {
+    offset_ns.map_or_else(
+        || "?".to_string(),
+        |offset_ns| {
+            let seconds = offset_ns / 1_000_000_000;
+            format!(
+                "{}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            )
+        },
+    )
+}
+
+fn describe_spans(spans: &[LeftOutSpan]) -> String {
+    spans
+        .iter()
+        .map(|span| {
+            format!(
+                "{}-{} ({:?})",
+                clock(span.start_offset_ns),
+                clock(span.end_offset_ns),
+                span.cause
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// The meeting, seeded into a scratch store the way the app stores an
 /// imported transcript, with every kept line under its speaker's name.
 fn seed(store: &MeetingStore, review: &Review) -> Result<MeetingSessionId, StoreError> {
@@ -362,8 +393,10 @@ fn notes_probe() {
     .expect("notes parts");
     let mut instructions = prompt.clone();
     let mut short = SHORT_NOTES_PROMPT.to_string();
+    let mut left_out = Vec::new();
     for round in 1..=MAX_REDUCTION_ROUNDS {
         let mut sections = Vec::new();
+        let round_start = left_out.len();
         for (index, pack) in input.iter().enumerate() {
             let step = format!(
                 "notes round {round} part {} of {} ({} bytes)",
@@ -372,7 +405,7 @@ fn notes_probe() {
                 pack.as_ref().len()
             );
             let started = Instant::now();
-            let read = read_notes_part(
+            let failure = match read_notes_part(
                 &witness,
                 &instructions,
                 &short,
@@ -380,19 +413,35 @@ fn notes_probe() {
                 &scope,
                 &evidence,
                 &|| Ok(()),
-            );
-            let failure = read
-                .as_ref()
-                .err()
-                .map(|error| format!("failed, {error:?}"));
+            ) {
+                Ok(part) => {
+                    sections.extend(part.sections);
+                    let spans = left_out_spans(&evidence, part.left_out);
+                    let failure =
+                        (!spans.is_empty()).then(|| format!("left out {}", describe_spans(&spans)));
+                    left_out.extend(spans);
+                    failure
+                }
+                Err(error) => Some(format!("failed, {error:?}")),
+            };
+            let failed = failure.is_some();
             report(&step, started, &witness.outcome(failure));
-            let failed = read.is_err();
-            sections.extend(read.into_iter().flatten());
             if round == 1 {
                 compare(&witness, &prompt, &profile, pack.as_ref(), failed);
             }
         }
-        if sections.len() <= 1 {
+        if sections.is_empty() {
+            println!("notes stopped: no part of round {round} could be read");
+            break;
+        }
+        if round > 1 && left_out.len() > round_start {
+            left_out.truncate(round_start);
+            println!(
+                "notes stopped: a joining part of round {round} failed, so the app writes plain notes"
+            );
+            break;
+        }
+        if sections.len() == 1 {
             break;
         }
         let mut facts = NoteFacts::default();
@@ -416,6 +465,14 @@ fn notes_probe() {
         }
         input = next;
     }
+    println!(
+        "notes left out: {}",
+        if left_out.is_empty() {
+            "nothing".to_string()
+        } else {
+            describe_spans(&left_out)
+        }
+    );
 
     let segments = store
         .analytics_segments(session_id)
@@ -481,11 +538,15 @@ fn notes_probe() {
         &plain_notes_prompt(language),
         || Ok(()),
     ) {
-        Ok(text) => report(
-            "plain notes",
-            started,
-            &format!("{}, {} bytes", witness.outcome(None), text.len()),
-        ),
+        Ok((text, spans)) => {
+            let failure =
+                (!spans.is_empty()).then(|| format!("left out {}", describe_spans(&spans)));
+            report(
+                "plain notes",
+                started,
+                &format!("{}, {} bytes", witness.outcome(failure), text.len()),
+            );
+        }
         Err(error) => report(
             "plain notes",
             started,

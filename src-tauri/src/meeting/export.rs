@@ -369,6 +369,18 @@ pub(crate) fn render_generated_notes(markdown: &mut String, content: &GeneratedM
             "_Plain notes: the full notes, with decisions and action items, could not be written for this meeting._\n"
         );
     }
+    for span in &content.left_out {
+        let when = match (span.start_offset_ns, span.end_offset_ns) {
+            (Some(start), Some(end)) => {
+                format!("from {} to {}", format_offset(start), format_offset(end))
+            }
+            _ => "a stretch with no times".to_string(),
+        };
+        let _ = writeln!(
+            markdown,
+            "_Not in these notes: {when}, which could not be read._\n"
+        );
+    }
     let summary = content.summary.text.trim();
     if !summary.is_empty() {
         let _ = writeln!(markdown, "{summary}");
@@ -523,6 +535,7 @@ mod tests {
                 ledger: None,
                 ledger_failure: None,
                 plain: false,
+                left_out: Vec::new(),
             }),
             receipt: None,
         }

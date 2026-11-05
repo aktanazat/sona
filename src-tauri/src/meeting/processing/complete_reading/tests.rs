@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_section_does_not_publish_partial_notes_as_a_complete_meeting() {
+    fn a_part_that_fails_every_try_is_left_out_and_named_on_the_notes() {
         let evidence = evidence();
         let generator = RefusingSecondSection(ReplayGenerator {
             window: None,
@@ -625,16 +625,29 @@ mod tests {
             reply: 3_200,
             calls: AtomicUsize::new(0),
         });
-        let result = notes(
+        let content = notes(
             &generator,
             &evidence,
             &artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default()),
             || Ok(()),
-        );
-        assert!(matches!(
-            result,
-            Err(ReadingError::Engine(MeetingTextGenerationError::TimedOut))
-        ));
+        )
+        .expect("notes from the part that could be read");
+        assert!(!content.summary.text.is_empty());
+        let meeting_end = evidence
+            .transcript
+            .iter()
+            .filter_map(|line| line.citation.end_offset_ns)
+            .max();
+        let meeting_start = evidence
+            .transcript
+            .iter()
+            .filter_map(|line| line.citation.start_offset_ns)
+            .min();
+        assert_eq!(content.left_out.len(), 1, "{:?}", content.left_out);
+        let span = content.left_out[0];
+        assert_eq!(span.cause, EngineFailureCause::TimedOut);
+        assert_eq!(span.end_offset_ns, meeting_end);
+        assert!(span.start_offset_ns > meeting_start);
     }
 
     #[test]
@@ -1276,7 +1289,7 @@ mod tests {
         let decisions: Vec<Value> = notes_facts(&raw.summary, &section, &scope)
             .expect("chronological note facts")
             .iter()
-            .map(|row| serde_json::from_str::<Value>(row).expect("typed fact"))
+            .map(|(row, _)| serde_json::from_str::<Value>(row).expect("typed fact"))
             .filter(|row| row["kind"] == "decision")
             .collect();
         assert_eq!(
@@ -1323,7 +1336,7 @@ mod tests {
         let rows: Vec<Value> = notes_facts(&raw.summary, &section, &scope)
             .expect("compacted narrative facts")
             .iter()
-            .map(|row| serde_json::from_str(row).expect("typed fact"))
+            .map(|(row, _)| serde_json::from_str(row).expect("typed fact"))
             .collect();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0]["kind"], "summary");
@@ -1851,6 +1864,56 @@ mod tests {
                     turn.citation.end_offset_ns.expect("original end")
                 ))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    struct PlainJoinBlocked(AtomicUsize);
+
+    impl MeetingTextGenerator for PlainJoinBlocked {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "plain-join-blocked"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            6_000
+        }
+        fn generate(
+            &self,
+            prompt: &str,
+            _pack: &str,
+            _max_tokens: i32,
+            _shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if prompt.ends_with(PLAIN_NOTES_JOIN) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(MeetingTextGenerationError::SafetyBlocked)
+            } else {
+                Ok("The team went through its agenda.".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn plain_notes_whose_join_is_stopped_keep_every_part() {
+        let generator = PlainJoinBlocked(AtomicUsize::new(0));
+        let (text, left_out) = plain_notes(
+            &generator,
+            &evidence(),
+            &HashMap::new(),
+            "Write plain notes.",
+            || Ok(()),
+        )
+        .expect("the parts are the notes");
+        assert!(generator.0.load(Ordering::SeqCst) > 0);
+        assert!(left_out.is_empty());
+        assert!(
+            text.matches("The team went through its agenda.").count() > 1,
+            "{text}"
         );
     }
 }

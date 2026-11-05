@@ -198,6 +198,7 @@ fn artifact_content(ledger: Option<MeetingLedger>) -> GeneratedMeetingArtifacts 
         ledger,
         ledger_failure: None,
         plain: false,
+        left_out: Vec::new(),
     }
 }
 

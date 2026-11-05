@@ -97,9 +97,23 @@ mod tests {
         report_revision: TranscriptSegmentId,
     }
 
-    fn seed_synthetic_meeting(store: &MeetingStore, output: &Path) -> SyntheticMeeting {
+    /// `distinct` numbers every filler turn, so no two lines repeat and the
+    /// meeting is read in many parts, as a real one is.
+    fn seed_synthetic_meeting(
+        store: &MeetingStore,
+        output: &Path,
+        distinct: bool,
+    ) -> SyntheticMeeting {
         let filler = "The team reviews the existing dashboard and checks the current setup. This part introduces no new decision, commitment, owner or deadline. ".repeat(8);
-        let mut texts: Vec<String> = (0..128).map(|_| filler.clone()).collect();
+        let mut texts: Vec<String> = (0..128)
+            .map(|index| {
+                if distinct {
+                    format!("Status check {index}. {filler}")
+                } else {
+                    filler.clone()
+                }
+            })
+            .collect();
         texts[0] = "Jordan says: We have decided to use the cobalt design. Everyone agrees; this is the final design decision.".to_string();
         texts[1] = "Casey says: I will send the report Friday. Jordan confirms that Casey owns sending this report.".to_string();
         texts[64] = "Jordan says: We have decided to keep the annual price at 240 dollars. Everyone agrees; the annual price remains 240 dollars.".to_string();
@@ -352,7 +366,7 @@ mod tests {
         std::fs::create_dir_all(&output).expect("create owned synthetic smoke directory");
         println!("actual_apple_smoke_output={}", output.display());
         let (_directory, store) = crate::meeting::store::workflow_core_tests::store();
-        let fixture = seed_synthetic_meeting(&store, &output);
+        let fixture = seed_synthetic_meeting(&store, &output, false);
         let service = Arc::new(MeetingProcessingService::new(None));
         let generator = Arc::new(ActualAppleWitness {
             output: output.clone(),
@@ -500,5 +514,209 @@ mod tests {
         assert!(ledger.commitments[0].what.to_lowercase().contains("friday"));
         assert_eq!(actual_sdk_started(), 2);
         println!("actual_named_assignment_passed");
+    }
+
+    /// How a forced request fails: as the safety filter stops it, or with a
+    /// reply that is not the notes asked for.
+    #[derive(Clone, Copy, Debug)]
+    enum Forced {
+        Blocked,
+        Garbled,
+    }
+
+    /// Apple Intelligence as the app calls it, except that a request of one
+    /// of `shapes` whose input holds `marker` (every one when `marker` is
+    /// empty) fails as `forced` says.
+    struct ForcedFailure {
+        marker: &'static str,
+        shapes: &'static [ReplyShape],
+        forced: Forced,
+        forced_requests: AtomicUsize,
+        requests: AtomicUsize,
+    }
+
+    impl MeetingTextGenerator for ForcedFailure {
+        fn is_available(&self) -> bool {
+            AppleIntelligenceGenerator.is_available()
+        }
+        fn model_id(&self) -> &'static str {
+            AppleIntelligenceGenerator.model_id()
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            AppleIntelligenceGenerator.model_version()
+        }
+        fn max_input_bytes(&self) -> usize {
+            AppleIntelligenceGenerator.max_input_bytes()
+        }
+        fn context_window_bytes(&self) -> Option<usize> {
+            AppleIntelligenceGenerator.context_window_bytes()
+        }
+        fn reserved_output_tokens(&self, requested: i32) -> usize {
+            AppleIntelligenceGenerator.reserved_output_tokens(requested)
+        }
+        fn generate(
+            &self,
+            prompt: &str,
+            input: &str,
+            max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let index = self.requests.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                index < 4 * MAX_ACTUAL_CALLS,
+                "forced-failure run exhausted its request budget"
+            );
+            if self.shapes.contains(&shape) && input.contains(self.marker) {
+                self.forced_requests.fetch_add(1, Ordering::SeqCst);
+                println!(
+                    "forced_failure request={index} shape={shape:?} forced={:?}",
+                    self.forced
+                );
+                return match self.forced {
+                    Forced::Blocked => Err(MeetingTextGenerationError::SafetyBlocked),
+                    Forced::Garbled => Ok("{\"summary\": [{\"text\": \"".to_string()),
+                };
+            }
+            AppleIntelligenceGenerator.generate(prompt, input, max_tokens, shape)
+        }
+    }
+
+    /// The synthetic meeting read and written again through the app's own
+    /// import and "Write the notes again" paths with `generator`, returning
+    /// the notes each of the `rewrites` presses left current.
+    fn notes_through_app_paths(
+        generator: Arc<ForcedFailure>,
+        rewrites: usize,
+    ) -> Vec<GeneratedMeetingArtifacts> {
+        assert!(
+            AppleIntelligenceGenerator.is_available(),
+            "actual Apple Intelligence is required; blocker={:?}",
+            AppleIntelligenceGenerator::blocker()
+        );
+        let output =
+            std::path::PathBuf::from(SCRATCH).join(format!("forced-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&output).expect("create owned synthetic directory");
+        let (_directory, store) = crate::meeting::store::workflow_core_tests::store();
+        let fixture = seed_synthetic_meeting(&store, &output, true);
+        let service = Arc::new(MeetingProcessingService::new(None));
+        service.set_text_generators(generator.clone(), generator.clone());
+        service.submit(
+            Arc::clone(&store),
+            fixture.session_id,
+            ProcessingOrigin::ImportedTranscript,
+        );
+        service.wait_for_job(fixture.session_id);
+        let mut written = Vec::new();
+        for press in 1..=rewrites {
+            let review = store
+                .review_snapshot(fixture.session_id)
+                .expect("synthetic review");
+            let (rewritten, _engine, _refresh) = service
+                .regenerate(
+                    &store,
+                    fixture.session_id,
+                    review.session.revision,
+                    MeetingOperationId::new(),
+                )
+                .unwrap_or_else(|failure| {
+                    panic!("press {press} of \"Write the notes again\" wrote no notes: {failure:?}")
+                });
+            let content = rewritten.content.expect("rewritten notes");
+            println!(
+                "forced_failure press={press} plain={} decisions={} left_out={:?} ledger_failure={:?}",
+                content.plain,
+                content.decisions.len(),
+                content.left_out,
+                content.ledger_failure
+            );
+            written.push(content);
+        }
+        written
+    }
+
+    const MARKED_TURN_NS: u64 = 64 * 60 * 1_000_000_000;
+
+    fn assert_marked_turn_left_out(content: &GeneratedMeetingArtifacts) {
+        assert!(
+            !content.plain,
+            "one failing part must not cost the structured notes"
+        );
+        assert!(
+            content.left_out.iter().any(|span| {
+                span.start_offset_ns
+                    .is_some_and(|start| start <= MARKED_TURN_NS)
+                    && span.end_offset_ns.is_some_and(|end| end > MARKED_TURN_NS)
+            }),
+            "the notes must say the stretch holding the failing turn was left out: {:?}",
+            content.left_out
+        );
+        assert!(
+            content.decisions.iter().any(|decision| {
+                let text = decision.text.to_lowercase();
+                text.contains("cobalt") || text.contains("november")
+            }),
+            "the notes keep what the readable parts decided: {:?}",
+            content.decisions
+        );
+    }
+
+    #[test]
+    #[ignore = "runs Apple Intelligence over a synthetic meeting for minutes"]
+    fn actual_apple_notes_leave_out_a_part_the_safety_filter_always_stops() {
+        let generator = Arc::new(ForcedFailure {
+            marker: "annual price at 240 dollars",
+            shapes: &[
+                ReplyShape::MeetingNotes,
+                ReplyShape::PlainNotes,
+                ReplyShape::MeetingLedger,
+            ],
+            forced: Forced::Blocked,
+            forced_requests: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+        });
+        for content in notes_through_app_paths(generator.clone(), 2) {
+            assert_marked_turn_left_out(&content);
+            assert!(content
+                .left_out
+                .iter()
+                .all(|span| span.cause == EngineFailureCause::SafetyBlocked));
+        }
+        assert!(generator.forced_requests.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    #[ignore = "runs Apple Intelligence over a synthetic meeting for minutes"]
+    fn actual_apple_notes_leave_out_a_part_whose_replies_never_parse() {
+        let generator = Arc::new(ForcedFailure {
+            marker: "annual price at 240 dollars",
+            shapes: &[ReplyShape::MeetingNotes],
+            forced: Forced::Garbled,
+            forced_requests: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+        });
+        for content in notes_through_app_paths(generator.clone(), 2) {
+            assert_marked_turn_left_out(&content);
+        }
+        assert!(generator.forced_requests.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    #[ignore = "runs Apple Intelligence over a synthetic meeting for minutes"]
+    fn actual_apple_structured_notes_that_never_parse_give_plain_notes() {
+        let generator = Arc::new(ForcedFailure {
+            marker: "",
+            shapes: &[ReplyShape::MeetingNotes],
+            forced: Forced::Garbled,
+            forced_requests: AtomicUsize::new(0),
+            requests: AtomicUsize::new(0),
+        });
+        for content in notes_through_app_paths(generator, 1) {
+            assert!(
+                content.plain,
+                "failed structured notes fall back to plain notes"
+            );
+            assert!(!content.summary.text.trim().is_empty());
+            assert!(content.ledger_failure.is_some());
+        }
     }
 }

@@ -319,9 +319,21 @@ enum MeetingEngineFailureCause: String, Decodable {
         case .modelDeclined: "Apple Intelligence declined to write about this meeting"
         case .unsupportedLanguage: "Apple Intelligence does not support this meeting's language"
         case .timedOut: "the model ran out of time"
-        case .replyNotStructured: "the model's reply was not the shape asked for"
-        case .replyRejected: "the model cited a moment that is not in the transcript"
+        case .replyNotStructured: "the model's reply came back incomplete"
+        case .replyRejected: "the model's notes did not match the transcript"
         case .panicked: "the notes pipeline crashed"
+        }
+    }
+
+    /// Why one stretch of a meeting was left out of its notes.
+    var leftOutReason: String {
+        switch self {
+        case .safetyBlocked: "Apple Intelligence's safety filter stopped it"
+        case .modelDeclined: "Apple Intelligence declined to write about it"
+        case .replyNotStructured: "the model's reply about it kept coming back incomplete"
+        case .replyRejected: "the model's notes about it did not match the transcript"
+        case .timedOut: "the model ran out of time on it"
+        default: label
         }
     }
 }
@@ -701,7 +713,7 @@ enum MeetingCommandError: String, Decodable {
         case .transcriptCorrectionConflict:
             "These people learned different replacements for the same phrase. Edit or remove the conflicting learned phrase before merging."
         case .remoteUnavailable: "The remote engine was unavailable."
-        case .engineFailure: "The engine failed while writing this."
+        case .engineFailure: "Sona could not finish writing this."
         case .safetyBlocked: "Apple Intelligence's safety filter blocked this meeting."
         case .modelDeclined: "Apple Intelligence declined to write about this meeting."
         case .unsupportedLanguage: "Apple Intelligence does not support this meeting's language."
@@ -1026,6 +1038,27 @@ struct MeetingGeneratedArtifacts: Decodable {
     /// Written as plain text because the engine stopped the structured
     /// notes; nil in a revision written before plain notes existed.
     let plain: Bool?
+    /// Stretches of the meeting the notes could not read, so they were
+    /// written from the rest; nil in a revision written before this existed.
+    let leftOut: [MeetingLeftOutSpan]?
+}
+
+/// `LeftOutSpan`: one stretch of a meeting its notes leave out, and why.
+struct MeetingLeftOutSpan: Decodable {
+    let startOffsetNs: Int64?
+    let endOffsetNs: Int64?
+    let cause: MeetingEngineFailureCause
+
+    /// "From 12:04 to 18:30: Apple Intelligence's safety filter stopped it."
+    var line: String {
+        let when: String
+        if let startOffsetNs, let endOffsetNs {
+            when = "From \(startOffsetNs.meetingOffsetClock) to \(endOffsetNs.meetingOffsetClock)"
+        } else {
+            when = "A stretch with no times"
+        }
+        return "\(when): \(cause.leftOutReason)."
+    }
 }
 
 enum MeetingArtifactState: String, Decodable {

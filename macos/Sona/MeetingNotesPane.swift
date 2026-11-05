@@ -20,6 +20,9 @@ struct ArtifactPane: View {
                 if content.plain == true {
                     PlainNotesBand(stoppedBy: content.ledgerFailure)
                 }
+                if let leftOut = content.leftOut, !leftOut.isEmpty {
+                    LeftOutBand(spans: leftOut)
+                }
                 if let outcome = notes.outcome {
                     section("Outcome") {
                         NoteLine(store: store, line: outcome, bulleted: false) {
@@ -163,6 +166,29 @@ private struct PlainNotesBand: View {
                         .bodyText()
                     Text("They have no decisions, action items or links to the transcript.")
                         .metaText(Theme.inkSecondary)
+                }
+            }
+        }
+    }
+}
+
+/// Stretches of the meeting the notes could not read, so they were written
+/// from the rest: when each one is, and why.
+private struct LeftOutBand: View {
+    let spans: [MeetingLeftOutSpan]
+
+    var body: some View {
+        Card {
+            CardRow {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(spans.count == 1
+                        ? "One part of the meeting is not in these notes."
+                        : "\(spans.count) parts of the meeting are not in these notes.")
+                        .bodyText()
+                    ForEach(spans.indices, id: \.self) { index in
+                        Text(spans[index].line)
+                            .metaText(Theme.inkSecondary)
+                    }
                 }
             }
         }

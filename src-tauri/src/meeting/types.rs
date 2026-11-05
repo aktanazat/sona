@@ -1289,6 +1289,20 @@ pub struct GeneratedMeetingArtifacts {
     /// empty. Defaulted so every earlier revision reads back as structured.
     #[serde(default)]
     pub plain: bool,
+    /// Stretches of the meeting these notes leave out: every reading of them
+    /// failed, so the notes were written from the rest. In meeting order.
+    /// Defaulted so every earlier revision reads back as covering it all.
+    #[serde(default)]
+    pub left_out: Vec<LeftOutSpan>,
+}
+
+/// One stretch of a meeting the notes could not read, and why. The offsets
+/// are absent for a transcript whose lines carry no times.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct LeftOutSpan {
+    pub start_offset_ns: Option<u64>,
+    pub end_offset_ns: Option<u64>,
+    pub cause: EngineFailureCause,
 }
 
 impl GeneratedMeetingArtifacts {

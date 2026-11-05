@@ -868,6 +868,7 @@ mod tests {
                     ledger: None,
                     ledger_failure: None,
                     plain: false,
+                    left_out: Vec::new(),
                 }),
                 generated_at_utc_ms: NOW,
             })
