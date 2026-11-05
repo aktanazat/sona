@@ -13,6 +13,7 @@ pub struct AppleLLMResponse {
     pub response: *mut c_char,
     pub success: c_int,
     pub error_message: *mut c_char,
+    pub failure_kind: c_int,
 }
 
 extern "C" {
@@ -40,10 +41,66 @@ pub fn check_apple_intelligence_availability() -> bool {
     apple_intelligence_blocker().is_none()
 }
 
-type GenerationResult = Result<String, String>;
+/// Why the model did not answer, when it said why. The codes are the
+/// `APPLE_LLM_FAILURE_*` defines in `swift/apple_intelligence_bridge.h`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppleFailureKind {
+    /// The safety guardrail stopped the request or the reply.
+    Guardrail,
+    /// The instructions, the input and the reply did not fit the window.
+    ContextWindow,
+    /// The model declined to answer.
+    Refusal,
+    UnsupportedLanguage,
+    /// The bridge's own deadline ended the wait.
+    TimedOut,
+    /// Anything else; the message is the only account of it.
+    Other,
+}
+
+impl AppleFailureKind {
+    const fn from_code(code: c_int) -> Self {
+        match code {
+            1 => Self::Guardrail,
+            2 => Self::ContextWindow,
+            3 => Self::Refusal,
+            4 => Self::UnsupportedLanguage,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AppleGenerationError {
+    pub kind: AppleFailureKind,
+    /// The error's own text, for the log.
+    pub message: String,
+}
+
+impl std::fmt::Display for AppleGenerationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<String> for AppleGenerationError {
+    fn from(message: String) -> Self {
+        Self {
+            kind: AppleFailureKind::Other,
+            message,
+        }
+    }
+}
+
+impl From<&str> for AppleGenerationError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+type GenerationResult = Result<String, AppleGenerationError>;
 type GenerationSender = oneshot::Sender<GenerationResult>;
 
-const GENERATION_DEADLINE: Duration = Duration::from_secs(30);
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 static REQUESTS: LazyLock<Mutex<HashMap<u64, GenerationSender>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -55,6 +112,17 @@ pub(crate) enum ResponseShape {
     Json = 1,
     MeetingNotes = 2,
     MeetingLedger = 3,
+}
+
+impl ResponseShape {
+    fn deadline(self) -> Duration {
+        const ONE_GENERATION: Duration = Duration::from_secs(30);
+        match self {
+            Self::Text | Self::Json => ONE_GENERATION,
+            // A meeting pass the guardrails stop runs up to five generations.
+            Self::MeetingNotes | Self::MeetingLedger => ONE_GENERATION.saturating_mul(5),
+        }
+    }
 }
 
 extern "C" {
@@ -91,7 +159,7 @@ impl Drop for GenerationRequest {
 
 extern "C" fn generation_completed(request_id: u64, response_ptr: *mut AppleLLMResponse) {
     let result = if response_ptr.is_null() {
-        Err("Null response from Apple LLM".to_string())
+        Err("Null response from Apple LLM".into())
     } else {
         // SAFETY: Swift transfers one live response to this callback, including ownership of its strings.
         let response = unsafe { &*response_ptr };
@@ -104,13 +172,19 @@ extern "C" fn generation_completed(request_id: u64, response_ptr: *mut AppleLLMR
                     .to_string_lossy()
                     .into_owned())
             }
-        } else if response.error_message.is_null() {
-            Err("Unknown error".to_string())
         } else {
-            // SAFETY: The error string has the same lifetime as the enclosing response.
-            Err(unsafe { CStr::from_ptr(response.error_message) }
-                .to_string_lossy()
-                .into_owned())
+            let message = if response.error_message.is_null() {
+                "Unknown error".to_string()
+            } else {
+                // SAFETY: The error string has the same lifetime as the enclosing response.
+                unsafe { CStr::from_ptr(response.error_message) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            Err(AppleGenerationError {
+                kind: AppleFailureKind::from_code(response.failure_kind),
+                message,
+            })
         };
         // SAFETY: This callback is the sole owner of this Swift allocation, even after cancellation.
         unsafe { free_apple_llm_response(response_ptr) };
@@ -133,8 +207,11 @@ async fn await_generation(
 ) -> GenerationResult {
     tokio::select! {
         biased;
-        result = receiver => result.unwrap_or_else(|_| Err("Apple Intelligence generation ended without a response".to_string())),
-        () = deadline => Err("Apple Intelligence generation timed out".to_string()),
+        result = receiver => result.unwrap_or_else(|_| Err("Apple Intelligence generation ended without a response".into())),
+        () = deadline => Err(AppleGenerationError {
+            kind: AppleFailureKind::TimedOut,
+            message: "Apple Intelligence generation timed out".to_string(),
+        }),
     }
 }
 
@@ -166,7 +243,7 @@ async fn generate(
         .is_none()
         .then(crate::planning::quiet::foreground_activity);
     if cancellation.is_some_and(|signal| signal.is_cancelled()) {
-        return Err("Apple Intelligence generation cancelled".to_string());
+        return Err("Apple Intelligence generation cancelled".into());
     }
     let system_cstr = CString::new(system_prompt).map_err(|error| error.to_string())?;
     let user_cstr = CString::new(user_content).map_err(|error| error.to_string())?;
@@ -207,11 +284,11 @@ async fn generate(
     if let Some(cancellation) = cancellation {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => Err("Apple Intelligence generation cancelled".to_string()),
-            result = await_generation(receiver, tokio::time::sleep(GENERATION_DEADLINE)) => result,
+            () = cancellation.cancelled() => Err("Apple Intelligence generation cancelled".into()),
+            result = await_generation(receiver, tokio::time::sleep(response_shape.deadline())) => result,
         }
     } else {
-        await_generation(receiver, tokio::time::sleep(GENERATION_DEADLINE)).await
+        await_generation(receiver, tokio::time::sleep(response_shape.deadline())).await
     }
 }
 
@@ -259,8 +336,8 @@ mod tests {
         let (sender, receiver) = oneshot::channel();
         let result = await_generation(receiver, std::future::ready(())).await;
         assert_eq!(
-            result,
-            Err("Apple Intelligence generation timed out".to_string())
+            result.map_err(|error| error.kind),
+            Err(AppleFailureKind::TimedOut)
         );
         assert!(sender.send(Ok("late output".to_string())).is_err());
     }
@@ -268,12 +345,14 @@ mod tests {
     #[tokio::test]
     async fn a_completed_generation_preserves_the_provider_error() {
         let (sender, receiver) = oneshot::channel();
-        sender
-            .send(Err("Model not ready".to_string()))
-            .expect("live receiver");
+        let refused = AppleGenerationError {
+            kind: AppleFailureKind::Guardrail,
+            message: "May contain unsafe content".to_string(),
+        };
+        sender.send(Err(refused.clone())).expect("live receiver");
         assert_eq!(
             await_generation(receiver, std::future::pending()).await,
-            Err("Model not ready".to_string())
+            Err(refused)
         );
     }
 

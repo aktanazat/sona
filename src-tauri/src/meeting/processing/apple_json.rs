@@ -151,6 +151,14 @@ mod scoped {
     /// duplicate.
     const NATIVE_SUMMARY_LINES: usize = 5;
 
+    /// A reply's first JSON value. A guided reply holds nothing else; a text
+    /// reply, asked for after the guardrail stopped a guided one, may trail a
+    /// remark.
+    fn reply<T: DeserializeOwned>(response: &str) -> Result<T, String> {
+        super::super::first_json_value(response)
+            .map_err(|()| "The reply was not one JSON object".to_string())
+    }
+
     #[derive(Default, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     struct NativeFactualReply {
@@ -1141,8 +1149,7 @@ mod scoped {
         }
 
         fn decode<T: DeserializeOwned>(&self, response: &str) -> Result<T, String> {
-            let mut output: Value =
-                serde_json::from_str(response).map_err(|error| error.to_string())?;
+            let mut output: Value = reply(response)?;
             restore_citations(&mut output, &self.sources)?;
             if let Some(excerpts) = &self.excerpts {
                 restore_quotes(&mut output, excerpts, &self.sources)?;
@@ -1167,8 +1174,7 @@ mod scoped {
         }
 
         fn decode_factual_notes(&self, response: &str) -> Result<NativeFactualReply, String> {
-            let mut factual: NativeFactualReply =
-                serde_json::from_str(response).map_err(|error| error.to_string())?;
+            let mut factual: NativeFactualReply = reply(response)?;
             for cited in factual
                 .decisions
                 .iter_mut()
@@ -1215,12 +1221,11 @@ mod scoped {
             response: &str,
         ) -> Result<String, String> {
             let mut narrative: NativeNarrativeReply = if factual.action_items.is_empty() {
-                serde_json::from_str(response).map_err(|error| error.to_string())?
+                reply(response)?
             } else {
-                let reply: NativeNarrativeActionsReply =
-                    serde_json::from_str(response).map_err(|error| error.to_string())?;
+                let answer: NativeNarrativeActionsReply = reply(response)?;
                 let mut selected = vec![false; factual.action_items.len()];
-                for label in reply.current_actions {
+                for label in answer.current_actions {
                     let entry = label
                         .strip_prefix('A')
                         .and_then(|number| number.parse::<usize>().ok())
@@ -1237,7 +1242,7 @@ mod scoped {
                     index += 1;
                     keep
                 });
-                reply.notes
+                answer.notes
             };
             if narrative.summary.is_empty() {
                 return Err("The answer omitted the required summary".to_string());
@@ -1306,8 +1311,7 @@ mod scoped {
         }
 
         fn decode_registers(&self, response: &str) -> Result<NativeLedgerRegisters, String> {
-            let mut wire: NativeLedgerRegistersWire =
-                serde_json::from_str(response).map_err(|error| error.to_string())?;
+            let mut wire: NativeLedgerRegistersWire = reply(response)?;
             let mut settled: Vec<bool> = (0..wire.settled_choices.len())
                 .map(|index| {
                     !wire.settled_choices[..index].iter().any(|earlier| {
@@ -2127,12 +2131,15 @@ mod scoped {
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    use crate::apple_intelligence::AppleGenerationError;
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     pub(in crate::meeting::processing) fn generate_json(
         system_prompt: &str,
         evidence: &str,
         max_tokens: i32,
         root: &RootSchema,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppleGenerationError> {
         generate_json_cancellable(system_prompt, evidence, max_tokens, root, None)
     }
 
@@ -2143,7 +2150,7 @@ mod scoped {
         max_tokens: i32,
         root: &RootSchema,
         cancellation: Option<&crate::planning::quiet::Cancellation>,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppleGenerationError> {
         use crate::apple_intelligence::{
             process_with_response_shape, process_with_response_shape_cancellable, ResponseShape,
         };
@@ -2187,7 +2194,7 @@ mod scoped {
         evidence: &str,
         max_tokens: i32,
         shape: ReplyShape,
-    ) -> Result<String, String> {
+    ) -> Result<String, AppleGenerationError> {
         use crate::apple_intelligence::{process_with_response_shape, ResponseShape};
         let response_shape = match shape {
             ReplyShape::Json => ResponseShape::Json,
@@ -2260,7 +2267,7 @@ mod scoped {
                 response_shape,
                 schema,
             )?;
-            return request.restore_notes(factual, &narrative);
+            return Ok(request.restore_notes(factual, &narrative)?);
         }
         let first_phase_bytes = LEDGER_REGISTERS_WIRE.len() + 1;
         let second_phase_bytes = super::super::LEDGER_STATE_RULES.len()
@@ -2308,7 +2315,7 @@ mod scoped {
             response_shape,
             request.narrative_schema.as_deref(),
         )?;
-        request.restore_ledger_parts(registers, &narrative)
+        Ok(request.restore_ledger_parts(registers, &narrative)?)
     }
 
     #[cfg(test)]

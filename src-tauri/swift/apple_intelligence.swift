@@ -89,15 +89,48 @@ private func completeGeneration(
     id: UInt64,
     output: String?,
     error: String?,
+    failureKind: Int32 = APPLE_LLM_FAILURE_OTHER,
     completion: AppleLLMCompletion
 ) {
     let pointer = ResponsePointer.allocate(capacity: 1)
     pointer.initialize(to: AppleLLMResponse(
         response: output.flatMap(duplicateCString),
         success: output == nil ? 0 : 1,
-        error_message: error.flatMap(duplicateCString)
+        error_message: error.flatMap(duplicateCString),
+        failure_kind: failureKind
     ))
     completion(id, pointer)
+}
+
+/// The APPLE_LLM_FAILURE_* code for an error the model raised.
+private func failureKind(_ error: Error) -> Int32 {
+    if #available(macOS 27.0, *) {
+        guard let error = error as? LanguageModelError else { return APPLE_LLM_FAILURE_OTHER }
+        switch error {
+        case .guardrailViolation: return APPLE_LLM_FAILURE_GUARDRAIL
+        case .contextSizeExceeded: return APPLE_LLM_FAILURE_CONTEXT_WINDOW
+        case .refusal: return APPLE_LLM_FAILURE_REFUSAL
+        case .unsupportedLanguageOrLocale: return APPLE_LLM_FAILURE_UNSUPPORTED_LANGUAGE
+        default: return APPLE_LLM_FAILURE_OTHER
+        }
+    } else if #available(macOS 26.0, *) {
+        return macOS26FailureKind(error)
+    }
+    return APPLE_LLM_FAILURE_OTHER
+}
+
+/// macOS 26 throws `GenerationError`, which macOS 27 replaced with
+/// `LanguageModelError`.
+@available(macOS, introduced: 26.0, deprecated: 27.0)
+private func macOS26FailureKind(_ error: Error) -> Int32 {
+    guard let error = error as? LanguageModelSession.GenerationError else { return APPLE_LLM_FAILURE_OTHER }
+    switch error {
+    case .guardrailViolation: return APPLE_LLM_FAILURE_GUARDRAIL
+    case .exceededContextWindowSize: return APPLE_LLM_FAILURE_CONTEXT_WINDOW
+    case .refusal: return APPLE_LLM_FAILURE_REFUSAL
+    case .unsupportedLanguageOrLocale: return APPLE_LLM_FAILURE_UNSUPPORTED_LANGUAGE
+    default: return APPLE_LLM_FAILURE_OTHER
+    }
 }
 
 @available(macOS 26.0, *)
@@ -114,6 +147,150 @@ private func generateJSON(
         options: options
     )
     return response.content.jsonString
+}
+
+/// One meeting pass under the guardrails Apple provides for transforming the
+/// user's own text.
+///
+/// Those guardrails stop a violation only for a String reply: guided
+/// generation still applies the default ones. Whether they stop a reply
+/// varies with the sampled words, so a stopped pass is sampled again, and
+/// then asked for text with the schema in its instructions. A text reply
+/// that misses the schema reports the guardrail stop, which is what kept
+/// this pass from its notes.
+@available(macOS 26.0, *)
+private func generateMeetingJSON(
+    instructions: String,
+    content: String,
+    schemaJSON: String,
+    options: GenerationOptions
+) async throws -> String {
+    let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
+    let sampled = GenerationOptions(maximumResponseTokens: options.maximumResponseTokens)
+    var guardrailStop: Error
+    do {
+        return try await generateJSON(
+            session: LanguageModelSession(model: model, instructions: instructions),
+            content: content,
+            schemaJSON: schemaJSON,
+            options: options
+        )
+    } catch where failureKind(error) == APPLE_LLM_FAILURE_GUARDRAIL {
+        guardrailStop = error
+    }
+    for _ in 0..<2 {
+        try Task.checkCancellation()
+        do {
+            return try await generateJSON(
+                session: LanguageModelSession(model: model, instructions: instructions),
+                content: content,
+                schemaJSON: schemaJSON,
+                options: sampled
+            )
+        } catch where failureKind(error) == APPLE_LLM_FAILURE_GUARDRAIL {
+            guardrailStop = error
+        }
+    }
+    let textInstructions = """
+        \(instructions)
+
+        Reply with one JSON object that matches this JSON schema. Write nothing before or after it, and no code fence.
+        \(schemaJSON)
+        """
+    let schema = try JSONDecoder().decode(ReplySchema.self, from: Data(schemaJSON.utf8))
+    for textOptions in [options, sampled] {
+        try Task.checkCancellation()
+        let session = LanguageModelSession(model: model, instructions: textInstructions)
+        let reply = try await session.respond(to: Prompt { content }, options: textOptions).content
+        guard let start = reply.firstIndex(of: "{"), let end = reply.lastIndex(of: "}"), start < end else {
+            continue
+        }
+        let json = String(reply[start...end])
+        if let value = try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)),
+           schema.admits(value, definitions: schema.definitions ?? [:]) {
+            return json
+        }
+    }
+    throw guardrailStop
+}
+
+private enum JSONValue: Decodable {
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case string(String)
+    case number(Double)
+    case boolean(Bool)
+    case null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .boolean(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: JSONValue].self))
+        }
+    }
+}
+
+/// The subset of JSON Schema the meeting reply types emit. Their objects
+/// take no other keys; an optional key may hold null.
+private final class ReplySchema: Decodable {
+    let reference: String?
+    let choices: [ReplySchema]?
+    let options: [String]?
+    let type: String?
+    let properties: [String: ReplySchema]?
+    let required: [String]?
+    let items: ReplySchema?
+    let minItems: Int?
+    let maxItems: Int?
+    let definitions: [String: ReplySchema]?
+
+    private enum CodingKeys: String, CodingKey {
+        case reference = "$ref"
+        case choices = "anyOf"
+        case options = "enum"
+        case type, properties, required, items, minItems, maxItems
+        case definitions = "$defs"
+    }
+
+    func admits(_ value: JSONValue, definitions: [String: ReplySchema]) -> Bool {
+        if let reference, let name = reference.split(separator: "/").last {
+            return definitions[String(name)]?.admits(value, definitions: definitions) ?? false
+        }
+        if let choices {
+            return choices.contains { $0.admits(value, definitions: definitions) }
+        }
+        switch (value, options, type) {
+        case let (.string(text), options?, _):
+            return options.contains(text)
+        case (_, _?, _):
+            return false
+        case let (.object(object), nil, "object"):
+            let required = required ?? []
+            return required.allSatisfy { object[$0] != nil } && object.allSatisfy { key, field in
+                guard let property = properties?[key] else { return false }
+                if case .null = field, !required.contains(key) { return true }
+                return property.admits(field, definitions: definitions)
+            }
+        case let (.array(array), nil, "array"):
+            return array.count >= minItems ?? 0
+                && array.count <= maxItems ?? Int.max
+                && array.allSatisfy { items?.admits($0, definitions: definitions) ?? true }
+        case (.string, nil, "string"), (.boolean, nil, "boolean"), (.number, nil, "integer"), (.number, nil, "number"):
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 @_cdecl("start_apple_intelligence_generation")
@@ -141,9 +318,9 @@ public func startAppleIntelligenceGeneration(
     GenerationTasks.shared.start(id: requestID) {
         var output: String?
         var failure: String?
+        var kind = APPLE_LLM_FAILURE_OTHER
         do {
             try Task.checkCancellation()
-            let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
             var options = GenerationOptions(maximumResponseTokens: maxTokens > 0 ? Int(maxTokens) : nil)
             switch responseShape {
             case Int32(APPLE_LLM_RESPONSE_MEETING_NOTES), Int32(APPLE_LLM_RESPONSE_MEETING_LEDGER):
@@ -153,13 +330,14 @@ public func startAppleIntelligenceGeneration(
                         NSLocalizedDescriptionKey: "The meeting response format is missing."
                     ])
                 }
-                output = try await generateJSON(
-                    session: session,
+                output = try await generateMeetingJSON(
+                    instructions: instructions,
                     content: content,
                     schemaJSON: schemaJSON,
                     options: options
                 )
             case Int32(APPLE_LLM_RESPONSE_JSON):
+                let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
                 if let schemaJSON {
                     options.sampling = .greedy
                     output = try await generateJSON(
@@ -172,6 +350,7 @@ public func startAppleIntelligenceGeneration(
                     output = try await session.respond(to: content, options: options).content
                 }
             case Int32(APPLE_LLM_RESPONSE_TEXT):
+                let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
                 do {
                     let response = try await session.respond(to: content, generating: CleanedTranscript.self, options: options)
                     output = response.content.cleanedText
@@ -185,9 +364,10 @@ public func startAppleIntelligenceGeneration(
             try Task.checkCancellation()
         } catch {
             failure = error.localizedDescription
+            kind = failureKind(error)
         }
         guard GenerationTasks.shared.finish(id: requestID) else { return }
-        completeGeneration(id: requestID, output: output, error: failure, completion: completion)
+        completeGeneration(id: requestID, output: output, error: failure, failureKind: kind, completion: completion)
     }
 }
 

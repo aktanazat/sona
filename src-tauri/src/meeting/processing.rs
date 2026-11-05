@@ -276,6 +276,16 @@ pub enum MeetingTextGenerationError {
     /// to say. Pressing the button again is a fair chance, because the next
     /// run may finish inside the limit.
     TimedOut,
+    /// The engine's safety filter stopped the request: Apple Intelligence's
+    /// guardrail, even after the pass was asked again for text.
+    SafetyBlocked,
+    /// The model read the request and declined to answer it.
+    Declined,
+    /// The instructions, the evidence and the reply did not fit the engine's
+    /// window.
+    ContextExceeded,
+    /// The engine does not support the transcript's language.
+    UnsupportedLanguage,
     /// The engine was never reached: it is not configured, or its transport
     /// refused before anything was generated. Nothing ran, so nothing is
     /// recorded as having failed to run.
@@ -360,7 +370,7 @@ impl RunFailure {
         }
     }
 
-    const fn cause(self) -> Option<EngineFailureCause> {
+    pub(crate) const fn cause(self) -> Option<EngineFailureCause> {
         match self {
             Self::Reason(_) => None,
             Self::Engine(cause) => Some(cause),
@@ -519,7 +529,7 @@ impl MeetingTextGenerator for AppleIntelligenceGenerator {
                 .map_err(|_| MeetingTextGenerationError::Failed)?;
             let max_tokens = max_tokens.min(reply_tokens);
             apple_json::generate(system_prompt, evidence, max_tokens, shape)
-                .map_err(|_| MeetingTextGenerationError::Failed)
+                .map_err(apple_generation_error)
         }
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
@@ -545,13 +555,36 @@ impl MeetingTextGenerator for AppleIntelligenceGenerator {
                 max_tokens.min(reply_tokens),
                 schema(),
             )
-            .map_err(|_| MeetingTextGenerationError::Failed)
+            .map_err(apple_generation_error)
         }
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             let _ = (system_prompt, evidence, max_tokens, schema);
             Err(MeetingTextGenerationError::Failed)
         }
+    }
+}
+
+/// The cause Apple Intelligence gave, kept, and its own words logged: until
+/// this said why, a meeting the safety filter stopped read as a model that did
+/// not answer, and the log had nothing to say otherwise.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn apple_generation_error(
+    error: crate::apple_intelligence::AppleGenerationError,
+) -> MeetingTextGenerationError {
+    use crate::apple_intelligence::AppleFailureKind;
+    log::warn!(
+        "Apple Intelligence did not write this pass ({:?}): {}",
+        error.kind,
+        error.message
+    );
+    match error.kind {
+        AppleFailureKind::Guardrail => MeetingTextGenerationError::SafetyBlocked,
+        AppleFailureKind::Refusal => MeetingTextGenerationError::Declined,
+        AppleFailureKind::ContextWindow => MeetingTextGenerationError::ContextExceeded,
+        AppleFailureKind::UnsupportedLanguage => MeetingTextGenerationError::UnsupportedLanguage,
+        AppleFailureKind::TimedOut => MeetingTextGenerationError::TimedOut,
+        AppleFailureKind::Other => MeetingTextGenerationError::Failed,
     }
 }
 
@@ -620,7 +653,7 @@ impl MeetingTextGenerator for QuietReviewGenerator {
                 schema(),
                 Some(&self.cancellation),
             )
-            .map_err(|_| MeetingTextGenerationError::Failed)
+            .map_err(apple_generation_error)
         }
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
@@ -1355,9 +1388,16 @@ impl MeetingProcessingService {
             Err(MeetingTextGenerationError::Unreachable) => {
                 failed(PromptRunFailure::ModelUnreachable)
             }
-            Err(MeetingTextGenerationError::Failed | MeetingTextGenerationError::TimedOut) => {
-                failed(PromptRunFailure::ModelFailed)
-            }
+            /* A refusal or a safety stop is, to a saved prompt, a model that
+             * failed: the prompt surface has one line for that. */
+            Err(
+                MeetingTextGenerationError::Failed
+                | MeetingTextGenerationError::TimedOut
+                | MeetingTextGenerationError::SafetyBlocked
+                | MeetingTextGenerationError::Declined
+                | MeetingTextGenerationError::ContextExceeded
+                | MeetingTextGenerationError::UnsupportedLanguage,
+            ) => failed(PromptRunFailure::ModelFailed),
             /* Answered in the wrong shape, which for a prompt is what
              * `SchemaMismatch` already names: the same reason a reply that
              * parsed and did not match this prompt's schema is given. */
@@ -2807,7 +2847,11 @@ impl MeetingProcessingService {
             Err(
                 MeetingTextGenerationError::Failed
                 | MeetingTextGenerationError::ReplyNotStructured
-                | MeetingTextGenerationError::TimedOut,
+                | MeetingTextGenerationError::TimedOut
+                | MeetingTextGenerationError::SafetyBlocked
+                | MeetingTextGenerationError::Declined
+                | MeetingTextGenerationError::ContextExceeded
+                | MeetingTextGenerationError::UnsupportedLanguage,
             ) => {
                 return Ok(MeetingCatchUp::empty(
                     MeetingCatchUpState::Failed,
@@ -2918,7 +2962,11 @@ impl MeetingProcessingService {
             Err(
                 MeetingTextGenerationError::Failed
                 | MeetingTextGenerationError::ReplyNotStructured
-                | MeetingTextGenerationError::TimedOut,
+                | MeetingTextGenerationError::TimedOut
+                | MeetingTextGenerationError::SafetyBlocked
+                | MeetingTextGenerationError::Declined
+                | MeetingTextGenerationError::ContextExceeded
+                | MeetingTextGenerationError::UnsupportedLanguage,
             ) => return Ok(empty(MeetingLiveHelpState::Failed, segment_count)),
         };
         let items = match validate_live_help(kind, &model_output, &read) {
@@ -5530,19 +5578,29 @@ pub(crate) fn generate_ledger(
     Ok(ledger)
 }
 
+impl From<MeetingTextGenerationError> for EngineFailureCause {
+    fn from(error: MeetingTextGenerationError) -> Self {
+        match error {
+            MeetingTextGenerationError::ReplyNotStructured => Self::ReplyNotStructured,
+            MeetingTextGenerationError::TimedOut => Self::TimedOut,
+            MeetingTextGenerationError::SafetyBlocked => Self::SafetyBlocked,
+            MeetingTextGenerationError::Declined => Self::ModelDeclined,
+            MeetingTextGenerationError::ContextExceeded => Self::EvidencePack,
+            MeetingTextGenerationError::UnsupportedLanguage => Self::UnsupportedLanguage,
+            /* An engine that wrote the notes a moment ago and then went away
+             * is, to a later pass, an engine that refused. */
+            MeetingTextGenerationError::Failed | MeetingTextGenerationError::Unreachable => {
+                Self::ModelRefused
+            }
+        }
+    }
+}
+
 fn reading_error_cause(error: complete_reading::ReadingError) -> EngineFailureCause {
     match error {
         complete_reading::ReadingError::Invalid(cause) => cause,
         complete_reading::ReadingError::Stopped(_) => EngineFailureCause::EvidencePack,
-        complete_reading::ReadingError::Engine(error) => match error {
-            MeetingTextGenerationError::ReplyNotStructured => {
-                EngineFailureCause::ReplyNotStructured
-            }
-            MeetingTextGenerationError::TimedOut => EngineFailureCause::TimedOut,
-            MeetingTextGenerationError::Failed | MeetingTextGenerationError::Unreachable => {
-                EngineFailureCause::ModelRefused
-            }
-        },
+        complete_reading::ReadingError::Engine(error) => error.into(),
     }
 }
 
@@ -5558,17 +5616,7 @@ fn read_ledger_pack(
     for _ in 0..=LEDGER_RECEIPT_RETRIES {
         let output = generator
             .generate(prompt, input, LEDGER_MAX_TOKENS, ReplyShape::MeetingLedger)
-            .map_err(|error| match error {
-                MeetingTextGenerationError::ReplyNotStructured => {
-                    EngineFailureCause::ReplyNotStructured
-                }
-                MeetingTextGenerationError::TimedOut => EngineFailureCause::TimedOut,
-                /* The engine that wrote the notes a moment ago and then went
-                 * away is, to this pass, an engine that refused. */
-                MeetingTextGenerationError::Unreachable | MeetingTextGenerationError::Failed => {
-                    EngineFailureCause::ModelRefused
-                }
-            })?;
+            .map_err(EngineFailureCause::from)?;
         let mut raw: RawLedgerOutput =
             first_json_value(&output).map_err(|()| EngineFailureCause::ReplyNotStructured)?;
         if let Some(scope) = scope {
@@ -7757,6 +7805,38 @@ pub(crate) mod tests {
             generation_shortfall(&ArtifactGenerationOutcome::NoSpeech),
             None,
             "silence is the one empty pass that is finished, not thwarted"
+        );
+    }
+
+    /// The work laptop's meeting read "the model did not answer" because the
+    /// safety filter's stop was flattened into a plain failure on its way
+    /// here. The reason Apple Intelligence gave has to reach the meeting.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn apple_intelligence_says_why_it_wrote_no_notes() {
+        use crate::apple_intelligence::{AppleFailureKind, AppleGenerationError};
+        let cause = |kind| {
+            EngineFailureCause::from(apple_generation_error(AppleGenerationError {
+                kind,
+                message: "Response may contain sensitive or unsafe content".to_string(),
+            }))
+        };
+        assert_eq!(
+            cause(AppleFailureKind::Guardrail),
+            EngineFailureCause::SafetyBlocked
+        );
+        assert_eq!(
+            cause(AppleFailureKind::Refusal),
+            EngineFailureCause::ModelDeclined
+        );
+        assert_eq!(
+            cause(AppleFailureKind::ContextWindow),
+            EngineFailureCause::EvidencePack
+        );
+        assert_eq!(
+            cause(AppleFailureKind::Other),
+            EngineFailureCause::ModelRefused,
+            "only a failure Apple did not explain reads as no answer"
         );
     }
 

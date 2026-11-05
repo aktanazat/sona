@@ -3613,7 +3613,7 @@ impl MeetingSessionManager {
                 if let Ok(snapshot) = store.session_snapshot(request.session_id) {
                     self.emit_session_changed(&snapshot);
                 }
-                return Err(map_processing_error(failure.reason()));
+                return Err(map_run_failure(failure));
             }
         };
         let receipt = store
@@ -4817,6 +4817,18 @@ fn map_processing_error(error: ProcessingFailure) -> MeetingCommandError {
     }
 }
 
+/// A run's failure as the command's answer, keeping the engine causes whose
+/// remedy is not "try again": a meeting the safety filter stopped, one the
+/// model declined to write about, and one in a language it does not support.
+fn map_run_failure(failure: RunFailure) -> MeetingCommandError {
+    match failure.cause() {
+        Some(EngineFailureCause::SafetyBlocked) => MeetingCommandError::SafetyBlocked,
+        Some(EngineFailureCause::ModelDeclined) => MeetingCommandError::ModelDeclined,
+        Some(EngineFailureCause::UnsupportedLanguage) => MeetingCommandError::UnsupportedLanguage,
+        _ => map_processing_error(failure.reason()),
+    }
+}
+
 /// A generation the operator asked for and did not get.
 ///
 /// Every outcome leaves the press with no engine text, and every one is the
@@ -4831,9 +4843,13 @@ fn map_processing_error(error: ProcessingFailure) -> MeetingCommandError {
 const fn map_generation_error(error: MeetingTextGenerationError) -> MeetingCommandError {
     match error {
         MeetingTextGenerationError::Unreachable => MeetingCommandError::RemoteUnavailable,
+        MeetingTextGenerationError::SafetyBlocked => MeetingCommandError::SafetyBlocked,
+        MeetingTextGenerationError::Declined => MeetingCommandError::ModelDeclined,
+        MeetingTextGenerationError::UnsupportedLanguage => MeetingCommandError::UnsupportedLanguage,
         MeetingTextGenerationError::Failed
         | MeetingTextGenerationError::ReplyNotStructured
-        | MeetingTextGenerationError::TimedOut => MeetingCommandError::EngineFailure,
+        | MeetingTextGenerationError::TimedOut
+        | MeetingTextGenerationError::ContextExceeded => MeetingCommandError::EngineFailure,
     }
 }
 

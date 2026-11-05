@@ -12,7 +12,16 @@ typedef struct {
     char* response;
     int success; // 0 for failure, 1 for success
     char* error_message; // Only valid when success = 0
+    int failure_kind; // One of APPLE_LLM_FAILURE_*; only valid when success = 0
 } AppleLLMResponse;
+
+// Why a generation failed, when the model said why. Anything else is OTHER,
+// and its error_message is the only account of it.
+#define APPLE_LLM_FAILURE_OTHER 0
+#define APPLE_LLM_FAILURE_GUARDRAIL 1
+#define APPLE_LLM_FAILURE_CONTEXT_WINDOW 2
+#define APPLE_LLM_FAILURE_REFUSAL 3
+#define APPLE_LLM_FAILURE_UNSUPPORTED_LANGUAGE 4
 
 // Why Apple Intelligence can or cannot answer right now. The OS distinguishes
 // three unavailability reasons and they call for different user action, so the

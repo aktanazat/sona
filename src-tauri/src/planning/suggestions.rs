@@ -482,6 +482,18 @@ pub(super) fn generate(
                 MeetingTextGenerationError::Failed => {
                     "The local model could not review these sources. Try again."
                 }
+                MeetingTextGenerationError::SafetyBlocked => {
+                    "Apple Intelligence's safety filter blocked these sources."
+                }
+                MeetingTextGenerationError::Declined => {
+                    "The local model declined to review these sources."
+                }
+                MeetingTextGenerationError::ContextExceeded => {
+                    "These sources are too long for the local model. Choose fewer."
+                }
+                MeetingTextGenerationError::UnsupportedLanguage => {
+                    "The local model does not support this language."
+                }
             }
             .to_string()
         })?;
