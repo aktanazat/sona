@@ -8013,9 +8013,11 @@ pub(crate) mod tests {
             [
                 ReplyShape::MeetingNotes,
                 ReplyShape::MeetingNotes,
+                ReplyShape::MeetingNotes,
+                ReplyShape::MeetingNotes,
                 ReplyShape::PlainNotes
             ],
-            "a stopped part is asked once more, and an engine that refused the structured reading is asked for no ledger"
+            "a stopped part is asked once more and then twice under short instructions, and an engine that refused the structured reading is asked for no ledger"
         );
     }
 

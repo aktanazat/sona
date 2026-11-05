@@ -12,8 +12,6 @@ use crate::meeting::store::workflow_core_tests;
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
-const SHORT_NOTES_PROMPT: &str = "Write notes of this meeting: what was decided, what each person agreed to do, the open questions and the risks.";
-
 #[derive(Deserialize)]
 struct Export {
     review: Review,
@@ -46,11 +44,11 @@ struct Base {
     text: String,
 }
 
-/// The app's Apple Intelligence engine, keeping how each failed request
-/// ended until the probe reports it.
+/// The app's Apple Intelligence engine, keeping how each request ended until
+/// the probe reports it.
 #[derive(Default)]
 struct Witness {
-    failures: Mutex<Vec<AppleGenerationError>>,
+    requests: Mutex<Vec<String>>,
 }
 
 impl MeetingTextGenerator for Witness {
@@ -83,44 +81,39 @@ impl MeetingTextGenerator for Witness {
             return Err(MeetingTextGenerationError::Failed);
         };
         let result = apple_json::generate(prompt, input, max_tokens.min(reply_tokens), shape);
-        if let Err(error) = &result {
-            self.failures
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(error.clone());
-        }
+        let short = if prompt.starts_with(SHORT_NOTES_PROMPT) {
+            ", short instructions"
+        } else {
+            ""
+        };
+        let ended = match &result {
+            Ok(_) => "answered".to_string(),
+            Err(error) => describe(error),
+        };
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(format!("{} bytes{short}: {ended}", input.len()));
         result.map_err(apple_generation_error)
     }
 }
 
 impl Witness {
-    fn take(&self) -> Vec<String> {
-        std::mem::take(&mut *self.failures.lock().unwrap_or_else(PoisonError::into_inner))
-            .iter()
-            .map(describe)
-            .collect()
-    }
-
-    /// How the requests since the last report failed, the last one first.
-    fn why(&self) -> String {
-        let mut failures = self.take();
-        let Some(last) = failures.pop() else {
-            return "written, but the app could not use the reply".to_string();
+    /// "ok" for a step its first request answered; otherwise every request
+    /// of the step in order, so second tries, halves and the short
+    /// instructions all show.
+    fn outcome(&self, failure: Option<String>) -> String {
+        let requests =
+            std::mem::take(&mut *self.requests.lock().unwrap_or_else(PoisonError::into_inner));
+        let count = match requests.len() {
+            1 => "1 request".to_string(),
+            count => format!("{count} requests"),
         };
-        match failures.pop() {
-            Some(earlier) => format!("{last} (before that: {earlier})"),
-            None => last,
-        }
-    }
-
-    /// "ok", or how the whole part failed before it passed on a second try
-    /// or in `parts` halves.
-    fn ok(&self, parts: usize) -> String {
-        match (parts, self.take().first()) {
-            (1, None) => "ok".to_string(),
-            (1, Some(first)) => format!("ok on the second try (first try: {first})"),
-            (_, None) => "ok in two halves".to_string(),
-            (_, Some(first)) => format!("ok in two halves (whole part: {first})"),
+        let trail = requests.join("; ");
+        match failure {
+            None if requests.len() <= 1 => "ok".to_string(),
+            None => format!("ok after {count}: {trail}"),
+            Some(failure) => format!("{failure} after {count}: {trail}"),
         }
     }
 }
@@ -216,11 +209,11 @@ fn compare(witness: &Witness, prompt: &str, profile: &str, pack: &str, failed: b
     }
     for (variant, other) in variants {
         let started = Instant::now();
-        let outcome =
-            match witness.generate(&other, pack, ARTIFACT_MAX_TOKENS, ReplyShape::MeetingNotes) {
-                Ok(_) => "ok".to_string(),
-                Err(_) => witness.why(),
-            };
+        let failure = witness
+            .generate(&other, pack, ARTIFACT_MAX_TOKENS, ReplyShape::MeetingNotes)
+            .err()
+            .map(|_| "failed".to_string());
+        let outcome = witness.outcome(failure);
         report(&format!("  same part, {variant}"), started, &outcome);
     }
 }
@@ -368,6 +361,7 @@ fn notes_probe() {
     )
     .expect("notes parts");
     let mut instructions = prompt.clone();
+    let mut short = SHORT_NOTES_PROMPT.to_string();
     for round in 1..=MAX_REDUCTION_ROUNDS {
         let mut sections = Vec::new();
         for (index, pack) in input.iter().enumerate() {
@@ -378,19 +372,22 @@ fn notes_probe() {
                 pack.as_ref().len()
             );
             let started = Instant::now();
-            let failed =
-                match read_notes_part(&witness, &instructions, pack, &scope, &evidence, &|| Ok(()))
-                {
-                    Ok(read) => {
-                        report(&step, started, &witness.ok(read.len()));
-                        sections.extend(read);
-                        false
-                    }
-                    Err(error) => {
-                        report(&step, started, &format!("{}; {error:?}", witness.why()));
-                        true
-                    }
-                };
+            let read = read_notes_part(
+                &witness,
+                &instructions,
+                &short,
+                pack,
+                &scope,
+                &evidence,
+                &|| Ok(()),
+            );
+            let failure = read
+                .as_ref()
+                .err()
+                .map(|error| format!("failed, {error:?}"));
+            report(&step, started, &witness.outcome(failure));
+            let failed = read.is_err();
+            sections.extend(read.into_iter().flatten());
             if round == 1 {
                 compare(&witness, &prompt, &profile, pack.as_ref(), failed);
             }
@@ -405,6 +402,7 @@ fn notes_probe() {
                 .expect("section facts");
         }
         instructions = format!("{prompt}{NOTES_RECONCILIATION}");
+        short = format!("{SHORT_NOTES_PROMPT}{NOTES_RECONCILIATION}");
         let next = packs(
             facts.rows(&scope).expect("section fact rows"),
             "{\"section_facts\":[",
@@ -453,20 +451,24 @@ fn notes_probe() {
             &|| Ok(()),
         ) {
             Ok(read) => {
-                report(&step, started, &witness.ok(read.len()));
+                report(&step, started, &witness.outcome(None));
                 ledgers.extend(read);
             }
-            Err(cause) => report(&step, started, &format!("{}; {cause:?}", witness.why())),
+            Err(error) => report(
+                &step,
+                started,
+                &witness.outcome(Some(format!("failed, {error:?}"))),
+            ),
         }
     }
     if ledgers.len() > 1 {
         let started = Instant::now();
         match merge_ledgers(&witness, ledgers, || Ok(())) {
-            Ok(_) => report("ledger merge", started, &witness.ok(1)),
+            Ok(_) => report("ledger merge", started, &witness.outcome(None)),
             Err(error) => report(
                 "ledger merge",
                 started,
-                &format!("{}; {error:?}", witness.why()),
+                &witness.outcome(Some(format!("failed, {error:?}"))),
             ),
         }
     }
@@ -479,11 +481,15 @@ fn notes_probe() {
         &plain_notes_prompt(language),
         || Ok(()),
     ) {
-        Ok(text) => report("plain notes", started, &format!("ok, {} bytes", text.len())),
+        Ok(text) => report(
+            "plain notes",
+            started,
+            &format!("{}, {} bytes", witness.outcome(None), text.len()),
+        ),
         Err(error) => report(
             "plain notes",
             started,
-            &format!("{}; {error:?}", witness.why()),
+            &witness.outcome(Some(format!("failed, {error:?}"))),
         ),
     }
 }

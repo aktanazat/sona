@@ -160,14 +160,16 @@ mod scoped {
             .next()
         {
             Some(Ok(value)) => Ok(value),
-            Some(Err(error)) => Err(unusable(response.len(), &error)),
+            Some(Err(error)) => Err(unusable(response.len(), response, &error)),
             None => Err("The reply was empty".to_string()),
         }
     }
 
     /// Why a reply could not be read, in words that hold none of it: serde's
-    /// own message can quote the value it rejected.
-    fn unusable(bytes: usize, error: &serde_json::Error) -> String {
+    /// own message can quote the value it rejected. A mismatch is placed by
+    /// how far before the end of the decoded text it was found, since a reply
+    /// cut off at the length limit breaks inside its last row.
+    fn unusable(bytes: usize, decoded: &str, error: &serde_json::Error) -> String {
         match error.classify() {
             serde_json::error::Category::Eof => {
                 format!("The {bytes}-byte reply ended before its JSON did")
@@ -182,7 +184,21 @@ mod scoped {
                     .and_then(|rest| rest.split_once('`'))
                 {
                     Some((field, _)) => format!("The {bytes}-byte reply has no `{field}`"),
-                    None => format!("The {bytes}-byte reply does not fit the schema"),
+                    None if error.line() == 0 => {
+                        format!("The {bytes}-byte reply does not fit the schema")
+                    }
+                    None => {
+                        let found = decoded
+                            .split_inclusive('\n')
+                            .take(error.line() - 1)
+                            .map(str::len)
+                            .sum::<usize>()
+                            + error.column();
+                        format!(
+                            "The {bytes}-byte reply does not fit the schema {} bytes before its end",
+                            decoded.len().saturating_sub(found)
+                        )
+                    }
                 }
             }
         }
@@ -1184,7 +1200,13 @@ mod scoped {
             if let Some(excerpts) = &self.excerpts {
                 restore_quotes(&mut output, excerpts, &self.sources)?;
             }
-            serde_json::from_value(output).map_err(|error| unusable(response.len(), &error))
+            T::deserialize(&output).map_err(|error| {
+                let restored = output.to_string();
+                match serde_json::from_str::<T>(&restored) {
+                    Err(located) => unusable(response.len(), &restored, &located),
+                    Ok(_) => unusable(response.len(), &restored, &error),
+                }
+            })
         }
 
         fn restore_cited_text(&self, cited: &mut RawCitedText) -> Result<(), String> {
