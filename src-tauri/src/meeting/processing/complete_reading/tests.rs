@@ -802,6 +802,49 @@ mod tests {
         ));
     }
 
+    /// A notes reply citing every source its pack holds.
+    fn reply_citing(pack: &str) -> String {
+        let input: Value = serde_json::from_str(pack).expect("bounded input");
+        let mut ids = Vec::new();
+        if let Some(turns) = input["transcript"].as_array() {
+            for turn in turns {
+                ids.push(turn["entity_id"].as_str().expect("source id").to_string());
+            }
+        } else {
+            for fact in input["section_facts"].as_array().expect("section facts") {
+                for id in citation_ids(&fact["value"]["citations"]) {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        let cited = json!({"text": "The team reviewed the dashboard.", "citations": ids});
+        json!({
+            "summary": [cited.clone()], "outline": [], "decisions": [],
+            "action_items": [], "key_questions": [], "risks": [],
+            "follow_up_draft": cited
+        })
+        .to_string()
+    }
+
+    fn cited_ids(result: &GeneratedMeetingArtifacts) -> Vec<String> {
+        result
+            .summary
+            .citations
+            .iter()
+            .map(|citation| citation.segment_id.uuid().to_string())
+            .collect()
+    }
+
+    fn source_ids(evidence: &ArtifactEvidence) -> Vec<String> {
+        evidence
+            .transcript
+            .iter()
+            .map(|item| item.citation.entity_id.clone())
+            .collect()
+    }
+
     /// Answers a part of one turn, and cuts off the reply to a part of more
     /// turns the way Apple Intelligence cuts off a reply at its limit.
     struct CutOffWhenDense;
@@ -827,51 +870,64 @@ mod tests {
             _: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
             let input: Value = serde_json::from_str(pack).expect("bounded input");
-            let mut ids = Vec::new();
-            if let Some(turns) = input["transcript"].as_array() {
-                if turns.len() > 1 {
-                    return Err(MeetingTextGenerationError::ReplyNotStructured);
-                }
-                for turn in turns {
-                    ids.push(turn["entity_id"].as_str().expect("source id").to_string());
-                }
-            } else {
-                for fact in input["section_facts"].as_array().expect("section facts") {
-                    for id in citation_ids(&fact["value"]["citations"]) {
-                        if !ids.contains(&id) {
-                            ids.push(id);
-                        }
-                    }
-                }
+            if input["transcript"]
+                .as_array()
+                .is_some_and(|turns| turns.len() > 1)
+            {
+                return Err(MeetingTextGenerationError::ReplyNotStructured);
             }
-            let cited = json!({"text": "The team reviewed the dashboard.", "citations": ids});
-            Ok(json!({
-                "summary": [cited.clone()], "outline": [], "decisions": [],
-                "action_items": [], "key_questions": [], "risks": [],
-                "follow_up_draft": cited
-            })
-            .to_string())
+            Ok(reply_citing(pack))
         }
     }
 
     #[test]
-    fn a_part_too_dense_for_one_reply_is_read_in_halves() {
-        let evidence = gradual_evidence();
+    fn a_part_too_dense_for_one_reply_is_read_in_quarters() {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(4);
         let result = notes(&CutOffWhenDense, &evidence, "Read the meeting.", || Ok(()))
-            .expect("each half fits in one reply");
-        assert_eq!(
-            result
-                .summary
-                .citations
-                .iter()
-                .map(|citation| citation.segment_id.uuid().to_string())
-                .collect::<Vec<_>>(),
-            evidence
-                .transcript
-                .iter()
-                .map(|item| item.citation.entity_id.clone())
-                .collect::<Vec<_>>()
-        );
+            .expect("each quarter fits in one reply");
+        assert_eq!(cited_ids(&result), source_ids(&evidence));
+    }
+
+    /// Stops every notes request by the safety filter unless it is asked under
+    /// the short instructions.
+    struct StoppedUnlessShort;
+
+    impl MeetingTextGenerator for StoppedUnlessShort {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "stopped-unless-short"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            6_000
+        }
+        fn generate(
+            &self,
+            instructions: &str,
+            pack: &str,
+            _: i32,
+            _: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if !instructions.starts_with(SHORT_NOTES_PROMPT) {
+                return Err(MeetingTextGenerationError::SafetyBlocked);
+            }
+            Ok(reply_citing(pack))
+        }
+    }
+
+    #[test]
+    fn a_part_the_safety_filter_keeps_stopping_is_read_under_short_instructions() {
+        let evidence = gradual_evidence();
+        let result = notes(&StoppedUnlessShort, &evidence, "Read the meeting.", || {
+            Ok(())
+        })
+        .expect("the short instructions pass");
+        assert_eq!(cited_ids(&result), source_ids(&evidence));
     }
 
     struct DenseSourceGenerator {
