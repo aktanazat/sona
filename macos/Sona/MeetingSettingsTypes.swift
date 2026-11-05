@@ -218,6 +218,15 @@ enum MeetingRetentionPolicy: Codable, Equatable, Hashable {
         case let .deleteAfter(days): "Delete after \(days) days"
         }
     }
+
+    /// Whether moving from `current` to this policy deletes sooner.
+    func shortens(from current: MeetingRetentionPolicy) -> Bool {
+        switch (current, self) {
+        case (.forever, .deleteAfter): true
+        case let (.deleteAfter(old), .deleteAfter(new)): new < old
+        default: false
+        }
+    }
 }
 
 struct MeetingRetentionSnapshot: Decodable {
@@ -241,7 +250,7 @@ struct MeetingTranscriptRetentionSnapshot: Decodable {
 
     static func label(_ policy: MeetingRetentionPolicy) -> String {
         switch policy {
-        case .forever: "Keep until I delete them"
+        case .forever: "Forever"
         case .deleteAfter(days: 1): "1 day"
         case .deleteAfter(days: 7): "1 week"
         case .deleteAfter(days: 180): "6 months"
@@ -252,18 +261,51 @@ struct MeetingTranscriptRetentionSnapshot: Decodable {
 
     var detail: String {
         guard case let .deleteAfter(days) = policy, let begins = deletionBeginsAtUtcMs else {
-            return "Keep audio and transcripts. Deleting a whole meeting still removes everything."
+            return "Transcripts stay until the whole meeting is deleted."
         }
         let date = Date(timeIntervalSince1970: Double(begins) / 1_000)
             .formatted(.dateTime.month(.abbreviated).day())
         let age = days == 1 ? "1 day" : "\(days) days"
-        return "Transcripts older than \(age) are deleted from \(date). Deletes recordings and transcripts on this Mac. Notes stay. Links you already shared keep what they showed."
+        return "Transcripts and audio older than \(age) are deleted from \(date). Notes stay."
     }
 }
 
 struct MeetingTranscriptRetentionMutation: Decodable {
     let receipt: MeetingSettingsReceipt
     let snapshot: MeetingTranscriptRetentionSnapshot
+}
+
+struct MeetingAudioRetentionSnapshot: Decodable {
+    let policy: MeetingRetentionPolicy
+    let revision: Int
+    let changedAtUtcMs: Int64
+    let deletionBeginsAtUtcMs: Int64?
+
+    static let choices: [MeetingRetentionPolicy] =
+        [.forever] + [30, 90, 180, 365].map { .deleteAfter(days: $0) }
+
+    static func label(_ policy: MeetingRetentionPolicy) -> String {
+        switch policy {
+        case .forever: "Forever"
+        case .deleteAfter(days: 180): "6 months"
+        case .deleteAfter(days: 365): "1 year"
+        case let .deleteAfter(days): "\(days) days"
+        }
+    }
+
+    var detail: String {
+        guard case let .deleteAfter(days) = policy, let begins = deletionBeginsAtUtcMs else {
+            return "Words and notes stay when audio is deleted."
+        }
+        let date = Date(timeIntervalSince1970: Double(begins) / 1_000)
+            .formatted(.dateTime.month(.abbreviated).day())
+        return "Audio older than \(days) days is deleted from \(date). Words and notes stay."
+    }
+}
+
+struct MeetingAudioRetentionMutation: Decodable {
+    let receipt: MeetingSettingsReceipt
+    let snapshot: MeetingAudioRetentionSnapshot
 }
 
 // MARK: - Receipts and errors

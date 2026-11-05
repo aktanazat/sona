@@ -1,4 +1,4 @@
-use super::transcript_retention::retained_transcripts_due_by_in;
+use super::audio_retention::meetings_purging_by_in;
 use super::*;
 use specta::Type;
 
@@ -14,8 +14,8 @@ pub struct MeetingHoldings {
     pub portraits: PortraitHoldings,
     /// People with contact details attached from the address book.
     pub contact_cards: u64,
-    /// Transcripts and their audio that the retention sweep removes within
-    /// the next seven days under the current policy.
+    /// Meetings whose transcript or audio a retention sweep removes within
+    /// the next seven days under the current policies.
     pub purging_within_week: u64,
     pub last_cloud_upload_at_utc_ms: Option<i64>,
 }
@@ -87,6 +87,7 @@ fn holding_rows_in(connection: &Connection, now_utc_ms: i64) -> Result<HoldingRo
                    JOIN meeting_track_records r ON r.track_id = t.track_id
                    JOIN meeting_sessions s ON s.id = t.session_id
                   WHERE s.phase != 'deleting' AND s.transcript_purged_at_utc_ms IS NULL
+                    AND s.audio_purged_at_utc_ms IS NULL
                   GROUP BY t.track_id
              ) GROUP BY session_id
          )",
@@ -134,7 +135,7 @@ fn holding_rows_in(connection: &Connection, now_utc_ms: i64) -> Result<HoldingRo
             bytes: from_i64(portrait_bytes)?,
         },
         contact_cards: from_i64(contact_cards)?,
-        purging_within_week: retained_transcripts_due_by_in(
+        purging_within_week: meetings_purging_by_in(
             connection,
             now_utc_ms.saturating_add(WEEK_MS),
         )?,

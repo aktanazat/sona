@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod artifact_trace_tests;
+mod audio_retention;
 pub(crate) mod automations;
 #[cfg(test)]
 mod automations_run_tests;
@@ -109,12 +110,19 @@ const MISSING_OFFSET: u64 = u64::MAX;
 
 /// How long a deleted meeting stays undoable.
 ///
-/// Thirty days, the same horizon as the default retention policy and the same
-/// one every desktop trash uses: long enough that "I deleted the wrong meeting"
-/// is recoverable after a holiday, short enough that deleting still means
-/// something. It is a constant rather than a setting because a bin whose depth
-/// is configurable is a second retention policy to explain.
+/// Thirty days, the horizon every desktop trash uses: long enough that "I
+/// deleted the wrong meeting" is recoverable after a holiday, short enough that
+/// deleting still means something. It is a constant rather than a setting
+/// because a bin whose depth is configurable is a second retention policy to
+/// explain.
 const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
+/// When a trashed meeting's undo runs out. One a retention setting removed
+/// has no deadline: it stays until someone restores or deletes it.
+fn trash_expires_at(cause_json: &str, deleted_at_utc_ms: i64) -> Result<Option<i64>, StoreError> {
+    let by_retention = decode_json::<DeletionCause>(cause_json)? == DeletionCause::Retention;
+    Ok((!by_retention).then_some(deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS)))
+}
 
 /// The three workflow tables, rebuilt around a widened allowed-value list.
 ///
@@ -1538,6 +1546,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/conversation_bookmark_kinds.sql")),
     M::up(include_str!("store/processing_speed.sql")),
     M::up(include_str!("store/transcript_relisten.sql")),
+    M::up(include_str!("store/audio_retention.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -2047,6 +2056,10 @@ struct LocalMeetingRestoreV2 {
     format_version: u8,
     meeting: cloud_bundle::CloudMeetingBundleV1,
     bookmarks: Vec<super::conversation_review::ConversationBookmark>,
+    /// Kept beside the bundle rather than in it: no cloud copy holds audio,
+    /// so only this Mac's undo needs to know it was deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_purged_at_utc_ms: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3307,15 +3320,7 @@ impl MeetingStore {
 
     pub fn default_retention_policy(&self) -> Result<(MeetingRetentionPolicy, u64), StoreError> {
         let connection = self.connection()?;
-        let (policy, revision): (String, i64) = connection.query_row(
-            "SELECT policy_json, revision FROM meeting_retention_policy WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        Ok((
-            decode_json(&policy)?,
-            u64::try_from(revision).map_err(|_| StoreError::Corrupt)?,
-        ))
+        default_retention_policy_in(&connection)
     }
     pub fn session_retention_policy(
         &self,
@@ -4302,6 +4307,7 @@ impl MeetingStore {
             preflight_local_processing,
             retention_deadline_utc_ms: row.delete_after_utc_ms,
             transcript_purged_at_utc_ms: row.transcript_purged_at_utc_ms,
+            audio_purged_at_utc_ms: row.audio_purged_at_utc_ms,
             allowed_actions,
         })
     }
@@ -6344,6 +6350,7 @@ impl MeetingStore {
                     format_version: 2,
                     meeting: bundle,
                     bookmarks,
+                    audio_purged_at_utc_ms: current.audio_purged_at_utc_ms,
                 })
             }) {
                 Ok(bundle_json) => Some(bundle_json),
@@ -6526,7 +6533,8 @@ impl MeetingStore {
         let mut statement = connection.prepare(
             "SELECT job_id, completed_at_utc_ms,
                     COALESCE(json_extract(restore_bundle_json, '$.meeting.session.title'),
-                             json_extract(restore_bundle_json, '$.session.title')) AS title
+                             json_extract(restore_bundle_json, '$.session.title')) AS title,
+                    cause
                FROM meeting_deletion_receipts
               WHERE restore_bundle_json IS NOT NULL AND trash_relative_path IS NOT NULL
               ORDER BY completed_at_utc_ms DESC, job_id DESC",
@@ -6535,19 +6543,25 @@ impl MeetingStore {
             .query_map([], |row| {
                 let job_id: String = row.get(0)?;
                 let deleted_at_utc_ms: i64 = row.get(1)?;
+                let cause: String = row.get(3)?;
                 Ok(MeetingTrashEntry {
                     job_id: MeetingDeletionJobId::from_uuid(
                         parse_uuid(&job_id).map_err(to_sql_error)?,
                     ),
                     title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     deleted_at_utc_ms,
-                    expires_at_utc_ms: deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS),
+                    expires_at_utc_ms: trash_expires_at(&cause, deleted_at_utc_ms)
+                        .map_err(to_sql_error)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries
             .into_iter()
-            .filter(|entry| entry.expires_at_utc_ms > now_utc_ms)
+            .filter(|entry| {
+                entry
+                    .expires_at_utc_ms
+                    .is_none_or(|expires| expires > now_utc_ms)
+            })
             .collect())
     }
 
@@ -6568,10 +6582,10 @@ impl MeetingStore {
         job_id: MeetingDeletionJobId,
         now_utc_ms: i64,
     ) -> Result<MeetingSessionId, StoreError> {
-        let (trash_relative_path, bundle_json, deleted_at_utc_ms) = self
+        let (trash_relative_path, bundle_json, deleted_at_utc_ms, cause) = self
             .connection()?
             .query_row(
-                "SELECT trash_relative_path, restore_bundle_json, completed_at_utc_ms
+                "SELECT trash_relative_path, restore_bundle_json, completed_at_utc_ms, cause
                    FROM meeting_deletion_receipts WHERE job_id = ?1",
                 params![id(job_id)],
                 |row| {
@@ -6579,6 +6593,7 @@ impl MeetingStore {
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -6588,16 +6603,20 @@ impl MeetingStore {
         else {
             return Err(StoreError::NotFound);
         };
-        if deleted_at_utc_ms.saturating_add(TRASH_RETENTION_MS) <= now_utc_ms {
+        if trash_expires_at(&cause, deleted_at_utc_ms)?.is_some_and(|expires| expires <= now_utc_ms)
+        {
             return Err(StoreError::NotFound);
         }
-        let (bundle, bookmarks) = match decode_json::<LocalMeetingRestore>(&bundle_json)? {
-            LocalMeetingRestore::V2(restore) if restore.format_version == 2 => {
-                (restore.meeting, restore.bookmarks)
-            }
-            LocalMeetingRestore::V2(_) => return Err(StoreError::Invalid),
-            LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new()),
-        };
+        let (bundle, bookmarks, audio_purged_at_utc_ms) =
+            match decode_json::<LocalMeetingRestore>(&bundle_json)? {
+                LocalMeetingRestore::V2(restore) if restore.format_version == 2 => (
+                    restore.meeting,
+                    restore.bookmarks,
+                    restore.audio_purged_at_utc_ms,
+                ),
+                LocalMeetingRestore::V2(_) => return Err(StoreError::Invalid),
+                LocalMeetingRestore::Legacy(bundle) => (bundle, Vec::new(), None),
+            };
         let session_id = bundle.session.session_id;
         {
             // Freeze deletion before moving files. A request already on the wire must
@@ -6627,6 +6646,13 @@ impl MeetingStore {
             fs::rename(&trash, &live)?;
         }
         self.import_cloud_meeting_bundle(&bundle)?;
+        if let Some(purged_at) = audio_purged_at_utc_ms {
+            self.connection()?.execute(
+                "UPDATE meeting_sessions SET audio_purged_at_utc_ms = ?2, audio_purge_pending = 1
+                 WHERE id = ?1",
+                params![id(session_id), purged_at],
+            )?;
+        }
         // The audio index is the one thing the bundle does not carry.
         self.repair_session_tracks(session_id)?;
         self.repair_session_snapshots(session_id)?;
@@ -6673,7 +6699,8 @@ impl MeetingStore {
     }
 
     /// Drop every trashed meeting past its thirty days, and forget what it
-    /// would have taken to restore it.
+    /// would have taken to restore it. One a retention setting removed is
+    /// passed over: it stays until someone restores or deletes it.
     ///
     /// The receipt row itself stays: it is the record that this meeting was
     /// deleted and when, and that record has no expiry. What expires is the
@@ -6685,11 +6712,15 @@ impl MeetingStore {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT job_id, trash_relative_path FROM meeting_deletion_receipts
-              WHERE trash_relative_path IS NOT NULL AND completed_at_utc_ms <= ?1",
+              WHERE trash_relative_path IS NOT NULL AND completed_at_utc_ms <= ?1
+                AND cause != ?2",
         )?;
         let expired = statement
             .query_map(
-                params![now_utc_ms.saturating_sub(TRASH_RETENTION_MS)],
+                params![
+                    now_utc_ms.saturating_sub(TRASH_RETENTION_MS),
+                    encode_json(&DeletionCause::Retention)?
+                ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -7031,7 +7062,7 @@ impl MeetingStore {
     {
         {
             let connection = self.connection()?;
-            transcript_retention::require_retained_transcript_in(&connection, session_id)?;
+            audio_retention::require_retained_audio_in(&connection, session_id)?;
             let owner: String = connection.query_row(
                 "SELECT session_id FROM meeting_source_tracks WHERE track_id = ?1",
                 params![id(track_id)],
@@ -7171,9 +7202,8 @@ impl MeetingStore {
 
     fn repair_session_tracks(&self, session_id: MeetingSessionId) -> Result<(), StoreError> {
         let connection = self.connection()?;
-        if session_row(&connection, session_id)?
-            .transcript_purged_at_utc_ms
-            .is_some()
+        let session = session_row(&connection, session_id)?;
+        if session.transcript_purged_at_utc_ms.is_some() || session.audio_purged_at_utc_ms.is_some()
         {
             return Ok(());
         }
@@ -7585,6 +7615,7 @@ struct SessionRow {
     started_at_utc_ms: Option<i64>,
     delete_after_utc_ms: Option<i64>,
     transcript_purged_at_utc_ms: Option<i64>,
+    audio_purged_at_utc_ms: Option<i64>,
 }
 
 struct TrackRow {
@@ -7677,7 +7708,7 @@ fn session_row(
         .query_row(
             "SELECT phase, revision, title, preflight_json, processing_status,
                     retention_policy_json, started_at_utc_ms, delete_after_utc_ms,
-                    transcript_purged_at_utc_ms
+                    transcript_purged_at_utc_ms, audio_purged_at_utc_ms
              FROM meeting_sessions WHERE id = ?1",
             params![id(session_id)],
             |row| {
@@ -7693,6 +7724,7 @@ fn session_row(
                     started_at_utc_ms: row.get(6)?,
                     delete_after_utc_ms: row.get(7)?,
                     transcript_purged_at_utc_ms: row.get(8)?,
+                    audio_purged_at_utc_ms: row.get(9)?,
                 })
             },
         )
@@ -10679,6 +10711,22 @@ fn export_cloud_meeting_bundle_in(
     })
 }
 
+fn default_retention_policy_in(
+    connection: &Connection,
+) -> Result<(MeetingRetentionPolicy, u64), StoreError> {
+    let (policy, revision): (String, i64) = connection.query_row(
+        "SELECT policy_json, revision FROM meeting_retention_policy WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((
+        decode_json(&policy)?,
+        u64::try_from(revision).map_err(|_| StoreError::Corrupt)?,
+    ))
+}
+
+/// A meeting from another Mac or back from the trash follows this Mac's
+/// whole-meeting setting, counted from its end, not the deadline it carries.
 fn import_cloud_meeting_bundle_in(
     transaction: &Transaction<'_>,
     bundle: &cloud_bundle::CloudMeetingBundleV1,
@@ -10692,6 +10740,13 @@ fn import_cloud_meeting_bundle_in(
     if exists {
         return Err(StoreError::Conflict);
     }
+    let (retention_policy, _) = default_retention_policy_in(transaction)?;
+    let delete_after_utc_ms = match (bundle.session.phase, bundle.session.ended_at_utc_ms) {
+        (MeetingPhase::ReviewReady, Some(ended_at)) => {
+            retention_policy.delete_after_utc_ms(ended_at)
+        }
+        _ => None,
+    };
     transaction.execute(
         "INSERT INTO meeting_sessions (
             id, phase, revision, title, origin_kind, preflight_json, created_at_utc_ms,
@@ -10714,8 +10769,8 @@ fn import_cloud_meeting_bundle_in(
             bundle.session.ended_at_utc_ms,
             bundle.session.recovered_at_utc_ms,
             encode_json(&bundle.session.processing_status)?,
-            encode_json(&bundle.session.retention_policy)?,
-            bundle.session.delete_after_utc_ms,
+            encode_json(&retention_policy)?,
+            delete_after_utc_ms,
             diarization_status_to_db(bundle.session.diarization_status),
             bundle.session.diarization_model_id,
             bundle.session.diarization_model_version,
@@ -13801,8 +13856,8 @@ mod tests {
         assert_eq!(trashed[0].job_id, job_id);
         assert_eq!(trashed[0].title, "Design sync");
         assert_eq!(
-            trashed[0].deleted_at_utc_ms,
-            trashed[0].expires_at_utc_ms - TRASH_RETENTION_MS
+            trashed[0].expires_at_utc_ms,
+            Some(trashed[0].deleted_at_utc_ms + TRASH_RETENTION_MS)
         );
 
         let restored = store
@@ -13940,6 +13995,155 @@ mod tests {
             store.restore_trashed_meeting(job_id, 20),
             Err(StoreError::NotFound),
             "a discard is final"
+        );
+    }
+
+    const DAY_MS: i64 = 86_400_000;
+
+    /// A meeting's whole-meeting setting, and how long after its end it goes.
+    fn whole_meeting_retention(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+    ) -> (MeetingRetentionPolicy, Option<i64>) {
+        let (policy, after_end): (String, Option<i64>) = store
+            .connection()
+            .expect("store connection")
+            .query_row(
+                "SELECT retention_policy_json, delete_after_utc_ms - ended_at_utc_ms
+                 FROM meeting_sessions WHERE id = ?1",
+                params![id(session_id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("meeting retention");
+        (decode_json(&policy).expect("retention policy"), after_end)
+    }
+
+    /// A finished meeting stamped the way the old 30-day default stamped it.
+    fn old_thirty_day_meeting(store: &MeetingStore) -> (MeetingSessionId, u64) {
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(store, session_id);
+        store
+            .connection()
+            .expect("store connection")
+            .execute(
+                "UPDATE meeting_sessions
+                    SET retention_policy_json = '{\"kind\":\"delete_after_days\",\"days\":30}',
+                        delete_after_utc_ms = ended_at_utc_ms + ?2
+                  WHERE id = ?1",
+                params![id(session_id), 30 * DAY_MS],
+            )
+            .expect("old default stamp");
+        (session_id, revision)
+    }
+
+    fn keep_meetings_thirty_days(store: &MeetingStore) {
+        let (_policy, revision) = store.default_retention_policy().expect("current setting");
+        store
+            .set_default_retention_policy(
+                MeetingOperationId::new(),
+                1,
+                revision,
+                &MeetingRetentionPolicy::DeleteAfterDays { days: 30 },
+            )
+            .expect("thirty-day setting");
+    }
+
+    fn trash(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        revision: u64,
+        cause: DeletionCause,
+    ) -> MeetingDeletionJobId {
+        let (_receipt, job_id) = store
+            .reserve_deletion(MeetingOperationId::new(), 10, session_id, revision, cause)
+            .expect("reserve deletion");
+        store.finish_deletion(job_id).expect("finish deletion");
+        job_id
+    }
+
+    #[test]
+    fn a_meeting_from_another_mac_follows_this_macs_whole_meeting_setting() {
+        let (_other_directory, other_mac) = store();
+        let (_directory, this_mac) = store();
+        let (stamped, _) = old_thirty_day_meeting(&other_mac);
+        let unstamped = MeetingSessionId::new();
+        review_ready_session(&other_mac, unstamped);
+        let arrive = |session_id| {
+            cloud_bundle::CloudMeetingBundleV1::export_from_store(&other_mac, session_id)
+                .expect("export bundle")
+                .import_into_store(&this_mac)
+                .expect("import bundle")
+        };
+
+        arrive(stamped);
+        assert_eq!(
+            whole_meeting_retention(&this_mac, stamped),
+            (MeetingRetentionPolicy::Forever, None),
+            "a Mac that keeps meetings drops the date one arrives with"
+        );
+
+        keep_meetings_thirty_days(&this_mac);
+        arrive(unstamped);
+        assert_eq!(
+            whole_meeting_retention(&this_mac, unstamped),
+            (
+                MeetingRetentionPolicy::DeleteAfterDays { days: 30 },
+                Some(30 * DAY_MS)
+            ),
+            "a Mac that deletes after 30 days counts them from the meeting's end"
+        );
+    }
+
+    #[test]
+    fn a_restored_meeting_follows_this_macs_whole_meeting_setting() {
+        let (_directory, this_mac) = store();
+        let (stamped, revision) = old_thirty_day_meeting(&this_mac);
+        let stamped_job = trash(&this_mac, stamped, revision, DeletionCause::User);
+        let unstamped = MeetingSessionId::new();
+        let revision = review_ready_session(&this_mac, unstamped);
+        let unstamped_job = trash(&this_mac, unstamped, revision, DeletionCause::User);
+
+        this_mac
+            .restore_trashed_meeting(stamped_job, 20)
+            .expect("restore");
+        assert_eq!(
+            whole_meeting_retention(&this_mac, stamped),
+            (MeetingRetentionPolicy::Forever, None),
+            "the date it was deleted with does not come back"
+        );
+
+        keep_meetings_thirty_days(&this_mac);
+        this_mac
+            .restore_trashed_meeting(unstamped_job, 20)
+            .expect("restore");
+        assert_eq!(
+            whole_meeting_retention(&this_mac, unstamped),
+            (
+                MeetingRetentionPolicy::DeleteAfterDays { days: 30 },
+                Some(30 * DAY_MS)
+            ),
+            "a Mac that deletes after 30 days counts them from the meeting's end"
+        );
+    }
+
+    /// A meeting a retention setting removed stays in the trash past the thirty
+    /// days a deleted meeting gets, until someone restores or deletes it.
+    #[test]
+    fn a_meeting_a_retention_setting_removed_stays_in_the_trash() {
+        let (_directory, store) = store();
+        let session_id = MeetingSessionId::new();
+        let revision = review_ready_session(&store, session_id);
+        let job_id = trash(&store, session_id, revision, DeletionCause::Retention);
+        let deleted_at = store.meeting_trash(20).expect("trash list")[0].deleted_at_utc_ms;
+        let a_year_later = deleted_at + 365 * DAY_MS;
+
+        assert_eq!(store.purge_expired_trash(a_year_later), Ok(0));
+        let listed = store.meeting_trash(a_year_later).expect("trash list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].expires_at_utc_ms, None);
+        assert_eq!(
+            store.restore_trashed_meeting(job_id, a_year_later),
+            Ok(session_id)
         );
     }
 

@@ -1781,6 +1781,8 @@ pub fn run(cli_args: CliArgs) {
             commands::meeting::meeting_retention_set,
             commands::meeting::meeting_transcript_retention_get,
             commands::meeting::meeting_transcript_retention_set,
+            commands::meeting::meeting_audio_retention_get,
+            commands::meeting::meeting_audio_retention_set,
             commands::meeting::meeting_remote_cancel,
             commands::meeting::get_meeting_analytics,
             commands::meeting::list_keyword_trackers,

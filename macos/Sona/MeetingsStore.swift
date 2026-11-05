@@ -620,7 +620,10 @@ final class MeetingsStore {
 
     /// "Deleted 12 Mar · gone in 5 days", the deadline read as whole days.
     func expiry(of entry: MeetingTrashEntry) -> String {
-        let remaining = Double(entry.expiresAtUtcMs - Int64(Date().timeIntervalSince1970 * 1000))
+        guard let expiresAtUtcMs = entry.expiresAtUtcMs else {
+            return "Removed \(entry.deletedAt.short) by your retention setting · stays until you delete it"
+        }
+        let remaining = Double(expiresAtUtcMs - Int64(Date().timeIntervalSince1970 * 1000))
         let days = Int((remaining / Double(MeetingsStore.dayMs)).rounded(.up))
         let deleted = "Deleted \(entry.deletedAt.short)"
         if days <= 0 { return "\(deleted) · gone today" }
@@ -1251,6 +1254,7 @@ final class MeetingsStore {
     }
 
     var transcriptDeleted: Bool { snapshot?.session.transcriptDeleted ?? false }
+    var audioDeleted: Bool { snapshot?.session.audioDeleted ?? false }
 
     func canJumpTo(_ segmentId: TranscriptSegmentId) -> Bool {
         !transcriptDeleted && (snapshot?.transcript.contains { $0.base.segmentId == segmentId } ?? false)
@@ -1278,7 +1282,7 @@ final class MeetingsStore {
     }
 
     func canPlay(_ segmentId: TranscriptSegmentId) -> Bool {
-        guard !transcriptDeleted,
+        guard !transcriptDeleted, !audioDeleted,
               let segment = snapshot?.transcript.first(where: { $0.base.segmentId == segmentId && !$0.removed })
         else { return false }
         return snapshot?.tracks.contains {
@@ -1358,7 +1362,7 @@ final class MeetingsStore {
     }
 
     func canPlayBookmark(_ offset: UInt64) -> Bool {
-        guard !transcriptDeleted else { return false }
+        guard !transcriptDeleted, !audioDeleted else { return false }
         let moment = Int64(clamping: offset)
         return snapshot?.tracks.contains {
             $0.durableRecordCount > 0

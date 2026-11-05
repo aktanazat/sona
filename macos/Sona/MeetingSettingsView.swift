@@ -803,7 +803,7 @@ private struct MeetingRetentionRows: View {
         if let snapshot = store.retention {
             ChoiceRow(
                 title: "Whole meetings",
-                detail: "Deletes the whole meeting, including notes. The recording setting below does not change this.",
+                detail: "Deletes the whole meeting, including notes. The settings below do not change this.",
                 choices: choices,
                 label: { $0.label },
                 selection: Binding(
@@ -821,6 +821,7 @@ private struct MeetingRetentionRows: View {
                 busy: store.retentionSaving,
                 action: { Task { await store.loadRetention() } })
         }
+        MeetingAudioRetentionRows(store: store)
         MeetingTranscriptRetentionRows(store: store)
     }
 }
@@ -833,14 +834,14 @@ private struct MeetingTranscriptRetentionRows: View {
         Group {
             if let snapshot = store.transcriptRetention {
                 ChoiceRow(
-                    title: "Recordings and transcripts",
+                    title: "Keep transcripts",
                     detail: store.transcriptRetentionSaving ? "Saving…" : snapshot.detail,
                     choices: MeetingTranscriptRetentionSnapshot.choices,
                     label: MeetingTranscriptRetentionSnapshot.label,
                     selection: Binding(
                         get: { snapshot.policy },
                         set: { policy in
-                            if shortens(policy, from: snapshot.policy) {
+                            if policy.shortens(from: snapshot.policy) {
                                 pending = policy
                             } else {
                                 Task { await store.setTranscriptRetention(policy) }
@@ -848,7 +849,7 @@ private struct MeetingTranscriptRetentionRows: View {
                         }))
                 .disabled(store.transcriptRetentionSaving || store.transcriptRetentionLoading)
             } else if store.transcriptRetentionLoading || store.transcriptRetentionNote == nil {
-                MeetingSettingsNote("Reading the recording retention setting…")
+                MeetingSettingsNote("Reading the transcript setting…")
             }
             if let note = store.transcriptRetentionNote {
                 ActionRow(
@@ -858,7 +859,7 @@ private struct MeetingTranscriptRetentionRows: View {
                     action: { Task { await store.loadTranscriptRetention() } })
             }
         }
-        .confirmationDialog("Delete older recordings and transcripts?", isPresented: Binding(
+        .confirmationDialog("Delete older transcripts and audio?", isPresented: Binding(
             get: { pending != nil },
             set: { if !$0 { pending = nil } })) {
                 if let policy = pending {
@@ -872,13 +873,54 @@ private struct MeetingTranscriptRetentionRows: View {
                 Text("Deletion starts in 7 days and includes past meetings on this Mac. Your notes, summaries, and action items stay. Links you already shared keep what they showed.")
             }
     }
+}
 
-    private func shortens(_ policy: MeetingRetentionPolicy, from current: MeetingRetentionPolicy) -> Bool {
-        switch (current, policy) {
-        case (.forever, .deleteAfter): true
-        case let (.deleteAfter(old), .deleteAfter(new)): new < old
-        default: false
+private struct MeetingAudioRetentionRows: View {
+    let store: MeetingSettingsStore
+    @State private var pending: MeetingRetentionPolicy?
+
+    var body: some View {
+        Group {
+            if let snapshot = store.audioRetention {
+                ChoiceRow(
+                    title: "Keep audio",
+                    detail: store.audioRetentionSaving ? "Saving…" : snapshot.detail,
+                    choices: MeetingAudioRetentionSnapshot.choices,
+                    label: MeetingAudioRetentionSnapshot.label,
+                    selection: Binding(
+                        get: { snapshot.policy },
+                        set: { policy in
+                            if policy.shortens(from: snapshot.policy) {
+                                pending = policy
+                            } else {
+                                Task { await store.setAudioRetention(policy) }
+                            }
+                        }))
+                .disabled(store.audioRetentionSaving || store.audioRetentionLoading)
+            } else if store.audioRetentionLoading || store.audioRetentionNote == nil {
+                MeetingSettingsNote("Reading the audio setting…")
+            }
+            if let note = store.audioRetentionNote {
+                ActionRow(
+                    title: note,
+                    button: "Try again",
+                    busy: store.audioRetentionLoading || store.audioRetentionSaving,
+                    action: { Task { await store.loadAudioRetention() } })
+            }
         }
+        .confirmationDialog("Delete older audio?", isPresented: Binding(
+            get: { pending != nil },
+            set: { if !$0 { pending = nil } })) {
+                if let policy = pending {
+                    Button("Delete older audio", role: .destructive) {
+                        pending = nil
+                        Task { await store.setAudioRetention(policy) }
+                    }
+                }
+                Button("Cancel", role: .cancel) { pending = nil }
+            } message: {
+                Text("Deletion starts in 7 days and includes past meetings on this Mac. Words and notes stay.")
+            }
     }
 }
 

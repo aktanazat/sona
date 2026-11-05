@@ -1,7 +1,50 @@
 use super::*;
 
 const COOLDOWN_MS: i64 = 7 * 86_400_000;
-const SWEEP_LIMIT: usize = 100;
+pub(super) const SWEEP_LIMIT: i64 = 100;
+
+/// A part of every meeting deleted on its own clock, ahead of the meeting.
+#[derive(Clone, Copy)]
+pub(super) enum RetainedPart {
+    Transcript,
+    Audio,
+}
+
+impl RetainedPart {
+    fn policy_query(self) -> &'static str {
+        match self {
+            Self::Transcript => "SELECT policy_json, revision, changed_at_utc_ms FROM meeting_transcript_retention_policy WHERE singleton = 1",
+            Self::Audio => "SELECT policy_json, revision, changed_at_utc_ms FROM meeting_audio_retention_policy WHERE singleton = 1",
+        }
+    }
+
+    fn policy_update(self) -> &'static str {
+        match self {
+            Self::Transcript => {
+                "UPDATE meeting_transcript_retention_policy
+                 SET policy_json = ?1, revision = ?2, changed_at_utc_ms = ?3 WHERE singleton = 1"
+            }
+            Self::Audio => {
+                "UPDATE meeting_audio_retention_policy
+                 SET policy_json = ?1, revision = ?2, changed_at_utc_ms = ?3 WHERE singleton = 1"
+            }
+        }
+    }
+
+    fn command(self) -> MeetingCommandKind {
+        match self {
+            Self::Transcript => MeetingCommandKind::TranscriptRetentionSet,
+            Self::Audio => MeetingCommandKind::AudioRetentionSet,
+        }
+    }
+
+    fn allowed_days(self) -> &'static [u32] {
+        match self {
+            Self::Transcript => &[1, 7, 30, 90, 180, 365],
+            Self::Audio => &[30, 90, 180, 365],
+        }
+    }
+}
 
 pub(crate) struct TranscriptPurge {
     pub people_revision: Option<u64>,
@@ -10,9 +53,9 @@ pub(crate) struct TranscriptPurge {
 impl MeetingStore {
     pub(crate) fn transcript_retention_policy(
         &self,
-    ) -> Result<MeetingTranscriptRetentionSnapshot, StoreError> {
+    ) -> Result<MeetingPartRetentionSnapshot, StoreError> {
         let connection = self.connection()?;
-        transcript_retention_policy_in(&connection)
+        part_retention_policy_in(&connection, RetainedPart::Transcript)
     }
 
     pub(crate) fn set_transcript_retention_policy(
@@ -22,8 +65,25 @@ impl MeetingStore {
         expected_revision: u64,
         policy: &MeetingRetentionPolicy,
     ) -> Result<OperationReceipt, StoreError> {
+        self.set_part_retention_policy(
+            RetainedPart::Transcript,
+            operation_id,
+            now_utc_ms,
+            expected_revision,
+            policy,
+        )
+    }
+
+    pub(super) fn set_part_retention_policy(
+        &self,
+        part: RetainedPart,
+        operation_id: MeetingOperationId,
+        now_utc_ms: i64,
+        expected_revision: u64,
+        policy: &MeetingRetentionPolicy,
+    ) -> Result<OperationReceipt, StoreError> {
         if let MeetingRetentionPolicy::DeleteAfterDays { days } = policy {
-            if ![1, 7, 30, 90, 180, 365].contains(days) {
+            if !part.allowed_days().contains(days) {
                 return Err(StoreError::Invalid);
             }
         }
@@ -32,11 +92,11 @@ impl MeetingStore {
         if let Some(receipt) = operation_receipt_in(&transaction, operation_id)? {
             return Ok(receipt);
         }
-        let current = transcript_retention_policy_in(&transaction)?;
+        let current = part_retention_policy_in(&transaction, part)?;
         if current.revision != expected_revision {
             let receipt = rejected_global_receipt(
                 operation_id,
-                MeetingCommandKind::TranscriptRetentionSet,
+                part.command(),
                 expected_revision,
                 current.revision,
                 now_utc_ms,
@@ -53,13 +113,12 @@ impl MeetingStore {
         };
         let next = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
         transaction.execute(
-            "UPDATE meeting_transcript_retention_policy
-             SET policy_json = ?1, revision = ?2, changed_at_utc_ms = ?3 WHERE singleton = 1",
+            part.policy_update(),
             params![encode_json(policy)?, to_i64(next)?, changed_at],
         )?;
         let receipt = committed_global_receipt(
             operation_id,
-            MeetingCommandKind::TranscriptRetentionSet,
+            part.command(),
             expected_revision,
             now_utc_ms,
             now_utc_ms,
@@ -75,8 +134,8 @@ impl MeetingStore {
         now_utc_ms: i64,
     ) -> Result<Vec<MeetingSessionId>, StoreError> {
         let connection = self.connection()?;
-        let policy = transcript_retention_policy_in(&connection)?;
-        let cutoff = transcript_cutoff(&policy, now_utc_ms);
+        let policy = part_retention_policy_in(&connection, RetainedPart::Transcript)?;
+        let cutoff = part_cutoff(&policy, now_utc_ms);
         let mut statement = connection.prepare(
             "SELECT id FROM meeting_sessions
              WHERE phase IN ('review_ready', 'recovery_required')
@@ -84,7 +143,7 @@ impl MeetingStore {
                     OR (transcript_purged_at_utc_ms IS NULL AND ended_at_utc_ms <= ?1))
              ORDER BY transcript_audio_purge_pending DESC, ended_at_utc_ms, id LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![cutoff, SWEEP_LIMIT as i64], |row| {
+        let rows = statement.query_map(params![cutoff, SWEEP_LIMIT], |row| {
             let value: String = row.get(0)?;
             parse_uuid(&value)
                 .map(MeetingSessionId::from_uuid)
@@ -117,9 +176,9 @@ impl MeetingStore {
         if current.transcript_purged_at_utc_ms.is_none() {
             // Recheck under the write lock: the operator may have changed the
             // policy after this meeting was selected by the sweep.
-            let policy = transcript_retention_policy_in(&transaction)?;
+            let policy = part_retention_policy_in(&transaction, RetainedPart::Transcript)?;
             if !ended_at
-                .zip(transcript_cutoff(&policy, now_utc_ms))
+                .zip(part_cutoff(&policy, now_utc_ms))
                 .is_some_and(|(ended, cutoff)| ended <= cutoff)
             {
                 return Ok(None);
@@ -281,13 +340,14 @@ pub(super) fn require_retained_transcript_in(
     Ok(())
 }
 
-fn transcript_retention_policy_in(
+pub(super) fn part_retention_policy_in(
     connection: &Connection,
-) -> Result<MeetingTranscriptRetentionSnapshot, StoreError> {
-    let (policy, revision, changed_at): (String, i64, i64) = connection.query_row(
-        "SELECT policy_json, revision, changed_at_utc_ms FROM meeting_transcript_retention_policy WHERE singleton = 1",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
+    part: RetainedPart,
+) -> Result<MeetingPartRetentionSnapshot, StoreError> {
+    let (policy, revision, changed_at): (String, i64, i64) =
+        connection.query_row(part.policy_query(), [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
     let policy = decode_json(&policy)?;
     let deletion_begins_at_utc_ms = match policy {
         MeetingRetentionPolicy::Forever => None,
@@ -295,7 +355,7 @@ fn transcript_retention_policy_in(
             Some(changed_at.saturating_add(COOLDOWN_MS))
         }
     };
-    Ok(MeetingTranscriptRetentionSnapshot {
+    Ok(MeetingPartRetentionSnapshot {
         policy,
         revision: from_i64(revision)?,
         changed_at_utc_ms: changed_at,
@@ -303,27 +363,7 @@ fn transcript_retention_policy_in(
     })
 }
 
-/// How many transcripts still held would be past the policy's cutoff at
-/// `at_utc_ms`: the meetings the sweep will have purged by then.
-pub(super) fn retained_transcripts_due_by_in(
-    connection: &Connection,
-    at_utc_ms: i64,
-) -> Result<u64, StoreError> {
-    let policy = transcript_retention_policy_in(connection)?;
-    let Some(cutoff) = transcript_cutoff(&policy, at_utc_ms) else {
-        return Ok(0);
-    };
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM meeting_sessions
-         WHERE phase IN ('review_ready', 'recovery_required')
-           AND transcript_purged_at_utc_ms IS NULL AND ended_at_utc_ms <= ?1",
-        params![cutoff],
-        |row| row.get(0),
-    )?;
-    from_i64(count)
-}
-
-fn transcript_cutoff(policy: &MeetingTranscriptRetentionSnapshot, now: i64) -> Option<i64> {
+pub(super) fn part_cutoff(policy: &MeetingPartRetentionSnapshot, now: i64) -> Option<i64> {
     if now < policy.deletion_begins_at_utc_ms? {
         return None;
     }

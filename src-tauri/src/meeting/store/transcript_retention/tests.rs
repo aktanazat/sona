@@ -289,6 +289,12 @@ fn migration_recovers_import_end_only_when_recorded_duration_is_known() {
         ).unwrap();
         expected.push((session_id, expected_end));
     }
+    connection
+        .execute(
+            "UPDATE meeting_retention_policy SET revision = 1 WHERE singleton = 1",
+            [],
+        )
+        .unwrap();
     migrations.to_latest(&mut connection).unwrap();
     for (session_id, expected_end) in expected {
         let retained: (i64, i64, String) = connection.query_row(

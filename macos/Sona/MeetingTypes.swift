@@ -428,10 +428,12 @@ struct MeetingSessionSnapshot: Decodable {
     let preflightLocalProcessing: MeetingSourceAvailability?
     let retentionDeadlineUtcMs: Int64?
     let transcriptPurgedAtUtcMs: Int64?
+    let audioPurgedAtUtcMs: Int64?
     let allowedActions: [MeetingAllowedAction]
 
     func allows(_ action: MeetingAllowedAction) -> Bool { allowedActions.contains(action) }
     var transcriptDeleted: Bool { transcriptPurgedAtUtcMs != nil }
+    var audioDeleted: Bool { audioPurgedAtUtcMs != nil }
 }
 
 struct MeetingProvisionalSegment: Decodable, Identifiable, Equatable {
@@ -588,6 +590,7 @@ enum MeetingCommandKind: String, Decodable {
     case delete
     case retentionSet = "retention_set"
     case transcriptRetentionSet = "transcript_retention_set"
+    case audioRetentionSet = "audio_retention_set"
     case remoteCancel = "remote_cancel"
     case loopResolve = "loop_resolve"
     case loopReopen = "loop_reopen"
@@ -1517,11 +1520,12 @@ struct MeetingTrashEntry: Decodable, Identifiable {
     let jobId: MeetingDeletionJobId
     let title: String
     let deletedAtUtcMs: Int64
-    let expiresAtUtcMs: Int64
+    /// Nil for a meeting a retention setting removed: it stays until someone
+    /// restores or deletes it.
+    let expiresAtUtcMs: Int64?
 
     var id: MeetingDeletionJobId { jobId }
     var deletedAt: Date { Date(timeIntervalSince1970: TimeInterval(deletedAtUtcMs) / 1000) }
-    var expiresAt: Date { Date(timeIntervalSince1970: TimeInterval(expiresAtUtcMs) / 1000) }
 }
 
 // MARK: - Folders

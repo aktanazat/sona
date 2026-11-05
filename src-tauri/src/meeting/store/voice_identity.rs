@@ -1597,12 +1597,12 @@ fn require_enrollment_evidence_in(
     require_evidence_span_owner_in(transaction, evidence.session_id, &span_owner)?;
     // The column holds `encode_json(&origin)`, so it must be decoded rather
     // than compared to a bare word.
-    let origin_json: String = transaction.query_row(
-        "SELECT origin_kind FROM meeting_sessions WHERE id = ?1",
+    let (origin_json, audio_purged): (String, bool) = transaction.query_row(
+        "SELECT origin_kind, audio_purged_at_utc_ms IS NOT NULL FROM meeting_sessions WHERE id = ?1",
         params![id(evidence.session_id)],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    if matches!(decode_json(&origin_json)?, MeetingOrigin::Import) {
+    if audio_purged || matches!(decode_json(&origin_json)?, MeetingOrigin::Import) {
         return Err(StoreError::LocalEvidenceUnavailable);
     }
     let has_local_records: bool = transaction.query_row(

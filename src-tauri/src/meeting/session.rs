@@ -967,6 +967,26 @@ impl MeetingSessionManager {
         if purged != 0 || failed != 0 {
             log::info!("Meeting transcript retention: {purged} purged, {failed} awaiting cleanup");
         }
+        let due_audio = store
+            .due_audio_retention_sessions(now_utc_ms)
+            .map_err(map_store_error)?;
+        let mut audio_purged = 0;
+        let mut audio_failed = 0;
+        for session_id in due_audio {
+            match store.purge_audio_at(session_id, now_utc_ms) {
+                Ok(true) => audio_purged += 1,
+                Ok(false) => continue,
+                Err(_) => audio_failed += 1,
+            }
+            if let Ok(snapshot) = store.session_snapshot(session_id) {
+                self.emit_session_changed(&snapshot);
+            }
+        }
+        if audio_purged != 0 || audio_failed != 0 {
+            log::info!(
+                "Meeting audio retention: {audio_purged} purged, {audio_failed} awaiting cleanup"
+            );
+        }
         Ok(result)
     }
 
@@ -4112,7 +4132,7 @@ impl MeetingSessionManager {
 
     pub async fn transcript_retention_get(
         &self,
-    ) -> Result<MeetingTranscriptRetentionSnapshot, MeetingCommandError> {
+    ) -> Result<MeetingPartRetentionSnapshot, MeetingCommandError> {
         self.store()
             .await?
             .transcript_retention_policy()
@@ -4122,7 +4142,7 @@ impl MeetingSessionManager {
     pub async fn transcript_retention_set(
         &self,
         request: MeetingRetentionSetRequest,
-    ) -> Result<MeetingTranscriptRetentionMutationResult, MeetingCommandError> {
+    ) -> Result<MeetingPartRetentionMutationResult, MeetingCommandError> {
         let store = self.store().await?;
         let receipt = store
             .set_transcript_retention_policy(
@@ -4135,7 +4155,33 @@ impl MeetingSessionManager {
         let snapshot = store
             .transcript_retention_policy()
             .map_err(map_store_error)?;
-        Ok(MeetingTranscriptRetentionMutationResult { receipt, snapshot })
+        Ok(MeetingPartRetentionMutationResult { receipt, snapshot })
+    }
+
+    pub async fn audio_retention_get(
+        &self,
+    ) -> Result<MeetingPartRetentionSnapshot, MeetingCommandError> {
+        self.store()
+            .await?
+            .audio_retention_policy()
+            .map_err(map_store_error)
+    }
+
+    pub async fn audio_retention_set(
+        &self,
+        request: MeetingRetentionSetRequest,
+    ) -> Result<MeetingPartRetentionMutationResult, MeetingCommandError> {
+        let store = self.store().await?;
+        let receipt = store
+            .set_audio_retention_policy(
+                request.operation_id,
+                utc_now_ms(),
+                request.expected_revision,
+                &request.policy,
+            )
+            .map_err(map_store_error)?;
+        let snapshot = store.audio_retention_policy().map_err(map_store_error)?;
+        Ok(MeetingPartRetentionMutationResult { receipt, snapshot })
     }
 
     pub async fn remote_cancel(

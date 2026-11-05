@@ -2949,6 +2949,14 @@ pub(super) async fn call(
                     .await,
             )
         }
+        "meeting_audio_retention_get" => {
+            reply(crate::commands::meeting::meeting_audio_retention_get(app.state()).await)
+        }
+        "meeting_audio_retention_set" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::meeting::meeting_audio_retention_set(app.state(), request).await)
+        }
         "meeting_remote_cancel" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

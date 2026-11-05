@@ -825,8 +825,9 @@ struct MeetingsPager: View {
 
 // MARK: - The trash
 
-/// Deleted meetings wait 30 days. Each row says when it goes, and offers a
-/// way back or an immediate, permanent deletion.
+/// A meeting someone deleted waits 30 days; one a retention setting removed
+/// waits until someone deletes it. Each row says which, and offers a way back
+/// or an immediate, permanent deletion.
 struct MeetingsTrashSheet: View {
     let store: MeetingsStore
     @State private var deleting: MeetingTrashEntry?
@@ -836,7 +837,7 @@ struct MeetingsTrashSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Deleted meetings").titleText().accessibilityAddTraits(.isHeader)
-                    Text("Sona keeps a deleted meeting for 30 days, then removes it for good.")
+                    Text("Sona keeps a meeting you delete for 30 days, then removes it for good.")
                         .metaText(Theme.inkSecondary)
                 }
                 Spacer(minLength: 20)
