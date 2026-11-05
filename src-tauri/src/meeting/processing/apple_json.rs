@@ -155,8 +155,37 @@ mod scoped {
     /// reply, asked for after the guardrail stopped a guided one, may trail a
     /// remark.
     fn reply<T: DeserializeOwned>(response: &str) -> Result<T, String> {
-        super::super::first_json_value(response)
-            .map_err(|()| "The reply was not one JSON object".to_string())
+        match serde_json::Deserializer::from_str(response)
+            .into_iter::<T>()
+            .next()
+        {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(error)) => Err(unusable(response.len(), &error)),
+            None => Err("The reply was empty".to_string()),
+        }
+    }
+
+    /// Why a reply could not be read, in words that hold none of it: serde's
+    /// own message can quote the value it rejected.
+    fn unusable(bytes: usize, error: &serde_json::Error) -> String {
+        match error.classify() {
+            serde_json::error::Category::Eof => {
+                format!("The {bytes}-byte reply ended before its JSON did")
+            }
+            serde_json::error::Category::Syntax | serde_json::error::Category::Io => {
+                format!("The {bytes}-byte reply is not valid JSON")
+            }
+            serde_json::error::Category::Data => {
+                let message = error.to_string();
+                match message
+                    .strip_prefix("missing field `")
+                    .and_then(|rest| rest.split_once('`'))
+                {
+                    Some((field, _)) => format!("The {bytes}-byte reply has no `{field}`"),
+                    None => format!("The {bytes}-byte reply does not fit the schema"),
+                }
+            }
+        }
     }
 
     #[derive(Default, Deserialize, JsonSchema)]
@@ -1155,7 +1184,7 @@ mod scoped {
             if let Some(excerpts) = &self.excerpts {
                 restore_quotes(&mut output, excerpts, &self.sources)?;
             }
-            serde_json::from_value(output).map_err(|error| error.to_string())
+            serde_json::from_value(output).map_err(|error| unusable(response.len(), &error))
         }
 
         fn restore_cited_text(&self, cited: &mut RawCitedText) -> Result<(), String> {
@@ -1410,7 +1439,18 @@ mod scoped {
                     continue;
                 };
                 let mut receipt = self.receipt(&version.receipt.quote)?;
-                let who = version.actor.person(&receipt)?.to_owned();
+                let who = match version.actor.person(&receipt) {
+                    Ok(who) => who.to_owned(),
+                    Err(_)
+                        if matches!(
+                            version.actor.basis,
+                            NativePromiseActorBasis::ExplicitNamedAssignment
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let (_, original_index) =
                     original.ok_or("A current promise has no original source event")?;
                 if original_index != current_index {
@@ -1488,11 +1528,6 @@ mod scoped {
             for thread in narrative.additional_discussion {
                 let thread: NativeLedgerThread = thread.try_into()?;
                 if registers.restates_known_fact(&thread.thread) {
-                    if thread.thread.state != "closed" {
-                        return Err(
-                            "A second reading cannot change a known fact's state".to_string()
-                        );
-                    }
                     continue;
                 }
                 threads.push(LedgerThreadRef::Discussion(thread));
@@ -2264,9 +2299,9 @@ mod scoped {
                 Some(&request.schema),
             )
             .map_err(|error| error.during(NOTES_FACTS_PASS))?;
-            let factual = request
-                .decode_factual_notes(&factual)
-                .map_err(|error| AppleGenerationError::from(error).during(NOTES_FACTS_PASS))?;
+            let factual = request.decode_factual_notes(&factual).map_err(|error| {
+                AppleGenerationError::unusable_reply(error).during(NOTES_FACTS_PASS)
+            })?;
             let action_narrative = if factual.action_items.is_empty() {
                 None
             } else {
@@ -2274,7 +2309,7 @@ mod scoped {
                     request
                         .action_narrative(&factual.action_items)
                         .map_err(|error| {
-                            AppleGenerationError::from(error).during(NOTES_FACTS_PASS)
+                            AppleGenerationError::unusable_reply(error).during(NOTES_FACTS_PASS)
                         })?,
                 )
             };
@@ -2294,9 +2329,9 @@ mod scoped {
                 schema,
             )
             .map_err(|error| error.during(NOTES_NARRATIVE_PASS))?;
-            return request
-                .restore_notes(factual, &narrative)
-                .map_err(|error| AppleGenerationError::from(error).during(NOTES_NARRATIVE_PASS));
+            return request.restore_notes(factual, &narrative).map_err(|error| {
+                AppleGenerationError::unusable_reply(error).during(NOTES_NARRATIVE_PASS)
+            });
         }
         let first_phase_bytes = LEDGER_REGISTERS_WIRE.len() + 1;
         let second_phase_bytes = super::super::LEDGER_STATE_RULES.len()
@@ -2328,12 +2363,12 @@ mod scoped {
             Some(&request.schema),
         )
         .map_err(|error| error.during(LEDGER_REGISTERS_PASS))?;
-        let registers = request
-            .decode_registers(&registers)
-            .map_err(|error| AppleGenerationError::from(error).during(LEDGER_REGISTERS_PASS))?;
-        let narrative_evidence = request
-            .ledger_narrative(&registers)
-            .map_err(|error| AppleGenerationError::from(error).during(LEDGER_REGISTERS_PASS))?;
+        let registers = request.decode_registers(&registers).map_err(|error| {
+            AppleGenerationError::unusable_reply(error).during(LEDGER_REGISTERS_PASS)
+        })?;
+        let narrative_evidence = request.ledger_narrative(&registers).map_err(|error| {
+            AppleGenerationError::unusable_reply(error).during(LEDGER_REGISTERS_PASS)
+        })?;
         instructions.truncate(shared_instructions_len);
         instructions.push('\n');
         instructions.push_str(super::super::LEDGER_STATE_RULES);
@@ -2352,7 +2387,9 @@ mod scoped {
         .map_err(|error| error.during(LEDGER_NARRATIVE_PASS))?;
         request
             .restore_ledger_parts(registers, &narrative)
-            .map_err(|error| AppleGenerationError::from(error).during(LEDGER_NARRATIVE_PASS))
+            .map_err(|error| {
+                AppleGenerationError::unusable_reply(error).during(LEDGER_NARRATIVE_PASS)
+            })
     }
 
     #[cfg(test)]
