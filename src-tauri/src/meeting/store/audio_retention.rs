@@ -29,7 +29,9 @@ impl MeetingStore {
 
     /// Finished meetings with recorded audio past the policy, after any purge
     /// a crash left half done. A meeting still capturing, processing or
-    /// waiting for recovery keeps its audio.
+    /// waiting for recovery keeps its audio, as does one whose words were
+    /// never written and one this Mac has held for less than the policy,
+    /// such as an old recording imported today.
     pub(crate) fn due_audio_retention_sessions(
         &self,
         now_utc_ms: i64,
@@ -41,7 +43,8 @@ impl MeetingStore {
              WHERE phase = 'review_ready'
                AND (audio_purge_pending = 1
                     OR (audio_purged_at_utc_ms IS NULL AND transcript_purged_at_utc_ms IS NULL
-                        AND ended_at_utc_ms <= ?1
+                        AND current_transcript_revision_id IS NOT NULL
+                        AND ended_at_utc_ms <= ?1 AND created_at_utc_ms <= ?1
                         AND EXISTS (SELECT 1 FROM meeting_source_tracks t
                                     JOIN meeting_track_records r ON r.track_id = t.track_id
                                     WHERE t.session_id = meeting_sessions.id)))
@@ -74,23 +77,39 @@ impl MeetingStore {
         if current.phase != MeetingPhase::ReviewReady {
             return Ok(false);
         }
-        let (ended_at, pending, recorded): (Option<i64>, bool, bool) = transaction.query_row(
-            "SELECT ended_at_utc_ms, audio_purge_pending,
+        let (ended_at, created_at, transcribed, pending, recorded): (
+            Option<i64>,
+            i64,
+            bool,
+            bool,
+            bool,
+        ) = transaction.query_row(
+            "SELECT ended_at_utc_ms, created_at_utc_ms,
+                    current_transcript_revision_id IS NOT NULL, audio_purge_pending,
                     EXISTS (SELECT 1 FROM meeting_source_tracks t
                             JOIN meeting_track_records r ON r.track_id = t.track_id
                             WHERE t.session_id = ?1)
              FROM meeting_sessions WHERE id = ?1",
             params![id(session_id)],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )?;
         if !pending {
             let policy = part_retention_policy_in(&transaction, RetainedPart::Audio)?;
             let due = recorded
+                && transcribed
                 && current.transcript_purged_at_utc_ms.is_none()
                 && current.audio_purged_at_utc_ms.is_none()
                 && ended_at
                     .zip(part_cutoff(&policy, now_utc_ms))
-                    .is_some_and(|(ended, cutoff)| ended <= cutoff);
+                    .is_some_and(|(ended, cutoff)| ended <= cutoff && created_at <= cutoff);
             if !due {
                 return Ok(false);
             }
@@ -164,7 +183,8 @@ pub(super) fn meetings_purging_by_in(
          WHERE transcript_purged_at_utc_ms IS NULL
            AND ((phase IN ('review_ready', 'recovery_required') AND ended_at_utc_ms <= ?1)
                 OR (phase = 'review_ready' AND audio_purged_at_utc_ms IS NULL
-                    AND ended_at_utc_ms <= ?2
+                    AND current_transcript_revision_id IS NOT NULL
+                    AND ended_at_utc_ms <= ?2 AND created_at_utc_ms <= ?2
                     AND EXISTS (SELECT 1 FROM meeting_source_tracks t
                                 JOIN meeting_track_records r ON r.track_id = t.track_id
                                 WHERE t.session_id = meeting_sessions.id)))",
@@ -544,5 +564,56 @@ mod tests {
             .due_audio_retention_sessions(NOW + DAY)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn audio_whose_words_were_never_written_is_kept() {
+        let (_dir, store) = store();
+        let session_id = ended(&store, Some(1), "review_ready");
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE meeting_sessions SET current_transcript_revision_id = NULL WHERE id = ?1",
+                params![id(session_id)],
+            )
+            .unwrap();
+        audio_policy(&store, Some(30), NOW - 7 * DAY);
+
+        assert!(store.due_audio_retention_sessions(NOW).unwrap().is_empty());
+        assert_eq!(
+            meetings_purging_by_in(&store.connection().unwrap(), NOW).unwrap(),
+            0
+        );
+        assert!(!store.purge_audio_at(session_id, NOW).unwrap());
+    }
+
+    #[test]
+    fn an_old_recording_keeps_its_audio_for_the_policy_after_it_is_imported() {
+        let (_dir, store) = store();
+        let session_id = ended(&store, Some(1), "review_ready");
+        let imported_at = NOW - DAY;
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE meeting_sessions SET created_at_utc_ms = ?1 WHERE id = ?2",
+                params![imported_at, id(session_id)],
+            )
+            .unwrap();
+        audio_policy(&store, Some(30), NOW - 7 * DAY);
+
+        assert!(store.due_audio_retention_sessions(NOW).unwrap().is_empty());
+        assert_eq!(
+            meetings_purging_by_in(&store.connection().unwrap(), NOW).unwrap(),
+            0
+        );
+        assert!(!store.purge_audio_at(session_id, NOW).unwrap());
+        assert_eq!(
+            store
+                .due_audio_retention_sessions(imported_at + 30 * DAY)
+                .unwrap(),
+            vec![session_id]
+        );
     }
 }
