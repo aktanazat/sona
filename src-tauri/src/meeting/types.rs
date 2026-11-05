@@ -1284,6 +1284,11 @@ pub struct GeneratedMeetingArtifacts {
     /// refused" and "nobody asked".
     #[serde(default)]
     pub ledger_failure: Option<EngineFailureCause>,
+    /// Written as plain text because the engine stopped the structured notes:
+    /// the summary holds the notes, and the lists, citations and ledger are
+    /// empty. Defaulted so every earlier revision reads back as structured.
+    #[serde(default)]
+    pub plain: bool,
 }
 
 impl GeneratedMeetingArtifacts {

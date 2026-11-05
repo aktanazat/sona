@@ -1283,6 +1283,10 @@ pub struct AsrPlan {
     pub language_candidates: Vec<String>,
     pub translate_to_english: bool,
     pub custom_words: Vec<VocabularyEntry>,
+    /// Whether Whisper decodes are prompted with the vocabulary. Meetings are
+    /// not: across their silences a prompted decoder writes the prompt back as
+    /// speech, so a meeting chunk made only of vocabulary words is discarded.
+    pub prompt_vocabulary: bool,
     pub emoji_replacements: Vec<EmojiReplacement>,
     pub emoji_replacements_enabled: bool,
     pub snippets: Vec<Snippet>,
@@ -1319,6 +1323,7 @@ impl AsrPlan {
             language_candidates,
             translate_to_english: mode.translate_to_english,
             custom_words: effective_vocabulary(&settings.custom_words, &mode.custom_words),
+            prompt_vocabulary: true,
             emoji_replacements: settings.emoji_replacements.clone(),
             emoji_replacements_enabled: settings.emoji_replacements_enabled,
             snippets: settings.snippets.clone(),
@@ -1346,6 +1351,7 @@ impl AsrPlan {
             language_candidates,
             translate_to_english: settings.translate_to_english,
             custom_words: settings.custom_words.clone(),
+            prompt_vocabulary: true,
             emoji_replacements: settings.emoji_replacements.clone(),
             emoji_replacements_enabled: settings.emoji_replacements_enabled,
             snippets: settings.snippets.clone(),
@@ -1388,6 +1394,7 @@ impl AsrPlan {
         plan.language = if language == "und" { "auto" } else { language }.to_string();
         plan.language_candidates.clear();
         plan.translate_to_english = false;
+        plan.prompt_vocabulary = false;
         plan
     }
 }

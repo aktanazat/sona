@@ -1119,6 +1119,7 @@ mod scoped {
                 ReplyShape::MeetingLedger => (&*LEDGER, &*LEDGER_NARRATIVE),
                 ReplyShape::Json
                 | ReplyShape::Prose
+                | ReplyShape::PlainNotes
                 | ReplyShape::LedgerMerge
                 | ReplyShape::MemoryNote => {
                     return Err("This response does not use a meeting schema".to_string())
@@ -2130,6 +2131,11 @@ mod scoped {
         Ok(())
     }
 
+    const NOTES_FACTS_PASS: &str = "notes facts";
+    const NOTES_NARRATIVE_PASS: &str = "notes narrative";
+    const LEDGER_REGISTERS_PASS: &str = "ledger registers";
+    const LEDGER_NARRATIVE_PASS: &str = "ledger narrative";
+
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     use crate::apple_intelligence::AppleGenerationError;
 
@@ -2199,10 +2205,14 @@ mod scoped {
         let response_shape = match shape {
             ReplyShape::Json => ResponseShape::Json,
             ReplyShape::Prose => ResponseShape::Text,
+            ReplyShape::PlainNotes => ResponseShape::MeetingPlainNotes,
             ReplyShape::MeetingNotes | ReplyShape::MemoryNote => ResponseShape::MeetingNotes,
             ReplyShape::MeetingLedger | ReplyShape::LedgerMerge => ResponseShape::MeetingLedger,
         };
-        if matches!(shape, ReplyShape::Json | ReplyShape::Prose) {
+        if matches!(
+            shape,
+            ReplyShape::Json | ReplyShape::Prose | ReplyShape::PlainNotes
+        ) {
             return process_with_response_shape(
                 system_prompt,
                 evidence,
@@ -2212,9 +2222,15 @@ mod scoped {
             );
         }
         if matches!(shape, ReplyShape::LedgerMerge | ReplyShape::MemoryNote) {
-            let root = match shape {
-                ReplyShape::MemoryNote => root_schema::<crate::scratchpad::synthesis::Synthesis>(),
-                _ => root_schema::<super::super::complete_reading::LedgerMergeReply>(),
+            let (root, pass) = match shape {
+                ReplyShape::MemoryNote => (
+                    root_schema::<crate::scratchpad::synthesis::Synthesis>(),
+                    "memory note",
+                ),
+                _ => (
+                    root_schema::<super::super::complete_reading::LedgerMergeReply>(),
+                    "ledger merge",
+                ),
             };
             let schema = serde_json::to_string(&GuidedSchema {
                 schema: &root.schema,
@@ -2232,7 +2248,8 @@ mod scoped {
                 max_tokens,
                 response_shape,
                 Some(&schema),
-            );
+            )
+            .map_err(|error| error.during(pass));
         }
         let request = Request::new(evidence, shape)?;
         if matches!(shape, ReplyShape::MeetingNotes) {
@@ -2245,12 +2262,21 @@ mod scoped {
                 max_tokens,
                 response_shape,
                 Some(&request.schema),
-            )?;
-            let factual = request.decode_factual_notes(&factual)?;
+            )
+            .map_err(|error| error.during(NOTES_FACTS_PASS))?;
+            let factual = request
+                .decode_factual_notes(&factual)
+                .map_err(|error| AppleGenerationError::from(error).during(NOTES_FACTS_PASS))?;
             let action_narrative = if factual.action_items.is_empty() {
                 None
             } else {
-                Some(request.action_narrative(&factual.action_items)?)
+                Some(
+                    request
+                        .action_narrative(&factual.action_items)
+                        .map_err(|error| {
+                            AppleGenerationError::from(error).during(NOTES_FACTS_PASS)
+                        })?,
+                )
             };
             let mut instructions = notes_instructions(system_prompt, NARRATIVE_NOTES_WIRE);
             let (input, schema) = match &action_narrative {
@@ -2266,8 +2292,11 @@ mod scoped {
                 max_tokens,
                 response_shape,
                 schema,
-            )?;
-            return Ok(request.restore_notes(factual, &narrative)?);
+            )
+            .map_err(|error| error.during(NOTES_NARRATIVE_PASS))?;
+            return request
+                .restore_notes(factual, &narrative)
+                .map_err(|error| AppleGenerationError::from(error).during(NOTES_NARRATIVE_PASS));
         }
         let first_phase_bytes = LEDGER_REGISTERS_WIRE.len() + 1;
         let second_phase_bytes = super::super::LEDGER_STATE_RULES.len()
@@ -2297,9 +2326,14 @@ mod scoped {
             max_tokens,
             response_shape,
             Some(&request.schema),
-        )?;
-        let registers = request.decode_registers(&registers)?;
-        let narrative_evidence = request.ledger_narrative(&registers)?;
+        )
+        .map_err(|error| error.during(LEDGER_REGISTERS_PASS))?;
+        let registers = request
+            .decode_registers(&registers)
+            .map_err(|error| AppleGenerationError::from(error).during(LEDGER_REGISTERS_PASS))?;
+        let narrative_evidence = request
+            .ledger_narrative(&registers)
+            .map_err(|error| AppleGenerationError::from(error).during(LEDGER_REGISTERS_PASS))?;
         instructions.truncate(shared_instructions_len);
         instructions.push('\n');
         instructions.push_str(super::super::LEDGER_STATE_RULES);
@@ -2314,8 +2348,11 @@ mod scoped {
             max_tokens,
             response_shape,
             request.narrative_schema.as_deref(),
-        )?;
-        Ok(request.restore_ledger_parts(registers, &narrative)?)
+        )
+        .map_err(|error| error.during(LEDGER_NARRATIVE_PASS))?;
+        request
+            .restore_ledger_parts(registers, &narrative)
+            .map_err(|error| AppleGenerationError::from(error).during(LEDGER_NARRATIVE_PASS))
     }
 
     #[cfg(test)]

@@ -68,6 +68,7 @@ pub(super) fn start(
         ResponseShape::Json => "json",
         ResponseShape::MeetingNotes => "meeting_notes",
         ResponseShape::MeetingLedger => "meeting_ledger",
+        ResponseShape::MeetingPlainNotes => "meeting_plain_notes",
     };
     append(&SdkReceipt::Start {
         index: count,

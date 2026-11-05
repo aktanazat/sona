@@ -104,6 +104,9 @@ private func completeGeneration(
 
 /// The APPLE_LLM_FAILURE_* code for an error the model raised.
 private func failureKind(_ error: Error) -> Int32 {
+    if let stopped = error as? MeetingPassStopped {
+        return failureKind(stopped.stop)
+    }
     if #available(macOS 27.0, *) {
         guard let error = error as? LanguageModelError else { return APPLE_LLM_FAILURE_OTHER }
         switch error {
@@ -149,6 +152,17 @@ private func generateJSON(
     return response.content.jsonString
 }
 
+/// A meeting pass the safety filter stopped, with what each try did: its
+/// stage and the size of a reply that did not fit, never the words.
+private struct MeetingPassStopped: LocalizedError {
+    let stop: Error
+    let tries: [String]
+
+    var errorDescription: String? {
+        "\(stop.localizedDescription) Tries: \(tries.joined(separator: "; "))."
+    }
+}
+
 /// One meeting pass under the guardrails Apple provides for transforming the
 /// user's own text.
 ///
@@ -168,6 +182,7 @@ private func generateMeetingJSON(
     let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
     let sampled = GenerationOptions(maximumResponseTokens: options.maximumResponseTokens)
     var guardrailStop: Error
+    var tries: [String] = []
     do {
         return try await generateJSON(
             session: LanguageModelSession(model: model, instructions: instructions),
@@ -177,6 +192,7 @@ private func generateMeetingJSON(
         )
     } catch where failureKind(error) == APPLE_LLM_FAILURE_GUARDRAIL {
         guardrailStop = error
+        tries.append("guided: safety filter")
     }
     for _ in 0..<2 {
         try Task.checkCancellation()
@@ -189,6 +205,7 @@ private func generateMeetingJSON(
             )
         } catch where failureKind(error) == APPLE_LLM_FAILURE_GUARDRAIL {
             guardrailStop = error
+            tries.append("guided sampled: safety filter")
         }
     }
     let textInstructions = """
@@ -198,20 +215,39 @@ private func generateMeetingJSON(
         \(schemaJSON)
         """
     let schema = try JSONDecoder().decode(ReplySchema.self, from: Data(schemaJSON.utf8))
-    for textOptions in [options, sampled] {
+    for (stage, textOptions) in [("text", options), ("text sampled", sampled)] {
         try Task.checkCancellation()
         let session = LanguageModelSession(model: model, instructions: textInstructions)
         let reply = try await session.respond(to: Prompt { content }, options: textOptions).content
+        let size = "\(reply.utf8.count)-byte reply"
         guard let start = reply.firstIndex(of: "{"), let end = reply.lastIndex(of: "}"), start < end else {
+            tries.append("\(stage): \(size) with no JSON object")
             continue
         }
         let json = String(reply[start...end])
-        if let value = try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)),
-           schema.admits(value, definitions: schema.definitions ?? [:]) {
+        guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)) else {
+            tries.append("\(stage): \(size) that is not valid JSON")
+            continue
+        }
+        guard let mismatch = schema.mismatch(value, definitions: schema.definitions ?? [:]) else {
             return json
         }
+        tries.append("\(stage): \(size) that does not fit the schema at \(mismatch)")
     }
-    throw guardrailStop
+    throw MeetingPassStopped(stop: guardrailStop, tries: tries)
+}
+
+/// Plain notes, for a meeting whose structured passes the safety filter
+/// stopped: a String reply is the one the permissive guardrails govern.
+@available(macOS 26.0, *)
+private func generateMeetingText(
+    instructions: String,
+    content: String,
+    options: GenerationOptions
+) async throws -> String {
+    let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
+    let session = LanguageModelSession(model: model, instructions: instructions)
+    return try await session.respond(to: Prompt { content }, options: options).content
 }
 
 private enum JSONValue: Decodable {
@@ -262,33 +298,52 @@ private final class ReplySchema: Decodable {
         case definitions = "$defs"
     }
 
-    func admits(_ value: JSONValue, definitions: [String: ReplySchema]) -> Bool {
+    /// Where `value` first leaves the schema, as a path of schema keys and
+    /// item positions, or nil when it fits.
+    func mismatch(_ value: JSONValue, definitions: [String: ReplySchema], at path: String = "$") -> String? {
         if let reference, let name = reference.split(separator: "/").last {
-            return definitions[String(name)]?.admits(value, definitions: definitions) ?? false
+            guard let definition = definitions[String(name)] else { return "\(path) (undefined reference)" }
+            return definition.mismatch(value, definitions: definitions, at: path)
         }
         if let choices {
-            return choices.contains { $0.admits(value, definitions: definitions) }
+            var misses: [String] = []
+            for choice in choices {
+                guard let miss = choice.mismatch(value, definitions: definitions, at: path) else { return nil }
+                misses.append(miss)
+            }
+            return misses.max { $0.count < $1.count } ?? "\(path) (no choice)"
         }
         switch (value, options, type) {
         case let (.string(text), options?, _):
-            return options.contains(text)
+            return options.contains(text) ? nil : "\(path) (not one of the allowed values)"
         case (_, _?, _):
-            return false
+            return "\(path) (not one of the allowed values)"
         case let (.object(object), nil, "object"):
             let required = required ?? []
-            return required.allSatisfy { object[$0] != nil } && object.allSatisfy { key, field in
-                guard let property = properties?[key] else { return false }
-                if case .null = field, !required.contains(key) { return true }
-                return property.admits(field, definitions: definitions)
+            if let missing = required.first(where: { object[$0] == nil }) {
+                return "\(path).\(missing) (missing)"
             }
+            for (key, field) in object.sorted(by: { $0.key < $1.key }) {
+                guard let property = properties?[key] else { return "\(path) (a key the schema does not have)" }
+                if case .null = field, !required.contains(key) { continue }
+                if let miss = property.mismatch(field, definitions: definitions, at: "\(path).\(key)") {
+                    return miss
+                }
+            }
+            return nil
         case let (.array(array), nil, "array"):
-            return array.count >= minItems ?? 0
-                && array.count <= maxItems ?? Int.max
-                && array.allSatisfy { items?.admits($0, definitions: definitions) ?? true }
+            if array.count < minItems ?? 0 { return "\(path) (too few items)" }
+            if array.count > maxItems ?? Int.max { return "\(path) (too many items)" }
+            for (index, item) in array.enumerated() {
+                if let items, let miss = items.mismatch(item, definitions: definitions, at: "\(path)[\(index)]") {
+                    return miss
+                }
+            }
+            return nil
         case (.string, nil, "string"), (.boolean, nil, "boolean"), (.number, nil, "integer"), (.number, nil, "number"):
-            return true
+            return nil
         default:
-            return false
+            return "\(path) (wrong type)"
         }
     }
 }
@@ -334,6 +389,12 @@ public func startAppleIntelligenceGeneration(
                     instructions: instructions,
                     content: content,
                     schemaJSON: schemaJSON,
+                    options: options
+                )
+            case Int32(APPLE_LLM_RESPONSE_MEETING_PLAIN_NOTES):
+                output = try await generateMeetingText(
+                    instructions: instructions,
+                    content: content,
                     options: options
                 )
             case Int32(APPLE_LLM_RESPONSE_JSON):

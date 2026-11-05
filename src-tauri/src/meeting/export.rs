@@ -363,6 +363,12 @@ fn current_artifact(review: &MeetingReviewSnapshot) -> Option<&GeneratedMeetingA
 /// An empty section is left out rather than written as "none": the file is
 /// something a person hands to someone else.
 pub(crate) fn render_generated_notes(markdown: &mut String, content: &GeneratedMeetingArtifacts) {
+    if content.plain {
+        let _ = writeln!(
+            markdown,
+            "_Plain notes: the full notes, with decisions and action items, could not be written for this meeting._\n"
+        );
+    }
     let summary = content.summary.text.trim();
     if !summary.is_empty() {
         let _ = writeln!(markdown, "{summary}");
@@ -516,6 +522,7 @@ mod tests {
                 follow_up_draft: cited(""),
                 ledger: None,
                 ledger_failure: None,
+                plain: false,
             }),
             receipt: None,
         }

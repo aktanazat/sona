@@ -7183,6 +7183,7 @@ pub(crate) mod tests {
                 },
                 ledger: None,
                 ledger_failure: None,
+                plain: false,
             };
             // A `Current` artifact generated from a revision that is not the
             // session's own is filed `OutOfDate` instead, which is the whole
