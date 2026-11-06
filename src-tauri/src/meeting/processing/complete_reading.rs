@@ -1508,19 +1508,26 @@ fn apply_merge(ledger: &mut MeetingLedger, reply: &LedgerMergeReply) {
         {
             continue;
         }
+        let Some(asked) = open_loop.citations.first().and_then(|asked_at| {
+            ledger.threads.iter().position(|thread| {
+                matches!(thread.state, LedgerThreadState::Unanswered)
+                    && thread
+                        .receipt
+                        .citations
+                        .iter()
+                        .any(|citation| citation.segment_id == asked_at.segment_id)
+            })
+        }) else {
+            continue;
+        };
         answered[question] = true;
-        if let Some(asked) = ledger.threads.iter().position(|thread| {
-            matches!(thread.state, LedgerThreadState::Unanswered)
-                && thread.receipt.citations == open_loop.citations
-        }) {
-            absorbed[by] = true;
-            let reply_thread = ledger.threads[by].clone();
-            let asked = &mut ledger.threads[asked];
-            asked.state = reply_thread.state;
-            asked.substantive |= reply_thread.substantive;
-            asked.owner = reply_thread.owner.or(asked.owner.take());
-            merge_receipts(&mut asked.receipt, reply_thread.receipt);
-        }
+        absorbed[by] = true;
+        let reply_thread = ledger.threads[by].clone();
+        let asked = &mut ledger.threads[asked];
+        asked.state = reply_thread.state;
+        asked.substantive |= reply_thread.substantive;
+        asked.owner = reply_thread.owner.or(asked.owner.take());
+        merge_receipts(&mut asked.receipt, reply_thread.receipt);
     }
     let mut index = 0;
     ledger.open_loops.retain(|_| {
