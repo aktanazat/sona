@@ -1781,6 +1781,11 @@ pub struct InterruptedRecovery {
     /// Start gates a previous launch left open, deleted by this pass. Nothing
     /// was ever recorded against them.
     pub discarded: Vec<MeetingSessionId>,
+    /// Imports a previous launch left at their start gate partway through
+    /// reading the file, deleted by this pass. The file is still where it
+    /// was, so importing it again brings in the whole meeting, and a phone
+    /// that never heard the import land sends it again.
+    pub abandoned_imports: Vec<MeetingSessionId>,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct StoreMutation {
@@ -6870,7 +6875,7 @@ impl MeetingStore {
     /// Reconcile every meeting a previous launch left mid-flight, so that no
     /// row can advertise processing that no job is doing.
     ///
-    /// Three shapes need it. A live phase means the launch ended mid-capture
+    /// Four shapes need it. A live phase means the launch ended mid-capture
     /// or mid-processing: the phase moves to `recovery_required` and the
     /// processing status becomes terminal in the same transaction, because a
     /// phase that parks the meeting for a human while the status still reads
@@ -6880,12 +6885,14 @@ impl MeetingStore {
     /// without touching the phase, the revision, or the event log, since
     /// nothing about the meeting changed — only what was always true about it
     /// is now written down. A row still sitting at its start gate is the
-    /// third, and it is discarded outright. Terminal statuses are fixpoints,
-    /// and a discarded row is gone, so a second pass in the same launch
-    /// changes nothing.
+    /// third, and it is discarded outright, and so is the fourth: an import
+    /// still at `starting`, which the launch cut off partway through its file.
+    /// Terminal statuses are fixpoints, and a discarded row is gone, so a
+    /// second pass in the same launch changes nothing.
     pub fn recover_interrupted(&self) -> Result<InterruptedRecovery, StoreError> {
         self.resume_deletions()?;
         let discarded = self.discard_abandoned_preflights()?;
+        let abandoned_imports = self.discard_unfinished_imports()?;
         let status_resolved = self.resolve_abandoned_recovery_status()?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
@@ -6947,6 +6954,7 @@ impl MeetingStore {
             recovered,
             status_resolved,
             discarded,
+            abandoned_imports,
         })
     }
 
@@ -6981,6 +6989,40 @@ impl MeetingStore {
         }
         connection.execute("DELETE FROM meeting_sessions WHERE phase = 'preflight'", [])?;
         Ok(ids)
+    }
+
+    /// Imports a previous launch left at `starting`, deleted with their files
+    /// the way a failed import deletes itself. An import holds `starting`
+    /// only while it reads its file, so one still there was cut off partway:
+    /// recovering it would offer a meeting missing its end, and a phone
+    /// recording would come back twice once the phone, which never heard this
+    /// one land, sends it again.
+    fn discard_unfinished_imports(&self) -> Result<Vec<MeetingSessionId>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, revision FROM meeting_sessions WHERE phase = 'starting' AND origin_kind = ?1",
+        )?;
+        let rows = statement
+            .query_map(params![encode_json(&MeetingOrigin::Import)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        let mut discarded = Vec::with_capacity(rows.len());
+        for (value, revision) in rows {
+            let session_id = MeetingSessionId::from_uuid(parse_uuid(&value)?);
+            let (_, job_id) = self.reserve_deletion(
+                MeetingOperationId::new(),
+                utc_now_ms(),
+                session_id,
+                from_i64(revision)?,
+                DeletionCause::Discard,
+            )?;
+            self.finish_deletion(job_id)?;
+            discarded.push(session_id);
+        }
+        Ok(discarded)
     }
 
     /// Meetings parked in `recovery_required` whose processing status never
@@ -13727,6 +13769,41 @@ mod tests {
             latest_event(&store, session_id).1,
             r#"{"prior_phase":"capturing_recording"}"#
         );
+    }
+
+    /// An import sits at its start gate while its file is decoded onto the
+    /// track, so one a launch left there holds part of a file that is still
+    /// on disk. Finishing it would file that part as the meeting, so the
+    /// sweep discards it the way a failed import is discarded. A recording
+    /// interrupted at the same gate is still parked for the person.
+    #[test]
+    fn recovery_discards_an_import_interrupted_while_its_file_was_read() {
+        let (_directory, store) = store();
+        let import = stranded_session(&store, "starting", ProcessingStatus::Pending);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE meeting_sessions SET origin_kind = ?1 WHERE id = ?2",
+                params![encode_json(&MeetingOrigin::Import).unwrap(), id(import)],
+            )
+            .unwrap();
+        let recording = stranded_session(&store, "starting", ProcessingStatus::Pending);
+
+        let recovery = store.recover_interrupted().expect("recovery sweep");
+
+        assert!(
+            matches!(store.session_snapshot(import), Err(StoreError::NotFound)),
+            "a half-read import was kept as an interrupted meeting"
+        );
+        assert_eq!(
+            recovery.recovered,
+            vec![RecoveredMeeting {
+                session_id: recording,
+                prior_phase: MeetingPhase::Starting,
+            }]
+        );
+        assert_eq!(recovery.abandoned_imports, vec![import]);
     }
 
     /// Matrix 3: the rows already on disk from launches that flipped the phase
