@@ -385,7 +385,7 @@ pub(crate) fn without_excluded_series(store: &MeetingStore, rows: Vec<QueryRow>)
 ///
 /// A loop's id leads with its session uuid by construction, so neither kind
 /// needs a lookup to find its meeting.
-fn session_behind(row: &QueryRow) -> Option<MeetingSessionId> {
+pub(super) fn session_behind(row: &QueryRow) -> Option<MeetingSessionId> {
     match row.kind {
         QueryRowKind::Meeting => Uuid::parse_str(&row.id)
             .ok()

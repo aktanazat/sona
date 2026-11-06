@@ -33,8 +33,8 @@
 //! rows and returns the store receipt verbatim.
 
 use super::{
-    loop_link, meeting_link, note_link, person_link, QueryError, QueryEventsPage, QueryPageReason,
-    QueryScope, QuerySearchPage, QUERY_SCHEMA_VERSION,
+    loop_link, meeting_link, note_link, person_link, KeptLocal, QueryError, QueryEventsPage,
+    QueryPageReason, QueryScope, QuerySearchPage, QUERY_SCHEMA_VERSION,
 };
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::cli::CliArgs;
@@ -1354,7 +1354,7 @@ pub async fn answer(
             super::search(
                 meetings,
                 history,
-                super::QueryAudience::Local,
+                super::QueryAudience::External,
                 *scope,
                 query,
                 Some(*limit),
@@ -1363,7 +1363,13 @@ pub async fn answer(
             .await?,
         )),
         ExternalRequest::Events { after_id, limit } => Ok(ExternalResponse::Events(
-            super::events(meetings, after_id.clone(), Some(*limit)).await?,
+            super::events(
+                meetings,
+                super::QueryAudience::External,
+                after_id.clone(),
+                Some(*limit),
+            )
+            .await?,
         )),
         ExternalRequest::Meetings {
             since_utc_ms,
@@ -1404,13 +1410,16 @@ pub async fn answer(
             since_utc_ms,
             view,
         } => {
-            store(meetings)
-                .await?
+            let store = store(meetings).await?;
+            store
                 .person_detail(*person_id)
                 .map_err(person_read_error(*person_id))?;
-            let snapshot = person_memory::read(app, *person_id, *since_utc_ms)
-                .await
-                .map_err(|message| note_read_error(history, message))?;
+            let kept_local = kept_local(&store)?;
+            let snapshot = person_memory::read(app, *person_id, *since_utc_ms, move |meeting_id| {
+                kept_local.hides_meeting(meeting_id)
+            })
+            .await
+            .map_err(|message| note_read_error(history, message))?;
             Ok(ExternalResponse::PersonMemory(Box::new(
                 ExternalPersonMemory {
                     schema_version: QUERY_SCHEMA_VERSION,
@@ -1432,13 +1441,13 @@ pub async fn answer(
             Ok(ExternalResponse::Projects(projects_page(projects, *limit)))
         }
         ExternalRequest::Project { id } => {
-            let detail = planning::planning_project(
-                app.state::<Arc<HistoryManager>>(),
-                app.state::<Arc<MeetingSessionManager>>(),
-                id.to_string(),
-            )
-            .await
-            .map_err(|message| project_read_error(history, message))?;
+            let kept_local = kept_local(store(meetings).await?.as_ref())?;
+            let detail =
+                planning::project_detail_without(history, meetings, id.to_string(), |evidence| {
+                    evidence_kept_local(evidence, &kept_local)
+                })
+                .await
+                .map_err(|message| project_read_error(history, message))?;
             Ok(ExternalResponse::Project(project_detail(detail)))
         }
         ExternalRequest::LoopResolve { loop_id } => Ok(ExternalResponse::LoopResolve(
@@ -1449,9 +1458,12 @@ pub async fn answer(
         }
         ExternalRequest::Note { id } => {
             let store = store(meetings).await?;
-            let memory = scratchpad::read_note_with_sources(history, &store, id)
-                .map_err(|message| note_read_error(history, message))?
-                .ok_or_else(|| missing_note(id))?;
+            let kept_local = kept_local(&store)?;
+            let memory = scratchpad::read_note_with_sources(history, &store, id, |meeting_id| {
+                kept_local.hides_meeting(meeting_id)
+            })
+            .map_err(|message| note_read_error(history, message))?
+            .ok_or_else(|| missing_note(id))?;
             Ok(ExternalResponse::Note(ExternalNoteDetail {
                 schema_version: QUERY_SCHEMA_VERSION,
                 memory,
@@ -1462,7 +1474,7 @@ pub async fn answer(
             let page = super::search(
                 meetings,
                 history,
-                super::QueryAudience::Local,
+                super::QueryAudience::External,
                 QueryScope::Notes,
                 query,
                 Some(*limit),
@@ -1470,9 +1482,13 @@ pub async fn answer(
             )
             .await?;
             let store = store(meetings).await?;
+            let kept_local = kept_local(&store)?;
             let mut entries = Vec::with_capacity(page.entries.len());
             for row in page.entries {
-                let memory = scratchpad::read_note_with_sources(history, &store, &row.id)
+                let memory =
+                    scratchpad::read_note_with_sources(history, &store, &row.id, |meeting_id| {
+                        kept_local.hides_meeting(meeting_id)
+                    })
                     .map_err(|message| note_read_error(history, message))?
                     .ok_or_else(|| missing_note(&row.id))?;
                 entries.push(ExternalNoteContextEntry {
@@ -1545,6 +1561,11 @@ async fn store(meetings: &Arc<MeetingSessionManager>) -> Result<Arc<MeetingStore
         .map_err(|error| QueryError::from(error).into())
 }
 
+/// D14, read once for the request that is about to use it. See [`KeptLocal`].
+fn kept_local(store: &MeetingStore) -> Result<KeptLocal, ExternalError> {
+    KeptLocal::read(store).map_err(|error| QueryError::from(error).into())
+}
+
 /// The week ahead, as the Meetings home reads it, projected for an outside
 /// reader.
 ///
@@ -1567,19 +1588,16 @@ async fn upcoming_page(
         .upcoming_events(calendar.access(), window, occurrences)
         .await
         .map_err(|error| ExternalError::from(QueryError::from(error)))?;
-    let has_more = events.rows.len() > limit;
+    let rows = super::tools::allowed_upcoming(store(meetings).await?.as_ref(), events.rows)
+        .map_err(|error| ExternalError::from(QueryError::from(error)))?;
+    let has_more = rows.len() > limit;
     Ok(ExternalUpcomingPage {
         schema_version: QUERY_SCHEMA_VERSION,
         calendar_access_subject: "responsible_process",
         calendar_access: events.access,
         window_start_utc_ms: events.window_start_utc_ms,
         window_end_utc_ms: events.window_end_utc_ms,
-        entries: events
-            .rows
-            .into_iter()
-            .take(limit)
-            .map(upcoming_row)
-            .collect(),
+        entries: rows.into_iter().take(limit).map(upcoming_row).collect(),
         has_more,
     })
 }
@@ -1620,6 +1638,9 @@ pub(crate) async fn resolve_loop(
     let session_id = loop_id
         .session_id()
         .ok_or_else(|| ExternalError::invalid("That loop id names no meeting."))?;
+    if kept_local(store(meetings).await?.as_ref())?.hides(session_id) {
+        return Err(missing_loop(loop_id));
+    }
     let loops = meetings
         .loops_list(session_id)
         .await
@@ -1628,12 +1649,7 @@ pub(crate) async fn resolve_loop(
         .rows
         .iter()
         .find(|row| &row.loop_id == loop_id)
-        .ok_or_else(|| {
-            ExternalError::new(
-                ExternalErrorCode::NotFound,
-                format!("No loop {} in this corpus.", loop_id.as_str()),
-            )
-        })?;
+        .ok_or_else(|| missing_loop(loop_id))?;
     if !row.is_open() {
         let receipt =
             existing_loop_receipt(meetings, row.resolving_operation_id.as_deref()).await?;
@@ -1667,6 +1683,13 @@ pub(crate) async fn resolve_loop(
         schema_version: QUERY_SCHEMA_VERSION,
         receipt: result.receipt,
     })
+}
+
+fn missing_loop(loop_id: &MeetingLoopId) -> ExternalError {
+    ExternalError::new(
+        ExternalErrorCode::NotFound,
+        format!("No loop {} in this corpus.", loop_id.as_str()),
+    )
 }
 
 /// The refusal for a closed loop that no resolution closed.
@@ -1742,7 +1765,8 @@ fn command_error(session: Uuid) -> impl Fn(MeetingCommandError) -> ExternalError
     }
 }
 
-/// One page of retained meetings, newest first.
+/// One page of retained meetings, newest first, without the meetings whose
+/// series is kept on this Mac.
 ///
 /// `pub(crate)` for the reason [`super::assemble`] is: everything above it is
 /// state lookup and `await`, and this is the half a fixture store can
@@ -1753,24 +1777,35 @@ pub(crate) fn meetings_page(
     before_utc_ms: Option<i64>,
     limit: usize,
 ) -> Result<ExternalMeetingsPage, ExternalError> {
-    let page = store
-        .list_sessions(before_utc_ms, limit, &MeetingListFilter::default())
-        .map_err(QueryError::from)?;
+    let kept_local = kept_local(store)?;
+    let mut entries = Vec::with_capacity(limit);
     // The store's cursor is the upper bound, so `--to` is already applied. The
     // lower bound is a suffix of a newest-first page, which is why it can be
-    // cut here rather than becoming a second list query nobody else needs.
-    let mut entries = page.entries;
-    let mut has_more = page.has_more;
-    if let Some(since) = since_utc_ms {
-        let kept = entries
-            .iter()
-            .take_while(|entry| entry.created_at_utc_ms >= since)
-            .count();
-        if kept < entries.len() {
-            has_more = false;
+    // cut here rather than becoming a second list query nobody else needs. A
+    // page the exclusion thinned reads on, so `--last 5` is five meetings, and
+    // `has_more` means a meeting this reader may see follows.
+    let mut before = before_utc_ms;
+    let has_more = 'pages: loop {
+        let page = store
+            .list_sessions(before, limit + 1, &MeetingListFilter::default())
+            .map_err(QueryError::from)?;
+        for entry in page.entries {
+            if since_utc_ms.is_some_and(|since| entry.created_at_utc_ms < since) {
+                break 'pages false;
+            }
+            before = Some(entry.created_at_utc_ms);
+            if kept_local.hides(entry.session_id) {
+                continue;
+            }
+            if entries.len() == limit {
+                break 'pages true;
+            }
+            entries.push(entry);
         }
-        entries.truncate(kept);
-    }
+        if !page.has_more {
+            break false;
+        }
+    };
     Ok(ExternalMeetingsPage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries: entries.into_iter().map(meeting_row).collect(),
@@ -1915,8 +1950,12 @@ pub(crate) fn loops_page(
     let mut last_scanned_id = None;
     let mut next_cursor = None;
     let mut scanned = 0usize;
+    let kept_local = kept_local(store)?;
     let corpus = store.corpus_loops().map_err(QueryError::from)?;
     'corpus: for meeting in corpus.meetings {
+        if kept_local.hides(meeting.session_id) {
+            continue;
+        }
         for row in meeting.rows {
             if !found_cursor {
                 found_cursor = after_id == Some(row.loop_id.as_str());
@@ -1944,7 +1983,11 @@ pub(crate) fn loops_page(
             "That loop id is no longer in the corpus. Start again without --after.",
         ));
     }
-    let reason = loops_reason(entries.len(), scanned, corpus.awaiting_continuity);
+    let awaiting_continuity = corpus
+        .awaiting_continuity
+        .iter()
+        .any(|session_id| !kept_local.hides(*session_id));
+    let reason = loops_reason(entries.len(), scanned, awaiting_continuity);
     Ok(ExternalLoopsPage {
         schema_version: QUERY_SCHEMA_VERSION,
         entries,
@@ -2021,9 +2064,13 @@ pub(crate) fn people_page(
     if tokens.is_empty() {
         return Err(ExternalError::invalid("--people needs a name to look up."));
     }
+    let kept_local = kept_local(store)?;
     let mut entries = Vec::new();
     let mut has_more = false;
-    let people = store.people_list().map_err(QueryError::from)?.entries;
+    let people = store
+        .people_list_without(kept_local.sessions())
+        .map_err(QueryError::from)?
+        .entries;
     let indexed = people.len();
     for entry in people {
         if !super::matches_every_token(&super::person_haystack(&entry), &tokens) {
@@ -2100,8 +2147,9 @@ pub(crate) fn person_stats(
     person_id: PersonId,
     now: DateTime<Local>,
 ) -> Result<ExternalPersonStats, ExternalError> {
+    let kept_local = kept_local(store)?;
     let detail = store
-        .person_detail(person_id)
+        .person_detail_without(person_id, kept_local.sessions())
         .map_err(person_read_error(person_id))?
         .detail;
     let confirmed = detail
@@ -2125,7 +2173,7 @@ pub(crate) fn person_stats(
         .filter(|open| open.direction == MeetingLoopDirection::Mine)
         .count();
     let earliest = store
-        .earliest_meeting_utc_ms()
+        .earliest_meeting_utc_ms(kept_local.sessions())
         .map_err(person_read_error(person_id))?;
     Ok(ExternalPersonStats {
         schema_version: QUERY_SCHEMA_VERSION,
@@ -2222,19 +2270,28 @@ fn usual_gap_days(meetings_utc_ms: &[i64]) -> Option<u32> {
     u32::try_from(median).ok()
 }
 
+/// A meeting whose series is kept on this Mac reads as absent, the same
+/// refusal as an id the corpus never held.
 fn review(
     store: &MeetingStore,
     session_id: MeetingSessionId,
 ) -> Result<MeetingReviewSnapshot, ExternalError> {
+    if kept_local(store)?.hides(session_id) {
+        return Err(missing_meeting(session_id));
+    }
     store
         .review_snapshot(session_id)
         .map_err(|error| match error {
-            crate::meeting::store::StoreError::NotFound => ExternalError::new(
-                ExternalErrorCode::NotFound,
-                format!("No meeting {} in this corpus.", session_id.uuid()),
-            ),
+            crate::meeting::store::StoreError::NotFound => missing_meeting(session_id),
             error => QueryError::from(error).into(),
         })
+}
+
+fn missing_meeting(session_id: MeetingSessionId) -> ExternalError {
+    ExternalError::new(
+        ExternalErrorCode::NotFound,
+        format!("No meeting {} in this corpus.", session_id.uuid()),
+    )
 }
 
 /// The generated artifacts a reader is looking at: the current revision's, or
@@ -2398,6 +2455,16 @@ fn project_detail(detail: planning::ProjectDetail) -> ExternalProjectDetail {
             })
             .collect(),
         evidence: detail.evidence.into_iter().map(project_evidence).collect(),
+    }
+}
+
+fn evidence_kept_local(evidence: &planning::EvidenceLink, kept_local: &KeptLocal) -> bool {
+    match evidence.source_kind {
+        EvidenceSourceKind::Meeting => kept_local.hides_meeting(&evidence.source_id),
+        EvidenceSourceKind::Loop => MeetingLoopId(evidence.source_id.clone())
+            .session_id()
+            .is_some_and(|session_id| kept_local.hides(session_id)),
+        EvidenceSourceKind::Note => false,
     }
 }
 

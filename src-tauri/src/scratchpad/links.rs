@@ -328,10 +328,14 @@ fn has_non_note_sources(history: &HistoryManager, id: &str) -> Result<bool, Stri
         .map_err(|_| "The note's sources could not be read.".to_string())
 }
 
+/// A note with what it cites and what it connects to, as a reader who may not
+/// see the meetings `hides_meeting` names has it: those leave the sources
+/// before any passage, connection or related note is drawn from them.
 pub(crate) fn read_memory(
     history: &HistoryManager,
     store: Option<&MeetingStore>,
     id: &str,
+    hides_meeting: impl Fn(&str) -> bool,
 ) -> Result<Option<ScratchNoteMemory>, String> {
     let memory = history.with_connection(|conn| {
         let Some(note) = note_with_connection(conn, id)? else { return Ok(None) };
@@ -355,6 +359,9 @@ pub(crate) fn read_memory(
     let Some(mut memory) = memory else {
         return Ok(None);
     };
+    memory
+        .sources
+        .retain(|source| source.kind != ScratchSourceKind::Meeting || !hides_meeting(&source.id));
     if store.is_none()
         && memory
             .sources
@@ -485,7 +492,7 @@ pub async fn scratchpad_memory(
     } else {
         None
     };
-    read_memory(&history, store.as_deref(), &id)
+    read_memory(&history, store.as_deref(), &id, |_| false)
 }
 
 #[tauri::command]
@@ -538,7 +545,7 @@ pub async fn scratchpad_link(
     })
     .map_err(|error| failure_sentence(&history, error, "The source could not be linked."))?;
     emit_changed(&app, &id, false);
-    read_memory(&history, store.as_deref(), &id)?
+    read_memory(&history, store.as_deref(), &id, |_| false)?
         .ok_or_else(|| "This note no longer exists.".to_string())
 }
 

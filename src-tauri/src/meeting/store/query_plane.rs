@@ -718,6 +718,7 @@ mod tests {
                 query: QUERY,
                 limit: 25,
                 cursor: None,
+                kept_local: None,
             },
         )
         .unwrap()
@@ -835,6 +836,7 @@ mod tests {
                     query,
                     limit: 25,
                     cursor: None,
+                    kept_local: None,
                 },
             )
             .unwrap();
@@ -892,6 +894,7 @@ mod tests {
                 query: "steven",
                 limit: 25,
                 cursor: None,
+                kept_local: None,
             },
         )
         .unwrap();
@@ -918,6 +921,7 @@ mod tests {
                     query,
                     limit: 25,
                     cursor: None,
+                    kept_local: None,
                 },
             )
             .unwrap()

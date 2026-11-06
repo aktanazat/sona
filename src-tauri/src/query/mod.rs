@@ -118,10 +118,71 @@ impl QueryScope {
     }
 }
 
+/// Who reads a page, which decides what the page may hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryAudience {
+    /// This app's own screens: everything.
     Local,
+    /// An agent on this Mac reading through the CLI or the MCP server. It may
+    /// read notes, but what it reads goes to whatever model drives it.
+    External,
+    /// Anything bound for the relay: neither notes nor a kept-local series.
     Remote,
+}
+
+impl QueryAudience {
+    fn reads_notes(self) -> bool {
+        self != Self::Remote
+    }
+
+    /// D14 for this audience: the series kept on this Mac are hidden from
+    /// every reader but the app's own screens.
+    pub(crate) fn kept_local(self, store: &MeetingStore) -> Result<Option<KeptLocal>, StoreError> {
+        match self {
+            Self::Local => Ok(None),
+            Self::External | Self::Remote => KeptLocal::read(store).map(Some),
+        }
+    }
+}
+
+/// D14 for a reader outside this app's own screens: the meetings whose series
+/// the operator kept on this Mac, read once per request. A row from one of
+/// them is left out of a listing and refused when named, the way the chat
+/// tools already treat it (`tools.rs`). A store that cannot answer fails the
+/// request rather than reading as "nothing hidden".
+pub(crate) struct KeptLocal(HashSet<MeetingSessionId>);
+
+impl KeptLocal {
+    pub(crate) fn read(store: &MeetingStore) -> Result<Self, StoreError> {
+        store.kept_local_sessions().map(Self)
+    }
+
+    pub(crate) fn hides(&self, session_id: MeetingSessionId) -> bool {
+        self.0.contains(&session_id)
+    }
+
+    pub(crate) fn sessions(&self) -> &HashSet<MeetingSessionId> {
+        &self.0
+    }
+
+    /// A meeting id as the corpus writes it into text, where a value that does
+    /// not parse names no meeting and so nothing to hide.
+    pub(crate) fn hides_meeting(&self, meeting_id: &str) -> bool {
+        uuid::Uuid::parse_str(meeting_id)
+            .is_ok_and(|uuid| self.hides(MeetingSessionId::from_uuid(uuid)))
+    }
+
+    fn hides_row(&self, row: &QueryRow) -> bool {
+        pack::session_behind(row).is_some_and(|session_id| self.hides(session_id))
+    }
+
+    fn hides_event(&self, row: &QueryEventRow) -> bool {
+        let session_id = match row {
+            QueryEventRow::Receipt { receipt, .. } => receipt.session_id,
+            QueryEventRow::Run { session_id, .. } => *session_id,
+        };
+        session_id.is_some_and(|session_id| self.hides(session_id))
+    }
 }
 
 /// Which noun a row is.
@@ -454,6 +515,7 @@ pub(crate) struct SearchRequest<'a> {
     pub query: &'a str,
     pub limit: usize,
     pub cursor: Option<&'a QueryCursor>,
+    pub kept_local: Option<&'a KeptLocal>,
 }
 
 /// Search the corpus.
@@ -471,11 +533,12 @@ pub async fn search(
     cursor: Option<QueryCursor>,
 ) -> Result<QuerySearchPage, QueryError> {
     let limit = page_size(limit)?;
-    let includes_notes = audience == QueryAudience::Local && scope.includes(QueryRowKind::Note);
+    let includes_notes = audience.reads_notes() && scope.includes(QueryRowKind::Note);
     if tokens(query).is_empty() {
         return Ok(QuerySearchPage::nothing_searchable());
     }
     let store = meetings.store().await?;
+    let kept_local = audience.kept_local(&store)?;
     // Dictations are the one source behind an async API, and the only read the
     // assembly below cannot do itself, so it happens here.
     let dictations = if scope.includes(QueryRowKind::Dictation) {
@@ -510,6 +573,7 @@ pub async fn search(
             query,
             limit: if includes_notes { limit + 1 } else { limit },
             cursor: cursor.as_ref(),
+            kept_local: kept_local.as_ref(),
         },
     )?;
     if !includes_notes {
@@ -556,6 +620,7 @@ pub(crate) fn assemble(
         query,
         limit,
         cursor,
+        kept_local,
     } = request;
     let tokens = tokens(query);
     let fetch = limit + 1;
@@ -563,6 +628,10 @@ pub(crate) fn assemble(
     let mut candidates = Vec::new();
 
     if scope.includes(QueryRowKind::Meeting) {
+        // A source names each meeting at most once, so asking it for one more
+        // row per hidden meeting still leaves a full page of the rest. A source
+        // thinned below its limit would let the cursor pass rows for good.
+        let fetch = fetch + kept_local.map_or(0, |hidden| hidden.sessions().len());
         for candidate in store.query_meetings_lexical(query, before, fetch)? {
             candidates.push(meeting_row(candidate));
         }
@@ -583,7 +652,9 @@ pub(crate) fn assemble(
     }
 
     if scope.includes(QueryRowKind::Person) {
-        for entry in store.people_list()?.entries {
+        let nobody = HashSet::new();
+        let hidden = kept_local.map_or(&nobody, KeptLocal::sessions);
+        for entry in store.people_list_without(hidden)?.entries {
             if !matches_every_token(&person_haystack(&entry), &tokens) {
                 continue;
             }
@@ -633,6 +704,9 @@ pub(crate) fn assemble(
         }
     }
 
+    if let Some(kept_local) = kept_local {
+        candidates.retain(|row| !kept_local.hides_row(row));
+    }
     let (entries, next_cursor) = merge(candidates, cursor, limit);
     let reason = search_reason(&entries, model, scope);
     Ok(QuerySearchPage {
@@ -710,12 +784,14 @@ pub(super) fn dictation_row(entry: &HistoryEntry) -> QueryRow {
 /// silent restart from the top, which would replay the whole ledger as new.
 pub async fn events(
     meetings: &Arc<MeetingSessionManager>,
+    audience: QueryAudience,
     after_id: Option<String>,
     limit: Option<usize>,
 ) -> Result<QueryEventsPage, QueryError> {
     let limit = page_size(limit)?;
     let store = meetings.store().await?;
-    let before = match after_id {
+    let kept_local = audience.kept_local(&store)?;
+    let mut before = match after_id {
         Some(id) => {
             let when = store
                 .query_event_position(&id)?
@@ -724,7 +800,20 @@ pub async fn events(
         }
         None => None,
     };
-    let mut rows = store.query_events(before, limit + 1)?;
+    let mut rows = Vec::new();
+    loop {
+        let page = store.query_events(before.take(), limit + 1)?;
+        let exhausted = page.len() <= limit;
+        before = page.last().map(event_position);
+        rows.extend(page.into_iter().filter(|row| {
+            !kept_local
+                .as_ref()
+                .is_some_and(|hidden| hidden.hides_event(row))
+        }));
+        if exhausted || rows.len() > limit {
+            break;
+        }
+    }
     let has_more = rows.len() > limit;
     rows.truncate(limit);
     let entries = rows.into_iter().map(event_from_row).collect::<Vec<_>>();
@@ -736,6 +825,21 @@ pub async fn events(
         entries,
         next_cursor,
     })
+}
+
+/// Where a row sits in the stream, as [`MeetingStore::query_events`] pages it.
+fn event_position(row: &QueryEventRow) -> (i64, String) {
+    match row {
+        QueryEventRow::Receipt {
+            receipt,
+            when_utc_ms,
+        } => (*when_utc_ms, receipt.operation_id.uuid().to_string()),
+        QueryEventRow::Run {
+            run_id,
+            when_utc_ms,
+            ..
+        } => (*when_utc_ms, run_id.clone()),
+    }
 }
 
 /// One ledger row as the plane reports it.

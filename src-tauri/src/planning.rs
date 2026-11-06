@@ -107,10 +107,22 @@ pub async fn planning_project(
     meetings: State<'_, Arc<MeetingSessionManager>>,
     id: String,
 ) -> Result<ProjectDetail, String> {
+    project_detail_without(&history_state, &meetings, id, |_| false).await
+}
+
+/// One project's page for a reader who may not see the evidence `hides`
+/// names: it leaves before the pulse counts the meetings behind it.
+pub(crate) async fn project_detail_without(
+    history_state: &HistoryManager,
+    meetings: &MeetingSessionManager,
+    id: String,
+    hides: impl Fn(&EvidenceLink) -> bool + Send + Sync,
+) -> Result<ProjectDetail, String> {
     let id = store::uuid(&id).map_err(failure)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let (records, local_only) = history(&history_state, |conn| {
+    let (records, local_only) = history(history_state, |conn| {
         let mut records = store::records(conn, &id)?;
+        records.evidence.retain(|link| !hides(link));
         let local_only = records
             .tasks
             .iter()
@@ -129,8 +141,9 @@ pub async fn planning_project(
     if local_only {
         return store::detail(records, None, now_ms).map_err(failure);
     }
-    with_sources(&history_state, &meetings, |history_conn, meeting_conn| {
+    with_sources(history_state, meetings, |history_conn, meeting_conn| {
         let mut records = store::records(history_conn, &id)?;
+        records.evidence.retain(|link| !hides(link));
         for task in &mut records.tasks {
             sources::resolve_owner(meeting_conn, task)?;
         }

@@ -125,7 +125,7 @@ impl MeetingStore {
     pub(crate) fn corpus_loops(&self) -> Result<CorpusLoops, StoreError> {
         let connection = self.connection()?;
         let mut meetings = Vec::new();
-        let mut awaiting_continuity = false;
+        let mut awaiting_continuity = Vec::new();
         for meeting in ledger_rows_in(&connection)? {
             if super::workflows::workflow_succeeded_for_session_in(
                 &connection,
@@ -133,8 +133,8 @@ impl MeetingStore {
                 meeting.session_id,
             )? {
                 meetings.push(meeting);
-            } else {
-                awaiting_continuity |= !meeting.rows.is_empty();
+            } else if !meeting.rows.is_empty() {
+                awaiting_continuity.push(meeting.session_id);
             }
         }
         Ok(CorpusLoops {
@@ -378,8 +378,8 @@ pub(crate) struct MeetingLedgerRows {
 /// about the rows it may not that an empty list cannot carry.
 pub(crate) struct CorpusLoops {
     pub meetings: Vec<MeetingLedgerRows>,
-    /// Whether some meeting holds rows the continuity gate has not released.
-    pub awaiting_continuity: bool,
+    /// The meetings holding rows the continuity gate has not released.
+    pub awaiting_continuity: Vec<MeetingSessionId>,
 }
 
 /// Every retained meeting that has a current ledger, newest first, with its
