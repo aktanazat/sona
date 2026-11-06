@@ -18,7 +18,7 @@ struct ArtifactPane: View {
                     StaleNotesBand(store: store, what: "These notes")
                 }
                 if content.plain == true {
-                    PlainNotesBand(stoppedBy: content.ledgerFailure)
+                    PlainNotesBand(stoppedBy: content.plainBecause ?? content.ledgerFailure)
                 }
                 if let leftOut = content.leftOut, !leftOut.isEmpty {
                     LeftOutBand(spans: leftOut)

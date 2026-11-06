@@ -410,6 +410,7 @@ mod tests {
                 ledger: None,
                 ledger_failure: None,
                 plain: false,
+                plain_because: None,
                 left_out: Vec::new(),
             }),
             receipt: None,

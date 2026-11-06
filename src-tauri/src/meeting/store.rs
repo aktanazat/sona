@@ -11847,6 +11847,7 @@ mod tests {
             follow_up_draft: text,
             ledger: None,
             ledger_failure: None,
+            plain_because: None,
             plain: false,
             left_out: Vec::new(),
         }

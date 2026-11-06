@@ -1285,10 +1285,15 @@ pub struct GeneratedMeetingArtifacts {
     #[serde(default)]
     pub ledger_failure: Option<EngineFailureCause>,
     /// Written as plain text because the engine stopped the structured notes:
-    /// the summary holds the notes, and the lists, citations and ledger are
-    /// empty. Defaulted so every earlier revision reads back as structured.
+    /// the summary holds the notes, and the lists and citations are empty.
+    /// Defaulted so every earlier revision reads back as structured.
     #[serde(default)]
     pub plain: bool,
+    /// Why the structured notes were stopped, for notes written as plain
+    /// text. `None` on structured notes, and on a plain revision written
+    /// before this existed, which kept the reason in `ledger_failure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_because: Option<EngineFailureCause>,
     /// Stretches of the meeting these notes leave out: every reading of them
     /// failed, so the notes were written from the rest. In meeting order.
     /// Defaulted so every earlier revision reads back as covering it all.

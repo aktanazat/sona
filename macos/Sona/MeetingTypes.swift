@@ -1038,6 +1038,10 @@ struct MeetingGeneratedArtifacts: Decodable {
     /// Written as plain text because the engine stopped the structured
     /// notes; nil in a revision written before plain notes existed.
     let plain: Bool?
+    /// Why the structured notes were stopped, for notes written as plain
+    /// text; nil on a plain revision written before this existed, which kept
+    /// the reason in `ledgerFailure`.
+    let plainBecause: MeetingEngineFailureCause?
     /// Stretches of the meeting the notes could not read, so they were
     /// written from the rest; nil in a revision written before this existed.
     let leftOut: [MeetingLeftOutSpan]?

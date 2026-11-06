@@ -2658,10 +2658,14 @@ impl MeetingProcessingService {
         // second pass produces nothing, the part that refused is written on
         // the revision beside the notes: a ledger tab that says only "no
         // ledger" read, from the outside, exactly like a meeting that never
-        // asked for one. Plain notes skip it: the engine has already refused
-        // the structured reading it needs.
-        if !content.plain {
-            match generate_ledger(
+        // asked for one. Plain notes written because the engine refused the
+        // structured reading skip it, since the ledger is one; plain notes
+        // written after a time limit or an oversized pack still ask.
+        match content.plain_because {
+            Some(stop) if refuses_structured_reading(stop) => {
+                content.ledger_failure = Some(stop);
+            }
+            _ => match generate_ledger(
                 generator.as_ref(),
                 &evidence,
                 &segments,
@@ -2674,7 +2678,7 @@ impl MeetingProcessingService {
                     log::warn!("Meeting {session_id:?} got notes but no ledger: {cause:?}");
                     content.ledger_failure = Some(cause);
                 }
-            }
+            },
         }
         checkpoint()?;
         let artifact = store
@@ -5502,6 +5506,7 @@ fn validate_artifact_output(
         // evidence; see `generate_ledger`.
         ledger: None,
         ledger_failure: None,
+        plain_because: None,
         plain: false,
         left_out: Vec::new(),
     })
@@ -5782,7 +5787,7 @@ fn plain_notes_prompt(language: MeetingNotesLanguage) -> String {
 }
 
 /// Plain notes as a revision: the summary holds them, and nothing claims a
-/// source, a decision or a ledger the engine did not write.
+/// source or a decision the engine did not write.
 fn plain_artifacts(
     text: String,
     stopped_by: EngineFailureCause,
@@ -5805,10 +5810,25 @@ fn plain_artifacts(
         risks: Vec::new(),
         follow_up_draft: empty(),
         ledger: None,
-        ledger_failure: Some(stopped_by),
+        ledger_failure: None,
         plain: true,
+        plain_because: Some(stopped_by),
         left_out,
     }
+}
+
+/// Whether a stop on the structured notes is the engine refusing any
+/// structured reading of this meeting, which the ledger would meet again. A
+/// time limit or an oversized pack is not: the ledger has its own budget and
+/// its own pack.
+const fn refuses_structured_reading(cause: EngineFailureCause) -> bool {
+    matches!(
+        cause,
+        EngineFailureCause::SafetyBlocked
+            | EngineFailureCause::ModelDeclined
+            | EngineFailureCause::ReplyNotStructured
+            | EngineFailureCause::ReplyRejected
+    )
 }
 
 /// Read the conversation as a ledger, refuse to ship a receipt that is not in
@@ -8716,6 +8736,73 @@ pub(crate) mod tests {
         assert_eq!(
             &stripped, unmarked,
             "marks add only their kinds to the lines they cover"
+        );
+    }
+
+    /// Plain notes written after the structured notes ran out of time still
+    /// get a ledger: a time limit is not the engine refusing the structured
+    /// reading a ledger is.
+    #[test]
+    fn plain_notes_after_a_time_limit_still_get_a_ledger() {
+        struct StructuredTimedOut {
+            ledger: String,
+            shapes: std::sync::Mutex<Vec<ReplyShape>>,
+        }
+        impl MeetingTextGenerator for StructuredTimedOut {
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn model_id(&self) -> &'static str {
+                "structured-timed-out"
+            }
+            fn model_version(&self) -> Cow<'static, str> {
+                Cow::Borrowed("1")
+            }
+            fn max_input_bytes(&self) -> usize {
+                usize::MAX
+            }
+            fn generate(
+                &self,
+                _system_prompt: &str,
+                _evidence: &str,
+                _max_tokens: i32,
+                shape: ReplyShape,
+            ) -> Result<String, MeetingTextGenerationError> {
+                self.shapes.lock().expect("shapes").push(shape);
+                match shape {
+                    ReplyShape::PlainNotes => {
+                        Ok("The fixture meeting had one sentence.".to_string())
+                    }
+                    ReplyShape::MeetingLedger => Ok(self.ledger.clone()),
+                    _ => Err(MeetingTextGenerationError::TimedOut),
+                }
+            }
+        }
+        let fixture = artifact_store_fixture();
+        let generator = Arc::new(StructuredTimedOut {
+            ledger: fixture_ledger_json(&fixture.segment_id, GENERATION_FIXTURE_TRANSCRIPT),
+            shapes: std::sync::Mutex::default(),
+        });
+        let outcome = MeetingProcessingService::new(None)
+            .generate_artifacts(
+                &fixture.store,
+                fixture.session_id,
+                ARTIFACT_FIXTURE_REVISION,
+                GenerationIntent::Pipeline,
+                Some(generator.clone()),
+            )
+            .expect("artifact generation");
+        let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
+            panic!("plain notes are written notes, not a failure");
+        };
+        let content = artifact.content.expect("plain notes");
+        assert!(content.plain);
+        assert_eq!(content.plain_because, Some(EngineFailureCause::TimedOut));
+        assert!(
+            content.ledger.is_some(),
+            "no ledger: {:?}, asked {:?}",
+            content.ledger_failure,
+            generator.shapes.lock().expect("shapes")
         );
     }
 

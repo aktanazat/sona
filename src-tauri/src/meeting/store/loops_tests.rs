@@ -114,6 +114,7 @@ pub(super) fn file_ledger(
         ledger: Some(ledger),
         ledger_failure: None,
         plain: false,
+        plain_because: None,
         left_out: Vec::new(),
     };
     let connection = store.connection().unwrap();

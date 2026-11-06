@@ -7525,6 +7525,7 @@ pub(crate) mod tests {
                 ledger: None,
                 ledger_failure: None,
                 plain: false,
+                plain_because: None,
                 left_out: Vec::new(),
             };
             // A `Current` artifact generated from a revision that is not the
