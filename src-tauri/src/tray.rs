@@ -70,6 +70,42 @@ impl tauri_specta::Event for TrayCopyFailedEvent {
     const NAME: &'static str = "tray:copy-failed";
 }
 
+/// What the tray's Cancel Meeting Notes item does to a meeting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MeetingCancel {
+    /// Leave the start gate, where nothing was recorded.
+    Preflight,
+    /// Throw away the capture in progress.
+    Capture,
+}
+
+/// The item acts in one click, so it never reaches a meeting past its capture: a discard there
+/// deletes the finished recording and its notes for good, with no undo.
+pub(crate) fn meeting_cancel(
+    phase: MeetingPhase,
+    allowed_actions: &[AllowedMeetingAction],
+) -> Option<MeetingCancel> {
+    let (cancel, action) = match phase {
+        MeetingPhase::Preflight => (
+            MeetingCancel::Preflight,
+            AllowedMeetingAction::CancelPreflight,
+        ),
+        MeetingPhase::Starting
+        | MeetingPhase::CapturingRecording
+        | MeetingPhase::CapturingPausing
+        | MeetingPhase::CapturingPaused
+        | MeetingPhase::CapturingResuming => {
+            (MeetingCancel::Capture, AllowedMeetingAction::Discard)
+        }
+        MeetingPhase::Stopping
+        | MeetingPhase::Processing
+        | MeetingPhase::ReviewReady
+        | MeetingPhase::RecoveryRequired
+        | MeetingPhase::Deleting => return None,
+    };
+    allowed_actions.contains(&action).then_some(cancel)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MeetingMenuState {
     phase: MeetingPhase,
@@ -89,12 +125,7 @@ impl MeetingMenuState {
         Self {
             phase,
             can_stop: allowed_actions.contains(&AllowedMeetingAction::Stop),
-            can_cancel: allowed_actions.iter().any(|action| {
-                matches!(
-                    action,
-                    AllowedMeetingAction::CancelPreflight | AllowedMeetingAction::Discard
-                )
-            }),
+            can_cancel: meeting_cancel(phase, allowed_actions).is_some(),
         }
     }
 
@@ -1267,6 +1298,8 @@ mod tests {
         assert!(!actions(TrayIconState::Transcribing).contains(&(MenuAction::StopDictation, true)));
     }
 
+    /// The store still allows Discard once a meeting stops, and the tray acts in one click, so
+    /// the action lists here are the store's own for each phase.
     #[test]
     fn meeting_snapshot_actions_control_stop_and_cancel() {
         let preflight = MeetingMenuState::from_phase_and_actions(
@@ -1285,10 +1318,20 @@ mod tests {
 
         let processing = MeetingMenuState::from_phase_and_actions(
             MeetingPhase::Processing,
-            &[AllowedMeetingAction::CancelRemote],
+            &[AllowedMeetingAction::Discard],
         );
         assert!(!processing.can_stop);
         assert!(!processing.can_cancel);
+
+        let recovery = MeetingMenuState::from_phase_and_actions(
+            MeetingPhase::RecoveryRequired,
+            &[
+                AllowedMeetingAction::FinalizePartial,
+                AllowedMeetingAction::Discard,
+                AllowedMeetingAction::Delete,
+            ],
+        );
+        assert!(!recovery.can_cancel);
     }
 
     #[test]
