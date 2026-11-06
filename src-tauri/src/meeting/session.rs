@@ -8906,6 +8906,32 @@ pub(crate) mod tests {
             stopped.unwrap();
         }
 
+        /// The session aborts a lane whose resume fails, and an aborted device
+        /// cannot resume. Once no lane can, Resume leaves the meeting's
+        /// actions instead of staying on offer as a press that does nothing,
+        /// and Stop keeps what was recorded.
+        #[test]
+        fn a_meeting_no_lane_can_resume_offers_stop_and_not_resume() {
+            let (_directory, manager, _starts, _aborts) = manager();
+            let live = recording(&manager);
+            block_on(manager.pause(request(&manager, live))).unwrap();
+
+            let failed = block_on(manager.resume(request(&manager, live)))
+                .unwrap()
+                .snapshot;
+            let stopped = stop(&manager, live);
+
+            assert_eq!(failed.phase, MeetingPhase::CapturingPaused);
+            assert!(
+                !failed
+                    .allowed_actions
+                    .contains(&AllowedMeetingAction::Resume),
+                "Resume is offered with no lane left that can resume"
+            );
+            assert!(failed.allowed_actions.contains(&AllowedMeetingAction::Stop));
+            stopped.unwrap();
+        }
+
         /// Startup recovery is for what an earlier launch left behind. Run
         /// after this launch opened a gate and started a recording, it used
         /// to delete the gate and move the live recording into recovery while
