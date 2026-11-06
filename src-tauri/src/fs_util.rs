@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const BUFFER_BYTES: usize = 64 * 1024;
 
@@ -104,7 +104,10 @@ pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing destination parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("tmp");
+    // The app and a command-line run of the core write the same files.
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".{}.tmp", std::process::id()));
+    let temporary = PathBuf::from(temporary);
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]
@@ -113,9 +116,14 @@ pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(temporary, path)
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 pub(crate) fn hex_digest(bytes: &[u8]) -> String {

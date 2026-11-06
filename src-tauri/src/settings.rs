@@ -8,7 +8,7 @@ use crate::modes::{
 };
 use crate::secrets::SecretState;
 use crate::snippets::Snippet;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use reqwest::Url;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -2351,19 +2351,95 @@ impl LegacySettings<'_> {
 
 struct SerializedSettings(serde_json::Value);
 
+/// Present when this run found the settings file unreadable. The file was
+/// kept under another name and the settings in force are defaults, so nothing
+/// may act on them as the person's choice, such as deleting history over the
+/// default limit.
+pub(crate) struct UnreadableSettings;
+
+/// The settings store and the file behind it. The store plugin saves by
+/// rewriting the file in place, so a save cut short leaves a torn file that
+/// the next load reads as empty; this writes a new file and swaps it in, and
+/// refuses the plugin's own save, which it runs for every store at exit.
+struct SettingsFile<R: tauri::Runtime> {
+    store: Arc<tauri_plugin_store::Store<R>>,
+    path: std::path::PathBuf,
+}
+
+impl<R: tauri::Runtime> SettingsFile<R> {
+    fn open(app: &AppHandle<R>) -> tauri_plugin_store::Result<Self> {
+        let path = tauri_plugin_store::resolve_store_path(
+            app,
+            crate::portable::store_path(SETTINGS_STORE_PATH),
+        )?;
+        Self::open_at(app, path)
+    }
+
+    fn open_at(app: &AppHandle<R>, path: std::path::PathBuf) -> tauri_plugin_store::Result<Self> {
+        if app.get_store(&path).is_none() && set_aside_unreadable_settings(&path) {
+            app.manage(UnreadableSettings);
+        }
+        let store = app
+            .store_builder(&path)
+            .disable_auto_save()
+            .serialize(|_| Err("the settings file is saved by SettingsFile::save".into()))
+            .build()?;
+        Ok(Self { store, path })
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        let document = self
+            .store
+            .entries()
+            .into_iter()
+            .collect::<serde_json::Map<_, _>>();
+        crate::fs_util::write_private_file(&self.path, &serde_json::to_vec_pretty(&document)?)
+    }
+}
+
+/// The plugin loads a file it cannot parse as an empty store, and the next
+/// save replaces it with defaults. Keeps such a file under another name and
+/// says whether there was one.
+fn set_aside_unreadable_settings(path: &std::path::Path) -> bool {
+    let failure = match std::fs::read(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => error.to_string(),
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(document) if document.is_object() => return false,
+            Ok(_) => "not a JSON object".to_string(),
+            Err(error) => error.to_string(),
+        },
+    };
+    let mut kept = path.as_os_str().to_owned();
+    kept.push(format!(
+        ".unreadable-{}",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    match std::fs::rename(path, &kept) {
+        Ok(()) => error!(
+            "Settings file could not be read ({failure}); kept it as {} and started from defaults",
+            std::path::Path::new(&kept).display()
+        ),
+        Err(error) => error!(
+            "Settings file could not be read ({failure}) or set aside ({error}); started from defaults"
+        ),
+    }
+    true
+}
+
 pub(crate) fn legacy_provider_secret_migration_pending(app: &AppHandle) -> bool {
     let _settings_lock = lock_settings_store();
-    app.store(crate::portable::store_path(SETTINGS_STORE_PATH))
+    SettingsFile::open(app)
         .ok()
-        .and_then(|store| store.get("settings"))
+        .and_then(|file| file.store.get("settings"))
         .is_some_and(|settings| LegacySettings(&settings).has_nonempty_provider_secrets())
 }
 
 pub(crate) fn legacy_provider_secret_cutover_pending(app: &AppHandle) -> bool {
     let _settings_lock = lock_settings_store();
-    app.store(crate::portable::store_path(SETTINGS_STORE_PATH))
+    SettingsFile::open(app)
         .ok()
-        .and_then(|store| store.get("settings"))
+        .and_then(|file| file.store.get("settings"))
         .is_some_and(|settings| settings.get("post_process_api_keys").is_some())
 }
 
@@ -2405,20 +2481,19 @@ fn get_settings_locked<R: tauri::Runtime>(app: &AppHandle<R>) -> AppSettings {
     if let Some(settings) = cache.slot().clone() {
         return settings;
     }
-    let store = match app.store(crate::portable::store_path(SETTINGS_STORE_PATH)) {
-        Ok(store) => store,
+    let file = match SettingsFile::open(app) {
+        Ok(file) => file,
         Err(error) => {
             panic!("Settings store must be available after its plugin is registered: {error}");
         }
     };
-    let settings = read_settings_from_store(&store);
+    let settings = read_settings_from_store(&file);
     *cache.slot() = Some(settings.clone());
     settings
 }
 
-fn read_settings_from_store<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
-) -> AppSettings {
+fn read_settings_from_store<R: tauri::Runtime>(file: &SettingsFile<R>) -> AppSettings {
+    let store = &file.store;
     let mut wrote_settings = false;
     // Settings reads also persist one-time migrations. Migration helpers are
     // idempotent, so this converges after the first read of an older store.
@@ -2484,7 +2559,7 @@ fn read_settings_from_store<R: tauri::Runtime>(
     }
 
     if wrote_settings {
-        if let Err(error) = store.save() {
+        if let Err(error) = file.save() {
             warn!("Failed to persist settings: {}", error);
         }
     }
@@ -2494,9 +2569,9 @@ fn read_settings_from_store<R: tauri::Runtime>(
 
 pub(crate) fn raw_settings_value(app: &AppHandle) -> Option<serde_json::Value> {
     let _settings_lock = lock_settings_store();
-    app.store(crate::portable::store_path(SETTINGS_STORE_PATH))
+    SettingsFile::open(app)
         .ok()
-        .and_then(|store| store.get("settings"))
+        .and_then(|file| file.store.get("settings"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2512,13 +2587,11 @@ pub(crate) fn mutate_raw_settings_value<R>(
 ) -> Result<R, RawSettingsSaveError> {
     let _settings_lock = lock_settings_store();
     forget_cached_settings(app);
-    let store = app
-        .store(crate::portable::store_path(SETTINGS_STORE_PATH))
-        .map_err(|_| RawSettingsSaveError)?;
-    let mut raw_settings = store.get("settings").ok_or(RawSettingsSaveError)?;
+    let file = SettingsFile::open(app).map_err(|_| RawSettingsSaveError)?;
+    let mut raw_settings = file.store.get("settings").ok_or(RawSettingsSaveError)?;
     let result = mutate(&mut raw_settings);
-    store.set("settings", raw_settings);
-    store.save().map_err(|_| RawSettingsSaveError)?;
+    file.store.set("settings", raw_settings);
+    file.save().map_err(|_| RawSettingsSaveError)?;
     Ok(result)
 }
 
@@ -3369,7 +3442,7 @@ pub enum SettingsPersistError {
     /// The typed document would not serialize, so the store was handed nothing.
     Serialize(serde_json::Error),
     /// The store took the document and could not write it out.
-    Save(tauri_plugin_store::Error),
+    Save(std::io::Error),
 }
 
 impl std::fmt::Display for SettingsPersistError {
@@ -3420,17 +3493,17 @@ impl From<SettingsPersistError> for CloudSttProviderSettingsError {
 /// saved" means. Split out from [`write_settings_locked`] because a store is
 /// the one part of the write a test can own outright.
 fn persist_settings_to_store<R: tauri::Runtime>(
-    store: &tauri_plugin_store::Store<R>,
+    file: &SettingsFile<R>,
     settings: &AppSettings,
 ) -> Result<(), SettingsPersistError> {
-    let raw_settings = store.get("settings");
+    let raw_settings = file.store.get("settings");
     let serialized = serialize_settings_preserving_legacy_secrets(
         settings,
         raw_settings.as_ref().map(LegacySettings),
     )
     .map_err(SettingsPersistError::Serialize)?;
-    store.set("settings", serialized.0);
-    store.save().map_err(SettingsPersistError::Save)
+    file.store.set("settings", serialized.0);
+    file.save().map_err(SettingsPersistError::Save)
 }
 
 fn write_settings_locked<R: tauri::Runtime>(
@@ -3438,8 +3511,8 @@ fn write_settings_locked<R: tauri::Runtime>(
     settings: &mut AppSettings,
 ) -> Result<(), SettingsPersistError> {
     forget_cached_settings(app);
-    let store = match app.store(crate::portable::store_path(SETTINGS_STORE_PATH)) {
-        Ok(store) => store,
+    let file = match SettingsFile::open(app) {
+        Ok(file) => file,
         Err(error) => {
             panic!("Settings store must be available after its plugin is registered: {error}");
         }
@@ -3448,7 +3521,7 @@ fn write_settings_locked<R: tauri::Runtime>(
     ensure_cloud_stt_defaults(settings);
     ensure_mode_settings(settings);
 
-    persist_settings_to_store(&store, settings)
+    persist_settings_to_store(&file, settings)
 }
 
 /// Atomically read, mutate, and write the typed settings document. The update
@@ -3619,18 +3692,15 @@ mod tests {
         path: &std::path::Path,
     ) -> (
         tauri::App<tauri::test::MockRuntime>,
-        Arc<tauri_plugin_store::Store<tauri::test::MockRuntime>>,
+        SettingsFile<tauri::test::MockRuntime>,
     ) {
         let app = tauri::test::mock_builder()
             .plugin(tauri_plugin_store::Builder::default().build())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("test app with a store plugin");
-        let store = app
-            .store_builder(path)
-            .disable_auto_save()
-            .build()
+        let file = SettingsFile::open_at(app.handle(), path.to_path_buf())
             .expect("temporary settings store");
-        (app, store)
+        (app, file)
     }
 
     /// Every window that mirrors a setting reads the record again when it
@@ -4452,8 +4522,8 @@ mod tests {
         )
         .expect("old settings store writes");
 
-        let (app, store) = temporary_settings_store(&path);
-        let migrated = read_settings_from_store(&store);
+        let (app, file) = temporary_settings_store(&path);
+        let migrated = read_settings_from_store(&file);
         assert_eq!(
             migrated.settings_schema_version, CURRENT_SETTINGS_SCHEMA_VERSION,
             "the in-memory read migrates the old store"
@@ -4469,11 +4539,11 @@ mod tests {
             "the migration marker survives the first short-lived read"
         );
 
-        drop(store);
+        drop(file);
         drop(app);
 
-        let (next_app, next_store) = temporary_settings_store(&path);
-        let reloaded = read_settings_from_store(&next_store);
+        let (next_app, next_file) = temporary_settings_store(&path);
+        let reloaded = read_settings_from_store(&next_file);
         assert_eq!(
             reloaded.settings_schema_version, CURRENT_SETTINGS_SCHEMA_VERSION,
             "the next process reads the migrated store"
@@ -4483,7 +4553,7 @@ mod tests {
             persisted_after_first_read,
             "the second read does not need another migration write"
         );
-        drop(next_store);
+        drop(next_file);
         drop(next_app);
     }
 
@@ -4495,7 +4565,7 @@ mod tests {
     fn a_store_that_cannot_write_reports_the_failure() {
         let directory = tempfile::tempdir().expect("temporary settings directory");
         let path = directory.path().join(SETTINGS_STORE_PATH);
-        let (app, store) = temporary_settings_store(&path);
+        let (app, file) = temporary_settings_store(&path);
         // A directory where the store's file belongs: the save has somewhere to
         // go and cannot go there.
         std::fs::create_dir(&path).expect("a directory in the store file's place");
@@ -4508,20 +4578,102 @@ mod tests {
             },
             ..get_default_settings()
         };
-        let error = persist_settings_to_store(&store, &settings)
+        let error = persist_settings_to_store(&file, &settings)
             .expect_err("a store that cannot write must not report a saved settings document");
         assert!(
             matches!(error, SettingsPersistError::Save(_)),
             "the failure names the save, not the serialization: {error:?}"
         );
         assert_eq!(
-            read_settings_from_store(&store).meeting_local_engine,
+            read_settings_from_store(&file).meeting_local_engine,
             settings.meeting_local_engine,
             "readback must expose the engine effective after a failed disk save"
         );
 
-        drop(store);
+        drop(file);
         drop(app);
+    }
+
+    /// A settings file cut short, as an in-place save killed part way left
+    /// it, loaded as an empty store and was overwritten with defaults, and
+    /// retention then deleted history over the default limit. The bytes must
+    /// stay on disk, and the run must know its settings are not the person's.
+    #[test]
+    fn an_unreadable_settings_file_is_kept_and_the_run_knows_it() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let path = directory.path().join(SETTINGS_STORE_PATH);
+        let mut raw = serde_json::Value::Object(default_settings_document().0);
+        raw["history_limit"] = serde_json::json!(5000);
+        let whole = serde_json::to_vec_pretty(&serde_json::json!({ "settings": raw }))
+            .expect("customized settings serialize");
+
+        for unreadable in [&whole[..whole.len() / 2], &[][..]] {
+            std::fs::write(&path, unreadable).expect("unreadable settings file");
+            let (app, file) = temporary_settings_store(&path);
+            read_settings_from_store(&file);
+
+            let kept = std::fs::read_dir(directory.path())
+                .expect("settings directory")
+                .map(|entry| entry.expect("directory entry").path())
+                .filter(|entry| {
+                    entry
+                        .to_string_lossy()
+                        .contains("settings_store.json.unreadable-")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(kept.len(), 1, "one kept copy: {kept:?}");
+            assert_eq!(
+                std::fs::read(&kept[0]).expect("kept copy"),
+                unreadable,
+                "the kept copy holds exactly the unreadable bytes"
+            );
+            assert!(app.try_state::<UnreadableSettings>().is_some());
+            std::fs::remove_file(&kept[0]).expect("clear the kept copy");
+        }
+    }
+
+    /// The plugin saved by rewriting the file in place, so a reader in another
+    /// process, such as a command-line run, could read a torn document. A
+    /// save must leave the file a reader already opened whole.
+    #[test]
+    fn a_save_never_changes_the_file_a_reader_has_open() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let path = directory.path().join(SETTINGS_STORE_PATH);
+        let (_app, file) = temporary_settings_store(&path);
+        persist_settings_to_store(&file, &get_default_settings()).expect("first save");
+        let before = std::fs::read(&path).expect("first document");
+        let mut reader = std::fs::File::open(&path).expect("reader");
+
+        let changed = AppSettings {
+            history_limit: 5000,
+            ..get_default_settings()
+        };
+        persist_settings_to_store(&file, &changed).expect("second save");
+
+        let mut seen = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut seen).expect("reader reads");
+        assert_eq!(
+            seen, before,
+            "the open reader sees the whole first document"
+        );
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("second document"))
+                .expect("second document parses");
+        assert_eq!(after["settings"]["history_limit"], serde_json::json!(5000));
+    }
+
+    /// The plugin saves every store again when the app exits, in place. That
+    /// save must not write the settings file: SIGTERM can cut it short.
+    #[test]
+    fn the_store_plugin_never_writes_the_settings_file() {
+        let directory = tempfile::tempdir().expect("temporary settings directory");
+        let path = directory.path().join(SETTINGS_STORE_PATH);
+        let (_app, file) = temporary_settings_store(&path);
+        persist_settings_to_store(&file, &get_default_settings()).expect("save");
+        std::fs::remove_file(&path).expect("remove the settings file");
+
+        assert!(file.store.save().is_err());
+        assert!(!path.exists());
     }
 
     #[test]
