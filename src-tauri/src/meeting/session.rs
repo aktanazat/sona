@@ -24,8 +24,8 @@ use super::people_types::{
     PersonId, PersonLinkConfidence, PersonSummaryOutcome, PersonSummaryRegenerateResult,
 };
 use super::processing::{
-    write_relationship_summary, LiveTranscript, LiveTranscriptWorker, MeetingProcessingService,
-    MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
+    write_relationship_summary, CaptureGate, LiveTranscript, LiveTranscriptWorker,
+    MeetingProcessingService, MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
     LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
 use super::store::voice_identity::names_user;
@@ -514,7 +514,6 @@ pub struct MeetingSessionManager {
     /// that failed today be tried again tomorrow.
     recovery_launch: Uuid,
     processing: Arc<MeetingProcessingService>,
-    keep_awake: Mutex<MeetingKeepAwake>,
     capture_active: Arc<AtomicBool>,
     actor: Mutex<ActorState>,
 }
@@ -545,6 +544,28 @@ impl Drop for CaptureLease {
     }
 }
 
+/// Everything a capture holds beyond its lanes: the Mac kept awake,
+/// processing parked, and the lease. It belongs to the capture and goes with
+/// it, so no other meeting's command can let go of any part of it.
+struct CaptureHold {
+    keep_awake: MeetingKeepAwake,
+    // Before the lease, so the next capture's park cannot be lifted by this one.
+    _processing: CaptureGate,
+    _lease: CaptureLease,
+}
+
+impl CaptureHold {
+    fn new(lease: CaptureLease, processing: &MeetingProcessingService) -> Self {
+        let mut keep_awake = MeetingKeepAwake::new();
+        keep_awake.acquire();
+        Self {
+            keep_awake,
+            _processing: processing.park_for_capture(),
+            _lease: lease,
+        }
+    }
+}
+
 struct ActiveCapture {
     session_id: MeetingSessionId,
     sources: HashMap<SourceKind, ActiveSource>,
@@ -556,7 +577,7 @@ struct ActiveCapture {
     /// The level of each track, for the warning that the call went silent.
     audibility: Arc<CaptureAudibility>,
     // Released last so idle cannot precede source and live-worker teardown.
-    _capture_lease: CaptureLease,
+    hold: CaptureHold,
 }
 
 struct ActiveSource {
@@ -612,7 +633,6 @@ impl MeetingSessionManager {
             recovery_complete: AtomicBool::new(false),
             recovery_launch: Uuid::new_v4(),
             processing,
-            keep_awake: Mutex::new(MeetingKeepAwake::new()),
             capture_active: Arc::new(AtomicBool::new(false)),
             actor: Mutex::new(ActorState {
                 active: None,
@@ -640,24 +660,11 @@ impl MeetingSessionManager {
         &self.processing
     }
 
-    fn acquire_keep_awake(&self) {
-        self.keep_awake
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .acquire();
-    }
     pub(crate) fn meeting_local_engine_status(&self) -> MeetingLocalEngineStatus {
         self.processing.meeting_local_engine_status()
     }
     pub(crate) fn text_engine_for_next_meeting(&self) -> MeetingTextEngineChoice {
         self.processing.text_engine_for_next_meeting()
-    }
-
-    fn release_keep_awake(&self) {
-        self.keep_awake
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .release();
     }
 
     pub(crate) fn start_retention_sweeper(self: &Arc<Self>) {
@@ -1785,10 +1792,96 @@ impl MeetingSessionManager {
             drop(actor);
             return self.result_for_receipt(store, receipt, request.session_id);
         }
-        self.acquire_keep_awake();
-        self.processing.set_capture_active(true);
+        let hold = CaptureHold::new(capture_lease, &self.processing);
+        let audibility = CaptureAudibility::new();
+        let mut sources = HashMap::new();
+        let began =
+            self.begin_capture(&store, request.session_id, &plan, &audibility, &mut sources);
+        if let Ok(true) = began {
+            actor.active = Some(ActiveCapture {
+                session_id: request.session_id,
+                sources,
+                call_names: None,
+                audibility,
+                live: LiveTranscriptWorker::start(
+                    Arc::clone(&self.processing),
+                    Arc::clone(&store),
+                    request.session_id,
+                ),
+                hold,
+            });
+            actor.tray_session_id = None;
+            drop(actor);
+            let snapshot = store
+                .session_snapshot(request.session_id)
+                .map_err(map_store_error)?;
+            self.emit_session_changed(&snapshot);
+            self.record_meeting_started(Arc::clone(&store), request.session_id);
+            return Ok(MeetingMutationResult { receipt, snapshot });
+        }
+        for source in sources.values_mut() {
+            let _ = source.source.abort();
+            let _ = source.worker.stop();
+        }
+        let (event_kind, reason_codes) = match &began {
+            Ok(_) => (
+                "source_start_incomplete",
+                vec![MeetingReasonCode::SourceStartFailed],
+            ),
+            Err(_) => {
+                if let Err(error) =
+                    store.close_open_capture_window(request.session_id, 0, "start_failed")
+                {
+                    log::warn!(
+                        "Meeting capture {} kept the capture window its failed start opened: {error:?}",
+                        request.session_id.uuid()
+                    );
+                }
+                ("start_failed", Vec::new())
+            }
+        };
+        let restored = system_transition(
+            &store,
+            request.session_id,
+            MeetingCommandKind::Start,
+            MeetingPhase::Starting,
+            MeetingPhase::Preflight,
+            event_kind,
+            reason_codes,
+        );
+        drop(hold);
+        drop(actor);
+        if let Err(error) = began {
+            if let Err(restore) = restored {
+                log::warn!(
+                    "Meeting capture {} failed to start and stayed at starting: {restore:?}",
+                    request.session_id.uuid()
+                );
+            }
+            self.emit_current(&store, request.session_id);
+            return Err(error);
+        }
+        restored.map_err(map_store_error)?;
+        let snapshot = store
+            .session_snapshot(request.session_id)
+            .map_err(map_store_error)?;
+        self.emit_session_changed(&snapshot);
+        Ok(MeetingMutationResult { receipt, snapshot })
+    }
 
-        let mut active_sources = HashMap::new();
+    /// Open the lanes of a start that has committed `starting`, write down
+    /// what opened, and begin recording. `Ok(true)` is a recording with every
+    /// lane in `sources`; `Ok(false)` is a start the degraded-start policy
+    /// refuses. Whatever the answer, every lane that opened is in `sources` or
+    /// already aborted.
+    fn begin_capture(
+        &self,
+        store: &Arc<MeetingStore>,
+        session_id: MeetingSessionId,
+        plan: &MeetingRunPlan,
+        audibility: &Arc<CaptureAudibility>,
+        sources: &mut HashMap<SourceKind, ActiveSource>,
+    ) -> Result<bool, MeetingCommandError> {
         let source_provider = Arc::clone(&*self.sources_lock());
         // Two devices cannot be handed the same instant, but they can be asked
         // in the same one. ScreenCaptureKit's start blocks on
@@ -1826,7 +1919,7 @@ impl MeetingSessionManager {
                     .into_iter()
                     .map(|(source_kind, track_id, mut source, sink, lane_reader)| {
                         let source_plan = SourceStartPlan {
-                            session_id: request.session_id,
+                            session_id,
                             track_id,
                             source_kind,
                             required: plan.required_sources.contains(&source_kind),
@@ -1850,11 +1943,11 @@ impl MeetingSessionManager {
                     })
                     .collect::<Vec<_>>()
             });
-        let audibility = CaptureAudibility::new();
-        for (source_kind, track_id, source, lane_reader, report) in started {
-            store
+        let mut started = started.into_iter();
+        while let Some((source_kind, track_id, mut source, lane_reader, report)) = started.next() {
+            let writer = store
                 .create_track(TrackCreation {
-                    session_id: request.session_id,
+                    session_id,
                     plan_id: plan.plan_id,
                     source_kind,
                     required: plan.required_sources.contains(&source_kind),
@@ -1862,18 +1955,25 @@ impl MeetingSessionManager {
                     descriptor_json: "{}",
                     report,
                 })
-                .map_err(map_store_error)?;
-            let writer = store
-                .open_track_writer(request.session_id, track_id, plan.storage.clone())
-                .map_err(map_store_error)?;
+                .and_then(|()| store.open_track_writer(session_id, track_id, plan.storage.clone()));
+            let writer = match writer {
+                Ok(writer) => writer,
+                Err(error) => {
+                    let _ = source.abort();
+                    for (_, _, mut unregistered, _, _) in started {
+                        let _ = unregistered.abort();
+                    }
+                    return Err(map_store_error(error));
+                }
+            };
             let worker = TrackWorker::start(
-                Arc::clone(&store),
+                Arc::clone(store),
                 writer,
                 lane_reader,
                 report,
                 audibility.meter(source_kind),
             );
-            active_sources.insert(
+            sources.insert(
                 source_kind,
                 ActiveSource {
                     track_id,
@@ -1883,86 +1983,30 @@ impl MeetingSessionManager {
                 },
             );
         }
-
         let missing_required_source = plan
             .required_sources
             .iter()
-            .any(|source_kind| !active_sources.contains_key(source_kind));
-        if active_sources.is_empty()
+            .any(|source_kind| !sources.contains_key(source_kind));
+        if sources.is_empty()
             || (missing_required_source
                 && plan.degraded_start_policy == DegradedStartPolicy::AbortIfRequiredSourceFails)
         {
-            for source in active_sources.values_mut() {
-                let _ = source.source.abort();
-                let _ = source.worker.stop();
-            }
-            let snapshot = store
-                .session_snapshot(request.session_id)
-                .map_err(map_store_error)?;
-            store
-                .transition(StoreTransition {
-                    operation_id: None,
-                    actor: OperationActor::System,
-                    command: MeetingCommandKind::Start,
-                    requested_at_utc_ms: utc_now_ms(),
-                    session_id: request.session_id,
-                    expected_revision: snapshot.revision,
-                    allowed_from: &[MeetingPhase::Starting],
-                    next_phase: MeetingPhase::Preflight,
-                    event_kind: "source_start_incomplete",
-                    reason_codes: vec![MeetingReasonCode::SourceStartFailed],
-                })
-                .map_err(map_store_error)?;
-            self.processing.set_capture_active(false);
-            self.release_keep_awake();
-            drop(actor);
-            let snapshot = store
-                .session_snapshot(request.session_id)
-                .map_err(map_store_error)?;
-            self.emit_session_changed(&snapshot);
-            return Ok(MeetingMutationResult { receipt, snapshot });
+            return Ok(false);
         }
-
         store
-            .open_capture_window(request.session_id, 0)
+            .open_capture_window(session_id, 0)
             .map_err(map_store_error)?;
-        let starting_snapshot = store
-            .session_snapshot(request.session_id)
-            .map_err(map_store_error)?;
-        store
-            .transition(StoreTransition {
-                operation_id: None,
-                actor: OperationActor::System,
-                command: MeetingCommandKind::Start,
-                requested_at_utc_ms: utc_now_ms(),
-                session_id: request.session_id,
-                expected_revision: starting_snapshot.revision,
-                allowed_from: &[MeetingPhase::Starting],
-                next_phase: MeetingPhase::CapturingRecording,
-                event_kind: "capture_started",
-                reason_codes: Vec::new(),
-            })
-            .map_err(map_store_error)?;
-        actor.active = Some(ActiveCapture {
-            session_id: request.session_id,
-            sources: active_sources,
-            call_names: None,
-            audibility,
-            live: LiveTranscriptWorker::start(
-                Arc::clone(&self.processing),
-                Arc::clone(&store),
-                request.session_id,
-            ),
-            _capture_lease: capture_lease,
-        });
-        actor.tray_session_id = None;
-        drop(actor);
-        let snapshot = store
-            .session_snapshot(request.session_id)
-            .map_err(map_store_error)?;
-        self.emit_session_changed(&snapshot);
-        self.record_meeting_started(Arc::clone(&store), request.session_id);
-        Ok(MeetingMutationResult { receipt, snapshot })
+        system_transition(
+            store,
+            session_id,
+            MeetingCommandKind::Start,
+            MeetingPhase::Starting,
+            MeetingPhase::CapturingRecording,
+            "capture_started",
+            Vec::new(),
+        )
+        .map_err(map_store_error)?;
+        Ok(true)
     }
 
     pub async fn call_name_targets(
@@ -2081,48 +2125,25 @@ impl MeetingSessionManager {
             drop(actor);
             return self.result_for_receipt(store, receipt, request.session_id);
         }
+        // The pause is written down before any device hears of it, so a write
+        // that fails leaves every lane recording under the phase that says so.
+        if let Err(error) = confirm_pause(&store, request.session_id) {
+            if let Err(restore) = undo_pause(&store, request.session_id) {
+                log::warn!(
+                    "Meeting capture {} could not pause and stayed at pausing: {restore:?}",
+                    request.session_id.uuid()
+                );
+            }
+            drop(actor);
+            self.emit_current(&store, request.session_id);
+            return Err(map_store_error(error));
+        }
         for source in active.sources.values_mut() {
             if source.source.pause().is_err() {
-                store
-                    .record_gap(&SourceGap {
-                        track_id: source.track_id,
-                        epoch: source.epoch,
-                        start_offset_ns: None,
-                        end_offset_ns: None,
-                        reason: SourceGapReason::SourceStopped,
-                        dropped_frames: None,
-                    })
-                    .map_err(map_store_error)?;
-                store
-                    .update_track_health(request.session_id, source.track_id, SourceHealth::Failed)
-                    .map_err(map_store_error)?;
+                note_failed_lane(&store, request.session_id, source.track_id, source.epoch);
             }
         }
-        let snapshot = store
-            .session_snapshot(request.session_id)
-            .map_err(map_store_error)?;
-        let end = snapshot.elapsed_offset_ns.unwrap_or(0);
-        store
-            .close_open_capture_window(request.session_id, end, "paused")
-            .map_err(map_store_error)?;
-        let pausing = store
-            .session_snapshot(request.session_id)
-            .map_err(map_store_error)?;
-        store
-            .transition(StoreTransition {
-                operation_id: None,
-                actor: OperationActor::System,
-                command: MeetingCommandKind::Pause,
-                requested_at_utc_ms: utc_now_ms(),
-                session_id: request.session_id,
-                expected_revision: pausing.revision,
-                allowed_from: &[MeetingPhase::CapturingPausing],
-                next_phase: MeetingPhase::CapturingPaused,
-                event_kind: "pause_confirmed",
-                reason_codes: Vec::new(),
-            })
-            .map_err(map_store_error)?;
-        self.release_keep_awake();
+        active.hold.keep_awake.release();
         drop(actor);
         let snapshot = store
             .session_snapshot(request.session_id)
@@ -2160,82 +2181,54 @@ impl MeetingSessionManager {
             drop(actor);
             return self.result_for_receipt(store, receipt, request.session_id);
         }
-        self.acquire_keep_awake();
-        let mut resumed = 0usize;
+        active.hold.keep_awake.acquire();
+        let mut resumed = Vec::new();
         for source in active.sources.values_mut() {
-            let next_epoch = source
-                .epoch
-                .get()
-                .checked_add(1)
-                .map(SourceEpoch::new)
-                .ok_or(MeetingCommandError::InvalidRequest)?;
-            match source.source.resume(next_epoch) {
-                Ok(report)
-                    if report.track_id == source.track_id
-                        && report.epoch.get() >= next_epoch.get() =>
+            let next_epoch = source.epoch.get().checked_add(1).map(SourceEpoch::new);
+            let report = next_epoch.and_then(|epoch| source.source.resume(epoch).ok());
+            match (next_epoch, report) {
+                (Some(epoch), Some(report))
+                    if report.track_id == source.track_id && report.epoch.get() >= epoch.get() =>
                 {
                     source.epoch = report.epoch;
-                    resumed += 1;
+                    resumed.push(source.track_id);
                 }
-                Ok(_) | Err(_) => {
+                _ => {
                     let _ = source.source.abort();
-                    store
-                        .record_gap(&SourceGap {
-                            track_id: source.track_id,
-                            epoch: next_epoch,
-                            start_offset_ns: None,
-                            end_offset_ns: None,
-                            reason: SourceGapReason::SourceStopped,
-                            dropped_frames: None,
-                        })
-                        .map_err(map_store_error)?;
-                    store
-                        .update_track_health(
-                            request.session_id,
-                            source.track_id,
-                            SourceHealth::Failed,
-                        )
-                        .map_err(map_store_error)?;
+                    note_failed_lane(
+                        &store,
+                        request.session_id,
+                        source.track_id,
+                        next_epoch.unwrap_or(source.epoch),
+                    );
                 }
             }
         }
-        let resuming = store
-            .session_snapshot(request.session_id)
-            .map_err(map_store_error)?;
-        // A window opens only over audio that is arriving. With every source
-        // failed the session stays paused under a committed receipt: nothing
-        // is recording, and Stop and a second Resume both remain open to it.
-        let (next_phase, event_kind, reason_codes) = if resumed == 0 {
-            self.release_keep_awake();
-            (
-                MeetingPhase::CapturingPaused,
-                "resume_failed",
-                vec![MeetingReasonCode::SourceStartFailed],
-            )
-        } else {
-            store
-                .open_capture_window(request.session_id, resuming.elapsed_offset_ns.unwrap_or(0))
-                .map_err(map_store_error)?;
-            (
-                MeetingPhase::CapturingRecording,
-                "resume_confirmed",
-                Vec::new(),
-            )
-        };
-        store
-            .transition(StoreTransition {
-                operation_id: None,
-                actor: OperationActor::System,
-                command: MeetingCommandKind::Resume,
-                requested_at_utc_ms: utc_now_ms(),
-                session_id: request.session_id,
-                expected_revision: resuming.revision,
-                allowed_from: &[MeetingPhase::CapturingResuming],
-                next_phase,
-                event_kind,
-                reason_codes,
-            })
-            .map_err(map_store_error)?;
+        if let Err(error) = confirm_resume(&store, request.session_id, !resumed.is_empty()) {
+            for source in active
+                .sources
+                .values_mut()
+                .filter(|source| resumed.contains(&source.track_id))
+            {
+                if source.source.pause().is_err() {
+                    let _ = source.source.abort();
+                    note_failed_lane(&store, request.session_id, source.track_id, source.epoch);
+                }
+            }
+            if let Err(restore) = undo_resume(&store, request.session_id) {
+                log::warn!(
+                    "Meeting capture {} could not resume and stayed at resuming: {restore:?}",
+                    request.session_id.uuid()
+                );
+            }
+            active.hold.keep_awake.release();
+            drop(actor);
+            self.emit_current(&store, request.session_id);
+            return Err(map_store_error(error));
+        }
+        if resumed.is_empty() {
+            active.hold.keep_awake.release();
+        }
         drop(actor);
         let snapshot = store
             .session_snapshot(request.session_id)
@@ -2299,15 +2292,31 @@ impl MeetingSessionManager {
         );
         let mut active = actor
             .active
-            .take()
-            .filter(|active| active.session_id == request.session_id)
+            .take_if(|active| active.session_id == request.session_id)
             .ok_or(MeetingCommandError::NotFound)?;
         drop(active.call_names.take());
         for source in active.sources.values_mut() {
             // The packet lane is the persistence path. The stop report repeats
             // what the source observed and must not insert every gap a second time.
             let _ = source.source.stop();
-            source.worker.stop().map_err(map_store_error)?;
+            // A writer that died lost only its lane's unsaved tail. What it
+            // saved is on disk, and the rest of the meeting still has to stop.
+            if let Err(error) = source.worker.stop() {
+                log::warn!(
+                    "Meeting capture {} stopped a lane whose writer had died: {error:?}",
+                    request.session_id.uuid()
+                );
+                if let Err(error) = store.update_track_health(
+                    request.session_id,
+                    source.track_id,
+                    SourceHealth::Failed,
+                ) {
+                    log::warn!(
+                        "Meeting capture {} could not mark that lane failed: {error:?}",
+                        request.session_id.uuid()
+                    );
+                }
+            }
         }
         // Every worker has drained and sealed, so whether a lane produced audio
         // is now a fact. Do it before the snapshot below reads the revision the
@@ -2339,8 +2348,6 @@ impl MeetingSessionManager {
                 reason_codes: Vec::new(),
             })
             .map_err(map_store_error)?;
-        self.processing.set_capture_active(false);
-        self.release_keep_awake();
         actor.tray_session_id = Some(request.session_id);
         drop(actor);
         // The lock goes first: dropping this record ends the provisional pass,
@@ -2834,8 +2841,6 @@ impl MeetingSessionManager {
         }
 
         self.processing.cancel(request.session_id);
-        self.processing.set_capture_active(false);
-        self.release_keep_awake();
 
         let active = {
             let mut actor = self.actor_lock();
@@ -2857,7 +2862,7 @@ impl MeetingSessionManager {
             drop(active.call_names.take());
             for source in active.sources.values_mut() {
                 let _ = source.source.abort();
-                source.worker.stop().map_err(map_store_error)?;
+                let _ = source.worker.stop();
             }
         }
         let people_revision = store.finish_deletion(job_id).map_err(map_store_error)?;
@@ -2941,7 +2946,6 @@ impl MeetingSessionManager {
             "recovery_finalized_partial",
         )?;
         if receipt.result == OperationResult::Committed {
-            self.processing.set_capture_active(false);
             self.processing.submit(
                 Arc::clone(&store),
                 request.session_id,
@@ -4535,6 +4539,14 @@ impl MeetingSessionManager {
         }
     }
 
+    /// A command that failed after moving the phase still tells the windows,
+    /// so the next press carries the revision the store has now.
+    fn emit_current(&self, store: &MeetingStore, session_id: MeetingSessionId) {
+        if let Ok(snapshot) = store.session_snapshot(session_id) {
+            self.emit_session_changed(&snapshot);
+        }
+    }
+
     fn emit_removed(&self, session_id: MeetingSessionId, revision: u64) {
         if let Some(app) = &self.app {
             let _ = app.emit(
@@ -4722,6 +4734,154 @@ fn required_transition_by(
         })
         .map_err(map_store_error)?
         .ok_or(MeetingCommandError::InvalidRequest)
+}
+
+/// A phase change the session makes on its own once a command's transition
+/// has committed: no operation id and no receipt, fenced on the phase.
+fn system_transition(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    command: MeetingCommandKind,
+    from: MeetingPhase,
+    to: MeetingPhase,
+    event_kind: &str,
+    reason_codes: Vec<MeetingReasonCode>,
+) -> Result<(), StoreError> {
+    let current = store.session_snapshot(session_id)?;
+    store.transition(StoreTransition {
+        operation_id: None,
+        actor: OperationActor::System,
+        command,
+        requested_at_utc_ms: utc_now_ms(),
+        session_id,
+        expected_revision: current.revision,
+        allowed_from: &[from],
+        next_phase: to,
+        event_kind,
+        reason_codes,
+    })?;
+    Ok(())
+}
+
+/// Close the capture window over what reached the disk and commit the pause.
+fn confirm_pause(store: &MeetingStore, session_id: MeetingSessionId) -> Result<(), StoreError> {
+    let pausing = store.session_snapshot(session_id)?;
+    store.close_open_capture_window(
+        session_id,
+        pausing.elapsed_offset_ns.unwrap_or(0),
+        "paused",
+    )?;
+    system_transition(
+        store,
+        session_id,
+        MeetingCommandKind::Pause,
+        MeetingPhase::CapturingPausing,
+        MeetingPhase::CapturingPaused,
+        "pause_confirmed",
+        Vec::new(),
+    )
+}
+
+/// Put a pause that could not be written back to recording, with the capture
+/// window it may have closed open again.
+fn undo_pause(store: &MeetingStore, session_id: MeetingSessionId) -> Result<(), StoreError> {
+    let pausing = store.session_snapshot(session_id)?;
+    if pausing.open_capture_window_started_at_ns.is_none() {
+        store.open_capture_window(session_id, pausing.elapsed_offset_ns.unwrap_or(0))?;
+    }
+    system_transition(
+        store,
+        session_id,
+        MeetingCommandKind::Pause,
+        MeetingPhase::CapturingPausing,
+        MeetingPhase::CapturingRecording,
+        "pause_failed",
+        Vec::new(),
+    )
+}
+
+/// Open a capture window over the lanes that came back and commit where the
+/// resume landed. A window opens only over audio that is arriving, so with no
+/// lane back the meeting stays paused under a committed receipt; a failed
+/// lane does not come back, so what it offers then is Stop.
+fn confirm_resume(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    any_resumed: bool,
+) -> Result<(), StoreError> {
+    let (next_phase, event_kind, reason_codes) = if any_resumed {
+        let resuming = store.session_snapshot(session_id)?;
+        store.open_capture_window(session_id, resuming.elapsed_offset_ns.unwrap_or(0))?;
+        (
+            MeetingPhase::CapturingRecording,
+            "resume_confirmed",
+            Vec::new(),
+        )
+    } else {
+        (
+            MeetingPhase::CapturingPaused,
+            "resume_failed",
+            vec![MeetingReasonCode::SourceStartFailed],
+        )
+    };
+    system_transition(
+        store,
+        session_id,
+        MeetingCommandKind::Resume,
+        MeetingPhase::CapturingResuming,
+        next_phase,
+        event_kind,
+        reason_codes,
+    )
+}
+
+/// Put a resume that could not be written back to paused, closing the capture
+/// window it may have opened.
+fn undo_resume(store: &MeetingStore, session_id: MeetingSessionId) -> Result<(), StoreError> {
+    let resuming = store.session_snapshot(session_id)?;
+    if resuming.open_capture_window_started_at_ns.is_some() {
+        store.close_open_capture_window(
+            session_id,
+            resuming.elapsed_offset_ns.unwrap_or(0),
+            "resume_failed",
+        )?;
+    }
+    system_transition(
+        store,
+        session_id,
+        MeetingCommandKind::Resume,
+        MeetingPhase::CapturingResuming,
+        MeetingPhase::CapturingPaused,
+        "resume_failed",
+        Vec::new(),
+    )
+}
+
+/// Write down a lane whose device would not pause or resume: a gap from here
+/// and failed health. Best effort, because the phase has already moved and an
+/// error here would only hide that from the caller.
+fn note_failed_lane(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    track_id: SourceTrackId,
+    epoch: SourceEpoch,
+) {
+    let noted = store
+        .record_gap(&SourceGap {
+            track_id,
+            epoch,
+            start_offset_ns: None,
+            end_offset_ns: None,
+            reason: SourceGapReason::SourceStopped,
+            dropped_frames: None,
+        })
+        .and_then(|()| store.update_track_health(session_id, track_id, SourceHealth::Failed));
+    if let Err(error) = noted {
+        log::warn!(
+            "Meeting capture {} could not record a failed lane: {error:?}",
+            session_id.uuid()
+        );
+    }
 }
 
 fn validate_destination(
@@ -8114,5 +8274,560 @@ pub(crate) mod tests {
             96_000,
             "the plan's count is a floor, not a target"
         );
+    }
+
+    /// What a recording holds (the Mac kept awake, processing parked behind
+    /// it, its lanes and their writers) is the recording's, and goes when it
+    /// goes. Each test takes a path where another meeting's command, or a
+    /// failure partway through the recording's own, used to take one away
+    /// early or leave one behind.
+    mod capture_ownership {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::mpsc;
+        use tauri::async_runtime::block_on;
+
+        /// Long enough for a run nothing parks to finish several times over:
+        /// a second of imported audio through the test engine takes a small
+        /// part of it.
+        const UNPARKED_RUN: Duration = Duration::from_secs(5);
+
+        fn available(source_kind: SourceKind) -> SourceProbe {
+            SourceProbe {
+                source_kind,
+                availability: SourceAvailability::Available,
+                health: SourceHealth::Healthy,
+                detail: None,
+                negotiated_format: Some(AudioFormat {
+                    sample_rate_hz: 48_000,
+                    channels: 1,
+                }),
+            }
+        }
+
+        /// A device that starts silent, reports the format epoch it was given,
+        /// and resumes or refuses to as it was told.
+        struct ScriptedSource {
+            kind: SourceKind,
+            format_epoch: u64,
+            resumes: bool,
+            aborts: Arc<AtomicUsize>,
+            track_id: Option<SourceTrackId>,
+        }
+
+        impl ScriptedSource {
+            fn report(&self, track_id: SourceTrackId, epoch: SourceEpoch) -> SourceStartReport {
+                SourceStartReport {
+                    track_id,
+                    source_kind: self.kind,
+                    format: AudioFormat {
+                        sample_rate_hz: 48_000,
+                        channels: 1,
+                    },
+                    epoch,
+                    format_epoch: self.format_epoch,
+                    timestamp_bridge: TimestampBridge {
+                        native_anchor_value: 0,
+                        native_timescale: 1_000_000_000,
+                        host_monotonic_anchor_ns: 0,
+                        session_offset_ns: 0,
+                    },
+                }
+            }
+        }
+
+        impl MeetingCaptureSource for ScriptedSource {
+            fn probe(&self) -> SourceProbe {
+                available(self.kind)
+            }
+
+            fn start(
+                &mut self,
+                plan: SourceStartPlan,
+                _anchor: SessionClockAnchor,
+                _sink: PacketSink,
+            ) -> Result<SourceStartReport, MeetingCaptureError> {
+                self.track_id = Some(plan.track_id);
+                Ok(self.report(plan.track_id, plan.source_epoch))
+            }
+
+            fn pause(&mut self) -> Result<(), MeetingCaptureError> {
+                Ok(())
+            }
+
+            fn resume(
+                &mut self,
+                epoch: SourceEpoch,
+            ) -> Result<SourceStartReport, MeetingCaptureError> {
+                match self.track_id {
+                    Some(track_id) if self.resumes => Ok(self.report(track_id, epoch)),
+                    _ => Err(MeetingCaptureError::InvalidState),
+                }
+            }
+
+            fn stop(&mut self) -> Result<SourceStopReport, MeetingCaptureError> {
+                Ok(SourceStopReport {
+                    track_id: SourceTrackId::new(),
+                    final_offset_ns: Some(0),
+                    health: SourceHealth::Healthy,
+                    observed_gaps: Vec::new(),
+                })
+            }
+
+            fn abort(&mut self) -> Result<(), MeetingCaptureError> {
+                self.aborts.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
+        }
+
+        struct ScriptedSources {
+            format_epoch: u64,
+            resumes: bool,
+            aborts: Arc<AtomicUsize>,
+        }
+
+        impl MeetingSourceProvider for ScriptedSources {
+            fn probe(&self, source_kind: SourceKind) -> SourceProbe {
+                available(source_kind)
+            }
+
+            fn acquire(
+                &self,
+                source_kind: SourceKind,
+            ) -> Result<Box<dyn MeetingCaptureSource>, MeetingCaptureError> {
+                Ok(Box::new(ScriptedSource {
+                    kind: source_kind,
+                    format_epoch: self.format_epoch,
+                    resumes: self.resumes,
+                    aborts: Arc::clone(&self.aborts),
+                    track_id: None,
+                }))
+            }
+        }
+
+        fn scripted(
+            format_epoch: u64,
+            resumes: bool,
+        ) -> (TempDir, MeetingSessionManager, Arc<AtomicUsize>) {
+            let aborts = Arc::new(AtomicUsize::new(0));
+            let (directory, manager) = manager_with(Arc::new(ScriptedSources {
+                format_epoch,
+                resumes,
+                aborts: Arc::clone(&aborts),
+            }));
+            (directory, manager, aborts)
+        }
+
+        /// FakeSources whose last opened lane stays reachable, so a test can
+        /// feed it what the device would.
+        fn recording_with_a_lane() -> (
+            TempDir,
+            MeetingSessionManager,
+            MeetingSessionId,
+            Arc<Mutex<Option<PacketSink>>>,
+        ) {
+            let lane = Arc::new(Mutex::new(None));
+            let (directory, manager) = manager_with(Arc::new(FakeSources {
+                starts: Arc::new(AtomicUsize::new(0)),
+                aborts: Arc::new(AtomicUsize::new(0)),
+                unavailable: None,
+                lane: Arc::clone(&lane),
+            }));
+            let live = recording(&manager);
+            (directory, manager, live, lane)
+        }
+
+        fn open_gate(manager: &MeetingSessionManager) -> MeetingSessionSnapshot {
+            block_on(manager.create_preflight_with_calendar(
+                MeetingPreflightCreateRequest {
+                    operation_id: MeetingOperationId::new(),
+                    expected_revision: 0,
+                    title: "Design review".to_string(),
+                    origin: MeetingOrigin::Manual,
+                    suggestion_id: None,
+                    calendar_event_key: None,
+                    requested_sources: SourceKind::ALL.to_vec(),
+                    required_sources: SourceKind::ALL.to_vec(),
+                    accepted_known_missing_sources: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                    microphone_device_uid: None,
+                    frozen_system_audio_application_bundle_ids: Vec::new(),
+                },
+                None,
+            ))
+            .unwrap()
+            .snapshot
+        }
+
+        fn start_request(gate: &MeetingSessionSnapshot) -> MeetingStartRequest {
+            MeetingStartRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id: gate.session_id,
+                expected_revision: gate.revision,
+                consent: MeetingConsentInput {
+                    policy_version: 1,
+                    microphone_acknowledged: true,
+                    system_audio_acknowledged: true,
+                    known_missing_sources_acknowledged: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                },
+            }
+        }
+
+        fn recording(manager: &MeetingSessionManager) -> MeetingSessionId {
+            let started = block_on(manager.start(start_request(&open_gate(manager))))
+                .unwrap()
+                .snapshot;
+            assert_eq!(started.phase, MeetingPhase::CapturingRecording);
+            assert!(keeps_awake(manager), "a recording keeps the Mac awake");
+            started.session_id
+        }
+
+        fn current(
+            manager: &MeetingSessionManager,
+            session_id: MeetingSessionId,
+        ) -> MeetingSessionSnapshot {
+            block_on(manager.store())
+                .unwrap()
+                .session_snapshot(session_id)
+                .unwrap()
+        }
+
+        fn request(
+            manager: &MeetingSessionManager,
+            session_id: MeetingSessionId,
+        ) -> MeetingMutationRequest {
+            MeetingMutationRequest {
+                operation_id: MeetingOperationId::new(),
+                session_id,
+                expected_revision: current(manager, session_id).revision,
+            }
+        }
+
+        fn stop(
+            manager: &MeetingSessionManager,
+            session_id: MeetingSessionId,
+        ) -> Result<MeetingMutationResult, MeetingCommandError> {
+            block_on(manager.stop(
+                request(manager, session_id),
+                MeetingStopCause::Operator(MeetingStopSurface::MeetingLive),
+            ))
+        }
+
+        fn keeps_awake(manager: &MeetingSessionManager) -> bool {
+            manager
+                .actor_lock()
+                .active
+                .as_ref()
+                .is_some_and(|capture| capture.hold.keep_awake.is_held())
+        }
+
+        /// A second connection to the meeting database, as another process
+        /// would hold one, for making the store's next write fail.
+        fn beside_the_store(manager: &MeetingSessionManager, sql: &str) {
+            let store = block_on(manager.store()).unwrap();
+            let key = block_on(manager.secrets.meeting_storage_key()).unwrap();
+            let connection = rusqlite::Connection::open(store.database_path()).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "PRAGMA key = \"x'{}'\";",
+                    hex::encode(key.as_bytes())
+                ))
+                .unwrap();
+            connection.execute_batch(sql).unwrap();
+        }
+
+        /// A gap whose offset the store cannot write, so the lane's writer
+        /// fails on its next pass and its thread ends, as any write it cannot
+        /// make ends it.
+        fn kill_writer(lane: &Mutex<Option<PacketSink>>) {
+            lane.lock()
+                .unwrap()
+                .as_mut()
+                .expect("a lane was opened")
+                .report_gap(SourceGap {
+                    track_id: SourceTrackId::new(),
+                    epoch: SourceEpoch::new(0),
+                    start_offset_ns: None,
+                    end_offset_ns: Some(u64::MAX),
+                    reason: SourceGapReason::SourceStopped,
+                    dropped_frames: None,
+                });
+        }
+
+        fn transcribes_imports(manager: &MeetingSessionManager) {
+            manager
+                .processing
+                .set_transcript_engine(Arc::new(TranscribingEngine));
+            manager
+                .processing
+                .set_vad_factory(Arc::new(AlwaysVoiceFactory));
+        }
+
+        fn import_request(files: &TempDir) -> ImportRecordingRequest {
+            let path = files.path().join("Earlier call.wav");
+            write_mono_wav(&path, 16_000);
+            ImportRecordingRequest {
+                path,
+                title: None,
+                recorded_at_utc_ms: Some(1_700_000_000_000),
+                origin: RecordingOrigin::LocalFile,
+            }
+        }
+
+        /// Runs `work` beside the recording, then stops the recording.
+        /// Returns whether `work` finished while the recording still ran, the
+        /// stop, and what `work` returned once it could.
+        fn beside_the_recording<T: Send>(
+            manager: &MeetingSessionManager,
+            live: MeetingSessionId,
+            work: impl FnOnce() -> T + Send,
+        ) -> (bool, Result<MeetingMutationResult, MeetingCommandError>, T) {
+            thread::scope(|scope| {
+                let (send, receive) = mpsc::channel();
+                scope.spawn(move || send.send(work()));
+                let early = receive.recv_timeout(UNPARKED_RUN);
+                let finished_early = early.is_ok();
+                let stopped = stop(manager, live);
+                let finished = early
+                    .or_else(|_| receive.recv())
+                    .expect("the work finishes once the recording stops");
+                (finished_early, stopped, finished)
+            })
+        }
+
+        /// Deleting a finished meeting, or discarding one waiting in
+        /// recovery, while another records leaves the recording's hold on the
+        /// Mac. Both used to let go of it, so the display could sleep partway
+        /// through the call.
+        #[test]
+        fn removing_another_meeting_keeps_the_recording_awake() {
+            let (_directory, manager, _starts, _aborts) = manager();
+            let finished = review_ready_session(&manager);
+            let recovered = interrupted_session(
+                &manager,
+                MeetingPhase::RecoveryRequired,
+                ProcessingDestination::Local,
+            );
+            let live = recording(&manager);
+
+            let deleted = block_on(manager.delete(request(&manager, finished.session_id))).unwrap();
+            let awake_after_delete = keeps_awake(&manager);
+            let discarded = block_on(manager.discard(request(&manager, recovered))).unwrap();
+            let awake_after_discard = keeps_awake(&manager);
+            stop(&manager, live).unwrap();
+
+            assert!(deleted.removed && discarded.removed);
+            assert!(
+                awake_after_delete,
+                "deleting another meeting let the Mac sleep mid-recording"
+            );
+            assert!(
+                awake_after_discard,
+                "discarding another meeting let the Mac sleep mid-recording"
+            );
+            assert!(!keeps_awake(&manager), "the stop lets the Mac sleep");
+        }
+
+        /// The same removal leaves processing parked behind the recording. A
+        /// run beside a live microphone competes with it for the machine, and
+        /// discarding another meeting used to lift the gate for every run.
+        #[test]
+        fn removing_another_meeting_keeps_processing_parked_behind_the_recording() {
+            let (files, manager, _starts, _aborts) = manager();
+            transcribes_imports(&manager);
+            let recovered = interrupted_session(
+                &manager,
+                MeetingPhase::RecoveryRequired,
+                ProcessingDestination::Local,
+            );
+            let live = recording(&manager);
+            block_on(manager.discard(request(&manager, recovered))).unwrap();
+            let import = import_request(&files);
+
+            let (ran_beside_the_recording, stopped, imported) =
+                beside_the_recording(&manager, live, || {
+                    block_on(manager.import_recording(import))
+                });
+
+            assert!(
+                !ran_beside_the_recording,
+                "discarding another meeting let processing run beside the recording"
+            );
+            stopped.unwrap();
+            imported.expect("the import lands once the recording stops");
+        }
+
+        /// Finishing a meeting from recovery while another records starts its
+        /// run behind the recording. It used to lift the gate for every run.
+        #[test]
+        fn finishing_a_recovered_meeting_waits_for_the_recording() {
+            let (_directory, manager, _starts, _aborts) = manager();
+            manager
+                .processing
+                .set_transcript_engine(Arc::new(ReadyEngine));
+            let recovered = interrupted_session(
+                &manager,
+                MeetingPhase::RecoveryRequired,
+                ProcessingDestination::Local,
+            );
+            let live = recording(&manager);
+            let finish = request(&manager, recovered);
+
+            let (ran_beside_the_recording, stopped, finished) =
+                beside_the_recording(&manager, live, || {
+                    block_on(manager.recovery_finalize(finish))
+                });
+
+            assert!(
+                !ran_beside_the_recording,
+                "finishing a recovered meeting let its run start beside the recording"
+            );
+            stopped.unwrap();
+            finished.unwrap();
+            assert_eq!(
+                current(&manager, recovered).phase,
+                MeetingPhase::ReviewReady
+            );
+        }
+
+        /// A recording whose lane writer died partway still stops: what
+        /// reached the disk is sealed and handed to processing, and the Mac
+        /// may sleep again. The stop used to return at the dead writer,
+        /// leaving the meeting at stopping with no notes until the next
+        /// launch.
+        #[test]
+        fn a_recording_whose_writer_died_still_stops() {
+            let (_directory, manager, live, lane) = recording_with_a_lane();
+            kill_writer(&lane);
+
+            let stopped = stop(&manager, live);
+
+            let phase = stopped.expect("the stop goes through").snapshot.phase;
+            assert!(
+                matches!(phase, MeetingPhase::Processing | MeetingPhase::ReviewReady),
+                "stopped at {phase:?}"
+            );
+            assert!(!keeps_awake(&manager));
+            assert!(!manager.is_capture_active());
+        }
+
+        /// The same dead writer does not keep a discard from finishing. It
+        /// used to leave the meeting at deleting, listed and never removed
+        /// until the next launch.
+        #[test]
+        fn a_recording_whose_writer_died_can_still_be_discarded() {
+            let (_directory, manager, live, lane) = recording_with_a_lane();
+            kill_writer(&lane);
+
+            let discarded = block_on(manager.discard(request(&manager, live)));
+
+            assert!(discarded.expect("the discard goes through").removed);
+            assert!(matches!(
+                block_on(manager.store()).unwrap().session_snapshot(live),
+                Err(StoreError::NotFound)
+            ));
+            assert!(!manager.is_capture_active());
+        }
+
+        /// A start whose lanes opened but whose tracks could not be written
+        /// goes back to its gate with nothing left running: every lane closed,
+        /// the Mac free to sleep, processing no longer parked. It used to stay
+        /// at starting, which no command leaves, with all of them held.
+        #[test]
+        fn a_start_that_fails_after_its_lanes_open_leaves_nothing_running() {
+            let (files, manager, aborts) = scripted(u64::MAX, false);
+            transcribes_imports(&manager);
+            let gate = open_gate(&manager);
+
+            let started = block_on(manager.start(start_request(&gate)));
+
+            let after = current(&manager, gate.session_id);
+            assert!(started.is_err());
+            assert_eq!(
+                after.phase,
+                MeetingPhase::Preflight,
+                "the gate is offered again"
+            );
+            assert_eq!(aborts.load(Ordering::Acquire), SourceKind::ALL.len());
+            assert!(!keeps_awake(&manager));
+            assert!(!manager.is_capture_active());
+            let manager = Arc::new(manager);
+            let importer = Arc::clone(&manager);
+            let import = import_request(&files);
+            let (send, receive) = mpsc::channel();
+            thread::spawn(move || send.send(block_on(importer.import_recording(import))));
+            assert!(
+                matches!(receive.recv_timeout(Duration::from_secs(30)), Ok(Ok(_))),
+                "processing stayed parked behind a capture that never began"
+            );
+        }
+
+        /// A pause whose bookkeeping cannot be written leaves the meeting
+        /// recording, where Pause and Stop both work. It used to stay at
+        /// pausing, which only Stop leaves, still holding the Mac awake.
+        #[test]
+        fn a_pause_that_cannot_be_written_leaves_the_meeting_recording() {
+            let (_directory, manager, _aborts) = scripted(0, true);
+            let live = recording(&manager);
+            beside_the_store(
+                &manager,
+                "CREATE TRIGGER refuse_close BEFORE UPDATE ON meeting_capture_windows
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            );
+
+            let refused = block_on(manager.pause(request(&manager, live)));
+            let after = current(&manager, live);
+            let awake = keeps_awake(&manager);
+            beside_the_store(&manager, "DROP TRIGGER refuse_close;");
+            let paused = block_on(manager.pause(request(&manager, live)));
+            let stopped = stop(&manager, live);
+
+            assert!(refused.is_err());
+            assert_eq!(after.phase, MeetingPhase::CapturingRecording);
+            assert!(awake, "a recording that did not pause keeps the Mac awake");
+            assert_eq!(
+                paused.unwrap().snapshot.phase,
+                MeetingPhase::CapturingPaused
+            );
+            stopped.unwrap();
+        }
+
+        /// A resume whose bookkeeping cannot be written leaves the meeting
+        /// paused, with its lanes paused again and the Mac free to sleep. It
+        /// used to stay at resuming, which no Resume leaves, with the lanes
+        /// running outside any capture window.
+        #[test]
+        fn a_resume_that_cannot_be_written_leaves_the_meeting_paused() {
+            let (_directory, manager, _aborts) = scripted(0, true);
+            let live = recording(&manager);
+            let paused = block_on(manager.pause(request(&manager, live))).unwrap();
+            assert_eq!(paused.snapshot.phase, MeetingPhase::CapturingPaused);
+            beside_the_store(
+                &manager,
+                "CREATE TRIGGER refuse_open BEFORE INSERT ON meeting_capture_windows
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            );
+
+            let refused = block_on(manager.resume(request(&manager, live)));
+            let after = current(&manager, live);
+            let awake = keeps_awake(&manager);
+            beside_the_store(&manager, "DROP TRIGGER refuse_open;");
+            let resumed = block_on(manager.resume(request(&manager, live)));
+            let stopped = stop(&manager, live);
+
+            assert!(refused.is_err());
+            assert_eq!(after.phase, MeetingPhase::CapturingPaused);
+            assert!(!awake, "a paused meeting lets the Mac sleep");
+            assert_eq!(
+                resumed.unwrap().snapshot.phase,
+                MeetingPhase::CapturingRecording
+            );
+            stopped.unwrap();
+        }
     }
 }
