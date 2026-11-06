@@ -1584,14 +1584,16 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             )
         };
         let app = R::native_handle(&self.app);
-        let applied = match config::apply_changes(&app, source_revision, &changes, &allowed) {
-            Ok(applied) => applied,
-            Err(error) => {
-                self.record_config_error(proposal_id, error);
-                return Err(map_config_error(error));
-            }
-        };
-        self.store_applied_receipt(proposal_id, applied)
+        let (applied, persisted) =
+            match config::apply_changes(&app, source_revision, &changes, &allowed) {
+                Ok(applied) => applied,
+                Err(error) => {
+                    self.record_config_error(proposal_id, error);
+                    return Err(map_config_error(error));
+                }
+            };
+        self.store_applied_receipt(proposal_id, applied)?;
+        persisted.map_err(map_config_error)
     }
 
     /// The one proposal shape that applies itself: every action in it is an
@@ -1693,13 +1695,14 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             (proposal.id.clone(), receipt.undo.clone())
         };
         let app = R::native_handle(&self.app);
-        let _revision = match config::undo_changes(&app, request.expected_revision, &undo) {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.record_config_error(&proposal_id, error);
-                return Err(map_config_error(error));
-            }
-        };
+        let (_revision, persisted) =
+            match config::undo_changes(&app, request.expected_revision, &undo) {
+                Ok(undone) => undone,
+                Err(error) => {
+                    self.record_config_error(&proposal_id, error);
+                    return Err(map_config_error(error));
+                }
+            };
         let (invalidation_id, proposal_state) = {
             let mut state = self.lock_state();
             let proposal_state = {
@@ -1723,6 +1726,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             (invalidation_id, proposal_state)
         };
         self.emit_proposal(invalidation_id, Some(proposal_id), Some(proposal_state));
+        persisted.map_err(map_config_error)?;
         Ok(self.current_status())
     }
 

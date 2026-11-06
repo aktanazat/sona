@@ -3606,16 +3606,13 @@ fn try_update_settings_inner<Rt: tauri::Runtime, R, E>(
     Ok((result, revision, persisted))
 }
 
+/// [`try_update_settings_committed`] for a caller that also keeps the
+/// revision the write produced, as an undo does.
 pub(crate) fn try_update_settings_with_revision<Rt: tauri::Runtime, R, E>(
     app: &AppHandle<Rt>,
     update: impl FnOnce(&mut AppSettings) -> Result<R, E>,
-) -> Result<(R, u64), E>
-where
-    E: From<SettingsPersistError>,
-{
-    let (result, revision, persisted) = try_update_settings_inner(app, update)?;
-    persisted?;
-    Ok((result, revision))
+) -> Result<(R, u64, Result<(), SettingsPersistError>), E> {
+    try_update_settings_inner(app, update)
 }
 
 /// The write for a mutation the runtime has to follow. A refused disk write
