@@ -65,7 +65,8 @@ enum CancelKeys {
     Held,
     /// Nothing holds the recording open (a latched tap, toggle mode, a
     /// signal), so the user is typing in other apps meanwhile and a bare
-    /// Escape there must not end it. Only the modifier variants cancel.
+    /// Escape there must not end it. Only the modifier variants cancel,
+    /// unless there are none: then the bare key stays, or no key would.
     HandsFree,
 }
 
@@ -112,7 +113,7 @@ pub(crate) fn active_cancel_bindings(settings: &AppSettings) -> Vec<ShortcutBind
         return Vec::new();
     };
     let mut bindings = cancel_bindings_for_registration(settings);
-    if keys == CancelKeys::HandsFree {
+    if keys == CancelKeys::HandsFree && bindings.iter().any(|binding| binding.id != "cancel") {
         bindings.retain(|binding| {
             binding.id != "cancel" || modifier_prefix(&binding.current_binding).is_some()
         });
@@ -1785,8 +1786,10 @@ mod tests {
     /// A held chord keeps the user in Sona, so every cancel chord works. A
     /// hands-free recording leaves them typing in other apps, where a bare
     /// cancel key such as Escape must reach the app; a cancel chord with a
-    /// modifier, and the modifier variants, still cancel. With nothing
-    /// recording, no cancel key is taken at all.
+    /// modifier, and the modifier variants, still cancel. When no dictation
+    /// chord has a modifier there is no variant, so the bare key stays rather
+    /// than leave the recording with no cancel key. With nothing recording, no
+    /// cancel key is taken at all.
     ///
     /// One test, because the cases share the process-wide cancel state.
     #[test]
@@ -1823,6 +1826,22 @@ mod tests {
             chords(&settings, Some(CancelKeys::HandsFree)),
             held,
             "a cancel chord with a modifier still cancels a hands-free recording"
+        );
+
+        let mut settings = settings::get_default_settings();
+        ensure_mode_settings(&mut settings);
+        settings.command_mode_enabled = false;
+        let dictation_bindings = settings.bindings.iter_mut().filter(|(id, _)| {
+            id.as_str() != crate::command_mode::COMMAND_BINDING_ID
+                && crate::modes::TranscriptionIntent::from_binding(id).is_some()
+        });
+        for ((_, binding), key) in dictation_bindings.zip(5..) {
+            binding.current_binding = format!("f{key}");
+        }
+        assert_eq!(
+            chords(&settings, Some(CancelKeys::HandsFree)),
+            vec!["escape"],
+            "with no other cancel key a hands-free recording keeps the bare one"
         );
 
         assert!(chords(&settings, None).is_empty());
