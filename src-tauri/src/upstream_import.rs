@@ -94,6 +94,7 @@ pub enum UpstreamImportError {
     SecretStoreUnavailable,
     SecretConflict,
     HistoryUnreadable,
+    HistoryLimitTooLow,
     RecordingCopyFailed,
     ReceiptWriteFailed,
     Internal,
@@ -529,10 +530,11 @@ fn import_history(
             Ok((entry, file_name))
         })
         .collect::<Result<Vec<_>, UpstreamImportError>>()?;
+    let limit = get_settings(app).history_limit;
     let imported = history
         .with_connection(|conn| {
             let entries = rows.iter().map(|(entry, _)| entry);
-            Ok(plan_history_import(conn, source_identity, entries))
+            Ok(plan_history_import(conn, source_identity, entries, limit))
         })
         .map_err(|_| UpstreamImportError::HistoryUnreadable)??;
 
@@ -603,21 +605,37 @@ fn import_history(
     Ok(summary)
 }
 
-/// Looks up, before anything is copied, whether an earlier import made each
-/// row and whether that row has its recording.
+/// Decides an import before it copies or inserts anything: for each row,
+/// whether an earlier import made it and whether that row has its recording.
+/// Refuses when the new unsaved rows would take "Dictations to keep" past
+/// `limit`, because the next sweep deletes the oldest unsaved rows, the
+/// person's own among them.
 fn plan_history_import<'a>(
     conn: &Connection,
     source_identity: &str,
     entries: impl IntoIterator<Item = &'a UpstreamHistoryImportEntry>,
+    limit: usize,
 ) -> Result<Vec<Option<bool>>, UpstreamImportError> {
-    entries
-        .into_iter()
-        .map(|entry| {
-            HistoryManager::imported_upstream_entry(conn, source_identity, entry)
-                .map(|existing| existing.map(|(_, has_audio)| has_audio))
-                .map_err(|_| UpstreamImportError::HistoryUnreadable)
-        })
-        .collect()
+    let mut imported = Vec::new();
+    let mut unsaved = 0_usize;
+    for entry in entries {
+        let existing = HistoryManager::imported_upstream_entry(conn, source_identity, entry)
+            .map_err(|_| UpstreamImportError::HistoryUnreadable)?
+            .map(|(_, has_audio)| has_audio);
+        if existing.is_none() && !entry.saved {
+            unsaved = unsaved.saturating_add(1);
+        }
+        imported.push(existing);
+    }
+    if unsaved > 0 {
+        let counted = HistoryManager::counted_entries_with_connection(conn)
+            .map_err(|_| UpstreamImportError::HistoryUnreadable)?
+            .len();
+        if counted.saturating_add(unsaved) > limit {
+            return Err(UpstreamImportError::HistoryLimitTooLow);
+        }
+    }
+    Ok(imported)
 }
 
 fn open_source_history(path: &Path) -> Result<Connection, UpstreamImportError> {
@@ -1146,6 +1164,46 @@ mod tests {
             "history counts follow the source"
         );
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// "Dictations to keep" trims the oldest unsaved rows at the next
+    /// dictation. An import that took the count past it lost the person's
+    /// own older dictations right after reporting success.
+    #[test]
+    fn an_import_past_the_dictation_limit_is_refused() -> Result<(), Box<dyn Error>> {
+        let mut sona = sona_history()?;
+        sona.execute(
+            "INSERT INTO transcription_history (file_name, timestamp, saved, title, transcription_text)
+             VALUES ('own.wav', 100, 0, '', 'my own words')",
+            [],
+        )?;
+        let identity = "a".repeat(64);
+        let entries = [legacy_entry(1, 200), legacy_entry(2, 300)];
+
+        assert!(matches!(
+            plan_history_import(&sona, &identity, &entries, 2),
+            Err(UpstreamImportError::HistoryLimitTooLow)
+        ));
+        assert_eq!(
+            plan_history_import(&sona, &identity, &entries, 3)?,
+            [None, None]
+        );
+
+        for entry in &entries {
+            HistoryManager::import_upstream_entry_with_connection(
+                &mut sona,
+                &identity,
+                entry,
+                "legacy.wav",
+                true,
+            )?;
+        }
+        assert_eq!(
+            plan_history_import(&sona, &identity, &entries, 3)?,
+            [Some(true), Some(true)],
+            "imported rows are found before their recordings are copied again"
+        );
         Ok(())
     }
 }

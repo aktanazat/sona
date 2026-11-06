@@ -2142,24 +2142,26 @@ impl HistoryManager {
         recordings_dir: &Path,
         limit: usize,
     ) -> Result<Vec<i64>> {
-        // Every unsaved row, newest first, so the survivors are a prefix. A
-        // kept dictation is neither counted nor taken.
-        let entries: Vec<(i64, String)> = {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
-                 WHERE h.saved = 0 AND NOT {KEPT_DICTATION}
-                 ORDER BY h.timestamp DESC"
-            ))?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let entries = Self::counted_entries_with_connection(conn)?;
 
         if entries.len() <= limit {
             return Ok(Vec::new());
         }
         Self::delete_entries_and_files_with_connection(conn, recordings_dir, &entries[limit..])
+    }
+
+    /// The rows "Dictations to keep" counts, newest first: every unsaved row
+    /// but a kept dictation.
+    pub(crate) fn counted_entries_with_connection(conn: &Connection) -> Result<Vec<(i64, String)>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
+             WHERE h.saved = 0 AND NOT {KEPT_DICTATION}
+             ORDER BY h.timestamp DESC"
+        ))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Take the recording from every unsaved row older than `cutoff` and leave
