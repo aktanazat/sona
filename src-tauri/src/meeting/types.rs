@@ -445,6 +445,9 @@ pub enum MeetingCommandError {
     /// Sona can read. Every refusal reaching the operator says this, because
     /// they all have the same answer: choose a different file.
     ImportUnreadable,
+    /// The meeting's notes are already being written, by its processing run
+    /// or by an earlier "Try again"; a second writer would race the first.
+    NotesInProgress,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]

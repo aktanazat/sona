@@ -233,24 +233,33 @@ fn the_roster_lists_met_series_newest_first_with_their_latest_name() {
 fn the_regeneration_receipt_names_the_engine_that_wrote_the_notes() {
     let (_directory, store) = store();
     let session_id = meeting(&store, "Weekly sync", 1_000);
-    let artifact_id = MeetingArtifactId::new();
+    let artifact = MeetingArtifactRevision {
+        artifact_id: MeetingArtifactId::new(),
+        session_id,
+        transcript_revision_id: TranscriptRevisionId::new(),
+        input_revision: 0,
+        template_id: "test".to_string(),
+        template_version: 1,
+        generation_key: "test".to_string(),
+        state: MeetingArtifactState::Current,
+        generated_at_utc_ms: 1_000,
+        content: None,
+        receipt: None,
+    };
 
     let receipt = store
-        .record_artifact_regeneration(
-            MeetingOperationId::new(),
-            1_000,
-            session_id,
-            0,
-            artifact_id,
-            "sona-relay",
-        )
-        .unwrap();
+        .record_artifact_regeneration(MeetingOperationId::new(), 1_000, 0, &artifact, "sona-relay")
+        .unwrap()
+        .receipt;
 
     assert_eq!(receipt.result, OperationResult::Committed);
     assert_eq!(receipt.command, MeetingCommandKind::ArtifactsRegenerate);
     assert_eq!(
         receipt.effect_ids,
-        vec![artifact_id.uuid().to_string(), "sona-relay".to_string()],
+        vec![
+            artifact.artifact_id.uuid().to_string(),
+            "sona-relay".to_string()
+        ],
         "the artifact and the engine that produced it"
     );
 }

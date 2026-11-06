@@ -1787,6 +1787,15 @@ pub struct InterruptedRecovery {
     /// that never heard the import land sends it again.
     pub abandoned_imports: Vec<MeetingSessionId>,
 }
+
+/// One recorded rewrite of a meeting's notes.
+#[derive(Clone, Debug)]
+pub(crate) struct ArtifactRegeneration {
+    pub receipt: OperationReceipt,
+    /// The rewrite gave the meeting its first notes: no earlier revision of
+    /// them has content. False for a replayed or refused press.
+    pub first_notes: bool,
+}
 #[derive(Clone, Copy)]
 pub(crate) struct StoreMutation {
     pub operation_id: MeetingOperationId,
@@ -4933,60 +4942,11 @@ impl MeetingStore {
         session_id: MeetingSessionId,
         headline: &str,
     ) -> Result<Option<OperationReceipt>, StoreError> {
-        let Some(title) = derived_title(headline) else {
-            return Ok(None);
-        };
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = session_row(&transaction, session_id)?;
-        if current.title != MANUAL_DEFAULT_TITLE || title == current.title {
-            transaction.commit()?;
-            return Ok(None);
-        }
-        let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
-        let now = utc_now_ms();
-        transaction.execute(
-            "UPDATE meeting_sessions SET title = ?1, revision = ?2 WHERE id = ?3",
-            params![title, to_i64(next_revision)?, id(session_id)],
-        )?;
-        rebuild_search_documents_in(&transaction, session_id)?;
-        // The event log is where a receipt's details live in this store, and
-        // the receipt's `new_revision` is the sequence that reads them back.
-        append_event_with_details(
-            &transaction,
-            session_id,
-            next_revision,
-            current.phase,
-            current.phase,
-            "title_derived",
-            None,
-            &encode_json(&serde_json::json!({
-                "source": "summary_headline",
-                "headline": headline.trim(),
-                "from": MANUAL_DEFAULT_TITLE,
-                "to": title,
-            }))?,
-        )?;
-        let receipt = OperationReceipt {
-            schema_version: STORE_SCHEMA_VERSION,
-            operation_id: MeetingOperationId::new(),
-            session_id: Some(session_id),
-            // Nobody asked for this one: the pipeline read it off the notes.
-            actor: OperationActor::System,
-            command: MeetingCommandKind::TitleSet,
-            expected_revision: current.revision,
-            from_phase: Some(current.phase),
-            to_phase: Some(current.phase),
-            requested_at_utc_ms: now,
-            committed_at_utc_ms: Some(now),
-            result: OperationResult::Committed,
-            reason_codes: Vec::new(),
-            new_revision: Some(next_revision),
-            effect_ids: vec![title],
-        };
-        insert_operation_receipt(&transaction, &receipt, now)?;
+        let receipt = derive_title_in(&transaction, session_id, headline)?;
         transaction.commit()?;
-        Ok(Some(receipt))
+        Ok(receipt)
     }
 
     pub fn create_note(
@@ -6318,18 +6278,25 @@ impl MeetingStore {
     /// the same transaction: the header used to keep describing whichever run
     /// came first, so a meeting whose notes had just been written still read
     /// "notes failed" from the pipeline's earlier shortfall.
+    ///
+    /// A title still at the manual default is read off the new notes in the
+    /// same transaction, after the revision check: derived any earlier, its
+    /// revision bump made the press that wrote the notes stale.
     pub(crate) fn record_artifact_regeneration(
         &self,
         operation_id: MeetingOperationId,
         requested_at_utc_ms: i64,
-        session_id: MeetingSessionId,
         expected_revision: u64,
-        artifact_id: MeetingArtifactId,
+        artifact: &MeetingArtifactRevision,
         engine: &str,
-    ) -> Result<OperationReceipt, StoreError> {
+    ) -> Result<ArtifactRegeneration, StoreError> {
         if let Some(receipt) = self.operation_receipt(operation_id)? {
-            return Ok(receipt);
+            return Ok(ArtifactRegeneration {
+                receipt,
+                first_notes: false,
+            });
         }
+        let session_id = artifact.session_id;
         let mutation = StoreMutation {
             operation_id,
             actor: OperationActor::User,
@@ -6350,7 +6317,10 @@ impl MeetingStore {
             );
             insert_operation_receipt(&transaction, &receipt, requested_at_utc_ms)?;
             transaction.commit()?;
-            return Ok(receipt);
+            return Ok(ArtifactRegeneration {
+                receipt,
+                first_notes: false,
+            });
         }
         if !matches!(
             current.phase,
@@ -6358,21 +6328,38 @@ impl MeetingStore {
         ) {
             return Err(StoreError::Conflict);
         }
+        let first_notes: bool = transaction.query_row(
+            "SELECT NOT EXISTS(
+                 SELECT 1 FROM meeting_artifact_revisions
+                  WHERE session_id = ?1 AND artifact_id != ?2 AND content_json IS NOT NULL)",
+            params![id(session_id), id(artifact.artifact_id)],
+            |row| row.get(0),
+        )?;
         let receipt = committed_receipt(
             mutation,
             current.phase,
             current.phase,
             requested_at_utc_ms,
             current.revision,
-            vec![id(artifact_id), engine.to_string()],
+            vec![id(artifact.artifact_id), engine.to_string()],
         );
         insert_operation_receipt(&transaction, &receipt, requested_at_utc_ms)?;
         transaction.execute(
             "UPDATE meeting_sessions SET processing_status = ?1 WHERE id = ?2",
             params![encode_json(&ProcessingStatus::Succeeded)?, id(session_id)],
         )?;
+        if let Some(headline) = artifact
+            .content
+            .as_ref()
+            .and_then(GeneratedMeetingArtifacts::headline)
+        {
+            derive_title_in(&transaction, session_id, headline)?;
+        }
         transaction.commit()?;
-        Ok(receipt)
+        Ok(ArtifactRegeneration {
+            receipt,
+            first_notes,
+        })
     }
 
     pub fn reserve_deletion(
@@ -8403,6 +8390,66 @@ fn derived_title(headline: &str) -> Option<String> {
     title.extend(first.to_uppercase());
     title.push_str(characters.as_str());
     Some(title)
+}
+
+/// Give a meeting still under the manual default the title its `headline`
+/// reads as, inside the caller's transaction. See
+/// [`MeetingStore::derive_title_from_headline`].
+fn derive_title_in(
+    transaction: &Transaction<'_>,
+    session_id: MeetingSessionId,
+    headline: &str,
+) -> Result<Option<OperationReceipt>, StoreError> {
+    let Some(title) = derived_title(headline) else {
+        return Ok(None);
+    };
+    let current = session_row(transaction, session_id)?;
+    if current.title != MANUAL_DEFAULT_TITLE || title == current.title {
+        return Ok(None);
+    }
+    let next_revision = current.revision.checked_add(1).ok_or(StoreError::Corrupt)?;
+    let now = utc_now_ms();
+    transaction.execute(
+        "UPDATE meeting_sessions SET title = ?1, revision = ?2 WHERE id = ?3",
+        params![title, to_i64(next_revision)?, id(session_id)],
+    )?;
+    rebuild_search_documents_in(transaction, session_id)?;
+    // The event log is where a receipt's details live in this store, and
+    // the receipt's `new_revision` is the sequence that reads them back.
+    append_event_with_details(
+        transaction,
+        session_id,
+        next_revision,
+        current.phase,
+        current.phase,
+        "title_derived",
+        None,
+        &encode_json(&serde_json::json!({
+            "source": "summary_headline",
+            "headline": headline.trim(),
+            "from": MANUAL_DEFAULT_TITLE,
+            "to": title,
+        }))?,
+    )?;
+    let receipt = OperationReceipt {
+        schema_version: STORE_SCHEMA_VERSION,
+        operation_id: MeetingOperationId::new(),
+        session_id: Some(session_id),
+        // Nobody asked for this one: the notes it was read off did.
+        actor: OperationActor::System,
+        command: MeetingCommandKind::TitleSet,
+        expected_revision: current.revision,
+        from_phase: Some(current.phase),
+        to_phase: Some(current.phase),
+        requested_at_utc_ms: now,
+        committed_at_utc_ms: Some(now),
+        result: OperationResult::Committed,
+        reason_codes: Vec::new(),
+        new_revision: Some(next_revision),
+        effect_ids: vec![title],
+    };
+    insert_operation_receipt(transaction, &receipt, now)?;
+    Ok(Some(receipt))
 }
 
 /// `text` cut to at most `limit` characters, on a word boundary when there is

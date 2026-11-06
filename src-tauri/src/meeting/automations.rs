@@ -201,6 +201,31 @@ pub(crate) fn after_meeting_finalized(
     });
 }
 
+/// Run the saved folder prompts, and nothing else, for a meeting whose notes
+/// came after its run: from a "Try again", or from a run an earlier launch
+/// finished. The series automations stay with the run that sets them off,
+/// because they can send the notes off the Mac. Spawns, or runs inline
+/// without an app, as [`after_meeting_finalized`] does.
+pub(crate) fn after_late_notes(
+    store: Arc<MeetingStore>,
+    app: Option<AppHandle>,
+    processing: MeetingProcessingService,
+    session_id: MeetingSessionId,
+) {
+    let run = move || {
+        if let Err(error) =
+            super::prompts::run_folder_prompts(&store, &processing, session_id, now_utc_ms())
+        {
+            log::warn!("Could not run folder prompts for {session_id:?}: {error:?}");
+        }
+    };
+    if app.is_none() {
+        run();
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(run);
+}
+
 /// Say in the log what the receipts already say in the store.
 ///
 /// Only the failures, and only one line each: the receipt is the record, and a
