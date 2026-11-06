@@ -1738,15 +1738,17 @@ fn rename(
     session_id: MeetingSessionId,
     speaker_id: SpeakerId,
     name: &str,
+    user_name: Option<&str>,
 ) -> Result<(), StoreError> {
-    store.rename_speaker(
-        MeetingOperationId::new(),
-        2,
+    store.rename_speaker(SpeakerRename {
+        operation_id: MeetingOperationId::new(),
+        requested_at_utc_ms: 2,
         session_id,
-        meeting_revision(store, session_id)?,
+        expected_revision: meeting_revision(store, session_id)?,
         speaker_id,
-        name.to_owned(),
-    )?;
+        display_name: name.to_owned(),
+        user_name,
+    })?;
     Ok(())
 }
 
@@ -1783,7 +1785,7 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
     let speaker_two = store.diarization_speaker(first, 1)?;
     keep_voices(&store, first, &[(speaker_one, 1), (speaker_two, 0)])?;
 
-    rename(&store, first, speaker_two, "Maya")?;
+    rename(&store, first, speaker_two, "Maya", None)?;
 
     let review = store.review_snapshot(first)?;
     let lines = review
@@ -1851,8 +1853,8 @@ fn renaming_a_speaker_back_to_its_label_takes_the_voice_off_the_person() -> Resu
     let speaker = store.diarization_speaker(first, 1)?;
     keep_voices(&store, first, &[(speaker, 0)])?;
 
-    rename(&store, first, speaker, "Maya")?;
-    rename(&store, first, speaker, "Speaker 2")?;
+    rename(&store, first, speaker, "Maya", None)?;
+    rename(&store, first, speaker, "Speaker 2", None)?;
 
     assert!(store
         .unresolved_active_voice_speaker_ids(first)?
@@ -1873,7 +1875,7 @@ fn naming_the_users_own_microphone_voice_creates_no_person() -> Result<(), Store
     let local = SpeakerId::new();
     insert_speaker(&store, first, local);
 
-    rename(&store, first, local, "Aktan")?;
+    rename(&store, first, local, "Aktan", None)?;
 
     assert!(people_named(&store, "Aktan")?.is_empty());
     assert!(store
@@ -1892,7 +1894,7 @@ fn a_first_name_names_the_one_person_known_by_it() -> Result<(), StoreError> {
     let speaker = store.diarization_speaker(first, 1)?;
     keep_voices(&store, first, &[(speaker, 0)])?;
 
-    rename(&store, first, speaker, "Maya")?;
+    rename(&store, first, speaker, "Maya", None)?;
 
     assert!(people_named(&store, "Maya")?.is_empty());
     let second = meeting(&store, "Second", 3);
@@ -1906,5 +1908,35 @@ fn a_first_name_names_the_one_person_known_by_it() -> Result<(), StoreError> {
             display_name: "Maya Chen".to_owned(),
         }]
     );
+    Ok(())
+}
+
+/// The user's name from About me, in full or by first name, is the user's
+/// voice on any lane: naming a speaker after them creates no person and takes
+/// the voice off whoever it was given to, until it is named again.
+#[test]
+fn naming_a_speaker_after_the_user_creates_no_person() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    person(&store, "Maya Chen", &[], &[]);
+    let first = meeting(&store, "First", 1);
+    let speaker = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(speaker, 0)])?;
+    let user = Some("Aktan Azat");
+
+    rename(&store, first, speaker, "Maya", user)?;
+    rename(&store, first, speaker, "Aktan", user)?;
+    assert!(store
+        .unresolved_active_voice_speaker_ids(first)?
+        .contains(&speaker));
+    rename(&store, first, speaker, "Aktan Azat", user)?;
+    let people: i64 = store
+        .connection()?
+        .query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))?;
+    assert_eq!(people, 1);
+
+    rename(&store, first, speaker, "Maya", user)?;
+    assert!(!store
+        .unresolved_active_voice_speaker_ids(first)?
+        .contains(&speaker));
     Ok(())
 }

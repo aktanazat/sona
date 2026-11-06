@@ -1823,6 +1823,18 @@ pub(crate) struct SegmentEdit {
     pub removed: bool,
 }
 
+pub(crate) struct SpeakerRename<'a> {
+    pub operation_id: MeetingOperationId,
+    pub requested_at_utc_ms: i64,
+    pub session_id: MeetingSessionId,
+    pub expected_revision: u64,
+    pub speaker_id: SpeakerId,
+    pub display_name: String,
+    /// The user's name from About me. A speaker given it is the user, who is
+    /// never a person.
+    pub user_name: Option<&'a str>,
+}
+
 pub(crate) struct DurableTrackRecord {
     pub track_id: SourceTrackId,
     pub sequence: u64,
@@ -5048,15 +5060,19 @@ impl MeetingStore {
         )
     }
 
-    pub fn rename_speaker(
+    pub(crate) fn rename_speaker(
         &self,
-        operation_id: MeetingOperationId,
-        requested_at_utc_ms: i64,
-        session_id: MeetingSessionId,
-        expected_revision: u64,
-        speaker_id: SpeakerId,
-        display_name: String,
+        rename: SpeakerRename<'_>,
     ) -> Result<OperationReceipt, StoreError> {
+        let SpeakerRename {
+            operation_id,
+            requested_at_utc_ms,
+            session_id,
+            expected_revision,
+            speaker_id,
+            display_name,
+            user_name,
+        } = rename;
         self.edit_session(
             StoreMutation {
                 operation_id,
@@ -5083,6 +5099,7 @@ impl MeetingStore {
                     session_id,
                     speaker_id,
                     &display_name,
+                    user_name,
                     requested_at_utc_ms,
                 )? {
                     people::bump_people_revision_in(transaction)?;
