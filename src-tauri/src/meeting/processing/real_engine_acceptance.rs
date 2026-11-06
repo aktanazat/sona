@@ -407,12 +407,9 @@ mod tests {
         );
         let operation_id = MeetingOperationId::new();
         let (rewritten, engine, refresh) = service
-            .regenerate(
-                &store,
-                fixture.session_id,
-                review.session.revision,
-                operation_id,
-            )
+            .begin_rewrite(fixture.session_id)
+            .expect("nothing else is writing the notes")
+            .regenerate(&store, review.session.revision, operation_id)
             .expect("actual manual regeneration");
         std::fs::write(
             output.join("regenerated-artifact.json"),
@@ -436,12 +433,12 @@ mod tests {
             .record_artifact_regeneration(
                 operation_id,
                 utc_now_ms(),
-                fixture.session_id,
                 review.session.revision,
-                rewritten.artifact_id,
+                &rewritten,
                 engine,
             )
-            .expect("real regeneration receipt");
+            .expect("real regeneration receipt")
+            .receipt;
         assert_eq!(receipt.result, OperationResult::Committed);
         std::fs::write(
             output.join("regeneration-receipt.json"),
@@ -612,12 +609,9 @@ mod tests {
                 .review_snapshot(fixture.session_id)
                 .expect("synthetic review");
             let (rewritten, _engine, _refresh) = service
-                .regenerate(
-                    &store,
-                    fixture.session_id,
-                    review.session.revision,
-                    MeetingOperationId::new(),
-                )
+                .begin_rewrite(fixture.session_id)
+                .expect("nothing else is writing the notes")
+                .regenerate(&store, review.session.revision, MeetingOperationId::new())
                 .unwrap_or_else(|failure| {
                     panic!("press {press} of \"Write the notes again\" wrote no notes: {failure:?}")
                 });

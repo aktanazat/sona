@@ -687,6 +687,7 @@ enum MeetingCommandError: String, Decodable {
     case modelDeclined = "model_declined"
     case unsupportedLanguage = "unsupported_language"
     case importUnreadable = "import_unreadable"
+    case notesInProgress = "notes_in_progress"
 
     var label: String {
         switch self {
@@ -718,6 +719,7 @@ enum MeetingCommandError: String, Decodable {
         case .modelDeclined: "Apple Intelligence declined to write about this meeting."
         case .unsupportedLanguage: "Apple Intelligence does not support this meeting's language."
         case .importUnreadable: "Sona cannot read that file. Choose a different one."
+        case .notesInProgress: "Sona is still writing this meeting's notes."
         }
     }
 }

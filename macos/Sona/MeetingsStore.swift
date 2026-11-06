@@ -310,7 +310,10 @@ final class MeetingsStore {
     /// The part of the ledger's outcome bar picked, which narrows its threads.
     private(set) var ledgerOutcome: LedgerOutcome?
     private(set) var receipt: MeetingOperationReceipt?
-    private(set) var pending: String?
+    /// Every action still running, the newest last. One that ends leaves the
+    /// others running, with the newest one's word on screen.
+    private var running: [RunningAction] = []
+    var pending: String? { running.last?.word }
     private(set) var analytics: MeetingAnalyticsSnapshot?
     private(set) var loops: [MeetingLoopRow]?
     private(set) var loopsBusy = false
@@ -2010,10 +2013,11 @@ final class MeetingsStore {
     /// Nothing is ever sent.
     func mailFollowUp() {
         guard let draft = followUp, !draft.body.isEmpty, pending == nil else { return }
-        pending = "Opening Mail"
+        let opening = RunningAction(word: "Opening Mail")
+        running.append(opening)
         error = nil
         Task {
-            defer { pending = nil }
+            defer { running.removeAll { $0.id == opening.id } }
             do {
                 let preferences: MeetingPrepPreferences = try await core.request("meeting_prep_preferences_get")
                 if preferences.mailComposeEnabled {
@@ -2064,11 +2068,18 @@ final class MeetingsStore {
         error = nil
     }
 
+    /// One action while it runs, told apart from another with the same word.
+    private struct RunningAction {
+        let id = UUID()
+        let word: String
+    }
+
     /// One action, with the word for it while it runs.
     private func act(_ action: String, _ work: () async throws -> Void) async {
-        pending = action
+        let mine = RunningAction(word: action)
+        running.append(mine)
         error = nil
-        defer { pending = nil }
+        defer { running.removeAll { $0.id == mine.id } }
         do {
             try await work()
         } catch let failure as CoreError {

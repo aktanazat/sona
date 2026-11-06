@@ -24,7 +24,7 @@ use super::people_types::{
     PersonId, PersonLinkConfidence, PersonSummaryOutcome, PersonSummaryRegenerateResult,
 };
 use super::processing::{
-    write_relationship_summary, CaptureGate, LiveTranscript, LiveTranscriptWorker,
+    write_relationship_summary, CaptureGate, FollowOns, LiveTranscript, LiveTranscriptWorker,
     MeetingProcessingService, MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
     LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
@@ -3647,21 +3647,26 @@ impl MeetingSessionManager {
         if current.revision != request.expected_revision {
             return Err(MeetingCommandError::StaleRevision);
         }
+        let rewrite = self
+            .processing
+            .begin_rewrite(request.session_id)
+            .ok_or(MeetingCommandError::NotesInProgress)?;
         /* Off the runtime. A relayed generation blocks its calling thread for
          * up to `RELAY_JOIN_TIMEOUT`, and this is an async command, so waiting
          * here would hold a runtime worker for minutes on a machine that is
-         * also transcribing. */
-        let generated = {
-            let processing = Arc::clone(&self.processing);
+         * also transcribing. The claim on the notes comes back with them and
+         * is held until their receipt is written, so no second press starts
+         * between the two. */
+        let (rewrite, generated) = {
             let store = Arc::clone(&store);
-            let session_id = request.session_id;
             let expected_revision = request.expected_revision;
             let operation_id = request.operation_id;
             tauri::async_runtime::spawn_blocking(move || {
-                processing.regenerate(&store, session_id, expected_revision, operation_id)
+                let generated = rewrite.regenerate(&store, expected_revision, operation_id);
+                (Some(rewrite), generated)
             })
             .await
-            .unwrap_or_else(|_| Err(RunFailure::engine(EngineFailureCause::Panicked)))
+            .unwrap_or_else(|_| (None, Err(RunFailure::engine(EngineFailureCause::Panicked))))
         };
         let (artifact, engine, relationship_refresh) = match generated {
             Ok(generated) => generated,
@@ -3679,21 +3684,29 @@ impl MeetingSessionManager {
                 return Err(map_run_failure(failure));
             }
         };
-        let receipt = store
+        let regeneration = store
             .record_artifact_regeneration(
                 request.operation_id,
                 utc_now_ms(),
-                request.session_id,
                 request.expected_revision,
-                artifact.artifact_id,
+                &artifact,
                 engine,
             )
             .map_err(map_store_error)?;
-        if receipt.result == OperationResult::Rejected {
+        drop(rewrite);
+        if regeneration.receipt.result == OperationResult::Rejected {
             return Err(MeetingCommandError::StaleRevision);
         }
-        let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
+        let result =
+            self.result_for_receipt(Arc::clone(&store), regeneration.receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
+        if regeneration.first_notes {
+            self.processing.notes_ready(
+                Arc::clone(&store),
+                &result.snapshot,
+                FollowOns::InsideSona,
+            );
+        }
         if let Some(refresh) = relationship_refresh {
             self.processing
                 .start_relationship_refresh(store, request.session_id, refresh);
@@ -7157,6 +7170,366 @@ pub(crate) mod tests {
                     .as_ref()
                     .is_some_and(|update| update.eta_ms.is_some())),
             "the first run's stages time the second"
+        );
+    }
+
+    /// An engine that is not there, so a run writes no notes.
+    fn no_engine() -> Arc<FixedGenerator> {
+        Arc::new(FixedGenerator {
+            available: false,
+            output: String::new(),
+        })
+    }
+
+    /// An engine that writes what `EchoingGenerator` writes and answers every
+    /// saved prompt with one line, so a test can count the prompts that ran.
+    struct NotesAndAnswers;
+
+    impl super::super::processing::MeetingTextGenerator for NotesAndAnswers {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "notes-and-answers"
+        }
+
+        fn model_version(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("notes-and-answers-v1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            system_prompt: &str,
+            evidence: &str,
+            max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            match shape {
+                ReplyShape::Prose => Ok("- Ship on Friday".to_string()),
+                _ => super::super::processing::MeetingTextGenerator::generate(
+                    &super::super::processing::tests::EchoingGenerator,
+                    system_prompt,
+                    evidence,
+                    max_tokens,
+                    shape,
+                ),
+            }
+        }
+    }
+
+    /// A one-second recording imported under `title` with no engine to
+    /// write notes: the meeting reaches review with a transcript and nothing
+    /// else.
+    fn import_without_notes(
+        files: &TempDir,
+        manager: &MeetingSessionManager,
+        title: Option<&str>,
+    ) -> MeetingSessionId {
+        manager
+            .processing
+            .set_text_generators(no_engine(), no_engine());
+        let path = files.path().join("Pricing sync.wav");
+        write_mono_wav(&path, 16_000);
+        tauri::async_runtime::block_on(manager.import_recording(ImportRecordingRequest {
+            path,
+            title: title.map(str::to_string),
+            recorded_at_utc_ms: Some(1_700_000_000_000),
+            origin: RecordingOrigin::LocalFile,
+        }))
+        .expect("the recording imports")
+        .session_id
+    }
+
+    /// "Try again" on the meeting as it is now.
+    fn rewrite(
+        manager: &MeetingSessionManager,
+        session_id: MeetingSessionId,
+    ) -> Result<MeetingMutationResult, MeetingCommandError> {
+        let expected_revision = tauri::async_runtime::block_on(manager.store())
+            .unwrap()
+            .session_snapshot(session_id)
+            .unwrap()
+            .revision;
+        tauri::async_runtime::block_on(manager.artifacts_regenerate(MeetingMutationRequest {
+            operation_id: MeetingOperationId::new(),
+            session_id,
+            expected_revision,
+        }))
+    }
+
+    /// A folder that runs one saved prompt on its meetings' notes, with the
+    /// meeting filed in it, and a series that runs another, with the meeting
+    /// in the series. The folder's prompt comes first.
+    fn folder_and_series_prompts(
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+    ) -> (SavedPromptId, SavedPromptId) {
+        use crate::meeting::automation_types::{
+            MeetingAutomationKind, MeetingSeriesAutomationSetRequest,
+        };
+        use crate::meeting::folder_types::{
+            MeetingFolderCreateRequest, MeetingFolderDefaultsSetRequest,
+            MeetingFolderMembershipRequest,
+        };
+        use crate::meeting::prompt_types::{PromptOutput, PromptTarget, SavedPromptSaveRequest};
+        const SERIES_KEY: &str = "weekly-pricing";
+        let save = |name: &str| {
+            let saved = store
+                .save_saved_prompt(
+                    &SavedPromptSaveRequest {
+                        operation_id: MeetingOperationId::new(),
+                        prompt_id: None,
+                        name: name.to_string(),
+                        body: "List the decisions.".to_string(),
+                        output: PromptOutput::Text,
+                        target: PromptTarget::Meeting,
+                        expected_revision: store.saved_prompts().unwrap().revision,
+                    },
+                    1,
+                )
+                .unwrap();
+            saved
+                .prompts
+                .prompts
+                .iter()
+                .find(|prompt| prompt.name == name)
+                .expect("the prompt is saved")
+                .prompt_id
+        };
+        let folder_prompt = save("Folder decisions");
+        let series_prompt = save("Series decisions");
+        store
+            .remember_calendar_facts(
+                session_id,
+                &CalendarEventSummary {
+                    event_key: format!("{SERIES_KEY}#1"),
+                    series_key: SERIES_KEY.to_string(),
+                    title: "Weekly pricing".to_string(),
+                    attendee_count: 2,
+                    start_utc_ms: 1,
+                    end_utc_ms: 1_800_001,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: None,
+                    url: None,
+                },
+            )
+            .unwrap();
+        let automation = store
+            .set_series_automation(
+                &MeetingSeriesAutomationSetRequest {
+                    operation_id: MeetingOperationId::new(),
+                    series_key: SERIES_KEY.to_string(),
+                    kind: MeetingAutomationKind::RunPrompt,
+                    enabled: true,
+                    target: Some(series_prompt.uuid().to_string()),
+                    expected_revision: store.series_automations(SERIES_KEY).unwrap().revision,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(automation.receipt.result, OperationResult::Committed);
+        let created = store
+            .create_meeting_folder(
+                &MeetingFolderCreateRequest {
+                    operation_id: MeetingOperationId::new(),
+                    name: "Clients".to_string(),
+                    expected_revision: store.meeting_folder_list().unwrap().revision,
+                },
+                1,
+            )
+            .unwrap();
+        let folder_id = created
+            .folders
+            .folders
+            .iter()
+            .find(|folder| folder.name == "Clients")
+            .expect("the folder is made")
+            .folder_id;
+        let defaults = store
+            .set_meeting_folder_defaults(
+                &MeetingFolderDefaultsSetRequest {
+                    operation_id: MeetingOperationId::new(),
+                    folder_id,
+                    template: None,
+                    prompt_ids: vec![folder_prompt],
+                    expected_revision: created.folders.revision,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(defaults.receipt.result, OperationResult::Committed);
+        let filed = store
+            .add_meeting_to_folder(
+                &MeetingFolderMembershipRequest {
+                    operation_id: MeetingOperationId::new(),
+                    folder_id,
+                    session_id,
+                    expected_revision: defaults.folders.revision,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(filed.receipt.result, OperationResult::Committed);
+        (folder_prompt, series_prompt)
+    }
+
+    /// The saved prompts that have run on the meeting.
+    fn prompts_run(store: &MeetingStore, session_id: MeetingSessionId) -> Vec<SavedPromptId> {
+        store
+            .prompt_runs(&crate::meeting::prompt_types::PromptTargetRef::Meeting { session_id })
+            .unwrap()
+            .into_iter()
+            .map(|run| run.prompt_id)
+            .collect()
+    }
+
+    /// A meeting still under the placeholder title whose first notes come
+    /// from "Try again": the press keeps the notes and the title read off
+    /// them, instead of failing as stale over the title it wrote itself.
+    #[test]
+    fn a_rewrite_that_names_the_meeting_keeps_its_notes() {
+        let (files, manager) = importing_manager();
+        let session_id = import_without_notes(&files, &manager, Some(MANUAL_DEFAULT_TITLE));
+        manager
+            .processing
+            .set_text_generators(Arc::new(NotesAndAnswers), no_engine());
+
+        let result = rewrite(&manager, session_id).expect("the rewrite is recorded");
+
+        assert_eq!(result.receipt.result, OperationResult::Committed);
+        assert_eq!(
+            result.snapshot.processing_status,
+            ProcessingStatus::Succeeded
+        );
+        assert_ne!(result.snapshot.title, MANUAL_DEFAULT_TITLE);
+    }
+
+    /// A second "Try again" while the first is still writing is refused,
+    /// rather than writing a second set of notes over the first, and only
+    /// one engine pass runs.
+    #[test]
+    fn a_second_rewrite_is_refused_while_the_first_writes() {
+        /// Holds its first answer until the test lets it go, and otherwise
+        /// writes what `EchoingGenerator` writes.
+        struct HeldGenerator {
+            entered: Mutex<std::sync::mpsc::Sender<()>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+            held: AtomicBool,
+            notes_asked: std::sync::atomic::AtomicUsize,
+        }
+
+        impl super::super::processing::MeetingTextGenerator for HeldGenerator {
+            fn is_available(&self) -> bool {
+                true
+            }
+
+            fn model_id(&self) -> &'static str {
+                "held"
+            }
+
+            fn model_version(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("held-v1")
+            }
+
+            fn max_input_bytes(&self) -> usize {
+                usize::MAX
+            }
+
+            fn generate(
+                &self,
+                system_prompt: &str,
+                evidence: &str,
+                max_tokens: i32,
+                shape: ReplyShape,
+            ) -> Result<String, MeetingTextGenerationError> {
+                if shape == ReplyShape::MeetingNotes {
+                    self.notes_asked.fetch_add(1, Ordering::SeqCst);
+                }
+                if !self.held.swap(true, Ordering::SeqCst) {
+                    self.entered
+                        .lock()
+                        .unwrap()
+                        .send(())
+                        .expect("the test waits");
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv()
+                        .expect("the test lets it go");
+                }
+                super::super::processing::MeetingTextGenerator::generate(
+                    &super::super::processing::tests::EchoingGenerator,
+                    system_prompt,
+                    evidence,
+                    max_tokens,
+                    shape,
+                )
+            }
+        }
+
+        let (files, manager) = importing_manager();
+        let session_id = import_without_notes(&files, &manager, None);
+        let (entered, first_entered) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let generator = Arc::new(HeldGenerator {
+            entered: Mutex::new(entered),
+            release: Mutex::new(held),
+            held: AtomicBool::new(false),
+            notes_asked: std::sync::atomic::AtomicUsize::new(0),
+        });
+        manager
+            .processing
+            .set_text_generators(generator.clone(), no_engine());
+        let first = {
+            let manager = Arc::clone(&manager);
+            thread::spawn(move || rewrite(&manager, session_id))
+        };
+        first_entered
+            .recv()
+            .expect("the first press reached the engine");
+
+        let second = rewrite(&manager, session_id);
+        release.send(()).expect("the first press is waiting");
+        let first = first.join().expect("the first press returns");
+
+        assert_eq!(second.err(), Some(MeetingCommandError::NotesInProgress));
+        assert_eq!(
+            first.expect("the first press writes").receipt.result,
+            OperationResult::Committed
+        );
+        assert_eq!(generator.notes_asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A meeting whose first notes come from "Try again" gets the folder
+    /// prompts it is filed for, as a run's notes would, and nothing that can
+    /// leave the Mac: its series automations stay with a run.
+    #[test]
+    fn first_notes_from_a_rewrite_run_only_the_folder_prompts() {
+        let (files, manager) = importing_manager();
+        let session_id = import_without_notes(&files, &manager, None);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let (folder_prompt, series_prompt) = folder_and_series_prompts(&store, session_id);
+        manager
+            .processing
+            .set_text_generators(Arc::new(NotesAndAnswers), no_engine());
+
+        let result = rewrite(&manager, session_id).expect("the rewrite writes the notes");
+
+        assert_eq!(
+            result.snapshot.processing_status,
+            ProcessingStatus::Succeeded
+        );
+        assert_eq!(
+            prompts_run(&store, session_id),
+            vec![folder_prompt],
+            "the series prompt {series_prompt:?} is not asked"
         );
     }
 

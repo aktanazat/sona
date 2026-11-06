@@ -882,7 +882,7 @@ pub struct MeetingProcessingService {
     relay_text_generator: Arc<Mutex<Arc<dyn MeetingTextGenerator>>>,
     diarizer: MeetingDiarizer,
     capture_active: Arc<AtomicBool>,
-    jobs: Arc<Mutex<HashMap<MeetingSessionId, Arc<AtomicBool>>>>,
+    jobs: Arc<Mutex<HashMap<MeetingSessionId, Job>>>,
     /// Signalled whenever a job leaves `jobs`. The map stays the only record
     /// of which jobs are live; this is how a caller waits for one to finish
     /// without polling it.
@@ -910,6 +910,118 @@ impl Drop for CaptureGate {
     }
 }
 
+/// One meeting's running job: how to stop it, and what it is writing.
+struct Job {
+    cancelled: Arc<AtomicBool>,
+    stage: JobStage,
+}
+
+/// What a running job is writing, which decides whether a "Try again" may
+/// start beside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JobStage {
+    /// The transcript, the notes or the ledger: a rewrite now would be a
+    /// second writer of the same notes.
+    Notes,
+    /// Only the people pages, after the notes are in. A rewrite stops it and
+    /// takes its place, and writes them again from its own notes.
+    People,
+}
+
+/// One "Try again" holding its meeting's notes. While it lives no other
+/// rewrite starts, and deleting the meeting stops it; dropping it lets the
+/// next writer in.
+pub(crate) struct RewriteJob {
+    service: MeetingProcessingService,
+    session_id: MeetingSessionId,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RewriteJob {
+    /// Rewrite the meeting's notes, and say which engine wrote them.
+    ///
+    /// The engine comes back with the revision because the caller records it
+    /// on the receipt: "these notes were written on your server" is a fact
+    /// about one operation, and reading it back from settings afterwards would
+    /// be a second answer that could differ from the one that actually ran.
+    ///
+    /// `operation_id` names the press. A person who asks for the notes again
+    /// with nothing changed is asking for a second reading, not for the first
+    /// one handed back from the cache, and the id is what makes this pass a
+    /// different generation from the pipeline's. The caller checks the
+    /// revision before asking, so a stale press never reaches an engine.
+    pub(crate) fn regenerate(
+        &self,
+        store: &MeetingStore,
+        input_revision: u64,
+        operation_id: MeetingOperationId,
+    ) -> Result<
+        (
+            MeetingArtifactRevision,
+            &'static str,
+            Option<RelationshipRefresh>,
+        ),
+        RunFailure,
+    > {
+        let session_id = self.session_id;
+        let generator = self.service.text_generator_for_session(store, session_id);
+        self.service
+            .generate_artifacts(
+                store,
+                session_id,
+                input_revision,
+                GenerationIntent::Rewrite(operation_id),
+                generator.clone(),
+            )
+            .and_then(|outcome| match outcome {
+                ArtifactGenerationOutcome::Generated { artifact, engine }
+                | ArtifactGenerationOutcome::Cached { artifact, engine } => Ok((
+                    artifact,
+                    engine,
+                    generator.map(|generator| RelationshipRefresh { generator }),
+                )),
+                /* Any outcome without a revision is a failure to whoever
+                 * pressed: they asked for notes and there are none. The
+                 * reason comes from `generation_shortfall`, so this and the
+                 * pipeline agree about what each outcome means and there is
+                 * one place to change it. Silence is the single deliberate
+                 * difference — a finished pass to the pipeline, an engine
+                 * failure to a person who pressed a button and got nothing.
+                 * The part that refused travels with the reason: the command
+                 * writes it on the row, so the header stops describing
+                 * whichever run came first. */
+                other => {
+                    let failure = generation_shortfall(&other)
+                        .unwrap_or(RunFailure::Reason(ProcessingFailure::EngineFailure));
+                    log::warn!(
+                        "Meeting {session_id:?} regenerated no notes: {failure:?}. The reason \
+                         travels to the caller; this line is so it is also written down."
+                    );
+                    Err(failure)
+                }
+            })
+    }
+}
+
+impl Drop for RewriteJob {
+    fn drop(&mut self) {
+        self.service.retire_job(self.session_id, &self.cancelled);
+    }
+}
+
+/// Which of the steps that follow a meeting's notes fire. The workflow event
+/// and the wrap card fire either way; neither leaves Sona.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FollowOns {
+    /// Notes a processing run wrote: also the connections' note sync and the
+    /// meeting's automations and folder prompts. An automation can send the
+    /// notes off the Mac.
+    All,
+    /// Notes the meeting got after its run, from a "Try again" or a run an
+    /// earlier launch finished: also the folder prompts, and nothing that
+    /// leaves the Mac.
+    InsideSona,
+}
 impl MeetingProcessingService {
     pub fn new(app: Option<AppHandle>) -> Self {
         let relay = RelayTextGenerator::new(app.clone());
@@ -1194,13 +1306,13 @@ impl MeetingProcessingService {
     }
 
     pub fn cancel(&self, session_id: MeetingSessionId) {
-        if let Some(cancelled) = self
+        if let Some(job) = self
             .jobs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&session_id)
         {
-            cancelled.store(true, Ordering::Release);
+            job.cancelled.store(true, Ordering::Release);
         }
     }
 
@@ -1245,7 +1357,13 @@ impl MeetingProcessingService {
         self.jobs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(session_id, Arc::clone(&cancelled));
+            .insert(
+                session_id,
+                Job {
+                    cancelled: Arc::clone(&cancelled),
+                    stage: JobStage::Notes,
+                },
+            );
         if self.app.is_none() {
             let _activity = activity;
             self.run(store, session_id, Arc::clone(&cancelled), origin);
@@ -1268,7 +1386,7 @@ impl MeetingProcessingService {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if jobs
             .get(&session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, cancelled))
+            .is_some_and(|current| Arc::ptr_eq(&current.cancelled, cancelled))
         {
             jobs.remove(&session_id);
         }
@@ -1309,7 +1427,13 @@ impl MeetingProcessingService {
             if jobs.contains_key(&session_id) {
                 return;
             }
-            jobs.insert(session_id, Arc::clone(&cancelled));
+            jobs.insert(
+                session_id,
+                Job {
+                    cancelled: Arc::clone(&cancelled),
+                    stage: JobStage::People,
+                },
+            );
         }
         let service = self.clone();
         let worker_cancelled = Arc::clone(&cancelled);
@@ -1332,66 +1456,48 @@ impl MeetingProcessingService {
         }
     }
 
-    /// Rewrite one meeting's notes, and say which engine wrote them.
-    ///
-    /// The engine comes back with the revision because the caller records it on
-    /// the receipt: "these notes were written on your server" is a fact about
-    /// one operation, and reading it back from settings afterwards would be a
-    /// second answer that could differ from the one that actually ran.
-    ///
-    /// `operation_id` names the press. A person who asks for the notes again
-    /// with nothing changed is asking for a second reading, not for the first
-    /// one handed back from the cache, and the id is what makes this pass a
-    /// different generation from the pipeline's. The caller checks the
-    /// revision before asking, so a stale press never reaches an engine.
-    pub(crate) fn regenerate(
-        &self,
-        store: &MeetingStore,
-        session_id: MeetingSessionId,
-        input_revision: u64,
-        operation_id: MeetingOperationId,
-    ) -> Result<
-        (
-            MeetingArtifactRevision,
-            &'static str,
-            Option<RelationshipRefresh>,
-        ),
-        RunFailure,
-    > {
-        let generator = self.text_generator_for_session(store, session_id);
-        self.generate_artifacts(
-            store,
-            session_id,
-            input_revision,
-            GenerationIntent::Rewrite(operation_id),
-            generator.clone(),
-        )
-        .and_then(|outcome| match outcome {
-            ArtifactGenerationOutcome::Generated { artifact, engine }
-            | ArtifactGenerationOutcome::Cached { artifact, engine } => Ok((
-                artifact,
-                engine,
-                generator.map(|generator| RelationshipRefresh { generator }),
-            )),
-            /* Any outcome without a revision is a failure to whoever
-             * pressed: they asked for notes and there are none. The reason
-             * comes from `generation_shortfall`, so this and the pipeline
-             * agree about what each outcome means and there is one place to
-             * change it. Silence is the single deliberate difference — a
-             * finished pass to the pipeline, an engine failure to a person
-             * who pressed a button and got nothing. The part that refused
-             * travels with the reason: the command writes it on the row, so
-             * the header stops describing whichever run came first. */
-            other => {
-                let failure = generation_shortfall(&other)
-                    .unwrap_or(RunFailure::Reason(ProcessingFailure::EngineFailure));
-                log::warn!(
-                    "Meeting {session_id:?} regenerated no notes: {failure:?}. The reason \
-                     travels to the caller; this line is so it is also written down."
-                );
-                Err(failure)
+    /// Claim this meeting's notes for one "Try again", or `None` while
+    /// something else is writing them. A people refresh is the one job a
+    /// rewrite replaces: it is stopped, and the rewrite starts its own once
+    /// the new notes are in.
+    pub(crate) fn begin_rewrite(&self, session_id: MeetingSessionId) -> Option<RewriteJob> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(job) = jobs.get(&session_id) {
+            if job.stage == JobStage::Notes {
+                return None;
             }
+            job.cancelled.store(true, Ordering::Release);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        jobs.insert(
+            session_id,
+            Job {
+                cancelled: Arc::clone(&cancelled),
+                stage: JobStage::Notes,
+            },
+        );
+        Some(RewriteJob {
+            service: self.clone(),
+            session_id,
+            cancelled,
         })
+    }
+
+    /// Let a "Try again" replace this run: all that is left of it is the
+    /// people pages, which a rewrite writes again from its own notes.
+    fn notes_written(&self, session_id: MeetingSessionId, cancelled: &Arc<AtomicBool>) {
+        if let Some(job) = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_mut(&session_id)
+            .filter(|job| Arc::ptr_eq(&job.cancelled, cancelled))
+        {
+            job.stage = JobStage::People;
+        }
     }
 
     /// Ask one saved prompt, and hand back what it produced.
@@ -1557,6 +1663,7 @@ impl MeetingProcessingService {
             self.finish_review(Arc::clone(&store), session_id, origin, run_completed);
             if run_completed {
                 if let Some(generator) = relationship_generator {
+                    self.notes_written(session_id, &cancelled);
                     self.enter_stage(session_id, &mut progress, ProcessingStage::People);
                     let refreshed = catch_unwind(AssertUnwindSafe(|| {
                         self.refresh_relationship_summaries(
@@ -1627,46 +1734,62 @@ impl MeetingProcessingService {
 
         if let Ok(snapshot) = store.session_snapshot(session_id) {
             self.emit("meeting:session-changed", session_id, snapshot.revision);
-            if snapshot.phase == MeetingPhase::ReviewReady {
-                let vocabulary = known_vocabulary(self.app.as_ref());
-                if let Err(error) = record_meeting_finalized(
-                    Arc::clone(&store),
-                    self.app.clone(),
-                    session_id,
-                    vocabulary,
-                ) {
-                    log::warn!("meeting finalization workflow event failed: {error:?}");
-                }
-                if let Some(app) = self.app.as_ref() {
-                    crate::integrations::after_notes_ready(
-                        Arc::clone(&store),
-                        app.clone(),
-                        session_id,
-                    );
-                    if let Some(runtime) =
-                        app.try_state::<Arc<crate::meeting::detection::DetectionRuntime>>()
-                    {
-                        let runtime = Arc::clone(runtime.inner());
-                        tauri::async_runtime::spawn(async move {
-                            runtime.present_wrap(session_id).await;
-                        });
-                    }
-                }
-                // D22, last and off this thread. Everything an automation sends
-                // is final by now — the artifact revision is current, its
-                // headline has become the title, loops have been carried, the
-                // semantic index is built — and the operator already has their
-                // notes, which is what makes it safe for this pass to spend
-                // thirty seconds on a Shortcut or a webhook. See
-                // `automations::after_meeting_finalized` for why one bounded
-                // attempt, and no retry, is the whole doctrine.
-                super::automations::after_meeting_finalized(
-                    Arc::clone(&store),
-                    self.app.clone(),
-                    self.clone(),
-                    session_id,
-                );
+            self.notes_ready(store, &snapshot, FollowOns::All);
+        }
+    }
+
+    /// Fire the steps that follow a meeting's notes, for a meeting that is
+    /// in review; `follow_ons` says which.
+    pub(crate) fn notes_ready(
+        &self,
+        store: Arc<MeetingStore>,
+        snapshot: &MeetingSessionSnapshot,
+        follow_ons: FollowOns,
+    ) {
+        if snapshot.phase != MeetingPhase::ReviewReady {
+            return;
+        }
+        let session_id = snapshot.session_id;
+        let vocabulary = known_vocabulary(self.app.as_ref());
+        if let Err(error) =
+            record_meeting_finalized(Arc::clone(&store), self.app.clone(), session_id, vocabulary)
+        {
+            log::warn!("meeting finalization workflow event failed: {error:?}");
+        }
+        if let Some(app) = self.app.as_ref() {
+            if follow_ons == FollowOns::All {
+                crate::integrations::after_notes_ready(Arc::clone(&store), app.clone(), session_id);
             }
+            if let Some(runtime) =
+                app.try_state::<Arc<crate::meeting::detection::DetectionRuntime>>()
+            {
+                let runtime = Arc::clone(runtime.inner());
+                tauri::async_runtime::spawn(async move {
+                    runtime.present_wrap(session_id).await;
+                });
+            }
+        }
+        match follow_ons {
+            // D22, last and off this thread. Everything an automation sends
+            // is final by now — the artifact revision is current, its
+            // headline has become the title, loops have been carried, the
+            // semantic index is built — and the operator already has their
+            // notes, which is what makes it safe for this pass to spend
+            // thirty seconds on a Shortcut or a webhook. See
+            // `automations::after_meeting_finalized` for why one bounded
+            // attempt, and no retry, is the whole doctrine.
+            FollowOns::All => super::automations::after_meeting_finalized(
+                store,
+                self.app.clone(),
+                self.clone(),
+                session_id,
+            ),
+            FollowOns::InsideSona => super::automations::after_late_notes(
+                store,
+                self.app.clone(),
+                self.clone(),
+                session_id,
+            ),
         }
     }
 
@@ -2700,15 +2823,19 @@ impl MeetingProcessingService {
         // The title first, because it is read out of the artifact and must not
         // invalidate it — `derive_title_from_headline` is the one title write
         // that leaves artifacts current, and it only fires when the meeting
-        // still carries the manual default.
+        // still carries the manual default. Only for the pipeline: a rewrite's
+        // title is derived when its receipt is recorded, because a title
+        // written here moved the revision the press was checked against.
         //
         // Then the ledger pass: an open loop this meeting inherited from the
         // previous session of its series closes that earlier occurrence as
         // carried. Both are best-effort — a meeting with notes and an
         // untouched title is worth more than no notes at all.
-        if let Some(headline) = content.headline() {
-            if let Err(error) = store.derive_title_from_headline(session_id, headline) {
-                log::warn!("Could not derive a title for {session_id:?}: {error:?}");
+        if intent == GenerationIntent::Pipeline {
+            if let Some(headline) = content.headline() {
+                if let Err(error) = store.derive_title_from_headline(session_id, headline) {
+                    log::warn!("Could not derive a title for {session_id:?}: {error:?}");
+                }
             }
         }
         if let Err(error) = store.carry_loops_forward(session_id) {
@@ -2737,7 +2864,7 @@ impl MeetingProcessingService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&session_id)
-            .is_some_and(|flag| flag.load(Ordering::Acquire));
+            .is_some_and(|job| job.cancelled.load(Ordering::Acquire));
         if cancelled {
             return Err(ProcessingFailure::Cancelled.into());
         }
@@ -8132,9 +8259,10 @@ pub(crate) mod tests {
         );
 
         let (rewritten, engine, _) = service
+            .begin_rewrite(fixture.session_id)
+            .expect("nothing else is writing the notes")
             .regenerate(
                 &fixture.store,
-                fixture.session_id,
                 ARTIFACT_FIXTURE_REVISION,
                 MeetingOperationId::new(),
             )
