@@ -646,9 +646,8 @@ mod macos {
     fn enrich(event: &EKEvent, summary: &mut CalendarEventSummary) {
         enrich_participants(event, summary);
         // SAFETY: a plain property read on a live event.
-        let (notes, location) = unsafe { (event.notes(), event.location()) };
+        let notes = unsafe { event.notes() };
         summary.notes = event_text(notes.map(|notes| notes.to_string()));
-        summary.location = event_text(location.map(|location| location.to_string()));
     }
 
     /// Everything a row can show about who is coming and where the event lives.
@@ -660,8 +659,14 @@ mod macos {
     /// the tick path.
     fn enrich_participants(event: &EKEvent, summary: &mut CalendarEventSummary) {
         // SAFETY: plain property reads on a live event.
-        let (attendees, calendar, url) =
-            unsafe { (event.attendees(), event.calendar(), event.URL()) };
+        let (attendees, calendar, url, location) = unsafe {
+            (
+                event.attendees(),
+                event.calendar(),
+                event.URL(),
+                event.location(),
+            )
+        };
         if let Some(attendees) = attendees {
             summary.attendees = attendees
                 .iter()
@@ -696,6 +701,7 @@ mod macos {
             url.and_then(|url| url.absoluteString())
                 .map(|absolute| absolute.to_string()),
         );
+        summary.location = event_text(location.map(|location| location.to_string()));
     }
 
     fn instant_ms(date: &NSDate) -> i64 {

@@ -717,6 +717,8 @@ struct OverviewUpcomingRow: Decodable, Identifiable {
     let attendeeCount: Int
     let calendarName: String?
     let joinUrl: String?
+    /// Where the event says it happens, as the calendar wrote it.
+    let location: String?
     /// Present exactly when the event repeats: a one-off has no series to
     /// remember anything, so it offers no standing decisions.
     var series: OverviewSeries?

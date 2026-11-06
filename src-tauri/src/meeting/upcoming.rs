@@ -106,6 +106,7 @@ pub fn upcoming_rows(
                 attendee_count: u32::try_from(summary.attendee_count).unwrap_or(u32::MAX),
                 calendar_name: summary.calendar_name,
                 join_url: summary.url,
+                location: summary.location,
                 series,
             }
         })
@@ -363,6 +364,26 @@ mod tests {
 
         assert_eq!(rows[0].attendees.len(), 1);
         assert_eq!(rows[0].attendee_count, 2);
+    }
+
+    /* Home and `sona_upcoming` say where the next meeting is only if the row
+     * keeps the place the calendar gave. */
+    #[test]
+    fn a_row_keeps_where_the_event_happens() {
+        let mut in_a_room = occurrence("Pricing", "pricing", 1_000, false, Vec::new());
+        in_a_room.summary.location = Some("Room 4B, 2nd floor".to_string());
+
+        let rows = upcoming_rows(
+            vec![
+                in_a_room,
+                occurrence("Lunch", "lunch", 2_000, false, Vec::new()),
+            ],
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(rows[0].location.as_deref(), Some("Room 4B, 2nd floor"));
+        assert_eq!(rows[1].location, None);
     }
 
     /* Rows come out in the order the calendar gave them. The source sorts by

@@ -960,6 +960,7 @@ pub struct ExternalUpcomingRow {
     pub attendee_count: u32,
     pub calendar_name: Option<String>,
     pub join_url: Option<String>,
+    pub location: Option<String>,
     /// Present exactly when the event repeats.
     pub series_key: Option<String>,
     /// A standing grant covers this series, so its occurrences record
@@ -1617,6 +1618,7 @@ fn upcoming_row(row: MeetingUpcomingRow) -> ExternalUpcomingRow {
         attendee_count: row.attendee_count,
         calendar_name: row.calendar_name,
         join_url: row.join_url,
+        location: row.location,
         series_key: row.series.as_ref().map(|series| series.series_key.clone()),
         always_record: row.series.is_some_and(|series| series.always_record),
     }
@@ -3195,6 +3197,9 @@ fn text_response(response: &ExternalResponse) -> String {
                     row.title,
                     row.attendees.join(", ")
                 );
+                if let Some(location) = &row.location {
+                    let _ = writeln!(text, "{location}");
+                }
                 if let Some(url) = &row.join_url {
                     let _ = writeln!(text, "{url}");
                 }

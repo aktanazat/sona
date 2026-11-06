@@ -360,6 +360,7 @@ mod tests {
             attendee_count: attendees,
             calendar_name: None,
             join_url: None,
+            location: None,
             series: None,
         }
     }
