@@ -1849,9 +1849,10 @@ pub(crate) struct TranscriptSegmentInput {
     pub end_offset_ns: u64,
     pub text: String,
     pub confidence_milli: Option<u16>,
-    /// The speaker this utterance is already attributed to, for a transcript
-    /// that arrived with names on it. `None` — every recognizer segment — takes
-    /// the track's default speaker and waits for diarization to say more.
+    /// The speaker this utterance is already attributed to: a name the
+    /// transcript arrived with, or the user's own for a live call's microphone
+    /// line. `None` takes the track's default speaker and waits for
+    /// diarization to say more.
     pub speaker: Option<String>,
 }
 

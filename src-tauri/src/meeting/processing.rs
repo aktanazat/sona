@@ -1139,6 +1139,18 @@ impl MeetingProcessingService {
         })
     }
 
+    /// The user's name from About me, which a live recording's own
+    /// microphone lines are labeled with. An imported recording's microphone
+    /// lane is the recording, not this Mac's microphone.
+    fn operator_name(&self, origin: MeetingOrigin) -> Option<String> {
+        if matches!(origin, MeetingOrigin::Import) {
+            return None;
+        }
+        let settings = crate::settings::get_settings(self.app.as_ref()?);
+        let name = settings.meeting_prep.about_me.name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
     /// Whether this meeting's series has been kept off the server.
     ///
     /// A series preference the store cannot read counts as opted out. Every
@@ -1767,6 +1779,7 @@ impl MeetingProcessingService {
             .review_snapshot(session_id)
             .map_err(RunFailure::from)?;
         let origin = store.meeting_origin(session_id).map_err(RunFailure::from)?;
+        let operator = self.operator_name(origin);
         let tracks = review.tracks;
         self.enter_stage(session_id, progress, ProcessingStage::Speech);
         let abandoned = AtomicBool::new(false);
@@ -1805,6 +1818,7 @@ impl MeetingProcessingService {
                             engine.as_ref(),
                             &asr_plan,
                             &mut far_end,
+                            operator.as_deref(),
                             cancelled,
                             progress,
                             span,
@@ -1850,6 +1864,7 @@ impl MeetingProcessingService {
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
         far_end: &mut FarEnd,
+        operator: Option<&str>,
         cancelled: &AtomicBool,
         progress: &mut RunProgress,
         span: TrackSpan,
@@ -1880,6 +1895,7 @@ impl MeetingProcessingService {
                             engine,
                             asr_plan,
                             far_end,
+                            operator,
                             chunk,
                         )?;
                     }
@@ -1894,6 +1910,7 @@ impl MeetingProcessingService {
                         engine,
                         asr_plan,
                         far_end,
+                        operator,
                         chunk,
                     )
                 })?;
@@ -1918,6 +1935,7 @@ impl MeetingProcessingService {
                 engine,
                 asr_plan,
                 far_end,
+                operator,
                 chunk,
             )?;
         }
@@ -1935,6 +1953,7 @@ impl MeetingProcessingService {
         engine: &dyn MeetingTranscriptEngine,
         asr_plan: &AsrPlan,
         far_end: &mut FarEnd,
+        operator: Option<&str>,
         chunk: AudioChunk,
     ) -> Result<(), RunFailure> {
         let text = engine
@@ -1943,17 +1962,18 @@ impl MeetingProcessingService {
         if text.trim().is_empty() {
             return Ok(());
         }
-        match source_kind {
+        let speaker = match source_kind {
             SourceKind::SystemAudio => {
                 far_end.heard(chunk.start_offset_ns, chunk.end_offset_ns, &text);
+                None
             }
             SourceKind::Microphone
                 if far_end.echoes(chunk.start_offset_ns, chunk.end_offset_ns, &text) =>
             {
                 return Ok(());
             }
-            _ => {}
-        }
+            SourceKind::Microphone => far_end.microphone_speaker(operator).map(str::to_owned),
+        };
         store
             .append_transcript_segments(
                 session_id,
@@ -1965,7 +1985,7 @@ impl MeetingProcessingService {
                     end_offset_ns: chunk.end_offset_ns,
                     text,
                     confidence_milli: None,
-                    speaker: None,
+                    speaker,
                 }],
             )
             .map_err(RunFailure::from)
@@ -4098,6 +4118,14 @@ impl FarEnd {
 
     fn heard(&mut self, start_ns: u64, end_ns: u64, text: &str) {
         self.spans.push((start_ns, end_ns, spoken_words(text)));
+    }
+
+    /// Who said a microphone line that is not an echo: the operator, once the
+    /// far end has spoken on its own lane. Without that lane the far end
+    /// reached Sona only through the microphone, and the line could be either
+    /// side's.
+    fn microphone_speaker<'a>(&self, operator: Option<&'a str>) -> Option<&'a str> {
+        operator.filter(|_| !self.spans.is_empty())
     }
 
     /// True when every word of the line, in order, was in what the far end
@@ -6301,6 +6329,21 @@ pub(crate) mod tests {
             ),
             "the far end's words in another order say something else"
         );
+    }
+
+    #[test]
+    fn a_microphone_line_is_the_operators_only_once_the_far_end_has_its_own_lane() {
+        let mut far_end = FarEnd::default();
+        assert_eq!(
+            far_end.microphone_speaker(Some("Aktan")),
+            None,
+            "a call heard only through the microphone holds both sides"
+        );
+
+        far_end.heard(10 * SECOND_NS, 14 * SECOND_NS, "Can you hear me now?");
+
+        assert_eq!(far_end.microphone_speaker(Some("Aktan")), Some("Aktan"));
+        assert_eq!(far_end.microphone_speaker(None), None);
     }
 
     struct EnergyVad;
