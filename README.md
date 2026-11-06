@@ -63,7 +63,7 @@ when the original conversation is deleted or its transcript expires, its saved e
 
 ### Screen recording
 
-- Records a screen you pick in the macOS picker, with an optional camera picture-in-picture and microphone, to an H.264/AAC MP4 in `recordings/`. Pause, resume, stop and save, or cancel. Requires macOS 15 or later and Screen Recording access; Camera and Microphone access only when you turn those on. It does not capture system audio, and it refuses to start while a dictation or meeting holds the microphone.
+- Records a window or screen you pick in the macOS picker, with an optional camera picture-in-picture and microphone, to an H.264/AAC MP4 in `recordings/`. Pause, resume, stop and save, or cancel. Requires macOS 15 or later. The pick itself grants that recording, so it needs no Screen Recording access; it asks for Camera and Microphone access only when you turn those on. It does not capture system audio, and it refuses to start while a dictation or meeting holds the microphone.
 
 ### Agents
 
@@ -190,7 +190,7 @@ xcodebuild -project mobile/Sona.xcodeproj -scheme Sona \
 
 ### macOS permissions
 
-Sona asks for Microphone and Accessibility access during setup. Screen recording asks for Screen Recording access, and for Camera and Microphone access only when you turn those on. The recorder's permission step opens the matching System Settings pane.
+Sona asks for Microphone and Accessibility access during setup. Screen recording needs no Screen Recording access, because the macOS picker grants what you pick for that recording; it asks for Camera and Microphone access only when you turn those on, and its permission step opens the matching System Settings pane.
 
 An upgrade keeps the installed app's identity, permissions, and data. Do not reset permission grants when replacing the app. Use the settings screens to inspect permission state and the application-data location.
 

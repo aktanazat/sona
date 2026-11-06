@@ -11,7 +11,6 @@ import ScreenCaptureKit
 private enum RecorderBridgeResult: Int32 {
     case ok = 0
     case unsupported = 1
-    case screenPermissionDenied = 2
     case cameraPermissionDenied = 3
     case microphonePermissionDenied = 4
     case sourceSelectionCancelled = 5
@@ -384,7 +383,7 @@ private final class ScreenRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         stateLock.unlock()
         guard pending else { return }
         var configuration = SCContentSharingPickerConfiguration()
-        configuration.allowedPickerModes = .singleDisplay
+        configuration.allowedPickerModes = [.singleWindow, .singleDisplay]
         configuration.allowsChangingSelectedContent = false
         SCContentSharingPicker.shared.defaultConfiguration = configuration
         SCContentSharingPicker.shared.add(self)
@@ -1028,11 +1027,10 @@ private final class ScreenRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         }
     }
 
-    /// The first permission the recorder needs and does not have, or nil when it has them all.
-    /// One decision, so the screen check cannot flip between two queries and be reported as a
-    /// microphone denial, and so a denial can only name a device the caller asked for.
+    /// The first device permission the recorder needs and does not have, or nil when it has them
+    /// all. The screen needs none: the system picker grants the stream exactly what was picked. A
+    /// denial can only name a device the caller asked for.
     private func permissionFailure() -> RecorderBridgeResult? {
-        if !CGPreflightScreenCaptureAccess() { return .screenPermissionDenied }
         if cameraEnabled, AVCaptureDevice.authorizationStatus(for: .video) != .authorized {
             return .cameraPermissionDenied
         }

@@ -1,6 +1,5 @@
 import AVFoundation
 import AppKit
-import CoreGraphics
 import Foundation
 import Observation
 
@@ -20,9 +19,9 @@ private struct RecorderPreviewStartParams: Encodable {
 /// The core owns the recording: it raises the native source picker, holds the
 /// microphone lease, writes the file and publishes a snapshot for every phase
 /// change. This store keeps the dialog's own machine
-/// (src/components/recorder/recorderMachine.ts) over those snapshots, asks the
-/// three OS permissions the React build asked a Tauri plugin for, and carries
-/// the clock forward between the core's one-per-second heartbeats.
+/// (src/components/recorder/recorderMachine.ts) over those snapshots, asks for
+/// the camera and microphone access the React build asked a Tauri plugin for,
+/// and carries the clock forward between the core's one-per-second heartbeats.
 @MainActor
 @Observable
 final class RecorderStore {
@@ -71,7 +70,7 @@ final class RecorderStore {
     var phase: RecorderPhase { state.snapshot.phase }
     var failure: RecorderFailureCode? { state.snapshot.failure }
     /// The permission the notice, the grant button and the Settings pane name.
-    var permission: RecorderPermission { state.permission ?? .screen }
+    var permission: RecorderPermission? { state.permission }
     var cameraDevices: [RecorderDevice] { state.preflight?.cameraDevices ?? [] }
     var microphoneDevices: [RecorderDevice] { state.preflight?.microphoneDevices ?? [] }
     /// `canCloseRecorder`: the phases that may be dismissed.
@@ -227,8 +226,7 @@ final class RecorderStore {
     /// re-reads the answer the user gave in System Settings. A granted
     /// permission goes straight on to the picker.
     func resolvePermission(request: Bool) {
-        guard !permissionPending else { return }
-        let permission = permission
+        guard !permissionPending, let permission else { return }
         let session = session
         permissionPending = true
         Task {
@@ -246,7 +244,7 @@ final class RecorderStore {
 
     /// The Privacy pane that grants the missing permission.
     func openPermissionSettings() {
-        guard let url = permission.settingsURL else { return }
+        guard let url = permission?.settingsURL else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -397,10 +395,10 @@ final class RecorderStore {
         }
     }
 
-    /// `requiredPermissions`: the screen always, and each input the user asked
-    /// for that has a device behind it.
+    /// `requiredPermissions`: each input the user asked for that has a device
+    /// behind it.
     private func requiredPermissions() -> [RecorderPermission] {
-        var permissions: [RecorderPermission] = [.screen]
+        var permissions: [RecorderPermission] = []
         if cameraEnabled, !cameraDevices.isEmpty { permissions.append(.camera) }
         if microphoneEnabled, !microphoneDevices.isEmpty { permissions.append(.microphone) }
         return permissions
@@ -412,24 +410,20 @@ final class RecorderStore {
 }
 
 extension RecorderPermission {
-    /// `checkScreenRecordingPermission` and its two siblings. The React build
-    /// reached these through tauri-plugin-macos-permissions; the shell asks
-    /// macOS itself.
+    /// `checkCameraPermission` and `checkMicrophonePermission`. The React
+    /// build reached these through tauri-plugin-macos-permissions; the shell
+    /// asks macOS itself.
     var granted: Bool {
         switch self {
-        case .screen: CGPreflightScreenCaptureAccess()
         case .camera: AVCaptureDevice.authorizationStatus(for: .video) == .authorized
         case .microphone: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         }
     }
 
-    /// The OS prompt. The two device accesses wait for the user's answer;
-    /// screen recording answers at once and sends the user to Settings, which
-    /// is why the dialog always re-checks afterwards.
+    /// The OS prompt. It returns once the user answers, or at once when an
+    /// earlier answer stands, which is why the dialog re-checks afterwards.
     func requestAccess() async {
         switch self {
-        case .screen:
-            _ = await Task.detached { CGRequestScreenCaptureAccess() }.value
         case .camera:
             _ = await AVCaptureDevice.requestAccess(for: .video)
         case .microphone:
@@ -440,8 +434,6 @@ extension RecorderPermission {
     /// The Privacy pane that grants it, as the React dialog opened it.
     var settingsURL: URL? {
         switch self {
-        case .screen:
-            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         case .camera:
             URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
         case .microphone:

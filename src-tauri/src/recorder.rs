@@ -72,7 +72,6 @@ pub struct RecorderStartRequest {
 pub enum RecorderFailureCode {
     Unsupported,
     CaptureBusy,
-    ScreenPermissionDenied,
     CameraPermissionDenied,
     MicrophonePermissionDenied,
     SourceSelectionCancelled,
@@ -744,8 +743,7 @@ fn cancel_reaches(phase: RecorderPhase) -> bool {
 fn is_permission_failure(failure: RecorderFailureCode) -> bool {
     matches!(
         failure,
-        RecorderFailureCode::ScreenPermissionDenied
-            | RecorderFailureCode::CameraPermissionDenied
+        RecorderFailureCode::CameraPermissionDenied
             | RecorderFailureCode::MicrophonePermissionDenied
     )
 }
@@ -955,7 +953,6 @@ fn map_native_error(error: crate::recorder_macos::NativeRecorderError) -> Record
     use crate::recorder_macos::NativeRecorderError;
     match error {
         NativeRecorderError::Unsupported => RecorderFailureCode::Unsupported,
-        NativeRecorderError::ScreenPermissionDenied => RecorderFailureCode::ScreenPermissionDenied,
         NativeRecorderError::CameraPermissionDenied => RecorderFailureCode::CameraPermissionDenied,
         NativeRecorderError::MicrophonePermissionDenied => {
             RecorderFailureCode::MicrophonePermissionDenied

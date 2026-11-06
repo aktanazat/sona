@@ -67,7 +67,6 @@ struct RecorderStartRequest: Encodable {
 enum RecorderFailureCode: String, Decodable, Equatable {
     case unsupported
     case captureBusy
-    case screenPermissionDenied
     case cameraPermissionDenied
     case microphonePermissionDenied
     case sourceSelectionCancelled
@@ -157,7 +156,6 @@ extension RecorderFailureCode {
         switch self {
         case .unsupported: "Screen recording requires macOS 14 or later."
         case .captureBusy: "Another Sona capture is using the microphone."
-        case .screenPermissionDenied: "Screen recording access was denied."
         case .cameraPermissionDenied: "Camera access was denied."
         case .microphonePermissionDenied: "Microphone access was denied."
         case .sourceSelectionCancelled: "Source selection was cancelled."
@@ -177,16 +175,16 @@ extension RecorderFailureCode {
         case .unsupported: .done
         case .captureBusy, .cameraUnavailable, .microphoneUnavailable, .streamFailed,
              .timestampDiscontinuity, .writerFailed, .outputFinalizeFailed, .outputCommitFailed: .retry
-        case .screenPermissionDenied, .cameraPermissionDenied, .microphonePermissionDenied: .permission
+        case .cameraPermissionDenied, .microphonePermissionDenied: .permission
         case .sourceSelectionCancelled, .sourceUnavailable: .choose
         }
     }
 }
 
-/// The three accesses a recording needs. Which one is missing decides the
-/// notice, the grant button and the System Settings pane.
+/// The device accesses a recording's inputs need. The screen needs none: the
+/// system picker grants the stream what was picked. Which access is missing
+/// decides the notice, the grant button and the System Settings pane.
 enum RecorderPermission: String {
-    case screen
     case camera
     case microphone
 
@@ -195,7 +193,6 @@ enum RecorderPermission: String {
     /// failure rather than as a field of its own.
     init?(failure: RecorderFailureCode?) {
         switch failure {
-        case .screenPermissionDenied: self = .screen
         case .cameraPermissionDenied: self = .camera
         case .microphonePermissionDenied: self = .microphone
         default: return nil
@@ -205,7 +202,6 @@ enum RecorderPermission: String {
     /// The `recorder.permission.*` copy.
     var request: String {
         switch self {
-        case .screen: "Allow screen recording to choose a source."
         case .camera: "Allow camera access to include your camera."
         case .microphone: "Allow microphone access to include your microphone."
         }
