@@ -8,6 +8,7 @@ use crate::meeting::store::people::{
     all_people_in, exact_phrase_mentioned, identity_names, merge_unique_case_insensitive,
     normalized, normalized_email, person_by_id_in,
 };
+use crate::meeting::store::voice_identity::is_generated_speaker_label;
 use crate::meeting::store::StoreError;
 use crate::meeting::types::MeetingSessionId;
 use rusqlite::{params, Connection};
@@ -195,7 +196,8 @@ impl crate::meeting::store::MeetingStore {
 /// Two bars, on two different axes, and both are load-bearing.
 ///
 /// One name-shaped: a bare first name is not specific enough to mint an
-/// identity the rest of the corpus will be keyed to.
+/// identity the rest of the corpus will be keyed to, and a label the store
+/// writes itself (`Speaker 2`, `Unknown speaker`) is no name at all.
 ///
 /// One voice-shaped: a microphone speaker is the user. `loop_types` states the
 /// invariant — Sona models no `Person` for its own user, so a `PersonId` is
@@ -214,7 +216,7 @@ pub(in crate::meeting::store) fn derive_speaker_link_in(
     now_utc_ms: i64,
 ) -> Result<usize, StoreError> {
     let display_name = display_name.trim();
-    if display_name.split_whitespace().count() < 2 {
+    if display_name.split_whitespace().count() < 2 || is_generated_speaker_label(display_name) {
         return Ok(0);
     }
     if microphone_speaker_labels_in(connection, meeting_id)?
