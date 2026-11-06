@@ -4332,6 +4332,15 @@ impl MeetingStore {
                 )
             });
         }
+        // A failed lane's device is gone for good, and a fresh one would
+        // restart the packet sequence its writer has already passed.
+        if row.phase == MeetingPhase::CapturingPaused
+            && sources
+                .iter()
+                .all(|source| source.health == SourceHealth::Failed)
+        {
+            allowed_actions.retain(|action| *action != AllowedMeetingAction::Resume);
+        }
         let elapsed_offset_ns = sources
             .iter()
             .filter_map(|source| source.last_durable_offset_ns)
