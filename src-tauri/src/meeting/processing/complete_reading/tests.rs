@@ -1077,6 +1077,63 @@ mod tests {
         assert_eq!(ledger.caveats, [PARTS_NOT_JOINED]);
     }
 
+    fn cited_at(seconds: u64) -> ArtifactCitation {
+        ArtifactCitation {
+            segment_id: TranscriptSegmentId::new(),
+            start_offset_ns: seconds * 1_000_000_000,
+            end_offset_ns: (seconds + 1) * 1_000_000_000,
+        }
+    }
+
+    fn thread_citing(state: LedgerThreadState, citation: &ArtifactCitation) -> LedgerThread {
+        LedgerThread {
+            topic: "Launch date".to_string(),
+            state,
+            substantive: true,
+            receipt: LedgerReceipt {
+                quote: "We launch on the ninth.".to_string(),
+                speaker: None,
+                t_ms: citation.start_offset_ns / 1_000_000,
+                citations: vec![citation.clone()],
+            },
+            owner: None,
+        }
+    }
+
+    /// An open-loop row cites the question and what happened instead, while
+    /// the thread of the question cites the question alone.
+    #[test]
+    fn a_question_answered_in_a_later_part_closes_its_thread() {
+        let (asked, instead, answer) = (cited_at(10), cited_at(20), cited_at(300));
+        let mut ledger = MeetingLedger {
+            headline: "The launch was discussed.".to_string(),
+            threads: vec![
+                thread_citing(LedgerThreadState::Unanswered, &asked),
+                thread_citing(LedgerThreadState::Decided, &answer),
+            ],
+            open_loops: vec![LedgerOpenLoop {
+                question: "When do we launch?".to_string(),
+                instead: "The talk moved to pricing.".to_string(),
+                at_ms: 10_000,
+                citations: vec![asked, instead],
+            }],
+            commitments: Vec::new(),
+            stances: Vec::new(),
+            caveats: Vec::new(),
+            receipts: LedgerReceiptState::Verified,
+        };
+        let reply: LedgerMergeReply = serde_json::from_value(json!({
+            "headline": "The launch was discussed.",
+            "answered": [{"question": "O1", "by": "T2"}]
+        }))
+        .expect("merge reply");
+        apply_merge(&mut ledger, &reply);
+        assert!(ledger.open_loops.is_empty());
+        let states: Vec<LedgerThreadState> =
+            ledger.threads.iter().map(|thread| thread.state).collect();
+        assert_eq!(states, [LedgerThreadState::Decided]);
+    }
+
     #[test]
     fn a_notes_row_names_its_speaker_and_not_its_meeting() {
         let mut evidence = evidence();
