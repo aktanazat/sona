@@ -345,6 +345,7 @@ struct MeetingsPlace: View {
             MeetingsTrashSheet(store: meetings)
         }
         .task { await live.loadUpcoming() }
+        .task { await live.watchEngine() }
     }
 
     /// What Sona has recorded in total, once the trend says.
