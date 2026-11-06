@@ -82,7 +82,7 @@ struct ChatActionReview: View {
             DatePicker("Ends", selection: $end, displayedComponents: [.date, .hourAndMinute])
             TextField("Location (optional)", text: $location).textFieldStyle(.roundedBorder)
             editor
-            Text("Uses this Mac's time zone and your default calendar. No invitees are added and no invitations are sent.").metaText()
+            Text("Uses this Mac's time zone and your Sona calendar. No invitees are added and no invitations are sent.").metaText()
         case let .sendNotes(draft):
             destination(draft.connectionId)
             if let notes {

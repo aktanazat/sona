@@ -1,5 +1,11 @@
 use crate::meeting::detection::calendar::{platform_calendar, CalendarAccess};
 
+/// The calendar this app writes its events into. Named, not configurable, the
+/// way Reminders get a "Sona" list: one place to find, hide or delete
+/// everything Sona added.
+#[cfg(target_os = "macos")]
+const SONA_CALENDAR: &str = "Sona";
+
 pub(crate) async fn request_access() -> Result<(), String> {
     let access = tauri::async_runtime::spawn_blocking(|| platform_calendar().request_access())
         .await
@@ -54,9 +60,8 @@ fn create_on_thread(
     // SAFETY: EventKit objects stay on this blocking thread and borrowed arguments live through each call.
     unsafe {
         let store = EKEventStore::new();
-        let calendar = store
-            .defaultCalendarForNewEvents()
-            .ok_or("Choose a default writable calendar in Calendar settings.")?;
+        let calendar = sona_calendar(&store)
+            .ok_or("Sona could not find or make its \"Sona\" calendar. No event was created.")?;
         let event = EKEvent::eventWithEventStore(&store);
         event.setCalendar(Some(&calendar));
         event.setTitle(Some(&NSString::from_str(title)));
@@ -71,9 +76,41 @@ fn create_on_thread(
         store
             .saveEvent_span_error(&event, EKSpan::ThisEvent)
             .map_err(|_| {
-                "Calendar refused the event. Check that the default calendar is writable."
+                "Calendar refused the event. Check that the \"Sona\" calendar is writable."
             })?;
         event.eventIdentifier().map(|id|id.to_string()).ok_or("Calendar saved the event without an identifier. Check Calendar before creating it again.".into())
+    }
+}
+
+/// The "Sona" calendar, created on first use in the account that holds the
+/// default calendar.
+///
+/// `None` when it neither exists nor can be made, which fails the action
+/// rather than writing into whatever calendar happens to be the default.
+#[cfg(target_os = "macos")]
+fn sona_calendar(
+    store: &objc2_event_kit::EKEventStore,
+) -> Option<objc2::rc::Retained<objc2_event_kit::EKCalendar>> {
+    use objc2_event_kit::{EKCalendar, EKEntityType};
+    use objc2_foundation::NSString;
+    // SAFETY: a plain query for this store's event calendars.
+    let existing = unsafe { store.calendarsForEntityType(EKEntityType::Event) };
+    for calendar in existing.iter() {
+        // SAFETY: plain property read on a live calendar.
+        if unsafe { calendar.title() }.to_string() == SONA_CALENDAR {
+            return Some(calendar);
+        }
+    }
+    // Homed on the default calendar's source so it sits beside the operator's own.
+    // SAFETY: a new calendar on this store; every argument outlives its call.
+    unsafe {
+        let calendar = EKCalendar::calendarForEntityType_eventStore(EKEntityType::Event, store);
+        calendar.setTitle(&NSString::from_str(SONA_CALENDAR));
+        calendar.setSource(store.defaultCalendarForNewEvents()?.source().as_deref());
+        store
+            .saveCalendar_commit_error(&calendar, true)
+            .ok()
+            .map(|()| calendar)
     }
 }
 
