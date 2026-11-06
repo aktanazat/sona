@@ -54,7 +54,7 @@ use crate::meeting::people_types::{PersonBriefingRow, PersonId};
 use crate::meeting::session::{MeetingSessionManager, MeetingTitleSetRequest};
 use crate::meeting::types::{
     MeetingArtifactState, MeetingNavigationDestination, MeetingOperationId, MeetingPhase,
-    MeetingSessionId, MeetingSessionSnapshot, SourceKind,
+    MeetingSessionId, MeetingSessionSnapshot, OperationReceipt, OperationResult, SourceKind,
 };
 use crate::meeting::workflow_types::WorkflowEventKind;
 use crate::settings::AppSettings;
@@ -783,6 +783,22 @@ impl RuntimeState {
                 started_utc_ms: now_utc_ms,
             },
         );
+    }
+
+    /// `end_tracked` for a stop detection or the recording card asked for. A
+    /// rejected receipt is a stop that did not happen — a stale revision, a
+    /// duplicate — and the capture is still recording, so it stays tracked:
+    /// every stop rule is level-based, and the next tick stops it again with
+    /// the revision it reads then.
+    fn end_stopped(
+        &mut self,
+        session_id: MeetingSessionId,
+        receipt: &OperationReceipt,
+    ) -> Option<TrackedCapture> {
+        if receipt.result != OperationResult::Committed {
+            return None;
+        }
+        self.end_tracked(session_id)
     }
 }
 
@@ -2385,12 +2401,9 @@ impl DetectionRuntime {
             )
             .await;
         match stopped {
-            Ok(_) => {
-                // No auto-stop event: a click on this card is a manual stop,
-                // and `StopTrigger` deliberately has no variant for one.
-                self.track_ended(active.session_id);
-                true
-            }
+            // No auto-stop event: a click on this card is a manual stop,
+            // and `StopTrigger` deliberately has no variant for one.
+            Ok(result) => self.track_stopped(active.session_id, &result.receipt),
             Err(error) => {
                 log::warn!("The recording card could not stop the capture: {error:?}");
                 false
@@ -2506,11 +2519,36 @@ impl DetectionRuntime {
         let Some(tracked) = state.end_tracked(session_id) else {
             return;
         };
+        self.retire_tracked(state, &tracked);
+    }
+
+    /// `track_ended` for a stop detection or the recording card asked for,
+    /// reporting whether it ended the tracking: only a committed stop does.
+    fn track_stopped(
+        self: &Arc<Self>,
+        session_id: MeetingSessionId,
+        receipt: &OperationReceipt,
+    ) -> bool {
+        let mut state = self.lock();
+        let Some(tracked) = state.end_stopped(session_id, receipt) else {
+            return false;
+        };
+        self.retire_tracked(state, &tracked);
+        true
+    }
+
+    /// Takes down what a capture that is no longer tracked had up: the panel
+    /// a detection capture held, its recording card, and its status.
+    fn retire_tracked(
+        self: &Arc<Self>,
+        mut state: std::sync::MutexGuard<'_, RuntimeState>,
+        tracked: &TrackedCapture,
+    ) {
         if matches!(tracked.kind, TrackedCaptureKind::Detection { .. }) {
             let commands = state.panel.end_capture();
             self.apply_panel_commands(&mut state, commands);
         }
-        let card = state.recording_card_id(session_id);
+        let card = state.recording_card_id(tracked.session_id);
         drop(state);
         if let Some(ritual_id) = card {
             self.finish_ritual(&ritual_id);
@@ -2672,11 +2710,12 @@ impl DetectionRuntime {
                 )
                 .await
             {
-                Ok(_) => {
-                    meetings
-                        .record_auto_record_stopped(session_id, trigger)
-                        .await;
-                    runtime.track_ended(session_id);
+                Ok(result) => {
+                    if runtime.track_stopped(session_id, &result.receipt) {
+                        meetings
+                            .record_auto_record_stopped(session_id, trigger)
+                            .await;
+                    }
                 }
                 Err(error) => {
                     log::warn!("Meeting detection could not stop the capture: {error:?}");
@@ -5026,5 +5065,60 @@ mod tests {
             CaptureTransition::Stop(machine::StopTrigger::SleepBoundary),
             "a sleep while recording still ends the capture"
         );
+    }
+
+    fn stop_receipt(session_id: MeetingSessionId, result: OperationResult) -> OperationReceipt {
+        use crate::meeting::types::{MeetingCommandKind, MeetingReasonCode, OperationActor};
+        let committed = result == OperationResult::Committed;
+        OperationReceipt {
+            schema_version: 1,
+            operation_id: MeetingOperationId::new(),
+            session_id: Some(session_id),
+            actor: OperationActor::System,
+            command: MeetingCommandKind::Stop,
+            expected_revision: 1,
+            from_phase: Some(MeetingPhase::CapturingRecording),
+            to_phase: committed.then_some(MeetingPhase::Stopping),
+            requested_at_utc_ms: NOW,
+            committed_at_utc_ms: committed.then_some(NOW),
+            result,
+            reason_codes: if committed {
+                Vec::new()
+            } else {
+                vec![MeetingReasonCode::StaleRevision]
+            },
+            new_revision: committed.then_some(2),
+            effect_ids: Vec::new(),
+        }
+    }
+
+    /* C8: a detection stop the session turned down for a stale revision
+     * still ended tracking, so the capture kept recording with nothing left
+     * to stop it. */
+    #[test]
+    fn a_stop_that_did_not_commit_keeps_its_capture_tracked() {
+        let session_id = MeetingSessionId::new();
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked_call(session_id));
+        state.slept = true;
+
+        assert!(state
+            .end_stopped(
+                session_id,
+                &stop_receipt(session_id, OperationResult::Rejected)
+            )
+            .is_none());
+        assert!(
+            state.tracked.is_some() && state.slept,
+            "a rejected stop left the capture recording with no stop rule"
+        );
+
+        assert!(state
+            .end_stopped(
+                session_id,
+                &stop_receipt(session_id, OperationResult::Committed)
+            )
+            .is_some());
+        assert!(state.tracked.is_none());
     }
 }
