@@ -219,6 +219,9 @@ pub async fn delete_history_entry(
         .map_err(|e| e.to_string())
 }
 
+/// Saved history at zero keeps no new rows, so a replay has nowhere to go.
+const HISTORY_OFF: &str = "Saved history is off, so the new version has nowhere to go. Set Dictations to keep above 0 in Library.";
+
 /// Runs a stored recording through an already-frozen plan and saves the result
 /// as a new history row linked back to `source`.
 ///
@@ -233,6 +236,9 @@ async fn replay_stored_recording(
     source: HistoryEntry,
     run: crate::modes::RunPlan,
 ) -> Result<(), String> {
+    if crate::settings::get_settings(app).history_limit == 0 {
+        return Err(HISTORY_OFF.to_string());
+    }
     let audio_path = history_manager
         .get_audio_file_path(&source.file_name)
         .ok_or_else(|| format!("History entry {} has no stored recording", source.id))?;
@@ -285,10 +291,7 @@ async fn replay_stored_recording(
             },
         )
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| {
-            "Saved history is off, so the new version has nowhere to go. Set Dictations to keep above 0 in Library."
-                .to_string()
-        })?;
+        .ok_or_else(|| HISTORY_OFF.to_string())?;
     history_manager
         .append_delivery_attempt(
             saved.id,
