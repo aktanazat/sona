@@ -207,6 +207,7 @@ final class Core: @unchecked Sendable {
         self.process = process
         let socket = try await Task.detached(priority: .userInitiated) { [socketPath] in
             Self.end(previous)
+            unlink(Self.waitingPath(socketPath))
             try process.run()
             return try Self.connect(to: socketPath, while: process)
         }.value
@@ -230,6 +231,13 @@ final class Core: @unchecked Sendable {
         }
         Self.end(process)
         unlink(socketPath)
+        unlink(Self.waitingPath(socketPath))
+    }
+
+    /// The core creates this file while startup waits on the person, who may
+    /// take any time to answer the move offer, and removes it when done.
+    private static func waitingPath(_ socketPath: String) -> String {
+        socketPath + ".waiting"
     }
 
     /// Waits out the exit window for a core that was asked to stop, or has
@@ -282,9 +290,10 @@ final class Core: @unchecked Sendable {
     }
 
     /// Connects, retrying until the core binds the socket, exits, or the
-    /// launch window closes. Runs off the main thread.
+    /// launch window closes. The window starts over while the core says
+    /// startup is waiting on the person. Runs off the main thread.
     private static func connect(to path: String, while process: Process) throws -> Int32 {
-        let deadline = Date().addingTimeInterval(launchWindow)
+        var deadline = Date().addingTimeInterval(launchWindow)
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let capacity = MemoryLayout.size(ofValue: address.sun_path)
@@ -319,7 +328,9 @@ final class Core: @unchecked Sendable {
             if !process.isRunning {
                 throw CoreError.unreachable("the core exited with status \(process.terminationStatus)")
             }
-            if Date() > deadline {
+            if FileManager.default.fileExists(atPath: waitingPath(path)) {
+                deadline = Date().addingTimeInterval(launchWindow)
+            } else if Date() > deadline {
                 throw CoreError.unreachable(failure)
             }
             usleep(retryPause)

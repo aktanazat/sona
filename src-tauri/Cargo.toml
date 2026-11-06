@@ -229,8 +229,10 @@ objc2-application-services = { version = "0.3", default-features = false, featur
 ] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
   "std",
+  "CFDate",
   "CFString",
   "CFURL",
+  "CFUserNotification",
 ] }
 # Automatic meeting detection. EventKit reads upcoming events, CoreAudio watches
 # the default input device, UserNotifications delivers the prompt, and block2

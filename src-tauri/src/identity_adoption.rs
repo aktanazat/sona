@@ -11,7 +11,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 pub(crate) const LEGACY_FORK_BUNDLE_ID: &str = "com.aktanazat.handy-personal";
 const RECEIPT_FILE: &str = "identity-adoption-receipt.json";
@@ -92,11 +91,17 @@ pub enum IdentityAdoptionError {
     SecretMigrationFailed,
     RollbackUnavailable,
     RollbackFailed,
+    ChoicePending,
 }
 
 impl std::fmt::Display for IdentityAdoptionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::ChoicePending => formatter.write_str(
+                "Open Sona once to choose whether to move your data from the Legacy app.",
+            ),
+            _ => write!(formatter, "{self:?}"),
+        }
     }
 }
 
@@ -148,7 +153,12 @@ enum AdoptionChoice {
 
 /// Runs before settings, models, history, and the normal credential manager
 /// touch the Sona root. The receipt is the one fast-path metadata read later.
-pub(crate) fn adopt_before_startup(app: &AppHandle) -> Result<(), IdentityAdoptionError> {
+/// Only a run with the native shell's socket can ask the person; any other
+/// run refuses while the move offer is open, so it never decides it for them.
+pub(crate) fn adopt_before_startup(
+    app: &AppHandle,
+    shell_socket: Option<&Path>,
+) -> Result<(), IdentityAdoptionError> {
     let destination_root =
         crate::portable::app_data_dir(app).map_err(|_| IdentityAdoptionError::Unavailable)?;
     if destination_root.join(RECEIPT_FILE).is_file() {
@@ -177,7 +187,8 @@ pub(crate) fn adopt_before_startup(app: &AppHandle) -> Result<(), IdentityAdopti
     };
     let source_secrets = SecretManager::native_for_service(LEGACY_FORK_SECRET_SERVICE_NAME);
     let destination_secrets = SecretManager::native();
-    let mut prompt = |state| native_adoption_choice(app, state);
+    let _waiting = shell_socket.map(WaitingOnPerson::begin);
+    let mut prompt = |state| shell_socket.and_then(|_| native_adoption_choice(state));
     adopt_paths(
         &paths,
         false,
@@ -195,46 +206,93 @@ pub(crate) fn adopt_before_startup(app: &AppHandle) -> Result<(), IdentityAdopti
     .map(|_| ())
 }
 
-fn native_adoption_choice(app: &AppHandle, state: LegacyAppState) -> AdoptionChoice {
-    let handle = app.clone();
-    let accepted = std::thread::spawn(move || match state {
-        LegacyAppState::Closed => handle
-            .dialog()
-            .message("Move your data from the Legacy app? Settings and history are copied; recordings and models move to Sona. You may be asked to allow access to legacy provider keys.")
-            .title("Sona")
-            .kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCancelCustom("Move data".into(), "Start fresh".into()))
-            .blocking_show(),
-        LegacyAppState::Running => handle
-            .dialog()
-            .message("Close the Legacy app before moving data. It may still own your recordings or shortcuts.")
-            .title("Sona")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom("Retry".into(), "Start fresh".into()))
-            .blocking_show(),
-        LegacyAppState::Unverifiable => handle
-            .dialog()
-            .message("Sona cannot verify whether the Legacy app is closed. Close it, then retry before moving data.")
-            .title("Sona")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom("Retry".into(), "Start fresh".into()))
-            .blocking_show(),
-    })
-    .join()
-    .unwrap_or(false);
-    match state {
+/// The shell gives the core a fixed launch window and extends it while a
+/// file named after its socket plus `.waiting` exists: the person may take
+/// any time to answer, and the move itself may ask for keychain access.
+struct WaitingOnPerson(PathBuf);
+
+impl WaitingOnPerson {
+    fn begin(socket: &Path) -> Self {
+        let mut path = socket.as_os_str().to_owned();
+        path.push(".waiting");
+        let path = PathBuf::from(path);
+        if let Err(error) = fs::File::create(&path) {
+            log::warn!("The shell cannot be told that startup waits on the move offer: {error}");
+        }
+        Self(path)
+    }
+}
+
+impl Drop for WaitingOnPerson {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Setup runs on the main thread, so a dialog that waits for the main run
+/// loop never appears. A system alert blocks only the calling thread.
+#[cfg(target_os = "macos")]
+fn native_adoption_choice(state: LegacyAppState) -> Option<AdoptionChoice> {
+    use objc2_core_foundation::{
+        kCFUserNotificationCautionAlertLevel, kCFUserNotificationDefaultResponse,
+        kCFUserNotificationNoteAlertLevel, CFOptionFlags, CFString, CFUserNotification,
+    };
+    let (level, message, accept) = match state {
+        LegacyAppState::Closed => (
+            kCFUserNotificationNoteAlertLevel,
+            "Move your data from the Legacy app? Settings and history are copied; recordings and models move to Sona. You may be asked to allow access to legacy provider keys.",
+            "Move data",
+        ),
+        LegacyAppState::Running => (
+            kCFUserNotificationCautionAlertLevel,
+            "Close the Legacy app before moving data. It may still own your recordings or shortcuts.",
+            "Retry",
+        ),
+        LegacyAppState::Unverifiable => (
+            kCFUserNotificationCautionAlertLevel,
+            "Sona cannot verify whether the Legacy app is closed. Close it, then retry before moving data.",
+            "Retry",
+        ),
+    };
+    let title = CFString::from_static_str("Sona");
+    let message = CFString::from_static_str(message);
+    let accept = CFString::from_static_str(accept);
+    let decline = CFString::from_static_str("Start fresh");
+    let mut response: CFOptionFlags = 0;
+    // SAFETY: the strings outlive the call and `response` is a valid place for the answer.
+    let status = unsafe {
+        CFUserNotification::display_alert(
+            0.0,
+            level,
+            None,
+            None,
+            None,
+            Some(&title),
+            Some(&message),
+            Some(&accept),
+            Some(&decline),
+            None,
+            &mut response,
+        )
+    };
+    let accepted = status == 0 && response == kCFUserNotificationDefaultResponse;
+    Some(match state {
         LegacyAppState::Closed if accepted => AdoptionChoice::Move,
-        LegacyAppState::Closed => AdoptionChoice::FreshStart,
         _ if accepted => AdoptionChoice::Retry,
         _ => AdoptionChoice::FreshStart,
-    }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_adoption_choice(_: LegacyAppState) -> Option<AdoptionChoice> {
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
 fn adopt_paths(
     paths: &AdoptionPaths,
     portable: bool,
-    prompt: &mut dyn FnMut(LegacyAppState) -> AdoptionChoice,
+    prompt: &mut dyn FnMut(LegacyAppState) -> Option<AdoptionChoice>,
     running_probe: &dyn Fn() -> LegacyAppState,
     source_secrets: &SecretManager,
     destination_secrets: &SecretManager,
@@ -249,7 +307,9 @@ fn adopt_paths(
         write_receipt(&receipt_path, &result)?;
         return Ok(result);
     }
-    if !source_has_adoptable_data(&paths.source_root) {
+    let resuming = read_journal(&paths.destination_root.join(JOURNAL_FILE))
+        .is_some_and(|journal| !journal.entries.is_empty());
+    if !resuming && !source_has_adoptable_data(&paths.source_root) {
         let result = receipt(
             IdentityAdoptionMode::NothingToAdopt,
             Some(LEGACY_FORK_BUNDLE_ID.to_string()),
@@ -259,7 +319,7 @@ fn adopt_paths(
         write_receipt(&receipt_path, &result)?;
         return Ok(result);
     }
-    if paths.destination_root.join(SETTINGS_FILE).exists() {
+    if !resuming && paths.destination_root.join(SETTINGS_FILE).exists() {
         let result = receipt(
             IdentityAdoptionMode::SkippedNonvirgin,
             Some(LEGACY_FORK_BUNDLE_ID.to_string()),
@@ -271,7 +331,8 @@ fn adopt_paths(
     }
     loop {
         let state = running_probe();
-        match (state, prompt(state)) {
+        let choice = prompt(state).ok_or(IdentityAdoptionError::ChoicePending)?;
+        match (state, choice) {
             (_, AdoptionChoice::FreshStart) => {
                 let result = receipt(
                     IdentityAdoptionMode::FreshStart,
@@ -1131,8 +1192,12 @@ mod tests {
         )
     }
 
-    fn move_data(_: LegacyAppState) -> AdoptionChoice {
-        AdoptionChoice::Move
+    fn move_data(_: LegacyAppState) -> Option<AdoptionChoice> {
+        Some(AdoptionChoice::Move)
+    }
+
+    fn nobody_to_ask(_: LegacyAppState) -> Option<AdoptionChoice> {
+        None
     }
 
     fn closed() -> LegacyAppState {
@@ -1362,5 +1427,79 @@ mod tests {
         )
         .expect("portable result");
         assert_eq!(portable.mode, IdentityAdoptionMode::Portable);
+    }
+
+    /// A command-line run cannot show the move offer. It must leave the offer
+    /// open, not answer it: the next launch of the app still asks.
+    #[test]
+    fn a_run_without_the_app_leaves_the_move_offer_open() {
+        let (_root, paths) = test_paths("headless");
+        fs::write(paths.source_root.join(SETTINGS_FILE), b"{}").expect("settings");
+        let (source, destination, _, _) = test_managers();
+
+        let headless = adopt_paths(
+            &paths,
+            false,
+            &mut nobody_to_ask,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        );
+        assert_eq!(headless, Err(IdentityAdoptionError::ChoicePending));
+        assert!(!paths.destination_root.join(RECEIPT_FILE).exists());
+        assert!(!paths.destination_root.join(SETTINGS_FILE).exists());
+
+        let app = adopt_paths(
+            &paths,
+            false,
+            &mut move_data,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        )
+        .expect("the app still asks");
+        assert_eq!(app.mode, IdentityAdoptionMode::Completed);
+    }
+
+    /// The settings file is the first thing a move copies. A move that stopped
+    /// after it must resume, not read that copy as a Sona already in use.
+    #[test]
+    fn a_move_stopped_after_the_settings_copy_resumes() {
+        let (_root, paths) = test_paths("stopped");
+        fs::write(paths.source_root.join(SETTINGS_FILE), b"{}").expect("settings");
+        fs::write(paths.source_root.join(HISTORY_FILE), b"history").expect("history");
+        fs::create_dir_all(paths.source_root.join("recordings")).expect("recordings");
+        fs::write(paths.source_root.join("recordings/clip.wav"), b"audio").expect("recording");
+        let mut journal = AdoptionJournal {
+            entries: planned_entries(&paths).expect("plan"),
+            credentials: Vec::new(),
+        };
+        fs::create_dir_all(&paths.destination_root).expect("destination");
+        fs::copy(
+            paths.source_root.join(SETTINGS_FILE),
+            paths.destination_root.join(SETTINGS_FILE),
+        )
+        .expect("settings copy");
+        journal.entries[0].stage = JournalStage::Done;
+        write_journal(&paths.destination_root.join(JOURNAL_FILE), &journal).expect("journal");
+        let (source, destination, _, _) = test_managers();
+
+        let resumed = adopt_paths(
+            &paths,
+            false,
+            &mut move_data,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        )
+        .expect("resumed move");
+
+        assert_eq!(resumed.mode, IdentityAdoptionMode::Completed);
+        assert!(paths.destination_root.join(HISTORY_FILE).is_file());
+        assert!(paths.destination_root.join("recordings/clip.wav").is_file());
+        assert!(!paths.source_root.join("recordings/clip.wav").exists());
     }
 }
