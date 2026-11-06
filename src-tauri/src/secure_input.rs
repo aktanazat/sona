@@ -13,8 +13,8 @@
 //! - while secure input is sustained, shadow-registers vulnerable *keyed*
 //!   bindings through the Carbon-backed Tauri global-shortcut path, which is
 //!   not affected by secure input (modifier-only bindings need no fallback)
-//! - dynamically shadows the Cancel binding while recording, so Escape and
-//!   other keyed cancellation shortcuts remain available under secure input
+//! - dynamically shadows the cancel keys the open recording owns, so they
+//!   remain available under secure input
 //! - exposes a count-only keyboard diagnostic for the debug window. Only
 //!   event *kinds* are counted — key identity is never logged or returned.
 
@@ -84,14 +84,9 @@ pub fn note_recorder_blocked(app: &AppHandle) {
     imp::note_recorder_blocked(app)
 }
 
-/// Register/unregister the dynamic Cancel binding through the Carbon fallback
-/// while a recording and sustained Secure Input overlap.
-pub fn register_cancel_fallback(app: &AppHandle) {
-    imp::register_cancel_fallback(app)
-}
-
-pub fn unregister_cancel_fallback(app: &AppHandle) {
-    imp::unregister_cancel_fallback(app)
+/// Re-shadow the cancel keys after the open recording's set changed.
+pub fn cancel_keys_changed(app: &AppHandle) {
+    imp::cancel_keys_changed(app)
 }
 
 /// Rebuild Carbon fallback registrations from the current settings and
@@ -226,7 +221,6 @@ mod imp {
         /// fallback state lock to be held across global-shortcut plugin calls.
         fallback_operation: Mutex<()>,
         recorder_blocked: AtomicBool,
-        cancel_requested: AtomicBool,
         monitor_started: AtomicBool,
     }
 
@@ -241,7 +235,6 @@ mod imp {
                 fallback: Mutex::new(FallbackState::default()),
                 fallback_operation: Mutex::new(()),
                 recorder_blocked: AtomicBool::new(false),
-                cancel_requested: AtomicBool::new(false),
                 monitor_started: AtomicBool::new(false),
             }
         }
@@ -623,11 +616,18 @@ mod imp {
         let mut next = FallbackState::default();
         let mut immune = 0usize;
         if eligible {
-            for (id, binding) in &settings.bindings {
-                if id == "cancel" && !state.cancel_requested.load(Ordering::SeqCst) {
-                    continue;
-                }
-
+            let cancel_bindings = crate::shortcut::active_cancel_bindings(&settings);
+            let bindings = settings
+                .bindings
+                .iter()
+                .filter(|(id, _)| id.as_str() != "cancel")
+                .map(|(id, binding)| (id.as_str(), binding))
+                .chain(
+                    cancel_bindings
+                        .iter()
+                        .map(|binding| (binding.id.as_str(), binding)),
+                );
+            for (id, binding) in bindings {
                 if register_fallback_binding(app, id, binding, &mut next) {
                     immune += 1;
                 }
@@ -669,21 +669,12 @@ mod imp {
         });
     }
 
-    pub fn register_cancel_fallback(app: &AppHandle) {
+    pub fn cancel_keys_changed(app: &AppHandle) {
         let state = app.state::<SecureInputState>();
-        state.cancel_requested.store(true, Ordering::SeqCst);
         // Without sustained Secure Input there are no Carbon shadows to
         // update. The monitor performs reconciliation when sustained mode is
         // entered or left, so spawning here would only race the normal tray
         // state transition for every recording start.
-        if state.is_sustained() {
-            schedule_reconcile(app);
-        }
-    }
-
-    pub fn unregister_cancel_fallback(app: &AppHandle) {
-        let state = app.state::<SecureInputState>();
-        state.cancel_requested.store(false, Ordering::SeqCst);
         if state.is_sustained() {
             schedule_reconcile(app);
         }
@@ -882,9 +873,7 @@ mod imp {
 
     pub fn note_recorder_blocked(_app: &AppHandle) {}
 
-    pub fn register_cancel_fallback(_app: &AppHandle) {}
-
-    pub fn unregister_cancel_fallback(_app: &AppHandle) {}
+    pub fn cancel_keys_changed(_app: &AppHandle) {}
 
     pub fn reconcile_fallback(_app: &AppHandle) {}
 

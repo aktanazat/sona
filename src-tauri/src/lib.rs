@@ -1173,8 +1173,9 @@ fn headless_asr_plan(settings: &crate::settings::AppSettings) -> modes::AsrPlan 
 }
 
 /// Headless one-shot transcription for the `--transcribe-file` / `--list-devices`
-/// path. Drives the same `TranscriptionManager::transcribe` the app uses; no
-/// mic, no VAD, no download. Returns a process exit code (0 ok, 1 runtime
+/// path. Decodes the file as the app decodes a recording known to hold speech
+/// (a dictation voice detection forwarded, or a recording a person retries);
+/// no mic, no VAD, no download. Returns a process exit code (0 ok, 1 runtime
 /// failure, 2 bad input/usage).
 fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
     use std::time::{Duration, Instant};
@@ -1317,9 +1318,15 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
     let load_ms = u64::try_from(load_start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let bound_backend = tm.current_backend();
 
+    let switches = managers::transcription::DecodeSwitches {
+        without_prompt: args.without_prompt,
+        without_no_speech_check: args.without_no_speech_check,
+        without_filters: args.without_filter.clone(),
+    };
     let runs = args.repeat.unwrap_or(1).max(1);
     let mut times_ms: Vec<u64> = Vec::new();
     let mut text = String::new();
+    let mut diagnosis = None;
     for i in 0..runs {
         // If the model's unload-timeout is "Immediately", transcribe() unloads
         // the engine after each run; reload (untimed) so repeats keep working
@@ -1331,7 +1338,16 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
             }
         }
         let t = Instant::now();
-        match tm.transcribe_shared(&asr, &samples) {
+        let mut run_diagnosis = args
+            .diagnose
+            .then(managers::transcription::DecodeDiagnosis::default);
+        match tm.transcribe_shared_with(
+            &asr,
+            &samples,
+            managers::transcription::SpeechEvidence::Detected,
+            &switches,
+            run_diagnosis.as_mut(),
+        ) {
             Ok(out) => text = out.text,
             Err(e) => {
                 eprintln!("error: transcribe failed: {}", e);
@@ -1339,6 +1355,7 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
             }
         }
         times_ms.push(u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
+        diagnosis = run_diagnosis;
     }
     let best_ms = times_ms.iter().copied().min().unwrap_or(0);
     let rtf = if best_ms > 0 {
@@ -1375,7 +1392,10 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
             best_ms,
             rtf,
         );
-        println!("text: {}", text);
+        match diagnosis {
+            Some(diagnosis) => print!("{diagnosis}"),
+            None => println!("text: {}", text),
+        }
     }
     0
 }
@@ -1713,6 +1733,7 @@ pub fn run(cli_args: CliArgs) {
             commands::history::get_history_usage_stats,
             commands::history::get_history_entries,
             commands::history::search_history_entries,
+            commands::history::get_kept_dictations,
             commands::history::get_history_run_receipts,
             commands::history::toggle_history_entry_saved,
             commands::history::read_history_audio_chunk,
@@ -2350,6 +2371,7 @@ pub fn run(cli_args: CliArgs) {
                 let unlock_secrets = secret_manager.clone();
                 tauri::async_runtime::spawn(async move {
                     unlock_history.unlock_storage(&unlock_secrets).await;
+                    unlock_history.recover_interrupted_dictations();
                     // The one trigger retention has that is not a new dictation.
                     //
                     // `cleanup_old_entries` otherwise runs only from an insert and

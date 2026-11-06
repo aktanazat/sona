@@ -50,7 +50,10 @@ use transcribe_rs::{
 use zeroize::Zeroizing;
 
 mod audio_chunks;
+mod diagnosis;
 use audio_chunks::transcribe_windows;
+pub use diagnosis::{DecodeDiagnosis, DecodeSwitches, TextFilter};
+use diagnosis::{FilterOutcome, NativeRuns, SAMPLING_SEED};
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -842,7 +845,8 @@ pub struct BatchDecode {
     pub realtime_factor: Option<f32>,
     /// Whether the *model* produced any text for this audio, measured before
     /// post-processing ran. A decode that only repeats its vocabulary prompt
-    /// produced nothing: Whisper echoes its prompt over audio with no speech.
+    /// produced nothing: Whisper echoes its prompt over audio with no speech,
+    /// and over noisy speech the prompt displaced (see [`SpeechEvidence`]).
     ///
     /// This is the only honest answer to "did the microphone capture speech",
     /// and it is not recoverable from `text`: filler removal (on by default)
@@ -861,6 +865,19 @@ impl BatchDecode {
             realtime_factor: None,
         }
     }
+}
+
+/// What the caller of a batch decode knows about speech in its audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeechEvidence {
+    /// Only the decode can tell. A Whisper decode that returns nothing or only
+    /// its vocabulary prompt means nothing was said.
+    Unknown,
+    /// Voice detection forwarded speech, or a person asked for this recording
+    /// to be transcribed. A Whisper decode that returns nothing or only its
+    /// vocabulary prompt here means the prompt displaced noisy speech, so the
+    /// audio is decoded again without the prompt.
+    Detected,
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2307,11 +2324,41 @@ impl TranscriptionManager {
     }
     /// Batch-transcribe shared completed PCM without copying it.
     pub fn transcribe_shared(&self, asr: &AsrPlan, audio: &[f32]) -> Result<BatchDecode> {
+        self.transcribe_with_evidence(asr, audio, SpeechEvidence::Unknown)
+    }
+
+    /// [`Self::transcribe_shared`] given what the caller knows about speech in
+    /// the audio.
+    pub fn transcribe_with_evidence(
+        &self,
+        asr: &AsrPlan,
+        audio: &[f32],
+        speech: SpeechEvidence,
+    ) -> Result<BatchDecode> {
+        self.transcribe_shared_with(asr, audio, speech, &DecodeSwitches::default(), None)
+    }
+
+    /// [`Self::transcribe_with_evidence`] with parts of the decode switched off
+    /// and, when `diagnosis` is given, a record of what each part did. Default
+    /// switches are the app's own decode; the headless `--diagnose` and
+    /// `--without-*` flags are the only callers that pass anything else.
+    pub fn transcribe_shared_with(
+        &self,
+        asr: &AsrPlan,
+        audio: &[f32],
+        speech: SpeechEvidence,
+        switches: &DecodeSwitches,
+        mut diagnosis: Option<&mut DecodeDiagnosis>,
+    ) -> Result<BatchDecode> {
         #[cfg(debug_assertions)]
         if std::env::var("SONA_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
                 "Simulated transcription failure (SONA_FORCE_TRANSCRIPTION_FAILURE)"
             ));
+        }
+        if let Some(diagnosis) = diagnosis.as_deref_mut() {
+            diagnosis.switches = switches.clone();
+            diagnosis.model = asr.model_id.clone();
         }
 
         let _batch_use = self.begin_batch_use();
@@ -2404,6 +2451,13 @@ impl TranscriptionManager {
                     model_supports_translate,
                     model_languages
                 );
+                if let Some(diagnosis) = diagnosis.as_deref_mut() {
+                    diagnosis.engine =
+                        format!("transcribe-cpp {} on {}", model.arch(), model.backend());
+                }
+            } else if let Some(diagnosis) = diagnosis.as_deref_mut() {
+                diagnosis.engine = "transcribe-rs onnx".to_owned();
+                diagnosis.no_speech_check = FilterOutcome::NotApplied("this engine has none");
             }
 
             let transcribe_result = catch_unwind(AssertUnwindSafe(|| -> Result<String> {
@@ -2420,11 +2474,17 @@ impl TranscriptionManager {
                         // prompt, and only for plans that ask for one. Its written
                         // forms still receive exact correction; only fuzzy matching
                         // is skipped for prompted runs.
-                        let initial_prompt = (model_is_whisper && asr.prompt_vocabulary)
-                            .then(|| vocabulary_initial_prompt(&asr.custom_words))
-                            .flatten();
+                        let initial_prompt =
+                            (model_is_whisper && asr.prompt_vocabulary && !switches.without_prompt)
+                                .then(|| vocabulary_initial_prompt(&asr.custom_words))
+                                .flatten();
                         vocabulary_prompt.clone_from(&initial_prompt);
-                        let family = whisper_run_extension(initial_prompt);
+                        let checks_no_speech =
+                            !(model_is_whisper && switches.without_no_speech_check);
+                        let seed =
+                            (model_is_whisper && diagnosis.is_some()).then_some(SAMPLING_SEED);
+                        let family =
+                            whisper_check_extension(initial_prompt, checks_no_speech, seed);
                         let run_plan = transcribe_cpp_run_plan(
                             asr.translate_to_english,
                             &validated_language,
@@ -2455,15 +2515,90 @@ impl TranscriptionManager {
                         } else {
                             audio.len()
                         };
-                        transcribe_windows(audio, max_samples, |window| {
+                        let mut diagnosed_runs = diagnosis.is_some().then(NativeRuns::default);
+                        let text = transcribe_windows(audio, max_samples, |window| {
                             transcribe_cpp_window(
                                 session,
                                 window,
                                 &run_options,
                                 &mut model_detected_language,
+                                diagnosed_runs.as_mut(),
                                 3,
                             )
-                        })
+                        })?;
+                        if let (Some(diagnosis), Some(runs)) =
+                            (diagnosis.as_deref_mut(), diagnosed_runs)
+                        {
+                            runs.report_into(diagnosis);
+                            diagnosis.sampling_seed = seed;
+                            diagnosis.no_speech_check = if !model_is_whisper {
+                                FilterOutcome::NotApplied("this engine has none")
+                            } else if !checks_no_speech {
+                                FilterOutcome::SwitchedOff
+                            } else {
+                                let unchecked_options = RunOptions {
+                                    family: whisper_check_extension(
+                                        vocabulary_prompt.clone(),
+                                        false,
+                                        seed,
+                                    ),
+                                    ..run_options.clone()
+                                };
+                                let unchecked = transcribe_windows(audio, max_samples, |window| {
+                                    transcribe_cpp_window(
+                                        session,
+                                        window,
+                                        &unchecked_options,
+                                        &mut None,
+                                        None,
+                                        3,
+                                    )
+                                })?;
+                                FilterOutcome::Ran {
+                                    before: unchecked.chars().count(),
+                                    after: text.chars().count(),
+                                }
+                            };
+                        }
+                        let prompt_heard_nothing = speech == SpeechEvidence::Detected
+                            && switches.keeps(TextFilter::PromptEcho)
+                            && vocabulary_prompt
+                                .as_deref()
+                                .is_some_and(|prompt| !model_heard_text(&text, Some(prompt)));
+                        if prompt_heard_nothing {
+                            info!(
+                                "The prompted decode heard nothing in audio known to hold speech; decoding again without the vocabulary prompt"
+                            );
+                            if let Some(diagnosis) = diagnosis.as_deref_mut() {
+                                diagnosis.engine_chars = text.chars().count();
+                                diagnosis.prompt_words = vocabulary_prompt
+                                    .as_deref()
+                                    .map(|prompt| prompt_words(prompt).count());
+                                diagnosis.prompt_echo =
+                                    FilterOutcome::whole(diagnosis.engine_chars, true);
+                            }
+                            vocabulary_prompt = None;
+                            let unprompted_options = RunOptions {
+                                family: whisper_check_extension(None, checks_no_speech, seed),
+                                ..run_options
+                            };
+                            let unprompted = transcribe_windows(audio, max_samples, |window| {
+                                transcribe_cpp_window(
+                                    session,
+                                    window,
+                                    &unprompted_options,
+                                    &mut model_detected_language,
+                                    None,
+                                    3,
+                                )
+                            })?;
+                            if let Some(diagnosis) = diagnosis.as_deref_mut() {
+                                diagnosis.retried_without_prompt = Some(unprompted.chars().count());
+                            }
+                            Ok(unprompted)
+                        } else {
+                            Ok(text)
+                        }
                     }
                     LoadedEngine::Parakeet(parakeet_engine) => {
                         let params = ParakeetParams {
@@ -2607,6 +2742,12 @@ impl TranscriptionManager {
                 }
             };
 
+            if let Some(diagnosis) = diagnosis.as_deref_mut() {
+                diagnosis.language_hint.clone_from(&applied_language_hint);
+                diagnosis
+                    .detected_language
+                    .clone_from(&model_detected_language);
+            }
             let output_language = with_model_detected_language(
                 resolve_output_language_evidence(
                     asr,
@@ -2630,15 +2771,66 @@ impl TranscriptionManager {
         // post-processor runs, because filler removal and spoken edits can
         // empty a real transcript and the capture receipt must not read that as
         // a silent microphone.
-        let model_produced_text = model_heard_text(&result, vocabulary_prompt.as_deref())
-            && (asr.prompt_vocabulary || !repeats_only_vocabulary(&result, &asr.custom_words));
-        let filtered_result = post_process_transcription_text(
-            result,
-            asr,
-            vocabulary_prompt.is_some(),
-            &output_language,
-            &model_languages,
-        );
+        let echo_prompt = vocabulary_prompt
+            .as_deref()
+            .filter(|_| switches.keeps(TextFilter::PromptEcho));
+        let vocabulary_only_applies =
+            !asr.prompt_vocabulary && switches.keeps(TextFilter::VocabularyOnly);
+        let model_produced_text = model_heard_text(&result, echo_prompt)
+            && !(vocabulary_only_applies && repeats_only_vocabulary(&result, &asr.custom_words));
+        if let Some(diagnosis) = diagnosis.as_deref_mut() {
+            let chars = result.chars().count();
+            if diagnosis.retried_without_prompt.is_none() {
+                diagnosis.engine_chars = chars;
+                diagnosis.prompt_words = vocabulary_prompt
+                    .as_deref()
+                    .map(|prompt| prompt_words(prompt).count());
+                diagnosis.prompt_echo = match (vocabulary_prompt.as_deref(), echo_prompt) {
+                    (None, _) => FilterOutcome::NotApplied("no prompt"),
+                    (Some(_), None) => FilterOutcome::SwitchedOff,
+                    (Some(_), Some(prompt)) => FilterOutcome::whole(
+                        chars,
+                        !result.trim().is_empty() && repeats_decode_prompt(&result, prompt),
+                    ),
+                };
+            }
+            diagnosis.vocabulary_only = if asr.prompt_vocabulary {
+                FilterOutcome::NotApplied("prompted plans skip it")
+            } else if !vocabulary_only_applies {
+                FilterOutcome::SwitchedOff
+            } else {
+                FilterOutcome::whole(chars, repeats_only_vocabulary(&result, &asr.custom_words))
+            };
+        }
+        let filtered_result = if switches.keeps(TextFilter::PostProcessing) {
+            post_process_transcription_text(
+                result,
+                asr,
+                vocabulary_prompt.is_some(),
+                &output_language,
+                &model_languages,
+            )
+        } else {
+            result
+        };
+        if let Some(diagnosis) = diagnosis.as_deref_mut() {
+            let filtered_chars = filtered_result.chars().count();
+            diagnosis.post_processing = if switches.keeps(TextFilter::PostProcessing) {
+                FilterOutcome::Ran {
+                    before: diagnosis
+                        .retried_without_prompt
+                        .unwrap_or(diagnosis.engine_chars),
+                    after: filtered_chars,
+                }
+            } else {
+                FilterOutcome::SwitchedOff
+            };
+            diagnosis.result_chars = if model_produced_text {
+                filtered_chars
+            } else {
+                0
+            };
+        }
 
         let et = std::time::Instant::now();
         let translation_note = if asr.translate_to_english {
@@ -2693,10 +2885,14 @@ fn transcribe_cpp_window(
     audio: &[f32],
     options: &RunOptions,
     detected_language: &mut Option<String>,
+    mut diagnosed_runs: Option<&mut NativeRuns>,
     splits_left: u8,
 ) -> Result<String> {
     match session.run(audio, options) {
         Ok(transcript) => {
+            if let Some(runs) = diagnosed_runs {
+                runs.record(&session.model(), audio.len(), &transcript);
+            }
             if detected_language.is_none() {
                 *detected_language = transcript.language;
             }
@@ -2706,7 +2902,14 @@ fn transcribe_cpp_window(
             transcribe_cpp::Error::InputTooLong(_) | transcribe_cpp::Error::OutputTruncated { .. },
         ) if splits_left > 0 && audio.len() > 16_000 => {
             transcribe_windows(audio, audio.len() / 2, |window| {
-                transcribe_cpp_window(session, window, options, detected_language, splits_left - 1)
+                transcribe_cpp_window(
+                    session,
+                    window,
+                    options,
+                    detected_language,
+                    diagnosed_runs.as_deref_mut(),
+                    splits_left - 1,
+                )
             })
         }
         Err(error) => Err(anyhow::anyhow!(
@@ -3301,6 +3504,25 @@ fn whisper_run_extension(initial_prompt: Option<String>) -> Option<RunExtension>
             ..Default::default()
         })
     })
+}
+
+/// [`whisper_run_extension`] as a headless check runs it: optionally without
+/// whisper's native no-speech skip, and with a fixed fallback sampling seed.
+/// With the check on and no seed it is exactly the app's extension.
+fn whisper_check_extension(
+    initial_prompt: Option<String>,
+    checks_no_speech: bool,
+    seed: Option<u32>,
+) -> Option<RunExtension> {
+    if checks_no_speech && seed.is_none() {
+        return whisper_run_extension(initial_prompt);
+    }
+    Some(RunExtension::Whisper(WhisperRunOptions {
+        initial_prompt,
+        no_speech_thold: (!checks_no_speech).then_some(f32::INFINITY),
+        seed,
+        ..Default::default()
+    }))
 }
 
 fn prompt_words(text: &str) -> impl Iterator<Item = &str> + Clone {

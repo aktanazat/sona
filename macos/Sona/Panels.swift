@@ -11,6 +11,10 @@ struct HUDPill: View {
             if model.settings.settings.overlayPosition == .top {
                 capsule
             }
+            if showsMeetingSuggestion {
+                meetingSuggestion
+                    .transition(.opacity.animation(.easeInOut(duration: reduceMotion ? 0.1 : 0.2)))
+            }
             if showsLiveWords {
                 liveWords
                     .transition(.opacity.animation(.easeInOut(duration: reduceMotion ? 0.1 : 0.2)))
@@ -37,6 +41,37 @@ struct HUDPill: View {
         guard model.settings.settings.overlayStyle == .live else { return false }
         if case .recording = presentation.capture { return true }
         return false
+    }
+
+    private var showsMeetingSuggestion: Bool {
+        guard model.meetingSuggested, presentation.feedback == nil else { return false }
+        if case .recording = presentation.capture { return true }
+        return false
+    }
+
+    /// Offered once a dictation reaches three minutes: end it as any other
+    /// and start a meeting for the rest.
+    private var meetingSuggestion: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Meeting mode suits long recordings.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.hudInkSecondary)
+            Button(action: model.finishIntoMeeting) {
+                Text("Finish and start a meeting")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.hudInk)
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .background(.white.opacity(0.12), in: Capsule())
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 212, alignment: .leading)
+        .padding(12)
+        .background(Theme.hud, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.12), lineWidth: 1))
+        .environment(\.colorScheme, .dark)
     }
 
     private var capsule: some View {

@@ -18,11 +18,13 @@ use crate::meeting::{
         SourceStopReport,
     },
 };
+use crate::modes::RunPlan;
 use crate::settings::{get_settings, update_settings, AppSettings};
 use crate::utils;
 use log::{debug, error, info, trace, warn};
 use serde::Serialize;
 use specta::Type;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -433,11 +435,31 @@ const WHISPER_SAMPLE_RATE: usize = 16000;
 
 /* ──────────────────────────────────────────────────────────────── */
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum RecordingState {
     Idle,
-    Recording { binding_id: String },
+    Recording {
+        binding_id: String,
+        spool: CaptureSpool,
+    },
     Stopping,
+}
+
+/// Where one dictation's whole capture is written while it records, and the
+/// run it belongs to. It moves with the recording: whichever of stop or cancel
+/// ends the recording takes it, and its caller decides whether the file stays.
+#[derive(Debug)]
+pub struct CaptureSpool {
+    pub path: PathBuf,
+    pub run: RunPlan,
+}
+
+/// What a stop hands back: the capture's outcome, absent when the stop was
+/// cancelled or the recorder failed, and the dictation's spool, which the
+/// caller owns from here whatever the outcome.
+pub struct StoppedRecording {
+    pub outcome: Option<RecordingStop>,
+    pub spool: Option<CaptureSpool>,
 }
 
 /// `is_recording()` flipped, broadcast to every webview. A window that wants to
@@ -1427,10 +1449,12 @@ impl AudioRecordingManager {
     /// would strand the lease and lock out meetings and the recorder for the life of the process.
     /// The ordering that matters: the state write lands first, then the release, so nothing can
     /// observe a free microphone while this manager still reports itself as recording.
-    fn set_state(&self, guard: &mut RecordingState, new_state: RecordingState) {
+    ///
+    /// Returns the state it replaced, so the caller that ends a recording takes its spool.
+    fn set_state(&self, guard: &mut RecordingState, new_state: RecordingState) -> RecordingState {
         let release_dictation =
             matches!(new_state, RecordingState::Idle) && !matches!(*guard, RecordingState::Idle);
-        *guard = new_state;
+        let previous = std::mem::replace(guard, new_state);
         let active = matches!(
             *guard,
             RecordingState::Recording { .. } | RecordingState::Stopping
@@ -1448,12 +1472,14 @@ impl AudioRecordingManager {
         if release_dictation {
             self.release_dictation_microphone();
         }
+        previous
     }
 
     pub fn try_start_recording(
         &self,
         binding_id: &str,
         vad_policy: VadPolicy,
+        spool: CaptureSpool,
     ) -> Result<RecordingReadiness, String> {
         let mut state = lock_recover(&self.state);
         if !matches!(*state, RecordingState::Idle) {
@@ -1488,7 +1514,7 @@ impl AudioRecordingManager {
             .ok_or_else(|| "Recorder not available".to_string())
             .and_then(|recorder| {
                 recorder
-                    .start(vad_policy)
+                    .start_spooled(vad_policy, &spool.path)
                     .map_err(|error| format!("Failed to start recorder: {error}"))
             });
         let receiver = match result {
@@ -1507,6 +1533,7 @@ impl AudioRecordingManager {
             &mut state,
             RecordingState::Recording {
                 binding_id: binding_id.to_string(),
+                spool,
             },
         );
         debug!("Recording requested for binding {binding_id}");
@@ -1689,19 +1716,19 @@ impl AudioRecordingManager {
         self.cancel_generation.load(Ordering::Acquire) != generation
     }
 
-    pub fn stop_recording(
-        &self,
-        binding_id: &str,
-        cancel_generation: u64,
-    ) -> Option<RecordingStop> {
+    pub fn stop_recording(&self, binding_id: &str, cancel_generation: u64) -> StoppedRecording {
         self.invalidate_recording_readiness();
         let mut state = lock_recover(&self.state);
 
         match *state {
             RecordingState::Recording {
                 binding_id: ref active,
+                ..
             } if active == binding_id => {
-                self.set_state(&mut state, RecordingState::Stopping);
+                let spool = match self.set_state(&mut state, RecordingState::Stopping) {
+                    RecordingState::Recording { spool, .. } => Some(spool),
+                    RecordingState::Idle | RecordingState::Stopping => None,
+                };
                 drop(state);
 
                 // Optionally keep recording for a bit longer to capture trailing audio.
@@ -1747,7 +1774,10 @@ impl AudioRecordingManager {
 
                 if self.was_cancelled_since(cancel_generation) {
                     debug!("Recording stop cancelled; discarding captured samples");
-                    return None;
+                    return StoppedRecording {
+                        outcome: None,
+                        spool,
+                    };
                 }
 
                 let capture = match capture {
@@ -1762,14 +1792,20 @@ impl AudioRecordingManager {
                         // truncated row, "was the retained prefix even audible"
                         // is exactly the question that decides a retry.
                         let level = measure_input_level(&prefix_samples);
-                        return Some(RecordingStop::Overrun {
-                            prefix_samples,
-                            level,
-                        });
+                        return StoppedRecording {
+                            outcome: Some(RecordingStop::Overrun {
+                                prefix_samples,
+                                level,
+                            }),
+                            spool,
+                        };
                     }
                     Err(error) => {
                         error!("stop() failed: {error}");
-                        return None;
+                        return StoppedRecording {
+                            outcome: None,
+                            spool,
+                        };
                     }
                 };
 
@@ -1790,7 +1826,10 @@ impl AudioRecordingManager {
                 // the model may conclude the user did not speak. Its verdict
                 // stands alone only where re-decoding is no longer cheap.
                 if !vad_forwarded_speech && !model_arbitrates_vad_silence(samples.len()) {
-                    return Some(RecordingStop::NoSpeech { samples, level });
+                    return StoppedRecording {
+                        outcome: Some(RecordingStop::NoSpeech { samples, level }),
+                        spool,
+                    };
                 }
 
                 // Pad a normal, very short recording for model input. An
@@ -1805,13 +1844,19 @@ impl AudioRecordingManager {
                 } else {
                     samples
                 };
-                Some(RecordingStop::Complete {
-                    samples,
-                    vad_forwarded_speech,
-                    level,
-                })
+                StoppedRecording {
+                    outcome: Some(RecordingStop::Complete {
+                        samples,
+                        vad_forwarded_speech,
+                        level,
+                    }),
+                    spool,
+                }
             }
-            _ => None,
+            _ => StoppedRecording {
+                outcome: None,
+                spool: None,
+            },
         }
     }
 
@@ -1830,15 +1875,19 @@ impl AudioRecordingManager {
         self.recording_active.load(Ordering::SeqCst)
     }
 
-    /// Cancel any ongoing recording without returning audio samples
-    pub fn cancel_recording(&self) {
+    /// Cancel any ongoing recording without returning audio samples. The
+    /// recording this cancel ended hands back its spool, finished and closed.
+    pub fn cancel_recording(&self) -> Option<CaptureSpool> {
         self.invalidate_recording_readiness();
         self.cancel_generation.fetch_add(1, Ordering::AcqRel);
         let mut state = lock_recover(&self.state);
 
         match *state {
             RecordingState::Recording { .. } => {
-                self.set_state(&mut state, RecordingState::Idle);
+                let spool = match self.set_state(&mut state, RecordingState::Idle) {
+                    RecordingState::Recording { spool, .. } => Some(spool),
+                    RecordingState::Idle | RecordingState::Stopping => None,
+                };
                 drop(state);
 
                 if let Some(rec) = lock_recover(&self.recorder).as_ref() {
@@ -1861,11 +1910,13 @@ impl AudioRecordingManager {
                         self.stop_microphone_stream();
                     }
                 }
+                spool
             }
             RecordingState::Stopping => {
                 debug!("Cancellation requested while recording is stopping");
+                None
             }
-            RecordingState::Idle => {}
+            RecordingState::Idle => None,
         }
     }
 }

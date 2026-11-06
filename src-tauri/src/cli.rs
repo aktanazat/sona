@@ -1,3 +1,4 @@
+use crate::managers::transcription::TextFilter;
 use crate::query::external::{ExternalFormat, ExternalLoopStatus};
 use crate::query::QueryScope;
 use clap::{ArgGroup, Parser};
@@ -95,6 +96,25 @@ pub struct CliArgs {
     /// Emit --transcribe-file results as JSON.
     #[arg(long)]
     pub json: bool,
+
+    /// With --transcribe-file: print how the decode went instead of the text:
+    /// model, prompt, language, windows, segments, and the characters each
+    /// filter removed. Prints no transcript words. Whisper decodes again to
+    /// measure its no-speech check, so timings cover every decode.
+    #[arg(long, requires = "transcribe_file", conflicts_with = "json")]
+    pub diagnose: bool,
+
+    /// With --transcribe-file: decode without the custom-words prompt.
+    #[arg(long, requires = "transcribe_file")]
+    pub without_prompt: bool,
+
+    /// With --transcribe-file: turn off whisper's own no-speech check.
+    #[arg(long, requires = "transcribe_file")]
+    pub without_no_speech_check: bool,
+
+    /// With --transcribe-file: skip one of Sona's text filters. Repeatable.
+    #[arg(long, value_enum, value_name = "FILTER", requires = "transcribe_file")]
+    pub without_filter: Vec<TextFilter>,
 
     // ── Read-only corpus queries ───────────────────────────────────────────
     // Each of these answers with one JSON value on stdout and exits. They

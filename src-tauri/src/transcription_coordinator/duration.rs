@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+const SUGGEST_MEETING_AFTER: Duration = Duration::from_secs(3 * 60);
 const WARNING_AFTER: Duration = Duration::from_secs(19 * 60);
 const STOP_AFTER: Duration = Duration::from_secs(20 * 60);
 
@@ -39,6 +40,36 @@ impl RecordingDeadline {
         } else if !self.warned && now >= self.started_at + WARNING_AFTER {
             self.warned = true;
             Some(DurationAction::Warn)
+        } else {
+            None
+        }
+    }
+}
+
+/// The point a dictation has run long enough that meeting mode suits it
+/// better. It comes due once per recording, and like the deadline it belongs
+/// to the recording stage.
+pub(super) struct MeetingSuggestion {
+    due: Option<Instant>,
+}
+
+impl MeetingSuggestion {
+    pub(super) fn new(started_at: Instant) -> Self {
+        Self {
+            due: Some(started_at + SUGGEST_MEETING_AFTER),
+        }
+    }
+
+    pub(super) fn next_deadline(&self) -> Option<Instant> {
+        self.due
+    }
+
+    /// The seconds recorded when the suggestion first comes due; `None`
+    /// before then and every time after.
+    pub(super) fn take(&mut self, now: Instant) -> Option<u32> {
+        if self.due.is_some_and(|due| now >= due) {
+            self.due = None;
+            Some(u32::try_from(SUGGEST_MEETING_AFTER.as_secs()).unwrap_or(u32::MAX))
         } else {
             None
         }

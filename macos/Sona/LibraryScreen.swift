@@ -29,6 +29,7 @@ struct LibraryScreen: View {
                     importAudio: importAudio)
                 ErrorNote(store.error)
                 LibraryActivity(store: store)
+                LibraryKeptSection(store: store)
                 LibraryFeed(
                     store: store,
                     correct: { correcting = $0 },
@@ -259,6 +260,100 @@ private enum TrendAxis {
     static func day(_ localDate: String) -> String {
         guard let date = wire.date(from: localDate) else { return localDate }
         return date.short
+    }
+}
+
+// MARK: - Kept recordings
+
+/// Recordings that never reached words: a cancel of ten seconds or more, or
+/// one that never finished. Each can be played, transcribed or deleted;
+/// one that gains words leaves for the feed.
+private struct LibraryKeptSection: View {
+    let store: LibraryStore
+
+    private var searching: Bool {
+        !store.activeQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        if !store.kept.isEmpty, !searching {
+            PageSection("Recently cancelled") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Kept for 14 days, then deleted.").metaText()
+                    ForEach(store.kept) { entry in
+                        Card {
+                            KeptDictationRow(store: store, entry: entry)
+                        }
+                        .id(entry.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One kept recording: when, how long, why, and the three things to do
+/// with it.
+private struct KeptDictationRow: View {
+    let store: LibraryStore
+    let entry: KeptDictation
+
+    @State private var confirmingDelete = false
+
+    private var retrying: Bool { store.retrying.contains(entry.id) }
+    private var busy: Bool { retrying || store.deleting.contains(entry.id) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                Text(retrying ? "Transcribing…" : entry.reason.label)
+                    .bodyText(14, Theme.inkSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let length = entry.length {
+                    Text(LibraryClock.short(length))
+                        .font(TypeScale.body(12).monospacedDigit())
+                        .foregroundStyle(Theme.inkTertiary)
+                }
+                Text("\(entry.date.relativeDay) \(entry.date.time)")
+                    .font(TypeScale.body(12).monospacedDigit())
+                    .foregroundStyle(Theme.inkTertiary)
+            }
+            HStack(spacing: 8) {
+                if entry.hasAudio {
+                    PlaybackBar(store: store, id: entry.id, length: entry.length)
+                    Button("Transcribe") { store.retryTranscription(entry.id) }
+                        .buttonStyle(.compact)
+                        .disabled(busy)
+                }
+                Button("Delete") { confirmingDelete = true }
+                    .buttonStyle(.compact)
+                    .disabled(busy)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(16)
+        .background(store.expanded == entry.id ? Theme.wash : .clear)
+        .deleteDictationAlert(isPresented: $confirmingDelete, withRecording: entry.hasAudio) {
+            store.delete(entry.id)
+        }
+    }
+}
+
+private extension View {
+    /// The one confirmation every delete of a dictation goes through.
+    func deleteDictationAlert(
+        isPresented: Binding<Bool>,
+        withRecording: Bool,
+        delete: @escaping () -> Void
+    ) -> some View {
+        alert("Delete this dictation?", isPresented: isPresented) {
+            Button("Delete", role: .destructive, action: delete)
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text(withRecording
+                ? "The words and the recording are removed for good."
+                : "The words are removed for good.")
+        }
     }
 }
 
@@ -592,13 +687,8 @@ private struct HistoryRowDetail: View {
             ReceiptInspector(store: store, row: row)
         }
         .padding(16)
-        .alert("Delete this dictation?", isPresented: $confirmingDelete) {
-            Button("Delete", role: .destructive) { store.delete(row.id) }
-            Button("Keep it", role: .cancel) {}
-        } message: {
-            Text(store.playable(row.id)
-                ? "The words and the recording are removed for good."
-                : "The words are removed for good.")
+        .deleteDictationAlert(isPresented: $confirmingDelete, withRecording: store.playable(row.id)) {
+            store.delete(row.id)
         }
     }
 
@@ -654,12 +744,14 @@ private struct HistoryRowDetail: View {
 private struct PlaybackBar: View {
     let store: LibraryStore
     let id: Int64
+    /// The length a caller already knows, used before the row has a receipt.
+    var length: TimeInterval? = nil
 
     private var active: Bool { store.playingId == id }
     private var loading: Bool { store.loadingAudio == id }
 
     private var total: TimeInterval {
-        active && store.duration > 0 ? store.duration : (store.statedLength(id) ?? 0)
+        active && store.duration > 0 ? store.duration : (store.statedLength(id) ?? length ?? 0)
     }
 
     private var fraction: Double {
@@ -887,7 +979,7 @@ private struct ReceiptCard: View {
     private func tone(_ status: ReceiptCaptureStatus) -> Color {
         switch status {
         case .complete: Theme.ink
-        case .truncated: Theme.accent
+        case .truncated, .cancelled, .interrupted: Theme.accent
         case .noSpeechDetected: Theme.inkSecondary
         }
     }

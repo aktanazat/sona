@@ -105,6 +105,41 @@ struct HistoryDay: Identifiable {
     let silent: [HistoryRow]
 }
 
+// MARK: - Kept recordings
+
+/// Why a recording with no words was kept rather than thrown away.
+enum KeptReason: String, Decodable {
+    case cancelled
+    case interrupted
+
+    var label: String {
+        switch self {
+        case .cancelled: "Cancelled"
+        case .interrupted: "Didn't finish"
+        }
+    }
+}
+
+/// A recording that never reached words. `timestamp` is seconds since 1970,
+/// as on `HistoryEntry`.
+struct KeptDictation: Identifiable, Decodable {
+    let id: Int64
+    let timestamp: Int64
+    let durationMs: UInt64?
+    let reason: KeptReason
+    let hasAudio: Bool
+
+    var date: Date { Date(timeIntervalSince1970: TimeInterval(timestamp)) }
+    var length: TimeInterval? { durationMs.map { TimeInterval($0) / 1000 } }
+}
+
+/// `get_kept_dictations`: every kept recording, newest first, and the ids the
+/// core recovered from a recording cut off when it last quit.
+struct KeptDictations: Decodable {
+    let entries: [KeptDictation]
+    let recoveredThisLaunch: [Int64]
+}
+
 // MARK: - Run receipts
 
 /// One immutable record of a run against a recording: content-free provenance.
@@ -265,12 +300,16 @@ enum ReceiptCaptureStatus: String, Decodable {
     case complete
     case truncated
     case noSpeechDetected = "no_speech_detected"
+    case cancelled
+    case interrupted
 
     var label: String {
         switch self {
         case .complete: "Complete"
         case .truncated: "Truncated"
         case .noSpeechDetected: "No speech detected"
+        case .cancelled: "Cancelled"
+        case .interrupted: "Didn't finish"
         }
     }
 }
