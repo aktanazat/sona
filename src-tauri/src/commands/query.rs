@@ -45,7 +45,13 @@ pub async fn sona_query_events(
     after_id: Option<String>,
     limit: Option<usize>,
 ) -> Result<QueryEventsPage, QueryError> {
-    crate::query::events(&meetings, after_id, limit).await
+    crate::query::events(
+        &meetings,
+        crate::query::QueryAudience::Local,
+        after_id,
+        limit,
+    )
+    .await
 }
 
 /// Assemble the evidence for one Ask turn: the corpus card, then the top rows

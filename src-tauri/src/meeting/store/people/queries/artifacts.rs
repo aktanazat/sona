@@ -9,6 +9,7 @@ use crate::meeting::store::people::{all_people_in, loop_concerns_person, owner_m
 use crate::meeting::store::{listed_outcomes, utc_now_ms, StoreError, CURRENT_ARTIFACT_CONTENT};
 use crate::meeting::types::{GeneratedMeetingArtifacts, MeetingSessionId};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub(super) struct PersonFacts {
@@ -227,6 +228,7 @@ pub(super) fn all_open_loops_in(
 pub(super) fn talk_share_average_in(
     connection: &Connection,
     person: &Person,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Option<u32>, StoreError> {
     let mut statement = connection.prepare(
         "SELECT c.metrics_json, s.speaker_id, s.display_name
@@ -234,16 +236,20 @@ pub(super) fn talk_share_average_in(
            JOIN meeting_conversation_metrics c ON c.session_id = l.meeting_id
            JOIN meeting_speakers s ON s.session_id = l.meeting_id
           WHERE l.person_id = ?1 AND l.confidence = 'confirmed'
-            AND s.merged_into_speaker_id IS NULL",
+            AND s.merged_into_speaker_id IS NULL
+            AND l.meeting_id NOT IN (SELECT value FROM json_each(?2))",
     )?;
     let rows = statement
-        .query_map([person.id.uuid().to_string()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
+        .query_map(
+            params![person.id.uuid().to_string(), super::hidden_json(hidden)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut shares = Vec::new();
     for (metrics_json, speaker_id, display_name) in rows {
@@ -273,11 +279,12 @@ pub(super) fn talk_share_average_in(
 }
 
 /// The time recorded and what became of the threads across a person's
-/// confirmed meetings, by the same rules a meeting's list row uses. Each is
-/// nil when none of those meetings has one.
+/// confirmed meetings outside `hidden`, by the same rules a meeting's list row
+/// uses. Each is nil when none of those meetings has one.
 pub(super) fn confirmed_totals_in(
     connection: &Connection,
     person_id: PersonId,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<(Option<u64>, Option<LedgerOutcomeCounts>), StoreError> {
     let mut statement = connection.prepare(&format!(
         "SELECT (SELECT SUM(w.end_offset_ns - w.start_offset_ns)
@@ -286,15 +293,19 @@ pub(super) fn confirmed_totals_in(
                 json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads')
            FROM meeting_person_links l
            JOIN meeting_sessions m ON m.id = l.meeting_id
-          WHERE l.person_id = ?1 AND l.confidence = 'confirmed'"
+          WHERE l.person_id = ?1 AND l.confidence = 'confirmed'
+            AND l.meeting_id NOT IN (SELECT value FROM json_each(?2))"
     ))?;
     let rows = statement
-        .query_map([person_id.uuid().to_string()], |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })?
+        .query_map(
+            params![person_id.uuid().to_string(), super::hidden_json(hidden)],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     let mut recorded_ns: Option<u64> = None;
     let mut outcomes: Option<LedgerOutcomeCounts> = None;

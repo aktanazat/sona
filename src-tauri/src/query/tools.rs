@@ -1455,7 +1455,11 @@ fn loops_result(
             .collect(),
     );
     value.insert("more".to_string(), Value::Bool(more));
-    if let Some(reason) = loops_reason(rows.len(), scanned, corpus.awaiting_continuity) {
+    let awaiting_continuity = corpus.awaiting_continuity.iter().any(|session_id| {
+        folder.is_none_or(|folder| folder.allows(*session_id))
+            && !series_opted_out_of_remote(store, *session_id)
+    });
+    if let Some(reason) = loops_reason(rows.len(), scanned, awaiting_continuity) {
         value.insert("reason".to_string(), json!(reason));
     }
     let mut outcome = Outcome::new(value, &["/rows"]);
@@ -2750,6 +2754,7 @@ mod tests {
                 query: "launch",
                 limit: 10,
                 cursor: None,
+                kept_local: None,
             },
         )
         .unwrap();

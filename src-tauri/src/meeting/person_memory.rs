@@ -156,10 +156,14 @@ pub struct PersonMemorySnapshot {
     pub limitations: Vec<String>,
 }
 
+/// `hides_meeting` names the meetings this reader may not see, by id. Their
+/// rows leave before anything below links a note to them or picks the last
+/// conversation.
 pub(crate) async fn read(
     app: &AppHandle,
     person_id: PersonId,
     since_utc_ms: Option<i64>,
+    hides_meeting: impl Fn(&str) -> bool + Send + 'static,
 ) -> Result<PersonMemorySnapshot, String> {
     let meetings = app.state::<Arc<MeetingSessionManager>>();
     let store = meetings
@@ -168,7 +172,7 @@ pub(crate) async fn read(
         .map_err(|_| "Conversations are still unlocking.".to_string())?;
     let history = app.state::<Arc<HistoryManager>>().inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        read_stored(&store, &history, person_id, since_utc_ms)
+        read_stored(&store, &history, person_id, since_utc_ms, &hides_meeting)
     })
     .await
     .map_err(|_| "This person's history could not be read.".to_string())?
@@ -179,10 +183,12 @@ fn read_stored(
     history: &HistoryManager,
     person_id: PersonId,
     since_utc_ms: Option<i64>,
+    hides_meeting: &dyn Fn(&str) -> bool,
 ) -> Result<PersonMemorySnapshot, String> {
     let mut snapshot = store
         .person_memory_snapshot(person_id, since_utc_ms)
         .map_err(|_| "This person's history is unavailable.".to_string())?;
+    without_meetings(&mut snapshot, hides_meeting);
     let confirmed_meetings = snapshot
         .conversations
         .iter()
@@ -398,6 +404,38 @@ fn read_stored(
     Ok(snapshot)
 }
 
+/// Every row of the stored snapshot is read out of one conversation and
+/// carries that meeting's id, so dropping by it leaves nothing of the meeting.
+fn without_meetings(snapshot: &mut PersonMemorySnapshot, hides_meeting: &dyn Fn(&str) -> bool) {
+    let hidden = |source: &PersonMemorySource| {
+        source
+            .meeting_id
+            .as_deref()
+            .is_some_and(|meeting_id| hides_meeting(meeting_id))
+    };
+    snapshot
+        .conversations
+        .retain(|conversation| !hidden(&conversation.source));
+    snapshot
+        .contributions
+        .retain(|contribution| !hidden(&contribution.passage.source));
+    snapshot.notes.retain(|note| !hidden(&note.source));
+    snapshot.commitments.retain(|commitment| {
+        !commitment
+            .evidence
+            .iter()
+            .any(|passage| hidden(&passage.source))
+    });
+    snapshot.threads.retain_mut(|thread| {
+        thread.sources.retain(|source| !hidden(source));
+        thread.evidence.retain(|passage| !hidden(&passage.source));
+        !thread.sources.is_empty() || !thread.evidence.is_empty()
+    });
+    snapshot
+        .changes
+        .retain(|change| !hidden(&change.earlier.source) && !hidden(&change.later.source));
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn person_memory(
@@ -405,5 +443,5 @@ pub async fn person_memory(
     person_id: PersonId,
     since_utc_ms: Option<i64>,
 ) -> Result<PersonMemorySnapshot, String> {
-    read(&app, person_id, since_utc_ms).await
+    read(&app, person_id, since_utc_ms, |_| false).await
 }

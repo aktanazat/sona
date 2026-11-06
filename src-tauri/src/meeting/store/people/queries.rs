@@ -30,9 +30,18 @@ use uuid::Uuid;
 
 impl MeetingStore {
     pub(crate) fn people_list(&self) -> Result<PeopleListResult, StoreError> {
+        self.people_list_without(&HashSet::new())
+    }
+
+    /// The people list for a reader the `hidden` meetings are kept from: they
+    /// count toward nobody and are nobody's last meeting.
+    pub(crate) fn people_list_without(
+        &self,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<PeopleListResult, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = people_list_in(&transaction)?;
+        let result = people_list_in(&transaction, hidden)?;
         transaction.commit()?;
         Ok(result)
     }
@@ -41,21 +50,35 @@ impl MeetingStore {
         &self,
         person_id: PersonId,
     ) -> Result<PersonDetailResult, StoreError> {
+        self.person_detail_without(person_id, &HashSet::new())
+    }
+
+    /// A person's page for a reader the `hidden` meetings are kept from: their
+    /// links, loops and totals are left out.
+    pub(crate) fn person_detail_without(
+        &self,
+        person_id: PersonId,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<PersonDetailResult, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let result = person_detail_in(&transaction, person_id)?;
+        let result = person_detail_in(&transaction, person_id, hidden)?;
         transaction.commit()?;
         Ok(result)
     }
 
-    /// When the corpus's first meeting began, or none when it holds no
-    /// meetings: before it, Sona was not recording, so no week there has a
-    /// count of its own.
-    pub(crate) fn earliest_meeting_utc_ms(&self) -> Result<Option<i64>, StoreError> {
+    /// When the corpus's first meeting outside `hidden` began, or none when it
+    /// holds no such meeting: before it, Sona was not recording, so no week
+    /// there has a count of its own.
+    pub(crate) fn earliest_meeting_utc_ms(
+        &self,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<Option<i64>, StoreError> {
         let connection = self.connection()?;
         Ok(connection.query_row(
-            "SELECT MIN(COALESCE(started_at_utc_ms, created_at_utc_ms)) FROM meeting_sessions",
-            [],
+            "SELECT MIN(COALESCE(started_at_utc_ms, created_at_utc_ms)) FROM meeting_sessions
+              WHERE id NOT IN (SELECT value FROM json_each(?1))",
+            [hidden_json(hidden)],
             |row| row.get(0),
         )?)
     }
@@ -257,7 +280,21 @@ pub(in crate::meeting::store) fn confirmed_person_ids_in(
         .collect()
 }
 
-fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreError> {
+/// `hidden` as the JSON array a query's `json_each` reads.
+fn hidden_json(hidden: &HashSet<MeetingSessionId>) -> String {
+    serde_json::Value::from(
+        hidden
+            .iter()
+            .map(|session_id| session_id.uuid().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .to_string()
+}
+
+fn people_list_in(
+    connection: &Connection,
+    hidden: &HashSet<MeetingSessionId>,
+) -> Result<PeopleListResult, StoreError> {
     let revision = people_revision_in(connection)?;
     let mut statement = connection.prepare(
         "SELECT p.id, p.display_name, p.aliases_json, p.calendar_emails_json,
@@ -276,6 +313,7 @@ fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreErro
                   ORDER BY a.generated_at_utc_ms DESC LIMIT 1)
            FROM persons p
            LEFT JOIN meeting_person_links l ON l.person_id = p.id
+                AND l.meeting_id NOT IN (SELECT value FROM json_each(?1))
            LEFT JOIN (
                 SELECT m.id, m.title,
                        COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) AS at_utc_ms
@@ -285,6 +323,7 @@ fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreErro
                   FROM meeting_person_links l2
                   JOIN meeting_sessions m2 ON m2.id = l2.meeting_id
                  WHERE l2.person_id = p.id AND l2.confidence = 'confirmed'
+                   AND l2.meeting_id NOT IN (SELECT value FROM json_each(?1))
                  ORDER BY COALESCE(m2.started_at_utc_ms, m2.created_at_utc_ms) DESC,
                           m2.id DESC
                  LIMIT 1
@@ -293,7 +332,7 @@ fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreErro
           ORDER BY p.display_name COLLATE NOCASE, p.id",
     )?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([hidden_json(hidden)], |row| {
             Ok((
                 person_from_row(row)?,
                 row.get::<_, i64>(10)?,
@@ -362,15 +401,23 @@ fn people_list_in(connection: &Connection) -> Result<PeopleListResult, StoreErro
 fn person_detail_in(
     connection: &Connection,
     person_id: PersonId,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<PersonDetailResult, StoreError> {
     let revision = people_revision_in(connection)?;
     let person = person_by_id_in(connection, person_id)?;
     let mut facts = facts_for_person_in(connection, &person)?;
     gate_continuity_facts_in(connection, &mut facts)?;
-    let links = links_for_person_in(connection, person_id)?;
+    facts
+        .open_loops
+        .retain(|open| !hidden.contains(&open.meeting_id));
+    facts
+        .commitments
+        .retain(|commitment| !hidden.contains(&commitment.meeting_id));
+    let mut links = links_for_person_in(connection, person_id)?;
+    links.retain(|link| !hidden.contains(&link.meeting.id));
     let documents = document_summaries_in(connection, person_id)?;
-    let talk_share_avg_permille = talk_share_average_in(connection, &person)?;
-    let (recorded_ms, ledger_outcomes) = confirmed_totals_in(connection, person_id)?;
+    let talk_share_avg_permille = talk_share_average_in(connection, &person, hidden)?;
+    let (recorded_ms, ledger_outcomes) = confirmed_totals_in(connection, person_id, hidden)?;
     let contact = contact_card_in(connection, person_id)?;
     Ok(PersonDetailResult {
         schema_version: SCHEMA_VERSION,
@@ -401,7 +448,7 @@ fn organization_detail_in(
     slug: &str,
 ) -> Result<OrganizationDetailResult, StoreError> {
     let slug = organization_slug(slug);
-    let list = people_list_in(connection)?;
+    let list = people_list_in(connection, &HashSet::new())?;
     let people = list
         .entries
         .into_iter()
@@ -473,7 +520,7 @@ fn companies_list_in(connection: &Connection) -> Result<CompaniesListResult, Sto
         last: Option<i64>,
         loops: HashSet<String>,
     }
-    let list = people_list_in(connection)?;
+    let list = people_list_in(connection, &HashSet::new())?;
     let mut tallies: HashMap<String, Tally> = HashMap::new();
     for entry in &list.entries {
         let Some(name) = entry.person.organization.as_deref() else {

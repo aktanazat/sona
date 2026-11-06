@@ -127,6 +127,24 @@ impl MeetingStore {
         Ok(records)
     }
 
+    /// D14. Every meeting whose series is kept on this Mac, in one read: the
+    /// set a reader outside the app checks each row it returns against.
+    pub(crate) fn kept_local_sessions(&self) -> Result<HashSet<MeetingSessionId>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT f.session_id FROM meeting_calendar_facts f
+               JOIN meeting_series_preferences p
+                 ON p.series_key = json_extract(f.event_json, '$.seriesKey')
+              WHERE p.remote_intelligence_opt_out = 1",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.iter()
+            .map(|session| parse_uuid(session).map(MeetingSessionId::from_uuid))
+            .collect()
+    }
+
     /// D14. The roster with the one preference the meeting-intelligence surface
     /// can change attached.
     ///

@@ -24,6 +24,7 @@ use crate::meeting::loop_types::{
     MeetingLoopResolveRequest, MeetingLoopRow, MeetingLoopStatus,
 };
 use crate::meeting::people_types::PersonId;
+use crate::meeting::series_types::MeetingSeriesRemoteOptOutSetRequest;
 use crate::meeting::session::{MeetingSessionManager, NoCaptureSources};
 use crate::meeting::types::{
     ManualNote, ManualNoteId, MeetingCommandKind, MeetingOperationId, MeetingSessionId,
@@ -36,7 +37,10 @@ use crate::query::external::{
     ExternalLoopSide, ExternalLoopStatus, ExternalRequest, ExternalResponse,
     EXTERNAL_ACCESS_SETTING_PATH, EXTERNAL_MUTATIONS_SETTING_PATH,
 };
-use crate::query::{QueryEventsPage, QueryPageReason, QuerySearchPage, QUERY_SCHEMA_VERSION};
+use crate::query::{
+    assemble, events, QueryAudience, QueryEventsPage, QueryPageReason, QueryScope, QuerySearchPage,
+    SearchRequest, QUERY_SCHEMA_VERSION,
+};
 use crate::secrets::{MemorySecretBackend, SecretManager};
 use chrono::TimeZone;
 use clap::Parser;
@@ -1173,5 +1177,151 @@ fn an_external_loop_resolve_refuses_a_loop_that_was_carried_forward() {
             refusal.message
         );
         assert_eq!(loop_row(&meetings, &corpus.open_loop).await, carried);
+    });
+}
+
+/// D14 at the CLI and the MCP server: an agent's answers go to whatever model
+/// drives it, so a series kept on this Mac is absent from every read it can
+/// make and refused when named. The older meeting is outside the series and
+/// stays, so an empty page cannot pass for the exclusion; the app's own
+/// screens still see the kept meeting, so a search that finds nothing at all
+/// cannot either.
+#[test]
+fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
+    let corpus = corpus();
+    corpus
+        .store
+        .remember_calendar_facts(corpus.session_id, &series_event(NOW))
+        .unwrap();
+    corpus
+        .store
+        .set_series_remote_opt_out(
+            &MeetingSeriesRemoteOptOutSetRequest {
+                operation_id: MeetingOperationId::new(),
+                series_key: "weekly-pricing".to_string(),
+                remote_intelligence_opt_out: true,
+                expected_revision: 0,
+            },
+            NOW,
+        )
+        .unwrap();
+    let connection = corpus.store.connection().unwrap();
+    for session_id in [corpus.session_id, corpus.older_id] {
+        connection
+            .execute(
+                "INSERT INTO meeting_person_links (
+                    meeting_id, person_id, source, confidence, created_at_utc_ms
+                 ) VALUES (?1, ?2, 'calendar', 'confirmed', 1)",
+                params![
+                    session_id.uuid().to_string(),
+                    corpus.person_id.uuid().to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    // The kept series on both sides of the older meeting: every row a source
+    // reads first is kept, and none the reader may see follows the older one.
+    let mut kept = vec![corpus.session_id.uuid().to_string()];
+    for at_utc_ms in [NOW - 60 * 60 * 1_000, EARLIER - 24 * 60 * 60 * 1_000] {
+        let session_id = meeting(&corpus.store, TITLE, at_utc_ms);
+        corpus
+            .store
+            .remember_calendar_facts(session_id, &series_event(at_utc_ms))
+            .unwrap();
+        note(&corpus.store, session_id);
+        kept.push(session_id.uuid().to_string());
+    }
+    note(&corpus.store, corpus.older_id);
+    let shows_kept = |page: &serde_json::Value| {
+        let page = page.to_string();
+        kept.iter().any(|id| page.contains(id))
+    };
+
+    let page = meetings_page(&corpus.store, None, None, 1).unwrap();
+    assert_eq!(
+        page.entries.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![corpus.older_id.uuid()],
+        "a page the exclusion thinned reads on to the next meeting"
+    );
+    assert!(!page.has_more);
+
+    for refused in [
+        meeting_detail(&corpus.store, corpus.session_id).unwrap_err(),
+        transcript_of(&corpus.store, corpus.session_id).unwrap_err(),
+        loops_page(
+            &corpus.store,
+            None,
+            None,
+            Some(corpus.open_loop.as_str()),
+            25,
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(refused.error, ExternalErrorCode::NotFound);
+    }
+    let loops = loops_page(&corpus.store, None, None, None, 25).unwrap();
+    assert!(loops.entries.is_empty(), "{:?}", value(&loops));
+
+    let people = value(&people_page(&corpus.store, "Dana", 25).unwrap());
+    let dana = &people["entries"][0];
+    assert_eq!(dana["meetings_count"], json!(1), "{people}");
+    assert_eq!(dana["last_meeting_at_utc_ms"], json!(EARLIER));
+    assert_eq!(dana["last_meeting_title"], json!(OLDER_TITLE));
+    assert_eq!(dana["last_meeting_headline"], json!(null));
+    let stats = value(
+        &person_stats(
+            &corpus.store,
+            corpus.person_id,
+            chrono::Local.timestamp_millis_opt(NOW).unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(stats["meetings"]["confirmed"], json!(1));
+    assert_eq!(stats["last_met_utc_ms"], json!(EARLIER));
+
+    let search = |audience: QueryAudience, limit| {
+        let kept_local = audience.kept_local(&corpus.store).unwrap();
+        let page = assemble(
+            &corpus.store,
+            None,
+            Vec::new(),
+            SearchRequest {
+                scope: QueryScope::All,
+                query: "tier",
+                limit,
+                cursor: None,
+                kept_local: kept_local.as_ref(),
+            },
+        )
+        .unwrap();
+        value(&page)
+    };
+    assert!(shows_kept(&search(QueryAudience::Local, 25)));
+    assert!(!shows_kept(&search(QueryAudience::External, 25)));
+    let first = search(QueryAudience::External, 1);
+    assert_eq!(
+        first["entries"][0]["id"],
+        json!(corpus.older_id.uuid().to_string()),
+        "a search page the exclusion thinned still fills: {first}"
+    );
+
+    tauri::async_runtime::block_on(async {
+        let meetings = headless_manager(&corpus);
+        let stream = |audience| {
+            let meetings = Arc::clone(&meetings);
+            async move { value(&events(&meetings, audience, None, Some(100)).await.unwrap()) }
+        };
+        assert!(shows_kept(&stream(QueryAudience::Local).await));
+        assert!(!shows_kept(&stream(QueryAudience::External).await));
+
+        let refused = resolve_loop(&meetings, &corpus.open_loop)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.error, ExternalErrorCode::NotFound);
+        assert_eq!(
+            loop_row(&meetings, &corpus.open_loop).await.status,
+            MeetingLoopStatus::Open
+        );
     });
 }
