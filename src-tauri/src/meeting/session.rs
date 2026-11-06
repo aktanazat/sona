@@ -506,7 +506,9 @@ pub struct MeetingSessionManager {
     suggestions: MeetingSuggestionService,
     sources: Mutex<Arc<dyn MeetingSourceProvider>>,
     store: Mutex<Option<Arc<MeetingStore>>>,
-    recovery_complete: AtomicBool,
+    /// What the mount's recovery sweep moved into recovery, held until
+    /// startup takes it for the automatic reprocess pass.
+    recovered_at_mount: Mutex<Vec<RecoveredMeeting>>,
     /// UUID namespace for this launch's automatic recovery attempts. Drawn
     /// once per launch so an attempt's operation id is stable inside the
     /// launch — a second pass is deduplicated by the receipt the first one
@@ -630,7 +632,7 @@ impl MeetingSessionManager {
             suggestions: MeetingSuggestionService::new(Vec::new(), 120_000_000_000),
             sources: Mutex::new(source_provider),
             store: Mutex::new(None),
-            recovery_complete: AtomicBool::new(false),
+            recovered_at_mount: Mutex::new(Vec::new()),
             recovery_launch: Uuid::new_v4(),
             processing,
             capture_active: Arc::new(AtomicBool::new(false)),
@@ -683,18 +685,19 @@ impl MeetingSessionManager {
         self.recover_at_startup_at(utc_now_ms()).await
     }
 
+    /// The recovery sweep runs inside the mount, where it sees only what an
+    /// earlier launch left. This mounts the store if nothing has yet, sweeps
+    /// retention, and hands the meetings the sweep recovered to the automatic
+    /// reprocess pass, once.
     pub(crate) async fn recover_at_startup_at(
         &self,
         now_utc_ms: i64,
     ) -> Result<Vec<RecoveredMeeting>, MeetingCommandError> {
-        let store = self.store().await?;
-        let recovery = store.recover_interrupted().map_err(map_store_error)?;
-        self.announce_recovery(&store, &recovery)?;
+        self.store().await?;
         if let Err(error) = self.sweep_retention_at(now_utc_ms).await {
             log::warn!("Meeting retention sweep is unavailable at startup: {error:?}");
         }
-        self.recovery_complete.store(true, Ordering::Release);
-        Ok(recovery.recovered)
+        Ok(std::mem::take(&mut *self.recovered_at_mount_lock()))
     }
 
     /// One summary line per sweep, then one line per meeting the
@@ -4271,11 +4274,10 @@ impl MeetingSessionManager {
         Err(MeetingCommandError::RemoteUnavailable)
     }
 
-    /// Returns the startup-recovered cached store without opening another SQLCipher connection.
+    /// Returns the cached store without opening another SQLCipher connection.
+    /// The mount sweeps recovery before it caches anything, so a store this
+    /// returns is one recovery has already seen.
     pub(crate) async fn cloud_store(&self) -> Result<Arc<MeetingStore>, MeetingCommandError> {
-        if !self.recovery_complete.load(Ordering::Acquire) {
-            return Err(MeetingCommandError::StorageUnavailable);
-        }
         self.store_lock()
             .clone()
             .ok_or(MeetingCommandError::StorageUnavailable)
@@ -4310,6 +4312,12 @@ impl MeetingSessionManager {
     /// them with `StorageUnavailable` and makes Capture report that meeting
     /// storage is gone on a healthy install.
     ///
+    /// The recovery sweep runs under the same lock, before the store is
+    /// cached, so a mounted store is always a swept one: whatever is still
+    /// mid-flight in it was left by an earlier launch, and no command of this
+    /// launch reaches a meeting the sweep has not seen. A mount that fails
+    /// caches nothing, so the next call tries it again.
+    ///
     /// Crate-visible rather than module-visible because the query plane spans
     /// this store and dictation history and so cannot live under `meeting/`;
     /// it reads through this mount rather than opening a second connection to
@@ -4333,6 +4341,7 @@ impl MeetingSessionManager {
             return Ok(store);
         }
         let opened = MeetingStore::open(root, key).map_err(map_store_error)?;
+        let recovery = opened.recover_interrupted().map_err(map_store_error)?;
         // A lane's health moves from the track worker's thread, which has no
         // handle to the shell. The store tells this listener after each
         // verdict commits, and the live screen re-reads the session — which
@@ -4349,8 +4358,12 @@ impl MeetingSessionManager {
                 );
             });
         }
+        *self.recovered_at_mount_lock() = recovery.recovered.clone();
         let store = cached.insert(opened).clone();
         drop(cached);
+        if let Err(error) = self.announce_recovery(&store, &recovery) {
+            log::warn!("Meeting recovery could not refresh the open windows: {error:?}");
+        }
         super::workflow_engine::resume_pending_workflow_events(
             Arc::clone(&store),
             self.app.clone(),
@@ -4506,6 +4519,12 @@ impl MeetingSessionManager {
 
     fn store_lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<MeetingStore>>> {
         self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn recovered_at_mount_lock(&self) -> std::sync::MutexGuard<'_, Vec<RecoveredMeeting>> {
+        self.recovered_at_mount
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -6512,6 +6531,17 @@ pub(crate) mod tests {
         })
     }
 
+    /// The launch before this one, over the same store. What it leaves behind
+    /// is what this launch's first mount finds and sweeps.
+    fn earlier_launch(manager: &MeetingSessionManager) -> MeetingSessionManager {
+        MeetingSessionManager::with_parts(
+            None,
+            manager.root.clone(),
+            Arc::clone(&manager.secrets),
+            Arc::new(NoCaptureSources),
+        )
+    }
+
     /// Matrix 6: the whole point of the pass. A meeting interrupted after its
     /// stop is transcribed without being asked, through the same command a
     /// person's Retry uses, and the receipt says the app did it.
@@ -6522,7 +6552,7 @@ pub(crate) mod tests {
             .processing
             .set_transcript_engine(Arc::new(ReadyEngine));
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::Processing,
             ProcessingDestination::Local,
         );
@@ -6563,7 +6593,7 @@ pub(crate) mod tests {
     fn automatic_reprocessing_withholds_the_attempt_without_a_local_model() {
         let (_directory, manager, _backend) = mounted_manager();
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::Processing,
             ProcessingDestination::Local,
         );
@@ -6596,7 +6626,7 @@ pub(crate) mod tests {
             .processing
             .set_transcript_engine(Arc::new(ProbeOnlyEngine));
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::Processing,
             ProcessingDestination::Local,
         );
@@ -6637,7 +6667,7 @@ pub(crate) mod tests {
             .processing
             .set_transcript_engine(Arc::new(PanickingEngine));
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::Processing,
             ProcessingDestination::Local,
         );
@@ -6668,7 +6698,7 @@ pub(crate) mod tests {
             .processing
             .set_transcript_engine(Arc::new(ReadyEngine));
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::Processing,
             ProcessingDestination::Remote {
                 destination_id: "remote-1".to_string(),
@@ -6700,12 +6730,13 @@ pub(crate) mod tests {
         manager
             .processing
             .set_transcript_engine(Arc::new(ReadyEngine));
+        let earlier = earlier_launch(&manager);
         let session_id = interrupted_session(
-            &manager,
+            &earlier,
             MeetingPhase::Processing,
             ProcessingDestination::Local,
         );
-        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let store = tauri::async_runtime::block_on(earlier.store()).unwrap();
         // A track the interrupted launch registered and never wrote a byte for.
         store
             .create_track(TrackCreation {
@@ -6733,9 +6764,12 @@ pub(crate) mod tests {
                 },
             })
             .unwrap();
+        drop(store);
+        drop(earlier);
 
         let recovered = tauri::async_runtime::block_on(manager.recover_at_startup_at(0)).unwrap();
         let result = tauri::async_runtime::block_on(manager.reprocess_recovered(&recovered));
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
 
         assert!(store.has_missing_record_gap(session_id).unwrap());
         assert_eq!(result.attempted, 0);
@@ -6757,7 +6791,7 @@ pub(crate) mod tests {
             .processing
             .set_transcript_engine(Arc::new(ReadyEngine));
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::CapturingRecording,
             ProcessingDestination::Local,
         );
@@ -6826,7 +6860,7 @@ pub(crate) mod tests {
             .processing
             .set_transcript_engine(Arc::new(ProbeOnlyEngine));
         let session_id = interrupted_session(
-            &manager,
+            &earlier_launch(&manager),
             MeetingPhase::Processing,
             ProcessingDestination::Local,
         );
@@ -8870,6 +8904,58 @@ pub(crate) mod tests {
                 MeetingPhase::CapturingRecording
             );
             stopped.unwrap();
+        }
+
+        /// Startup recovery is for what an earlier launch left behind. Run
+        /// after this launch opened a gate and started a recording, it used
+        /// to delete the gate and move the live recording into recovery while
+        /// its lanes kept writing.
+        #[test]
+        fn recovery_after_this_launch_began_leaves_its_meetings_alone() {
+            let (_directory, manager, _starts, _aborts) = manager();
+            let gate = open_gate(&manager);
+            let live = recording(&manager);
+
+            let recovered = block_on(manager.recover_at_startup_at(0)).unwrap();
+            let gate_after = block_on(manager.store())
+                .unwrap()
+                .session_snapshot(gate.session_id);
+            let live_after = current(&manager, live);
+            let stopped = stop(&manager, live);
+
+            assert!(recovered.is_empty());
+            assert_eq!(
+                gate_after.expect("the gate is still there").phase,
+                MeetingPhase::Preflight
+            );
+            assert_eq!(live_after.phase, MeetingPhase::CapturingRecording);
+            stopped.unwrap();
+        }
+
+        /// A launch whose startup recovery could not open the store recovers
+        /// at the first mount that can. The later mount used to skip it:
+        /// meetings an earlier launch left read as processing all launch, and
+        /// cloud work stayed refused.
+        #[test]
+        fn a_mount_after_a_failed_startup_recovery_still_recovers() {
+            let (_directory, manager, _backend) = mounted_manager();
+            let interrupted = interrupted_session(
+                &earlier_launch(&manager),
+                MeetingPhase::Processing,
+                ProcessingDestination::Local,
+            );
+            manager.secrets.set_migration_pending(true);
+            let refused = block_on(manager.recover_at_startup());
+            manager.secrets.set_migration_pending(false);
+
+            let store = block_on(manager.store()).unwrap();
+
+            assert!(refused.is_err(), "no key while a migration is pending");
+            assert_eq!(
+                store.session_snapshot(interrupted).unwrap().phase,
+                MeetingPhase::RecoveryRequired
+            );
+            assert!(block_on(manager.cloud_store()).is_ok());
         }
     }
 }
