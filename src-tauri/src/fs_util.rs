@@ -18,11 +18,37 @@ pub(crate) fn copy_verified(source: &Path, destination: &Path) -> io::Result<Ver
     fs::create_dir_all(parent)?;
 
     let temporary = destination.with_extension("copying");
+    let copied = copy_to_temporary(source, &temporary)
+        .and_then(|copy| fs::rename(&temporary, destination).map(|()| copy));
+    let copy = match copied {
+        Ok(copy) => copy,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    if file_hash(destination)? != copy.sha256 {
+        let _ = fs::remove_file(destination);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "copy hash mismatch",
+        ));
+    }
+    Ok(copy)
+}
+
+/// The temporary name is fixed per destination, so one left by a copy that
+/// died part way belongs to an earlier attempt and is replaced.
+fn copy_to_temporary(source: &Path, temporary: &Path) -> io::Result<VerifiedCopy> {
     let mut input = File::open(source)?;
+    match fs::remove_file(temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&temporary)?;
+        .open(temporary)?;
     let mut source_hash = Sha256::new();
     let mut copied = 0_u64;
     let mut buffer = vec![0_u8; BUFFER_BYTES];
@@ -40,27 +66,15 @@ pub(crate) fn copy_verified(source: &Path, destination: &Path) -> io::Result<Ver
     drop(output);
 
     let source_len = fs::metadata(source)?.len();
-    if copied != source_len || fs::metadata(&temporary)?.len() != source_len {
-        let _ = fs::remove_file(&temporary);
+    if copied != source_len || fs::metadata(temporary)?.len() != source_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "copy size mismatch",
         ));
     }
-
-    let source_hash: [u8; 32] = source_hash.finalize().into();
-    fs::rename(&temporary, destination)?;
-    if file_hash(destination)? != source_hash {
-        let _ = fs::remove_file(destination);
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "copy hash mismatch",
-        ));
-    }
-
     Ok(VerifiedCopy {
         bytes: source_len,
-        sha256: source_hash,
+        sha256: source_hash.finalize().into(),
     })
 }
 

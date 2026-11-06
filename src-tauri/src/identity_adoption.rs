@@ -115,10 +115,26 @@ enum JournalStage {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlannedAction {
+    Renamed,
+    Copied,
+}
+
+impl From<PlannedAction> for IdentityAdoptionAction {
+    fn from(action: PlannedAction) -> Self {
+        match action {
+            PlannedAction::Renamed => Self::Renamed,
+            PlannedAction::Copied => Self::Copied,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct JournalEntry {
     path: String,
-    action: IdentityAdoptionAction,
+    action: PlannedAction,
     stage: JournalStage,
     bytes: u64,
     sha256: Option<String>,
@@ -364,22 +380,14 @@ fn adopt_paths(
         let source = paths.source_root.join(&journal.entries[index].path);
         let destination = paths.destination_root.join(&journal.entries[index].path);
         let expected = journal.entries[index].action;
-        match materialize_entry(&source, &destination, expected) {
-            Ok((action, bytes, sha256)) => {
-                journal.entries[index].action = action;
-                journal.entries[index].bytes = bytes;
-                journal.entries[index].sha256 = sha256;
-                journal.entries[index].stage = JournalStage::Acted;
-                write_journal(&journal_path, &journal)?;
-                journal.entries[index].stage = JournalStage::Done;
-                write_journal(&journal_path, &journal)?;
-            }
-            Err(error) => {
-                journal.entries[index].action = IdentityAdoptionAction::Failed;
-                let _ = write_journal(&journal_path, &journal);
-                return Err(error);
-            }
-        }
+        let (action, bytes, sha256) = materialize_entry(&source, &destination, expected)?;
+        journal.entries[index].action = action;
+        journal.entries[index].bytes = bytes;
+        journal.entries[index].sha256 = sha256;
+        journal.entries[index].stage = JournalStage::Acted;
+        write_journal(&journal_path, &journal)?;
+        journal.entries[index].stage = JournalStage::Done;
+        write_journal(&journal_path, &journal)?;
     }
 
     rewrite_factory_vocabulary(&paths.destination_root.join(SETTINGS_FILE))?;
@@ -401,7 +409,7 @@ fn adopt_paths(
             .iter()
             .map(|entry| IdentityAdoptionEntry {
                 path: entry.path.clone(),
-                action: entry.action,
+                action: entry.action.into(),
                 bytes: entry.bytes,
                 sha256: entry.sha256.clone(),
             })
@@ -440,7 +448,7 @@ fn planned_entries(paths: &AdoptionPaths) -> Result<Vec<JournalEntry>, IdentityA
         if paths.source_root.join(file).is_file() {
             entries.push(JournalEntry {
                 path: file.to_string(),
-                action: IdentityAdoptionAction::Copied,
+                action: PlannedAction::Copied,
                 stage: JournalStage::Intent,
                 bytes: 0,
                 sha256: None,
@@ -460,7 +468,7 @@ fn planned_entries(paths: &AdoptionPaths) -> Result<Vec<JournalEntry>, IdentityA
                     .join(child.file_name())
                     .to_string_lossy()
                     .into_owned(),
-                action: IdentityAdoptionAction::Renamed,
+                action: PlannedAction::Renamed,
                 stage: JournalStage::Intent,
                 bytes: 0,
                 sha256: None,
@@ -473,8 +481,8 @@ fn planned_entries(paths: &AdoptionPaths) -> Result<Vec<JournalEntry>, IdentityA
 fn materialize_entry(
     source: &Path,
     destination: &Path,
-    expected: IdentityAdoptionAction,
-) -> Result<(IdentityAdoptionAction, u64, Option<String>), IdentityAdoptionError> {
+    expected: PlannedAction,
+) -> Result<(PlannedAction, u64, Option<String>), IdentityAdoptionError> {
     let parent = destination
         .parent()
         .ok_or(IdentityAdoptionError::InvalidData)?;
@@ -485,7 +493,7 @@ fn materialize_entry(
             if !files_equal(source, destination).map_err(|_| IdentityAdoptionError::CopyFailed)? {
                 return Err(IdentityAdoptionError::DestinationConflict);
             }
-            if expected == IdentityAdoptionAction::Renamed {
+            if expected == PlannedAction::Renamed {
                 fs::remove_file(source).map_err(|_| IdentityAdoptionError::CopyFailed)?;
             }
             metadata_for(destination, expected)
@@ -494,7 +502,7 @@ fn materialize_entry(
             if !directories_equal(source, destination)? {
                 return Err(IdentityAdoptionError::DestinationConflict);
             }
-            if expected == IdentityAdoptionAction::Renamed {
+            if expected == PlannedAction::Renamed {
                 fs::remove_dir_all(source).map_err(|_| IdentityAdoptionError::CopyFailed)?;
             }
             metadata_for(destination, expected)
@@ -502,22 +510,19 @@ fn materialize_entry(
         (true, true) => Err(IdentityAdoptionError::DestinationConflict),
         (false, false) => Err(IdentityAdoptionError::InvalidData),
         (true, false) => match expected {
-            IdentityAdoptionAction::Copied => {
+            PlannedAction::Copied => {
                 copy_verified(source, destination)
                     .map_err(|_| IdentityAdoptionError::CopyFailed)?;
-                metadata_for(destination, IdentityAdoptionAction::Copied)
+                metadata_for(destination, PlannedAction::Copied)
             }
-            IdentityAdoptionAction::Renamed => match fs::rename(source, destination) {
-                Ok(()) => metadata_for(destination, IdentityAdoptionAction::Renamed),
+            PlannedAction::Renamed => match fs::rename(source, destination) {
+                Ok(()) => metadata_for(destination, PlannedAction::Renamed),
                 Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
                     copy_then_delete(source, destination)?;
-                    metadata_for(destination, IdentityAdoptionAction::Copied)
+                    metadata_for(destination, PlannedAction::Copied)
                 }
                 Err(_) => Err(IdentityAdoptionError::CopyFailed),
             },
-            IdentityAdoptionAction::Skipped | IdentityAdoptionAction::Failed => {
-                Err(IdentityAdoptionError::InvalidData)
-            }
         },
     }
 }
@@ -612,8 +617,8 @@ fn directories_equal(left: &Path, right: &Path) -> Result<bool, IdentityAdoption
 
 fn metadata_for(
     path: &Path,
-    action: IdentityAdoptionAction,
-) -> Result<(IdentityAdoptionAction, u64, Option<String>), IdentityAdoptionError> {
+    action: PlannedAction,
+) -> Result<(PlannedAction, u64, Option<String>), IdentityAdoptionError> {
     let metadata = fs::metadata(path).map_err(|_| IdentityAdoptionError::CopyFailed)?;
     if metadata.is_file() {
         return Ok((
@@ -1351,11 +1356,11 @@ mod tests {
         let result = materialize_entry(
             &paths.source_root.join("recordings/clip.wav"),
             &destination,
-            IdentityAdoptionAction::Renamed,
+            PlannedAction::Renamed,
         )
         .expect("resume moved entry");
 
-        assert_eq!(result.0, IdentityAdoptionAction::Renamed);
+        assert_eq!(result.0, PlannedAction::Renamed);
         assert_eq!(result.1, 5);
     }
 
@@ -1501,5 +1506,73 @@ mod tests {
         assert!(paths.destination_root.join(HISTORY_FILE).is_file());
         assert!(paths.destination_root.join("recordings/clip.wav").is_file());
         assert!(!paths.source_root.join("recordings/clip.wav").exists());
+    }
+
+    /// A copy that failed once, here because the file could not be read, must
+    /// run again on the next launch instead of failing there for good.
+    #[test]
+    fn a_move_that_failed_runs_its_plan_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, paths) = test_paths("retry");
+        let settings = paths.source_root.join(SETTINGS_FILE);
+        fs::write(&settings, b"{}").expect("settings");
+        fs::write(paths.source_root.join(HISTORY_FILE), b"history").expect("history");
+        let (source, destination, _, _) = test_managers();
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o000)).expect("lock settings");
+
+        let failed = adopt_paths(
+            &paths,
+            false,
+            &mut move_data,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        );
+        assert_eq!(failed, Err(IdentityAdoptionError::CopyFailed));
+
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).expect("unlock settings");
+        let retried = adopt_paths(
+            &paths,
+            false,
+            &mut move_data,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        )
+        .expect("the retry runs the same plan");
+        assert_eq!(retried.mode, IdentityAdoptionMode::Completed);
+        assert!(paths.destination_root.join(HISTORY_FILE).is_file());
+    }
+
+    /// A copy that died part way leaves its temporary file behind. The next
+    /// attempt replaces it instead of failing on it.
+    #[test]
+    fn a_leftover_copy_temporary_does_not_block_the_move() {
+        let (_root, paths) = test_paths("leftover");
+        fs::write(paths.source_root.join(SETTINGS_FILE), b"{}").expect("settings");
+        fs::create_dir_all(&paths.destination_root).expect("destination");
+        let leftover = paths.destination_root.join("settings_store.copying");
+        fs::write(&leftover, b"{\"partial").expect("leftover");
+        let (source, destination, _, _) = test_managers();
+
+        let adopted = adopt_paths(
+            &paths,
+            false,
+            &mut move_data,
+            &closed,
+            &source,
+            &destination,
+            |_| {},
+        )
+        .expect("adoption");
+
+        assert_eq!(adopted.mode, IdentityAdoptionMode::Completed);
+        assert_eq!(
+            fs::read(paths.destination_root.join(SETTINGS_FILE)).expect("settings copy"),
+            b"{}"
+        );
+        assert!(!leftover.exists());
     }
 }
