@@ -1015,6 +1015,68 @@ mod tests {
         }
     }
 
+    /// Reads each part as a part too dense for one reply is read, and fails
+    /// the reply that joins the parts.
+    struct CannotJoinParts;
+
+    impl MeetingTextGenerator for CannotJoinParts {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "cannot-join-parts"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            6_000
+        }
+        fn generate(
+            &self,
+            instructions: &str,
+            pack: &str,
+            max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let input: Value = serde_json::from_str(pack).expect("bounded input");
+            if input.get("part_headlines").is_some() {
+                return Err(MeetingTextGenerationError::TimedOut);
+            }
+            FailsWhenDense(|_| Err(MeetingTextGenerationError::ReplyNotStructured)).generate(
+                instructions,
+                pack,
+                max_tokens,
+                shape,
+            )
+        }
+    }
+
+    #[test]
+    fn a_ledger_whose_parts_cannot_be_joined_keeps_every_part() {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(4);
+        let haystack =
+            ledger::fold_haystack(evidence.transcript.iter().map(|turn| turn.text.as_str()));
+        let ledger = ledger(
+            &CannotJoinParts,
+            &evidence,
+            &HashMap::new(),
+            &haystack,
+            || Ok(()),
+        )
+        .unwrap_or_else(|error| panic!("{error:?}"));
+        let cited: Vec<String> = ledger
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.receipt.citations)
+            .map(|citation| citation.segment_id.uuid().to_string())
+            .collect();
+        assert_eq!(cited, source_ids(&evidence));
+        assert_eq!(ledger.headline, "The meeting was read.");
+        assert_eq!(ledger.caveats, [PARTS_NOT_JOINED]);
+    }
+
     #[test]
     fn a_notes_row_names_its_speaker_and_not_its_meeting() {
         let mut evidence = evidence();
