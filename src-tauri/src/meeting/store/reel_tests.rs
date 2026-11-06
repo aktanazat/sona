@@ -229,7 +229,7 @@ fn a_person_reel_plays_oldest_first_across_meetings() {
     link(&store, later, ada, "calendar", "confirmed");
     link(&store, earlier, ada, "calendar", "confirmed");
 
-    let reel = store.conversation_reel_for_person(ada).unwrap();
+    let reel = store.conversation_reel_for_person(ada, None).unwrap();
 
     assert_eq!(
         order(&reel),
@@ -267,7 +267,7 @@ fn a_speaker_nobody_confirmed_is_never_named() {
     );
     link(&store, session_id, ada, "speaker", "confirmed");
 
-    let reel = store.conversation_reel_for_person(ada).unwrap();
+    let reel = store.conversation_reel_for_person(ada, None).unwrap();
 
     assert_eq!(reel.moments.len(), 2, "{reel:?}");
     assert_eq!(
@@ -338,7 +338,7 @@ fn a_moment_whose_audio_is_gone_stays_listed_and_is_marked() {
     link(&store, gone, ada, "calendar", "confirmed");
     link(&store, kept, ada, "calendar", "confirmed");
 
-    let reel = store.conversation_reel_for_person(ada).unwrap();
+    let reel = store.conversation_reel_for_person(ada, None).unwrap();
 
     let audio: Vec<_> = reel
         .moments
@@ -396,10 +396,10 @@ fn a_promise_reel_follows_it_from_meeting_to_meeting() {
     };
 
     let from_latest = store
-        .conversation_reel_for_loop(&promise_in(second))
+        .conversation_reel_for_loop(&promise_in(second), None)
         .unwrap();
     let from_first = store
-        .conversation_reel_for_loop(&promise_in(first))
+        .conversation_reel_for_loop(&promise_in(first), None)
         .unwrap();
 
     assert_eq!(order(&from_latest), vec![(first, 0), (second, TURN_NS)]);

@@ -519,10 +519,13 @@ pub async fn meeting_said_search(
     limit: Option<usize>,
 ) -> Result<Vec<SaidMoment>, MeetingCommandError> {
     let store = manager.store().await?;
-    tauri::async_runtime::spawn_blocking(move || store.said_search(&query, limit.unwrap_or(4)))
-        .await
-        .map_err(|_| MeetingCommandError::StorageUnavailable)?
-        .map_err(map_store_error)
+    let user_name = manager.user_name();
+    tauri::async_runtime::spawn_blocking(move || {
+        store.said_search(&query, limit.unwrap_or(4), user_name.as_deref())
+    })
+    .await
+    .map_err(|_| MeetingCommandError::StorageUnavailable)?
+    .map_err(map_store_error)
 }
 
 #[tauri::command]

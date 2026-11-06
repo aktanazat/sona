@@ -61,10 +61,13 @@ pub async fn conversation_reel_for_person(
     person_id: PersonId,
 ) -> Result<ConversationReel, MeetingCommandError> {
     let store = manager.store().await?;
-    tauri::async_runtime::spawn_blocking(move || store.conversation_reel_for_person(person_id))
-        .await
-        .map_err(|_| MeetingCommandError::StorageUnavailable)?
-        .map_err(map_store_error)
+    let user_name = manager.user_name();
+    tauri::async_runtime::spawn_blocking(move || {
+        store.conversation_reel_for_person(person_id, user_name.as_deref())
+    })
+    .await
+    .map_err(|_| MeetingCommandError::StorageUnavailable)?
+    .map_err(map_store_error)
 }
 
 #[tauri::command]
@@ -74,10 +77,13 @@ pub async fn conversation_reel_for_loop(
     loop_id: MeetingLoopId,
 ) -> Result<ConversationReel, MeetingCommandError> {
     let store = manager.store().await?;
-    tauri::async_runtime::spawn_blocking(move || store.conversation_reel_for_loop(&loop_id))
-        .await
-        .map_err(|_| MeetingCommandError::StorageUnavailable)?
-        .map_err(map_store_error)
+    let user_name = manager.user_name();
+    tauri::async_runtime::spawn_blocking(move || {
+        store.conversation_reel_for_loop(&loop_id, user_name.as_deref())
+    })
+    .await
+    .map_err(|_| MeetingCommandError::StorageUnavailable)?
+    .map_err(map_store_error)
 }
 
 #[tauri::command]
