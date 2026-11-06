@@ -5,13 +5,13 @@ use crate::secrets::{
 };
 use crate::settings::{
     self, decode_settings_backup, decode_upstream_import_settings, get_settings,
-    merge_upstream_import_settings, SettingsDocument,
+    merge_upstream_import_settings, SettingsDocument, ShortcutBinding,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 #[cfg(test)]
@@ -285,32 +285,54 @@ pub fn get_upstream_import_status(
 #[specta::specta]
 pub fn revert_upstream_import_settings(app: AppHandle) -> Result<(), UpstreamImportError> {
     let (receipt_path, settings_backup) = local_import_paths(&app)?;
-    let mut receipt =
-        read_receipt(&receipt_path).ok_or(UpstreamImportError::SettingsNotImported)?;
-    if !receipt.settings_imported {
-        return Err(UpstreamImportError::SettingsNotImported);
-    }
-    let (_, backup_settings) = read_settings_backup(&settings_backup)?;
-
-    let (snapshot, previous_bindings, current_bindings) =
-        settings::try_update_settings(&app, |target| {
-            let snapshot = crate::modes::mode_settings_snapshot(&backup_settings);
-            let previous_bindings = target.bindings.clone();
-            let current_bindings = backup_settings.bindings.clone();
-            *target = backup_settings;
-            receipt.settings_imported = false;
-            receipt.settings_backup_path = None;
-            receipt.settings_backup_saved_at_ms = None;
-            write_receipt(&receipt_path, &receipt)?;
-            Ok::<_, UpstreamImportError>((snapshot, previous_bindings, current_bindings))
-        })?;
-
+    let ((snapshot, previous_bindings, current_bindings), settled) =
+        revert_settings_import(&app, &receipt_path, &settings_backup)?;
     crate::shortcut::reconcile_mode_shortcuts(&app, &previous_bindings, &current_bindings);
     crate::modes::emit_modes_changed(&app, &snapshot);
+    settled?;
     if let Err(error) = fs::remove_file(&settings_backup) {
         log::warn!("Failed to remove reverted settings backup: {error}");
     }
     Ok(())
+}
+
+/// What the running app follows after the settings are replaced: the modes to
+/// announce, and the shortcut bindings before and after.
+type ReplacedSettings = (
+    crate::modes::ModeSettingsSnapshot,
+    HashMap<String, ShortcutBinding>,
+    HashMap<String, ShortcutBinding>,
+);
+
+/// Puts back the settings from before the import, beside whether the revert
+/// reached the disk. The receipt stops saying "imported" only after the
+/// settings are saved: until then the backup is the only copy of them, and an
+/// import that saw no earlier import would overwrite it.
+fn revert_settings_import<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    receipt_path: &Path,
+    settings_backup: &Path,
+) -> Result<(ReplacedSettings, Result<(), UpstreamImportError>), UpstreamImportError> {
+    let mut receipt = read_receipt(receipt_path).ok_or(UpstreamImportError::SettingsNotImported)?;
+    if !receipt.settings_imported {
+        return Err(UpstreamImportError::SettingsNotImported);
+    }
+    let (_, backup_settings) = read_settings_backup(settings_backup)?;
+
+    let (replaced, persisted) = settings::try_update_settings_committed(app, |target| {
+        let snapshot = crate::modes::mode_settings_snapshot(&backup_settings);
+        let previous_bindings = target.bindings.clone();
+        let current_bindings = backup_settings.bindings.clone();
+        *target = backup_settings;
+        Ok::<_, UpstreamImportError>((snapshot, previous_bindings, current_bindings))
+    })?;
+    let settled = persisted.map_err(UpstreamImportError::from).and_then(|()| {
+        receipt.settings_imported = false;
+        receipt.settings_backup_path = None;
+        receipt.settings_backup_saved_at_ms = None;
+        write_receipt(receipt_path, &receipt)
+    });
+    Ok((replaced, settled))
 }
 
 #[tauri::command]
@@ -1204,6 +1226,51 @@ mod tests {
             [Some(true), Some(true)],
             "imported rows are found before their recordings are copied again"
         );
+        Ok(())
+    }
+
+    /// Undo wrote "not imported" before the settings were saved. When the
+    /// save failed, the disk kept the imported settings while the Undo row
+    /// went away, and the next import overwrote the backup: the only copy of
+    /// the settings from before.
+    #[test]
+    fn a_revert_that_was_not_saved_keeps_its_undo() -> Result<(), Box<dyn Error>> {
+        let root = temp_root("revert-unsaved")?;
+        let paths = import_paths_in(&root);
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = root.join("data").to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)?;
+        let handle = app.handle();
+        settings::update_settings(handle, |imported| imported.history_limit = 5000)?;
+        write_settings_backup(
+            &paths.settings_backup,
+            &crate::settings::get_default_settings(),
+            42,
+        )?;
+        let receipt = ImportReceipt {
+            settings_imported: true,
+            settings_backup_saved_at_ms: Some(42),
+            ..ImportReceipt::default()
+        };
+        write_receipt(&paths.receipt, &receipt)?;
+        let settings_file = root.join("data").join(crate::settings::SETTINGS_STORE_PATH);
+        let mut blocked = settings_file.clone().into_os_string();
+        blocked.push(format!(".{}.tmp", std::process::id()));
+        fs::create_dir(&blocked)?;
+
+        let (_, settled) = revert_settings_import(handle, &paths.receipt, &paths.settings_backup)?;
+
+        assert!(settled.is_err(), "the settings were not saved");
+        let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&settings_file)?)?;
+        assert_eq!(on_disk["settings"]["history_limit"], 5000);
+        assert!(
+            status_for_paths(&paths)?.settings_backup_available,
+            "Undo is still offered while the imported settings are on disk"
+        );
+        drop(app);
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }
