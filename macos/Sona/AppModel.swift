@@ -141,15 +141,24 @@ struct DictationDeliveryEvent: Decodable {
     let outcome: DictationDeliveryOutcome
 }
 
+/// `dictation-kept`: a cancel kept the recording as a Library entry instead
+/// of throwing it away.
+struct DictationKeptEvent: Decodable {
+    let historyId: Int64
+    let durationMs: UInt64
+}
+
 enum PillFeedback: Equatable {
     case delivered(DictationDeliveryOutcome)
     case failed
+    case kept
 
     var label: String {
         switch self {
         case .delivered(.pasted): "Pasted"
         case .delivered(.sent): "Sent"
         case .failed: "Couldn't paste"
+        case .kept: "Recording kept"
         }
     }
 
@@ -158,6 +167,15 @@ enum PillFeedback: Equatable {
         case .delivered(.pasted): "checkmark"
         case .delivered(.sent): "arrow.up.right"
         case .failed: "exclamationmark"
+        case .kept: "tray.and.arrow.down"
+        }
+    }
+
+    /// How long the pill holds it. A line that needs reading stays longer.
+    var holdMilliseconds: Int {
+        switch self {
+        case .delivered: 900
+        case .failed, .kept: 2200
         }
     }
 }
@@ -181,6 +199,9 @@ extension CoreEvent {
     static let commandAnswered = "command-mode://answered"
     static let showMainWindow = "show-main-window"
     static let dictationDelivery = "dictation-delivery"
+    static let dictationKept = "dictation-kept"
+    /// Sent once per dictation when it reaches three minutes.
+    static let dictationMeetingSuggestion = "dictation-meeting-suggestion"
 }
 
 /// Everything the windows share. One instance, on the main actor, handed to
@@ -239,6 +260,12 @@ final class AppModel {
     /// if it has to.
     private(set) var pillWarningSeconds: Int?
     private(set) var pillFeedback: PillFeedback?
+    /// The dictation has run long enough that meeting mode would suit it,
+    /// until the recording ends.
+    private(set) var meetingSuggested = false
+    /// The pill's meeting button was pressed: the meeting start opens once the
+    /// dictation has been delivered, so the words still reach the app it was for.
+    private var meetingAfterCapture = false
     // The panel fades after capture ends; its content changes only on the next show.
     private(set) var pillPresentation = PillPresentation(capture: .idle, feedback: nil)
     /// Bumped when the pill's hour away is over, so the pill is placed again.
@@ -345,9 +372,11 @@ final class AppModel {
             CoreEvent.transcriptionError, CoreEvent.settingsChanged, CoreEvent.modesChanged,
             CoreEvent.meetingNavigationRequested, CoreEvent.dictationDurationWarning,
             CoreEvent.commandAnswered, CoreEvent.showMainWindow, CoreEvent.dictationDelivery,
+            CoreEvent.dictationKept, CoreEvent.dictationMeetingSuggestion,
         ] {
             core.observe(name) { [weak self] line in self?.handle(name, line) }
         }
+        library.recovered = { [weak self] ids in self?.announceRecovered(ids) }
         query.onLink = { [weak self] target in self?.open(target) }
         imports.jobCompleted = { [weak self] _ in
             Task { await self?.library.start() }
@@ -633,6 +662,20 @@ final class AppModel {
         clearPillFeedback()
     }
 
+    /// The long dictation ends as any other, transcribed and delivered, and the
+    /// meeting start opens for what comes next.
+    func finishIntoMeeting() {
+        meetingSuggested = false
+        call {
+            try await self.core.request("finish_recording")
+            if case .idle = self.capture {
+                self.recordMeeting()
+            } else {
+                self.meetingAfterCapture = true
+            }
+        }
+    }
+
     func dismissNotice() {
         notice = nil
     }
@@ -643,16 +686,31 @@ final class AppModel {
             clearPillFeedback()
             meter.start()
         } else {
+            meetingSuggested = false
             meter.stop()
         }
         if case .idle = state {
             dismissPillFeedbackAfterDelay()
+            if meetingAfterCapture {
+                meetingAfterCapture = false
+                recordMeeting()
+            }
         }
+    }
+
+    /// The recordings the core recovered from a dictation that never
+    /// finished, in one notice that opens the newest.
+    private func announceRecovered(_ ids: [Int64]) {
+        let text = ids.count == 1
+            ? "A dictation didn't finish last time. The recording is kept in the Library."
+            : "\(ids.count) dictations didn't finish last time. The recordings are kept in the Library."
+        notice = CaptureNotice(text: text, dictation: ids.max())
     }
 
     private func showPillFeedback(_ feedback: PillFeedback) {
         guard settings.settings.overlayStyle != .none else { return }
-        if case .recording = capture { return }
+        // A kept recording is announced as its cancel ends the recording.
+        if case .recording = capture, feedback != .kept { return }
         feedbackDismissal?.cancel()
         feedbackDismissal = nil
         pillFeedback = feedback
@@ -665,7 +723,7 @@ final class AppModel {
         guard let feedback = pillFeedback else { return }
         feedbackDismissal?.cancel()
         feedbackDismissal = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(feedback == .failed ? 2200 : 900))
+            try? await Task.sleep(for: .milliseconds(feedback.holdMilliseconds))
             guard !Task.isCancelled else { return }
             self?.pillFeedback = nil
             self?.feedbackDismissal = nil
@@ -790,6 +848,7 @@ final class AppModel {
         Task { await about.start() }
         Task { await debug.start() }
         Task { await self.loadModels() }
+        Task { await library.coreStarted() }
         call { try await self.loadPill() }
     }
 
@@ -1127,6 +1186,15 @@ final class AppModel {
             case CoreEvent.dictationDelivery:
                 let event: DictationDeliveryEvent = try Core.payload(line)
                 showPillFeedback(.delivered(event.outcome))
+            case CoreEvent.dictationKept:
+                let event: DictationKeptEvent = try Core.payload(line)
+                let length = LibraryClock.milliseconds(Int64(clamping: event.durationMs))
+                notice = CaptureNotice(
+                    text: "Cancelled. The \(length) recording is kept in the Library for 14 days.",
+                    dictation: event.historyId)
+                showPillFeedback(.kept)
+            case CoreEvent.dictationMeetingSuggestion:
+                if case .recording = capture { meetingSuggested = true }
             default:
                 break
             }

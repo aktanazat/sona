@@ -1,5 +1,6 @@
 use std::{
     io::Error,
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         mpsc, Arc, Mutex, MutexGuard,
@@ -13,7 +14,7 @@ use cpal::{
 };
 
 use crate::audio_toolkit::{
-    audio::{AudioVisualiser, FrameResampler},
+    audio::{spool::SpoolWriter, AudioVisualiser, FrameResampler},
     constants,
     vad::{self, VadFrame},
     VoiceActivityDetector,
@@ -243,6 +244,8 @@ enum Cmd {
     /// sent only after the first microphone samples are processed.
     Start(VadPolicy, Instant, mpsc::Sender<()>, bool),
     Stop(mpsc::Sender<Result<RecordedAudio, CaptureError>>),
+    /// The file the next `Start` writes its whole 16 kHz capture to.
+    Spool(SpoolWriter),
     StartMeeting {
         plan: SourceStartPlan,
         anchor: SessionClockAnchor,
@@ -864,6 +867,35 @@ impl AudioRecorder {
         vad_policy: VadPolicy,
     ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
         self.start_capture(vad_policy, true)
+    }
+
+    /// [`Self::start`] for a dictation that also writes every 16 kHz sample,
+    /// before voice-activity filtering, to a new WAV file at `spool`. A spool
+    /// that cannot be created leaves the recording without one.
+    pub fn start_spooled(
+        &self,
+        vad_policy: VadPolicy,
+        spool: &Path,
+    ) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
+        let tx = self
+            .cmd_tx
+            .as_ref()
+            .ok_or_else(|| Error::other("Recorder is not open"))?;
+        match SpoolWriter::create(spool) {
+            Ok(writer) => tx.send(Cmd::Spool(writer)).map_err(|_| {
+                let _ = std::fs::remove_file(spool);
+                Error::other("Recorder is not open")
+            })?,
+            Err(error) => log::error!(
+                "Recording without a spool; {} could not be created: {error}",
+                spool.display()
+            ),
+        }
+        let started = self.start(vad_policy);
+        if started.is_err() {
+            let _ = std::fs::remove_file(spool);
+        }
+        started
     }
 
     pub(crate) fn start_practice(&self) -> Result<mpsc::Receiver<()>, Box<dyn std::error::Error>> {
@@ -1700,6 +1732,10 @@ fn run_consumer(inputs: ConsumerInputs) {
     let mut recording = false;
     let mut vad_policy = VadPolicy::Offline;
     let mut session_audio_cb = audio_cb.clone();
+    // The spool the next Start takes, and the one the dictation in progress
+    // writes.
+    let mut next_spool: Option<SpoolWriter> = None;
+    let mut spool: Option<SpoolWriter> = None;
 
     // ---------- latency instrumentation ---------------------------------- //
     // First arrival exposes the play()->samples-flowing gap; the first-captured
@@ -1749,6 +1785,7 @@ fn run_consumer(inputs: ConsumerInputs) {
         audio_cb: &Option<AudioFrameCallback>,
         out_buf: &mut Vec<f32>,
         silence_until_speech: &mut Option<Vec<f32>>,
+        spool: &mut Option<SpoolWriter>,
     ) {
         fn emit_frame(
             samples: &[f32],
@@ -1781,6 +1818,10 @@ fn run_consumer(inputs: ConsumerInputs) {
             samples
         };
 
+        if let Some(spool) = spool {
+            spool.write(samples);
+        }
+
         if vad_policy == VadPolicy::Disabled {
             emit_frame(samples, audio_cb, out_buf, silence_until_speech);
             return;
@@ -1811,6 +1852,7 @@ fn run_consumer(inputs: ConsumerInputs) {
         frame_resampler: &mut FrameResampler,
         out_buf: &mut Vec<f32>,
         silence_until_speech: &mut Option<Vec<f32>>,
+        spool: &mut Option<SpoolWriter>,
     ) {
         frame_resampler.push(chunk, &mut |frame: &[f32]| {
             handle_frame(
@@ -1820,6 +1862,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                 audio_cb,
                 out_buf,
                 silence_until_speech,
+                spool,
             )
         });
     }
@@ -1836,6 +1879,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                 &mut frame_resampler,
                 &mut processed_samples,
                 &mut silence_until_speech,
+                &mut spool,
             )
         };
     }
@@ -1901,6 +1945,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                         None
                     };
                     processed_samples.clear();
+                    spool = next_spool.take();
                     silence_until_speech = (policy != VadPolicy::Disabled).then(Vec::new);
                     recording = true;
                     visualizer.reset();
@@ -1974,8 +2019,12 @@ fn run_consumer(inputs: ConsumerInputs) {
                             &session_audio_cb,
                             &mut processed_samples,
                             &mut silence_until_speech,
+                            &mut spool,
                         )
                     });
+                    if let Some(spool) = spool.take() {
+                        spool.finish();
+                    }
 
                     log::debug!(
                         "capture lane peak occupancy {} of {} samples",
@@ -2227,6 +2276,7 @@ fn run_consumer(inputs: ConsumerInputs) {
                     };
                     let _ = reply.send(result);
                 }
+                Cmd::Spool(writer) => next_spool = Some(writer),
                 Cmd::Shutdown => {
                     lane.request_stop();
                     return;

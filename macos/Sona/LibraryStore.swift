@@ -56,6 +56,16 @@ final class LibraryStore {
     /// The row that was copied in the last two seconds.
     private(set) var copied: Int64?
 
+    // MARK: Kept recordings
+
+    /// Recordings that never reached words, newest first: a cancel of ten
+    /// seconds or more, or a recording that never finished. The feed
+    /// leaves these out of its empty recordings so none shows twice.
+    private(set) var kept: [KeptDictation] = []
+    /// Called with the ids the core recovered at its start, the first time
+    /// a read after that start answers.
+    @ObservationIgnored var recovered: ([Int64]) -> Void = { _ in }
+
     // MARK: Totals and trend
 
     private(set) var stats: HistoryStats?
@@ -106,10 +116,18 @@ final class LibraryStore {
     @ObservationIgnored private var copiedTask: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var player: AVAudioPlayer?
+    @ObservationIgnored private var keptRequest = 0
+    @ObservationIgnored private var recoveryPending = false
 
     init(core: Core) {
         self.core = core
-        core.observe(CoreEvent.historyUpdate) { [weak self] line in self?.applyHistory(line) }
+        core.observe(CoreEvent.historyUpdate) { [weak self] line in
+            self?.applyHistory(line)
+            Task { await self?.loadKept() }
+        }
+        core.observe(CoreEvent.dictationKept) { [weak self] _ in
+            Task { await self?.loadKept() }
+        }
         // The startup unlock. A read the core refused while the database was
         // still locked is asked again here, once storage says what it is.
         core.observe(CoreEvent.historyStorage) { [weak self] line in
@@ -118,6 +136,7 @@ final class LibraryStore {
             if self.phase == .error { self.reload() }
             Task { await self.refreshStats() }
             Task { await self.loadTrend() }
+            Task { await self.loadKept() }
         }
         core.observe(CoreEvent.librarySettingsChanged) { [weak self] _ in
             Task { await self?.loadSettings() }
@@ -132,7 +151,8 @@ final class LibraryStore {
         async let settings: Void = loadSettings()
         async let storageState: Void = loadStorage()
         async let activity: Void = loadTrend()
-        _ = await (page, totals, settings, storageState, activity)
+        async let keptRecordings: Void = loadKept()
+        _ = await (page, totals, settings, storageState, activity, keptRecordings)
     }
 
     // MARK: - Reading the log
@@ -224,7 +244,32 @@ final class LibraryStore {
                 id: day,
                 heading: day.relativeDay,
                 spoken: items.filter { !$0.silent },
-                silent: items.filter(\.silent))
+                silent: items.filter { $0.silent && !keptIds.contains($0.id) })
+        }
+    }
+
+    // MARK: - Kept recordings
+
+    /// A new core. Its recovery runs once storage unlocks, so a read may
+    /// answer before it; the first read that names recovered ids is told to
+    /// the shell, once.
+    func coreStarted() async {
+        recoveryPending = true
+        await loadKept()
+    }
+
+    /// The kept recordings, read again. Only the newest read writes; a read
+    /// that fails keeps the list on screen, and the core logs the cause.
+    func loadKept() async {
+        keptRequest += 1
+        let request = keptRequest
+        guard let answer: KeptDictations = try? await core.request("get_kept_dictations"),
+              request == keptRequest else { return }
+        kept = answer.entries
+        rebuildDays()
+        if recoveryPending, !answer.recoveredThisLaunch.isEmpty {
+            recoveryPending = false
+            recovered(answer.recoveredThisLaunch)
         }
     }
 
@@ -354,8 +399,9 @@ final class LibraryStore {
     /// read from the top, and read on until the page holding the row lands.
     /// A dictation just kept is on the first page; one reached from a search
     /// result or a notice may be pages down, and ids fall as the pages do, so
-    /// the read stops the moment a page ends past it. `revealed` ticks when
-    /// the row is on screen, so the feed can scroll to it.
+    /// the read stops the moment a page ends past it. A kept recording is
+    /// in its own list, which is read instead. `revealed` ticks when the row
+    /// is on screen, so the feed can scroll to it.
     func reveal(_ id: Int64) {
         searchTask?.cancel()
         query = ""
@@ -363,6 +409,11 @@ final class LibraryStore {
         expanded = id
         Task {
             await fetchPage(cursor: nil)
+            if !keptIds.contains(id) { await loadKept() }
+            if keptIds.contains(id) {
+                if expanded == id { revealed += 1 }
+                return
+            }
             while phase == .ready, hasMore, let last = rows.last, last.id > id, expanded == id {
                 await fetchPage(cursor: last.id)
             }
@@ -371,6 +422,8 @@ final class LibraryStore {
             }
         }
     }
+
+    private var keptIds: Set<Int64> { Set(kept.map(\.id)) }
 
     func toggleSaved(_ id: Int64) {
         call { [self] in

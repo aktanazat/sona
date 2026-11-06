@@ -2477,6 +2477,9 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "get_kept_dictations" => {
+            reply(crate::commands::history::get_kept_dictations(app.state()).await)
+        }
         "get_history_run_receipts" => {
             let mut args = Args::parse(params)?;
             let history_id = args.take("historyId")?;

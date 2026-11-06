@@ -118,6 +118,7 @@ core=/Applications/Sona.app/Contents/Helpers/SonaCore.app/Contents/MacOS/sona-co
 "$core" --list-models --json
 "$core" --list-devices
 "$core" --transcribe-file recording.wav --repeat 3 --json
+"$core" --transcribe-file recording.wav --diagnose
 "$core" --meetings --last 5
 "$core" --loops --status open
 

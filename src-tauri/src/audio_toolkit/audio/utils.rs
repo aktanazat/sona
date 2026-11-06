@@ -4,7 +4,7 @@ use log::debug;
 use rustfft::num_traits::ToPrimitive;
 use std::path::Path;
 
-fn wav_sample_to_i16(sample: f32) -> i16 {
+pub(super) fn wav_sample_to_i16(sample: f32) -> i16 {
     let scaled = sample * f32::from(i16::MAX);
     match scaled.to_i16() {
         Some(sample) => sample,

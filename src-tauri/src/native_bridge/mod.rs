@@ -29,16 +29,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tauri::{AppHandle, Listener, Manager};
 
-use crate::actions::DICTATION_DELIVERY_EVENT;
+use crate::actions::{DICTATION_DELIVERY_EVENT, DICTATION_KEPT_EVENT};
 use crate::managers::history::HISTORY_STORAGE_EVENT;
 use crate::managers::media_import::MediaImportManager;
+use crate::transcription_coordinator::DICTATION_MEETING_SUGGESTION_EVENT;
 use crate::tray::DICTATION_ACTIVITY_EVENT;
 
 /// The events the managers emit by string name rather than through a specta
 /// type. The typed ones are listed in [`dispatch::TYPED_EVENTS`].
-const NAMED_EVENTS: [&str; 28] = [
+const NAMED_EVENTS: [&str; 30] = [
     DICTATION_ACTIVITY_EVENT,
     DICTATION_DELIVERY_EVENT,
+    DICTATION_KEPT_EVENT,
+    DICTATION_MEETING_SUGGESTION_EVENT,
     HISTORY_STORAGE_EVENT,
     "handy-keys-event",
     "hide-overlay",

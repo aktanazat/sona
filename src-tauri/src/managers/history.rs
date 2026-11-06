@@ -1,7 +1,7 @@
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest, LocalCalendarRange};
 use crate::context::ContextReceipt;
 use crate::delivery::{DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
-use crate::modes::ModeReceipt;
+use crate::modes::{ModeReceipt, RunPlan};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use log::{debug, error, info, warn};
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_specta::Event;
 
@@ -358,6 +358,10 @@ pub enum CaptureStatus {
     Complete,
     Truncated,
     NoSpeechDetected,
+    /// Cancelled with enough audio to keep, before any words were read.
+    Cancelled,
+    /// Left on disk by a launch that ended mid-dictation, kept by the next.
+    Interrupted,
 }
 
 impl CaptureStatus {
@@ -366,6 +370,8 @@ impl CaptureStatus {
             Self::Complete => "complete",
             Self::Truncated => "truncated",
             Self::NoSpeechDetected => "no_speech_detected",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
         }
     }
 
@@ -374,9 +380,68 @@ impl CaptureStatus {
             Some("complete") => Some(Self::Complete),
             Some("truncated") => Some(Self::Truncated),
             Some("no_speech_detected") => Some(Self::NoSpeechDetected),
+            Some("cancelled") => Some(Self::Cancelled),
+            Some("interrupted") => Some(Self::Interrupted),
             _ => None,
         }
     }
+}
+
+/// Where a dictation's whole capture is written while it records, inside the
+/// recordings directory so a kept one moves out with a rename.
+const IN_PROGRESS_DIR: &str = "in-progress";
+
+/// A spool under about a second holds nothing worth recovering.
+const RECOVERABLE_SPOOL_SAMPLES: u64 = 16_000;
+
+/// How long a kept dictation waits for the user, counted from when Sona kept
+/// it, so one recovered long after it was recorded still gets the full time.
+const KEPT_DICTATION_RETENTION_MS: i64 = 14 * 24 * 60 * 60 * 1_000;
+
+/// The rows of `transcription_history h` kept from a cancel or a crash that
+/// still have no words: their capture run says so, they are empty, and no
+/// retry has given them any.
+const KEPT_DICTATION: &str = "(h.transcription_text = ''
+    AND EXISTS (SELECT 1 FROM transcription_runs r
+                WHERE r.history_id = h.id
+                  AND r.capture_status IN ('cancelled', 'interrupted'))
+    AND NOT EXISTS (SELECT 1 FROM transcription_history c
+                    WHERE c.parent_id = h.id AND c.transcription_text != ''))";
+
+/// Why a dictation was kept before it had words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum KeptDictationReason {
+    Cancelled,
+    Interrupted,
+}
+
+impl KeptDictationReason {
+    fn capture_status(self) -> CaptureStatus {
+        match self {
+            Self::Cancelled => CaptureStatus::Cancelled,
+            Self::Interrupted => CaptureStatus::Interrupted,
+        }
+    }
+}
+
+/// A dictation Sona kept without words, for the user to play, transcribe or
+/// delete through the ordinary history commands.
+#[derive(Clone, Debug, Serialize, Type)]
+pub struct KeptDictation {
+    pub id: i64,
+    pub timestamp: i64,
+    pub duration_ms: Option<u64>,
+    pub reason: KeptDictationReason,
+    pub has_audio: bool,
+}
+
+/// Every kept dictation, newest first, and which of them this launch
+/// recovered from the one before.
+#[derive(Clone, Debug, Serialize, Type)]
+pub struct KeptDictations {
+    pub entries: Vec<KeptDictation>,
+    pub recovered_this_launch: Vec<i64>,
 }
 
 /// One source-kind subtotal in the all-time history summary. Older rows can
@@ -723,6 +788,11 @@ pub struct HistoryManager {
     /// Dropped with the manager, which is what stops the worker: its `recv`
     /// fails once no sender remains.
     semantic_work: Sender<SemanticWork>,
+    /// Spools a previous launch left behind, listed before this launch could
+    /// start a dictation of its own, for recovery to take once.
+    orphaned_spools: Mutex<Vec<PathBuf>>,
+    /// The rows this launch's recovery made from them.
+    recovered_this_launch: Mutex<Vec<i64>>,
 }
 
 impl HistoryManager {
@@ -738,6 +808,7 @@ impl HistoryManager {
             fs::create_dir_all(&recordings_dir)?;
             debug!("Created recordings directory: {:?}", recordings_dir);
         }
+        let orphaned_spools = list_spools(&recordings_dir.join(IN_PROGRESS_DIR));
 
         let (semantic_work, semantic_inbox) = std::sync::mpsc::channel();
         let manager = Self {
@@ -746,6 +817,8 @@ impl HistoryManager {
             storage: Arc::clone(&storage),
             semantic: Arc::clone(&semantic),
             semantic_work,
+            orphaned_spools: Mutex::new(orphaned_spools),
+            recovered_this_launch: Mutex::new(Vec::new()),
         };
         Self::spawn_semantic_worker(storage, semantic, semantic_inbox);
 
@@ -1053,6 +1126,17 @@ impl HistoryManager {
     pub fn recordings_dir(&self) -> &std::path::Path {
         &self.recordings_dir
     }
+
+    /// Where `run`'s whole capture is written while it records. The name
+    /// carries the second the run started, which recovery reads back.
+    pub fn spool_path(&self, run: &RunPlan) -> PathBuf {
+        self.recordings_dir.join(IN_PROGRESS_DIR).join(format!(
+            "sona-{}-{}.wav",
+            run.run_started_at_ms / 1_000,
+            run.run_id
+        ))
+    }
+
     /// Insert one validated upstream row through this manager's schema. It
     /// preserves source timestamps and text while letting SQLite allocate fresh
     /// IDs, fire FTS triggers, and keep receipt foreign keys local to this DB.
@@ -1285,6 +1369,7 @@ impl HistoryManager {
             post_processed_text,
             None,
             receipt,
+            None,
         )
     }
 
@@ -1308,7 +1393,148 @@ impl HistoryManager {
             post_processed_text,
             Some(derived_from_history_id),
             Some(receipt),
+            None,
         )
+    }
+
+    /// Keep a dictation's spool as a row with no words yet. The file moves
+    /// into the recordings under its own name, or the first free variant of
+    /// it, and goes back to the spool folder if the row cannot be saved, so
+    /// the next launch can try again. `None` is saved history turned off: no
+    /// row and no file.
+    pub fn keep_spool(
+        &self,
+        spool: &Path,
+        run: &RunPlan,
+        reason: KeptDictationReason,
+        started_at_ms: u64,
+        samples: u64,
+    ) -> Result<Option<KeptDictation>> {
+        let file_name = move_into_recordings(&self.recordings_dir, spool)?;
+        let duration_ms = samples.saturating_mul(1_000)
+            / u64::from(crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE);
+        let receipt = NewRunReceipt {
+            run: run.mode_receipt(),
+            context: run.context().receipt().clone(),
+            started_at_ms,
+            completed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
+            duration_ms: Some(duration_ms),
+            word_count: Some(0),
+            source_kind: HistorySourceKind::Microphone,
+            has_audio: true,
+            capture_status: Some(reason.capture_status()),
+            application_identifier: None,
+        };
+        let saved = self.save_entry_with_receipt_internal(
+            file_name.clone(),
+            String::new(),
+            run.post_process_requested(),
+            None,
+            None,
+            Some(receipt),
+            i64::try_from(started_at_ms / 1_000).ok(),
+        );
+        if saved.is_err() {
+            if let Err(error) = fs::rename(self.recordings_dir.join(&file_name), spool) {
+                error!(
+                    "Kept dictation {file_name} could not return to {}: {error}",
+                    spool.display()
+                );
+            }
+        }
+        Ok(saved?.map(|entry| KeptDictation {
+            id: entry.id,
+            timestamp: entry.timestamp,
+            duration_ms: Some(duration_ms),
+            reason,
+            has_audio: true,
+        }))
+    }
+
+    /// Keep every spool a previous launch left behind as a row the user can
+    /// play or transcribe. Each header is repaired first; a spool under a
+    /// second goes, and one that is not a spool stays where it is.
+    pub fn recover_interrupted_dictations(&self) {
+        let orphans = std::mem::take(
+            &mut *self
+                .orphaned_spools
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        if orphans.is_empty() {
+            return;
+        }
+        let settings = crate::settings::get_settings(&self.app_handle);
+        let post_process =
+            crate::modes::active_mode(&settings).is_some_and(|mode| mode.llm.enabled);
+        for spool in orphans {
+            let samples = match crate::audio_toolkit::repair_spool(&spool) {
+                Ok(samples) => samples,
+                Err(error) => {
+                    warn!("Leaving interrupted dictation {}: {error}", spool.display());
+                    continue;
+                }
+            };
+            if samples < RECOVERABLE_SPOOL_SAMPLES {
+                if let Err(error) = fs::remove_file(&spool) {
+                    warn!(
+                        "Could not remove empty dictation {}: {error}",
+                        spool.display()
+                    );
+                }
+                continue;
+            }
+            let run = match RunPlan::for_retry(&settings, post_process) {
+                Ok(run) => run,
+                Err(error) => {
+                    warn!("Leaving interrupted dictations for a later launch: {error}");
+                    return;
+                }
+            };
+            let started_at_ms = spool_started_at_ms(&spool).unwrap_or(run.run_started_at_ms);
+            match self.keep_spool(
+                &spool,
+                &run,
+                KeptDictationReason::Interrupted,
+                started_at_ms,
+                samples,
+            ) {
+                Ok(Some(kept)) => {
+                    info!(
+                        "Recovered an interrupted dictation as history entry {}",
+                        kept.id
+                    );
+                    self.recovered_this_launch
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(kept.id);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        "Could not recover interrupted dictation {}: {error:#}",
+                        spool.display()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether a row already holds the receipt of the run that started at
+    /// `started_at_ms` with `run_id`.
+    pub fn has_run_receipt(&self, run_id: u64, started_at_ms: u64) -> Result<bool> {
+        let run_id = as_sql_i64(run_id)?;
+        let started_at_ms = as_sql_i64(started_at_ms)?;
+        self.storage.with_connection(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM transcription_runs WHERE run_id = ?1 AND started_at_ms = ?2
+                )",
+                params![run_id, started_at_ms],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
     }
 
     fn save_entry_with_receipt_internal(
@@ -1319,6 +1545,7 @@ impl HistoryManager {
         post_processed_text: Option<String>,
         derived_from_history_id: Option<i64>,
         receipt: Option<NewRunReceipt>,
+        timestamp: Option<i64>,
     ) -> Result<Option<HistoryEntry>> {
         // "Dictations to keep" at zero is saved history turned off. Nothing is
         // written, not even the receipt. A fresh recording goes with the
@@ -1342,7 +1569,7 @@ impl HistoryManager {
             }
             receipt
         });
-        let timestamp = Utc::now().timestamp();
+        let timestamp = timestamp.unwrap_or_else(|| Utc::now().timestamp());
         let title = self.format_timestamp_title(timestamp);
         // The insert owns the connection only until it commits. `cleanup_old_entries`
         // below takes the same single connection, and the emit after it must not
@@ -1679,7 +1906,11 @@ impl HistoryManager {
     /// unsaved log under every audio choice, and "not kept" strips audio from
     /// every unsaved row the count let live. A saved row is outside both.
     ///
-    /// Both run on one connection, and the rows they touched are announced
+    /// A dictation kept from a cancel or a crash before it had words is outside
+    /// both as well. It stays two weeks from when Sona kept it, then goes with
+    /// its recording unless the user saved it or a retry gave it words.
+    ///
+    /// All three run on one connection, and the rows they touched are announced
     /// once it is released, so an open Library mirrors the sweep instead of
     /// finding out at its next reload.
     pub fn cleanup_old_entries(&self) -> Result<()> {
@@ -1687,9 +1918,16 @@ impl HistoryManager {
         let limit = settings.history_limit;
         let expiry =
             recording_expiry_cutoff(settings.recording_retention_period, Utc::now().timestamp());
+        let kept_cutoff_ms = Utc::now().timestamp_millis() - KEPT_DICTATION_RETENTION_MS;
 
         let (deleted, expired) = self.storage.with_connection(|conn| {
-            let deleted = Self::sweep_by_count_with_connection(conn, &self.recordings_dir, limit)?;
+            let mut deleted =
+                Self::sweep_by_count_with_connection(conn, &self.recordings_dir, limit)?;
+            deleted.extend(Self::sweep_kept_dictations_with_connection(
+                conn,
+                &self.recordings_dir,
+                kept_cutoff_ms,
+            )?);
             let expired = match expiry {
                 Some(cutoff) => {
                     Self::expire_recordings_with_connection(conn, &self.recordings_dir, cutoff)?
@@ -1805,11 +2043,14 @@ impl HistoryManager {
         recordings_dir: &Path,
         limit: usize,
     ) -> Result<Vec<i64>> {
-        // Every unsaved row, newest first, so the survivors are a prefix.
+        // Every unsaved row, newest first, so the survivors are a prefix. A
+        // kept dictation is neither counted nor taken.
         let entries: Vec<(i64, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, file_name FROM transcription_history WHERE saved = 0 ORDER BY timestamp DESC"
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
+                 WHERE h.saved = 0 AND NOT {KEPT_DICTATION}
+                 ORDER BY h.timestamp DESC"
+            ))?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
             })?;
@@ -1836,10 +2077,11 @@ impl HistoryManager {
         cutoff_timestamp: i64,
     ) -> Result<Vec<HistoryEntry>> {
         let entries: Vec<(i64, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT id, file_name FROM transcription_history
-                 WHERE saved = 0 AND has_audio = 1 AND timestamp < ?1",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
+                 WHERE h.saved = 0 AND h.has_audio = 1 AND h.timestamp < ?1
+                   AND NOT {KEPT_DICTATION}"
+            ))?;
             let rows = stmt.query_map(params![cutoff_timestamp], |row| {
                 Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
             })?;
@@ -1873,6 +2115,29 @@ impl HistoryManager {
         }
 
         Ok(expired)
+    }
+
+    /// Kept dictations nobody saved or transcribed, kept before `cutoff_ms`:
+    /// the rows go, with the recordings only they hold.
+    fn sweep_kept_dictations_with_connection(
+        conn: &Connection,
+        recordings_dir: &Path,
+        cutoff_ms: i64,
+    ) -> Result<Vec<i64>> {
+        let entries: Vec<(i64, String)> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT h.id AS id, h.file_name AS file_name FROM transcription_history h
+                 WHERE h.saved = 0 AND {KEPT_DICTATION}
+                   AND (SELECT MIN(r.completed_at_ms) FROM transcription_runs r
+                        WHERE r.history_id = h.id
+                          AND r.capture_status IN ('cancelled', 'interrupted')) < ?1"
+            ))?;
+            let rows = stmt.query_map(params![cutoff_ms], |row| {
+                Ok((row.get::<_, i64>("id")?, row.get::<_, String>("file_name")?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Self::delete_entries_and_files_with_connection(conn, recordings_dir, &entries)
     }
 
     /// Read all-time aggregates from the retained history rows. The one grouped
@@ -2620,6 +2885,54 @@ impl HistoryManager {
         Ok(entry)
     }
 
+    /// Every kept dictation still without words, newest first.
+    pub fn get_kept_dictations(&self) -> Result<KeptDictations> {
+        let entries = self
+            .storage
+            .with_connection(|conn| Self::kept_dictations_with_connection(conn))?;
+        let recovered_this_launch = self
+            .recovered_this_launch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .copied()
+            .filter(|id| entries.iter().any(|entry| entry.id == *id))
+            .collect();
+        Ok(KeptDictations {
+            entries,
+            recovered_this_launch,
+        })
+    }
+
+    fn kept_dictations_with_connection(conn: &Connection) -> Result<Vec<KeptDictation>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT h.id, h.timestamp, h.duration_ms, h.has_audio,
+                    (SELECT r.capture_status FROM transcription_runs r
+                     WHERE r.history_id = h.id
+                       AND r.capture_status IN ('cancelled', 'interrupted')
+                     ORDER BY r.id LIMIT 1)
+             FROM transcription_history h
+             WHERE {KEPT_DICTATION}
+             ORDER BY h.timestamp DESC, h.id DESC"
+        ))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(KeptDictation {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                duration_ms: row
+                    .get::<_, Option<i64>>(2)?
+                    .map(|duration| as_u64(duration, 2))
+                    .transpose()?,
+                has_audio: row.get(3)?,
+                reason: match CaptureStatus::from_stored(row.get(4)?) {
+                    Some(CaptureStatus::Interrupted) => KeptDictationReason::Interrupted,
+                    _ => KeptDictationReason::Cancelled,
+                },
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub async fn delete_entry(&self, id: i64) -> Result<()> {
         // The row is read, its recording is resolved, and the row is deleted on
         // one connection. Reading the entry on a second connection made the
@@ -2935,6 +3248,63 @@ fn recording_path(recordings_dir: &Path, file_name: &str) -> Option<PathBuf> {
     (Path::new(file_name).file_name() == Some(file_name.as_ref()))
         .then(|| recordings_dir.join(file_name))
 }
+
+/// The spool files in `directory`, none when it does not exist yet.
+fn list_spools(directory: &Path) -> Vec<PathBuf> {
+    match fs::read_dir(directory) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "wav"))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            warn!("Could not list interrupted dictations: {error}");
+            Vec::new()
+        }
+    }
+}
+
+/// When a spool's dictation started, read back from the name
+/// [`HistoryManager::spool_path`] gave it.
+fn spool_started_at_ms(spool: &Path) -> Option<u64> {
+    let seconds: u64 = spool
+        .file_stem()?
+        .to_str()?
+        .strip_prefix("sona-")?
+        .split('-')
+        .next()?
+        .parse()
+        .ok()?;
+    seconds.checked_mul(1_000)
+}
+
+/// Move a spool among the recordings without replacing a file there, under
+/// its own name or the first free `-N` variant of it.
+fn move_into_recordings(recordings_dir: &Path, spool: &Path) -> std::io::Result<String> {
+    let stem = spool
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "spool has no file name")
+        })?;
+    for attempt in 0..100_u32 {
+        let file_name = match attempt {
+            0 => format!("{stem}.wav"),
+            _ => format!("{stem}-{attempt}.wav"),
+        };
+        let destination = recordings_dir.join(&file_name);
+        if destination.symlink_metadata().is_ok() {
+            continue;
+        }
+        fs::rename(spool, &destination)?;
+        return Ok(file_name);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "every name for this recording is taken",
+    ))
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -4250,6 +4620,181 @@ mod tests {
 
         assert!(deleted.is_empty());
         assert!(row_exists(&conn, only));
+    }
+
+    fn seed_kept_dictation(
+        conn: &mut Connection,
+        recordings_dir: &std::path::Path,
+        file_name: &str,
+        recorded_at_ms: u64,
+        kept_at_ms: u64,
+    ) -> i64 {
+        crate::audio_toolkit::save_wav_file(&recordings_dir.join(file_name), &[0.0; 1_600])
+            .expect("write kept WAV fixture");
+        let mut receipt = new_run_receipt(recorded_at_ms);
+        receipt.started_at_ms = recorded_at_ms;
+        receipt.completed_at_ms = kept_at_ms;
+        receipt.word_count = Some(0);
+        receipt.capture_status = Some(CaptureStatus::Cancelled);
+        HistoryManager::save_entry_with_receipt_with_connection(
+            conn,
+            file_name,
+            i64::try_from(recorded_at_ms / 1_000).expect("seconds fit a timestamp"),
+            "Kept",
+            "",
+            false,
+            None,
+            None,
+            Some(&receipt),
+        )
+        .expect("save kept dictation")
+    }
+
+    /// A kept dictation waits for the user whatever the history limit: the
+    /// count sweep neither counts it toward the limit nor takes it.
+    #[test]
+    fn a_count_sweep_neither_counts_nor_takes_a_kept_dictation() {
+        let mut conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let kept = seed_kept_dictation(&mut conn, recordings.path(), "kept.wav", 50_000, 60_000);
+        let older = seed_wav_retention_entry(
+            &conn,
+            recordings.path(),
+            100,
+            "older.wav",
+            "older words",
+            false,
+            None,
+        );
+        let newer = seed_wav_retention_entry(
+            &conn,
+            recordings.path(),
+            200,
+            "newer.wav",
+            "newer words",
+            false,
+            None,
+        );
+
+        assert!(
+            HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 2)
+                .expect("count sweep at the limit")
+                .is_empty(),
+            "a kept dictation must not use up the history limit"
+        );
+
+        let deleted = HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 1)
+            .expect("count sweep over the limit");
+
+        assert_eq!(deleted, vec![older]);
+        assert!(row_exists(&conn, kept));
+        assert!(row_exists(&conn, newer));
+        assert!(recordings.path().join("kept.wav").exists());
+    }
+
+    #[test]
+    fn expiry_leaves_a_kept_dictation_its_recording() {
+        let mut conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let kept = seed_kept_dictation(&mut conn, recordings.path(), "kept.wav", 50_000, 60_000);
+
+        let expired =
+            HistoryManager::expire_recordings_with_connection(&conn, recordings.path(), 1_000)
+                .expect("expiry runs");
+
+        assert!(expired.is_empty());
+        assert!(row_has_audio(&conn, kept));
+        assert!(recordings.path().join("kept.wav").exists());
+    }
+
+    /// The kept sweep counts from when Sona kept a dictation, not from when it
+    /// was recorded, so one recovered long after a crash is not swept as soon
+    /// as it is saved. A star keeps it.
+    #[test]
+    fn the_kept_sweep_counts_from_when_a_dictation_was_kept() {
+        const KEPT_AT_MS: u64 = 1_788_417_783_000;
+        const MONTH_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+        let mut conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let unstarred = seed_kept_dictation(
+            &mut conn,
+            recordings.path(),
+            "unstarred.wav",
+            KEPT_AT_MS - MONTH_MS,
+            KEPT_AT_MS,
+        );
+        let starred = seed_kept_dictation(
+            &mut conn,
+            recordings.path(),
+            "starred.wav",
+            KEPT_AT_MS - MONTH_MS + 1,
+            KEPT_AT_MS,
+        );
+        conn.execute(
+            "UPDATE transcription_history SET saved = 1 WHERE id = ?1",
+            params![starred],
+        )
+        .expect("star a kept dictation");
+        let kept_at = i64::try_from(KEPT_AT_MS).expect("milliseconds fit");
+
+        let early = HistoryManager::sweep_kept_dictations_with_connection(
+            &conn,
+            recordings.path(),
+            kept_at,
+        )
+        .expect("sweep at the keep time");
+        assert!(early.is_empty());
+        assert!(recordings.path().join("unstarred.wav").exists());
+
+        let late = HistoryManager::sweep_kept_dictations_with_connection(
+            &conn,
+            recordings.path(),
+            kept_at + 1,
+        )
+        .expect("sweep after the keep time");
+        assert_eq!(late, vec![unstarred]);
+        assert!(!row_exists(&conn, unstarred));
+        assert!(!recordings.path().join("unstarred.wav").exists());
+        assert!(row_exists(&conn, starred));
+        assert!(recordings.path().join("starred.wav").exists());
+    }
+
+    /// A retry that finds words ends the wait: the dictation is no longer
+    /// listed as kept. A retry that finds nothing leaves it kept.
+    #[test]
+    fn a_kept_dictation_stays_kept_until_a_retry_finds_words() {
+        let mut conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let kept = seed_kept_dictation(&mut conn, recordings.path(), "kept.wav", 50_000, 60_000);
+        let retry = |conn: &mut Connection, run_id: u64, text: &str| {
+            let mut receipt = new_run_receipt(run_id);
+            receipt.capture_status = None;
+            HistoryManager::save_entry_with_receipt_with_connection(
+                conn,
+                "kept.wav",
+                70,
+                "Retry",
+                text,
+                false,
+                None,
+                Some(kept),
+                Some(&receipt),
+            )
+            .expect("save retry");
+        };
+        let kept_ids = |conn: &Connection| {
+            HistoryManager::kept_dictations_with_connection(conn)
+                .expect("list kept dictations")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
+        };
+
+        retry(&mut conn, 1, "");
+        assert_eq!(kept_ids(&conn), vec![kept]);
+
+        retry(&mut conn, 2, "hello there");
+        assert!(kept_ids(&conn).is_empty());
     }
 
     fn row_exists(conn: &Connection, id: i64) -> bool {

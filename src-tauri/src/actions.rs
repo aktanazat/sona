@@ -3,14 +3,16 @@ use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
 use crate::delivery::{self, DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
-use crate::managers::audio::{AudioRecordingManager, InputLevel, RecordingStop};
-use crate::managers::history::{CaptureStatus, HistoryManager, NewRunReceipt};
+use crate::managers::audio::{AudioRecordingManager, CaptureSpool, InputLevel, RecordingStop};
+use crate::managers::history::{CaptureStatus, HistoryManager, KeptDictationReason, NewRunReceipt};
 use crate::managers::model::ModelManager;
 #[cfg(feature = "cloud-realtime")]
 use crate::managers::transcription::CloudStreamFinalization;
 #[cfg(feature = "cloud-realtime")]
 use crate::managers::transcription::StreamEngine;
-use crate::managers::transcription::{BatchDecode, StreamWorkKind, TranscriptionManager};
+use crate::managers::transcription::{
+    BatchDecode, SpeechEvidence, StreamWorkKind, TranscriptionManager,
+};
 use crate::modes::{AsrPlan, CloudReceiptStatus, RequestedEngine, RewriteOutcome, RunPlan};
 use crate::prompt_renderer::RenderedPrompt;
 use crate::secrets::{SecretAccount, SecretManager, SecretResolveError};
@@ -121,6 +123,17 @@ impl RewriteSkippedEvent {
             }),
         }
     }
+}
+
+pub(crate) const DICTATION_KEPT_EVENT: &str = "dictation-kept";
+
+/// `dictation-kept`: a cancel ended a dictation long enough to keep, and its
+/// recording is now the history entry `history_id`, waiting for words.
+#[derive(Clone, serde::Serialize)]
+struct DictationKeptEvent {
+    history_id: i64,
+    duration_ms: u64,
+    reason: KeptDictationReason,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,6 +558,7 @@ fn transcribe_frozen_run(
     manager: &TranscriptionManager,
     run: &RunPlan,
     samples: &[f32],
+    speech: SpeechEvidence,
 ) -> anyhow::Result<FrozenTranscript> {
     if let Some(cloud) = run.cloud() {
         let finalization = manager.finalize_cloud_stream();
@@ -557,12 +571,12 @@ fn transcribe_frozen_run(
             manager.emit_stream_engine(StreamEngine::LocalFallback);
         }
         resolve_cloud_finalization(run, cloud, finalization, samples, |fallback, audio| {
-            manager.transcribe_shared(fallback, audio)
+            manager.transcribe_with_evidence(fallback, audio, speech)
         })
     } else {
         let decode =
             select_final_transcription(manager.finalize_stream(run.asr()), samples, |audio| {
-                manager.transcribe_shared(run.asr(), audio)
+                manager.transcribe_with_evidence(run.asr(), audio, speech)
             })?;
         Ok(FrozenTranscript::Final {
             text: decode.text,
@@ -579,13 +593,14 @@ fn transcribe_frozen_run(
     manager: &TranscriptionManager,
     run: &RunPlan,
     samples: &[f32],
+    speech: SpeechEvidence,
 ) -> anyhow::Result<FrozenTranscript> {
     if run.cloud().is_some() {
         Ok(FrozenTranscript::HeldCloudUnavailable)
     } else {
         let decode =
             select_final_transcription(manager.finalize_stream(run.asr()), samples, |audio| {
-                manager.transcribe_shared(run.asr(), audio)
+                manager.transcribe_with_evidence(run.asr(), audio, speech)
             })?;
         Ok(FrozenTranscript::Final {
             text: decode.text,
@@ -1388,6 +1403,89 @@ impl Drop for UnclaimedRecording {
     }
 }
 
+/// Ten seconds of 16 kHz audio: a cancelled dictation at least this long is
+/// kept, and a shorter one is taken as a false start.
+const KEEP_CANCELLED_SAMPLES: u64 = 160_000;
+
+/// A dictation's spool once its stop returned, settled however the stop task
+/// ends: removed when a row already holds the capture or history is off, kept
+/// when a cancel cut the run short, and otherwise left for the next launch to
+/// recover.
+struct SpoolClaim {
+    app: AppHandle,
+    spool: Option<CaptureSpool>,
+    cancel_generation: u64,
+}
+
+impl Drop for SpoolClaim {
+    fn drop(&mut self) {
+        let Some(spool) = self.spool.take() else {
+            return;
+        };
+        let saved = self
+            .app
+            .state::<Arc<HistoryManager>>()
+            .has_run_receipt(spool.run.run_id, spool.run.run_started_at_ms)
+            .unwrap_or_else(|error| {
+                warn!("Could not check whether the spooled run was saved: {error:#}");
+                false
+            });
+        if saved {
+            remove_recording(&spool.path, "spooled");
+        } else if self
+            .app
+            .state::<Arc<AudioRecordingManager>>()
+            .was_cancelled_since(self.cancel_generation)
+        {
+            keep_cancelled_capture(&self.app, spool);
+        } else if get_settings(&self.app).history_limit == 0 {
+            remove_recording(&spool.path, "spooled");
+        } else {
+            warn!(
+                "Leaving the spool of an unsaved run for the next launch: {}",
+                spool.path.display()
+            );
+        }
+    }
+}
+
+/// Keep a cancelled dictation of at least ten seconds as a history entry with
+/// its recording and no words, and remove a shorter one.
+pub(crate) fn keep_cancelled_capture(app: &AppHandle, spool: CaptureSpool) {
+    let samples = match crate::audio_toolkit::repair_spool(&spool.path) {
+        Ok(samples) => samples,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!("Leaving a cancelled dictation for the next launch: {error}");
+            return;
+        }
+    };
+    if samples < KEEP_CANCELLED_SAMPLES {
+        remove_recording(&spool.path, "cancelled");
+        return;
+    }
+    match app.state::<Arc<HistoryManager>>().keep_spool(
+        &spool.path,
+        &spool.run,
+        KeptDictationReason::Cancelled,
+        spool.run.run_started_at_ms,
+        samples,
+    ) {
+        Ok(Some(kept)) => {
+            let _ = app.emit(
+                DICTATION_KEPT_EVENT,
+                DictationKeptEvent {
+                    history_id: kept.id,
+                    duration_ms: kept.duration_ms.unwrap_or_default(),
+                    reason: kept.reason,
+                },
+            );
+        }
+        Ok(None) => {}
+        Err(error) => error!("Could not keep a cancelled dictation: {error:#}"),
+    }
+}
+
 async fn rollback_cancelled_no_speech_history(
     history: &HistoryManager,
     history_id: i64,
@@ -1761,7 +1859,11 @@ impl TranscribeAction {
 
         let mut recording_error: Option<String> = None;
         let recording_start_time = Instant::now();
-        match rm.try_start_recording(&binding_id, vad_policy) {
+        let spool = CaptureSpool {
+            path: app.state::<Arc<HistoryManager>>().spool_path(&self.run),
+            run: self.run.clone(),
+        };
+        match rm.try_start_recording(&binding_id, vad_policy, spool) {
             Ok(readiness) => {
                 debug!(
                     "Recording request accepted in {:?}; waiting for first microphone samples",
@@ -1917,7 +2019,13 @@ impl TranscribeAction {
             );
 
             let stop_recording_time = Instant::now();
-            match rm.stop_recording(&binding_id, cancel_generation) {
+            let stopped = rm.stop_recording(&binding_id, cancel_generation);
+            let _spool = SpoolClaim {
+                app: ah.clone(),
+                spool: stopped.spool,
+                cancel_generation,
+            };
+            match stopped.outcome {
                 Some(RecordingStop::NoSpeech { samples, level }) => {
                     if rm.was_cancelled_since(cancel_generation) {
                         debug!("No-speech recording was cancelled before persistence");
@@ -2017,8 +2125,13 @@ impl TranscribeAction {
                         // running, finalize it and use its text (all audio was already
                         // fed to the stream); otherwise batch-transcribe the samples.
                         let transcription_time = Instant::now();
+                        let speech = if vad_forwarded_speech && run.asr().vad_enabled {
+                            SpeechEvidence::Detected
+                        } else {
+                            SpeechEvidence::Unknown
+                        };
                         let transcription_result =
-                            transcribe_frozen_run(&tm, &run, completed_pcm.as_slice());
+                            transcribe_frozen_run(&tm, &run, completed_pcm.as_slice(), speech);
 
                         // Await WAV save and verify
                         let wav_saved = match wav_handle.await {

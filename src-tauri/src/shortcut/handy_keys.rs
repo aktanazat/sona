@@ -373,7 +373,7 @@ impl Drop for HandyKeysState {
     }
 }
 
-fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -438,53 +438,6 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
     app.manage(state);
     info!("handy-keys shortcuts initialized");
     Ok(())
-}
-
-/// Register the cancel shortcut (called when recording starts)
-pub fn register_cancel_shortcut(app: &AppHandle) {
-    // Disabled on Linux due to instability
-    #[cfg(target_os = "linux")]
-    {
-        let _ = app;
-        return;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let app_clone = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let Some(state) = app_clone.try_state::<HandyKeysState>() else {
-                return;
-            };
-            for binding in super::cancel_bindings_for_registration(&get_settings(&app_clone)) {
-                if let Err(e) = state.register(&binding) {
-                    error!("Failed to register cancel shortcut '{}': {e}", binding.id);
-                }
-            }
-        });
-    }
-}
-
-/// Unregister the cancel shortcut (called when recording stops)
-pub fn unregister_cancel_shortcut(app: &AppHandle) {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = app;
-        return;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let app_clone = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let Some(state) = app_clone.try_state::<HandyKeysState>() else {
-                return;
-            };
-            for binding in super::cancel_bindings_for_registration(&get_settings(&app_clone)) {
-                let _ = state.unregister(&binding);
-            }
-        });
-    }
 }
 
 /// Register a shortcut

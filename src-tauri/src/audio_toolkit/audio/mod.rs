@@ -5,6 +5,7 @@ mod device;
 mod microphone_access;
 mod recorder;
 mod resampler;
+mod spool;
 mod utils;
 mod visualizer;
 
@@ -16,5 +17,6 @@ pub use recorder::{
     CaptureOverrun, RecordedAudio, VadPolicy,
 };
 pub use resampler::FrameResampler;
+pub use spool::repair_spool;
 pub use utils::{read_wav_samples, save_wav_file, verify_wav_file};
 pub use visualizer::AudioVisualiser;

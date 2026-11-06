@@ -3,9 +3,9 @@ use crate::analytics::DashboardTrendRequest;
 use crate::managers::{
     history::{
         HistoryEntry, HistoryManager, HistorySourceKind, HistoryStats, HistoryStorageStatus,
-        HistoryTrendProjection, HistoryUsageStats, NewRunReceipt, PaginatedHistory,
+        HistoryTrendProjection, HistoryUsageStats, KeptDictations, NewRunReceipt, PaginatedHistory,
     },
-    transcription::TranscriptionManager,
+    transcription::{SpeechEvidence, TranscriptionManager},
 };
 use log::error;
 use std::fs::{self, File};
@@ -96,6 +96,16 @@ pub async fn search_history_entries(
         .search_history_entries(&query, cursor, limit)
         .await
         .map_err(|error| error!("Failed to search history entries: {error:#}"))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_kept_dictations(
+    history_manager: State<'_, Arc<HistoryManager>>,
+) -> Result<KeptDictations, ()> {
+    history_manager
+        .get_kept_dictations()
+        .map_err(|error| error!("Failed to read kept dictations: {error:#}"))
 }
 
 #[tauri::command]
@@ -239,11 +249,12 @@ async fn replay_stored_recording(
     transcription_manager.initiate_model_load(run.asr());
     let manager = Arc::clone(transcription_manager);
     let asr = run.asr().clone();
-    let decode =
-        tauri::async_runtime::spawn_blocking(move || manager.transcribe_shared(&asr, &samples))
-            .await
-            .map_err(|error| format!("Transcription task panicked: {error}"))?
-            .map_err(|error| error.to_string())?;
+    let decode = tauri::async_runtime::spawn_blocking(move || {
+        manager.transcribe_with_evidence(&asr, &samples, SpeechEvidence::Detected)
+    })
+    .await
+    .map_err(|error| format!("Transcription task panicked: {error}"))?
+    .map_err(|error| error.to_string())?;
     let transcription = decode.text;
     if transcription.is_empty() {
         return Err("Recording contains no speech".to_string());

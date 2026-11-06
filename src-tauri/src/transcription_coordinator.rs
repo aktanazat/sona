@@ -6,16 +6,23 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_specta::Event as _;
 
 mod duration;
-use duration::{DurationAction, RecordingDeadline};
+use duration::{DurationAction, MeetingSuggestion, RecordingDeadline};
 
 #[derive(Clone, Debug, serde::Serialize, specta::Type, tauri_specta::Event)]
 pub struct DictationDurationWarningEvent {
     /// None clears the warning when the recording leaves its active stage.
     pub remaining_seconds: Option<u32>,
+}
+
+pub(crate) const DICTATION_MEETING_SUGGESTION_EVENT: &str = "dictation-meeting-suggestion";
+
+#[derive(Clone, serde::Serialize)]
+struct DictationMeetingSuggestion {
+    elapsed_seconds: u32,
 }
 
 const DEBOUNCE: Duration = Duration::from_millis(30);
@@ -148,6 +155,7 @@ enum Stage {
         /// Releases no longer stop this recording; the next press does.
         latched: bool,
         duration: RecordingDeadline,
+        suggestion: MeetingSuggestion,
     },
     Processing,
 }
@@ -170,6 +178,11 @@ enum Effect {
         run_plan: Box<RunPlan>,
     },
     DurationWarning,
+    /// A tap latched the recording open: no key holds it any more.
+    Latched,
+    MeetingSuggestion {
+        elapsed_seconds: u32,
+    },
 }
 
 /// Turn a press edge into the start it triggers. Signals and CLI toggles have
@@ -246,13 +259,18 @@ impl CoordinatorState {
     }
 
     fn next_deadline(&self) -> Option<Instant> {
-        let recording_deadline = match &self.stage {
-            Stage::Recording { duration, .. } => Some(duration.next_deadline()),
-            Stage::Idle | Stage::Processing => None,
+        let (recording_deadline, suggestion_deadline) = match &self.stage {
+            Stage::Recording {
+                duration,
+                suggestion,
+                ..
+            } => (Some(duration.next_deadline()), suggestion.next_deadline()),
+            Stage::Idle | Stage::Processing => (None, None),
         };
         self.grace_deadline()
             .into_iter()
             .chain(recording_deadline)
+            .chain(suggestion_deadline)
             .min()
     }
 
@@ -269,6 +287,13 @@ impl CoordinatorState {
             }
             Some(DurationAction::Warn) => return Some(Effect::DurationWarning),
             None => {}
+        }
+        let suggestion = match &mut self.stage {
+            Stage::Recording { suggestion, .. } => suggestion.take(now),
+            Stage::Idle | Stage::Processing => None,
+        };
+        if let Some(elapsed_seconds) = suggestion {
+            return Some(Effect::MeetingSuggestion { elapsed_seconds });
         }
         if self
             .grace_deadline()
@@ -436,16 +461,13 @@ impl CoordinatorState {
         let pending = self.pending_release.take()?;
         match pending.outcome {
             GraceOutcome::Stop => self.stop_recording(&pending.intent, pending.shortcut_label),
-            GraceOutcome::Latch => {
-                self.latch(&pending.intent);
-                None
-            }
+            GraceOutcome::Latch => self.latch(&pending.intent).then_some(Effect::Latched),
         }
     }
 
     /// Keep `intent`'s recording open past its key-up, so a 100 ms chord still
-    /// captures a whole utterance.
-    fn latch(&mut self, intent: &TranscriptionIntent) {
+    /// captures a whole utterance. Whether it latched.
+    fn latch(&mut self, intent: &TranscriptionIntent) -> bool {
         match &mut self.stage {
             Stage::Recording {
                 intent: active,
@@ -454,8 +476,9 @@ impl CoordinatorState {
             } if active == intent => {
                 debug!("Tap latch: recording continues until next press");
                 *latched = true;
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -505,6 +528,7 @@ impl CoordinatorState {
                 pressed_at,
                 latched,
                 duration: RecordingDeadline::new(recording_started_at),
+                suggestion: MeetingSuggestion::new(recording_started_at),
             };
         }
     }
@@ -702,7 +726,11 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             }
             .emit(app);
             let run_plan = start(app, &intent, &shortcut_label);
+            let hands_free = latched && run_plan.is_some();
             state.on_started(intent, pressed_at, latched, Instant::now(), run_plan);
+            if hands_free {
+                crate::shortcut::release_bare_cancel_key(app);
+            }
         }
         Effect::Stop {
             intent,
@@ -720,6 +748,15 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
                 remaining_seconds: Some(60),
             }
             .emit(app);
+        }
+        Effect::Latched => crate::shortcut::release_bare_cancel_key(app),
+        Effect::MeetingSuggestion { elapsed_seconds } => {
+            if let Err(error) = app.emit(
+                DICTATION_MEETING_SUGGESTION_EVENT,
+                DictationMeetingSuggestion { elapsed_seconds },
+            ) {
+                warn!("Failed to emit {DICTATION_MEETING_SUGGESTION_EVENT}: {error}");
+            }
         }
     }
 }
@@ -931,6 +968,7 @@ mod tests {
         starts: u32,
         stops: u32,
         warnings: u32,
+        latches: u32,
         microphone_opens: bool,
     }
 
@@ -942,6 +980,7 @@ mod tests {
                 starts: 0,
                 stops: 0,
                 warnings: 0,
+                latches: 0,
                 microphone_opens: true,
             }
         }
@@ -969,6 +1008,8 @@ mod tests {
                 }
                 Some(Effect::Stop { .. }) => self.stops += 1,
                 Some(Effect::DurationWarning) => self.warnings += 1,
+                Some(Effect::Latched) => self.latches += 1,
+                Some(Effect::MeetingSuggestion { .. }) => {}
                 None => {}
             }
         }
@@ -1092,6 +1133,10 @@ mod tests {
         harness.grace_expired();
         assert_eq!((harness.starts, harness.stops), (1, 0));
         assert!(harness.is_recording(), "the tap latched the recording open");
+        assert_eq!(
+            harness.latches, 1,
+            "a latched recording gives up the bare cancel key"
+        );
 
         // The latch hands the stop to the next press.
         harness.input(active_mode(), true, true);
