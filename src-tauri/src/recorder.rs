@@ -225,9 +225,11 @@ impl ScreenRecorderManager {
         history: Arc<HistoryManager>,
         audio: Arc<AudioRecordingManager>,
     ) -> Arc<Self> {
+        let recordings_dir = history.recordings_dir().to_path_buf();
+        remove_orphaned_partials(&recordings_dir);
         let manager = Arc::new(Self {
             app: app.clone(),
-            recordings_dir: history.recordings_dir().to_path_buf(),
+            recordings_dir,
             audio,
             state: Mutex::new(RecorderState::default()),
             heartbeat_stop: AtomicBool::new(false),
@@ -811,9 +813,12 @@ fn allocate_output_paths(recordings_dir: &Path) -> Result<(PathBuf, PathBuf), st
     ))
 }
 
+const PARTIAL_PREFIX: &str = ".sona-screen-";
+const PARTIAL_SUFFIX: &str = ".partial.mp4";
+
 fn output_names(timestamp: &str, id: &str) -> (String, String) {
     (
-        format!(".sona-screen-{id}.partial.mp4"),
+        format!("{PARTIAL_PREFIX}{id}{PARTIAL_SUFFIX}"),
         format!("sona-screen-{timestamp}-{id}.mp4"),
     )
 }
@@ -821,6 +826,24 @@ fn output_names(timestamp: &str, id: &str) -> (String, String) {
 fn remove_partial(path: Option<&Path>) {
     if let Some(path) = path {
         let _ = fs::remove_file(path);
+    }
+}
+
+/// Every path out of a recording renames or removes its partial, so one that exists at launch
+/// was left by a process that ended mid-recording. It is hidden and unplayable, and nothing else
+/// removes it.
+fn remove_orphaned_partials(recordings_dir: &Path) {
+    let Ok(entries) = fs::read_dir(recordings_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(PARTIAL_PREFIX) && name.ends_with(PARTIAL_SUFFIX) {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -997,9 +1020,10 @@ fn map_native_error(error: crate::recorder_macos::NativeRecorderError) -> Record
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_reaches, output_names, RecorderAvailability, RecorderPhase, RecorderPreflight,
-        RecorderStartAvailability, RecorderState,
+        cancel_reaches, output_names, remove_orphaned_partials, RecorderAvailability,
+        RecorderPhase, RecorderPreflight, RecorderStartAvailability, RecorderState,
     };
+    use std::fs;
     use std::time::Duration;
 
     /// Cancellation is the only way out of a phase that owns work in flight. If any of these
@@ -1058,5 +1082,36 @@ mod tests {
         let wire = serde_json::to_value(&preflight).expect("preflight serializes");
         assert_eq!(wire["session"]["phase"], "paused");
         assert_eq!(wire["session"]["elapsedMs"], 4000);
+    }
+
+    /// A quit or crash mid-recording leaves a hidden partial that no playback, library or cleanup
+    /// ever reaches. The next launch removes it, and nothing else in the recordings folder.
+    #[test]
+    fn launch_removes_only_partials_left_by_an_unfinished_recording() {
+        let recordings = tempfile::tempdir().expect("recordings folder");
+        let (orphan, published) = output_names("20260903T120000Z", "left-behind");
+        for name in [
+            orphan.as_str(),
+            published.as_str(),
+            "dictation.wav",
+            ".DS_Store",
+        ] {
+            fs::write(recordings.path().join(name), b"bytes").expect("seed file");
+        }
+
+        remove_orphaned_partials(recordings.path());
+
+        let mut left: Vec<String> = fs::read_dir(recordings.path())
+            .expect("read recordings folder")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(left, [".DS_Store", "dictation.wav", published.as_str()]);
     }
 }
