@@ -73,7 +73,7 @@ struct ConnectionsView: View {
                         CardRow {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Calendar events").bodyText()
-                                Text("Approval creates an event in your default calendar. No invitations are sent.").metaText()
+                                Text("Approval creates an event in a calendar named Sona. No invitations are sent.").metaText()
                             }
                         } trailing: {
                             Toggle("Calendar events", isOn: Binding(get: { preferences.calendarActionsEnabled }, set: { value in
