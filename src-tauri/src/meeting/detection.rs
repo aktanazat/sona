@@ -296,6 +296,8 @@ pub struct DetectionStatus {
     pub countdown: Option<DetectionCountdown>,
     /// The call a hand-started capture adopted as its stop trigger.
     pub adopted_call: Option<machine::AdoptedCall>,
+    /// The tracked capture whose meeting ended, counting down to its stop.
+    pub auto_stop: Option<DetectionAutoStop>,
     /// Allowlisted bundle IDs whose application is running right now. Empty is a
     /// legitimate answer and the settings UI shows it as such.
     pub running_meeting_apps: Vec<String>,
@@ -306,6 +308,17 @@ pub struct DetectionStatus {
 
 impl tauri_specta::Event for DetectionStatus {
     const NAME: &'static str = "detection-status";
+}
+
+/// A tracked capture whose meeting ended, and when it stops by itself. The
+/// operator can keep it recording until then through
+/// `detection_keep_recording`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionAutoStop {
+    pub session_id: MeetingSessionId,
+    pub trigger: machine::StopTrigger,
+    pub stops_at_utc_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -384,6 +397,8 @@ impl PendingPanel {
 struct TrackedCapture {
     session_id: MeetingSessionId,
     kind: TrackedCaptureKind,
+    /// How far this capture is between its meeting ending and its stop.
+    ending: machine::CaptureEnding,
 }
 
 #[derive(Clone, Debug)]
@@ -394,8 +409,8 @@ enum TrackedCaptureKind {
         /// The lanes the session actually started, as its snapshot reported them.
         /// A stop rule about a device applies only to a capture listening to it.
         sources: Vec<SourceKind>,
-        /// What the default output device has done since a call app's trigger tied
-        /// this capture to a call. Only that trigger arms it, and only at start.
+        /// What the trigger app's sound has done since it tied this capture to
+        /// a call. Only a trigger app arms it, and only at start.
         call_output: Option<machine::CallOutputWatch>,
     },
     Operator(machine::OperatorCapture),
@@ -404,6 +419,10 @@ struct CaptureTick<'a> {
     running: &'a [RunningApp],
     mic: MicSignal,
     output: OutputSignal,
+    /// What the tracked capture's trigger app plays through its own
+    /// processes, when that app is not a call app. `None` when CoreAudio
+    /// attributes no process to it.
+    app_output: Option<OutputSignal>,
     sona_holds: bool,
     call: &'a machine::CallSignal,
     call_live: bool,
@@ -412,6 +431,10 @@ struct CaptureTick<'a> {
 enum CaptureTransition {
     Continue,
     Adopted(machine::AdoptedCall),
+    /// The meeting ended: the capture stops once its countdown runs out.
+    CountdownStarted(machine::StopTrigger),
+    /// The ending the countdown waited on no longer holds.
+    CountdownWithdrawn,
     Stop(machine::StopTrigger),
 }
 
@@ -422,8 +445,7 @@ impl TrackedCapture {
         event_end_utc_ms: Option<i64>,
     ) -> Self {
         let call_output = trigger_bundle_id
-            .as_deref()
-            .is_some_and(apps::is_call_app_bundle_id)
+            .is_some()
             .then(machine::CallOutputWatch::default);
         Self {
             session_id: snapshot.session_id,
@@ -437,6 +459,7 @@ impl TrackedCapture {
                     .collect(),
                 call_output,
             },
+            ending: machine::CaptureEnding::default(),
         }
     }
 
@@ -444,6 +467,7 @@ impl TrackedCapture {
         Self {
             session_id: snapshot.session_id,
             kind: TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting),
+            ending: machine::CaptureEnding::default(),
         }
     }
 
@@ -453,6 +477,20 @@ impl TrackedCapture {
             TrackedCaptureKind::Detection { .. }
                 | TrackedCaptureKind::Operator(machine::OperatorCapture::Adopted { .. })
         )
+    }
+
+    /// The app whose own processes this capture's call watch reads. A call
+    /// app plays through system daemons that CoreAudio never attributes to
+    /// it, so its watch reads the default output device instead.
+    fn output_app(&self) -> Option<&str> {
+        match &self.kind {
+            TrackedCaptureKind::Detection {
+                trigger_bundle_id, ..
+            } => trigger_bundle_id
+                .as_deref()
+                .filter(|bundle_id| !apps::is_call_app_bundle_id(bundle_id)),
+            TrackedCaptureKind::Operator(_) => None,
+        }
     }
 
     fn observe_call_output(
@@ -467,6 +505,25 @@ impl TrackedCapture {
         };
         watch.observe(output, now_utc_ms);
         Some(*watch)
+    }
+
+    /// The operator kept this capture recording through its countdown. Kept
+    /// past its scheduled end, the capture then ends with the call itself:
+    /// the event end outranks every other ending and would hide it.
+    fn keep_recording(&mut self, now_utc_ms: i64) -> bool {
+        let Some(kept) = self.ending.keep(now_utc_ms) else {
+            return false;
+        };
+        if let (
+            machine::StopTrigger::EventEnd,
+            TrackedCaptureKind::Detection {
+                event_end_utc_ms, ..
+            },
+        ) = (kept, &mut self.kind)
+        {
+            *event_end_utc_ms = None;
+        }
+        true
     }
 
     fn microphone_lane(&self) -> bool {
@@ -585,6 +642,55 @@ impl RuntimeState {
         }
     }
 
+    /// Folds this tick's stop reading into the tracked capture's ending. A
+    /// capture that is no longer tracked has nothing left to stop.
+    fn advance_ending(
+        &mut self,
+        session_id: MeetingSessionId,
+        trigger: Option<machine::StopTrigger>,
+        now_utc_ms: i64,
+    ) -> CaptureTransition {
+        let Some(tracked) = self
+            .tracked
+            .as_mut()
+            .filter(|tracked| tracked.session_id == session_id)
+        else {
+            return CaptureTransition::Continue;
+        };
+        match tracked.ending.advance(trigger, now_utc_ms) {
+            machine::EndingStep::Unchanged => CaptureTransition::Continue,
+            machine::EndingStep::CountdownStarted(trigger) => {
+                CaptureTransition::CountdownStarted(trigger)
+            }
+            machine::EndingStep::CountdownWithdrawn => CaptureTransition::CountdownWithdrawn,
+            machine::EndingStep::Stop(trigger) => CaptureTransition::Stop(trigger),
+        }
+    }
+
+    /// The operator kept `session_id` recording through its countdown.
+    fn keep_recording(&mut self, session_id: MeetingSessionId, now_utc_ms: i64) -> bool {
+        self.tracked
+            .as_mut()
+            .filter(|tracked| tracked.session_id == session_id)
+            .is_some_and(|tracked| tracked.keep_recording(now_utc_ms))
+    }
+
+    fn auto_stop(&self) -> Option<DetectionAutoStop> {
+        let tracked = self.tracked.as_ref()?;
+        let machine::CaptureEnding::CountingDown {
+            trigger,
+            stops_at_utc_ms,
+        } = tracked.ending
+        else {
+            return None;
+        };
+        Some(DetectionAutoStop {
+            session_id: tracked.session_id,
+            trigger,
+            stops_at_utc_ms,
+        })
+    }
+
     /// Raises the recording card for the tracked capture into the panel slot.
     /// `None` when the capture the card names is no longer the tracked one —
     /// a start that lost a race against its own stop, which must show nothing.
@@ -661,8 +767,14 @@ fn evaluate_running_capture_transition(
             event_end_utc_ms,
             ..
         } => {
-            let call_output =
-                state.observe_call_output(tracked.session_id, tick.output, now_utc_ms);
+            let output = if tracked.output_app().is_some() {
+                tick.app_output
+            } else {
+                Some(tick.output)
+            };
+            let call_output = output.and_then(|output| {
+                state.observe_call_output(tracked.session_id, output, now_utc_ms)
+            });
             let trigger = evaluate_stop(&StopInputs {
                 now_utc_ms,
                 linked_event_end_utc_ms: *event_end_utc_ms,
@@ -675,7 +787,7 @@ fn evaluate_running_capture_transition(
                     .is_none_or(|bundle_id| apps::is_app_running(tick.running, bundle_id)),
                 slept_since_start: state.slept,
             });
-            trigger.map_or(CaptureTransition::Continue, CaptureTransition::Stop)
+            state.advance_ending(tracked.session_id, trigger, now_utc_ms)
         }
         TrackedCaptureKind::Operator(machine::OperatorCapture::Waiting) => {
             let Some(adopted) =
@@ -700,7 +812,7 @@ fn evaluate_running_capture_transition(
                 trigger_app_running: apps::is_app_running(tick.running, &adopted.bundle_id),
                 slept_since_start: state.slept,
             });
-            trigger.map_or(CaptureTransition::Continue, CaptureTransition::Stop)
+            state.advance_ending(tracked.session_id, trigger, now_utc_ms)
         }
     }
 }
@@ -901,7 +1013,7 @@ impl DetectionRuntime {
                 observing = true;
             }
 
-            self.wakeup.wait(Some(interval));
+            self.wakeup.wait(Some(self.until_next_tick(interval)));
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
@@ -1014,6 +1126,12 @@ impl DetectionRuntime {
         };
 
         let tracked = self.lock().tracked.clone();
+        // Read per tick, and only for a capture a meeting app triggered: the
+        // process list is every audio client on the Mac.
+        let app_output = tracked
+            .as_ref()
+            .and_then(TrackedCapture::output_app)
+            .and_then(input_device::app_output_signal);
         // With the master toggle off there is no calendar query, application
         // enumeration, or store read. Detection-started captures and operator
         // captures that already adopted a call stay alive so their stop triggers
@@ -1104,6 +1222,7 @@ impl DetectionRuntime {
                     running: &running,
                     mic,
                     output,
+                    app_output,
                     sona_holds,
                     call: &call,
                     call_live,
@@ -2341,7 +2460,7 @@ impl DetectionRuntime {
         if let Some(ritual_id) = card {
             self.finish_ritual(&ritual_id);
         }
-        self.publish_adopted_call_status();
+        self.publish_capture_status();
     }
 
     /// The one place detection touches capture, and it touches only the entry
@@ -2451,7 +2570,23 @@ impl DetectionRuntime {
                     tracked.session_id.uuid(),
                     adopted.display_name
                 );
-                self.publish_adopted_call_status();
+                self.publish_capture_status();
+                return;
+            }
+            CaptureTransition::CountdownStarted(trigger) => {
+                log::info!(
+                    "Meeting detection will stop capture {} on {trigger:?} unless it is kept",
+                    tracked.session_id.uuid()
+                );
+                self.publish_capture_status();
+                return;
+            }
+            CaptureTransition::CountdownWithdrawn => {
+                log::info!(
+                    "Meeting capture {} is no longer ending; its countdown is withdrawn",
+                    tracked.session_id.uuid()
+                );
+                self.publish_capture_status();
                 return;
             }
             CaptureTransition::Stop(trigger) => trigger,
@@ -2513,20 +2648,45 @@ impl DetectionRuntime {
             })
     }
 
-    fn publish_adopted_call_status(&self) {
+    /// Re-emits the last status when what the tracked capture shows changed:
+    /// the call it adopted, or its countdown to a stop.
+    fn publish_capture_status(&self) {
         let status = {
             let mut state = self.lock();
             let adopted_call = state.adopted_call();
+            let auto_stop = state.auto_stop();
             let Some(status) = state.last_status.as_mut() else {
                 return;
             };
-            if status.adopted_call == adopted_call {
+            if status.adopted_call == adopted_call && status.auto_stop == auto_stop {
                 return;
             }
             status.adopted_call = adopted_call;
+            status.auto_stop = auto_stop;
             status.clone()
         };
         let _ = status.emit(&self.app);
+    }
+
+    /// The wait before the next tick: the interval, or less when a countdown
+    /// on screen runs out sooner, so its stop lands when it says. The margin
+    /// covers a wall clock that lags the wait's own by a few milliseconds: a
+    /// tick just short of the deadline would leave the stop to the next one.
+    fn until_next_tick(&self, interval: Duration) -> Duration {
+        const MARGIN_MS: i64 = 250;
+        let Some(auto_stop) = self.lock().auto_stop() else {
+            return interval;
+        };
+        let wait_ms = auto_stop
+            .stops_at_utc_ms
+            .saturating_add(MARGIN_MS)
+            .saturating_sub(utc_now_ms());
+        u64::try_from(wait_ms)
+            .ok()
+            .filter(|wait_ms| *wait_ms > 0)
+            .map_or(interval, |wait_ms| {
+                interval.min(Duration::from_millis(wait_ms))
+            })
     }
 
     fn publish_status(
@@ -2553,7 +2713,10 @@ impl DetectionRuntime {
             && running_meeting_apps
                 .iter()
                 .any(|bundle_id| !apps::is_call_app_bundle_id(bundle_id));
-        let adopted_call = self.lock().adopted_call();
+        let (adopted_call, auto_stop) = {
+            let state = self.lock();
+            (state.adopted_call(), state.auto_stop())
+        };
         let status = DetectionStatus {
             event_schema_version: DETECTION_EVENT_SCHEMA_VERSION,
             settings: DetectionSettings::from_app_settings(settings),
@@ -2564,6 +2727,7 @@ impl DetectionRuntime {
             suppress_reason,
             countdown,
             adopted_call,
+            auto_stop,
             running_meeting_apps,
             input_device_reporting_suspect,
         };
@@ -2586,9 +2750,13 @@ impl DetectionRuntime {
     /// The status the frontend reads on mount, before any tick has fired.
     pub fn status(&self) -> DetectionStatus {
         let settings = crate::settings::get_settings(&self.app);
-        let (last_status, adopted_call) = {
+        let (last_status, adopted_call, auto_stop) = {
             let state = self.lock();
-            (state.last_status.clone(), state.adopted_call())
+            (
+                state.last_status.clone(),
+                state.adopted_call(),
+                state.auto_stop(),
+            )
         };
         let mut status = last_status.unwrap_or_else(|| DetectionStatus {
             event_schema_version: DETECTION_EVENT_SCHEMA_VERSION,
@@ -2600,11 +2768,28 @@ impl DetectionRuntime {
             suppress_reason: None,
             countdown: None,
             adopted_call: None,
+            auto_stop: None,
             running_meeting_apps: Vec::new(),
             input_device_reporting_suspect: false,
         });
         status.adopted_call = adopted_call;
+        status.auto_stop = auto_stop;
         status
+    }
+
+    /// The operator's answer to a countdown: keep recording. False when no
+    /// countdown for `session_id` is still running, which leaves a stop that
+    /// already landed, or is landing, as it is.
+    pub fn keep_recording(&self, session_id: MeetingSessionId) -> bool {
+        let kept = self.lock().keep_recording(session_id, utc_now_ms());
+        if kept {
+            log::info!(
+                "Meeting capture {} was kept recording past its countdown",
+                session_id.uuid()
+            );
+            self.publish_capture_status();
+        }
+        kept
     }
 
     /// Writes the operator's detection policy and returns the status it produces.
@@ -3305,24 +3490,70 @@ mod tests {
         assert!(tracked_call(session_id).microphone_lane());
     }
 
-    /* Only a call app's own trigger arms the output watch, and a tick for
-     * another session reads nothing, so a stale stop cannot end the wrong
-     * capture. Zoom is a meeting app rather than a call app: its capture is
-     * tied to the process, and `TriggerAppExited` is what ends it. */
+    /* A call app plays through system daemons, so its capture watches the
+     * default output device. Any other meeting app's capture watches only its
+     * own processes: the device going quiet is not Zoom hanging up, and music
+     * elsewhere cannot keep a finished Zoom call alive. A Zoom no process is
+     * attributed to is never read as quiet. A tick for another session reads
+     * nothing, so a stale stop cannot end the wrong capture. */
     #[test]
-    fn only_a_call_capture_watches_the_output_device() {
+    fn a_call_app_capture_watches_the_device_and_a_meeting_app_its_own_sound() {
+        use CaptureTransition::{Continue, CountdownStarted};
+        use OutputSignal::{Active, Idle};
+
         let session_id = MeetingSessionId::new();
-        let mut state = RuntimeState::default();
-        state.tracked = Some(TrackedCapture::detection(
+        let zoom = TrackedCapture::detection(
             &capturing(session_id, &SourceKind::ALL),
             Some("us.zoom.xos".to_string()),
             None,
-        ));
+        );
+        let running = [RunningApp {
+            bundle_id: "us.zoom.xos".to_string(),
+            display_name: "Zoom".to_string(),
+            frontmost: true,
+        }];
+        let ticks = |device: [OutputSignal; 3], app: [Option<OutputSignal>; 3]| {
+            let mut state = RuntimeState::default();
+            state.tracked = Some(zoom.clone());
+            [
+                NOW,
+                NOW + 1_000,
+                NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS,
+            ]
+            .into_iter()
+            .zip(device.into_iter().zip(app))
+            .map(|(now_utc_ms, (output, app_output))| {
+                meeting_app_transition_at(
+                    &mut state, &zoom, now_utc_ms, &running, output, app_output,
+                )
+            })
+            .collect::<Vec<_>>()
+        };
 
-        assert!(state
-            .observe_call_output(session_id, OutputSignal::Active, NOW)
-            .is_none());
+        assert_eq!(
+            ticks(
+                [Active, Active, Active],
+                [Some(Active), Some(Idle), Some(Idle)]
+            ),
+            [
+                Continue,
+                Continue,
+                CountdownStarted(machine::StopTrigger::CallEnded)
+            ],
+            "Zoom's own sound ending ends its call while other sound plays on"
+        );
+        assert_eq!(
+            ticks([Active, Idle, Idle], [Some(Idle), Some(Idle), Some(Idle)]),
+            [Continue, Continue, Continue],
+            "the device going quiet is not Zoom hanging up"
+        );
+        assert_eq!(
+            ticks([Active, Idle, Idle], [Some(Active), None, None]),
+            [Continue, Continue, Continue],
+            "a Zoom no process is attributed to is never read as quiet"
+        );
 
+        let mut state = RuntimeState::default();
         state.tracked = Some(tracked_call(session_id));
 
         assert!(state
@@ -3465,9 +3696,36 @@ mod tests {
                 running,
                 mic,
                 output,
+                app_output: None,
                 sona_holds,
                 call,
                 call_live,
+            },
+            now_utc_ms,
+        )
+    }
+
+    /// One tick of a capture a meeting app started, with the device's sound
+    /// and the app's own as given, while Sona's microphone runs.
+    fn meeting_app_transition_at(
+        state: &mut RuntimeState,
+        tracked: &TrackedCapture,
+        now_utc_ms: i64,
+        running: &[RunningApp],
+        output: OutputSignal,
+        app_output: Option<OutputSignal>,
+    ) -> CaptureTransition {
+        evaluate_running_capture_transition(
+            state,
+            tracked,
+            CaptureTick {
+                running,
+                mic: MicSignal::Active,
+                output,
+                app_output,
+                sona_holds: true,
+                call: &machine::CallSignal::Absent,
+                call_live: false,
             },
             now_utc_ms,
         )
@@ -3539,7 +3797,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_capture_stops_after_output_silence_grace_and_resets_before_it() {
+    fn a_call_capture_counts_down_after_output_silence_grace_and_resets_before_it() {
         let session_id = MeetingSessionId::new();
         let tracked = tracked_call(session_id);
         let mut state = RuntimeState::default();
@@ -3605,7 +3863,7 @@ mod tests {
                 &call,
                 true,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
         );
 
         let resumed_id = MeetingSessionId::new();
@@ -3694,12 +3952,12 @@ mod tests {
                 &call,
                 true,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
         );
     }
 
     #[test]
-    fn a_tracked_capture_stops_when_its_triggering_app_quits() {
+    fn a_tracked_capture_counts_down_when_its_triggering_app_quits() {
         let call_id = MeetingSessionId::new();
         let call_capture = tracked_call(call_id);
         let mut call_state = RuntimeState::default();
@@ -3737,7 +3995,7 @@ mod tests {
                 &machine::CallSignal::Absent,
                 false,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::TriggerAppExited)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::TriggerAppExited)
         );
 
         let zoom_id = MeetingSessionId::new();
@@ -3779,7 +4037,7 @@ mod tests {
                 &machine::CallSignal::Absent,
                 false,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::TriggerAppExited)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::TriggerAppExited)
         );
     }
 
@@ -4031,7 +4289,7 @@ mod tests {
                 &facetime_call,
                 true,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
         );
 
         let quit_id = MeetingSessionId::new();
@@ -4068,7 +4326,7 @@ mod tests {
                 &machine::CallSignal::Absent,
                 false,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::TriggerAppExited)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::TriggerAppExited)
         );
     }
 
@@ -4173,7 +4431,7 @@ mod tests {
     }
 
     #[test]
-    fn a_linked_capture_stops_at_event_end_not_before_it() {
+    fn a_linked_capture_counts_down_at_event_end_not_before_it() {
         let session_id = MeetingSessionId::new();
         let event_end = NOW + 1_000;
         let tracked = TrackedCapture::detection(
@@ -4211,8 +4469,296 @@ mod tests {
                 &call,
                 false,
             ),
-            CaptureTransition::Stop(machine::StopTrigger::EventEnd)
+            CaptureTransition::CountdownStarted(machine::StopTrigger::EventEnd)
         );
+    }
+
+    fn facetime_running() -> [RunningApp; 1] {
+        [RunningApp {
+            bundle_id: "com.apple.facetime".to_string(),
+            display_name: "FaceTime".to_string(),
+            frontmost: true,
+        }]
+    }
+
+    /* The leak this closes: a call that ended kept recording. Its end now
+     * counts down on screen and then stops the capture through the ordinary
+     * stop, which keeps the recording. Sound coming back before then means
+     * the call did not end, and a stop that is not the meeting ending, such
+     * as sleep, never waits on the countdown. */
+    #[test]
+    fn a_call_that_ended_counts_down_and_then_stops_its_capture() {
+        let session_id = MeetingSessionId::new();
+        let tracked = tracked_call(session_id);
+        let call = facetime(true);
+        let running = facetime_running();
+        let at = |state: &mut RuntimeState, now_utc_ms: i64, output: OutputSignal| {
+            transition_at(
+                state,
+                &tracked,
+                now_utc_ms,
+                &running,
+                MicSignal::Active,
+                output,
+                true,
+                &call,
+                true,
+            )
+        };
+        let hang_up = |state: &mut RuntimeState| {
+            assert_eq!(
+                at(state, NOW, OutputSignal::Active),
+                CaptureTransition::Continue
+            );
+            assert_eq!(
+                at(state, NOW + 1_000, OutputSignal::Idle),
+                CaptureTransition::Continue
+            );
+        };
+        let ended_at = NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS;
+
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        hang_up(&mut state);
+        assert_eq!(
+            at(&mut state, ended_at, OutputSignal::Idle),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
+        );
+        assert_eq!(
+            state.auto_stop(),
+            Some(DetectionAutoStop {
+                session_id,
+                trigger: machine::StopTrigger::CallEnded,
+                stops_at_utc_ms: ended_at + machine::ENDING_COUNTDOWN_MS,
+            })
+        );
+        assert_eq!(
+            at(&mut state, ended_at + 1_000, OutputSignal::Active),
+            CaptureTransition::CountdownWithdrawn
+        );
+        assert_eq!(state.auto_stop(), None);
+
+        assert_eq!(
+            at(&mut state, ended_at + 2_000, OutputSignal::Idle),
+            CaptureTransition::Continue
+        );
+        let ended_again_at = ended_at + 2_000 + machine::CALL_HANGUP_GRACE_MS;
+        assert_eq!(
+            at(&mut state, ended_again_at, OutputSignal::Idle),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
+        );
+        let stops_at = ended_again_at + machine::ENDING_COUNTDOWN_MS;
+        assert_eq!(
+            at(&mut state, stops_at - 1, OutputSignal::Idle),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            at(&mut state, stops_at, OutputSignal::Idle),
+            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+        );
+
+        let mut slept = RuntimeState::default();
+        slept.tracked = Some(tracked.clone());
+        hang_up(&mut slept);
+        assert_eq!(
+            at(&mut slept, ended_at, OutputSignal::Idle),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
+        );
+        slept.slept = true;
+        assert_eq!(
+            at(&mut slept, ended_at + 1_000, OutputSignal::Idle),
+            CaptureTransition::Stop(machine::StopTrigger::SleepBoundary)
+        );
+    }
+
+    /* "Can you stay a minute?": Keep holds the capture past the ending it was
+     * counting down to for as long as that ending stands, and the call's next
+     * ending counts down again. A keep that arrives once the countdown has run
+     * out is refused rather than racing the stop. */
+    #[test]
+    fn keeping_a_countdown_records_on_until_the_call_ends_again() {
+        let session_id = MeetingSessionId::new();
+        let tracked = tracked_call(session_id);
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        let call = facetime(true);
+        let running = facetime_running();
+        let at = |state: &mut RuntimeState, now_utc_ms: i64, output: OutputSignal| {
+            transition_at(
+                state,
+                &tracked,
+                now_utc_ms,
+                &running,
+                MicSignal::Active,
+                output,
+                true,
+                &call,
+                true,
+            )
+        };
+
+        assert_eq!(
+            at(&mut state, NOW, OutputSignal::Active),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            at(&mut state, NOW + 1_000, OutputSignal::Idle),
+            CaptureTransition::Continue
+        );
+        let ended_at = NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS;
+        assert_eq!(
+            at(&mut state, ended_at, OutputSignal::Idle),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
+        );
+
+        assert!(!state.keep_recording(MeetingSessionId::new(), ended_at + 1_000));
+        assert!(state.keep_recording(session_id, ended_at + 1_000));
+        assert_eq!(state.auto_stop(), None);
+        assert!(
+            !state.keep_recording(session_id, ended_at + 2_000),
+            "a kept capture has no countdown left to keep"
+        );
+        for now_utc_ms in [ended_at + machine::ENDING_COUNTDOWN_MS, ended_at + 600_000] {
+            assert_eq!(
+                at(&mut state, now_utc_ms, OutputSignal::Idle),
+                CaptureTransition::Continue
+            );
+        }
+
+        let resumed_at = ended_at + 601_000;
+        assert_eq!(
+            at(&mut state, resumed_at, OutputSignal::Active),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            at(&mut state, resumed_at + 1_000, OutputSignal::Idle),
+            CaptureTransition::Continue
+        );
+        let ended_again_at = resumed_at + 1_000 + machine::CALL_HANGUP_GRACE_MS;
+        assert_eq!(
+            at(&mut state, ended_again_at, OutputSignal::Idle),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
+        );
+        let stops_at = ended_again_at + machine::ENDING_COUNTDOWN_MS;
+        assert!(
+            !state.keep_recording(session_id, stops_at),
+            "a keep after the countdown ran out is refused"
+        );
+        assert_eq!(
+            at(&mut state, stops_at, OutputSignal::Idle),
+            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+        );
+    }
+
+    /* The meeting ran over its slot: Keep at the scheduled end must not hide
+     * the call's own end, which the event end would outrank on every tick. */
+    #[test]
+    fn a_capture_kept_past_its_scheduled_end_still_stops_when_the_call_ends() {
+        let session_id = MeetingSessionId::new();
+        let event_end = NOW + 60_000;
+        let mut tracked = TrackedCapture::detection(
+            &capturing(session_id, &SourceKind::ALL),
+            Some("com.apple.facetime".to_string()),
+            Some(event_end),
+        );
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        let call = facetime(true);
+        let running = facetime_running();
+        let at = |state: &mut RuntimeState,
+                  tracked: &TrackedCapture,
+                  now_utc_ms: i64,
+                  output: OutputSignal| {
+            transition_at(
+                state,
+                tracked,
+                now_utc_ms,
+                &running,
+                MicSignal::Active,
+                output,
+                true,
+                &call,
+                true,
+            )
+        };
+
+        assert_eq!(
+            at(&mut state, &tracked, NOW, OutputSignal::Active),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            at(&mut state, &tracked, event_end, OutputSignal::Active),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::EventEnd)
+        );
+        assert!(state.keep_recording(session_id, event_end + 1_000));
+        tracked = state.tracked.clone().expect("a kept capture stays tracked");
+
+        assert_eq!(
+            at(
+                &mut state,
+                &tracked,
+                event_end + 15_000,
+                OutputSignal::Active
+            ),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            at(&mut state, &tracked, event_end + 20_000, OutputSignal::Idle),
+            CaptureTransition::Continue
+        );
+        let ended_at = event_end + 20_000 + machine::CALL_HANGUP_GRACE_MS;
+        assert_eq!(
+            at(&mut state, &tracked, ended_at, OutputSignal::Idle),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::CallEnded)
+        );
+        assert_eq!(
+            at(
+                &mut state,
+                &tracked,
+                ended_at + machine::ENDING_COUNTDOWN_MS,
+                OutputSignal::Idle
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::CallEnded)
+        );
+    }
+
+    /* A recording started by hand with no call to watch has no ending to count
+     * down to: whatever the Mac's sound and apps do, it records until the
+     * operator stops it, and Keep has nothing to cancel. */
+    #[test]
+    fn a_manual_recording_never_counts_down_or_stops_by_itself() {
+        let session_id = MeetingSessionId::new();
+        let tracked = TrackedCapture::operator(&capturing(session_id, &SourceKind::ALL));
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+
+        for (now_utc_ms, mic, output) in [
+            (NOW, MicSignal::Active, OutputSignal::Active),
+            (NOW + 1_000, MicSignal::Idle, OutputSignal::Idle),
+            (
+                NOW + 1_000 + machine::CALL_HANGUP_GRACE_MS + machine::ENDING_COUNTDOWN_MS,
+                MicSignal::Idle,
+                OutputSignal::Idle,
+            ),
+            (NOW + 3_600_000, MicSignal::Idle, OutputSignal::Idle),
+        ] {
+            assert_eq!(
+                transition_at(
+                    &mut state,
+                    &tracked,
+                    now_utc_ms,
+                    &[],
+                    mic,
+                    output,
+                    false,
+                    &machine::CallSignal::Absent,
+                    false,
+                ),
+                CaptureTransition::Continue
+            );
+        }
+        assert_eq!(state.auto_stop(), None);
+        assert!(!state.keep_recording(session_id, NOW + 3_600_000));
     }
 
     /* Which apps the operator used is the episode's memory, and the episode

@@ -7,6 +7,7 @@ use crate::meeting::detection::notify::NotificationAccess;
 use crate::meeting::detection::{
     DetectionRuntime, DetectionSettings, DetectionStatus, MeetingRitualAction,
 };
+use crate::meeting::types::MeetingSessionId;
 
 /// Writes the operator's detection policy and returns the status it produces, so
 /// the caller never has to re-read to see the effect of its own write.
@@ -91,6 +92,17 @@ pub async fn meeting_ritual_respond(
 ) -> Result<bool, ()> {
     let runtime = Arc::clone(&runtime);
     Ok(runtime.respond_ritual(&ritual_id, action).await)
+}
+
+/// The countdown's "Keep recording": the capture runs on past the end
+/// detection saw. False when no countdown for the session is still running.
+#[tauri::command]
+#[specta::specta]
+pub fn detection_keep_recording(
+    runtime: State<'_, Arc<DetectionRuntime>>,
+    session_id: MeetingSessionId,
+) -> bool {
+    runtime.keep_recording(session_id)
 }
 
 /// Allowlisted bundle IDs whose application is running right now. The settings UI

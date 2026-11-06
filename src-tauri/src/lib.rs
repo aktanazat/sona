@@ -1915,6 +1915,7 @@ pub fn run(cli_args: CliArgs) {
             commands::detection::detection_prompt_panel_ack,
             commands::detection::meeting_ritual_panel_ack,
             commands::detection::meeting_ritual_respond,
+            commands::detection::detection_keep_recording,
             commands::detection::detection_running_meeting_apps,
             commands::detection::detection_settings_set,
             commands::query::sona_query_search,

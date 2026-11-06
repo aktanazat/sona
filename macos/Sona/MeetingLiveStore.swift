@@ -665,6 +665,19 @@ final class MeetingLiveStore {
         }
     }
 
+    /// The countdown's "Keep recording". The dock follows the status the core
+    /// publishes, so a keep that lands too late shows as the stop it was.
+    func keepRecording(_ autoStop: DetectionAutoStop) {
+        Task {
+            do {
+                let _: Bool = try await core.request(
+                    "detection_keep_recording", MeetingRequest.session(autoStop.sessionId))
+            } catch {
+                self.error = reason(error)
+            }
+        }
+    }
+
     // MARK: - Rituals
 
     private func receive(_ event: RitualEvent) {

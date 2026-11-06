@@ -6,8 +6,9 @@ use objc2_core_audio::{
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
     kAudioHardwarePropertyProcessObjectList, kAudioObjectPropertyElementMain,
     kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
-    kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID, AudioObjectGetPropertyData,
-    AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
+    kAudioProcessPropertyBundleID, kAudioProcessPropertyIsRunningOutput, kAudioProcessPropertyPID,
+    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
+    AudioObjectPropertyAddress,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use std::ptr::NonNull;
@@ -49,14 +50,14 @@ pub(crate) fn is_bluetooth_device_named(name: &str) -> bool {
             read_u32(device_id, kAudioDevicePropertyTransportType).is_some_and(|transport| {
                 transport == kAudioDeviceTransportTypeBluetooth
                     || transport == kAudioDeviceTransportTypeBluetoothLE
-            }) && device_name(device_id).as_deref() == Some(name)
+            }) && read_string(device_id, kAudioObjectPropertyName).as_deref() == Some(name)
         })
 }
 
 pub(crate) fn input_configuration_identity(name: &str) -> Option<[u64; 6]> {
     let mut matching = device_ids()?
         .into_iter()
-        .filter(|id| device_name(*id).as_deref() == Some(name));
+        .filter(|id| read_string(*id, kAudioObjectPropertyName).as_deref() == Some(name));
     let device_id = matching.next()?;
     if matching.next().is_some() {
         return None;
@@ -206,7 +207,7 @@ pub(crate) fn input_channel_count(device_id: AudioObjectID) -> Option<u32> {
 pub(crate) fn input_channel_count_named(name: &str) -> Option<u32> {
     device_ids()?
         .into_iter()
-        .filter(|id| device_name(*id).as_deref() == Some(name))
+        .filter(|id| read_string(*id, kAudioObjectPropertyName).as_deref() == Some(name))
         .find_map(|id| input_channel_count(id).filter(|channels| *channels > 0))
 }
 
@@ -240,6 +241,41 @@ pub(crate) fn other_process_is_playing() -> Option<bool> {
         return None;
     }
     read_u32(device, kAudioDevicePropertyDeviceIsRunningSomewhere).map(|running| running != 0)
+}
+
+/// Whether the app `bundle_id` names is playing sound through its own
+/// processes, including the helpers a browser or an Electron app plays from,
+/// whose bundle ids extend the app's. `None` when CoreAudio refuses the
+/// per-process list, as releases before macOS 14.2 do, or lists no process
+/// of the app.
+pub(crate) fn app_is_playing(bundle_id: &str) -> Option<bool> {
+    let system = u32::try_from(kAudioObjectSystemObject).ok()?;
+    let mut listed = false;
+    let mut playing = false;
+    for process in object_list(system, kAudioHardwarePropertyProcessObjectList)? {
+        let owned = read_string(process, kAudioProcessPropertyBundleID)
+            .is_some_and(|process_bundle_id| is_app_or_helper(&process_bundle_id, bundle_id));
+        if !owned {
+            continue;
+        }
+        listed = true;
+        playing |= read_u32(process, kAudioProcessPropertyIsRunningOutput)
+            .is_some_and(|running| running != 0);
+    }
+    listed.then_some(playing)
+}
+
+/// True when `process_bundle_id` is `bundle_id`'s own or one of its
+/// helpers'. Compared without case: CoreAudio spells an id as its bundle
+/// does, and the allowlist stores ids lowercased.
+fn is_app_or_helper(process_bundle_id: &str, bundle_id: &str) -> bool {
+    process_bundle_id
+        .get(..bundle_id.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(bundle_id))
+        && matches!(
+            process_bundle_id.as_bytes().get(bundle_id.len()),
+            None | Some(b'.')
+        )
 }
 
 /// Every device CoreAudio lists, or `None` when it refuses the query.
@@ -292,27 +328,52 @@ fn object_list(object_id: AudioObjectID, selector: u32) -> Option<Vec<AudioObjec
     Some(object_ids)
 }
 
-fn device_name(device_id: AudioObjectID) -> Option<String> {
-    let mut property = address(kAudioObjectPropertyName);
-    let mut name: *const CFString = std::ptr::null();
+fn read_string(object_id: AudioObjectID, selector: u32) -> Option<String> {
+    let mut property = address(selector);
+    let mut string: *const CFString = std::ptr::null();
     let mut size = u32::try_from(std::mem::size_of::<*const CFString>()).ok()?;
-    // `size` states `name`'s exact byte length, as CoreAudio requires.
-    // SAFETY: `property` and `name` are live stack slots for this call.
+    // `size` states `string`'s exact byte length, as CoreAudio requires.
+    // SAFETY: `property` and `string` are live stack slots for this call.
     let status = unsafe {
         AudioObjectGetPropertyData(
-            device_id,
+            object_id,
             NonNull::from(&mut property),
             0,
             std::ptr::null(),
             NonNull::from(&mut size),
-            NonNull::from(&mut name).cast(),
+            NonNull::from(&mut string).cast(),
         )
     };
     if status != 0 {
         return None;
     }
     // CoreAudio hands the caller a retained CFString it must release.
-    // SAFETY: `name` is that owned reference; `CFRetained` releases it on drop.
-    let name = unsafe { CFRetained::from_raw(NonNull::new(name.cast_mut())?) };
-    Some(name.to_string())
+    // SAFETY: `string` is that owned reference; `CFRetained` releases it on drop.
+    let string = unsafe { CFRetained::from_raw(NonNull::new(string.cast_mut())?) };
+    Some(string.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_app_or_helper;
+
+    /* A browser call plays from a helper whose bundle id extends the
+     * browser's, spelled as its bundle spells it while the allowlist is
+     * lowercase. An id that only starts with the same letters is another
+     * app, and counting its sound as the meeting's would keep alive a
+     * meeting that ended. */
+    #[test]
+    fn an_app_owns_its_helpers_and_nothing_that_only_shares_its_prefix() {
+        assert!(is_app_or_helper("us.zoom.xos", "us.zoom.xos"));
+        assert!(is_app_or_helper(
+            "com.google.Chrome.helper",
+            "com.google.chrome"
+        ));
+        assert!(!is_app_or_helper("com.google.chromex", "com.google.chrome"));
+        assert!(!is_app_or_helper(
+            "com.apple.WebKit.GPU",
+            "com.apple.safari"
+        ));
+        assert!(!is_app_or_helper("com.google", "com.google.chrome"));
+    }
 }

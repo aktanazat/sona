@@ -3760,6 +3760,18 @@ pub(super) async fn call(
                     .await,
             )
         }
+        "detection_keep_recording" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let handle = app.clone();
+            on_main_thread(app, move || {
+                encode_plain(crate::commands::detection::detection_keep_recording(
+                    handle.state(),
+                    session_id,
+                ))
+            })
+            .await?
+        }
         "detection_running_meeting_apps" => {
             let handle = app.clone();
             on_main_thread(app, move || {
