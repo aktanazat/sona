@@ -852,9 +852,16 @@ fn build_tray(app_handle: &AppHandle, visible: bool) -> anyhow::Result<()> {
             }
             "start_meeting_notes" => {
                 let manager = Arc::clone(&app.state::<Arc<MeetingSessionManager>>());
+                let detection =
+                    Arc::clone(&app.state::<Arc<meeting::detection::DetectionRuntime>>());
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    match manager.create_manual_preflight_from_tray().await {
+                    let under_way = tauri::async_runtime::spawn_blocking(move || {
+                        detection.calendar_event_under_way()
+                    })
+                    .await
+                    .unwrap_or_default();
+                    match manager.create_manual_preflight_from_tray(under_way).await {
                         Ok(snapshot) => {
                             tray::set_meeting_tray_snapshot(&app, Some(&snapshot));
                             show_meeting_destination(

@@ -1061,11 +1061,24 @@ impl MeetingSessionManager {
         self.suggestions.list(now_ns)
     }
 
-    pub async fn create_preflight(
+    /// A start made by hand that names no event. During the one meeting
+    /// under way (`under_way`, which the caller reads from the calendar) it
+    /// records that meeting the way a detected start does: the preflight
+    /// carries the event, and the "Local notes" default takes its title.
+    pub async fn create_manual_preflight(
         &self,
-        request: MeetingPreflightCreateRequest,
+        mut request: MeetingPreflightCreateRequest,
+        under_way: Option<CalendarEventSummary>,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
-        self.create_preflight_with_calendar(request, None).await
+        if let Some(event) = under_way.as_ref() {
+            request.calendar_event_key = Some(event.event_key.clone());
+            let title = event.title.trim();
+            if request.title == MANUAL_DEFAULT_TITLE && !title.is_empty() {
+                request.title = title.to_string();
+            }
+        }
+        self.create_preflight_with_calendar(request, under_way)
+            .await
     }
 
     pub async fn create_preflight_with_calendar(
@@ -1141,24 +1154,28 @@ impl MeetingSessionManager {
 
     pub async fn create_manual_preflight_from_tray(
         &self,
+        under_way: Option<CalendarEventSummary>,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
         let result = self
-            .create_preflight(MeetingPreflightCreateRequest {
-                operation_id: MeetingOperationId::new(),
-                expected_revision: 0,
-                title: MANUAL_DEFAULT_TITLE.to_string(),
-                origin: MeetingOrigin::Manual,
-                suggestion_id: None,
-                calendar_event_key: None,
-                requested_sources: SourceKind::ALL.to_vec(),
-                required_sources: SourceKind::ALL.to_vec(),
-                accepted_known_missing_sources: Vec::new(),
-                degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
-                destination: ProcessingDestination::Local,
-                remote_acknowledgement: None,
-                microphone_device_uid: None,
-                frozen_system_audio_application_bundle_ids: Vec::new(),
-            })
+            .create_manual_preflight(
+                MeetingPreflightCreateRequest {
+                    operation_id: MeetingOperationId::new(),
+                    expected_revision: 0,
+                    title: MANUAL_DEFAULT_TITLE.to_string(),
+                    origin: MeetingOrigin::Manual,
+                    suggestion_id: None,
+                    calendar_event_key: None,
+                    requested_sources: SourceKind::ALL.to_vec(),
+                    required_sources: SourceKind::ALL.to_vec(),
+                    accepted_known_missing_sources: Vec::new(),
+                    degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+                    destination: ProcessingDestination::Local,
+                    remote_acknowledgement: None,
+                    microphone_device_uid: None,
+                    frozen_system_audio_application_bundle_ids: Vec::new(),
+                },
+                under_way,
+            )
             .await?;
         let snapshot = result.snapshot;
         self.actor_lock().tray_session_id = Some(snapshot.session_id);
@@ -5470,7 +5487,7 @@ pub(crate) mod tests {
     fn retention_sweep_does_not_take_another_session_capture() {
         let (_directory, manager, _starts, aborts) = manager();
         let due = review_ready_session(&manager);
-        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight_with_calendar(
             MeetingPreflightCreateRequest {
                 operation_id: MeetingOperationId::new(),
                 expected_revision: 0,
@@ -5487,6 +5504,7 @@ pub(crate) mod tests {
                 microphone_device_uid: None,
                 frozen_system_audio_application_bundle_ids: Vec::new(),
             },
+            None,
         ))
         .unwrap();
         let active = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
@@ -5781,7 +5799,7 @@ pub(crate) mod tests {
                 lane: Arc::new(Mutex::new(None)),
             }),
         );
-        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight_with_calendar(
             MeetingPreflightCreateRequest {
                 operation_id: MeetingOperationId::new(),
                 expected_revision: 0,
@@ -5798,6 +5816,7 @@ pub(crate) mod tests {
                 microphone_device_uid: None,
                 frozen_system_audio_application_bundle_ids: Vec::new(),
             },
+            None,
         ))
         .unwrap();
 
@@ -5857,7 +5876,7 @@ pub(crate) mod tests {
                 evidence_flags: Default::default(),
             });
         assert_eq!(starts.load(Ordering::Acquire), 0);
-        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight_with_calendar(
             MeetingPreflightCreateRequest {
                 operation_id: MeetingOperationId::new(),
                 expected_revision: 0,
@@ -5874,6 +5893,7 @@ pub(crate) mod tests {
                 microphone_device_uid: None,
                 frozen_system_audio_application_bundle_ids: Vec::new(),
             },
+            None,
         ))
         .unwrap();
         assert_eq!(starts.load(Ordering::Acquire), 0);
@@ -5897,7 +5917,7 @@ pub(crate) mod tests {
     #[test]
     fn stale_discard_does_not_abort_an_active_capture() {
         let (_directory, manager, _starts, aborts) = manager();
-        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight_with_calendar(
             MeetingPreflightCreateRequest {
                 operation_id: MeetingOperationId::new(),
                 expected_revision: 0,
@@ -5914,6 +5934,7 @@ pub(crate) mod tests {
                 microphone_device_uid: None,
                 frozen_system_audio_application_bundle_ids: Vec::new(),
             },
+            None,
         ))
         .unwrap();
         let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
@@ -5993,6 +6014,73 @@ pub(crate) mod tests {
                 .meeting_calendar_facts(result.snapshot.session_id)
                 .unwrap(),
             Some(event)
+        );
+    }
+
+    #[test]
+    fn a_manual_start_during_a_meeting_records_it_under_that_event() {
+        let (_directory, manager, _, _) = manager();
+        let event = CalendarEventSummary {
+            event_key: "calendar-series-1#1000".to_string(),
+            series_key: "calendar-series-1".to_string(),
+            title: "Roadmap review".to_string(),
+            attendee_count: 2,
+            start_utc_ms: 1_000,
+            end_utc_ms: 2_000,
+            attendees: Vec::new(),
+            notes: Some("Review Q4".to_string()),
+            calendar_name: Some("Work".to_string()),
+            location: None,
+            url: None,
+        };
+        let untitled = CalendarEventSummary {
+            title: "  ".to_string(),
+            ..event.clone()
+        };
+        let record_pressed = || MeetingPreflightCreateRequest {
+            operation_id: MeetingOperationId::new(),
+            expected_revision: 0,
+            title: MANUAL_DEFAULT_TITLE.to_string(),
+            origin: MeetingOrigin::Manual,
+            suggestion_id: None,
+            calendar_event_key: None,
+            requested_sources: SourceKind::ALL.to_vec(),
+            required_sources: SourceKind::ALL.to_vec(),
+            accepted_known_missing_sources: Vec::new(),
+            degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+            destination: ProcessingDestination::Local,
+            remote_acknowledgement: None,
+            microphone_device_uid: None,
+            frozen_system_audio_application_bundle_ids: Vec::new(),
+        };
+        let start = |under_way| {
+            tauri::async_runtime::block_on(
+                manager.create_manual_preflight(record_pressed(), under_way),
+            )
+            .unwrap()
+            .snapshot
+        };
+        let joined = start(Some(event.clone()));
+        let joined_untitled = start(Some(untitled.clone()));
+        let alone = start(None);
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+
+        assert_eq!(joined.title, "Roadmap review");
+        assert_eq!(
+            store.meeting_calendar_facts(joined.session_id).unwrap(),
+            Some(event)
+        );
+        assert_eq!(joined_untitled.title, MANUAL_DEFAULT_TITLE);
+        assert_eq!(
+            store
+                .meeting_calendar_facts(joined_untitled.session_id)
+                .unwrap(),
+            Some(untitled)
+        );
+        assert_eq!(alone.title, MANUAL_DEFAULT_TITLE);
+        assert_eq!(
+            store.meeting_calendar_facts(alone.session_id).unwrap(),
+            None
         );
     }
 
@@ -7425,7 +7513,7 @@ pub(crate) mod tests {
                 output: String::new(),
             }),
         );
-        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight_with_calendar(
             MeetingPreflightCreateRequest {
                 operation_id: MeetingOperationId::new(),
                 expected_revision: 0,
@@ -7442,6 +7530,7 @@ pub(crate) mod tests {
                 microphone_device_uid: None,
                 frozen_system_audio_application_bundle_ids: Vec::new(),
             },
+            None,
         ))
         .unwrap();
         let started = tauri::async_runtime::block_on(manager.start(MeetingStartRequest {
@@ -7918,7 +8007,7 @@ pub(crate) mod tests {
         let (_directory, manager) = manager_with(Arc::new(RendezvousSources {
             rendezvous: Arc::clone(&rendezvous),
         }));
-        let preflight = tauri::async_runtime::block_on(manager.create_preflight(
+        let preflight = tauri::async_runtime::block_on(manager.create_preflight_with_calendar(
             MeetingPreflightCreateRequest {
                 operation_id: MeetingOperationId::new(),
                 expected_revision: 0,
@@ -7935,6 +8024,7 @@ pub(crate) mod tests {
                 microphone_device_uid: None,
                 frozen_system_audio_application_bundle_ids: Vec::new(),
             },
+            None,
         ))
         .unwrap();
 

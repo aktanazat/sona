@@ -81,6 +81,32 @@ pub fn select_event<'a>(
         .map(|(index, _)| index)
 }
 
+/// The meeting under way at `now_utc_ms`, read in full, for a recording the
+/// operator starts by hand.
+///
+/// Nothing is read unless the operator turned "Use my calendar" on. A meeting
+/// is an event in progress that meets the attendee floor, so a solo block
+/// never counts. Two meetings at once leave no way to tell which one is being
+/// recorded, and the recording stays unattached rather than taking a guess.
+pub fn meeting_under_way(
+    settings: &crate::settings::AppSettings,
+    calendar: &dyn CalendarSource,
+    now_utc_ms: i64,
+) -> Option<CalendarEventSummary> {
+    if !settings.detection_calendar_enabled {
+        return None;
+    }
+    let occurrences = calendar.events_between(now_utc_ms, now_utc_ms + 1);
+    let mut meetings = occurrences
+        .iter()
+        .filter(|occurrence| occurrence.summary.attendee_count >= ATTENDEE_FLOOR);
+    let meeting = meetings.next()?;
+    if meetings.next().is_some() {
+        return None;
+    }
+    calendar.event_by_key(&meeting.summary.event_key)
+}
+
 /// Authorization for reading events, as the operator would recognize it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
@@ -815,6 +841,130 @@ mod tests {
             "a solo block reaches the table so it can be declined there for its own reason"
         );
         assert_eq!(select_event([&ended], NOW, 60), None);
+    }
+
+    /// A calendar that answers like EventKit: the ranged listing leaves the
+    /// notes out, and only the read by key carries them. It counts every read.
+    struct Calendar {
+        events: Vec<CalendarEventSummary>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Calendar {
+        fn holding(events: Vec<CalendarEventSummary>) -> Self {
+            Self {
+                events,
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn read(&self) {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl CalendarSource for Calendar {
+        fn access(&self) -> CalendarAccess {
+            CalendarAccess::Authorized
+        }
+
+        fn request_access(&self) -> CalendarAccess {
+            CalendarAccess::Authorized
+        }
+
+        fn next_event(
+            &self,
+            _now_utc_ms: i64,
+            _lookahead_ms: i64,
+            _lead_seconds: i64,
+        ) -> Option<CalendarEventSummary> {
+            self.read();
+            None
+        }
+
+        fn event_by_key(&self, event_key: &str) -> Option<CalendarEventSummary> {
+            self.read();
+            self.events
+                .iter()
+                .find(|event| event.event_key == event_key)
+                .cloned()
+        }
+
+        fn events_between(&self, start_utc_ms: i64, end_utc_ms: i64) -> Vec<CalendarOccurrence> {
+            self.read();
+            self.events
+                .iter()
+                .filter(|event| event.start_utc_ms < end_utc_ms && event.end_utc_ms > start_utc_ms)
+                .map(|event| CalendarOccurrence {
+                    summary: CalendarEventSummary {
+                        notes: None,
+                        ..event.clone()
+                    },
+                    is_recurring: false,
+                })
+                .collect()
+        }
+    }
+
+    fn calendar_on() -> crate::settings::AppSettings {
+        crate::settings::AppSettings {
+            detection_calendar_enabled: true,
+            ..Default::default()
+        }
+    }
+
+    fn in_progress(event_key: &str, attendee_count: usize) -> CalendarEventSummary {
+        CalendarEventSummary {
+            event_key: event_key.to_string(),
+            attendee_count,
+            notes: Some("Agenda: ship the card".to_string()),
+            ..event(-10 * MINUTE_MS, 60 * MINUTE_MS)
+        }
+    }
+
+    #[test]
+    fn a_manual_start_joins_the_one_meeting_under_way_read_in_full() {
+        let meeting = in_progress("meeting", 2);
+        let calendar = Calendar::holding(vec![
+            in_progress("solo-block", 1),
+            meeting.clone(),
+            CalendarEventSummary {
+                event_key: "meeting-later".to_string(),
+                ..event(30 * MINUTE_MS, 30 * MINUTE_MS)
+            },
+        ]);
+
+        assert_eq!(
+            meeting_under_way(&calendar_on(), &calendar, NOW),
+            Some(meeting),
+            "a solo block or a later meeting is not a second meeting under way"
+        );
+    }
+
+    #[test]
+    fn a_manual_start_stays_unattached_without_exactly_one_meeting_under_way() {
+        let solo = Calendar::holding(vec![in_progress("solo-block", 1)]);
+        let overlapping =
+            Calendar::holding(vec![in_progress("first", 2), in_progress("second", 3)]);
+
+        assert_eq!(meeting_under_way(&calendar_on(), &solo, NOW), None);
+        assert_eq!(
+            meeting_under_way(&calendar_on(), &overlapping, NOW),
+            None,
+            "two meetings at once leave no way to tell which one is being recorded"
+        );
+    }
+
+    #[test]
+    fn a_manual_start_never_reads_the_calendar_while_it_is_off() {
+        let calendar = Calendar::holding(vec![in_progress("meeting", 2)]);
+
+        assert_eq!(
+            meeting_under_way(&crate::settings::AppSettings::default(), &calendar, NOW),
+            None
+        );
+        assert_eq!(calendar.reads.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]
