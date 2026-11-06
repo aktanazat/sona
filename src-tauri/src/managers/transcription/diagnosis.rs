@@ -1,6 +1,7 @@
 //! How one batch decode went, for the headless `--diagnose` report. It holds
 //! counts, never transcript words, so the report can be shared as it is.
 
+use super::RecoveredSpan;
 use clap::ValueEnum;
 use std::fmt;
 use transcribe_cpp::{Model, Transcript};
@@ -122,21 +123,42 @@ impl SegmentStats {
     }
 }
 
+/// A stretch of a window that heard nothing and was decoded again.
+#[derive(Debug)]
+pub struct RecoveredStats {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub chars: usize,
+}
+
 /// The successful native runs of a diagnosed decode, in audio order.
 #[derive(Debug, Default)]
 pub(super) struct NativeRuns {
     runs: usize,
     decoded_samples: usize,
     segments: Vec<SegmentStats>,
+    recovered: Vec<RecoveredStats>,
 }
 
 impl NativeRuns {
-    pub(super) fn record(&mut self, model: &Model, samples: usize, transcript: &Transcript) {
+    pub(super) fn record(
+        &mut self,
+        model: &Model,
+        samples: usize,
+        transcript: &Transcript,
+        recovered: &[RecoveredSpan],
+    ) {
         let offset_ms = i64::try_from(self.decoded_samples / 16).unwrap_or(i64::MAX);
         self.segments.extend(
             (0..transcript.segments.len())
                 .map(|index| SegmentStats::new(model, transcript, index, offset_ms)),
         );
+        self.recovered
+            .extend(recovered.iter().map(|recovered| RecoveredStats {
+                start_ms: offset_ms + recovered.span.start,
+                end_ms: offset_ms + recovered.span.end,
+                chars: recovered.text.chars().count(),
+            }));
         self.runs += 1;
         self.decoded_samples += samples;
     }
@@ -144,6 +166,7 @@ impl NativeRuns {
     pub(super) fn report_into(self, diagnosis: &mut DecodeDiagnosis) {
         diagnosis.windows = Some(self.runs);
         diagnosis.segments = Some(self.segments);
+        diagnosis.recovered_spans = self.recovered;
     }
 }
 
@@ -164,16 +187,16 @@ pub struct DecodeDiagnosis {
     pub no_speech_check: FilterOutcome,
     /// The fallback sampling seed every whisper decode here shared.
     pub sampling_seed: Option<u32>,
-    /// Characters of the decode run again without the prompt after the
-    /// prompted one heard nothing in audio known to hold speech.
-    pub retried_without_prompt: Option<usize>,
+    /// Stretches of a window that heard nothing in audio known to hold
+    /// speech, decoded again without the prompt.
+    pub recovered_spans: Vec<RecoveredStats>,
     pub prompt_echo: FilterOutcome,
     pub vocabulary_only: FilterOutcome,
     pub post_processing: FilterOutcome,
     pub result_chars: usize,
 }
 
-fn seconds(ms: i64) -> f64 {
+pub(super) fn seconds(ms: i64) -> f64 {
     f64::from(i32::try_from(ms).unwrap_or(i32::MAX)) / 1000.0
 }
 
@@ -271,10 +294,13 @@ impl fmt::Display for DecodeDiagnosis {
             other => writeln!(f, "  no-speech check (engine): {other}")?,
         }
         writeln!(f, "  prompt echo: {}", self.prompt_echo)?;
-        if let Some(chars) = self.retried_without_prompt {
+        for span in &self.recovered_spans {
             writeln!(
                 f,
-                "  the audio is known to hold speech, so it was decoded again without the prompt: {chars} characters"
+                "  {:.2}-{:.2}s heard nothing though the audio holds speech, so it was decoded again without the prompt: {} characters",
+                seconds(span.start_ms),
+                seconds(span.end_ms),
+                span.chars
             )?;
         }
         writeln!(f, "  vocabulary-only: {}", self.vocabulary_only)?;
