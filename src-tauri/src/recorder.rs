@@ -56,6 +56,9 @@ pub struct RecorderPreflight {
     pub start_availability: RecorderStartAvailability,
     pub camera_devices: Vec<RecorderDevice>,
     pub microphone_devices: Vec<RecorderDevice>,
+    /// The capture the recorder already holds. A sheet opened over it shows it instead of setup,
+    /// or nothing could reach a paused recording again.
+    pub session: Option<RecorderSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, Type)]
@@ -201,6 +204,10 @@ impl RecorderState {
             failure: self.failure,
         }
     }
+
+    fn held_session(&self) -> Option<RecorderSnapshot> {
+        cancel_reaches(self.phase).then(|| self.snapshot())
+    }
 }
 
 pub struct ScreenRecorderManager {
@@ -249,34 +256,32 @@ impl ScreenRecorderManager {
         } else {
             RecorderStartAvailability::Ready
         };
-        let preflight = match native_preflight() {
-            Ok(native) => RecorderPreflight {
-                availability: native.availability,
-                start_availability,
-                camera_devices: native.camera_devices,
-                microphone_devices: native.microphone_devices,
-            },
-            Err(_) => RecorderPreflight {
-                availability: RecorderAvailability::Unsupported,
-                start_availability,
-                camera_devices: Vec::new(),
-                microphone_devices: Vec::new(),
-            },
-        };
+        let native = native_preflight().unwrap_or_else(|_| NativePreflight {
+            availability: RecorderAvailability::Unsupported,
+            camera_devices: Vec::new(),
+            microphone_devices: Vec::new(),
+        });
 
-        let idle = {
+        let (idle, session) = {
             let mut state = lock_recover(&self.state);
             if state.phase == RecorderPhase::Checking {
                 state.phase = RecorderPhase::Idle;
-                Some(state.snapshot())
+                (Some(state.snapshot()), None)
             } else {
-                None
+                self.refresh_native_metrics(&mut state);
+                (None, state.held_session())
             }
         };
         if let Some(snapshot) = idle {
             self.emit(snapshot);
         }
-        preflight
+        RecorderPreflight {
+            availability: native.availability,
+            start_availability,
+            camera_devices: native.camera_devices,
+            microphone_devices: native.microphone_devices,
+            session,
+        }
     }
 
     pub fn preview_start(
@@ -991,7 +996,11 @@ fn map_native_error(error: crate::recorder_macos::NativeRecorderError) -> Record
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_reaches, output_names, RecorderPhase};
+    use super::{
+        cancel_reaches, output_names, RecorderAvailability, RecorderPhase, RecorderPreflight,
+        RecorderStartAvailability, RecorderState,
+    };
+    use std::time::Duration;
 
     /// Cancellation is the only way out of a phase that owns work in flight. If any of these
     /// stops accepting it, that phase becomes a wedge: preview_start rejects it, stop rejects it,
@@ -1025,5 +1034,29 @@ mod tests {
 
         assert_eq!(partial, ".sona-screen-test-id.partial.mp4");
         assert_eq!(published, "sona-screen-20260903T120000Z-test-id.mp4");
+    }
+
+    /// Nothing heartbeats while paused, so preflight is the only thing a reopened sheet reads.
+    /// Without the session there it shows setup or a capture-busy failure, and nothing can
+    /// resume, save or discard the paused recording that still holds the microphone.
+    #[test]
+    fn preflight_carries_a_paused_recording_to_a_reopened_sheet() {
+        let paused = RecorderState {
+            phase: RecorderPhase::Paused,
+            screen_selected: true,
+            elapsed_before_active: Duration::from_secs(4),
+            ..RecorderState::default()
+        };
+        let preflight = RecorderPreflight {
+            availability: RecorderAvailability::Supported,
+            start_availability: RecorderStartAvailability::CaptureBusy,
+            camera_devices: Vec::new(),
+            microphone_devices: Vec::new(),
+            session: paused.held_session(),
+        };
+
+        let wire = serde_json::to_value(&preflight).expect("preflight serializes");
+        assert_eq!(wire["session"]["phase"], "paused");
+        assert_eq!(wire["session"]["elapsedMs"], 4000);
     }
 }
