@@ -180,6 +180,29 @@ impl Default for RecorderState {
     }
 }
 
+impl RecorderState {
+    fn snapshot(&self) -> RecorderSnapshot {
+        RecorderSnapshot {
+            phase: self.phase,
+            elapsed_ms: duration_millis(
+                self.elapsed_before_active
+                    + self
+                        .active_since
+                        .map_or(Duration::ZERO, |started| started.elapsed()),
+            ),
+            screen_selected: self.screen_selected,
+            dropped_video_frames: self.dropped_video_frames,
+            output_path: self
+                .output_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            width: self.width,
+            height: self.height,
+            failure: self.failure,
+        }
+    }
+}
+
 pub struct ScreenRecorderManager {
     app: AppHandle,
     recordings_dir: PathBuf,
@@ -212,7 +235,7 @@ impl ScreenRecorderManager {
             let mut state = lock_recover(&self.state);
             if state.phase == RecorderPhase::Idle {
                 state.phase = RecorderPhase::Checking;
-                Some(self.snapshot_locked(&state))
+                Some(state.snapshot())
             } else {
                 None
             }
@@ -245,7 +268,7 @@ impl ScreenRecorderManager {
             let mut state = lock_recover(&self.state);
             if state.phase == RecorderPhase::Checking {
                 state.phase = RecorderPhase::Idle;
-                Some(self.snapshot_locked(&state))
+                Some(state.snapshot())
             } else {
                 None
             }
@@ -275,7 +298,7 @@ impl ScreenRecorderManager {
             }
             reset_for_preview(&mut state);
             state.phase = RecorderPhase::SelectingSource;
-            self.snapshot_locked(&state)
+            state.snapshot()
         };
         self.emit(selecting);
 
@@ -313,7 +336,7 @@ impl ScreenRecorderManager {
                     state.microphone_lease = microphone_lease;
                     state.phase = RecorderPhase::Previewing;
                     state.screen_selected = true;
-                    self.snapshot_locked(&state)
+                    state.snapshot()
                 };
                 self.emit(snapshot.clone());
                 Ok(snapshot)
@@ -325,7 +348,7 @@ impl ScreenRecorderManager {
                         reset_for_preview(&mut state);
                         state.phase = RecorderPhase::Idle;
                         state.failure = Some(failure);
-                        self.snapshot_locked(&state)
+                        state.snapshot()
                     };
                     self.emit(snapshot.clone());
                     Ok(snapshot)
@@ -348,7 +371,7 @@ impl ScreenRecorderManager {
             let partial = state.partial_path.take();
             reset_for_preview(&mut state);
             state.phase = RecorderPhase::Idle;
-            let snapshot = self.snapshot_locked(&state);
+            let snapshot = state.snapshot();
             (native, lease, partial, snapshot)
         };
         drop(native);
@@ -375,7 +398,7 @@ impl ScreenRecorderManager {
                 return Err(RecorderCommandError::InvalidState);
             }
             state.phase = RecorderPhase::Starting;
-            self.snapshot_locked(&state)
+            state.snapshot()
         };
         self.emit(starting);
 
@@ -405,7 +428,7 @@ impl ScreenRecorderManager {
             state.active_since = Some(Instant::now());
             state.elapsed_before_active = Duration::ZERO;
             state.phase = RecorderPhase::Recording;
-            self.snapshot_locked(&state)
+            state.snapshot()
         };
         self.emit(snapshot.clone());
         Ok(snapshot)
@@ -432,7 +455,7 @@ impl ScreenRecorderManager {
                         .saturating_add(active_since.elapsed());
                 }
                 state.phase = RecorderPhase::Paused;
-                Ok(self.snapshot_locked(&state))
+                Ok(state.snapshot())
             }
         };
         match result {
@@ -462,7 +485,7 @@ impl ScreenRecorderManager {
             } else {
                 state.active_since = Some(Instant::now());
                 state.phase = RecorderPhase::Recording;
-                Ok(self.snapshot_locked(&state))
+                Ok(state.snapshot())
             }
         };
         match result {
@@ -501,7 +524,7 @@ impl ScreenRecorderManager {
                 drop(state);
                 return Ok(self.fail(RecorderFailureCode::OutputFinalizeFailed));
             };
-            let snapshot = self.snapshot_locked(&state);
+            let snapshot = state.snapshot();
             (native, partial_path, final_path, snapshot)
         };
         self.emit(finalizing);
@@ -543,7 +566,7 @@ impl ScreenRecorderManager {
             state.elapsed_before_active = Duration::from_millis(report.duration_ms);
             state.failure = None;
             state.phase = RecorderPhase::Saved;
-            let snapshot = self.snapshot_locked(&state);
+            let snapshot = state.snapshot();
             (lease, snapshot)
         };
         drop(lease);
@@ -562,7 +585,7 @@ impl ScreenRecorderManager {
             let partial = state.partial_path.take();
             reset_for_preview(&mut state);
             state.phase = RecorderPhase::Idle;
-            let snapshot = self.snapshot_locked(&state);
+            let snapshot = state.snapshot();
             (native, lease, partial, snapshot)
         };
         drop(native);
@@ -576,7 +599,7 @@ impl ScreenRecorderManager {
         self.apply_native_failure();
         let mut state = lock_recover(&self.state);
         self.refresh_native_metrics(&mut state);
-        self.snapshot_locked(&state)
+        state.snapshot()
     }
 
     pub(crate) fn is_capture_active(&self) -> bool {
@@ -611,7 +634,7 @@ impl ScreenRecorderManager {
         let snapshot = {
             let mut state = lock_recover(&self.state);
             self.refresh_native_metrics(&mut state);
-            (state.phase == RecorderPhase::Recording).then(|| self.snapshot_locked(&state))
+            (state.phase == RecorderPhase::Recording).then(|| state.snapshot())
         };
         if let Some(snapshot) = snapshot {
             self.emit(snapshot);
@@ -647,7 +670,7 @@ impl ScreenRecorderManager {
             } else {
                 RecorderPhase::Failed
             };
-            let snapshot = self.snapshot_locked(&state);
+            let snapshot = state.snapshot();
             (native, lease, partial, snapshot)
         };
         drop(native);
@@ -660,27 +683,6 @@ impl ScreenRecorderManager {
     fn refresh_native_metrics(&self, state: &mut RecorderState) {
         if let Some(native) = state.native.as_ref() {
             state.dropped_video_frames = native_dropped_video_frames(native);
-        }
-    }
-
-    fn snapshot_locked(&self, state: &RecorderState) -> RecorderSnapshot {
-        RecorderSnapshot {
-            phase: state.phase,
-            elapsed_ms: duration_millis(
-                state.elapsed_before_active
-                    + state
-                        .active_since
-                        .map_or(Duration::ZERO, |started| started.elapsed()),
-            ),
-            screen_selected: state.screen_selected,
-            dropped_video_frames: state.dropped_video_frames,
-            output_path: state
-                .output_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
-            width: state.width,
-            height: state.height,
-            failure: state.failure,
         }
     }
 
