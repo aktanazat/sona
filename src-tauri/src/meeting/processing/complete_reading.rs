@@ -233,6 +233,9 @@ impl From<Rejection> for ReadingError {
 fn serialize(value: &impl Serialize) -> Result<String, ReadingError> {
     serde_json::to_string(value).map_err(|_| EngineFailureCause::EvidencePack.into())
 }
+
+/// The hash of everything the notes are written from. Marks join it only when
+/// a meeting has some, so a meeting without marks keeps the key it had.
 pub(super) fn evidence_digest(evidence: &ArtifactEvidence) -> Result<String, RunFailure> {
     struct Writer(Sha256);
     impl std::io::Write for Writer {
@@ -246,6 +249,13 @@ pub(super) fn evidence_digest(evidence: &ArtifactEvidence) -> Result<String, Run
     }
     let mut writer = Writer(Sha256::new());
     serde_json::to_writer(&mut writer, &ArtifactPromptInput::from(evidence))
+        .and_then(|()| {
+            if evidence.marks.is_empty() {
+                Ok(())
+            } else {
+                serde_json::to_writer(&mut writer, &evidence.marks)
+            }
+        })
         .map_err(|_| RunFailure::engine(EngineFailureCause::EvidencePack))?;
     Ok(format!("{:x}", writer.0.finalize()))
 }
@@ -362,6 +372,7 @@ fn transcript_rows(
         &str,
         &str,
         Option<SourceOccurrences<'_, '_>>,
+        Range<usize>,
     ) -> Result<String, ReadingError>,
 ) -> Result<Vec<(String, Range<usize>)>, ReadingError> {
     let evidence = scope.evidence();
@@ -381,7 +392,7 @@ fn transcript_rows(
                 while low <= high {
                     let count = low + (high - low) / 2;
                     let (id, occurrences) = scope.raw_source(start..start + count, ledger);
-                    let row = encode(item, &item.text, &id, occurrences)?;
+                    let row = encode(item, &item.text, &id, occurrences, start..start + count)?;
                     if row.len() <= row_budget {
                         best = Some((count, row));
                         low = count + 1;
@@ -398,7 +409,8 @@ fn transcript_rows(
             let mut rest = item.text.as_str();
             while !rest.is_empty() {
                 if rest.len() <= row_budget {
-                    let whole = encode(item, rest, &item.citation.entity_id, None)?;
+                    let whole =
+                        encode(item, rest, &item.citation.entity_id, None, start..start + 1)?;
                     if whole.len() <= row_budget {
                         rows.push((whole, start..start + 1));
                         break;
@@ -413,7 +425,13 @@ fn transcript_rows(
                     while end > 0 && !rest.is_char_boundary(end) {
                         end -= 1;
                     }
-                    let row = encode(item, &rest[..end], &item.citation.entity_id, None)?;
+                    let row = encode(
+                        item,
+                        &rest[..end],
+                        &item.citation.entity_id,
+                        None,
+                        start..start + 1,
+                    )?;
                     if row.len() <= row_budget {
                         if end > 0 {
                             best = Some((end, row));
@@ -454,11 +472,25 @@ fn notes_packs(
         speakers,
         false,
         row_budget,
-        |item, text, id, occurrences| {
+        |item, text, id, occurrences, lines| {
             let mut row = NotesPromptEvidence::from(item);
             row.entity_id = id;
             row.speaker = speakers.get(&item.citation.entity_id).copied();
             row.text = text;
+            let covered = &scope.evidence()[lines];
+            for mark in &evidence.marks {
+                if !covered.iter().any(|line| marks_line(mark, line)) {
+                    continue;
+                }
+                if !row.marked.contains(&mark.kind) {
+                    row.marked.push(mark.kind);
+                }
+                if let Some(label) = mark.label.as_deref() {
+                    if !row.mark_labels.contains(&label) {
+                        row.mark_labels.push(label);
+                    }
+                }
+            }
             serialize(&RawSourceRow { row, occurrences })
         },
     )?;
@@ -484,7 +516,7 @@ fn ledger_packs(
         speakers,
         true,
         row_budget,
-        |item, text, id, occurrences| {
+        |item, text, id, occurrences, _| {
             serialize(&RawSourceRow {
                 row: LedgerPromptEvidence {
                     segment_uuid: id,
@@ -805,6 +837,138 @@ fn first_left_out(left_out: Vec<LeftOut>, round_start: usize) -> ReadingError {
     )
 }
 
+/// How far back a mark reaches: a decision or a task is marked as it is said
+/// or a few seconds after.
+const MARK_REACH_NS: u64 = 10_000_000_000;
+
+/// Whether `line` was being said in the [`MARK_REACH_NS`] up to the press of
+/// `mark`.
+fn marks_line(mark: &NotesMark, line: &MeetingEvidence) -> bool {
+    line.citation
+        .start_offset_ns
+        .is_some_and(|start| start <= mark.at_offset_ns)
+        && line
+            .citation
+            .end_offset_ns
+            .is_some_and(|end| end.saturating_add(MARK_REACH_NS) >= mark.at_offset_ns)
+}
+
+/// Each marked moment in the list its mark names. An engine that answers one
+/// mark with several entries has split it when some only repeat its lines
+/// word for word: those copies go, short of a task copy that names an owner
+/// or a deadline. A mark that nothing in its list then cites adds the lines
+/// it covers as they were said, cited and in meeting order, so a mark counts
+/// even when the engine passed over it. A mark covering no line, or more
+/// words than one entry holds, is left as it is.
+fn keep_marked_moments(content: &mut GeneratedMeetingArtifacts, evidence: &ArtifactEvidence) {
+    for mark in &evidence.marks {
+        let lines: Vec<_> = evidence
+            .transcript
+            .iter()
+            .filter(|line| marks_line(mark, line))
+            .collect();
+        let said = RawCitedText {
+            text: lines
+                .iter()
+                .map(|line| line.text.trim())
+                .collect::<Vec<_>>()
+                .join(" "),
+            citations: lines
+                .iter()
+                .map(|line| line.citation.entity_id.clone())
+                .collect(),
+        };
+        let Ok(said) = validate_cited_text(&said, &evidence.transcript, "marks") else {
+            continue;
+        };
+        let line_of = |citation: &ArtifactCitation| {
+            lines
+                .iter()
+                .zip(&said.citations)
+                .find(|(_, marked)| marked.segment_id == citation.segment_id)
+                .map(|(line, _)| line.text.trim())
+        };
+        let cites_mark = |text: &CitedArtifactText| {
+            text.citations
+                .iter()
+                .any(|citation| line_of(citation).is_some())
+        };
+        let within = |text: &CitedArtifactText| {
+            !text.citations.is_empty()
+                && text
+                    .citations
+                    .iter()
+                    .all(|citation| line_of(citation).is_some())
+        };
+        let copies = |text: &CitedArtifactText| {
+            text.citations
+                .iter()
+                .map(line_of)
+                .collect::<Option<Vec<_>>>()
+                .is_some_and(|words| words.join(" ") == text.text.trim())
+        };
+        let first = |text: &CitedArtifactText| {
+            text.citations
+                .iter()
+                .map(|citation| citation.start_offset_ns)
+                .min()
+        };
+        match mark.kind {
+            NotesMarkKind::Decision => {
+                if content
+                    .decisions
+                    .iter()
+                    .filter(|&text| within(text))
+                    .count()
+                    > 1
+                {
+                    content.decisions.retain(|decision| !copies(decision));
+                }
+                if !content.decisions.iter().any(cites_mark) {
+                    let at = content
+                        .decisions
+                        .iter()
+                        .position(|decision| first(decision) > first(&said))
+                        .unwrap_or(content.decisions.len());
+                    content.decisions.insert(at, said);
+                }
+            }
+            NotesMarkKind::ActionItem => {
+                if content
+                    .action_items
+                    .iter()
+                    .filter(|item| within(&item.text))
+                    .count()
+                    > 1
+                {
+                    content.action_items.retain(|item| {
+                        item.owner_text.is_some() || item.due_text.is_some() || !copies(&item.text)
+                    });
+                }
+                if !content
+                    .action_items
+                    .iter()
+                    .any(|item| cites_mark(&item.text))
+                {
+                    let at = content
+                        .action_items
+                        .iter()
+                        .position(|item| first(&item.text) > first(&said))
+                        .unwrap_or(content.action_items.len());
+                    content.action_items.insert(
+                        at,
+                        MeetingActionItem {
+                            text: said,
+                            owner_text: None,
+                            due_text: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Notes of the whole meeting, written from every part that could be read.
 /// A part of the transcript that failed on every try is left out and named
 /// on the notes. A joining round reads facts gathered from all over the
@@ -868,6 +1032,7 @@ pub(super) fn notes(
         let sections = match <[_; 1]>::try_from(sections) {
             Ok([(_, mut content)]) => {
                 content.left_out = left_out_spans(evidence, left_out);
+                keep_marked_moments(&mut content, evidence);
                 return Ok(content);
             }
             Err(sections) => sections,

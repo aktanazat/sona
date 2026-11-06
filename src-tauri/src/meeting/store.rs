@@ -77,6 +77,7 @@ use super::analytics::{
 };
 use super::capture::SessionClock;
 use super::cloud_bundle;
+use super::conversation_review::ConversationBookmarkKind;
 use super::ledger::{LedgerOutcomeCounts, LedgerThreadState};
 use super::template_types::{NotesTemplate, NotesTemplateChoice};
 use super::types::*;
@@ -1899,7 +1900,27 @@ pub(crate) struct ArtifactEvidence {
     /// The rough notes the user typed for this meeting. They steer the shape
     /// of the generated notes; they are never citable evidence.
     pub user_notes: String,
+    /// The decisions and to-dos the user marked while recording, in meeting
+    /// order.
+    pub marks: Vec<NotesMark>,
     pub template: NotesTemplate,
+}
+
+/// A moment the user marked while recording as a decision or a to-do, with
+/// the words they gave it, if any.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NotesMark {
+    pub kind: NotesMarkKind,
+    pub at_offset_ns: u64,
+    pub label: Option<String>,
+}
+
+/// The list of the notes a marked moment belongs in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NotesMarkKind {
+    Decision,
+    ActionItem,
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -5938,10 +5959,28 @@ impl MeetingStore {
                 });
             }
         }
+        let marks = conversation_review::export_bookmarks_in(&connection, session_id)?
+            .into_iter()
+            .filter_map(|bookmark| {
+                let kind = match bookmark.kind {
+                    ConversationBookmarkKind::Decision => NotesMarkKind::Decision,
+                    ConversationBookmarkKind::Todo => NotesMarkKind::ActionItem,
+                    ConversationBookmarkKind::Mark | ConversationBookmarkKind::Question => {
+                        return None;
+                    }
+                };
+                Some(NotesMark {
+                    kind,
+                    at_offset_ns: bookmark.start_offset_ns,
+                    label: bookmark.label,
+                })
+            })
+            .collect();
         Ok(ArtifactEvidence {
             transcript,
             manual_notes,
             user_notes,
+            marks,
             template,
         })
     }
@@ -15053,6 +15092,7 @@ mod tests {
             transcript,
             manual_notes: Vec::new(),
             user_notes: String::new(),
+            marks: Vec::new(),
             template: MeetingNotesTemplate::General.into(),
         };
         let captured = Arc::new(Mutex::new(None));

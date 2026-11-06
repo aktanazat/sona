@@ -62,8 +62,9 @@ pub struct ConversationPlaceReview {
     pub sessions: Vec<ConversationPlaceSession>,
 }
 
-/// What a bookmark marks, as the person pressing it said. A decision mark is
-/// their note, not a ledger decision, and a to-do mark makes no task.
+/// What a bookmark marks, as the person pressing it said. The notes list what
+/// was said in the seconds up to a decision mark as a decision, and up to a
+/// to-do mark as an action item. The other two only mark a place.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationBookmarkKind {

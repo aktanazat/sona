@@ -232,6 +232,7 @@ mod tests {
                 .collect(),
             manual_notes: Vec::new(),
             user_notes: String::new(),
+            marks: Vec::new(),
             template: crate::meeting::analytics::MeetingNotesTemplate::default().into(),
         }
     }
