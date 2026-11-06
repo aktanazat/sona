@@ -129,6 +129,20 @@ struct ImportReceipt {
     completed_at_ms: u64,
 }
 
+impl ImportReceipt {
+    /// This receipt for an import from `source_identity`. The history counts
+    /// describe one source database; the settings backup belongs to this
+    /// Sona, so a new source keeps it and its undo.
+    fn for_source(mut self, source_identity: &str) -> Self {
+        if self.source_identity != source_identity {
+            self.source_identity = source_identity.to_owned();
+            self.history_imported = 0;
+            self.recordings_imported = 0;
+        }
+        self
+    }
+}
+
 struct ImportPaths {
     source_root: PathBuf,
     source_settings: PathBuf,
@@ -314,12 +328,10 @@ pub async fn import_legacy_app(
         return Err(UpstreamImportError::SourceUnavailable);
     }
 
-    let mut receipt = read_receipt(&paths.receipt).unwrap_or_default();
     let source_identity = source_identity(&paths)?;
-    if !receipt.source_identity.is_empty() && receipt.source_identity != source_identity {
-        receipt = ImportReceipt::default();
-    }
-    receipt.source_identity = source_identity.clone();
+    let mut receipt = read_receipt(&paths.receipt)
+        .unwrap_or_default()
+        .for_source(&source_identity);
 
     let settings_imported = if selection.settings {
         emit_progress(&app, UpstreamImportPhase::Settings, 0, 1);
@@ -486,47 +498,79 @@ fn import_history(
                 row.get::<_, bool>(7)?,
             ))
         })
-        .map_err(|_| UpstreamImportError::HistoryUnreadable)?;
+        .map_err(|_| UpstreamImportError::HistoryUnreadable)?
+        .map(|row| {
+            let (source_id, file_name, timestamp, saved, title, text, processed, requested) =
+                row.map_err(|_| UpstreamImportError::HistoryUnreadable)?;
+            let row_hash = history_row_hash(HistoryRowHashInput {
+                id: source_id,
+                file_name: &file_name,
+                timestamp,
+                saved,
+                title: &title,
+                text: &text,
+                processed: processed.as_deref(),
+                requested,
+            });
+            let entry = UpstreamHistoryImportEntry {
+                source_history_id: source_id,
+                source_row_sha256: row_hash,
+                timestamp,
+                saved,
+                title,
+                transcription_text: text,
+                post_processed_text: processed,
+                post_process_requested: requested,
+                duration_ms: None,
+                word_count: None,
+                source_kind: Some(HistorySourceKind::Microphone),
+                runs: Vec::new(),
+            };
+            Ok((entry, file_name))
+        })
+        .collect::<Result<Vec<_>, UpstreamImportError>>()?;
+    let imported = history
+        .with_connection(|conn| {
+            let entries = rows.iter().map(|(entry, _)| entry);
+            Ok(plan_history_import(conn, source_identity, entries))
+        })
+        .map_err(|_| UpstreamImportError::HistoryUnreadable)??;
 
     let mut summary = HistoryImportSummary::default();
     let mut history_completed = 0_u64;
     let mut recordings_completed = 0_u64;
-    for row in rows {
-        let (source_id, file_name, timestamp, saved, title, text, processed, requested) =
-            row.map_err(|_| UpstreamImportError::HistoryUnreadable)?;
-        let row_hash = history_row_hash(HistoryRowHashInput {
-            id: source_id,
-            file_name: &file_name,
-            timestamp,
-            saved,
-            title: &title,
-            text: &text,
-            processed: processed.as_deref(),
-            requested,
-        });
+    for ((entry, file_name), imported) in rows.into_iter().zip(imported) {
         let mut imported_file_name = file_name.clone();
         let mut has_audio = false;
         if selection.recordings {
             if let Some(source_audio) =
                 source_recording_path(source_recordings, &file_name).filter(|path| path.is_file())
             {
-                imported_file_name =
-                    imported_recording_name(source_identity, source_id, &file_name);
-                let destination = destination_recordings.join(&imported_file_name);
-                if destination.is_file() {
-                    if files_equal(&source_audio, &destination)
-                        .map_err(|_| UpstreamImportError::RecordingCopyFailed)?
-                    {
-                        summary.recordings_existing = summary.recordings_existing.saturating_add(1);
-                        has_audio = true;
-                    } else {
-                        return Err(UpstreamImportError::RecordingCopyFailed);
-                    }
+                if imported == Some(true) {
+                    summary.recordings_existing = summary.recordings_existing.saturating_add(1);
                 } else {
-                    copy_verified(&source_audio, &destination)
-                        .map_err(|_| UpstreamImportError::RecordingCopyFailed)?;
-                    summary.recordings_copied = summary.recordings_copied.saturating_add(1);
-                    has_audio = true;
+                    imported_file_name = imported_recording_name(
+                        source_identity,
+                        entry.source_history_id,
+                        &file_name,
+                    );
+                    let destination = destination_recordings.join(&imported_file_name);
+                    if destination.is_file() {
+                        if files_equal(&source_audio, &destination)
+                            .map_err(|_| UpstreamImportError::RecordingCopyFailed)?
+                        {
+                            summary.recordings_existing =
+                                summary.recordings_existing.saturating_add(1);
+                            has_audio = true;
+                        } else {
+                            return Err(UpstreamImportError::RecordingCopyFailed);
+                        }
+                    } else {
+                        copy_verified(&source_audio, &destination)
+                            .map_err(|_| UpstreamImportError::RecordingCopyFailed)?;
+                        summary.recordings_copied = summary.recordings_copied.saturating_add(1);
+                        has_audio = true;
+                    }
                 }
                 recordings_completed = recordings_completed.saturating_add(1);
                 emit_progress(
@@ -537,20 +581,6 @@ fn import_history(
                 );
             }
         }
-        let entry = UpstreamHistoryImportEntry {
-            source_history_id: source_id,
-            source_row_sha256: row_hash,
-            timestamp,
-            saved,
-            title,
-            transcription_text: text,
-            post_processed_text: processed,
-            post_process_requested: requested,
-            duration_ms: None,
-            word_count: None,
-            source_kind: Some(HistorySourceKind::Microphone),
-            runs: Vec::new(),
-        };
         match history
             .import_upstream_entry(source_identity, &entry, &imported_file_name, has_audio)
             .map_err(|_| UpstreamImportError::HistoryUnreadable)?
@@ -571,6 +601,23 @@ fn import_history(
         );
     }
     Ok(summary)
+}
+
+/// Looks up, before anything is copied, whether an earlier import made each
+/// row and whether that row has its recording.
+fn plan_history_import<'a>(
+    conn: &Connection,
+    source_identity: &str,
+    entries: impl IntoIterator<Item = &'a UpstreamHistoryImportEntry>,
+) -> Result<Vec<Option<bool>>, UpstreamImportError> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            HistoryManager::imported_upstream_entry(conn, source_identity, entry)
+                .map(|existing| existing.map(|(_, has_audio)| has_audio))
+                .map_err(|_| UpstreamImportError::HistoryUnreadable)
+        })
+        .collect()
 }
 
 fn open_source_history(path: &Path) -> Result<Connection, UpstreamImportError> {
@@ -638,8 +685,14 @@ fn source_identity(paths: &ImportPaths) -> Result<String, UpstreamImportError> {
     digest.update(SOURCE_IDENTITY_LABEL.as_bytes());
     digest.update([0]);
     digest.update(canonical.to_string_lossy().as_bytes());
-    if let Ok(metadata) = fs::metadata(&paths.source_history) {
-        digest.update(metadata.len().to_be_bytes());
+    // A new legacy database at the same path has a new creation time; its
+    // length changes with every use of the legacy app.
+    let created = fs::metadata(&paths.source_history)
+        .and_then(|metadata| metadata.created())
+        .ok()
+        .and_then(|created| created.duration_since(UNIX_EPOCH).ok());
+    if let Some(created) = created {
+        digest.update(created.as_nanos().to_be_bytes());
     }
     Ok(hex_digest(digest.finalize().as_slice()))
 }
@@ -767,6 +820,7 @@ fn upstream_data_root() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::managers::history::UpstreamHistoryImportOutcome;
     use std::error::Error;
 
     fn temp_root(name: &str) -> io::Result<PathBuf> {
@@ -943,5 +997,155 @@ mod tests {
             imported_recording_name(&"b".repeat(64), 7, "../a.wav"),
             "upstream-bbbbbbbbbbbb-7-a.wav"
         );
+    }
+
+    fn import_paths_in(root: &Path) -> ImportPaths {
+        let legacy = root.join("legacy");
+        let sona = root.join("sona");
+        ImportPaths {
+            source_settings: legacy.join("settings_store.json"),
+            source_history: legacy.join("history.db"),
+            source_recordings: legacy.join("recordings"),
+            source_root: legacy,
+            destination_recordings: sona.join("recordings"),
+            receipt: sona.join(RECEIPT_FILE),
+            settings_backup: sona.join(SETTINGS_BACKUP_FILE),
+        }
+    }
+
+    fn sona_history() -> Result<Connection, Box<dyn Error>> {
+        let mut conn = Connection::open_in_memory()?;
+        rusqlite_migration::Migrations::new(crate::managers::history::MIGRATIONS.to_vec())
+            .to_latest(&mut conn)?;
+        Ok(conn)
+    }
+
+    fn legacy_entry(id: i64, timestamp: i64) -> UpstreamHistoryImportEntry {
+        let text = format!("legacy dictation {id}");
+        UpstreamHistoryImportEntry {
+            source_history_id: id,
+            source_row_sha256: history_row_hash(HistoryRowHashInput {
+                id,
+                file_name: "legacy.wav",
+                timestamp,
+                saved: false,
+                title: "",
+                text: &text,
+                processed: None,
+                requested: false,
+            }),
+            timestamp,
+            saved: false,
+            title: String::new(),
+            transcription_text: text,
+            post_processed_text: None,
+            post_process_requested: false,
+            duration_ms: None,
+            word_count: None,
+            source_kind: Some(HistorySourceKind::Microphone),
+            runs: Vec::new(),
+        }
+    }
+
+    /// The legacy app keeps writing to its database, which grows a page at a
+    /// time. An identity that hashed the length changed with it, and the next
+    /// import copied every dictation and recording a second time.
+    #[test]
+    fn a_growing_legacy_history_keeps_its_source_identity() -> Result<(), Box<dyn Error>> {
+        let root = temp_root("identity")?;
+        let paths = import_paths_in(&root);
+        fs::create_dir_all(&paths.source_root)?;
+        let legacy = Connection::open(&paths.source_history)?;
+        legacy.execute_batch(
+            "CREATE TABLE transcription_history (id INTEGER PRIMARY KEY, text TEXT NOT NULL);",
+        )?;
+        let before = source_identity(&paths)?;
+        let length = fs::metadata(&paths.source_history)?.len();
+
+        for _ in 0..16 {
+            legacy.execute(
+                "INSERT INTO transcription_history (text) VALUES (?1)",
+                ["words ".repeat(1_000)],
+            )?;
+        }
+
+        assert!(fs::metadata(&paths.source_history)?.len() > length);
+        assert_eq!(source_identity(&paths)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Rows imported while the identity hashed the length sit under
+    /// identities no later import computes again, and still count as
+    /// imported.
+    #[test]
+    fn a_row_imported_under_an_old_identity_is_not_imported_again() -> Result<(), Box<dyn Error>> {
+        let mut sona = sona_history()?;
+        let entry = legacy_entry(7, 1_000);
+
+        let first = HistoryManager::import_upstream_entry_with_connection(
+            &mut sona,
+            &"a".repeat(64),
+            &entry,
+            "legacy.wav",
+            false,
+        )?;
+        let again = HistoryManager::import_upstream_entry_with_connection(
+            &mut sona,
+            &"b".repeat(64),
+            &entry,
+            "legacy.wav",
+            false,
+        )?;
+
+        let UpstreamHistoryImportOutcome::Inserted { history_id } = first else {
+            panic!("the first import inserts the row");
+        };
+        assert_eq!(again, UpstreamHistoryImportOutcome::Existing { history_id });
+        let rows: i64 =
+            sona.query_row("SELECT COUNT(*) FROM transcription_history", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(rows, 1);
+        Ok(())
+    }
+
+    /// The settings backup belongs to this Sona, not to the legacy database.
+    /// A new source identity reset the whole receipt, which hid the undo and
+    /// let the next settings import write over the backup.
+    #[test]
+    fn a_new_source_keeps_the_settings_undo() -> Result<(), Box<dyn Error>> {
+        let root = temp_root("receipt-source")?;
+        let paths = import_paths_in(&root);
+        write_settings_backup(
+            &paths.settings_backup,
+            &crate::settings::get_default_settings(),
+            42,
+        )?;
+        let receipt = ImportReceipt {
+            source_identity: "a".repeat(64),
+            settings_imported: true,
+            settings_backup_path: Some(paths.settings_backup.to_string_lossy().into_owned()),
+            settings_backup_saved_at_ms: Some(42),
+            history_imported: 3,
+            recordings_imported: 2,
+            completed_at_ms: 42,
+        };
+
+        write_receipt(&paths.receipt, &receipt.for_source(&"b".repeat(64)))?;
+
+        let status = status_for_paths(&paths)?;
+        assert!(
+            status.settings_imported,
+            "a second settings import would write over the backup"
+        );
+        assert!(status.settings_backup_available);
+        assert_eq!(status.settings_backup_saved_at_ms, Some(42));
+        assert_eq!(
+            status.history_imported, 0,
+            "history counts follow the source"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

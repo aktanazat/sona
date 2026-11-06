@@ -266,6 +266,12 @@ pub(crate) static MIGRATIONS: &[M] = &[
     M::up(crate::planning::QUIET_REVIEW_MIGRATION),
     M::up(crate::planning::MEETING_NOTE_LINK_MIGRATION),
     M::up(crate::planning::DISMISSED_LOOP_MIGRATION),
+    // An import looks a source row up by its id and content as well as by
+    // the source identity it was imported under.
+    M::up(
+        "CREATE INDEX upstream_import_history_source_row
+            ON upstream_import_history(source_history_id, source_row_sha256);",
+    ),
 ];
 
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
@@ -1216,17 +1222,8 @@ impl HistoryManager {
         file_name: &str,
         has_audio: bool,
     ) -> Result<UpstreamHistoryImportOutcome> {
-        if let Some((history_id, existing_has_audio)) = transaction
-            .query_row(
-                "SELECT h.id, h.has_audio
-                 FROM upstream_import_history AS imported
-                 JOIN transcription_history AS h ON h.id = imported.history_id
-                 WHERE imported.source_identity = ?1
-                   AND imported.source_history_id = ?2",
-                params![source_identity, entry.source_history_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
-            )
-            .optional()?
+        if let Some((history_id, existing_has_audio)) =
+            Self::imported_upstream_entry(transaction, source_identity, entry)?
         {
             if has_audio && !existing_has_audio {
                 transaction.execute(
@@ -1284,6 +1281,34 @@ impl HistoryManager {
             ],
         )?;
         Ok(UpstreamHistoryImportOutcome::Inserted { history_id })
+    }
+
+    /// The row an earlier import made from this source row, and whether it
+    /// has its recording. A row imported under another source identity counts
+    /// when its content matches: the identity once hashed the legacy
+    /// database's length, which changes as the legacy app is used.
+    pub(crate) fn imported_upstream_entry(
+        conn: &Connection,
+        source_identity: &str,
+        entry: &UpstreamHistoryImportEntry,
+    ) -> Result<Option<(i64, bool)>> {
+        Ok(conn
+            .query_row(
+                "SELECT h.id, h.has_audio
+                 FROM upstream_import_history AS imported
+                 JOIN transcription_history AS h ON h.id = imported.history_id
+                 WHERE imported.source_history_id = ?2
+                   AND (imported.source_identity = ?1 OR imported.source_row_sha256 = ?3)
+                 ORDER BY imported.source_identity = ?1 DESC
+                 LIMIT 1",
+                params![
+                    source_identity,
+                    entry.source_history_id,
+                    &entry.source_row_sha256
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?)
     }
 
     fn insert_upstream_run_receipts(
