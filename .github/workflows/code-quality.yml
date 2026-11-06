@@ -48,3 +48,5 @@ jobs:
         run: bash scripts/check-onboarding.sh
       - name: Run native Library checks
         run: bash scripts/check-library.sh
+      - name: Run native recorder checks
+        run: bash scripts/check-recorder.sh

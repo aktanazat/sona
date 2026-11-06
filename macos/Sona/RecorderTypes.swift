@@ -41,6 +41,8 @@ struct RecorderPreflight: Decodable {
     let startAvailability: RecorderStartAvailability
     let cameraDevices: [RecorderDevice]
     let microphoneDevices: [RecorderDevice]
+    /// The capture the core already holds, which the sheet shows instead of setup.
+    let session: RecorderSnapshot?
 }
 
 /// The `request` parameter of `recorder_preview_start`. The optional device ids
@@ -301,7 +303,9 @@ extension RecorderUiState {
             next.revealFailed = false
         case let .preflight(preflight):
             next.preflight = preflight
-            if preflight.availability == .unsupported {
+            if let held = preflight.session {
+                next.snapshot = held
+            } else if preflight.availability == .unsupported {
                 next.snapshot = snapshot.failing(.unsupported)
             } else if preflight.startAvailability == .captureBusy {
                 next.snapshot = snapshot.failing(.captureBusy)
