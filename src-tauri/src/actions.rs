@@ -204,13 +204,16 @@ fn emit_cloud_run_error(app: &AppHandle, error: CloudRunError) {
     );
 }
 
-/// Drop guard that notifies the [`TranscriptionCoordinator`] when the
-/// transcription pipeline finishes — whether it completes normally or panics.
-struct FinishGuard(AppHandle);
+/// Tells the [`TranscriptionCoordinator`] that run `run_id` is over when the
+/// last holder drops it: after the delivery it waits for, or on a panic.
+struct FinishGuard {
+    app: AppHandle,
+    run_id: u64,
+}
 impl Drop for FinishGuard {
     fn drop(&mut self) {
-        if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
-            c.notify_processing_finished();
+        if let Some(c) = self.app.try_state::<TranscriptionCoordinator>() {
+            c.notify_processing_finished(self.run_id);
         }
         // The pipeline just freed its large transient buffers (captured PCM,
         // WAV copy, engine scratch); hand the cached pages back to the OS so
@@ -341,9 +344,15 @@ fn cloud_preflight(_app: &AppHandle, run: &RunPlan) -> Result<(), CloudRunError>
     }
 }
 
-/// Begin a recording for an already-frozen run plan.
-pub fn start_transcription(app: &AppHandle, binding_id: &str, shortcut_str: &str, run: &RunPlan) {
-    TranscribeAction { run: run.clone() }.start(app, binding_id, shortcut_str);
+/// Begin a recording for an already-frozen run plan. Whether the microphone
+/// accepted it.
+pub fn start_transcription(
+    app: &AppHandle,
+    binding_id: &str,
+    shortcut_str: &str,
+    run: &RunPlan,
+) -> bool {
+    TranscribeAction { run: run.clone() }.start(app, binding_id, shortcut_str)
 }
 
 /// Finish the recording started with this exact run plan.
@@ -1757,7 +1766,7 @@ pub(crate) async fn process_transcription_output(
 }
 
 impl TranscribeAction {
-    fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+    fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) -> bool {
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
 
@@ -1765,7 +1774,7 @@ impl TranscribeAction {
         let rm = app.state::<Arc<AudioRecordingManager>>();
         if let Err(error) = cloud_preflight(app, &self.run) {
             emit_cloud_run_error(app, error);
-            return;
+            return false;
         }
         if let Some(error_type) = local_model_refusal(&self.run, |model_id| {
             app.state::<Arc<ModelManager>>()
@@ -1773,7 +1782,7 @@ impl TranscribeAction {
         }) {
             warn!("Refusing to record: the local transcription model cannot load ({error_type})");
             let _ = app.emit("recording-error", RecordingErrorEvent::typed(error_type));
-            return;
+            return false;
         }
         let cloud_requested = self.run.cloud().is_some();
 
@@ -1927,7 +1936,8 @@ impl TranscribeAction {
             }
         }
 
-        if recording_error.is_none() {
+        let started = recording_error.is_none();
+        if started {
             // Dynamically register the cancel shortcut in a separate task to avoid deadlock
             shortcut::register_cancel_shortcut(app);
         } else {
@@ -1952,6 +1962,7 @@ impl TranscribeAction {
             "TranscribeAction::start completed in {:?}",
             start_time.elapsed()
         );
+        started
     }
 
     fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
@@ -2012,7 +2023,10 @@ impl TranscribeAction {
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
-            let _guard = FinishGuard(ah.clone());
+            let finish = Arc::new(FinishGuard {
+                app: ah.clone(),
+                run_id: run.run_id,
+            });
             debug!(
                 "Starting async transcription task for binding: {}",
                 binding_id
@@ -2029,9 +2043,6 @@ impl TranscribeAction {
                 Some(RecordingStop::NoSpeech { samples, level }) => {
                     if rm.was_cancelled_since(cancel_generation) {
                         debug!("No-speech recording was cancelled before persistence");
-                        tm.cancel_stream();
-                        utils::hide_recording_overlay(&ah);
-                        set_tray_state(&ah, TrayIconState::Idle);
                         return;
                     }
                     tm.cancel_stream();
@@ -2047,8 +2058,6 @@ impl TranscribeAction {
                     if let Some(error_type) = persistence.recording_error_type() {
                         let _ = ah.emit("recording-error", RecordingErrorEvent::typed(error_type));
                     }
-                    utils::hide_recording_overlay(&ah);
-                    set_tray_state(&ah, TrayIconState::Idle);
                 }
                 Some(RecordingStop::Complete {
                     samples,
@@ -2064,9 +2073,6 @@ impl TranscribeAction {
 
                     if rm.was_cancelled_since(cancel_generation) {
                         debug!("Transcription operation cancelled after recording stop");
-                        tm.cancel_stream();
-                        utils::hide_recording_overlay(&ah);
-                        set_tray_state(&ah, TrayIconState::Idle);
                         return;
                     }
 
@@ -2092,8 +2098,6 @@ impl TranscribeAction {
                             let _ =
                                 ah.emit("recording-error", RecordingErrorEvent::typed(error_type));
                         }
-                        utils::hide_recording_overlay(&ah);
-                        set_tray_state(&ah, TrayIconState::Idle);
                         return;
                     }
 
@@ -2102,8 +2106,6 @@ impl TranscribeAction {
                         // Tear down any streaming worker so its channel doesn't leak
                         // and block the next start_stream.
                         tm.cancel_stream();
-                        utils::hide_recording_overlay(&ah);
-                        set_tray_state(&ah, TrayIconState::Idle);
                     } else {
                         // Save WAV concurrently with transcription
                         let completed_pcm = share_completed_pcm(samples);
@@ -2159,8 +2161,6 @@ impl TranscribeAction {
 
                         if rm.was_cancelled_since(cancel_generation) {
                             debug!("Transcription operation cancelled before output handling");
-                            utils::hide_recording_overlay(&ah);
-                            set_tray_state(&ah, TrayIconState::Idle);
                             return;
                         }
 
@@ -2193,8 +2193,6 @@ impl TranscribeAction {
                                     "recording-error",
                                     RecordingErrorEvent::typed("cloud_transcription_held"),
                                 );
-                                utils::hide_recording_overlay(&ah);
-                                set_tray_state(&ah, TrayIconState::Idle);
                             }
                             Ok(FrozenTranscript::Final {
                                 text: transcription,
@@ -2239,8 +2237,6 @@ impl TranscribeAction {
                                             RecordingErrorEvent::typed(error_type),
                                         );
                                     }
-                                    utils::hide_recording_overlay(&ah);
-                                    set_tray_state(&ah, TrayIconState::Idle);
                                     return;
                                 }
                                 if post_process {
@@ -2259,15 +2255,11 @@ impl TranscribeAction {
                                     debug!(
                                         "Transcription operation cancelled during output handling"
                                     );
-                                    utils::hide_recording_overlay(&ah);
-                                    set_tray_state(&ah, TrayIconState::Idle);
                                     return;
                                 };
 
                                 if rm.was_cancelled_since(cancel_generation) {
                                     debug!("Transcription operation cancelled before paste");
-                                    utils::hide_recording_overlay(&ah);
-                                    set_tray_state(&ah, TrayIconState::Idle);
                                     return;
                                 }
 
@@ -2296,8 +2288,6 @@ impl TranscribeAction {
                                         run.run_id,
                                         DeliveryReceipt::not_dispatched(),
                                     );
-                                    utils::hide_recording_overlay(&ah);
-                                    set_tray_state(&ah, TrayIconState::Idle);
                                 } else {
                                     // Persist the text and content-free run receipt
                                     // before dispatch. The later delivery outcome is
@@ -2319,7 +2309,9 @@ impl TranscribeAction {
                                     let final_text = processed.final_text;
                                     let delivery_settings = run.delivery().clone();
                                     let rm_for_paste = Arc::clone(&rm);
+                                    let finish_for_main = Arc::clone(&finish);
                                     let dispatch = ah.run_on_main_thread(move || {
+                                        let _finish = finish_for_main;
                                         if rm_for_paste.was_cancelled_since(cancel_generation) {
                                             debug!(
                                                 "Transcription operation cancelled before delivery"
@@ -2330,8 +2322,6 @@ impl TranscribeAction {
                                                 run_id,
                                                 DeliveryReceipt::not_dispatched(),
                                             );
-                                            utils::hide_recording_overlay(&ah_clone);
-                                            set_tray_state(&ah_clone, TrayIconState::Idle);
                                             return;
                                         }
 
@@ -2366,8 +2356,6 @@ impl TranscribeAction {
                                             "Text delivery completed in {:?}",
                                             paste_time.elapsed()
                                         );
-                                        utils::hide_recording_overlay(&ah_clone);
-                                        set_tray_state(&ah_clone, TrayIconState::Idle);
                                     });
                                     if let Err(error) = dispatch {
                                         error!("Failed to schedule text delivery on the main thread: {error:?}");
@@ -2377,8 +2365,6 @@ impl TranscribeAction {
                                             run_id,
                                             DeliveryReceipt::not_dispatched(),
                                         );
-                                        utils::hide_recording_overlay(&ah);
-                                        set_tray_state(&ah, TrayIconState::Idle);
                                     }
                                 }
                             }
@@ -2387,8 +2373,6 @@ impl TranscribeAction {
                                     debug!(
                                     "Transcription operation cancelled after transcription error"
                                 );
-                                    utils::hide_recording_overlay(&ah);
-                                    set_tray_state(&ah, TrayIconState::Idle);
                                     return;
                                 }
 
@@ -2416,8 +2400,6 @@ impl TranscribeAction {
                                     run.run_id,
                                     DeliveryReceipt::not_dispatched(),
                                 );
-                                utils::hide_recording_overlay(&ah);
-                                set_tray_state(&ah, TrayIconState::Idle);
                             }
                         }
                     }
@@ -2428,9 +2410,6 @@ impl TranscribeAction {
                 }) => {
                     if rm.was_cancelled_since(cancel_generation) {
                         debug!("Capture overrun was cancelled before prefix persistence");
-                        tm.cancel_stream();
-                        utils::hide_recording_overlay(&ah);
-                        set_tray_state(&ah, TrayIconState::Idle);
                         return;
                     }
 
@@ -2439,15 +2418,14 @@ impl TranscribeAction {
                     // clean prefix for an explicit history retry.
                     tm.cancel_stream();
                     persist_truncated_capture(&ah, &hm, &run, prefix_samples, level).await;
-                    utils::hide_recording_overlay(&ah);
-                    set_tray_state(&ah, TrayIconState::Idle);
                 }
                 None => {
                     debug!("No samples retrieved from recording stop");
-                    // Tear down any streaming worker so its channel doesn't leak.
-                    tm.cancel_stream();
-                    utils::hide_recording_overlay(&ah);
-                    set_tray_state(&ah, TrayIconState::Idle);
+                    // A cancel already tore the stream down, and the next
+                    // recording may have armed its own since.
+                    if !rm.was_cancelled_since(cancel_generation) {
+                        tm.cancel_stream();
+                    }
                 }
             }
         });

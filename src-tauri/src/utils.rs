@@ -83,7 +83,6 @@ pub fn cancel_current_operation(app: &AppHandle) {
 
     // Cancel any ongoing recording
     let audio_manager = app.state::<Arc<AudioRecordingManager>>();
-    let recording_was_active = audio_manager.is_recording();
     if let Some(spool) = audio_manager.cancel_recording() {
         let app = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -104,7 +103,7 @@ pub fn cancel_current_operation(app: &AppHandle) {
 
     // Notify coordinator so it can keep lifecycle state coherent.
     if let Some(coordinator) = app.try_state::<TranscriptionCoordinator>() {
-        coordinator.notify_cancel(recording_was_active);
+        coordinator.notify_cancel();
     }
 
     info!("Operation cancellation completed - returned to idle state");

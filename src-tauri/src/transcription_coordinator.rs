@@ -1,12 +1,12 @@
 use crate::actions;
-use crate::managers::audio::AudioRecordingManager;
 use crate::modes::{RunPlan, TranscriptionIntent};
+use crate::tray::{set_tray_state, TrayIconState};
+use crate::utils::hide_recording_overlay;
 use log::{debug, error, warn};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tauri_specta::Event as _;
 
 mod duration;
@@ -87,6 +87,9 @@ struct PendingRelease {
 struct PendingPress {
     intent: TranscriptionIntent,
     shortcut_label: String,
+    /// When its key went down. The recording it opens times a tap from here,
+    /// not from the drain, so a press held through the drain stops on release.
+    pressed_at: Instant,
     /// Whether the start it eventually produces latches; see [`start_effect`].
     latched: bool,
 }
@@ -130,6 +133,9 @@ struct InputEvent {
     /// edge by design and must never be debounced: dropping one desyncs toggle
     /// parity and leaves recording wedged on.
     external: bool,
+    /// When the edge happened, stamped as it was sent: a tap is timed key to
+    /// key, however long the edge waited behind earlier commands.
+    at: Instant,
 }
 
 /// Commands processed sequentially by the coordinator thread.
@@ -139,10 +145,11 @@ enum Command {
     Finish {
         source: String,
     },
-    Cancel {
-        recording_was_active: bool,
+    Cancel,
+    /// The pipeline of this run delivered its result or gave up.
+    ProcessingFinished {
+        run_id: u64,
     },
-    ProcessingFinished,
 }
 
 enum Stage {
@@ -150,33 +157,43 @@ enum Stage {
     Recording {
         intent: TranscriptionIntent,
         run_plan: Box<RunPlan>,
-        /// When the press that opened this recording was processed.
+        /// When the press that opened this recording went down.
         pressed_at: Instant,
         /// Releases no longer stop this recording; the next press does.
         latched: bool,
         duration: RecordingDeadline,
         suggestion: MeetingSuggestion,
     },
-    Processing,
+    /// The pipeline of `run_id` owns the capture. Only that run's finish ends
+    /// the wait; a cancel abandons it.
+    Processing {
+        run_id: u64,
+    },
+}
+
+/// A recording to open, and the press that asked for it.
+struct StartRequest {
+    intent: TranscriptionIntent,
+    shortcut_label: String,
+    /// Press provenance for the recording this opens, threaded back
+    /// through [`CoordinatorState::on_started`] so a recording always
+    /// knows whether a release can stop it.
+    pressed_at: Instant,
+    latched: bool,
 }
 
 /// A side effect decided by [`CoordinatorState`]. The coordinator thread is
 /// the only executor, so every decision stays testable without an `AppHandle`.
 enum Effect {
-    Start {
-        intent: TranscriptionIntent,
-        shortcut_label: String,
-        /// Press provenance for the recording this opens, threaded back
-        /// through [`CoordinatorState::on_started`] so a recording always
-        /// knows whether a release can stop it.
-        pressed_at: Instant,
-        latched: bool,
-    },
+    Start(StartRequest),
     Stop {
         intent: TranscriptionIntent,
         shortcut_label: String,
         run_plan: Box<RunPlan>,
     },
+    /// The pipeline this machine waited for is done: the overlay and the tray
+    /// go idle, and only then does a press remembered meanwhile record.
+    Settled(Option<StartRequest>),
     DurationWarning,
     /// A tap latched the recording open: no key holds it any more.
     Latched,
@@ -188,13 +205,13 @@ enum Effect {
 /// Turn a press edge into the start it triggers. Signals and CLI toggles have
 /// no key to release, so the recording they open latches at once: only their
 /// next edge can stop it.
-fn start_effect(input: InputEvent, pressed_at: Instant) -> Effect {
-    Effect::Start {
+fn start_effect(input: InputEvent) -> Effect {
+    Effect::Start(StartRequest {
         intent: input.intent,
         shortcut_label: input.shortcut_label,
-        pressed_at,
+        pressed_at: input.at,
         latched: input.external,
-    }
+    })
 }
 
 fn classify_ptt_event(
@@ -265,7 +282,7 @@ impl CoordinatorState {
                 suggestion,
                 ..
             } => (Some(duration.next_deadline()), suggestion.next_deadline()),
-            Stage::Idle | Stage::Processing => (None, None),
+            Stage::Idle | Stage::Processing { .. } => (None, None),
         };
         self.grace_deadline()
             .into_iter()
@@ -279,7 +296,7 @@ impl CoordinatorState {
     fn on_timer(&mut self, now: Instant) -> Option<Effect> {
         let action = match &mut self.stage {
             Stage::Recording { duration, .. } => duration.action(now),
-            Stage::Idle | Stage::Processing => None,
+            Stage::Idle | Stage::Processing { .. } => None,
         };
         match action {
             Some(DurationAction::Finish) => {
@@ -290,7 +307,7 @@ impl CoordinatorState {
         }
         let suggestion = match &mut self.stage {
             Stage::Recording { suggestion, .. } => suggestion.take(now),
-            Stage::Idle | Stage::Processing => None,
+            Stage::Idle | Stage::Processing { .. } => None,
         };
         if let Some(elapsed_seconds) = suggestion {
             return Some(Effect::MeetingSuggestion { elapsed_seconds });
@@ -305,8 +322,8 @@ impl CoordinatorState {
         }
     }
 
-    /// How the recording in flight relates to `intent` at `now`.
-    fn active_recording(&self, intent: &TranscriptionIntent, now: Instant) -> ActiveRecording {
+    /// How the recording in flight relates to `intent` for an edge at `at`.
+    fn active_recording(&self, intent: &TranscriptionIntent, at: Instant) -> ActiveRecording {
         match &self.stage {
             Stage::Recording {
                 intent: active,
@@ -318,7 +335,7 @@ impl CoordinatorState {
                     ActiveRecording::Latched
                 } else {
                     ActiveRecording::Held {
-                        tapped: now.duration_since(*pressed_at) < TAP_LATCH_THRESHOLD,
+                        tapped: at.duration_since(*pressed_at) < TAP_LATCH_THRESHOLD,
                     }
                 }
             }
@@ -328,7 +345,7 @@ impl CoordinatorState {
 
     fn on_input(&mut self, input: InputEvent, now: Instant) -> Option<Effect> {
         let pending_release_intent = self.pending_release.as_ref().map(|pending| &pending.intent);
-        let recording = self.active_recording(&input.intent, now);
+        let recording = self.active_recording(&input.intent, input.at);
 
         match classify_ptt_event(
             pending_release_intent,
@@ -369,7 +386,7 @@ impl CoordinatorState {
             self.last_press = Some(now);
         }
 
-        if matches!(self.stage, Stage::Processing) {
+        if matches!(self.stage, Stage::Processing { .. }) {
             self.remember_or_forget(input);
             return None;
         }
@@ -384,7 +401,7 @@ impl CoordinatorState {
                 // The chord is still down, so the OS is repeating it, not the user.
                 ActiveRecording::Held { .. } => None,
                 ActiveRecording::Unrelated if matches!(self.stage, Stage::Idle) => {
-                    Some(start_effect(input, now))
+                    Some(start_effect(input))
                 }
                 ActiveRecording::Unrelated => None,
             },
@@ -396,7 +413,7 @@ impl CoordinatorState {
                     self.stop_recording(&input.intent, input.shortcut_label)
                 }
                 ActiveRecording::Unrelated if matches!(self.stage, Stage::Idle) => {
-                    Some(start_effect(input, now))
+                    Some(start_effect(input))
                 }
                 ActiveRecording::Unrelated => {
                     debug!(
@@ -438,6 +455,7 @@ impl CoordinatorState {
                 self.pending_press = Some(PendingPress {
                     intent: input.intent,
                     shortcut_label: input.shortcut_label,
+                    pressed_at: input.at,
                     latched: input.external,
                 });
             }
@@ -482,34 +500,38 @@ impl CoordinatorState {
         }
     }
 
-    fn on_cancel(&mut self, recording_was_active: bool) {
+    /// A cancel ends every stage. The pipeline it interrupts discards its
+    /// result, so nothing is left to wait for and the next press records.
+    fn on_cancel(&mut self) {
         self.pending_release = None;
         // An explicit cancel abandons a remembered start too: the user asked
         // for silence, not for a deferred recording.
         self.pending_press = None;
-        // Don't reset during processing — wait for the pipeline to finish.
-        if !matches!(self.stage, Stage::Processing)
-            && (recording_was_active || matches!(self.stage, Stage::Recording { .. }))
-        {
-            self.stage = Stage::Idle;
-        }
+        self.stage = Stage::Idle;
     }
 
-    fn on_processing_finished(&mut self, now: Instant) -> Option<Effect> {
+    /// The pipeline of `run_id` is done. Only the one this machine still waits
+    /// for settles it: a pipeline abandoned by a cancel finishes while the
+    /// next recording may already be open.
+    fn on_processing_finished(&mut self, run_id: u64) -> Option<Effect> {
+        if !matches!(self.stage, Stage::Processing { run_id: waiting } if waiting == run_id) {
+            debug!("Ignoring the finish of run {run_id}: it is not the run in flight");
+            return None;
+        }
         self.stage = Stage::Idle;
-        let pending = self.pending_press.take()?;
-        debug!(
-            "Pipeline drained; starting the press remembered for {:?}",
-            pending.intent
-        );
-        Some(Effect::Start {
-            intent: pending.intent,
-            shortcut_label: pending.shortcut_label,
-            // The drain is this recording's press edge: the key has been down
-            // since before the pipeline finished, so the tap window opens now.
-            pressed_at: now,
-            latched: pending.latched,
-        })
+        let next = self.pending_press.take().map(|pending| {
+            debug!(
+                "Pipeline drained; starting the press remembered for {:?}",
+                pending.intent
+            );
+            StartRequest {
+                intent: pending.intent,
+                shortcut_label: pending.shortcut_label,
+                pressed_at: pending.pressed_at,
+                latched: pending.latched,
+            }
+        });
+        Some(Effect::Settled(next))
     }
 
     /// Reconcile with the executor: recording began only if it produced a plan.
@@ -559,14 +581,19 @@ impl CoordinatorState {
     }
 
     fn hand_over_recording(&mut self, shortcut_label: String) -> Option<Effect> {
-        match std::mem::replace(&mut self.stage, Stage::Processing) {
+        match std::mem::replace(&mut self.stage, Stage::Idle) {
             Stage::Recording {
                 intent, run_plan, ..
-            } => Some(Effect::Stop {
-                intent,
-                shortcut_label,
-                run_plan,
-            }),
+            } => {
+                self.stage = Stage::Processing {
+                    run_id: run_plan.run_id,
+                };
+                Some(Effect::Stop {
+                    intent,
+                    shortcut_label,
+                    run_plan,
+                })
+            }
             other => {
                 self.stage = other;
                 None
@@ -614,17 +641,17 @@ impl TranscriptionCoordinator {
                     let effect = match cmd {
                         Command::Input(input) => state.on_input(input, Instant::now()),
                         Command::Finish { source } => state.on_finish(source),
-                        Command::Cancel {
-                            recording_was_active,
-                        } => {
-                            state.on_cancel(recording_was_active);
+                        Command::Cancel => {
+                            state.on_cancel();
                             let _ = DictationDurationWarningEvent {
                                 remaining_seconds: None,
                             }
                             .emit(&app);
                             None
                         }
-                        Command::ProcessingFinished => state.on_processing_finished(Instant::now()),
+                        Command::ProcessingFinished { run_id } => {
+                            state.on_processing_finished(run_id)
+                        }
                     };
 
                     if let Some(effect) = effect {
@@ -656,6 +683,7 @@ impl TranscriptionCoordinator {
             is_pressed,
             push_to_talk,
             external: false,
+            at: Instant::now(),
         });
     }
 
@@ -669,6 +697,7 @@ impl TranscriptionCoordinator {
             is_pressed: true,
             push_to_talk: false,
             external: true,
+            at: Instant::now(),
         });
     }
 
@@ -692,46 +721,28 @@ impl TranscriptionCoordinator {
         }
     }
 
-    pub fn notify_cancel(&self, recording_was_active: bool) {
+    pub fn notify_cancel(&self) {
+        if self.tx.send(Command::Cancel).is_err() {
+            warn!("Transcription coordinator channel closed");
+        }
+    }
+
+    /// The pipeline of `run_id` is done, its delivery included.
+    pub fn notify_processing_finished(&self, run_id: u64) {
         if self
             .tx
-            .send(Command::Cancel {
-                recording_was_active,
-            })
+            .send(Command::ProcessingFinished { run_id })
             .is_err()
         {
             warn!("Transcription coordinator channel closed");
         }
     }
-
-    pub fn notify_processing_finished(&self) {
-        if self.tx.send(Command::ProcessingFinished).is_err() {
-            warn!("Transcription coordinator channel closed");
-        }
-    }
 }
 
-/// Run one decision from [`CoordinatorState`] and report a start back, so the
-/// machine only ever holds a recording the microphone actually opened.
+/// Run one decision from [`CoordinatorState`].
 fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
     match effect {
-        Effect::Start {
-            intent,
-            shortcut_label,
-            pressed_at,
-            latched,
-        } => {
-            let _ = DictationDurationWarningEvent {
-                remaining_seconds: None,
-            }
-            .emit(app);
-            let run_plan = start(app, &intent, &shortcut_label);
-            let hands_free = latched && run_plan.is_some();
-            state.on_started(intent, pressed_at, latched, Instant::now(), run_plan);
-            if hands_free {
-                crate::shortcut::release_bare_cancel_key(app);
-            }
-        }
+        Effect::Start(request) => begin(app, state, request),
         Effect::Stop {
             intent,
             shortcut_label,
@@ -742,6 +753,13 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
             }
             .emit(app);
             actions::stop_transcription(app, &intent.recording_id(), &shortcut_label, *run_plan);
+        }
+        Effect::Settled(next) => {
+            hide_recording_overlay(app);
+            set_tray_state(app, TrayIconState::Idle);
+            if let Some(request) = next {
+                begin(app, state, request);
+            }
         }
         Effect::DurationWarning => {
             let _ = DictationDurationWarningEvent {
@@ -758,6 +776,27 @@ fn execute(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
                 warn!("Failed to emit {DICTATION_MEETING_SUGGESTION_EVENT}: {error}");
             }
         }
+    }
+}
+
+/// Open the recording `request` asks for and report it back, so the machine
+/// only ever holds a recording the microphone actually opened.
+fn begin(app: &AppHandle, state: &mut CoordinatorState, request: StartRequest) {
+    let _ = DictationDurationWarningEvent {
+        remaining_seconds: None,
+    }
+    .emit(app);
+    let run_plan = start(app, &request.intent, &request.shortcut_label);
+    let hands_free = request.latched && run_plan.is_some();
+    state.on_started(
+        request.intent,
+        request.pressed_at,
+        request.latched,
+        Instant::now(),
+        run_plan,
+    );
+    if hands_free {
+        crate::shortcut::release_bare_cancel_key(app);
     }
 }
 
@@ -780,11 +819,7 @@ fn start(
         }
     };
     let recording_id = intent.recording_id();
-    actions::start_transcription(app, &recording_id, shortcut_label, &run_plan);
-    if app
-        .try_state::<Arc<AudioRecordingManager>>()
-        .is_some_and(|manager| manager.is_recording())
-    {
+    if actions::start_transcription(app, &recording_id, shortcut_label, &run_plan) {
         Some(Box::new(run_plan))
     } else {
         debug!("Start for {intent:?} did not begin recording; staying idle");
@@ -959,17 +994,21 @@ mod tests {
         assert!(harness.is_processing());
     }
 
-    /// Drives the production state machine. The executor is stubbed by
-    /// `started`: `Effect::Start` becomes a recording with a real run plan
+    /// Drives the production state machine. The executor is stubbed: a start,
+    /// alone or carried by a settle, becomes a recording with a real run plan
     /// unless the test says the microphone refused.
     struct Harness {
         state: CoordinatorState,
         clock: Instant,
         starts: u32,
         stops: u32,
+        /// How many times the overlay and the tray were set idle.
+        settles: u32,
         warnings: u32,
         latches: u32,
         microphone_opens: bool,
+        /// The run the last stop handed to the pipeline.
+        handed_over: Option<u64>,
     }
 
     impl Harness {
@@ -979,9 +1018,11 @@ mod tests {
                 clock: Instant::now(),
                 starts: 0,
                 stops: 0,
+                settles: 0,
                 warnings: 0,
                 latches: 0,
                 microphone_opens: true,
+                handed_over: None,
             }
         }
 
@@ -995,23 +1036,34 @@ mod tests {
 
         fn apply(&mut self, effect: Option<Effect>) {
             match effect {
-                Some(Effect::Start {
-                    intent,
-                    pressed_at,
-                    latched,
-                    ..
-                }) => {
-                    self.starts += 1;
-                    let plan = self.microphone_opens.then(Self::run_plan);
-                    self.state
-                        .on_started(intent, pressed_at, latched, self.clock, plan);
+                Some(Effect::Start(request)) => self.begin(request),
+                Some(Effect::Stop { run_plan, .. }) => {
+                    self.stops += 1;
+                    self.handed_over = Some(run_plan.run_id);
                 }
-                Some(Effect::Stop { .. }) => self.stops += 1,
+                Some(Effect::Settled(next)) => {
+                    self.settles += 1;
+                    if let Some(request) = next {
+                        self.begin(request);
+                    }
+                }
                 Some(Effect::DurationWarning) => self.warnings += 1,
                 Some(Effect::Latched) => self.latches += 1,
                 Some(Effect::MeetingSuggestion { .. }) => {}
                 None => {}
             }
+        }
+
+        fn begin(&mut self, request: StartRequest) {
+            self.starts += 1;
+            let plan = self.microphone_opens.then(Self::run_plan);
+            self.state.on_started(
+                request.intent,
+                request.pressed_at,
+                request.latched,
+                self.clock,
+                plan,
+            );
         }
 
         fn input(&mut self, intent: TranscriptionIntent, is_pressed: bool, push_to_talk: bool) {
@@ -1023,6 +1075,7 @@ mod tests {
                     is_pressed,
                     push_to_talk,
                     external: false,
+                    at: self.clock,
                 },
                 self.clock,
             );
@@ -1038,6 +1091,7 @@ mod tests {
                     is_pressed: true,
                     push_to_talk,
                     external: true,
+                    at: self.clock,
                 },
                 self.clock,
             );
@@ -1049,8 +1103,16 @@ mod tests {
             self.apply(effect);
         }
 
+        /// The pipeline the last stop started finishes.
         fn processing_finished(&mut self) {
-            let effect = self.state.on_processing_finished(self.clock);
+            let run_id = self
+                .handed_over
+                .expect("a stop handed a run to the pipeline");
+            self.processing_finished_for(run_id);
+        }
+
+        fn processing_finished_for(&mut self, run_id: u64) {
+            let effect = self.state.on_processing_finished(run_id);
             self.apply(effect);
         }
 
@@ -1068,7 +1130,7 @@ mod tests {
         }
 
         fn is_processing(&self) -> bool {
-            matches!(self.state.stage, Stage::Processing)
+            matches!(self.state.stage, Stage::Processing { .. })
         }
 
         fn is_idle(&self) -> bool {
@@ -1377,7 +1439,7 @@ mod tests {
         harness.advance(DEBOUNCE);
         harness.input(active_mode(), true, false);
 
-        harness.state.on_cancel(false);
+        harness.state.on_cancel();
         harness.processing_finished();
         assert_eq!(
             harness.starts, 1,
@@ -1461,7 +1523,7 @@ mod tests {
     fn cancel_and_manual_stop_remove_duration_deadlines() {
         let mut harness = Harness::new();
         harness.input(active_mode(), true, false);
-        harness.state.on_cancel(true);
+        harness.state.on_cancel();
         assert_eq!(harness.state.next_deadline(), None);
         harness.advance(Duration::from_secs(20 * 60));
         assert!(harness.state.on_timer(harness.clock).is_none());
@@ -1485,5 +1547,136 @@ mod tests {
         assert_eq!(harness.stops, 1);
         assert_eq!(harness.state.next_deadline(), None);
         assert!(harness.state.on_grace_expired().is_none());
+    }
+
+    /// A cancel while the pipeline still works abandons it, so the next press
+    /// records instead of waiting for a result nobody will see.
+    #[test]
+    fn a_cancel_during_processing_lets_the_next_press_record() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        harness.advance(TAP_LATCH_THRESHOLD);
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert!(harness.is_processing());
+
+        harness.state.on_cancel();
+        harness.advance(DEBOUNCE);
+        press_and_hold(&mut harness);
+        assert_eq!(
+            harness.starts, 2,
+            "the press after a cancel starts a recording"
+        );
+        assert!(harness.is_recording());
+    }
+
+    /// The pipeline a cancel abandoned still finishes later, when the next
+    /// recording may be open. Its finish must neither end that recording nor
+    /// set the overlay and the tray idle over it.
+    #[test]
+    fn an_abandoned_pipeline_finishing_leaves_the_next_recording_alone() {
+        let mut harness = Harness::new();
+        harness.input(active_mode(), true, false);
+        harness.advance(DEBOUNCE);
+        harness.input(active_mode(), true, false);
+        let abandoned = harness.handed_over.expect("the toggle handed its run over");
+
+        harness.state.on_cancel();
+        harness.advance(DEBOUNCE);
+        harness.input(active_mode(), true, false);
+        assert!(harness.is_recording());
+
+        harness.processing_finished_for(abandoned);
+        assert!(
+            harness.is_recording(),
+            "an abandoned run's finish must not end the next recording"
+        );
+        assert_eq!(harness.settles, 0, "nor show idle over it");
+    }
+
+    /// The idle the overlay and the tray show comes from the machine once the
+    /// pipeline it waits for is done, and a press remembered meanwhile
+    /// records only after that idle, so nothing hides the new recording.
+    #[test]
+    fn a_remembered_press_records_after_the_pipeline_settles() {
+        let mut harness = Harness::new();
+        harness.input(active_mode(), true, false);
+        harness.advance(DEBOUNCE);
+        harness.input(active_mode(), true, false);
+        harness.advance(DEBOUNCE);
+        harness.input(active_mode(), true, false);
+        assert_eq!(
+            harness.settles, 0,
+            "nothing settles while the pipeline works"
+        );
+
+        let run_id = harness.handed_over.expect("the toggle handed its run over");
+        let effect = harness.state.on_processing_finished(run_id);
+        assert!(
+            matches!(&effect, Some(Effect::Settled(Some(request))) if request.intent == active_mode()),
+            "the finish settles the UI and carries the remembered press"
+        );
+        harness.apply(effect);
+        assert_eq!((harness.starts, harness.settles), (2, 1));
+        assert!(harness.is_recording());
+    }
+
+    /// A press held through the drain started its key-down long before the
+    /// drain, so letting go is the end of a hold, not a tap that latches.
+    #[test]
+    fn a_press_held_through_the_drain_stops_on_release() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        harness.advance(TAP_LATCH_THRESHOLD);
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert!(harness.is_processing());
+
+        press_and_hold(&mut harness);
+        harness.advance(Duration::from_secs(2));
+        harness.processing_finished();
+        assert!(harness.is_recording());
+
+        harness.advance(Duration::from_millis(100));
+        harness.input(active_mode(), false, true);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert_eq!(
+            (harness.starts, harness.stops, harness.latches),
+            (2, 2, 0),
+            "a two-second hold is not a tap"
+        );
+    }
+
+    /// A tap is timed key to key. Read 500 ms after its press because the
+    /// coordinator was busy, a release that came 100 ms after it still latches.
+    #[test]
+    fn a_tap_taken_late_still_latches() {
+        let mut harness = Harness::new();
+        press_and_hold(&mut harness);
+        let released_at = harness.clock + Duration::from_millis(100);
+        harness.advance(Duration::from_millis(500));
+        let effect = harness.state.on_input(
+            InputEvent {
+                intent: active_mode(),
+                shortcut_label: "test".to_string(),
+                is_pressed: false,
+                push_to_talk: true,
+                external: false,
+                at: released_at,
+            },
+            harness.clock,
+        );
+        harness.apply(effect);
+        harness.advance(RELEASE_GRACE);
+        harness.grace_expired();
+        assert_eq!(
+            (harness.stops, harness.latches),
+            (0, 1),
+            "a 100 ms tap latches however late it is read"
+        );
+        assert!(harness.is_recording());
     }
 }
