@@ -436,6 +436,8 @@ enum CaptureTransition {
     /// The ending the countdown waited on no longer holds.
     CountdownWithdrawn,
     Stop(machine::StopTrigger),
+    /// The session left capture by some other route.
+    Ended,
 }
 
 impl TrackedCapture {
@@ -753,14 +755,60 @@ impl RuntimeState {
         self.slept = false;
         Some(tracked)
     }
+
+    /// Starts tracking a capture the operator started. A gate detection
+    /// opened for this session keeps the stop rules it was opened with, now
+    /// over the lanes that started; any other capture is the operator's own
+    /// and waits to adopt a call.
+    fn begin_operator_capture(&mut self, snapshot: &MeetingSessionSnapshot, now_utc_ms: i64) {
+        let tracked = match self.tracked.take() {
+            Some(TrackedCapture {
+                session_id,
+                kind:
+                    TrackedCaptureKind::Detection {
+                        trigger_bundle_id,
+                        event_end_utc_ms,
+                        ..
+                    },
+                ..
+            }) if session_id == snapshot.session_id => {
+                TrackedCapture::detection(snapshot, trigger_bundle_id, event_end_utc_ms)
+            }
+            _ => TrackedCapture::operator(snapshot),
+        };
+        self.begin_tracked(
+            tracked,
+            RecentCapture {
+                session_id: snapshot.session_id.uuid().to_string(),
+                started_utc_ms: now_utc_ms,
+            },
+        );
+    }
 }
 
 fn evaluate_running_capture_transition(
     state: &mut RuntimeState,
     tracked: &TrackedCapture,
+    phase: MeetingPhase,
     tick: CaptureTick<'_>,
     now_utc_ms: i64,
 ) -> CaptureTransition {
+    match phase {
+        MeetingPhase::CapturingRecording => {}
+        // A paused capture records nothing, so a sleep it spans says nothing
+        // about the meeting having ended.
+        MeetingPhase::CapturingPausing
+        | MeetingPhase::CapturingPaused
+        | MeetingPhase::CapturingResuming => state.slept = false,
+        // A gate detection opened waits for the operator's Start, and the
+        // capture it starts keeps the stop rules the gate was opened with.
+        MeetingPhase::Preflight | MeetingPhase::Starting
+            if matches!(tracked.kind, TrackedCaptureKind::Detection { .. }) =>
+        {
+            return CaptureTransition::Continue;
+        }
+        _ => return CaptureTransition::Ended,
+    }
     match &tracked.kind {
         TrackedCaptureKind::Detection {
             trigger_bundle_id,
@@ -1206,18 +1254,21 @@ impl DetectionRuntime {
         }
 
         // The tick thread's one entry into the async runtime, and detection's
-        // only one. `active_capture` is `async`, so a caller that already runs
+        // only one. `tray_session` is `async`, so a caller that already runs
         // on the runtime — a notification click, a command — awaits it instead
         // of nesting a `block_on` and hanging the very path the operator asked
         // for. This thread is not a runtime thread, so blocking here is a plain
         // wait. One read serves both the stop evaluation and the decision
         // table, so the two cannot disagree about whether a capture is live.
-        let active = tauri::async_runtime::block_on(self.active_capture());
+        let session = tauri::async_runtime::block_on(self.tray_session());
+        let active = session
+            .as_ref()
+            .filter(|session| session.phase.capture_mode().is_some());
 
         if let Some(tracked) = tracked {
             self.evaluate_running_capture(
                 &tracked,
-                active.as_ref(),
+                session.as_ref(),
                 CaptureTick {
                     running: &running,
                     mic,
@@ -2418,13 +2469,7 @@ impl DetectionRuntime {
         if !policy_from_settings(&settings).enabled {
             return;
         }
-        self.lock().begin_tracked(
-            TrackedCapture::operator(snapshot),
-            RecentCapture {
-                session_id: snapshot.session_id.uuid().to_string(),
-                started_utc_ms: utc_now_ms(),
-            },
-        );
+        self.lock().begin_operator_capture(snapshot, utc_now_ms());
     }
 
     /// Raises the auto-record card into the panel `begin_capture` just took
@@ -2554,26 +2599,33 @@ impl DetectionRuntime {
     fn evaluate_running_capture(
         self: &Arc<Self>,
         tracked: &TrackedCapture,
-        active: Option<&MeetingSessionSnapshot>,
+        session: Option<&MeetingSessionSnapshot>,
         tick: CaptureTick<'_>,
         now_utc_ms: i64,
     ) {
-        let Some(active) = active else {
+        let Some(session) = session.filter(|session| session.session_id == tracked.session_id)
+        else {
             // The capture ended by some other route. Stop tracking it, but keep
             // recent so the cross-link window still applies.
             self.track_ended(tracked.session_id);
             return;
         };
-        if active.session_id != tracked.session_id {
-            self.track_ended(tracked.session_id);
-            return;
-        }
         let transition = {
             let mut state = self.lock();
-            evaluate_running_capture_transition(&mut state, tracked, tick, now_utc_ms)
+            evaluate_running_capture_transition(
+                &mut state,
+                tracked,
+                session.phase,
+                tick,
+                now_utc_ms,
+            )
         };
         let trigger = match transition {
             CaptureTransition::Continue => return,
+            CaptureTransition::Ended => {
+                self.track_ended(tracked.session_id);
+                return;
+            }
             CaptureTransition::Adopted(adopted) => {
                 log::info!(
                     "Meeting capture {} adopted the {} call as its stop trigger",
@@ -2608,10 +2660,10 @@ impl DetectionRuntime {
         let meetings = Arc::clone(&self.meetings);
         let request = crate::meeting::session::MeetingMutationRequest {
             operation_id: MeetingOperationId::new(),
-            session_id: active.session_id,
-            expected_revision: active.revision,
+            session_id: session.session_id,
+            expected_revision: session.revision,
         };
-        let session_id = active.session_id;
+        let session_id = session.session_id;
         tauri::async_runtime::spawn(async move {
             match meetings
                 .stop(
@@ -2642,20 +2694,15 @@ impl DetectionRuntime {
     /// there deadlocks. The tick thread does the one permitted blocking read,
     /// at the boundary in `tick` that says so.
     async fn active_capture(&self) -> Option<MeetingSessionSnapshot> {
-        self.meetings
-            .tray_snapshot()
+        self.tray_session()
             .await
-            .ok()
-            .flatten()
-            .filter(|snapshot| {
-                matches!(
-                    snapshot.phase,
-                    MeetingPhase::CapturingRecording
-                        | MeetingPhase::CapturingPausing
-                        | MeetingPhase::CapturingPaused
-                        | MeetingPhase::CapturingResuming
-                )
-            })
+            .filter(|snapshot| snapshot.phase.capture_mode().is_some())
+    }
+
+    /// The session the tray holds: the capture running, or else the gate
+    /// last opened from the tray or by detection.
+    async fn tray_session(&self) -> Option<MeetingSessionSnapshot> {
+        self.meetings.tray_snapshot().await.ok().flatten()
     }
 
     /// Re-emits the last status when what the tracked capture shows changed:
@@ -3702,6 +3749,7 @@ mod tests {
         evaluate_running_capture_transition(
             state,
             tracked,
+            MeetingPhase::CapturingRecording,
             CaptureTick {
                 running,
                 mic,
@@ -3728,6 +3776,7 @@ mod tests {
         evaluate_running_capture_transition(
             state,
             tracked,
+            MeetingPhase::CapturingRecording,
             CaptureTick {
                 running,
                 mic: MicSignal::Active,
@@ -4868,5 +4917,114 @@ mod tests {
 
         assert!(state.end_tracked(MeetingSessionId::new()).is_none());
         assert!(state.tracked.is_some());
+    }
+
+    /// One tick of `tracked` while its session is in `phase`, with nothing
+    /// else going on: Sona's microphone live, no call, no trigger app.
+    fn quiet_tick_in(
+        state: &mut RuntimeState,
+        tracked: &TrackedCapture,
+        phase: MeetingPhase,
+        now_utc_ms: i64,
+    ) -> CaptureTransition {
+        evaluate_running_capture_transition(
+            state,
+            tracked,
+            phase,
+            CaptureTick {
+                running: &[],
+                mic: MicSignal::Active,
+                output: OutputSignal::Idle,
+                app_output: None,
+                sona_holds: true,
+                call: &machine::CallSignal::Absent,
+                call_live: false,
+            },
+            now_utc_ms,
+        )
+    }
+
+    /* C7: the gate a calendar prompt opened was dropped at the first tick
+     * that found it still in preflight, and Start from it replaced what was
+     * left with an operator capture, so the event end never stopped it. */
+    #[test]
+    fn a_capture_started_from_a_detection_gate_keeps_its_event_end() {
+        let session_id = MeetingSessionId::new();
+        let event_end = NOW + 60_000;
+        let gate = MeetingSessionSnapshot {
+            phase: MeetingPhase::Preflight,
+            ..capturing(session_id, &SourceKind::ALL)
+        };
+        let mut state = RuntimeState::default();
+        state.begin_tracked(
+            TrackedCapture::detection(&gate, None, Some(event_end)),
+            RecentCapture {
+                session_id: session_id.uuid().to_string(),
+                started_utc_ms: NOW,
+            },
+        );
+        let armed = state.tracked.clone().expect("the gate is tracked");
+
+        assert_eq!(
+            quiet_tick_in(&mut state, &armed, MeetingPhase::Preflight, NOW),
+            CaptureTransition::Continue,
+            "a gate waiting for Start is not a capture that ended"
+        );
+
+        state.begin_operator_capture(&capturing(session_id, &SourceKind::ALL), NOW + 1_000);
+        let started = state
+            .tracked
+            .clone()
+            .expect("the started capture is tracked");
+
+        assert_eq!(
+            quiet_tick_in(
+                &mut state,
+                &started,
+                MeetingPhase::CapturingRecording,
+                event_end
+            ),
+            CaptureTransition::CountdownStarted(machine::StopTrigger::EventEnd)
+        );
+    }
+
+    /* C14: a capture paused when the Mac slept was stopped at wake, and one
+     * resumed before the first tick after it too. The owner's rule: sleep
+     * does not end a paused meeting. */
+    #[test]
+    fn a_sleep_while_paused_neither_stops_the_capture_nor_its_resume() {
+        let session_id = MeetingSessionId::new();
+        let tracked =
+            TrackedCapture::detection(&capturing(session_id, &SourceKind::ALL), None, None);
+        let mut state = RuntimeState::default();
+        state.tracked = Some(tracked.clone());
+        state.slept = true;
+
+        assert_eq!(
+            quiet_tick_in(&mut state, &tracked, MeetingPhase::CapturingPaused, NOW),
+            CaptureTransition::Continue
+        );
+        assert_eq!(
+            quiet_tick_in(
+                &mut state,
+                &tracked,
+                MeetingPhase::CapturingRecording,
+                NOW + 1_000
+            ),
+            CaptureTransition::Continue,
+            "the resumed capture was stopped by a sleep its pause spanned"
+        );
+
+        state.slept = true;
+        assert_eq!(
+            quiet_tick_in(
+                &mut state,
+                &tracked,
+                MeetingPhase::CapturingRecording,
+                NOW + 2_000
+            ),
+            CaptureTransition::Stop(machine::StopTrigger::SleepBoundary),
+            "a sleep while recording still ends the capture"
+        );
     }
 }
