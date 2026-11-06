@@ -2829,16 +2829,14 @@ impl MeetingSessionManager {
                 removed: false,
             });
         }
-        if !self.is_capture_active() {
-            store
-                .enqueue_cloud_tombstone_for_session(
-                    request.session_id,
-                    receipt.new_revision.unwrap_or(request.expected_revision),
-                    format!("tombstone-{}", job_id.uuid()),
-                    utc_now_ms(),
-                )
-                .map_err(map_store_error)?;
-        }
+        store
+            .enqueue_cloud_tombstone_for_session(
+                request.session_id,
+                receipt.new_revision.unwrap_or(request.expected_revision),
+                format!("tombstone-{}", job_id.uuid()),
+                utc_now_ms(),
+            )
+            .map_err(map_store_error)?;
 
         self.processing.cancel(request.session_id);
 
@@ -8283,6 +8281,7 @@ pub(crate) mod tests {
     /// early or leave one behind.
     mod capture_ownership {
         use super::*;
+        use crate::meeting::store::{CloudHead, CloudOutboxKind};
         use std::sync::atomic::AtomicUsize;
         use std::sync::mpsc;
         use tauri::async_runtime::block_on;
@@ -8692,6 +8691,42 @@ pub(crate) mod tests {
             assert_eq!(
                 current(&manager, recovered).phase,
                 MeetingPhase::ReviewReady
+            );
+        }
+
+        /// A synced meeting deleted while another records still queues the
+        /// removal of its cloud copy. The delete used to skip it whenever any
+        /// capture ran, and nothing queues it later, so the copy stayed in the
+        /// cloud and on every other device.
+        #[test]
+        fn deleting_a_synced_meeting_during_a_recording_still_removes_its_cloud_copy() {
+            let (_directory, manager, _starts, _aborts) = manager();
+            let finished = review_ready_session(&manager);
+            let store = block_on(manager.store()).unwrap();
+            store
+                .upsert_cloud_head(&CloudHead {
+                    object_id: "meeting-deleted-during-capture".to_string(),
+                    source_session_id: Some(finished.session_id),
+                    remote_revision_id: Some("revision-1".to_string()),
+                    tombstone: false,
+                    acknowledged_revision_id: Some("revision-1".to_string()),
+                    change_sequence: 1,
+                })
+                .unwrap();
+            let live = recording(&manager);
+
+            let deleted = block_on(manager.delete(request(&manager, finished.session_id))).unwrap();
+            let outbox = store
+                .cloud_outboxes_for_session(finished.session_id)
+                .unwrap();
+            stop(&manager, live).unwrap();
+
+            assert!(deleted.removed);
+            assert!(
+                outbox
+                    .iter()
+                    .any(|row| row.kind == CloudOutboxKind::Tombstone),
+                "the deletion never reaches the cloud"
             );
         }
 
