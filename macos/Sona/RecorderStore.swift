@@ -187,8 +187,10 @@ final class RecorderStore {
         Task { await run("recorder_resume", phase: .recording) }
     }
 
-    /// `recorder_stop`: finalize the file and publish where it landed.
-    func stopAndSave() {
+    /// `recorder_stop`: finalize the file and publish where it landed. The
+    /// task ends once the core answered, which is what quit waits for.
+    @discardableResult
+    func stopAndSave() -> Task<Void, Never> {
         Task { await run("recorder_stop", phase: .finalizing) }
     }
 

@@ -427,6 +427,8 @@ pub enum MeetingStopSurface {
     MeetingLive,
     /// The stop control in the consent panel.
     ConsentPanel,
+    /// The confirmation Sona asks for when it quits during a capture.
+    Quit,
 }
 
 impl MeetingStopSurface {
@@ -434,6 +436,7 @@ impl MeetingStopSurface {
         match self {
             Self::MeetingLive => "the live meeting screen",
             Self::ConsentPanel => "the consent panel",
+            Self::Quit => "quitting Sona",
         }
     }
 }

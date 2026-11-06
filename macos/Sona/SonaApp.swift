@@ -46,8 +46,10 @@ struct SonaApp: App {
     }
 }
 
-/// The app's single lifetime owner. Ordinary quit waits for editable notes;
-/// the core keeps running until AppKit actually commits to termination.
+/// The app's single lifetime owner. Ordinary quit asks before it ends a
+/// meeting or a screen recording, waits for editable notes, and stops what the
+/// person agreed to stop; the core keeps running until AppKit actually commits
+/// to termination.
 @MainActor
 final class SonaAppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
@@ -62,31 +64,98 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
         terminationPending = true
         model.pauseQuietReview()
         Task {
+            let meeting = await stoppableMeeting() != nil
+            let screen = [RecorderPhase.recording, .paused].contains(model.recorder.phase)
+            if meeting || screen, !confirmStopping(meeting: meeting, screen: screen) {
+                terminationPending = false
+                model.resumeQuietReview()
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
             repeat {
                 guard await model.live.flushLiveNotes() else {
                     cancelTermination(
                         sender, place: .meetings,
                         message: "Your meeting notes could not be saved. Your words are still in the editor.",
-                        detail: model.live.notesError)
+                        detail: model.live.notesError, button: "Keep editing")
                     return
                 }
                 guard await model.scratchpad.flush() else {
                     cancelTermination(
                         sender, place: .scratchpad,
                         message: "Your scratchpad note could not be saved. Your words are still in the editor.",
-                        detail: model.scratchpad.error)
+                        detail: model.scratchpad.error, button: "Keep editing")
                     return
                 }
                 // A person may type in either editor while the other's
                 // request is out. Both must be settled in this same turn.
             } while model.live.hasPendingLiveNotes || model.scratchpad.hasPendingSave
+            if meeting {
+                guard await stopMeeting(sender) else { return }
+            }
+            if screen {
+                await model.recorder.stopAndSave().value
+            }
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
 
+    /// True when the person chose to stop the capture and quit.
+    private func confirmStopping(meeting: Bool, screen: Bool) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        switch (meeting, screen) {
+        case (true, true): alert.messageText = "A meeting and the screen are recording"
+        case (true, false): alert.messageText = "A meeting is recording"
+        default: alert.messageText = "The screen is recording"
+        }
+        var lines: [String] = []
+        if meeting { lines.append("The meeting stops now and its audio is kept.") }
+        if screen { lines.append("The screen recording stops and is saved.") }
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "Stop and Quit")
+        alert.addButton(withTitle: "Keep Recording").keyEquivalent = "\u{1b}"
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Quit goes on only once the meeting is no longer capturing: a refused
+    /// stop keeps Sona open, since quitting would cut the capture off.
+    private func stopMeeting(_ sender: NSApplication) async -> Bool {
+        guard let session = await stoppableMeeting() else { return true }
+        var detail: String?
+        do {
+            let result: MeetingMutationResult = try await model.core.request(
+                "meeting_stop",
+                MeetingLiveRequest.stop(session.sessionId, revision: session.revision, surface: .quit))
+            if result.receipt.result == .committed { return true }
+            detail = result.receipt.refusal
+        } catch {
+            detail = error.localizedDescription
+        }
+        guard await stoppableMeeting() != nil else { return true }
+        cancelTermination(
+            sender, place: .meetings,
+            message: "The meeting could not be stopped, so it is still recording.",
+            detail: detail, button: "Keep Recording")
+        return false
+    }
+
+    /// The capture a quit would cut off. A meeting still starting is not
+    /// reported, so quitting in that moment still ends it unasked.
+    private func stoppableMeeting() async -> MeetingSessionSnapshot? {
+        do {
+            let active: MeetingConsentPanelSessionState? =
+                try await model.core.request("meeting_consent_panel_active_state")
+            return active?.snapshot
+        } catch {
+            return nil
+        }
+    }
+
     private func cancelTermination(
-        _ sender: NSApplication, place: Place, message: String, detail: String?
+        _ sender: NSApplication, place: Place, message: String, detail: String?, button: String
     ) {
         terminationPending = false
         model.resumeQuietReview()
@@ -101,7 +170,7 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
         alert.messageText = "Sona stayed open"
         alert.informativeText = detail.map { "\(message)\n\n\($0)" } ?? message
-        alert.addButton(withTitle: "Keep editing")
+        alert.addButton(withTitle: button)
         alert.runModal()
     }
 
