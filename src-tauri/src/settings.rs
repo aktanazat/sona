@@ -2357,6 +2357,10 @@ struct SerializedSettings(serde_json::Value);
 /// default limit.
 pub(crate) struct UnreadableSettings;
 
+/// Present once the settings file was moved out of Sona's folder. Writing it
+/// again would make the next launch take Sona for a copy already in use.
+struct SettingsFileRetired;
+
 /// The settings store and the file behind it. The store plugin saves by
 /// rewriting the file in place, so a save cut short leaves a torn file that
 /// the next load reads as empty; this writes a new file and swaps it in, and
@@ -2364,6 +2368,7 @@ pub(crate) struct UnreadableSettings;
 struct SettingsFile<R: tauri::Runtime> {
     store: Arc<tauri_plugin_store::Store<R>>,
     path: std::path::PathBuf,
+    retired: bool,
 }
 
 impl<R: tauri::Runtime> SettingsFile<R> {
@@ -2384,10 +2389,19 @@ impl<R: tauri::Runtime> SettingsFile<R> {
             .disable_auto_save()
             .serialize(|_| Err("the settings file is saved by SettingsFile::save".into()))
             .build()?;
-        Ok(Self { store, path })
+        Ok(Self {
+            store,
+            path,
+            retired: app.try_state::<SettingsFileRetired>().is_some(),
+        })
     }
 
     fn save(&self) -> std::io::Result<()> {
+        if self.retired {
+            return Err(std::io::Error::other(
+                "the settings file was moved out of Sona's folder",
+            ));
+        }
         let document = self
             .store
             .entries()
@@ -2425,6 +2439,19 @@ fn set_aside_unreadable_settings(path: &std::path::Path) -> bool {
         ),
     }
     true
+}
+
+/// Runs `move_away`, which takes the settings file out of Sona's folder,
+/// under the settings lock. Once it succeeds, nothing in this run writes the
+/// file again.
+pub(crate) fn retire_settings_file<R: tauri::Runtime, T, E>(
+    app: &AppHandle<R>,
+    move_away: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let _settings_lock = lock_settings_store();
+    let moved = move_away()?;
+    app.manage(SettingsFileRetired);
+    Ok(moved)
 }
 
 pub(crate) fn legacy_provider_secret_migration_pending(app: &AppHandle) -> bool {
@@ -4674,6 +4701,38 @@ mod tests {
 
         assert!(file.store.save().is_err());
         assert!(!path.exists());
+    }
+
+    /// Putting adopted data back moves the settings file out of Sona's
+    /// folder, and Sona quits after. A settings write in between, such as a
+    /// cleanup marking its key verified, put the file back, and the next
+    /// launch took Sona for a copy in use and never offered the move again.
+    #[test]
+    fn a_retired_settings_file_is_not_written_again() {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        update_settings(handle, |settings| settings.history_limit = 5000).expect("first write");
+        let path = data_dir.path().join(SETTINGS_STORE_PATH);
+        assert!(
+            path.is_file(),
+            "the first write lands in the app data folder"
+        );
+
+        let backup = data_dir.path().join("rollback-settings.json");
+        retire_settings_file(handle, || std::fs::rename(&path, &backup)).expect("move away");
+        let refused = update_settings(handle, |settings| settings.history_limit = 10);
+
+        assert!(
+            refused.is_err(),
+            "a write after the move must not report success"
+        );
+        assert!(!path.exists(), "nothing puts the settings file back");
     }
 
     #[test]

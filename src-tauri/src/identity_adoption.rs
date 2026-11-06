@@ -976,7 +976,7 @@ pub async fn revert_identity_adoption(
         destination_root,
     };
     let backup_dir = rollback_backup_dir(&paths.destination_root, chrono::Local::now());
-    let kept = rollback_paths(&paths, &backup_dir)?;
+    let kept = crate::settings::retire_settings_file(&app, || rollback_paths(&paths, &backup_dir))?;
     let AdoptionPaths {
         source_root,
         destination_root,
