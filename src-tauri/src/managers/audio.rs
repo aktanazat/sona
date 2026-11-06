@@ -1717,14 +1717,14 @@ impl AudioRecordingManager {
     }
 
     pub fn stop_recording(&self, binding_id: &str, cancel_generation: u64) -> StoppedRecording {
-        self.invalidate_recording_readiness();
         let mut state = lock_recover(&self.state);
 
         match *state {
             RecordingState::Recording {
                 binding_id: ref active,
                 ..
-            } if active == binding_id => {
+            } if active == binding_id && !self.was_cancelled_since(cancel_generation) => {
+                self.invalidate_recording_readiness();
                 let spool = match self.set_state(&mut state, RecordingState::Stopping) {
                     RecordingState::Recording { spool, .. } => Some(spool),
                     RecordingState::Idle | RecordingState::Stopping => None,

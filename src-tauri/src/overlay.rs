@@ -863,9 +863,9 @@ static OVERLAY_SHOW_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Returns the overlay to rest after a dictation.
 ///
 /// When the idle pill is enabled the window is not unmapped: the pill *is* the
-/// resting state, so the overlay transitions to it instead. Every terminal path
-/// in the pipeline already calls this one function, which is why the guard
-/// lives here rather than at each of those call sites.
+/// resting state, so the overlay transitions to it instead. Every path that
+/// ends a dictation calls this one function, which is why the guard lives
+/// here rather than at each of those call sites.
 pub fn hide_recording_overlay(app_handle: &AppHandle) {
     if hud_pill_visible(&settings::get_settings(app_handle), utc_now_ms()) {
         show_overlay_state(app_handle, HUD_IDLE_STATE);
