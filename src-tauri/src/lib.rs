@@ -758,6 +758,24 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     #[cfg(unix)]
     signal_handle::setup_signal_handler(app_handle.clone());
 
+    // Reconcile the autostart preference off the startup path. On macOS 13+ the
+    // SMAppService status query is a synchronous XPC round-trip that measured
+    // ~1.75 s on a cold launch — more than the rest of startup put together —
+    // and the login item it settles only takes effect at the next login, so
+    // nothing before the first paint has any reason to wait for it.
+    // `reconcile_autostart` reads the persisted preference under its own lock,
+    // so a settings change made while this is still in flight wins.
+    let autostart_app = app_handle.clone();
+    std::thread::spawn(move || autostart::reconcile_autostart(&autostart_app));
+
+    match runtime.tray {
+        StartupTray::Absent => Ok(()),
+        StartupTray::Hidden => build_tray(app_handle, false),
+        StartupTray::Shown => build_tray(app_handle, true),
+    }
+}
+
+fn build_tray(app_handle: &AppHandle, visible: bool) -> anyhow::Result<()> {
     // Get the current theme to set the appropriate initial icon
     let initial_theme = tray::get_current_theme(app_handle);
 
@@ -973,8 +991,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     // Initialize tray menu with idle state
     tray::update_tray_menu(app_handle);
 
-    // Apply show_tray_icon setting
-    if !runtime.tray_available {
+    if !visible {
         tray::set_tray_visibility(app_handle, false);
     }
 
@@ -983,16 +1000,6 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     app_handle.listen("model-state-changed", move |_| {
         tray::update_tray_menu(&app_handle_for_listener);
     });
-
-    // Reconcile the autostart preference off the startup path. On macOS 13+ the
-    // SMAppService status query is a synchronous XPC round-trip that measured
-    // ~1.75 s on a cold launch — more than the rest of startup put together —
-    // and the login item it settles only takes effect at the next login, so
-    // nothing before the first paint has any reason to wait for it.
-    // `reconcile_autostart` reads the persisted preference under its own lock,
-    // so a settings change made while this is still in flight wins.
-    let autostart_app = app_handle.clone();
-    std::thread::spawn(move || autostart::reconcile_autostart(&autostart_app));
     Ok(())
 }
 
@@ -1033,26 +1040,37 @@ const fn uses_bundle_single_instance(portable: bool) -> bool {
     !cfg!(target_os = "macos") || !portable
 }
 
+/// Whether this launch has a tray. The native macOS app draws its own menu bar
+/// item and starts the core with `--no-tray`; a tray built there anyway, even
+/// hidden, is one setting change away from a second menu bar icon whose menu
+/// drives the core behind the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupTray {
+    Absent,
+    Hidden,
+    Shown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StartupRuntime {
     log_level: settings::LogLevel,
-    tray_available: bool,
-}
-
-fn tray_is_available(settings: &settings::AppSettings, cli_args: &CliArgs) -> bool {
-    settings.show_tray_icon && !cli_args.no_tray
+    tray: StartupTray,
 }
 
 fn startup_runtime(settings: &settings::AppSettings, cli_args: &CliArgs) -> StartupRuntime {
-    let tray_available = tray_is_available(settings, cli_args);
-
     StartupRuntime {
         log_level: if cli_args.debug {
             settings::LogLevel::Trace
         } else {
             settings.log_level
         },
-        tray_available,
+        tray: if cli_args.no_tray {
+            StartupTray::Absent
+        } else if settings.show_tray_icon {
+            StartupTray::Shown
+        } else {
+            StartupTray::Hidden
+        },
     }
 }
 
@@ -2502,7 +2520,7 @@ mod portable_lock_refusal_tests {
 
 #[cfg(test)]
 mod startup_runtime_tests {
-    use super::startup_runtime;
+    use super::{startup_runtime, StartupTray};
     use crate::cli::CliArgs;
     use crate::settings::{get_default_settings, LogLevel};
     use clap::Parser;
@@ -2521,6 +2539,21 @@ mod startup_runtime_tests {
         assert_eq!(
             (settings.debug_mode, settings.log_level),
             persisted_debug_settings
+        );
+    }
+
+    /// The native macOS app starts the core with --no-tray and draws its own
+    /// menu bar item. A tray built there, even hidden, is shown by any later
+    /// tray setting change, such as one the chat applies.
+    #[test]
+    fn no_tray_launch_builds_no_tray_whatever_the_setting() {
+        let mut settings = get_default_settings();
+        settings.show_tray_icon = true;
+        let cli_args = CliArgs::try_parse_from(["sona", "--no-tray"]).expect("parse --no-tray");
+
+        assert_eq!(
+            startup_runtime(&settings, &cli_args).tray,
+            StartupTray::Absent
         );
     }
 }
