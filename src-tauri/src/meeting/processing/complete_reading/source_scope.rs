@@ -1,6 +1,6 @@
 use super::{
-    ArtifactCitation, MeetingEvidence, RawArtifactOutput, RawCitedText, RawLedgerOutput,
-    TranscriptSegmentId,
+    ArtifactCitation, MeetingEvidence, RawArtifactOutput, RawCitedText, RawLedgerOutput, Rejection,
+    ReplyRule, TranscriptSegmentId,
 };
 use indexmap::IndexSet;
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -31,15 +31,9 @@ impl<'a> SourceScope<'a> {
         self.evidence
     }
 
-    pub(super) fn raw_run_end(
-        &self,
-        start: usize,
-        speakers: Option<&HashMap<String, &str>>,
-    ) -> usize {
+    pub(super) fn raw_run_end(&self, start: usize, speakers: &HashMap<String, &str>) -> usize {
         let first = &self.evidence[start];
-        let speaker = |item: &MeetingEvidence| {
-            speakers.and_then(|values| values.get(&item.citation.entity_id).copied())
-        };
+        let speaker = |item: &MeetingEvidence| speakers.get(&item.citation.entity_id);
         let mut end = start + 1;
         while let Some(next) = self.evidence.get(end) {
             if first.text != next.text
@@ -150,47 +144,57 @@ impl<'a> SourceScope<'a> {
         Ok(())
     }
 
-    fn restore_cited(&self, value: &mut RawCitedText) -> Result<(), ()> {
-        self.restore_ids(&mut value.citations)
+    fn restore_cited(
+        &self,
+        value: &mut RawCitedText,
+        field: &'static str,
+    ) -> Result<(), Rejection> {
+        self.restore_field(&mut value.citations, field)
     }
 
-    pub(super) fn restore_notes(&self, output: &mut RawArtifactOutput) -> Result<(), ()> {
-        for cited in output
-            .summary
-            .iter_mut()
-            .chain(&mut output.decisions)
-            .chain(&mut output.key_questions)
-            .chain(&mut output.risks)
-        {
-            self.restore_cited(cited)?;
+    fn restore_field(&self, ids: &mut Vec<String>, field: &'static str) -> Result<(), Rejection> {
+        self.restore_ids(ids)
+            .map_err(|()| ReplyRule::UnknownCitation.on(field))
+    }
+
+    pub(super) fn restore_notes(&self, output: &mut RawArtifactOutput) -> Result<(), Rejection> {
+        for (field, values) in [
+            ("summary", &mut output.summary),
+            ("decisions", &mut output.decisions),
+            ("key_questions", &mut output.key_questions),
+            ("risks", &mut output.risks),
+        ] {
+            for cited in values {
+                self.restore_cited(cited, field)?;
+            }
         }
         for topic in &mut output.outline {
-            self.restore_cited(&mut topic.title)?;
+            self.restore_cited(&mut topic.title, "outline.title")?;
             if let Some(detail) = &mut topic.detail {
-                self.restore_cited(detail)?;
+                self.restore_cited(detail, "outline.detail")?;
             }
         }
         for action in &mut output.action_items {
-            self.restore_cited(&mut action.text)?;
+            self.restore_cited(&mut action.text, "action_items.text")?;
         }
-        self.restore_cited(&mut output.follow_up_draft)
+        self.restore_cited(&mut output.follow_up_draft, "follow_up_draft")
     }
 
     pub(in crate::meeting::processing) fn restore_ledger(
         &self,
         output: &mut RawLedgerOutput,
-    ) -> Result<(), ()> {
+    ) -> Result<(), Rejection> {
         for thread in &mut output.threads {
-            self.restore_ids(&mut thread.receipt.citations)?;
+            self.restore_field(&mut thread.receipt.citations, "threads.receipt")?;
         }
         for open_loop in &mut output.open_loops {
-            self.restore_ids(&mut open_loop.citations)?;
+            self.restore_field(&mut open_loop.citations, "open_loops")?;
         }
         for commitment in &mut output.commitments {
-            self.restore_ids(&mut commitment.receipt.citations)?;
+            self.restore_field(&mut commitment.receipt.citations, "commitments.receipt")?;
         }
         for stance in &mut output.stances {
-            self.restore_ids(&mut stance.citations)?;
+            self.restore_field(&mut stance.citations, "stances")?;
         }
         Ok(())
     }

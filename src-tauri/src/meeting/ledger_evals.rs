@@ -730,9 +730,7 @@ fn messy_two_party_with_model_or_skips_without_a_local_server() {
             match serde_json::from_str::<RawLedgerOutput>(answer) {
                 Err(error) => println!("does not parse as a ledger: {error}"),
                 Ok(raw) => match validate_ledger_output(&raw, &fixture.evidence.transcript) {
-                    Err(()) => println!(
-                        "refused at validation: a citation that is not a transcript entity_id, an empty field, an unknown state or firmness, or no threads"
-                    ),
+                    Err(rejection) => println!("refused at validation: {rejection:?}"),
                     Ok(candidate) => println!(
                         "accepted, then {} receipt(s) were not in the transcript",
                         ledger::unverified_receipts(&candidate, &fixture.haystack())

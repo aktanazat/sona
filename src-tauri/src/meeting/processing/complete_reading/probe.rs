@@ -1,6 +1,12 @@
-//! Every notes and ledger pass on Apple Intelligence, run over a meeting
-//! exported from Sona as JSON, each reported by how it ended. The report
-//! holds no word of the meeting, so it can leave the Mac the meeting is on.
+//! Every notes and ledger pass on the meeting engine, run over a meeting
+//! exported from Sona as JSON, each reported by how it ended, then the notes
+//! the app's own pipeline writes from it, by count. The report holds no word
+//! of the meeting, so it can leave the Mac the meeting is on.
+//!
+//! The engine is the one this Mac's Sona settings choose, or the one
+//! SONA_PROBE_ENGINE names in the form the settings keep it, such as
+//! `{"kind":"local_endpoint","base_url":"http://127.0.0.1:11434/v1","model":"sona-notes","context_window_tokens":16384}`.
+//! SONA_PROBE_PRINT_NOTES=1 also prints the pipeline's notes, words and all.
 //!
 //! SONA_PROBE_MEETING=<export.json> <test binary> --ignored --exact \
 //!     meeting::processing::complete_reading::probe::notes_probe \
@@ -9,6 +15,7 @@
 use super::*;
 use crate::apple_intelligence::{AppleFailureKind, AppleGenerationError};
 use crate::meeting::store::workflow_core_tests;
+use crate::settings::MeetingLocalEngine;
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
@@ -44,31 +51,32 @@ struct Base {
     text: String,
 }
 
-/// The app's Apple Intelligence engine, keeping how each request ended until
-/// the probe reports it.
-#[derive(Default)]
+/// The app's meeting engine, keeping how each request ended until the probe
+/// reports it.
 struct Witness {
+    /// The endpoint the engine names; Apple Intelligence when it names none.
+    local: Option<LocalEndpointGenerator>,
     requests: Mutex<Vec<String>>,
 }
 
 impl MeetingTextGenerator for Witness {
     fn is_available(&self) -> bool {
-        AppleIntelligenceGenerator.is_available()
+        self.engine().is_available()
     }
     fn model_id(&self) -> &'static str {
-        AppleIntelligenceGenerator.model_id()
+        self.engine().model_id()
     }
     fn model_version(&self) -> Cow<'static, str> {
-        AppleIntelligenceGenerator.model_version()
+        self.engine().model_version()
     }
     fn max_input_bytes(&self) -> usize {
-        AppleIntelligenceGenerator.max_input_bytes()
+        self.engine().max_input_bytes()
     }
     fn context_window_bytes(&self) -> Option<usize> {
-        AppleIntelligenceGenerator.context_window_bytes()
+        self.engine().context_window_bytes()
     }
     fn reserved_output_tokens(&self, requested: i32) -> usize {
-        AppleIntelligenceGenerator.reserved_output_tokens(requested)
+        self.engine().reserved_output_tokens(requested)
     }
     fn generate(
         &self,
@@ -77,28 +85,64 @@ impl MeetingTextGenerator for Witness {
         max_tokens: i32,
         shape: ReplyShape,
     ) -> Result<String, MeetingTextGenerationError> {
-        let Ok(reply_tokens) = i32::try_from(ON_DEVICE_REPLY_TOKENS) else {
-            return Err(MeetingTextGenerationError::Failed);
+        let (result, ended) = match &self.local {
+            Some(local) => {
+                let result = local.generate(prompt, input, max_tokens, shape);
+                let ended = match &result {
+                    Ok(reply) => format!("answered {} bytes", reply.len()),
+                    Err(error) => format!("{error:?}"),
+                };
+                (result, ended)
+            }
+            None => {
+                let Ok(reply_tokens) = i32::try_from(ON_DEVICE_REPLY_TOKENS) else {
+                    return Err(MeetingTextGenerationError::Failed);
+                };
+                let result =
+                    apple_json::generate(prompt, input, max_tokens.min(reply_tokens), shape);
+                let ended = match &result {
+                    Ok(_) => "answered".to_string(),
+                    Err(error) => describe(error),
+                };
+                (result.map_err(apple_generation_error), ended)
+            }
         };
-        let result = apple_json::generate(prompt, input, max_tokens.min(reply_tokens), shape);
         let short = if prompt.starts_with(SHORT_NOTES_PROMPT) {
             ", short instructions"
         } else {
             ""
         };
-        let ended = match &result {
-            Ok(_) => "answered".to_string(),
-            Err(error) => describe(error),
-        };
         self.requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(format!("{} bytes{short}: {ended}", input.len()));
-        result.map_err(apple_generation_error)
+        result
     }
 }
 
 impl Witness {
+    fn new(engine: &MeetingLocalEngine) -> Self {
+        Self {
+            local: LocalEndpointGenerator::from_settings(engine)
+                .expect("the meeting engine names a loopback endpoint"),
+            requests: Mutex::default(),
+        }
+    }
+
+    fn engine(&self) -> &dyn MeetingTextGenerator {
+        match &self.local {
+            Some(local) => local,
+            None => &AppleIntelligenceGenerator,
+        }
+    }
+
+    fn blocker(&self) -> String {
+        match &self.local {
+            Some(local) => format!("{:?}", local.status()),
+            None => format!("{:?}", AppleIntelligenceGenerator::blocker()),
+        }
+    }
+
     /// "ok" for a step its first request answered; otherwise every request
     /// of the step in order, so second tries, halves and the short
     /// instructions all show.
@@ -115,6 +159,45 @@ impl Witness {
             None => format!("ok after {count}: {trail}"),
             Some(failure) => format!("{failure} after {count}: {trail}"),
         }
+    }
+}
+
+/// The reading's own account as it goes: the tokens a local model read and
+/// wrote and why it stopped, and each piece read again or left out with the
+/// rule its reply broke. These lines carry counts and rules, never words of
+/// the meeting.
+struct ReadingLog;
+
+impl log::Log for ReadingLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+            && [
+                "sona_app_lib::meeting::local_generator",
+                "sona_app_lib::meeting::processing::complete_reading",
+            ]
+            .iter()
+            .any(|target| metadata.target().starts_with(target))
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            println!("    {}", record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+/// The engine the app writes meeting notes with: the one SONA_PROBE_ENGINE
+/// names, or the one this Mac's settings choose.
+fn probe_engine(
+    settings: Option<&crate::settings::AppSettings>,
+) -> Result<MeetingLocalEngine, serde_json::Error> {
+    match std::env::var("SONA_PROBE_ENGINE") {
+        Ok(engine) => serde_json::from_str(&engine),
+        Err(_) => Ok(
+            settings.map_or(MeetingLocalEngine::AppleIntelligence, |settings| {
+                settings.meeting_local_engine.clone()
+            }),
+        ),
     }
 }
 
@@ -305,7 +388,7 @@ fn seed(store: &MeetingStore, review: &Review) -> Result<MeetingSessionId, Store
     Ok(session_id)
 }
 
-#[ignore = "runs Apple Intelligence over the meeting export SONA_PROBE_MEETING names"]
+#[ignore = "runs the meeting engine over the meeting export SONA_PROBE_MEETING names"]
 #[test]
 fn notes_probe() {
     let path = std::env::var_os("SONA_PROBE_MEETING")
@@ -319,16 +402,32 @@ fn notes_probe() {
         )
     });
     println!("\nsona build {}", env!("SONA_BUILD_COMMIT"));
-    let witness = Witness::default();
+    let settings = app_settings();
+    let engine = probe_engine(settings.as_ref())
+        .expect("SONA_PROBE_ENGINE is a meeting engine in the form Sona's settings keep it");
+    let witness = Witness::new(&engine);
+    if log::set_logger(&ReadingLog).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+    match &engine {
+        MeetingLocalEngine::AppleIntelligence => println!("engine: apple intelligence"),
+        MeetingLocalEngine::LocalEndpoint {
+            base_url,
+            model,
+            context_window_tokens,
+        } => println!(
+            "engine: local model {model} at {base_url}, context {}",
+            context_window_tokens.map_or_else(
+                || "as the endpoint reports it".to_string(),
+                |tokens| format!("{tokens} tokens")
+            )
+        ),
+    }
     if !witness.is_available() {
-        println!(
-            "apple intelligence is not available: {:?}",
-            AppleIntelligenceGenerator::blocker()
-        );
+        println!("the engine is not available: {}", witness.blocker());
         return;
     }
 
-    let settings = app_settings();
     match &settings {
         Some(settings) if settings.meeting_notes_custom_template_id.is_some() => println!(
             "settings: this mac's sona settings, but the built-in notes template stands in for the custom one"
@@ -385,9 +484,17 @@ fn notes_probe() {
         .unwrap_or_default();
     let prompt = notes_system_prompt(&evidence, settings.as_ref());
     let scope = SourceScope::new(&evidence.transcript).expect("source scope");
+    let segments = store
+        .analytics_segments(session_id)
+        .expect("scratch segments");
+    let speaker_names = store
+        .speaker_display_names(session_id)
+        .expect("scratch speakers");
+    let speakers = turn_speakers(&segments, &speaker_names);
     let mut input = notes_packs(
         &evidence,
         &scope,
+        &speakers,
         evidence_budget(&witness, &prompt, ARTIFACT_MAX_TOKENS),
     )
     .expect("notes parts");
@@ -412,6 +519,7 @@ fn notes_probe() {
                 pack,
                 &scope,
                 &evidence,
+                &speakers,
                 &|| Ok(()),
             ) {
                 Ok(part) => {
@@ -426,7 +534,7 @@ fn notes_probe() {
             };
             let failed = failure.is_some();
             report(&step, started, &witness.outcome(failure));
-            if round == 1 {
+            if round == 1 && witness.local.is_none() {
                 compare(&witness, &prompt, &profile, pack.as_ref(), failed);
             }
         }
@@ -457,6 +565,7 @@ fn notes_probe() {
             "{\"section_facts\":[",
             "]}",
             evidence_budget(&witness, &instructions, ARTIFACT_MAX_TOKENS),
+            Fill::Even,
         )
         .expect("join parts");
         if round > 1 && packed_bytes(&next) >= packed_bytes(&input) {
@@ -474,13 +583,6 @@ fn notes_probe() {
         }
     );
 
-    let segments = store
-        .analytics_segments(session_id)
-        .expect("scratch segments");
-    let speaker_names = store
-        .speaker_display_names(session_id)
-        .expect("scratch speakers");
-    let speakers = turn_speakers(&segments, &speaker_names);
     let haystack = ledger::fold_haystack(evidence.transcript.iter().map(|item| item.text.as_str()));
     let ledger_prompt = ledger_system_prompt();
     let ledger_input = ledger_packs(
@@ -507,9 +609,12 @@ fn notes_probe() {
             &scope,
             &|| Ok(()),
         ) {
-            Ok(read) => {
-                report(&step, started, &witness.outcome(None));
-                ledgers.extend(read);
+            Ok(part) => {
+                let spans = left_out_spans(&evidence, part.left_out);
+                let failure =
+                    (!spans.is_empty()).then(|| format!("left out {}", describe_spans(&spans)));
+                report(&step, started, &witness.outcome(failure));
+                ledgers.extend(part.sections);
             }
             Err(error) => report(
                 &step,
@@ -552,5 +657,136 @@ fn notes_probe() {
             started,
             &witness.outcome(Some(format!("failed, {error:?}"))),
         ),
+    }
+
+    pipeline(&engine, &store, session_id).expect("scratch review");
+}
+
+/// The notes the app's own pipeline writes from the meeting with the same
+/// engine: the import job's notes and ledger passes, its plain-notes
+/// fallback and the store, reported by count.
+fn pipeline(
+    engine: &MeetingLocalEngine,
+    store: &Arc<MeetingStore>,
+    session_id: MeetingSessionId,
+) -> Result<(), StoreError> {
+    let witness = Arc::new(Witness::new(engine));
+    let service = Arc::new(MeetingProcessingService::new(None));
+    service.set_text_generators(witness.clone(), witness.clone());
+    let started = Instant::now();
+    service.submit(
+        Arc::clone(store),
+        session_id,
+        ProcessingOrigin::ImportedTranscript,
+    );
+    service.wait_for_job(session_id);
+    let review = store.review_snapshot(session_id)?;
+    let Some(notes) = review
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.state == MeetingArtifactState::Current)
+        .and_then(|artifact| artifact.content.as_ref())
+    else {
+        let failure = format!("no notes, {:?}", review.session.processing_status);
+        report("app pipeline", started, &witness.outcome(Some(failure)));
+        return Ok(());
+    };
+    report("app pipeline", started, &witness.outcome(None));
+    println!("app pipeline notes: {}", counted(notes));
+    if std::env::var_os("SONA_PROBE_PRINT_NOTES").is_some() {
+        print_notes(notes);
+    }
+    Ok(())
+}
+
+/// What the notes hold, in counts, so the report says how complete they are
+/// without a word of the meeting.
+fn counted(notes: &GeneratedMeetingArtifacts) -> String {
+    let actions = &notes.action_items;
+    let owned = actions
+        .iter()
+        .filter(|action| action.owner_text.is_some())
+        .count();
+    let dated = actions
+        .iter()
+        .filter(|action| action.due_text.is_some())
+        .count();
+    let ledger = notes.ledger.as_ref().map_or_else(
+        || format!("no ledger ({:?})", notes.ledger_failure),
+        |ledger| {
+            format!(
+                "a ledger of {} threads, {} commitments, {} open questions and {} caveats",
+                ledger.threads.len(),
+                ledger.commitments.len(),
+                ledger.open_loops.len(),
+                ledger.caveats.len()
+            )
+        },
+    );
+    format!(
+        "{} notes, {} summary lines, {} topics, {} decisions, {} action items ({owned} with an owner, {dated} with a date), {} questions, {} risks, {ledger}; left out: {}",
+        if notes.plain { "plain" } else { "structured" },
+        notes.summary.text.lines().count(),
+        notes.outline.len(),
+        notes.decisions.len(),
+        actions.len(),
+        notes.key_questions.len(),
+        notes.risks.len(),
+        if notes.left_out.is_empty() {
+            "nothing".to_string()
+        } else {
+            describe_spans(&notes.left_out)
+        }
+    )
+}
+
+fn print_notes(notes: &GeneratedMeetingArtifacts) {
+    println!("summary:\n{}", notes.summary.text);
+    for topic in &notes.outline {
+        match &topic.detail {
+            Some(detail) => println!("topic: {} - {}", topic.title.text, detail.text),
+            None => println!("topic: {}", topic.title.text),
+        }
+    }
+    for decision in &notes.decisions {
+        println!("decision: {}", decision.text);
+    }
+    for action in &notes.action_items {
+        println!(
+            "action: {} | owner: {} | due: {}",
+            action.text.text,
+            action.owner_text.as_deref().unwrap_or("-"),
+            action.due_text.as_deref().unwrap_or("-")
+        );
+    }
+    for question in &notes.key_questions {
+        println!("question: {}", question.text);
+    }
+    for risk in &notes.risks {
+        println!("risk: {}", risk.text);
+    }
+    println!("follow-up:\n{}", notes.follow_up_draft.text);
+    if let Some(ledger) = &notes.ledger {
+        println!("ledger: {}", ledger.headline);
+        for thread in &ledger.threads {
+            println!(
+                "thread: {} [{:?}] owner {}",
+                thread.topic,
+                thread.state,
+                thread.owner.as_deref().unwrap_or("-")
+            );
+        }
+        for commitment in &ledger.commitments {
+            println!(
+                "commitment: {} - {} [{:?}]",
+                commitment.who, commitment.what, commitment.firmness
+            );
+        }
+        for open_loop in &ledger.open_loops {
+            println!("open: {} - {}", open_loop.question, open_loop.instead);
+        }
+        for caveat in &ledger.caveats {
+            println!("caveat: {caveat}");
+        }
     }
 }

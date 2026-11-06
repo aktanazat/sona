@@ -61,7 +61,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -414,6 +414,58 @@ impl ReplyShape {
             Self::Prose | Self::PlainNotes => false,
         }
     }
+
+    /// The JSON schema a reply of this shape is held to and its name, for an
+    /// engine that enforces a schema while it writes. Apple Intelligence
+    /// constrains its own wire, so this is the one every other engine reads,
+    /// where a field the prompt lets a model leave unknown takes null.
+    pub(crate) fn wire_schema(
+        self,
+    ) -> Option<(&'static str, &'static serde_json::value::RawValue)> {
+        type Raw = std::sync::LazyLock<Option<Box<serde_json::value::RawValue>>>;
+        static NOTES: Raw = Raw::new(|| raw_schema(&reply_schema::<RawArtifactOutput>()));
+        static LEDGER: Raw = Raw::new(|| raw_schema(&ledger_reply_schema()));
+        static MERGE: Raw =
+            Raw::new(|| raw_schema(&reply_schema::<complete_reading::LedgerMergeReply>()));
+        let (name, schema) = match self {
+            Self::MeetingNotes => ("meeting_notes", &NOTES),
+            Self::MeetingLedger => ("meeting_ledger", &LEDGER),
+            Self::LedgerMerge => ("ledger_merge", &MERGE),
+            Self::Json | Self::Prose | Self::PlainNotes | Self::MemoryNote => return None,
+        };
+        schema.as_deref().map(|schema| (name, schema))
+    }
+}
+
+fn reply_schema<T: schemars::JsonSchema>() -> schemars::schema::RootSchema {
+    schemars::gen::SchemaSettings::draft07()
+        .with(|settings| settings.meta_schema = None)
+        .into_generator()
+        .into_root_schema_for::<T>()
+}
+
+/// The ledger's schema with each receipt quoting the words themselves: the
+/// receipt's derived schema describes the excerpt labels Apple Intelligence
+/// picks instead.
+fn ledger_reply_schema() -> schemars::schema::RootSchema {
+    let mut root = reply_schema::<RawLedgerOutput>();
+    if let Some(schemars::schema::Schema::Object(receipt)) =
+        root.definitions.get_mut("RawLedgerReceipt")
+    {
+        receipt.object().properties.insert(
+            "quote".to_string(),
+            schemars::schema::SchemaObject {
+                instance_type: Some(schemars::schema::InstanceType::String.into()),
+                ..Default::default()
+            }
+            .into(),
+        );
+    }
+    root
+}
+
+fn raw_schema(root: &schemars::schema::RootSchema) -> Option<Box<serde_json::value::RawValue>> {
+    serde_json::value::to_raw_value(root).ok()
 }
 
 pub trait MeetingTextGenerator: Send + Sync {
@@ -2519,9 +2571,11 @@ impl MeetingProcessingService {
         let speaker_names = store
             .speaker_display_names(session_id)
             .map_err(RunFailure::from)?;
+        let speakers = turn_speakers(&segments, &speaker_names);
         let mut content = match complete_reading::notes(
             generator.as_ref(),
             &evidence,
+            &speakers,
             &system_prompt,
             checkpoint,
         ) {
@@ -2541,7 +2595,7 @@ impl MeetingProcessingService {
                 match complete_reading::plain_notes(
                     generator.as_ref(),
                     &evidence,
-                    &turn_speakers(&segments, &speaker_names),
+                    &speakers,
                     &plain_notes_prompt(language),
                     checkpoint,
                 ) {
@@ -4344,30 +4398,57 @@ impl<'a> From<&'a MeetingEvidence> for PromptEvidence<'a> {
         }
     }
 }
+
+/// One transcript or manual-note row of a notes part: [`PromptEvidence`]
+/// without `session_id`, for the reason [`LedgerPromptEvidence`] gives, and
+/// with the line's speaker, without whom the owner of a first-person
+/// commitment is unknown. The notes prompt asks for segment ids, and a local
+/// model shown both uuids cited the session id for all 26 citations of one
+/// part.
+#[derive(Serialize)]
+struct NotesPromptEvidence<'a> {
+    kind: &'a CitationKind,
+    entity_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker: Option<&'a str>,
+    start_offset_ns: Option<u64>,
+    end_offset_ns: Option<u64>,
+    text: &'a str,
+}
+
+impl<'a> From<&'a MeetingEvidence> for NotesPromptEvidence<'a> {
+    fn from(evidence: &'a MeetingEvidence) -> Self {
+        Self {
+            kind: &evidence.citation.kind,
+            entity_id: &evidence.citation.entity_id,
+            speaker: None,
+            start_offset_ns: evidence.citation.start_offset_ns,
+            end_offset_ns: evidence.citation.end_offset_ns,
+            text: &evidence.text,
+        }
+    }
+}
+
 /// The whole model input for generated notes. `my_notes` is the user's own
 /// rough writing: it steers what the notes emphasize, it is not evidence, and
 /// it is omitted entirely when empty so an untouched meeting hashes and reads
 /// exactly as it did before the notes pane existed.
 #[derive(Serialize)]
-struct ArtifactPromptInput<'a> {
-    transcript: Vec<PromptEvidence<'a>>,
-    manual_notes: Vec<PromptEvidence<'a>>,
+struct ArtifactPromptInput<'a, Row = PromptEvidence<'a>> {
+    transcript: Vec<Row>,
+    manual_notes: Vec<Row>,
     #[serde(skip_serializing_if = "Option::is_none")]
     my_notes: Option<&'a str>,
 }
 
-impl<'a> ArtifactPromptInput<'a> {
+impl<'a, Row: From<&'a MeetingEvidence>> ArtifactPromptInput<'a, Row> {
     /// The same input over a chosen slice of the transcript, for an engine
     /// whose wire cannot carry all of it. `From` stays the whole-evidence
     /// case so the common path reads as it always has.
     fn from_parts(transcript: &'a [MeetingEvidence], evidence: &'a ArtifactEvidence) -> Self {
         Self {
-            transcript: transcript.iter().map(PromptEvidence::from).collect(),
-            manual_notes: evidence
-                .manual_notes
-                .iter()
-                .map(PromptEvidence::from)
-                .collect(),
+            transcript: transcript.iter().map(Row::from).collect(),
+            manual_notes: evidence.manual_notes.iter().map(Row::from).collect(),
             my_notes: (!evidence.user_notes.is_empty()).then_some(evidence.user_notes.as_str()),
         }
     }
@@ -4709,7 +4790,7 @@ fn artifact_system_prompt(
         ""
     };
     let mut prompt = format!(
-        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. {steering}{notes_rule}"
+        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision. A question the meeting answered is not a key question. {steering}{notes_rule}"
     );
     if let NotesTemplate::Custom(template) = template {
         prompt.push_str("\n\nThe user's custom template arranges only the outline. The summary, decisions, action items, key questions, risks and follow-up draft retain the schema and all citation, text and list limits above. Use these outline sections in the order given, at most once each, with each title spelled exactly as given. Write each section's detail from the transcript following that section's instructions. Omit sections not covered by the transcript; an empty outline is valid. Each title and non-null detail still needs at least one transcript citation. Section instructions guide emphasis, never supply facts or override this schema.");
@@ -5249,11 +5330,44 @@ pub enum GenerationIntent {
     Rewrite(MeetingOperationId),
 }
 
+/// The rule a model's reply broke and the field that broke it, logged for
+/// the piece the reply cost so a refused reply says why without quoting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Rejection {
+    field: &'static str,
+    rule: ReplyRule,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplyRule {
+    /// Blank, or longer than the field allows.
+    Length,
+    /// Fewer or more entries than the field allows.
+    Count,
+    /// Cites nothing.
+    Uncited,
+    /// Cites a line the reply was not given.
+    UnknownCitation,
+    /// A value the field does not allow.
+    UnknownValue,
+    /// Not one of the custom template's sections, in its order.
+    TemplateSection,
+    /// Quotes words the transcript does not hold.
+    UnverifiedQuote,
+}
+
+impl ReplyRule {
+    pub(crate) const fn on(self, field: &'static str) -> Rejection {
+        Rejection { field, rule: self }
+    }
+}
+
 fn validate_artifact_output(
     output: &RawArtifactOutput,
     evidence: &[MeetingEvidence],
+    speakers: &HashMap<String, &str>,
     template: &NotesTemplate,
-) -> Result<GeneratedMeetingArtifacts, ()> {
+) -> Result<GeneratedMeetingArtifacts, Rejection> {
     let (summary, summary_trace) = validate_summary_lines(&output.summary, evidence)?;
     let mut outline = output
         .outline
@@ -5261,68 +5375,79 @@ fn validate_artifact_output(
         .take(32)
         .map(|topic| {
             Ok(MeetingOutlineTopic {
-                title: validate_cited_text(&topic.title, evidence)?,
+                title: validate_cited_text(&topic.title, evidence, "outline.title")?,
                 detail: topic
                     .detail
                     .as_ref()
-                    .map(|detail| validate_cited_text(detail, evidence))
+                    .map(|detail| validate_cited_text(detail, evidence, "outline.detail"))
                     .transpose()?,
             })
         })
-        .collect::<Result<Vec<_>, ()>>()?;
+        .collect::<Result<Vec<_>, Rejection>>()?;
     if let NotesTemplate::Custom(template) = template {
         if output.outline.len() > template.sections.len() {
-            return Err(());
+            return Err(ReplyRule::Count.on("outline"));
         }
         let mut next_section = 0;
         for topic in &mut outline {
             let offset = template.sections[next_section..]
                 .iter()
                 .position(|section| same_section_title(&section.title, &topic.title.text))
-                .ok_or(())?;
+                .ok_or(ReplyRule::TemplateSection.on("outline.title"))?;
             let index = next_section + offset;
             topic.title.text.clone_from(&template.sections[index].title);
             next_section = index + 1;
         }
     }
+    let cited_list = |items: &[RawCitedText], field| {
+        items
+            .iter()
+            .take(64)
+            .map(|item| validate_cited_text(item, evidence, field))
+            .collect::<Result<Vec<_>, Rejection>>()
+    };
+    let decisions = cited_list(&output.decisions, "decisions")?;
+    let action_items = output
+        .action_items
+        .iter()
+        .take(64)
+        .map(|item| {
+            let citations = &item.text.citations;
+            Ok(MeetingActionItem {
+                text: validate_cited_text(&item.text, evidence, "action_items.text")?,
+                owner_text: bounded_generated_text(
+                    item.owner_text.as_deref(),
+                    "action_items.owner_text",
+                )?
+                .filter(|owner| {
+                    cited_words_say(citations, evidence, owner)
+                        || commits_in_first_person(citations, evidence, speakers, owner)
+                }),
+                due_text: bounded_generated_text(
+                    item.due_text.as_deref(),
+                    "action_items.due_text",
+                )?
+                .filter(|due| cited_words_say(citations, evidence, due)),
+            })
+        })
+        .collect::<Result<Vec<_>, Rejection>>()?;
+    let decisions = decisions
+        .into_iter()
+        .filter(|decision| {
+            !action_items
+                .iter()
+                .any(|item| restates_task(decision, item))
+        })
+        .collect();
     Ok(GeneratedMeetingArtifacts {
         summary,
         summary_trace,
         outline,
-        decisions: output
-            .decisions
-            .iter()
-            .take(64)
-            .map(|item| validate_cited_text(item, evidence))
-            .collect::<Result<Vec<_>, ()>>()?,
-        action_items: output
-            .action_items
-            .iter()
-            .take(64)
-            .map(|item| {
-                let said = |phrase: Option<String>| {
-                    phrase.filter(|phrase| cited_words_say(&item.text.citations, evidence, phrase))
-                };
-                Ok(MeetingActionItem {
-                    text: validate_cited_text(&item.text, evidence)?,
-                    owner_text: said(bounded_generated_text(item.owner_text.as_deref())?),
-                    due_text: said(bounded_generated_text(item.due_text.as_deref())?),
-                })
-            })
-            .collect::<Result<Vec<_>, ()>>()?,
-        key_questions: output
-            .key_questions
-            .iter()
-            .take(64)
-            .map(|item| validate_cited_text(item, evidence))
-            .collect::<Result<Vec<_>, ()>>()?,
-        risks: output
-            .risks
-            .iter()
-            .take(64)
-            .map(|item| validate_cited_text(item, evidence))
-            .collect::<Result<Vec<_>, ()>>()?,
-        follow_up_draft: validate_cited_text(&output.follow_up_draft, evidence)?,
+        decisions,
+        action_items,
+        key_questions: cited_list(&output.key_questions, "key_questions")?,
+        risks: cited_list(&output.risks, "risks")?,
+        follow_up_draft: validate_cited_text(&output.follow_up_draft, evidence, "follow_up_draft")?,
         // Filled in by a second, separately budgeted pass over the same
         // evidence; see `generate_ledger`.
         ledger: None,
@@ -5335,12 +5460,16 @@ fn validate_artifact_output(
 fn validate_cited_text(
     value: &RawCitedText,
     evidence: &[MeetingEvidence],
-) -> Result<CitedArtifactText, ()> {
-    let text = required_generated_text(&value.text)?;
-    let index = transcript_citation_index(evidence)?;
+    field: &'static str,
+) -> Result<CitedArtifactText, Rejection> {
+    let text = required_generated_text(&value.text, field)?;
+    let index =
+        transcript_citation_index(evidence).map_err(|()| ReplyRule::UnknownCitation.on(field))?;
     let mut citations = Vec::new();
     for citation_id in &value.citations {
-        let citation = index.get(citation_id.as_str()).ok_or(())?;
+        let citation = index
+            .get(citation_id.as_str())
+            .ok_or(ReplyRule::UnknownCitation.on(field))?;
         if !citations
             .iter()
             .any(|existing: &ArtifactCitation| existing.segment_id == citation.segment_id)
@@ -5349,7 +5478,7 @@ fn validate_cited_text(
         }
     }
     if citations.is_empty() {
-        return Err(());
+        return Err(ReplyRule::Uncited.on(field));
     }
     Ok(CitedArtifactText { text, citations })
 }
@@ -5362,20 +5491,20 @@ fn validate_cited_text(
 fn validate_summary_lines(
     lines: &[RawCitedText],
     evidence: &[MeetingEvidence],
-) -> Result<(CitedArtifactText, Vec<SummaryLineTrace>), ()> {
+) -> Result<(CitedArtifactText, Vec<SummaryLineTrace>), Rejection> {
     if lines.is_empty() || lines.len() > MAX_SUMMARY_LINES {
-        return Err(());
+        return Err(ReplyRule::Count.on("summary"));
     }
     let mut text = String::new();
     let mut citations: Vec<ArtifactCitation> = Vec::new();
     let mut trace = Vec::with_capacity(lines.len());
     for (ordinal, raw) in lines.iter().enumerate() {
-        let line = validate_cited_text(raw, evidence)?;
+        let line = validate_cited_text(raw, evidence, "summary")?;
         let anchor = line
             .citations
             .iter()
             .min_by_key(|citation| citation.start_offset_ns)
-            .ok_or(())?
+            .ok_or(ReplyRule::Uncited.on("summary"))?
             .clone();
         if !text.is_empty() {
             text.push('\n');
@@ -5397,12 +5526,12 @@ fn validate_summary_lines(
             }
         }
         trace.push(SummaryLineTrace {
-            line: u32::try_from(ordinal).map_err(|_| ())?,
+            line: u32::try_from(ordinal).map_err(|_| ReplyRule::Count.on("summary"))?,
             anchor,
         });
     }
     // The joined block answers to the same length rule the summary always had.
-    let text = required_generated_text(&text)?;
+    let text = required_generated_text(&text, "summary")?;
     Ok((CitedArtifactText { text, citations }, trace))
 }
 
@@ -5704,6 +5833,7 @@ impl From<MeetingTextGenerationError> for EngineFailureCause {
 fn reading_error_cause(error: complete_reading::ReadingError) -> EngineFailureCause {
     match error {
         complete_reading::ReadingError::Invalid(cause) => cause,
+        complete_reading::ReadingError::Rejected(_) => EngineFailureCause::ReplyRejected,
         complete_reading::ReadingError::Stopped(_) => EngineFailureCause::EvidencePack,
         complete_reading::ReadingError::Engine(error) => error.into(),
     }
@@ -5731,11 +5861,8 @@ fn read_ledger_pack(
         )?;
         let mut raw: RawLedgerOutput =
             first_json_value(&output).map_err(|()| EngineFailureCause::ReplyNotStructured)?;
-        scope
-            .restore_ledger(&mut raw)
-            .map_err(|()| EngineFailureCause::ReplyRejected)?;
-        let candidate = validate_ledger_output(&raw, &evidence.transcript)
-            .map_err(|()| EngineFailureCause::ReplyRejected)?;
+        scope.restore_ledger(&mut raw)?;
+        let candidate = validate_ledger_output(&raw, &evidence.transcript)?;
         if ledger::unverified_receipts(&candidate, haystack) == 0 {
             return Ok(candidate);
         }
@@ -5746,7 +5873,7 @@ fn read_ledger_pack(
     // A ledger whose every thread was invented is not a degraded ledger, it is
     // no ledger: the model answered and nothing it said checked out.
     if degraded.threads.is_empty() {
-        return Err(EngineFailureCause::ReplyRejected.into());
+        return Err(ReplyRule::UnverifiedQuote.on("threads.receipt").into());
     }
     Ok(degraded)
 }
@@ -5754,78 +5881,79 @@ fn read_ledger_pack(
 pub(crate) fn validate_ledger_output(
     output: &RawLedgerOutput,
     evidence: &[MeetingEvidence],
-) -> Result<MeetingLedger, ()> {
-    let index = transcript_citation_index(evidence)?;
+) -> Result<MeetingLedger, Rejection> {
+    let index = transcript_citation_index(evidence)
+        .map_err(|()| ReplyRule::UnknownCitation.on("transcript"))?;
     let mut threads = output
         .threads
         .iter()
         .take(MAX_LEDGER_ROWS)
         .map(|thread| {
             Ok(LedgerThread {
-                topic: required_generated_text(&thread.topic)?,
+                topic: required_generated_text(&thread.topic, "threads.topic")?,
                 state: ledger_state(&thread.state)?,
                 substantive: thread.substantive,
-                receipt: validate_receipt(&thread.receipt, &index)?,
-                owner: bounded_generated_text(thread.owner.as_deref())?,
+                receipt: validate_receipt(&thread.receipt, &index, "threads.receipt")?,
+                owner: bounded_generated_text(thread.owner.as_deref(), "threads.owner")?,
             })
         })
-        .collect::<Result<Vec<_>, ()>>()?;
+        .collect::<Result<Vec<_>, Rejection>>()?;
     threads.dedup();
     if threads.is_empty() {
-        return Err(());
+        return Err(ReplyRule::Count.on("threads"));
     }
     Ok(MeetingLedger {
-        headline: required_generated_text(&output.headline)?,
+        headline: required_generated_text(&output.headline, "headline")?,
         threads,
         open_loops: output
             .open_loops
             .iter()
             .take(MAX_LEDGER_ROWS)
             .map(|item| {
-                let citations = resolve_citations(&item.citations, &index)?;
+                let citations = resolve_citations(&item.citations, &index, "open_loops")?;
                 Ok(LedgerOpenLoop {
-                    question: required_generated_text(&item.question)?,
-                    instead: required_generated_text(&item.instead)?,
+                    question: required_generated_text(&item.question, "open_loops.question")?,
+                    instead: required_generated_text(&item.instead, "open_loops.instead")?,
                     at_ms: first_offset_ms(&citations),
                     citations,
                 })
             })
-            .collect::<Result<Vec<_>, ()>>()?,
+            .collect::<Result<Vec<_>, Rejection>>()?,
         commitments: output
             .commitments
             .iter()
             .take(MAX_LEDGER_ROWS)
             .map(|item| {
                 Ok(LedgerCommitment {
-                    who: required_generated_text(&item.who)?,
-                    what: required_generated_text(&item.what)?,
+                    who: required_generated_text(&item.who, "commitments.who")?,
+                    what: required_generated_text(&item.what, "commitments.what")?,
                     firmness: ledger_firmness(&item.firmness)?,
-                    receipt: validate_receipt(&item.receipt, &index)?,
+                    receipt: validate_receipt(&item.receipt, &index, "commitments.receipt")?,
                 })
             })
-            .collect::<Result<Vec<_>, ()>>()?,
+            .collect::<Result<Vec<_>, Rejection>>()?,
         stances: output
             .stances
             .iter()
             .take(MAX_LEDGER_ROWS)
             .map(|item| {
-                let citations = resolve_citations(&item.citations, &index)?;
+                let citations = resolve_citations(&item.citations, &index, "stances")?;
                 Ok(LedgerStance {
-                    from: required_generated_text(&item.from)?,
-                    to: bounded_generated_text(item.to.as_deref())?,
-                    what: required_generated_text(&item.what)?,
-                    note: bounded_generated_text(item.note.as_deref())?,
+                    from: required_generated_text(&item.from, "stances.from")?,
+                    to: bounded_generated_text(item.to.as_deref(), "stances.to")?,
+                    what: required_generated_text(&item.what, "stances.what")?,
+                    note: bounded_generated_text(item.note.as_deref(), "stances.note")?,
                     at_ms: first_offset_ms(&citations),
                     citations,
                 })
             })
-            .collect::<Result<Vec<_>, ()>>()?,
+            .collect::<Result<Vec<_>, Rejection>>()?,
         caveats: output
             .caveats
             .iter()
             .take(MAX_LEDGER_ROWS)
-            .map(|caveat| required_generated_text(caveat))
-            .collect::<Result<Vec<_>, ()>>()?,
+            .map(|caveat| required_generated_text(caveat, "caveats"))
+            .collect::<Result<Vec<_>, Rejection>>()?,
         receipts: LedgerReceiptState::Verified,
     })
 }
@@ -5835,11 +5963,12 @@ pub(crate) fn validate_ledger_output(
 fn validate_receipt(
     value: &RawLedgerReceipt,
     index: &BTreeMap<&str, ArtifactCitation>,
-) -> Result<LedgerReceipt, ()> {
-    let citations = resolve_citations(&value.citations, index)?;
+    field: &'static str,
+) -> Result<LedgerReceipt, Rejection> {
+    let citations = resolve_citations(&value.citations, index, field)?;
     Ok(LedgerReceipt {
-        quote: required_generated_text(&value.quote)?,
-        speaker: bounded_generated_text(value.speaker.as_deref())?,
+        quote: required_generated_text(&value.quote, field)?,
+        speaker: bounded_generated_text(value.speaker.as_deref(), field)?,
         t_ms: first_offset_ms(&citations),
         citations,
     })
@@ -5848,18 +5977,21 @@ fn validate_receipt(
 fn resolve_citations(
     ids: &[String],
     index: &BTreeMap<&str, ArtifactCitation>,
-) -> Result<Vec<ArtifactCitation>, ()> {
+    field: &'static str,
+) -> Result<Vec<ArtifactCitation>, Rejection> {
     let capacity = ids.len().min(index.len());
     let mut citations = Vec::with_capacity(capacity);
     let mut seen = std::collections::HashSet::with_capacity(capacity);
     for id in ids {
-        let citation = index.get(id.as_str()).ok_or(())?;
+        let citation = index
+            .get(id.as_str())
+            .ok_or(ReplyRule::UnknownCitation.on(field))?;
         if seen.insert(citation.segment_id) {
             citations.push(citation.clone());
         }
     }
     if citations.is_empty() {
-        return Err(());
+        return Err(ReplyRule::Uncited.on(field));
     }
     citations.sort_unstable_by_key(|citation| citation.start_offset_ns);
     Ok(citations)
@@ -5871,7 +6003,7 @@ fn first_offset_ms(citations: &[ArtifactCitation]) -> u64 {
         .map_or(0, |citation| citation.start_offset_ns / 1_000_000)
 }
 
-fn ledger_state(value: &str) -> Result<LedgerThreadState, ()> {
+fn ledger_state(value: &str) -> Result<LedgerThreadState, Rejection> {
     match value {
         "decided" => Ok(LedgerThreadState::Decided),
         "agreed" => Ok(LedgerThreadState::Agreed),
@@ -5882,32 +6014,35 @@ fn ledger_state(value: &str) -> Result<LedgerThreadState, ()> {
         "ambiguous" => Ok(LedgerThreadState::Ambiguous),
         "unanswered" => Ok(LedgerThreadState::Unanswered),
         "dropped" => Ok(LedgerThreadState::Dropped),
-        _ => Err(()),
+        _ => Err(ReplyRule::UnknownValue.on("threads.state")),
     }
 }
 
-fn ledger_firmness(value: &str) -> Result<LedgerFirmness, ()> {
+fn ledger_firmness(value: &str) -> Result<LedgerFirmness, Rejection> {
     match value {
         "firm" | "Firm" => Ok(LedgerFirmness::Firm),
         "soft" | "Soft" => Ok(LedgerFirmness::Soft),
-        _ => Err(()),
+        _ => Err(ReplyRule::UnknownValue.on("commitments.firmness")),
     }
 }
 
-fn required_generated_text(value: &str) -> Result<String, ()> {
+fn required_generated_text(value: &str, field: &'static str) -> Result<String, Rejection> {
     let value = value.trim();
     if value.is_empty() || value.len() > 8_000 {
-        return Err(());
+        return Err(ReplyRule::Length.on(field));
     }
     Ok(value.to_string())
 }
 
-fn bounded_generated_text(value: Option<&str>) -> Result<Option<String>, ()> {
+fn bounded_generated_text(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<Option<String>, Rejection> {
     value
         .map(|value| {
             let value = value.trim();
             if value.is_empty() || value.len() > 512 {
-                Err(())
+                Err(ReplyRule::Length.on(field))
             } else {
                 Ok(value.to_string())
             }
@@ -5919,23 +6054,172 @@ fn bounded_generated_text(value: Option<&str>) -> Result<Option<String>, ()> {
 /// or a deadline the cited words never say is the model's guess, not the
 /// meeting's, so it is left off the action rather than shown as fact.
 fn cited_words_say(citations: &[String], evidence: &[MeetingEvidence], phrase: &str) -> bool {
-    let phrase = phrase.to_lowercase();
+    let phrase = normalized_words(phrase);
     evidence
         .iter()
         .filter(|evidence| citations.contains(&evidence.citation.entity_id))
-        .any(|evidence| {
-            let text = evidence.text.to_lowercase();
-            text.match_indices(&phrase).any(|(start, _)| {
-                !text[..start]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_alphanumeric)
-                    && !text[start + phrase.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(char::is_alphanumeric)
-            })
+        .any(|evidence| says_words(&normalized_words(&evidence.text), &phrase))
+}
+
+/// Whether one of the cited segments is `owner` committing in the first
+/// person: the owner of an "I'll ..." commitment is its speaker, whom its own
+/// words never name. A speaker asking someone else ("can you send me ...")
+/// is not the owner, and neither is a label the store wrote for a voice.
+fn commits_in_first_person(
+    citations: &[String],
+    evidence: &[MeetingEvidence],
+    speakers: &HashMap<String, &str>,
+    owner: &str,
+) -> bool {
+    let owner = normalized_words(owner);
+    evidence
+        .iter()
+        .filter(|line| citations.contains(&line.citation.entity_id))
+        .filter(|line| {
+            speakers
+                .get(&line.citation.entity_id)
+                .is_some_and(|speaker| {
+                    !is_placeholder_speaker(speaker)
+                        && says_words(&normalized_words(speaker), &owner)
+                })
         })
+        .any(|line| commits(&normalized_words(&line.text)))
+}
+
+fn is_placeholder_speaker(name: &str) -> bool {
+    name == "Unknown speaker"
+        || name == "Local speaker"
+        || name.strip_prefix("Speaker ").is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// "I'll", "I will", "I can", "I'm going to", "let me": words that promise
+/// the speaker's own work, unless a negation follows.
+fn commits(words: &[String]) -> bool {
+    words.windows(2).enumerate().any(|(index, pair)| {
+        let next = words.get(index + 2).map(String::as_str);
+        let negated = matches!(next, Some("t" | "not" | "never"));
+        match (pair[0].as_str(), pair[1].as_str()) {
+            ("i", "ll" | "will" | "can" | "shall") => !negated,
+            ("i", "m" | "am") => next == Some("going"),
+            ("let", "me") => true,
+            _ => false,
+        }
+    })
+}
+
+fn says_words(text: &[String], phrase: &[String]) -> bool {
+    !phrase.is_empty() && text.windows(phrase.len()).any(|words| words == phrase)
+}
+
+/// Whether `decision` only restates `item`'s task: the two cite a line in
+/// common, the decision says at least two thirds of the task's words, at
+/// least half of its own words are the task's, and it names no number or
+/// negation the task does not. A local model filed most tasks it heard
+/// twice, once as a decision; a decision that also carries a task, such as
+/// a launch date beside the email due before it, says more than the task and
+/// stays, and so does a decision calling the task off.
+fn restates_task(decision: &CitedArtifactText, item: &MeetingActionItem) -> bool {
+    let shares_a_line = decision.citations.iter().any(|citation| {
+        item.text
+            .citations
+            .iter()
+            .any(|other| other.segment_id == citation.segment_id)
+    });
+    let said: HashSet<String> = normalized_words(&decision.text).into_iter().collect();
+    let task: HashSet<String> = normalized_words(&item.text.text).into_iter().collect();
+    let shared = task.intersection(&said).count();
+    let adds_a_number_or_negation = said.iter().any(|word| {
+        (word.bytes().all(|byte| byte.is_ascii_digit())
+            || matches!(word.as_str(), "not" | "no" | "t" | "never" | "won"))
+            && !task.contains(word)
+    });
+    shares_a_line
+        && !task.is_empty()
+        && !adds_a_number_or_negation
+        && 3 * shared >= 2 * task.len()
+        && 2 * shared >= said.len()
+}
+
+const SPELLED_UNITS: [[&str; 2]; 20] = [
+    ["zero", "zeroth"],
+    ["one", "first"],
+    ["two", "second"],
+    ["three", "third"],
+    ["four", "fourth"],
+    ["five", "fifth"],
+    ["six", "sixth"],
+    ["seven", "seventh"],
+    ["eight", "eighth"],
+    ["nine", "ninth"],
+    ["ten", "tenth"],
+    ["eleven", "eleventh"],
+    ["twelve", "twelfth"],
+    ["thirteen", "thirteenth"],
+    ["fourteen", "fourteenth"],
+    ["fifteen", "fifteenth"],
+    ["sixteen", "sixteenth"],
+    ["seventeen", "seventeenth"],
+    ["eighteen", "eighteenth"],
+    ["nineteen", "nineteenth"],
+];
+
+const SPELLED_TENS: [[&str; 2]; 8] = [
+    ["twenty", "twentieth"],
+    ["thirty", "thirtieth"],
+    ["forty", "fortieth"],
+    ["fifty", "fiftieth"],
+    ["sixty", "sixtieth"],
+    ["seventy", "seventieth"],
+    ["eighty", "eightieth"],
+    ["ninety", "ninetieth"],
+];
+
+/// The words of `text` in lower case without punctuation, every number
+/// among them in digits: a model writes the "Thursday the thirteenth" it
+/// read as "Thursday the 13th", and both are the same words here.
+fn normalized_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut open_tens: Option<usize> = None;
+    for word in text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+    {
+        let word = word.to_lowercase();
+        let units = SPELLED_UNITS
+            .iter()
+            .position(|names| names.contains(&word.as_str()));
+        if let (Some(tens), Some(units @ 1..=9)) = (open_tens, units) {
+            words.pop();
+            words.push((tens + units).to_string());
+            open_tens = None;
+            continue;
+        }
+        let tens = SPELLED_TENS
+            .iter()
+            .position(|names| names.contains(&word.as_str()))
+            .map(|index| (20 + 10 * index, SPELLED_TENS[index][0] == word));
+        open_tens = tens.and_then(|(value, cardinal)| cardinal.then_some(value));
+        words.push(match (units, tens) {
+            (Some(units), _) => units.to_string(),
+            (None, Some((value, _))) => value.to_string(),
+            (None, None) => written_number(&word).unwrap_or(word),
+        });
+    }
+    words
+}
+
+/// `13`, `13th` or `013` as `13`; None for a word that is not a number.
+fn written_number(word: &str) -> Option<String> {
+    let digits = ["st", "nd", "rd", "th"]
+        .into_iter()
+        .find_map(|suffix| word.strip_suffix(suffix))
+        .unwrap_or(word);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u64>().ok().map(|number| number.to_string())
 }
 
 fn utc_now_ms() -> i64 {
@@ -6511,7 +6795,7 @@ pub(crate) mod tests {
             text: "Invented source".to_string(),
             citations: vec![TranscriptSegmentId::new().uuid().to_string()],
         };
-        assert!(validate_cited_text(&raw, &evidence).is_err());
+        assert!(validate_cited_text(&raw, &evidence, "decisions").is_err());
     }
 
     /// Evidence for `count` segments, each one second long and a minute apart,
@@ -7328,6 +7612,7 @@ pub(crate) mod tests {
         let input = complete_reading::notes(
             &generator,
             &evidence,
+            &HashMap::new(),
             &artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default()),
             || Ok(()),
         );
@@ -7446,8 +7731,9 @@ pub(crate) mod tests {
         assert_eq!(generator.models(), Err(LocalEndpointError::InvalidResponse));
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let notes = complete_reading::notes(&generator, &evidence, &prompt, || Ok(()))
-            .expect("configured complete reading");
+        let notes =
+            complete_reading::notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
+                .expect("configured complete reading");
         assert_eq!(notes.summary.text, GENERATION_FIXTURE_TRANSCRIPT);
         server.handle.join().expect("override fixture");
         let requests: Vec<_> = server.requests.try_iter().collect();
@@ -7464,7 +7750,7 @@ pub(crate) mod tests {
                 .expect("submitted evidence"),
         )
         .expect("submitted evidence JSON");
-        assert_eq!(submitted["transcript"][0]["entity_id"], meeting.segment_id);
+        assert_eq!(submitted["transcript"][0]["entity_id"], "L1");
         assert_eq!(
             submitted["transcript"][0]["text"],
             GENERATION_FIXTURE_TRANSCRIPT
@@ -8272,6 +8558,7 @@ pub(crate) mod tests {
         let artifacts = validate_artifact_output(
             &raw,
             &press_evidence(),
+            &HashMap::new(),
             &MeetingNotesTemplate::General.into(),
         )
         .expect("every citation names a segment that was in evidence");
@@ -8317,12 +8604,203 @@ pub(crate) mod tests {
         let artifacts = validate_artifact_output(
             &raw,
             &press_evidence(),
+            &HashMap::new(),
             &MeetingNotesTemplate::General.into(),
         )
         .expect("dropping an unknown owner is not a validation failure");
         assert_eq!(artifacts.action_items[0].owner_text, None);
         assert_eq!(artifacts.action_items[0].due_text, None);
         assert_eq!(artifacts.outline[0].detail, None);
+    }
+
+    fn segment_line(session_id: MeetingSessionId, id: u64, text: &str) -> MeetingEvidence {
+        MeetingEvidence {
+            citation: MeetingCitation {
+                kind: CitationKind::Transcript,
+                session_id,
+                entity_id: uuid::Uuid::from_u128(u128::from(id)).to_string(),
+                start_offset_ns: Some(id * 1_000_000_000),
+                end_offset_ns: Some((id + 1) * 1_000_000_000),
+            },
+            text: text.to_string(),
+        }
+    }
+
+    fn cited(line: &MeetingEvidence, text: &str) -> RawCitedText {
+        RawCitedText {
+            text: text.to_string(),
+            citations: vec![line.citation.entity_id.clone()],
+        }
+    }
+
+    fn task(
+        line: &MeetingEvidence,
+        text: &str,
+        owner: Option<&str>,
+        due: Option<&str>,
+    ) -> RawActionItem {
+        RawActionItem {
+            text: cited(line, text),
+            owner_text: owner.map(str::to_string),
+            due_text: due.map(str::to_string),
+        }
+    }
+
+    fn notes(
+        line: &MeetingEvidence,
+        decisions: Vec<RawCitedText>,
+        action_items: Vec<RawActionItem>,
+    ) -> RawArtifactOutput {
+        RawArtifactOutput {
+            summary: vec![cited(line, "The meeting set its next steps.")],
+            outline: Vec::new(),
+            decisions,
+            action_items,
+            key_questions: Vec::new(),
+            risks: Vec::new(),
+            follow_up_draft: cited(line, "Each owner sends their part."),
+        }
+    }
+
+    #[test]
+    fn a_first_person_task_belongs_to_its_speaker_and_a_deadline_reads_in_digits() {
+        let session_id = MeetingSessionId::new();
+        let evidence = vec![
+            segment_line(
+                session_id,
+                1,
+                "I'll send the decision summary to Priya by Thursday the thirteenth.",
+            ),
+            segment_line(session_id, 2, "Lena, can you send me mockups by Friday?"),
+            segment_line(session_id, 3, "I'll check the analytics freeze."),
+        ];
+        let speakers: HashMap<String, &str> = evidence
+            .iter()
+            .zip(["Maya Chen", "Maya Chen", "Speaker 2"])
+            .map(|(line, speaker)| (line.citation.entity_id.clone(), speaker))
+            .collect();
+        let raw = notes(
+            &evidence[0],
+            Vec::new(),
+            vec![
+                task(
+                    &evidence[0],
+                    "Send the decision summary to Priya.",
+                    Some("Maya"),
+                    Some("Thursday the 13th"),
+                ),
+                task(
+                    &evidence[0],
+                    "Send the decision summary to Priya.",
+                    Some("Lena"),
+                    Some("Thursday"),
+                ),
+                task(
+                    &evidence[1],
+                    "Have mockups ready.",
+                    Some("Lena"),
+                    Some("Friday the 14th"),
+                ),
+                task(&evidence[1], "Have mockups ready.", Some("Maya"), None),
+                task(
+                    &evidence[2],
+                    "Check the analytics freeze.",
+                    Some("Speaker 2"),
+                    None,
+                ),
+            ],
+        );
+        let artifacts = validate_artifact_output(
+            &raw,
+            &evidence,
+            &speakers,
+            &MeetingNotesTemplate::General.into(),
+        )
+        .expect("cited notes");
+        let kept: Vec<_> = artifacts
+            .action_items
+            .iter()
+            .map(|item| (item.owner_text.as_deref(), item.due_text.as_deref()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (Some("Maya"), Some("Thursday the 13th")),
+                (None, Some("Thursday")),
+                (Some("Lena"), None),
+                (None, None),
+                (None, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decision_that_only_restates_a_task_is_left_to_the_task() {
+        let session_id = MeetingSessionId::new();
+        let evidence = vec![
+            segment_line(session_id, 1, "Dev, the SSO redirect bug gets fixed this week."),
+            segment_line(
+                session_id,
+                2,
+                "We launch Monday the twenty-fourth and Tom drafts the launch email by the seventeenth.",
+            ),
+            segment_line(
+                session_id,
+                3,
+                "Checklist over the tour, users got lost. Lena, mockups by Thursday the thirteenth.",
+            ),
+            segment_line(session_id, 4, "Ship the beta Friday? No, we hold it."),
+        ];
+        let launch = "The new onboarding launches on Monday the twenty-fourth, with Tom drafting the launch email by Monday the seventeenth.";
+        let checklist = "We chose the checklist over the tour because users got lost, and Lena delivers mockups by Thursday the thirteenth.";
+        let held = "We will not ship the beta on Friday.";
+        let raw = notes(
+            &evidence[1],
+            vec![
+                cited(
+                    &evidence[0],
+                    "The SSO redirect bug will be fixed this week.",
+                ),
+                cited(&evidence[1], launch),
+                cited(&evidence[2], checklist),
+                cited(&evidence[3], held),
+            ],
+            vec![
+                task(
+                    &evidence[0],
+                    "Dev, fix the SSO redirect bug this week.",
+                    Some("Dev"),
+                    Some("this week"),
+                ),
+                task(
+                    &evidence[1],
+                    "Tom will draft the launch email by Monday the seventeenth.",
+                    Some("Tom"),
+                    Some("the seventeenth"),
+                ),
+                task(
+                    &evidence[2],
+                    "Lena delivers mockups by Thursday the thirteenth.",
+                    Some("Lena"),
+                    Some("Thursday the thirteenth"),
+                ),
+                task(&evidence[3], "Ship the beta on Friday.", None, None),
+            ],
+        );
+        let artifacts = validate_artifact_output(
+            &raw,
+            &evidence,
+            &HashMap::new(),
+            &MeetingNotesTemplate::General.into(),
+        )
+        .expect("cited notes");
+        let decisions: Vec<_> = artifacts
+            .decisions
+            .iter()
+            .map(|decision| decision.text.as_str())
+            .collect();
+        assert_eq!(decisions, [launch, checklist, held]);
+        assert_eq!(artifacts.action_items.len(), 4);
     }
 
     #[test]
@@ -8333,6 +8811,7 @@ pub(crate) mod tests {
         assert!(validate_artifact_output(
             &raw,
             &press_evidence(),
+            &HashMap::new(),
             &MeetingNotesTemplate::General.into()
         )
         .is_err());
@@ -8361,6 +8840,7 @@ pub(crate) mod tests {
             validate_artifact_output(
                 &raw,
                 &press_evidence(),
+                &HashMap::new(),
                 &MeetingNotesTemplate::General.into()
             )
             .is_err(),
@@ -8403,6 +8883,7 @@ pub(crate) mod tests {
         let artifacts = validate_artifact_output(
             &custom_notes_output(&[" price ", "RISKS"]),
             &press_evidence(),
+            &HashMap::new(),
             &custom_notes_template(),
         )
         .unwrap();
@@ -8434,6 +8915,7 @@ pub(crate) mod tests {
                 validate_artifact_output(
                     &custom_notes_output(&titles),
                     &press_evidence(),
+                    &HashMap::new(),
                     &custom_notes_template(),
                 )
                 .is_err(),
@@ -8447,6 +8929,7 @@ pub(crate) mod tests {
         let artifacts = validate_artifact_output(
             &custom_notes_output(&[]),
             &press_evidence(),
+            &HashMap::new(),
             &custom_notes_template(),
         )
         .unwrap();
