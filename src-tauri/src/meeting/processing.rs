@@ -891,10 +891,22 @@ pub struct MeetingProcessingService {
     /// through its stages.
     #[cfg(test)]
     published_progress: Arc<Mutex<Vec<MeetingProcessingProgressPayload>>>,
+    /// Whether remote intelligence is on, for a test: with no app handle
+    /// there is no setting to read it from.
+    #[cfg(test)]
+    remote_intelligence_in_tests: Arc<AtomicBool>,
 }
 
 pub(crate) struct RelationshipRefresh {
+    engine: ChosenEngine,
+}
+
+/// The engine chosen to write one meeting's text, and the route that sends
+/// the meeting there.
+#[derive(Clone)]
+struct ChosenEngine {
     generator: Arc<dyn MeetingTextGenerator>,
+    route: ProcessingRoute,
 }
 
 /// Processing parked behind the capture that holds this, lifted when the
@@ -964,21 +976,21 @@ impl RewriteJob {
         RunFailure,
     > {
         let session_id = self.session_id;
-        let generator = self.service.text_generator_for_session(store, session_id);
+        let chosen = self.service.text_engine_for_session(store, session_id);
         self.service
             .generate_artifacts(
                 store,
                 session_id,
                 input_revision,
                 GenerationIntent::Rewrite(operation_id),
-                generator.clone(),
+                chosen.clone(),
             )
             .and_then(|outcome| match outcome {
                 ArtifactGenerationOutcome::Generated { artifact, engine }
                 | ArtifactGenerationOutcome::Cached { artifact, engine } => Ok((
                     artifact,
                     engine,
-                    generator.map(|generator| RelationshipRefresh { generator }),
+                    chosen.map(|engine| RelationshipRefresh { engine }),
                 )),
                 /* Any outcome without a revision is a failure to whoever
                  * pressed: they asked for notes and there are none. The
@@ -1038,6 +1050,8 @@ impl MeetingProcessingService {
             jobs_idle: Arc::new(Condvar::new()),
             #[cfg(test)]
             published_progress: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            remote_intelligence_in_tests: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1131,10 +1145,26 @@ impl MeetingProcessingService {
         store: &MeetingStore,
         session_id: MeetingSessionId,
     ) -> Option<Arc<dyn MeetingTextGenerator>> {
+        self.text_engine_for_session(store, session_id)
+            .map(|engine| engine.generator)
+    }
+
+    /// [`Self::text_generator_for_session`]'s choice, with its route.
+    fn text_engine_for_session(
+        &self,
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+    ) -> Option<ChosenEngine> {
         let engines = self.text_engines(self.series_opted_out_of_remote(store, session_id));
         match engines.choice {
-            TextEngineChoice::Relay => Some(engines.relay),
-            TextEngineChoice::Local => engines.local.generator(),
+            TextEngineChoice::Relay => Some(ChosenEngine {
+                generator: engines.relay,
+                route: ProcessingRoute::Relay,
+            }),
+            TextEngineChoice::Local => engines.local.generator().map(|generator| ChosenEngine {
+                generator,
+                route: ProcessingRoute::Local,
+            }),
             TextEngineChoice::None => None,
         }
     }
@@ -1256,9 +1286,13 @@ impl MeetingProcessingService {
     }
 
     /// Whether the operator has routed meeting intelligence to their own
-    /// server. Off on install, and off for a build with no app handle, which is
-    /// every test that has not been given one.
+    /// server. Off on install, and off for a build with no app handle unless
+    /// a test turns it on.
     fn remote_intelligence_enabled(&self) -> bool {
+        #[cfg(test)]
+        if self.app.is_none() {
+            return self.remote_intelligence_in_tests.load(Ordering::Acquire);
+        }
         self.app.as_ref().is_some_and(|app| {
             crate::settings::get_settings(app).meeting_remote_intelligence_enabled
         })
@@ -1294,6 +1328,21 @@ impl MeetingProcessingService {
                 true
             }
         }
+    }
+
+    /// Whether a generation on `route` may still send this meeting's
+    /// evidence there. Asked again during a run, because the operator can
+    /// turn remote intelligence off, or keep the series here, while one is
+    /// writing on their server.
+    fn route_still_allowed(
+        &self,
+        store: &MeetingStore,
+        session_id: MeetingSessionId,
+        route: ProcessingRoute,
+    ) -> bool {
+        route == ProcessingRoute::Local
+            || (self.remote_intelligence_enabled()
+                && !self.series_opted_out_of_remote(store, session_id))
     }
 
     /// Park every run at its next checkpoint until the returned gate drops.
@@ -1445,7 +1494,7 @@ impl MeetingProcessingService {
                     service.refresh_relationship_summaries(
                         &store,
                         session_id,
-                        refresh.generator.as_ref(),
+                        &refresh.engine,
                         &worker_cancelled,
                     );
                 }));
@@ -1623,14 +1672,14 @@ impl MeetingProcessingService {
         // swept it. Catching it here, at the layer that turns an outcome into
         // a persisted status, is what closes that window. Nothing in-memory is
         // read afterwards — the status is written through a fresh connection.
-        let mut relationship_generator = None;
+        let mut relationship_engine = None;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             self.process(
                 &store,
                 session_id,
                 &cancelled,
                 origin,
-                &mut relationship_generator,
+                &mut relationship_engine,
                 &mut progress,
             )
         }))
@@ -1662,16 +1711,11 @@ impl MeetingProcessingService {
         if store.set_processing_status(session_id, status).is_ok() {
             self.finish_review(Arc::clone(&store), session_id, origin, run_completed);
             if run_completed {
-                if let Some(generator) = relationship_generator {
+                if let Some(engine) = relationship_engine {
                     self.notes_written(session_id, &cancelled);
                     self.enter_stage(session_id, &mut progress, ProcessingStage::People);
                     let refreshed = catch_unwind(AssertUnwindSafe(|| {
-                        self.refresh_relationship_summaries(
-                            &store,
-                            session_id,
-                            generator.as_ref(),
-                            &cancelled,
-                        )
+                        self.refresh_relationship_summaries(&store, session_id, &engine, &cancelled)
                     }));
                     if refreshed.unwrap_or(false) {
                         progress.stage_did_work();
@@ -1806,7 +1850,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         cancelled: &AtomicBool,
         origin: ProcessingOrigin,
-        relationship_generator: &mut Option<Arc<dyn MeetingTextGenerator>>,
+        relationship_engine: &mut Option<ChosenEngine>,
         progress: &mut RunProgress,
     ) -> Result<Option<RunFailure>, RunFailure> {
         store.require_retained_transcript(session_id)?;
@@ -1833,17 +1877,19 @@ impl MeetingProcessingService {
         // they are derived before generation and survive a model that is
         // unavailable or fails.
         let _ = self.refresh_analytics(store, session_id, input_revision);
-        let generator = self.text_generator_for_session(store, session_id);
+        let engine = self.text_engine_for_session(store, session_id);
         let shortfall = match self.generate_artifacts(
             store,
             session_id,
             input_revision,
             GenerationIntent::Pipeline,
-            generator.clone(),
+            engine.clone(),
         ) {
             Ok(outcome) => {
-                if let ArtifactGenerationOutcome::Generated { artifact, engine } = &outcome {
-                    progress.wrote_notes(artifact.artifact_id, self.route_for(engine));
+                if let (ArtifactGenerationOutcome::Generated { artifact, .. }, Some(engine)) =
+                    (&outcome, &engine)
+                {
+                    progress.wrote_notes(artifact.artifact_id, engine.route);
                 }
                 if matches!(
                     outcome,
@@ -1851,7 +1897,7 @@ impl MeetingProcessingService {
                         | ArtifactGenerationOutcome::Cached { .. }
                 ) {
                     self.emit_current(store, "meeting:artifact-changed", session_id);
-                    *relationship_generator = generator;
+                    *relationship_engine = engine;
                 }
                 /* A meeting with no notes still reaches review, where the
                  * transcript and the reason are waiting and the operator can
@@ -2646,7 +2692,7 @@ impl MeetingProcessingService {
         session_id: MeetingSessionId,
         input_revision: u64,
         intent: GenerationIntent,
-        generator: Option<Arc<dyn MeetingTextGenerator>>,
+        engine: Option<ChosenEngine>,
     ) -> Result<ArtifactGenerationOutcome, RunFailure> {
         store.require_retained_transcript(session_id)?;
         let transcript_revision_id = store
@@ -2666,7 +2712,7 @@ impl MeetingProcessingService {
         if evidence.transcript.is_empty() {
             return Ok(ArtifactGenerationOutcome::NoSpeech);
         }
-        let Some(generator) = generator else {
+        let Some(ChosenEngine { generator, route }) = engine else {
             return Ok(ArtifactGenerationOutcome::Unavailable);
         };
         let template = &evidence.template;
@@ -2722,7 +2768,7 @@ impl MeetingProcessingService {
                 generated_at_utc_ms: utc_now_ms(),
             });
         };
-        let checkpoint = || self.generation_checkpoint(store, session_id);
+        let checkpoint = || self.generation_checkpoint(store, session_id, route);
         let segments = store
             .analytics_segments(session_id)
             .map_err(RunFailure::from)?;
@@ -2854,10 +2900,13 @@ impl MeetingProcessingService {
         })
     }
 
+    /// Whether a generation under way may go on: not cancelled, its
+    /// transcript still kept, and its route still allowed.
     fn generation_checkpoint(
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
+        route: ProcessingRoute,
     ) -> Result<(), RunFailure> {
         let cancelled = self
             .jobs
@@ -2867,6 +2916,9 @@ impl MeetingProcessingService {
             .is_some_and(|job| job.cancelled.load(Ordering::Acquire));
         if cancelled {
             return Err(ProcessingFailure::Cancelled.into());
+        }
+        if !self.route_still_allowed(store, session_id, route) {
+            return Err(ProcessingFailure::RemoteUnavailable.into());
         }
         store
             .require_retained_transcript(session_id)
@@ -2889,7 +2941,7 @@ impl MeetingProcessingService {
         &self,
         store: &MeetingStore,
         session_id: MeetingSessionId,
-        generator: &dyn MeetingTextGenerator,
+        engine: &ChosenEngine,
         cancelled: &AtomicBool,
     ) -> bool {
         let person_ids = match store.person_ids_for_meeting(session_id) {
@@ -2905,6 +2957,7 @@ impl MeetingProcessingService {
             .take(MAX_RELATIONSHIP_SUMMARIES_PER_ARTIFACT)
         {
             if cancelled.load(Ordering::Acquire)
+                || !self.route_still_allowed(store, session_id, engine.route)
                 || store.require_retained_transcript(session_id).is_err()
             {
                 return false;
@@ -2912,7 +2965,7 @@ impl MeetingProcessingService {
             match write_relationship_summary_guarded(
                 store,
                 person_id,
-                generator,
+                engine.generator.as_ref(),
                 Some((session_id, cancelled)),
             ) {
                 Ok(PersonSummaryOutcome::Written) => wrote = true,
@@ -3493,21 +3546,6 @@ impl MeetingProcessingService {
                 <MeetingProcessingProgressEvent as tauri_specta::Event>::NAME,
                 payload,
             );
-        }
-    }
-
-    /// Where the engine that wrote a meeting's notes runs: the relay's is the
-    /// operator's own server, and every other engine is on this Mac.
-    fn route_for(&self, engine: &str) -> ProcessingRoute {
-        let relay = self
-            .relay_text_generator
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .model_id();
-        if engine == relay {
-            ProcessingRoute::Relay
-        } else {
-            ProcessingRoute::Local
         }
     }
 }
@@ -8106,7 +8144,7 @@ pub(crate) mod tests {
                 fixture.session_id,
                 1,
                 GenerationIntent::Pipeline,
-                service.text_generator_for_session(&fixture.store, fixture.session_id),
+                service.text_engine_for_session(&fixture.store, fixture.session_id),
             )
             .expect("artifact generation");
         assert!(matches!(
@@ -8150,7 +8188,7 @@ pub(crate) mod tests {
                 fixture.session_id,
                 1,
                 GenerationIntent::Pipeline,
-                service.text_generator_for_session(&fixture.store, fixture.session_id),
+                service.text_engine_for_session(&fixture.store, fixture.session_id),
             )
             .expect("first artifact generation")
         {
@@ -8185,7 +8223,7 @@ pub(crate) mod tests {
                 fixture.session_id,
                 1,
                 GenerationIntent::Pipeline,
-                service.text_generator_for_session(&fixture.store, fixture.session_id),
+                service.text_engine_for_session(&fixture.store, fixture.session_id),
             )
             .expect("second artifact generation")
         {
@@ -8229,7 +8267,7 @@ pub(crate) mod tests {
                 fixture.session_id,
                 ARTIFACT_FIXTURE_REVISION,
                 GenerationIntent::Pipeline,
-                service.text_generator_for_session(&fixture.store, fixture.session_id),
+                service.text_engine_for_session(&fixture.store, fixture.session_id),
             )
             .expect("pipeline generation")
         {
@@ -8243,7 +8281,7 @@ pub(crate) mod tests {
                 fixture.session_id,
                 ARTIFACT_FIXTURE_REVISION,
                 GenerationIntent::Pipeline,
-                service.text_generator_for_session(&fixture.store, fixture.session_id),
+                service.text_engine_for_session(&fixture.store, fixture.session_id),
             )
             .expect("second pipeline pass")
         {
@@ -8276,6 +8314,76 @@ pub(crate) mod tests {
         assert!(
             generator.calls.load(Ordering::SeqCst) > calls_after_pipeline,
             "a rewrite asks the engine again"
+        );
+    }
+
+    /// Remote intelligence turned off while a rewrite is writing on the
+    /// operator's server: nothing more of the meeting is sent there, and the
+    /// rewrite says the remote engine is unavailable.
+    #[test]
+    fn a_rewrite_sends_nothing_more_once_remote_intelligence_is_off() {
+        struct RelayTurnedOffMidRun {
+            remote_on: Arc<AtomicBool>,
+            reply: String,
+            calls: AtomicUsize,
+        }
+        impl MeetingTextGenerator for RelayTurnedOffMidRun {
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn model_id(&self) -> &'static str {
+                "sona-relay"
+            }
+            fn model_version(&self) -> Cow<'static, str> {
+                Cow::Borrowed("1")
+            }
+            fn max_input_bytes(&self) -> usize {
+                usize::MAX
+            }
+            fn generate(
+                &self,
+                _system_prompt: &str,
+                _evidence: &str,
+                _max_tokens: i32,
+                _shape: ReplyShape,
+            ) -> Result<String, MeetingTextGenerationError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.remote_on.store(false, Ordering::Release);
+                Ok(self.reply.clone())
+            }
+        }
+        let fixture = artifact_store_fixture();
+        let service = MeetingProcessingService::new(None);
+        service
+            .remote_intelligence_in_tests
+            .store(true, Ordering::Release);
+        let relay = Arc::new(RelayTurnedOffMidRun {
+            remote_on: Arc::clone(&service.remote_intelligence_in_tests),
+            reply: fixture_artifact_json(&fixture.segment_id, GENERATION_FIXTURE_TRANSCRIPT),
+            calls: AtomicUsize::new(0),
+        });
+        service.set_text_generators(
+            Arc::new(StubGenerator::new("apple-intelligence", false)),
+            Arc::clone(&relay) as Arc<dyn MeetingTextGenerator>,
+        );
+
+        let outcome = service
+            .begin_rewrite(fixture.session_id)
+            .expect("nothing else is writing the notes")
+            .regenerate(
+                &fixture.store,
+                ARTIFACT_FIXTURE_REVISION,
+                MeetingOperationId::new(),
+            );
+
+        assert_eq!(
+            outcome.err(),
+            Some(RunFailure::Reason(ProcessingFailure::RemoteUnavailable))
+        );
+        assert_eq!(
+            relay.calls.load(Ordering::SeqCst),
+            1,
+            "the ledger is not sent to the server after the setting went off"
         );
     }
 
@@ -8503,7 +8611,10 @@ pub(crate) mod tests {
                 fixture.session_id,
                 1,
                 GenerationIntent::Pipeline,
-                Some(generator.clone()),
+                Some(ChosenEngine {
+                    generator: generator.clone(),
+                    route: ProcessingRoute::Local,
+                }),
             )
             .expect("artifact generation");
         let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
@@ -8574,7 +8685,10 @@ pub(crate) mod tests {
                 fixture.session_id,
                 1,
                 GenerationIntent::Pipeline,
-                Some(Arc::new(CitesNothingReal)),
+                Some(ChosenEngine {
+                    generator: Arc::new(CitesNothingReal),
+                    route: ProcessingRoute::Local,
+                }),
             )
             .expect("artifact generation");
         let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
@@ -8917,7 +9031,10 @@ pub(crate) mod tests {
                 fixture.session_id,
                 ARTIFACT_FIXTURE_REVISION,
                 GenerationIntent::Pipeline,
-                Some(generator.clone()),
+                Some(ChosenEngine {
+                    generator: generator.clone(),
+                    route: ProcessingRoute::Local,
+                }),
             )
             .expect("artifact generation");
         let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
