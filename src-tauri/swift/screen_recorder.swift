@@ -895,7 +895,8 @@ private final class ScreenRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
 
 
     private func finishWriting() -> RecorderBridgeResult {
-        guard let writer, let videoInput else {
+        guard let writer, let videoInput, writer.status == .writing else {
+            clearWriter()
             return .outputFinalizeFailed
         }
         videoInput.markAsFinished()
@@ -1063,12 +1064,14 @@ private final class ScreenRecorder: NSObject, AVCaptureAudioDataOutputSampleBuff
         }
 
         let failure = RecorderBridgeResult(rawValue: status.rawValue) ?? .streamFailed
-        let shouldCancel = self.failure == nil
+        let firstFailure = self.failure == nil
         self.failure = failure
         stateLock.unlock()
-        guard shouldCancel else { return }
+        guard firstFailure else { return }
+        // The writer stays: the core finalizes what was encoded before the failure, and the
+        // writer's own status decides whether that file survives.
         controlQueue.async { [weak self] in
-            self?.cancelSynchronously()
+            _ = self?.stopInputs(cancelWriter: false)
         }
     }
 }
