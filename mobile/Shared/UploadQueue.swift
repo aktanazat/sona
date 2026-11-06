@@ -7,6 +7,7 @@ struct QueuedRecording: Codable, Equatable {
     var audioByteLength: Int
     var audioSha256: String
     var personalNotes: String?
+    var calendarEvent: DeviceRecordingManifest.CalendarEvent?
 }
 
 /// A thought's part of a queued object. Attachment files live in the item directory
@@ -88,7 +89,8 @@ actor UploadQueue {
         audio: CapturedAudio,
         recordedAtUtcMs: Int64,
         title: String,
-        notes: String? = nil
+        notes: String? = nil,
+        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil
     ) throws -> QueuedObject {
         let objectId = randomOpaqueId()
         try adopt(audio.url, as: UploadQueue.recordingAudioFile, objectId: objectId)
@@ -101,7 +103,8 @@ actor UploadQueue {
                     title: title,
                     audioByteLength: audio.byteLength,
                     audioSha256: audio.sha256,
-                    personalNotes: notes
+                    personalNotes: notes,
+                    calendarEvent: calendarEvent
                 )
             )
         )
@@ -396,7 +399,8 @@ actor UploadQueue {
                     title: recording.title,
                     audioByteLength: recording.audioByteLength,
                     audioSha256: recording.audioSha256,
-                    notes: recording.personalNotes
+                    notes: recording.personalNotes,
+                    calendarEvent: recording.calendarEvent
                 )
             )
         case let .thought(thought):

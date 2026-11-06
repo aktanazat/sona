@@ -261,7 +261,7 @@ pub fn named_attendee(
     named_attendee_with_email(name, status_raw, is_self, None)
 }
 
-fn named_attendee_with_email(
+pub fn named_attendee_with_email(
     name: Option<&str>,
     status_raw: isize,
     is_self: bool,

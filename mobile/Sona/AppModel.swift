@@ -246,7 +246,10 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
 
-    func startRecording() {
+    /// The calendar event the running recording was started from.
+    private var recordingEvent: DeviceRecordingManifest.CalendarEvent?
+
+    func startRecording(during event: DeviceRecordingManifest.CalendarEvent? = nil) {
         guard consentAccepted, !startingRecording, !recorder.isRecording else { return }
         /* A recording takes the microphone from dictation instead of refusing: the
          * transcript so far stays on the dictation screen, and an offer the operator
@@ -267,6 +270,7 @@ final class AppModel: NSObject, ObservableObject {
             }
             do {
                 try recorder.start()
+                recordingEvent = event
                 AppModel.tap()
             } catch {
                 recorder.notice = .microphoneUnavailable
@@ -295,6 +299,8 @@ final class AppModel: NSObject, ObservableObject {
         afterCall = false
         let notes = meetingNotes
         let chosenTitle = meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let event = recordingEvent
+        recordingEvent = nil
         guard let finished = recorder.stop() else {
             /* Stopping with nothing to keep is the one outcome that must never pass in
              * silence: the operator watched a clock run and has to be told it is gone. */
@@ -312,7 +318,8 @@ final class AppModel: NSObject, ObservableObject {
                         : NSLocalizedString("title.phone", comment: ""),
                     utcMs: finished.recordedAtUtcMs
                 ) : chosenTitle,
-                notes: notes
+                notes: notes,
+                calendarEvent: event
             )
             if kept && !recorder.isRecording && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
@@ -322,11 +329,20 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func enqueue(audio: CapturedAudio, recordedAtUtcMs: Int64, title: String, notes: String = "") async -> Bool {
+    private func enqueue(
+        audio: CapturedAudio,
+        recordedAtUtcMs: Int64,
+        title: String,
+        notes: String = "",
+        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil
+    ) async -> Bool {
         do {
             try library.keep(kind: .meeting, title: title, text: notes,
                              date: Date(timeIntervalSince1970: Double(recordedAtUtcMs) / 1000), audio: audio)
-            _ = try await queue.enqueue(audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes)
+            _ = try await queue.enqueue(
+                audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes,
+                calendarEvent: calendarEvent
+            )
             await drain()
             return true
         } catch { library.error = error.localizedDescription; return false }

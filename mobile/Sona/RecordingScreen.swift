@@ -118,7 +118,7 @@ struct RecordingScreen: View {
                         let event = calendar.events[index]
                         Button {
                             model.meetingTitle = event.title ?? NSLocalizedString("meeting.untitled", comment: "")
-                            model.startRecording()
+                            model.startRecording(during: DeviceRecordingManifest.CalendarEvent(event))
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(event.title ?? NSLocalizedString("meeting.untitled", comment: ""))

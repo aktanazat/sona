@@ -13,6 +13,25 @@ struct DeviceRecordingManifest: Codable, Equatable {
         var sha256: String
     }
 
+    /// The calendar event a recording was made during, as EventKit reported it. The
+    /// desktop reduces it with the same helpers its own calendar reader uses.
+    struct CalendarEvent: Codable, Equatable {
+        struct Attendee: Codable, Equatable {
+            var name: String?
+            /// `EKParticipantStatus.rawValue`.
+            var status: Int
+            var is_self: Bool
+            var url: String
+        }
+
+        var identifier: String
+        var title: String
+        var start_utc_ms: Int64
+        var end_utc_ms: Int64
+        var attendees: [Attendee]
+        var location: String?
+    }
+
     var format_version: Int
     var kind: String
     var device_id: String
@@ -21,6 +40,7 @@ struct DeviceRecordingManifest: Codable, Equatable {
     var title: String
     var audio: Audio
     var personal_notes: String?
+    var calendar_event: CalendarEvent?
 }
 
 /// Recording capture format. The phone resamples to this before anything is written,
@@ -55,7 +75,8 @@ enum DeviceRecordingObject {
         title: String,
         audioByteLength: Int,
         audioSha256: String,
-        notes: String? = nil
+        notes: String? = nil,
+        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil
     ) -> DeviceRecordingManifest {
         DeviceRecordingManifest(
             format_version: 1,
@@ -71,7 +92,8 @@ enum DeviceRecordingObject {
                 byte_length: audioByteLength,
                 sha256: audioSha256
             ),
-            personal_notes: notes?.isEmpty == false ? notes : nil
+            personal_notes: notes?.isEmpty == false ? notes : nil,
+            calendar_event: calendarEvent
         )
     }
 
