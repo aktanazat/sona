@@ -249,6 +249,69 @@ pub(in crate::meeting::store) fn derive_speaker_link_in(
     Ok(usize::from(identity_changed) + usize::from(link_changed))
 }
 
+/// The person a name the user typed for one of this meeting's speakers stands
+/// for, and whether that person was just created; `None` when it is nobody's.
+///
+/// The user named this voice on purpose, so a bare first name is enough here.
+/// A single word that is nobody's full name or alias goes to the one person
+/// whose first name it is, so `Maya` finds the `Maya Chen` already known
+/// instead of creating a second Maya. A name several people answer to keeps
+/// the person the voice already belongs to when they are one of them. The
+/// microphone bar is the one [`derive_speaker_link_in`] states.
+pub(in crate::meeting::store) fn person_for_named_speaker_in(
+    connection: &Connection,
+    meeting_id: MeetingSessionId,
+    display_name: &str,
+    current: Option<PersonId>,
+    now_utc_ms: i64,
+) -> Result<Option<(PersonId, bool)>, StoreError> {
+    let display_name = display_name.trim();
+    if display_name.is_empty()
+        || microphone_speaker_labels_in(connection, meeting_id)?
+            .iter()
+            .any(|label| normalized(label) == normalized(display_name))
+    {
+        return Ok(None);
+    }
+    let mut candidates = find_people_by_name_in(connection, display_name)?;
+    if candidates.is_empty() && display_name.split_whitespace().count() == 1 {
+        let first_name = normalized(display_name);
+        candidates = all_people_in(connection)?
+            .into_iter()
+            .filter(|person| {
+                person
+                    .display_name
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|first| normalized(first) == first_name)
+            })
+            .collect();
+    }
+    if let Some(current) =
+        current.filter(|current| candidates.iter().any(|person| person.id == *current))
+    {
+        return Ok(Some((current, false)));
+    }
+    match candidates.as_slice() {
+        [] => {
+            let person = Person {
+                id: PersonId::new(),
+                display_name: display_name.to_string(),
+                aliases: Vec::new(),
+                calendar_emails: Vec::new(),
+                organization: None,
+                summary: None,
+                created_at_utc_ms: now_utc_ms,
+                updated_at_utc_ms: now_utc_ms,
+            };
+            let created = insert_person_if_missing_in(connection, &person)?;
+            Ok(Some((person.id, created)))
+        }
+        [person] => Ok(Some((person.id, false))),
+        _ => Ok(None),
+    }
+}
+
 pub(in crate::meeting::store) fn derive_title_links_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,

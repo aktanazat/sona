@@ -4,7 +4,7 @@ use super::voice_identity::{
     MeetingSpeakerIdentifyTarget, VoiceEnrollmentEvidence, VoiceProfileEnrollmentRequest,
     VoiceProfileStatus, VoiceSpeakerSuggestion,
 };
-use super::workflow_core_tests::{meeting, person, store};
+use super::workflow_core_tests::{meeting, person, reviewable_meeting, store};
 use super::*;
 use crate::meeting::diarization::{
     wespeaker_embedding_model_key, SpeakerEmbedding, SPEAKER_EMBEDDING_DIMENSIONS,
@@ -1637,5 +1637,274 @@ fn merging_speakers_keeps_the_target_voice_or_takes_the_source_one() -> Result<(
 
     keep_voices(&store, session_id, &[(source, 5)])?;
     assert_eq!(kept_voice(&store, source)?, None);
+    Ok(())
+}
+
+/// Lines diarization gave to `Speaker N`, `N` being `cluster + 1`, over one
+/// system-audio track, published the way processing publishes them.
+fn diarized_transcript(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    lines: &[(u32, &str)],
+) -> Result<(), StoreError> {
+    let transcript_revision_id = TranscriptRevisionId::new();
+    let segments = {
+        let connection = store.connection()?;
+        let plan_id = Uuid::new_v4();
+        let track_id = SourceTrackId::new();
+        let source_speaker_id = SpeakerId::new();
+        connection.execute(
+            "INSERT INTO meeting_run_plans (
+                plan_id, session_id, attempt_number, schema_version, consent_id,
+                canonical_plan_json, created_at_utc_ms
+             ) VALUES (?1, ?2, 1, 1, ?3, '{}', 1)",
+            params![
+                plan_id.to_string(),
+                id(session_id),
+                Uuid::new_v4().to_string()
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO meeting_source_tracks (
+                track_id, session_id, plan_id, source_kind, required, requested,
+                descriptor_json, timestamp_bridge_json, health
+             ) VALUES (?1, ?2, ?3, 'system_audio', 1, 1, '{}', '{}', '\"healthy\"')",
+            params![id(track_id), id(session_id), plan_id.to_string()],
+        )?;
+        connection.execute(
+            "INSERT INTO meeting_speakers (
+                speaker_id, session_id, source_kind, display_name, revision
+             ) VALUES (?1, ?2, 'system_audio', 'Unknown speaker', 0)",
+            params![id(source_speaker_id), id(session_id)],
+        )?;
+        connection.execute(
+            "INSERT INTO meeting_transcript_revisions (
+                transcript_revision_id, session_id, engine_id, destination_json,
+                source_set_json, language, state, created_at_utc_ms
+             ) VALUES (?1, ?2, 'test', '{}', '[]', 'en', 'complete', 1)",
+            params![id(transcript_revision_id), id(session_id)],
+        )?;
+        let mut segments = Vec::new();
+        for (ordinal, (cluster, text)) in (0_i64..).zip(lines) {
+            let segment_id = TranscriptSegmentId::new();
+            connection.execute(
+                "INSERT INTO meeting_transcript_segments (
+                    segment_id, transcript_revision_id, track_id, ordinal,
+                    start_offset_ns, end_offset_ns, speaker_id, base_text
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id(segment_id),
+                    id(transcript_revision_id),
+                    id(track_id),
+                    ordinal,
+                    ordinal * 1_000_000_000,
+                    ordinal * 1_000_000_000 + 1,
+                    id(source_speaker_id),
+                    text
+                ],
+            )?;
+            segments.push((segment_id, *cluster));
+        }
+        connection.execute(
+            "UPDATE meeting_sessions SET current_transcript_revision_id = ?1 WHERE id = ?2",
+            params![id(transcript_revision_id), id(session_id)],
+        )?;
+        segments
+    };
+    let generation_id = store.begin_diarization_generation(
+        session_id,
+        transcript_revision_id,
+        0,
+        "test",
+        "test",
+    )?;
+    let assignments = segments
+        .into_iter()
+        .map(|(segment_id, cluster)| {
+            Ok(DiarizationAssignmentInput {
+                segment_id,
+                speaker_id: store.diarization_speaker(session_id, cluster)?,
+                assignment: SpeakerAssignmentKind::SystemSpeaker,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    store.write_diarization_assignments(generation_id, &assignments)?;
+    store.publish_diarization_generation(session_id, generation_id)?;
+    Ok(())
+}
+
+fn rename(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    speaker_id: SpeakerId,
+    name: &str,
+) -> Result<(), StoreError> {
+    store.rename_speaker(
+        MeetingOperationId::new(),
+        2,
+        session_id,
+        meeting_revision(store, session_id)?,
+        speaker_id,
+        name.to_owned(),
+    )?;
+    Ok(())
+}
+
+fn people_named(store: &MeetingStore, name: &str) -> Result<Vec<PersonId>, StoreError> {
+    let connection = store.connection()?;
+    let mut statement = connection.prepare("SELECT id FROM persons WHERE display_name = ?1")?;
+    let rows = statement.query_map(params![name], |row| row.get::<_, String>(0))?;
+    rows.map(|row| {
+        let person_id = Uuid::parse_str(&row?).map_err(|_| StoreError::Corrupt)?;
+        Ok(PersonId::from_uuid(person_id))
+    })
+    .collect()
+}
+
+/// Naming a speaker in the transcript names every line it said and teaches
+/// Sona the voice: the next meeting offers that person for the same voice and
+/// names nobody until the user confirms.
+#[test]
+fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
+) -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let first = reviewable_meeting(&store, "First", 1);
+    diarized_transcript(
+        &store,
+        first,
+        &[
+            (0, "Morning."),
+            (1, "Hi, it's Maya."),
+            (0, "Shall we start?"),
+            (1, "Yes."),
+        ],
+    )?;
+    let speaker_one = store.diarization_speaker(first, 0)?;
+    let speaker_two = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(speaker_one, 1), (speaker_two, 0)])?;
+
+    rename(&store, first, speaker_two, "Maya")?;
+
+    let review = store.review_snapshot(first)?;
+    let lines = review
+        .transcript
+        .iter()
+        .map(|segment| {
+            let speaker = review
+                .speakers
+                .iter()
+                .find(|speaker| speaker.speaker_id == segment.assigned_speaker_id);
+            (
+                speaker.map(|speaker| speaker.display_name.as_str()),
+                segment.base.text.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            (Some("Speaker 1"), "Morning."),
+            (Some("Maya"), "Hi, it's Maya."),
+            (Some("Speaker 1"), "Shall we start?"),
+            (Some("Maya"), "Yes."),
+        ]
+    );
+    let maya = people_named(&store, "Maya")?;
+    assert_eq!(maya.len(), 1);
+    assert_eq!(kept_voice(&store, speaker_two)?, Some(0));
+    assert!(!store
+        .unresolved_active_voice_speaker_ids(first)?
+        .contains(&speaker_two));
+
+    let second = meeting(&store, "Second", 3);
+    let same_voice = store.diarization_speaker(second, 0)?;
+    let other_voice = store.diarization_speaker(second, 1)?;
+    keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
+    assert_eq!(
+        store.voice_speaker_suggestions(second)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: same_voice,
+            person_id: maya[0],
+            display_name: "Maya".to_owned(),
+        }]
+    );
+    let (display_name, links): (String, i64) = store.connection()?.query_row(
+        "SELECT speaker.display_name,
+                (SELECT COUNT(*) FROM meeting_person_links WHERE meeting_id = speaker.session_id)
+           FROM meeting_speakers speaker WHERE speaker.speaker_id = ?1",
+        params![id(same_voice)],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!((display_name.as_str(), links), ("Speaker 1", 0));
+    assert!(store
+        .unresolved_active_voice_speaker_ids(second)?
+        .contains(&same_voice));
+    Ok(())
+}
+
+/// Renaming back to the label Sona wrote, as the chat rename's undo does,
+/// takes the voice off the person it was given to.
+#[test]
+fn renaming_a_speaker_back_to_its_label_takes_the_voice_off_the_person() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let first = meeting(&store, "First", 1);
+    let speaker = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(speaker, 0)])?;
+
+    rename(&store, first, speaker, "Maya")?;
+    rename(&store, first, speaker, "Speaker 2")?;
+
+    assert!(store
+        .unresolved_active_voice_speaker_ids(first)?
+        .contains(&speaker));
+    let second = meeting(&store, "Second", 3);
+    let same_voice = store.diarization_speaker(second, 0)?;
+    keep_voices(&store, second, &[(same_voice, 0)])?;
+    assert!(store.voice_speaker_suggestions(second)?.is_empty());
+    Ok(())
+}
+
+/// The microphone speaker is the user, who is never a person, whatever name
+/// they give it.
+#[test]
+fn naming_the_users_own_microphone_voice_creates_no_person() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let first = meeting(&store, "First", 1);
+    let local = SpeakerId::new();
+    insert_speaker(&store, first, local);
+
+    rename(&store, first, local, "Aktan")?;
+
+    assert!(people_named(&store, "Aktan")?.is_empty());
+    assert!(store
+        .unresolved_active_voice_speaker_ids(first)?
+        .contains(&local));
+    Ok(())
+}
+
+/// A bare first name goes to the one person already known by it instead of
+/// creating a second one.
+#[test]
+fn a_first_name_names_the_one_person_known_by_it() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let maya = person(&store, "Maya Chen", &[], &[]);
+    let first = meeting(&store, "First", 1);
+    let speaker = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(speaker, 0)])?;
+
+    rename(&store, first, speaker, "Maya")?;
+
+    assert!(people_named(&store, "Maya")?.is_empty());
+    let second = meeting(&store, "Second", 3);
+    let same_voice = store.diarization_speaker(second, 0)?;
+    keep_voices(&store, second, &[(same_voice, 0)])?;
+    assert_eq!(
+        store.voice_speaker_suggestions(second)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: same_voice,
+            person_id: maya,
+            display_name: "Maya Chen".to_owned(),
+        }]
+    );
     Ok(())
 }

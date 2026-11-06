@@ -5076,6 +5076,16 @@ impl MeetingStore {
                     return Err(StoreError::NotFound);
                 }
                 voice_identity::clear_automatic_match_for_speaker_in(transaction, speaker_id)?;
+                if voice_identity::resolve_renamed_speaker_in(
+                    transaction,
+                    operation_id,
+                    session_id,
+                    speaker_id,
+                    &display_name,
+                    requested_at_utc_ms,
+                )? {
+                    people::bump_people_revision_in(transaction)?;
+                }
                 mark_artifacts_out_of_date(transaction, session_id)
             },
         )

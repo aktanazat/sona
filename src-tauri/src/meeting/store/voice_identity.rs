@@ -1,4 +1,7 @@
-use super::people::{bump_people_revision_in, people_revision_in, person_by_id_in, upsert_link_in};
+use super::people::{
+    bump_people_revision_in, people_revision_in, person_by_id_in, person_for_named_speaker_in,
+    upsert_link_in,
+};
 use super::{
     append_event, committed_receipt, decode_json, id, insert_operation_receipt,
     mark_artifacts_out_of_date, operation_receipt_in, session_row, to_i64, utc_now_ms,
@@ -1087,6 +1090,72 @@ pub(in crate::meeting::store) fn is_generated_speaker_label(name: &str) -> bool 
             !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
         })
 }
+
+/// A name the user gives a speaker settles whose voice it is, the way
+/// confirming it on the speaker sheet does: the kept voice counts toward that
+/// person's suggestions in later meetings, which name nobody until the user
+/// confirms one. A name that is nobody's takes the voice back off whoever it
+/// was given to. Returns whether people changed.
+pub(in crate::meeting::store) fn resolve_renamed_speaker_in(
+    transaction: &Transaction<'_>,
+    operation_id: MeetingOperationId,
+    session_id: MeetingSessionId,
+    speaker_id: SpeakerId,
+    display_name: &str,
+    now_utc_ms: i64,
+) -> Result<bool, StoreError> {
+    let current = identified_person_in(transaction, speaker_id)?;
+    let named = if is_generated_speaker_label(display_name.trim()) {
+        None
+    } else {
+        person_for_named_speaker_in(transaction, session_id, display_name, current, now_utc_ms)?
+    };
+    let mut people_changed = false;
+    if let Some((person_id, created)) = named {
+        let linked = upsert_link_in(
+            transaction,
+            session_id,
+            person_id,
+            PersonLinkSource::Speaker,
+            PersonLinkConfidence::Confirmed,
+            now_utc_ms,
+        )?;
+        people_changed = created || linked;
+    }
+    let target = named.map(|(person_id, _)| person_id);
+    if target == current {
+        return Ok(people_changed);
+    }
+    people_changed |= remove_profile_samples_for_speaker_in(transaction, speaker_id)?;
+    match target {
+        Some(person_id) => persist_manual_voice_speaker_resolution_in(
+            transaction,
+            operation_id,
+            speaker_id,
+            ManualVoiceSpeakerResolution::Identified(person_id),
+        )?,
+        None => withdraw_manual_voice_speaker_resolution_in(transaction, speaker_id)?,
+    }
+    Ok(people_changed)
+}
+
+fn identified_person_in(
+    transaction: &Transaction<'_>,
+    speaker_id: SpeakerId,
+) -> Result<Option<PersonId>, StoreError> {
+    let person_id: Option<String> = transaction
+        .query_row(
+            "SELECT resolved_person_id FROM meeting_voice_speaker_resolutions
+              WHERE speaker_id = ?1 AND is_current = 1 AND resolution_kind = 'identified'",
+            params![id(speaker_id)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    person_id
+        .map(|person_id| Ok(PersonId::from_uuid(parse_uuid(&person_id)?)))
+        .transpose()
+}
+
 fn resolved_person_id_for_operation_in(
     transaction: &Transaction<'_>,
     operation_id: MeetingOperationId,
@@ -1114,12 +1183,7 @@ fn persist_manual_voice_speaker_resolution_in(
     speaker_id: SpeakerId,
     resolution: ManualVoiceSpeakerResolution,
 ) -> Result<(), StoreError> {
-    transaction.execute(
-        "UPDATE meeting_voice_speaker_resolutions
-            SET is_current = 0
-          WHERE speaker_id = ?1 AND is_current = 1",
-        params![id(speaker_id)],
-    )?;
+    withdraw_manual_voice_speaker_resolution_in(transaction, speaker_id)?;
     transaction.execute(
         "INSERT INTO meeting_voice_speaker_resolutions (
             operation_id, speaker_id, resolution_kind, resolved_person_id, is_current
@@ -1130,6 +1194,19 @@ fn persist_manual_voice_speaker_resolution_in(
             resolution.kind(),
             resolution.resolved_person_id().map(id),
         ],
+    )?;
+    Ok(())
+}
+
+fn withdraw_manual_voice_speaker_resolution_in(
+    transaction: &Transaction<'_>,
+    speaker_id: SpeakerId,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "UPDATE meeting_voice_speaker_resolutions
+            SET is_current = 0
+          WHERE speaker_id = ?1 AND is_current = 1",
+        params![id(speaker_id)],
     )?;
     Ok(())
 }
