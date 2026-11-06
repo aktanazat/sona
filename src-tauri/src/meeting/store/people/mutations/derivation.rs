@@ -8,7 +8,7 @@ use crate::meeting::store::people::{
     all_people_in, exact_phrase_mentioned, identity_names, merge_unique_case_insensitive,
     normalized, normalized_email, person_by_id_in,
 };
-use crate::meeting::store::voice_identity::is_generated_speaker_label;
+use crate::meeting::store::voice_identity::{is_generated_speaker_label, names_user};
 use crate::meeting::store::StoreError;
 use crate::meeting::types::MeetingSessionId;
 use rusqlite::{params, Connection};
@@ -259,16 +259,20 @@ pub(in crate::meeting::store) fn derive_speaker_link_in(
 /// whose first name it is, so `Maya` finds the `Maya Chen` already known
 /// instead of creating a second Maya. A name several people answer to keeps
 /// the person the voice already belongs to when they are one of them. The
-/// microphone bar is the one [`derive_speaker_link_in`] states.
+/// microphone bar is the one [`derive_speaker_link_in`] states, and
+/// `user_name`, the user's name from About me, is barred on any lane for the
+/// same reason: naming a voice after the user says it is the user's.
 pub(in crate::meeting::store) fn person_for_named_speaker_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,
     display_name: &str,
+    user_name: Option<&str>,
     current: Option<PersonId>,
     now_utc_ms: i64,
 ) -> Result<Option<(PersonId, bool)>, StoreError> {
     let display_name = display_name.trim();
     if display_name.is_empty()
+        || names_user(display_name, user_name)
         || microphone_speaker_labels_in(connection, meeting_id)?
             .iter()
             .any(|label| normalized(label) == normalized(display_name))

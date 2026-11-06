@@ -47,6 +47,16 @@ impl AboutMe {
     }
 }
 
+/// The user's name from About me, when it gives one.
+pub(crate) fn user_name(app: &AppHandle) -> Option<String> {
+    let name = crate::settings::get_settings(app)
+        .meeting_prep
+        .about_me
+        .name;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrepPreferences {

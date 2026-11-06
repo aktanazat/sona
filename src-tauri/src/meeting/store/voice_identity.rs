@@ -1,6 +1,6 @@
 use super::people::{
-    bump_people_revision_in, people_revision_in, person_by_id_in, person_for_named_speaker_in,
-    upsert_link_in,
+    bump_people_revision_in, normalized, people_revision_in, person_by_id_in,
+    person_for_named_speaker_in, upsert_link_in,
 };
 use super::{
     append_event, committed_receipt, decode_json, id, insert_operation_receipt,
@@ -1091,24 +1091,47 @@ pub(in crate::meeting::store) fn is_generated_speaker_label(name: &str) -> bool 
         })
 }
 
+/// Whether `name` is the user's own: their name from About me, in full or by
+/// its first word.
+pub(crate) fn names_user(name: &str, user_name: Option<&str>) -> bool {
+    let Some(user_name) = user_name else {
+        return false;
+    };
+    let name = normalized(name);
+    !name.is_empty()
+        && (normalized(user_name) == name
+            || user_name
+                .split_whitespace()
+                .next()
+                .is_some_and(|first| normalized(first) == name))
+}
+
 /// A name the user gives a speaker settles whose voice it is, the way
 /// confirming it on the speaker sheet does: the kept voice counts toward that
 /// person's suggestions in later meetings, which name nobody until the user
-/// confirms one. A name that is nobody's takes the voice back off whoever it
-/// was given to. Returns whether people changed.
+/// confirms one. A name that is nobody's, `user_name` among them, takes the
+/// voice back off whoever it was given to. Returns whether people changed.
 pub(in crate::meeting::store) fn resolve_renamed_speaker_in(
     transaction: &Transaction<'_>,
     operation_id: MeetingOperationId,
     session_id: MeetingSessionId,
     speaker_id: SpeakerId,
     display_name: &str,
+    user_name: Option<&str>,
     now_utc_ms: i64,
 ) -> Result<bool, StoreError> {
     let current = identified_person_in(transaction, speaker_id)?;
     let named = if is_generated_speaker_label(display_name.trim()) {
         None
     } else {
-        person_for_named_speaker_in(transaction, session_id, display_name, current, now_utc_ms)?
+        person_for_named_speaker_in(
+            transaction,
+            session_id,
+            display_name,
+            user_name,
+            current,
+            now_utc_ms,
+        )?
     };
     let mut people_changed = false;
     if let Some((person_id, created)) = named {

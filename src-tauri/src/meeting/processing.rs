@@ -1146,9 +1146,7 @@ impl MeetingProcessingService {
         if matches!(origin, MeetingOrigin::Import) {
             return None;
         }
-        let settings = crate::settings::get_settings(self.app.as_ref()?);
-        let name = settings.meeting_prep.about_me.name.trim();
-        (!name.is_empty()).then(|| name.to_owned())
+        super::prep::user_name(self.app.as_ref()?)
     }
 
     /// Whether this meeting's series has been kept off the server.

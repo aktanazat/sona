@@ -28,10 +28,11 @@ use super::processing::{
     MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
     LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
+use super::store::voice_identity::names_user;
 use super::store::{
     InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting, SegmentEdit,
-    StoreError, StoreMutation, StoreTransition, TrackCreation, TranscriptRevisionInput,
-    TranscriptSegmentInput, STORE_SCHEMA_VERSION,
+    SpeakerRename, StoreError, StoreMutation, StoreTransition, TrackCreation,
+    TranscriptRevisionInput, TranscriptSegmentInput, STORE_SCHEMA_VERSION,
 };
 use super::suggestions::{
     MeetingSuggestion, MeetingSuggestionService, MeetingSuggestionSignal, MeetingSuggestionSink,
@@ -3403,18 +3404,20 @@ impl MeetingSessionManager {
         let before = store
             .transcript_correction_identity_snapshot(request.session_id, &[request.speaker_id])
             .map_err(map_store_error)?;
+        let user_name = self.user_name();
         let display_name = request.display_name.clone();
         let operation_id = request.operation_id;
         let session_id = request.session_id;
         let receipt = store
-            .rename_speaker(
-                request.operation_id,
-                utc_now_ms(),
-                request.session_id,
-                request.expected_revision,
-                request.speaker_id,
-                request.display_name,
-            )
+            .rename_speaker(SpeakerRename {
+                operation_id: request.operation_id,
+                requested_at_utc_ms: utc_now_ms(),
+                session_id: request.session_id,
+                expected_revision: request.expected_revision,
+                speaker_id: request.speaker_id,
+                display_name: request.display_name,
+                user_name: user_name.as_deref(),
+            })
             .map_err(map_store_error)?;
         self.emit_transcript_correction_changes(
             store
@@ -3425,7 +3428,11 @@ impl MeetingSessionManager {
         );
         let result = self.result_for_receipt(Arc::clone(&store), receipt, request.session_id)?;
         self.emit_session_changed(&result.snapshot);
-        if result.receipt.result == OperationResult::Committed {
+        // Person linking reads a renamed speaker's name without About me, so it
+        // would make a person of the user.
+        if result.receipt.result == OperationResult::Committed
+            && !names_user(&display_name, user_name.as_deref())
+        {
             self.record_speaker_renamed(Arc::clone(&store), session_id, operation_id, display_name);
         }
         Ok(result)
@@ -4303,6 +4310,11 @@ impl MeetingSessionManager {
             self.app.clone(),
         );
         Ok(store)
+    }
+
+    /// The user's name from About me.
+    pub(crate) fn user_name(&self) -> Option<String> {
+        self.app.as_ref().and_then(super::prep::user_name)
     }
 
     fn build_preflight_snapshot(
