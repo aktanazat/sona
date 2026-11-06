@@ -788,9 +788,9 @@ pub struct HistoryManager {
     /// Dropped with the manager, which is what stops the worker: its `recv`
     /// fails once no sender remains.
     semantic_work: Sender<SemanticWork>,
-    /// Spools a previous launch left behind, listed before this launch could
+    /// What a previous launch left behind, listed before this launch could
     /// start a dictation of its own, for recovery to take once.
-    orphaned_spools: Mutex<Vec<PathBuf>>,
+    interrupted: Mutex<Interrupted>,
     /// The rows this launch's recovery made from them.
     recovered_this_launch: Mutex<Vec<i64>>,
 }
@@ -808,7 +808,7 @@ impl HistoryManager {
             fs::create_dir_all(&recordings_dir)?;
             debug!("Created recordings directory: {:?}", recordings_dir);
         }
-        let orphaned_spools = list_spools(&recordings_dir.join(IN_PROGRESS_DIR));
+        let interrupted = list_interrupted(&recordings_dir);
 
         let (semantic_work, semantic_inbox) = std::sync::mpsc::channel();
         let manager = Self {
@@ -817,7 +817,7 @@ impl HistoryManager {
             storage: Arc::clone(&storage),
             semantic: Arc::clone(&semantic),
             semantic_work,
-            orphaned_spools: Mutex::new(orphaned_spools),
+            interrupted: Mutex::new(interrupted),
             recovered_this_launch: Mutex::new(Vec::new()),
         };
         Self::spawn_semantic_worker(storage, semantic, semantic_inbox);
@@ -1453,21 +1453,32 @@ impl HistoryManager {
 
     /// Keep every spool a previous launch left behind as a row the user can
     /// play or transcribe. Each header is repaired first; a spool under a
-    /// second goes, and one that is not a spool stays where it is.
+    /// second goes, and one that is not a spool stays where it is. What
+    /// history already settles goes first; see
+    /// [`Self::settle_interrupted_with_connection`].
     pub fn recover_interrupted_dictations(&self) {
-        let orphans = std::mem::take(
+        let interrupted = std::mem::take(
             &mut *self
-                .orphaned_spools
+                .interrupted
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
         );
-        if orphans.is_empty() {
+        if interrupted.spools.is_empty() {
             return;
         }
+        let spools = match self.storage.with_connection(|conn| {
+            Self::settle_interrupted_with_connection(conn, &self.recordings_dir, &interrupted)
+        }) {
+            Ok(spools) => spools,
+            Err(error) => {
+                warn!("Could not check interrupted dictations against history: {error:#}");
+                interrupted.spools
+            }
+        };
         let settings = crate::settings::get_settings(&self.app_handle);
         let post_process =
             crate::modes::active_mode(&settings).is_some_and(|mode| mode.llm.enabled);
-        for spool in orphans {
+        for spool in spools {
             let samples = match crate::audio_toolkit::repair_spool(&spool) {
                 Ok(samples) => samples,
                 Err(error) => {
@@ -1518,6 +1529,53 @@ impl HistoryManager {
                 }
             }
         }
+    }
+
+    /// Clear what a previous launch left that history already settles: every
+    /// copy of an interrupted run's audio that no row holds, which nothing
+    /// could ever play or delete, and every spool whose run a row holds
+    /// because that launch ended between the save and the spool's removal.
+    /// Names carry only the second a run started, so receipts are matched to
+    /// that second. Returns the spools still to keep.
+    fn settle_interrupted_with_connection(
+        conn: &Connection,
+        recordings_dir: &Path,
+        interrupted: &Interrupted,
+    ) -> Result<Vec<PathBuf>> {
+        for file_name in &interrupted.copies {
+            if !Self::has_other_recording_reference(conn, None, file_name)? {
+                if let Err(error) = Self::remove_recording_file(recordings_dir, file_name) {
+                    warn!("Could not remove the copy an interrupted dictation left: {error:#}");
+                }
+            }
+        }
+        let mut unsaved = Vec::with_capacity(interrupted.spools.len());
+        for spool in &interrupted.spools {
+            let saved = match spool
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(dictation_run)
+            {
+                Some((started_at_seconds, run_id)) => conn.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM transcription_runs
+                        WHERE run_id = ?1 AND started_at_ms / 1000 = ?2
+                    )",
+                    params![as_sql_i64(run_id)?, as_sql_i64(started_at_seconds)?],
+                    |row| row.get(0),
+                )?,
+                None => false,
+            };
+            if !saved {
+                unsaved.push(spool.clone());
+            } else if let Err(error) = fs::remove_file(spool) {
+                warn!(
+                    "Could not remove the spool of saved dictation {}: {error}",
+                    spool.display()
+                );
+            }
+        }
+        Ok(unsaved)
     }
 
     /// Whether a row already holds the receipt of the run that started at
@@ -1659,6 +1717,11 @@ impl HistoryManager {
                 ),
                 None => (None, None, None, true, None),
             };
+        // A derived row reuses its parent's recording, which a sweep may have
+        // removed while the retry ran.
+        let has_audio = has_audio
+            && (derived_from_history_id.is_none()
+                || Self::has_other_recording_reference(&transaction, None, file_name)?);
         transaction.execute(
             "INSERT INTO transcription_history (
                 file_name,
@@ -1978,18 +2041,19 @@ impl HistoryManager {
         }
     }
 
-    /// Whether another row still holds this recording. A retry or a reprocess
-    /// reuses its parent's file, and a row whose audio expired keeps the name
-    /// without the file, so only a row that still has audio counts.
+    /// Whether a row other than `history_id`, or any row when there is none,
+    /// still holds this recording. A retry or a reprocess reuses its parent's
+    /// file, and a row whose audio expired keeps the name without the file,
+    /// so only a row that still has audio counts.
     fn has_other_recording_reference(
         conn: &Connection,
-        history_id: i64,
+        history_id: Option<i64>,
         file_name: &str,
     ) -> Result<bool> {
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM transcription_history
-                WHERE file_name = ?1 AND id != ?2 AND has_audio = 1
+                WHERE file_name = ?1 AND id IS NOT ?2 AND has_audio = 1
             )",
             params![file_name, history_id],
             |row| row.get(0),
@@ -2008,7 +2072,7 @@ impl HistoryManager {
         let mut deleted = Vec::with_capacity(entries.len());
 
         for (id, file_name) in entries {
-            if !Self::has_other_recording_reference(conn, *id, file_name)? {
+            if !Self::has_other_recording_reference(conn, Some(*id), file_name)? {
                 if let Err(error) = Self::remove_recording_file(recordings_dir, file_name) {
                     error!(
                         "Failed to delete WAV file {} for history entry {}; retaining it for retry: {}",
@@ -2096,7 +2160,7 @@ impl HistoryManager {
                 "UPDATE transcription_history SET has_audio = 0 WHERE id = ?1",
                 params![id],
             )?;
-            if !Self::has_other_recording_reference(conn, *id, file_name)? {
+            if !Self::has_other_recording_reference(conn, Some(*id), file_name)? {
                 if let Err(error) = Self::remove_recording_file(recordings_dir, file_name) {
                     error!(
                         "Failed to delete expired WAV file {} for history entry {}; retaining it for retry: {}",
@@ -2943,7 +3007,7 @@ impl HistoryManager {
             // so cleanup can retry it later. Retry rows share the original WAV and
             // therefore must not delete it while another row still references it.
             if let Some(entry) = Self::entry_by_id_with_connection(conn, id)? {
-                if !Self::has_other_recording_reference(conn, id, &entry.file_name)? {
+                if !Self::has_other_recording_reference(conn, Some(id), &entry.file_name)? {
                     Self::remove_recording_file(&self.recordings_dir, &entry.file_name)?;
                 }
             }
@@ -3249,6 +3313,47 @@ fn recording_path(recordings_dir: &Path, file_name: &str) -> Option<PathBuf> {
         .then(|| recordings_dir.join(file_name))
 }
 
+/// What a previous launch left behind.
+#[derive(Default)]
+struct Interrupted {
+    /// The spools of the dictations it was still recording or decoding.
+    spools: Vec<PathBuf>,
+    /// Recordings named for one of those runs and written since it started:
+    /// the copy the stop path saves for the row it is about to write.
+    copies: Vec<String>,
+}
+
+/// What a previous launch left under `recordings_dir`.
+fn list_interrupted(recordings_dir: &Path) -> Interrupted {
+    let spools = list_spools(&recordings_dir.join(IN_PROGRESS_DIR));
+    let runs: Vec<(u64, u64)> = spools
+        .iter()
+        .filter_map(|spool| dictation_run(spool.file_name()?.to_str()?))
+        .collect();
+    if runs.is_empty() {
+        return Interrupted {
+            spools,
+            copies: Vec::new(),
+        };
+    }
+    let copies = match fs::read_dir(recordings_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| {
+                dictation_run(name).is_some_and(|(written_at, run_id)| {
+                    runs.iter()
+                        .any(|&(started_at, spooled)| spooled == run_id && started_at <= written_at)
+                })
+            })
+            .collect(),
+        Err(error) => {
+            warn!("Could not list recordings beside interrupted dictations: {error}");
+            Vec::new()
+        }
+    };
+    Interrupted { spools, copies }
+}
+
 /// The spool files in `directory`, none when it does not exist yet.
 fn list_spools(directory: &Path) -> Vec<PathBuf> {
     match fs::read_dir(directory) {
@@ -3264,17 +3369,20 @@ fn list_spools(directory: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// When a spool's dictation started, read back from the name
-/// [`HistoryManager::spool_path`] gave it.
-fn spool_started_at_ms(spool: &Path) -> Option<u64> {
-    let seconds: u64 = spool
-        .file_stem()?
-        .to_str()?
+/// The second and the run a dictation's file is named for: `sona-{s}-{run}.wav`,
+/// as [`HistoryManager::spool_path`] names a spool and the stop path names
+/// its copy. A `-N` variant of a kept spool is neither.
+fn dictation_run(file_name: &str) -> Option<(u64, u64)> {
+    let (seconds, run_id) = file_name
         .strip_prefix("sona-")?
-        .split('-')
-        .next()?
-        .parse()
-        .ok()?;
+        .strip_suffix(".wav")?
+        .split_once('-')?;
+    Some((seconds.parse().ok()?, run_id.parse().ok()?))
+}
+
+/// When a spool's dictation started, read back from its name.
+fn spool_started_at_ms(spool: &Path) -> Option<u64> {
+    let (seconds, _) = dictation_run(spool.file_name()?.to_str()?)?;
     seconds.checked_mul(1_000)
 }
 
@@ -5990,6 +6098,137 @@ mod tests {
         assert!(
             !seen.contains(&semantic_row),
             "a semantic hit newer than the first page's cursor is not resurfaced"
+        );
+    }
+
+    #[test]
+    fn a_retry_saved_after_its_recording_was_swept_offers_no_audio() {
+        let mut conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let parent = seed_wav_retention_entry(
+            &conn,
+            recordings.path(),
+            100,
+            "parent.wav",
+            "parent words",
+            false,
+            None,
+        );
+        let newer = seed_wav_retention_entry(
+            &conn,
+            recordings.path(),
+            200,
+            "newer.wav",
+            "newer words",
+            false,
+            None,
+        );
+        let swept = HistoryManager::sweep_by_count_with_connection(&conn, recordings.path(), 1)
+            .expect("count sweep runs");
+        assert_eq!(swept, vec![parent]);
+        assert!(!recordings.path().join("parent.wav").exists());
+
+        let retry = |conn: &mut Connection, file_name: &str, parent_id: i64, run_id: u64| {
+            HistoryManager::save_entry_with_receipt_with_connection(
+                conn,
+                file_name,
+                300,
+                "Retry",
+                "retried words",
+                false,
+                None,
+                Some(parent_id),
+                Some(&new_run_receipt(run_id)),
+            )
+            .expect("save retry")
+        };
+        let of_newer = retry(&mut conn, "newer.wav", newer, 1);
+        let of_parent = retry(&mut conn, "parent.wav", parent, 2);
+        assert!(
+            row_has_audio(&conn, of_newer),
+            "a retry of a recording that is still kept plays it"
+        );
+        assert!(
+            !row_has_audio(&conn, of_parent),
+            "a retry must not offer a recording the sweep already deleted"
+        );
+    }
+
+    /// A launch that ended mid-decode left the run's spool and the copy the
+    /// stop path wrote for a row it never saved. Recovery keeps the spool, so
+    /// the copy, which nothing could play or delete, goes. Recordings of other
+    /// runs, or older than the spool, stay.
+    #[test]
+    fn recovery_removes_the_copy_an_interrupted_decode_left() {
+        let conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let in_progress = recordings.path().join(IN_PROGRESS_DIR);
+        fs::create_dir_all(&in_progress).expect("spool directory");
+        let spool = in_progress.join("sona-100-9.wav");
+        fs::write(&spool, b"").expect("write spool");
+        for name in ["sona-160-9.wav", "sona-90-9.wav", "sona-160-8.wav"] {
+            fs::write(recordings.path().join(name), b"").expect("write recording");
+        }
+
+        let kept = HistoryManager::settle_interrupted_with_connection(
+            &conn,
+            recordings.path(),
+            &list_interrupted(recordings.path()),
+        )
+        .expect("settle interrupted dictations");
+
+        assert_eq!(kept, vec![spool]);
+        let present = |name: &str| recordings.path().join(name).exists();
+        assert!(!present("sona-160-9.wav"), "the copy no row will hold goes");
+        assert!(
+            present("sona-90-9.wav"),
+            "a recording older than the run stays"
+        );
+        assert!(present("sona-160-8.wav"), "another run's recording stays");
+    }
+
+    /// A launch that ended after its dictation was saved, before the spool
+    /// went, left a spool whose run a row already holds. Recovery removes it
+    /// rather than keep the same capture a second time; the row keeps its
+    /// recording, and the spool of an unsaved run is still kept.
+    #[test]
+    fn recovery_drops_the_spool_of_a_run_already_saved() {
+        let mut conn = setup_conn();
+        let recordings = tempfile::tempdir().expect("recordings directory");
+        let in_progress = recordings.path().join(IN_PROGRESS_DIR);
+        fs::create_dir_all(&in_progress).expect("spool directory");
+        let saved = in_progress.join("sona-100-7.wav");
+        let unsaved = in_progress.join("sona-100-9.wav");
+        for path in [&saved, &unsaved, &recordings.path().join("sona-160-7.wav")] {
+            fs::write(path, b"").expect("write fixture");
+        }
+        let mut receipt = new_run_receipt(7);
+        receipt.started_at_ms = 100_250;
+        HistoryManager::save_entry_with_receipt_with_connection(
+            &mut conn,
+            "sona-160-7.wav",
+            160,
+            "Saved",
+            "saved words",
+            false,
+            None,
+            None,
+            Some(&receipt),
+        )
+        .expect("save the finished run");
+
+        let kept = HistoryManager::settle_interrupted_with_connection(
+            &conn,
+            recordings.path(),
+            &list_interrupted(recordings.path()),
+        )
+        .expect("settle interrupted dictations");
+
+        assert_eq!(kept, vec![unsaved]);
+        assert!(!saved.exists(), "the spool of a saved run goes");
+        assert!(
+            recordings.path().join("sona-160-7.wav").exists(),
+            "the saved run keeps its recording"
         );
     }
 }
