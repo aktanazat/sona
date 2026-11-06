@@ -2348,14 +2348,19 @@ impl MeetingSessionManager {
         &self,
         request: ImportRecordingRequest,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
-        self.import_recording_with_notes(request, None).await
+        self.import_recording_with(request, None, None).await
     }
 
-    /// Install the phone's own notes before any processing can read the meeting.
-    pub(crate) async fn import_recording_with_notes(
+    /// Install what the phone knew about a recording before any processing
+    /// can read the meeting: its own notes, and the calendar event it was
+    /// made during. The event is remembered the way a Mac preflight remembers
+    /// one, and followed by the start a live meeting records, so its
+    /// attendees are linked to people the way a Mac recording's are.
+    pub(crate) async fn import_recording_with(
         &self,
         request: ImportRecordingRequest,
         notes: Option<&str>,
+        calendar_event: Option<&CalendarEventSummary>,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
         let _activity = crate::planning::quiet::foreground_activity();
         let media = validate_media_path(&request.path).map_err(|error| {
@@ -2391,6 +2396,14 @@ impl MeetingSessionManager {
                     .abandon_import(session_id, map_store_error(error))
                     .await);
             }
+        }
+        if let Some(event) = calendar_event {
+            if let Err(error) = store.remember_calendar_facts(session_id, event) {
+                return Err(self
+                    .abandon_import(session_id, map_store_error(error))
+                    .await);
+            }
+            self.record_meeting_started(Arc::clone(&store), session_id);
         }
         match self
             .write_imported_audio(Arc::clone(&store), session_id, media, &request.origin)

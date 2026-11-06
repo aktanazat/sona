@@ -31,3 +31,25 @@ final class PhoneCalendar: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 }
+
+extension DeviceRecordingManifest.CalendarEvent {
+    /// What EventKit says about the event, unreduced, so the desktop reads it with the
+    /// same helpers it reads its own calendar with.
+    init(_ event: EKEvent) {
+        self.init(
+            identifier: event.calendarItemIdentifier,
+            title: event.title ?? "",
+            start_utc_ms: Int64(event.startDate.timeIntervalSince1970 * 1000),
+            end_utc_ms: Int64(event.endDate.timeIntervalSince1970 * 1000),
+            attendees: (event.attendees ?? []).map { participant in
+                Attendee(
+                    name: participant.name,
+                    status: participant.participantStatus.rawValue,
+                    is_self: participant.isCurrentUser,
+                    url: participant.url.absoluteString
+                )
+            },
+            location: event.location
+        )
+    }
+}

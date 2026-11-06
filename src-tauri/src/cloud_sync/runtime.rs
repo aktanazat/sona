@@ -19,6 +19,10 @@ use zeroize::Zeroize;
 use crate::{
     meeting::{
         cloud_bundle::CloudMeetingBundleV1,
+        detection::{
+            calendar::{event_text, named_attendee_with_email, occurrence_key},
+            machine::CalendarEventSummary,
+        },
         session::{ImportRecordingRequest, MeetingSessionManager, RecordingOrigin},
         store::{
             cloud_phone_notes_object_id, CloudCapabilitiesCache, CloudConflict, CloudHead,
@@ -317,6 +321,8 @@ struct DeviceRecordingManifest {
     audio: DeviceRecordingAudio,
     #[serde(default)]
     personal_notes: Option<String>,
+    #[serde(default)]
+    calendar_event: Option<DeviceCalendarEvent>,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +333,68 @@ struct DeviceRecordingAudio {
     channels: u16,
     byte_length: u64,
     sha256: String,
+}
+
+/// The calendar event a device recorded during, as that device's EventKit
+/// reported it. `summary` reduces it with the helpers this Mac's own calendar
+/// reader uses, so its attendees, their addresses and its place read the same
+/// whichever device read the event.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceCalendarEvent {
+    /// `calendarItemIdentifier`, which is local to the device that read it.
+    identifier: String,
+    title: String,
+    start_utc_ms: i64,
+    end_utc_ms: i64,
+    attendees: Vec<DeviceCalendarAttendee>,
+    #[serde(default)]
+    location: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceCalendarAttendee {
+    #[serde(default)]
+    name: Option<String>,
+    /// `EKParticipantStatus`'s raw value.
+    status: isize,
+    is_self: bool,
+    url: String,
+}
+
+impl DeviceCalendarEvent {
+    /// `None` for an event this Mac's reader would not summarize either: one
+    /// with no identifier, or one that does not end after it starts.
+    fn summary(self) -> Option<CalendarEventSummary> {
+        if self.identifier.is_empty() || self.end_utc_ms <= self.start_utc_ms {
+            return None;
+        }
+        Some(CalendarEventSummary {
+            event_key: occurrence_key(&self.identifier, self.start_utc_ms),
+            attendee_count: self.attendees.len(),
+            attendees: self
+                .attendees
+                .iter()
+                .filter_map(|attendee| {
+                    named_attendee_with_email(
+                        attendee.name.as_deref(),
+                        attendee.status,
+                        attendee.is_self,
+                        Some(&attendee.url),
+                    )
+                })
+                .collect(),
+            series_key: self.identifier,
+            title: self.title,
+            start_utc_ms: self.start_utc_ms,
+            end_utc_ms: self.end_utc_ms,
+            notes: None,
+            calendar_name: None,
+            url: None,
+            location: event_text(self.location),
+        })
+    }
 }
 
 /// What a revision says it is. The manifest is the only place an object
@@ -357,9 +425,33 @@ struct DeviceRecordingImport {
     recorded_at_utc_ms: i64,
     device_id: String,
     personal_notes: Option<String>,
+    calendar_event: Option<CalendarEventSummary>,
 }
 
 impl DeviceRecordingImport {
+    /// The staged audio and what its manifest says about it. An event the
+    /// device named that this Mac cannot summarize is dropped, not the
+    /// recording.
+    fn new(audio: ScratchAudioFile, manifest: DeviceRecordingManifest, object_id: &str) -> Self {
+        let calendar_event = manifest.calendar_event.and_then(|event| {
+            let summary = event.summary();
+            if summary.is_none() {
+                log::warn!(
+                    "Cloud recording {object_id} names a calendar event this Mac cannot attach"
+                );
+            }
+            summary
+        });
+        Self {
+            audio,
+            title: manifest.title,
+            recorded_at_utc_ms: manifest.recorded_at_utc_ms,
+            device_id: manifest.device_id,
+            personal_notes: manifest.personal_notes,
+            calendar_event,
+        }
+    }
+
     /// The import request this recording files as: the device's title when it
     /// gave one, else the placeholder a meeting carries until its notes name
     /// it. The importer's own fallback is the file stem, and the staged file
@@ -3187,13 +3279,7 @@ impl CloudSyncRuntime {
         let audio = staging.finish(&manifest.audio).inspect_err(|_| {
             log::warn!("Cloud recording {object_id} did not match its manifest");
         })?;
-        Ok(DeviceRecordingImport {
-            audio,
-            title: manifest.title,
-            recorded_at_utc_ms: manifest.recorded_at_utc_ms,
-            device_id: manifest.device_id,
-            personal_notes: manifest.personal_notes,
-        })
+        Ok(DeviceRecordingImport::new(audio, manifest, object_id))
     }
 
     /// Fetch a revision's chunks in order, check each against the digest the
@@ -3373,7 +3459,11 @@ impl CloudSyncRuntime {
         }
         let snapshot = self
             .meetings
-            .import_recording_with_notes(recording.request(), recording.personal_notes.as_deref())
+            .import_recording_with(
+                recording.request(),
+                recording.personal_notes.as_deref(),
+                recording.calendar_event.as_ref(),
+            )
             .await
             .map_err(|error| {
                 log::warn!("Cloud recording {object_id} would not import: {error:?}");
@@ -4884,6 +4974,16 @@ mod tests {
     }
 
     fn phone_object(audio: Vec<u8>, declared_sha256: &str, writer_device_id: &str) -> PhoneObject {
+        phone_object_with_event(audio, declared_sha256, writer_device_id, None)
+    }
+
+    /// `calendar_event` is the event's JSON exactly as the device encodes it.
+    fn phone_object_with_event(
+        audio: Vec<u8>,
+        declared_sha256: &str,
+        writer_device_id: &str,
+        calendar_event: Option<&str>,
+    ) -> PhoneObject {
         let chunks: Vec<Vec<u8>> = audio
             .chunks(MAX_PLAINTEXT_CHUNK_BYTES)
             .map(Vec::from)
@@ -4895,11 +4995,14 @@ mod tests {
         let manifest = format!(
             "{{\"audio\":{{\"byte_length\":{byte_length},\"channels\":1,\
              \"codec\":\"pcm_s16le\",\"sample_rate_hz\":16000,\
-             \"sha256\":\"{declared_sha256}\"}},\
+             \"sha256\":\"{declared_sha256}\"}},{calendar_event}\
              \"device_id\":\"{writer_device_id}\",\"duration_ms\":{duration_ms},\
              \"format_version\":1,\"kind\":\"device_recording\",\
              \"recorded_at_utc_ms\":1788305031276,\"title\":\"Phone recording\"}}",
             byte_length = audio.len(),
+            calendar_event = calendar_event
+                .map(|event| format!("\"calendar_event\":{event},"))
+                .unwrap_or_default(),
             // 16 kHz mono s16le is 32 bytes a millisecond.
             duration_ms = audio.len() / 32,
         );
@@ -4999,7 +5102,7 @@ mod tests {
         assert_eq!(bytes.len(), WAVE_HEADER_BYTES + audio.len());
         assert_eq!(&bytes[WAVE_HEADER_BYTES..], audio.as_slice());
 
-        let snapshot = tauri::async_runtime::block_on(manager.import_recording_with_notes(
+        let snapshot = tauri::async_runtime::block_on(manager.import_recording_with(
             ImportRecordingRequest {
                 path: staged.path().to_owned(),
                 title: Some("Phone recording".to_owned()),
@@ -5009,6 +5112,7 @@ mod tests {
                 },
             },
             Some("Confirm the launch date."),
+            None,
         ))
         .expect("the pulled recording imports");
         let review = tauri::async_runtime::block_on(manager.get(snapshot.session_id))
@@ -5028,6 +5132,123 @@ mod tests {
                 .expect("phone notes persist before processing")
                 .body,
             "Confirm the launch date."
+        );
+    }
+
+    /// The event `DeviceRecordingTests.testCalendarEventIsTheAgreedJson`
+    /// pins the phone to, byte for byte.
+    const PHONE_CALENDAR_EVENT: &str = "{\"attendees\":[\
+        {\"is_self\":false,\"name\":\"Dana Lee\",\"status\":2,\
+         \"url\":\"mailto:Dana.Lee@Example.com\"},\
+        {\"is_self\":true,\"name\":\"Aktan Azat\",\"status\":4,\
+         \"url\":\"mailto:aktan@example.com\"},\
+        {\"is_self\":false,\"status\":0,\"url\":\"mailto:guest@example.com\"}],\
+        \"end_utc_ms\":1788308400000,\"identifier\":\"event-0001\",\
+        \"location\":\"Room 4\",\"start_utc_ms\":1788304800000,\
+        \"title\":\"Launch review\"}";
+
+    /// A phone recording made during a calendar event arrives with it,
+    /// attached the way this Mac attaches its own: summarized by the rules
+    /// this Mac's calendar reader applies, with the event's location as the
+    /// meeting's place. A phone that names no event files a meeting with none.
+    #[test]
+    fn a_phone_recording_keeps_the_calendar_event_it_was_made_during() {
+        use crate::meeting::detection::machine::{CalendarAttendee, ParticipationStatus};
+
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).expect("the store mounts");
+        let audio = vec![1_u8; 32_000];
+        let import = |calendar_event: Option<&str>| {
+            let object = phone_object_with_event(
+                audio.clone(),
+                &sha256_base64url(&audio),
+                TEST_DEVICE_ID,
+                calendar_event,
+            );
+            let manifest = match open_remote_manifest(
+                &TEST_VAULT_ROOT,
+                TEST_VAULT_ID,
+                TEST_OBJECT_ID,
+                TEST_REVISION_ID,
+                object.envelope.chunk_count,
+                &object.sealed_manifest,
+            )
+            .expect("the manifest opens")
+            {
+                RemoteManifest::DeviceRecording(manifest) => manifest,
+                RemoteManifest::Meeting(_) => panic!("a device recording read as a meeting bundle"),
+            };
+            let staged = stage(
+                &object,
+                store
+                    .cloud_recording_staging_path(TEST_OBJECT_ID)
+                    .expect("the store owns a staging path"),
+            )
+            .expect("the object stages");
+            let recording = DeviceRecordingImport::new(staged, manifest, TEST_OBJECT_ID);
+            tauri::async_runtime::block_on(manager.import_recording_with(
+                recording.request(),
+                recording.personal_notes.as_deref(),
+                recording.calendar_event.as_ref(),
+            ))
+            .expect("the recording imports")
+            .session_id
+        };
+
+        let during = import(Some(PHONE_CALENDAR_EVENT));
+        assert_eq!(
+            store
+                .meeting_calendar_facts(during)
+                .expect("calendar facts are readable"),
+            Some(CalendarEventSummary {
+                event_key: "event-0001#1788304800000".to_owned(),
+                series_key: "event-0001".to_owned(),
+                title: "Launch review".to_owned(),
+                attendee_count: 3,
+                start_utc_ms: 1_788_304_800_000,
+                end_utc_ms: 1_788_308_400_000,
+                attendees: vec![
+                    CalendarAttendee {
+                        name: "Dana Lee".to_owned(),
+                        status: ParticipationStatus::Accepted,
+                        email: Some("dana.lee@example.com".to_owned()),
+                        is_self: false,
+                    },
+                    CalendarAttendee {
+                        name: "Aktan Azat".to_owned(),
+                        status: ParticipationStatus::Tentative,
+                        email: Some("aktan@example.com".to_owned()),
+                        is_self: true,
+                    },
+                ],
+                notes: None,
+                calendar_name: None,
+                url: None,
+                location: Some("Room 4".to_owned()),
+            })
+        );
+        assert_eq!(
+            store
+                .conversation_context(during)
+                .expect("the meeting's context is readable")
+                .calendar_location
+                .as_deref(),
+            Some("Room 4")
+        );
+
+        let without = import(None);
+        assert_eq!(
+            store
+                .meeting_calendar_facts(without)
+                .expect("calendar facts are readable"),
+            None
+        );
+        assert_eq!(
+            store
+                .conversation_context(without)
+                .expect("the meeting's context is readable")
+                .calendar_location,
+            None
         );
     }
 
@@ -5053,6 +5274,7 @@ mod tests {
             recorded_at_utc_ms: 1_788_305_031_276,
             device_id: TEST_DEVICE_ID.to_owned(),
             personal_notes: None,
+            calendar_event: None,
         };
 
         let snapshot =

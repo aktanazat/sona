@@ -31,6 +31,56 @@ final class DeviceRecordingTests: XCTestCase {
         )
     }
 
+    /// `calendar_event` is byte for byte `runtime.rs`'s `PHONE_CALENDAR_EVENT`, so a rename
+    /// on either side fails a test instead of shipping a recording the desktop refuses.
+    func testCalendarEventIsTheAgreedJson() throws {
+        let event = DeviceRecordingManifest.CalendarEvent(
+            identifier: "event-0001",
+            title: "Launch review",
+            start_utc_ms: 1_788_304_800_000,
+            end_utc_ms: 1_788_308_400_000,
+            attendees: [
+                .init(name: "Dana Lee", status: 2, is_self: false, url: "mailto:Dana.Lee@Example.com"),
+                .init(name: "Aktan Azat", status: 4, is_self: true, url: "mailto:aktan@example.com"),
+                .init(name: nil, status: 0, is_self: false, url: "mailto:guest@example.com"),
+            ],
+            location: "Room 4"
+        )
+        let manifest = DeviceRecordingObject.manifest(
+            deviceId: "phone_device_0001",
+            recordedAtUtcMs: 1_700_000_000_000,
+            durationMs: 1500,
+            title: "Phone recording",
+            audioByteLength: 48000,
+            audioSha256: "T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8",
+            calendarEvent: event
+        )
+        let encoded = try DeviceRecordingObject.encodeManifest(manifest)
+        XCTAssertEqual(
+            try JSONSerialization.data(
+                withJSONObject: JSONSerialization.jsonObject(with: encoded),
+                options: .sortedKeys
+            ),
+            Data("""
+            {"audio":{"byte_length":48000,"channels":1,"codec":"pcm_s16le",\
+            "sample_rate_hz":16000,"sha256":"T8pUgTxKXVmy0A-asLSzM7bdweWhqToLZWeaGTYG3_8"},\
+            "calendar_event":{"attendees":[\
+            {"is_self":false,"name":"Dana Lee","status":2,"url":"mailto:Dana.Lee@Example.com"},\
+            {"is_self":true,"name":"Aktan Azat","status":4,"url":"mailto:aktan@example.com"},\
+            {"is_self":false,"status":0,"url":"mailto:guest@example.com"}],\
+            "end_utc_ms":1788308400000,"identifier":"event-0001",\
+            "location":"Room 4","start_utc_ms":1788304800000,\
+            "title":"Launch review"},\
+            "device_id":"phone_device_0001","duration_ms":1500,"format_version":1,\
+            "kind":"device_recording","recorded_at_utc_ms":1700000000000,\
+            "title":"Phone recording"}
+            """.utf8)
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(DeviceRecordingManifest.self, from: encoded), manifest
+        )
+    }
+
     /// Every chunk but the last must encrypt to exactly the Worker's 4 MiB ceiling, or
     /// `parseChunks` rejects the plan.
     func testChunkingFillsEveryChunkButTheLast() {
