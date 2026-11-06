@@ -1877,6 +1877,16 @@ impl DetectionRuntime {
         self.calendar.event_by_key(event_key)
     }
 
+    /// The one meeting under way now, for a recording started by hand that
+    /// names no event. Blocking, like every EventKit read.
+    pub fn calendar_event_under_way(&self) -> Option<CalendarEventSummary> {
+        calendar::meeting_under_way(
+            &crate::settings::get_settings(&self.app),
+            self.calendar.as_ref(),
+            utc_now_ms(),
+        )
+    }
+
     fn raise(self: &Arc<Self>, prompt: PromptKind, calendar_event: Option<CalendarEventSummary>) {
         // A calendar meeting that has started with the microphone live is a
         // detection, not a reminder, so only unscheduled calls follow this switch.
@@ -2490,7 +2500,7 @@ impl DetectionRuntime {
             log::info!("Meeting detection dropped a prompt whose application had already quit");
             return;
         }
-        let snapshot = match self.meetings.create_manual_preflight_from_tray().await {
+        let snapshot = match self.meetings.create_manual_preflight_from_tray(None).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 log::warn!("Meeting detection could not open a preflight: {error:?}");
