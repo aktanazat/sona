@@ -498,35 +498,45 @@ impl ScreenRecorderManager {
     }
 
     pub fn stop(&self) -> Result<RecorderSnapshot, RecorderCommandError> {
-        self.apply_native_failure();
-        let (mut native, partial_path, final_path, finalizing) = {
-            let mut state = lock_recover(&self.state);
-            if !matches!(
-                state.phase,
-                RecorderPhase::Recording | RecorderPhase::Paused
-            ) {
-                return Err(RecorderCommandError::InvalidState);
-            }
-            if let Some(active_since) = state.active_since.take() {
-                state.elapsed_before_active = state
-                    .elapsed_before_active
-                    .saturating_add(active_since.elapsed());
-            }
-            state.phase = RecorderPhase::Finalizing;
-            // Past this point the phase is committed, so a missing field cannot return through
-            // `?`: that would leave the recorder in Finalizing with no native handle and no
-            // command that accepts it. Report it as a failure instead, which lands on Failed.
-            let taken = state
-                .native
-                .take()
-                .zip(state.partial_path.clone().zip(state.final_path.clone()));
-            let Some((native, (partial_path, final_path))) = taken else {
-                drop(state);
-                return Ok(self.fail(RecorderFailureCode::OutputFinalizeFailed));
-            };
-            let snapshot = state.snapshot();
-            (native, partial_path, final_path, snapshot)
+        let state = lock_recover(&self.state);
+        if !matches!(
+            state.phase,
+            RecorderPhase::Recording | RecorderPhase::Paused
+        ) {
+            return Err(RecorderCommandError::InvalidState);
+        }
+        let notice = native_failure(state.native.as_ref());
+        Ok(self.finalize(state, notice))
+    }
+
+    /// `notice` is the native failure that cut the capture short. The frames written before it
+    /// are still the recording the user made, so they are saved and the snapshot names the
+    /// failure; only a file that cannot be finalized is lost.
+    fn finalize(
+        &self,
+        mut state: MutexGuard<'_, RecorderState>,
+        notice: Option<RecorderFailureCode>,
+    ) -> RecorderSnapshot {
+        if let Some(active_since) = state.active_since.take() {
+            state.elapsed_before_active = state
+                .elapsed_before_active
+                .saturating_add(active_since.elapsed());
+        }
+        state.phase = RecorderPhase::Finalizing;
+        state.failure = notice;
+        // Past this point the phase is committed, so a missing field cannot return through
+        // `?`: that would leave the recorder in Finalizing with no native handle and no
+        // command that accepts it. Report it as a failure instead, which lands on Failed.
+        let taken = state
+            .native
+            .take()
+            .zip(state.partial_path.clone().zip(state.final_path.clone()));
+        let Some((mut native, (partial_path, final_path))) = taken else {
+            drop(state);
+            return self.fail(notice.unwrap_or(RecorderFailureCode::OutputFinalizeFailed));
         };
+        let finalizing = state.snapshot();
+        drop(state);
         self.emit(finalizing);
 
         let report = native_stop(&mut native);
@@ -539,12 +549,12 @@ impl ScreenRecorderManager {
             Ok(report) => report,
             Err(failure) => {
                 native_cancel(&mut native);
-                return Ok(self.fail(failure));
+                return self.fail(notice.unwrap_or(failure));
             }
         };
         if fs::rename(&partial_path, &final_path).is_err() {
             native_cancel(&mut native);
-            return Ok(self.fail(RecorderFailureCode::OutputCommitFailed));
+            return self.fail(RecorderFailureCode::OutputCommitFailed);
         }
         native_cancel(&mut native);
         // Read the counter after `cancel_and_destroy`: past that point Swift is neither running
@@ -564,14 +574,14 @@ impl ScreenRecorderManager {
             state.dropped_video_frames = dropped_video_frames;
             state.active_since = None;
             state.elapsed_before_active = Duration::from_millis(report.duration_ms);
-            state.failure = None;
+            state.failure = notice;
             state.phase = RecorderPhase::Saved;
             let snapshot = state.snapshot();
             (lease, snapshot)
         };
         drop(lease);
         self.emit(snapshot.clone());
-        Ok(snapshot)
+        snapshot
     }
 
     pub fn cancel(&self) -> Result<RecorderSnapshot, RecorderCommandError> {
@@ -642,11 +652,17 @@ impl ScreenRecorderManager {
     }
 
     fn apply_native_failure(&self) {
-        let failure = {
-            let state = lock_recover(&self.state);
-            native_failure(state.native.as_ref())
+        let state = lock_recover(&self.state);
+        let Some(failure) = native_failure(state.native.as_ref()) else {
+            return;
         };
-        if let Some(failure) = failure {
+        if matches!(
+            state.phase,
+            RecorderPhase::Recording | RecorderPhase::Paused
+        ) {
+            let _ = self.finalize(state, Some(failure));
+        } else {
+            drop(state);
             let _ = self.fail(failure);
         }
     }

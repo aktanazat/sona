@@ -144,8 +144,8 @@ struct RecorderSheet: View {
         }
     }
 
-    /// The saved file: its name, how long it runs, how big it is, and why
-    /// Finder refused it when it did.
+    /// The saved file: its name, how long it runs, how big it is, what cut it
+    /// short when a failure did, and why Finder refused it when it did.
     private var saved: some View {
         panel {
             CardRow {
@@ -154,6 +154,9 @@ struct RecorderSheet: View {
                 Text(savedFacts).metaText(Theme.inkSecondary).monospacedDigit()
             }
             droppedFrames
+            if let failure = store.failure {
+                RecorderNotice(text: failure.message, tone: Theme.live)
+            }
             if store.state.revealFailed, let note = store.revealNote {
                 RecorderNotice(text: note, tone: Theme.live)
             }
