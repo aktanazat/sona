@@ -710,10 +710,11 @@ impl MeetingSessionManager {
         recovery: &InterruptedRecovery,
     ) -> Result<(), MeetingCommandError> {
         log::info!(
-            "Meeting recovery sweep: {} interrupted, {} status healed, {} abandoned start gates discarded",
+            "Meeting recovery sweep: {} interrupted, {} status healed, {} abandoned start gates discarded, {} unfinished imports discarded",
             recovery.recovered.len(),
             recovery.status_resolved.len(),
             recovery.discarded.len(),
+            recovery.abandoned_imports.len(),
         );
         for meeting in &recovery.recovered {
             log::info!(
@@ -733,6 +734,12 @@ impl MeetingSessionManager {
             );
             // The row is gone, so there is no snapshot to refresh — the
             // windows are told to drop it, exactly as a cancelled gate does.
+            self.emit_removed(*session_id, 0);
+        }
+        for session_id in &recovery.abandoned_imports {
+            log::info!(
+                "Meeting recovery: {session_id:?} was an import an earlier launch left partway through its file, discarded",
+            );
             self.emit_removed(*session_id, 0);
         }
         for session_id in recovery
