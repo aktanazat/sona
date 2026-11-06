@@ -513,7 +513,7 @@ pub(crate) struct LedgerPageInput<'a> {
     pub segment_speakers: &'a HashMap<TranscriptSegmentId, SpeakerId>,
 }
 
-fn mmss(seconds: u64) -> String {
+pub(crate) fn mmss(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 

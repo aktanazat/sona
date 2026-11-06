@@ -2067,6 +2067,7 @@ final class MeetingsStore {
     /// One action, with the word for it while it runs.
     private func act(_ action: String, _ work: () async throws -> Void) async {
         pending = action
+        error = nil
         defer { pending = nil }
         do {
             try await work()

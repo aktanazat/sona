@@ -48,10 +48,37 @@ struct LoopbackResponseFormat {
 }
 
 #[derive(Debug, Serialize, Clone)]
+struct LoopbackJsonSchema {
+    name: &'static str,
+    strict: bool,
+    schema: &'static serde_json::value::RawValue,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct LoopbackSchemaFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
+    json_schema: LoopbackJsonSchema,
+}
+
+#[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 enum ChatResponseFormat {
     Schema(ResponseFormat),
     JsonObject(LoopbackResponseFormat),
+    LoopbackSchema(LoopbackSchemaFormat),
+}
+
+/// What a loopback reply is asked to be.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LoopbackReply {
+    Text,
+    /// One JSON object.
+    Json,
+    /// One JSON object the server holds to this named schema while it writes.
+    /// The schema stays raw JSON so its properties keep their declared
+    /// order, which is the order the model writes them in.
+    Schema(&'static str, &'static serde_json::value::RawValue),
 }
 
 #[derive(Debug, Serialize, Clone, Default, PartialEq)]
@@ -446,6 +473,7 @@ pub(crate) struct LoopbackModel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LoopbackChatCompletionError {
     Unreachable,
+    TimedOut,
     Failed,
 }
 
@@ -502,6 +530,8 @@ fn is_connection_refused(error: &reqwest::Error) -> bool {
 fn loopback_request_error(error: &reqwest::Error) -> LoopbackChatCompletionError {
     if is_connection_refused(error) {
         LoopbackChatCompletionError::Unreachable
+    } else if error.is_timeout() {
+        LoopbackChatCompletionError::TimedOut
     } else {
         LoopbackChatCompletionError::Failed
     }
@@ -514,7 +544,7 @@ pub(crate) async fn send_loopback_chat_completion(
     evidence: &str,
     max_tokens: i32,
     timeout: Duration,
-    json_response: bool,
+    reply: LoopbackReply,
 ) -> Result<LoopbackChatCompletion, LoopbackChatCompletionError> {
     let _activity = crate::planning::quiet::foreground_activity();
     if endpoint.is_remote() {
@@ -540,11 +570,24 @@ pub(crate) async fn send_loopback_chat_completion(
         messages,
         OpenAiChatCompletionOptions {
             max_tokens: Some(max_tokens),
-            response_format: json_response.then_some(ChatResponseFormat::JsonObject(
-                LoopbackResponseFormat {
-                    format_type: "json_object",
-                },
-            )),
+            response_format: match reply {
+                LoopbackReply::Text => None,
+                LoopbackReply::Json => {
+                    Some(ChatResponseFormat::JsonObject(LoopbackResponseFormat {
+                        format_type: "json_object",
+                    }))
+                }
+                LoopbackReply::Schema(name, schema) => {
+                    Some(ChatResponseFormat::LoopbackSchema(LoopbackSchemaFormat {
+                        format_type: "json_schema",
+                        json_schema: LoopbackJsonSchema {
+                            name,
+                            strict: true,
+                            schema,
+                        },
+                    }))
+                }
+            },
             reasoning: ReasoningParams {
                 reasoning_effort: Some("none".to_string()),
                 ..Default::default()
@@ -557,10 +600,10 @@ pub(crate) async fn send_loopback_chat_completion(
     )
     .await
     .map_err(|error| match error {
-        OpenAiChatCompletionError::Request(error) => loopback_request_error(&error),
-        OpenAiChatCompletionError::RetryRequest(_)
-        | OpenAiChatCompletionError::Status(_)
-        | OpenAiChatCompletionError::Body(_)
+        OpenAiChatCompletionError::Request(error)
+        | OpenAiChatCompletionError::RetryRequest(error)
+        | OpenAiChatCompletionError::Body(error) => loopback_request_error(&error),
+        OpenAiChatCompletionError::Status(_)
         | OpenAiChatCompletionError::TooLarge
         | OpenAiChatCompletionError::Decode(_) => LoopbackChatCompletionError::Failed,
     })?;
@@ -1853,7 +1896,7 @@ mod tests {
                 EVIDENCE,
                 16,
                 Duration::from_secs(5),
-                false,
+                LoopbackReply::Text,
             )
             .await
             .expect("local completion");
@@ -1938,12 +1981,43 @@ mod tests {
             "evidence",
             16,
             Duration::from_secs(2),
-            false,
+            LoopbackReply::Text,
         )
         .await;
 
         assert!(matches!(result, Err(LoopbackChatCompletionError::Failed)));
         server.await.expect("reset fixture completed");
+    }
+
+    #[tokio::test]
+    async fn a_loopback_reply_slower_than_its_timeout_is_timed_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow fixture");
+        let address = listener.local_addr().expect("slow fixture address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("loopback request");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(stream);
+        });
+        let provider = provider("custom", &format!("http://{address}/v1"));
+        let endpoint = endpoint(&provider);
+
+        let result = send_loopback_chat_completion(
+            &endpoint,
+            "model",
+            "system",
+            "evidence",
+            16,
+            Duration::from_millis(200),
+            LoopbackReply::Text,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LoopbackChatCompletionError::TimedOut)));
+        server.await.expect("slow fixture completed");
     }
     #[tokio::test]
     async fn loopback_catalog_connection_reset_is_invalid_response() {
@@ -2049,7 +2123,7 @@ mod tests {
             "evidence",
             16,
             Duration::from_secs(2),
-            false,
+            LoopbackReply::Text,
         )
         .await;
 

@@ -948,7 +948,7 @@ mod scoped {
                 let LedgerThreadRef::Discussion(row) = row else {
                     continue;
                 };
-                let state = super::super::ledger_state(&row.thread.state).map_err(|()| {
+                let state = super::super::ledger_state(&row.thread.state).map_err(|_| {
                     serde::ser::Error::custom("The model returned an unsupported discussion state")
                 })?;
                 if !state.unresolved() {

@@ -1,10 +1,11 @@
 use super::processing::{MeetingTextGenerationError, MeetingTextGenerator, ReplyShape};
 use crate::llm_client::{
     probe_loopback_model_info, send_loopback_chat_completion, LoopbackChatCompletionError,
-    LoopbackModel,
+    LoopbackModel, LoopbackReply,
 };
 use crate::settings::{MeetingLocalEngine, PostProcessEndpoint};
 use serde::Serialize;
+use serde_json::Value;
 use specta::Type;
 use std::borrow::Cow;
 use std::future::Future;
@@ -23,6 +24,11 @@ use std::time::{Duration, Instant};
 const LOCAL_ENGINE_MODEL_ID: &str = "local-openai-compatible";
 const AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(2);
 const MEETING_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+/// What one token of a local model's window holds, in bytes of the pack as
+/// it is built, before [`SourceLabels`] shortens it. Measured with the
+/// qwen3 tokenizer on notes rows: 3.3 bytes a token once the uuids are
+/// labels, 2.2 with them. Ollama cuts a prompt that overflows its window
+/// without saying so, and the model then answers about what was left.
 const LOCAL_CONTEXT_BYTES_PER_TOKEN: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,7 +220,7 @@ impl LocalEndpointGenerator {
             self.model_info()
                 .ok()?
                 .into_iter()
-                .find(|model| model.id == self.model)
+                .find(|model| serves(&model.id, &self.model))
                 .and_then(|model| model.context_window_tokens)
         })?;
         tokens.checked_mul(LOCAL_CONTEXT_BYTES_PER_TOKEN)
@@ -248,7 +254,7 @@ impl LocalEndpointGenerator {
             Some("model_not_selected")
         } else if models.is_empty() {
             Some("no_models")
-        } else if !models.iter().any(|served| served == &self.model) {
+        } else if !models.iter().any(|served| serves(served, &self.model)) {
             Some("model_not_served")
         } else if self.configured_context_window_bytes().is_none() {
             Some("context_window_not_configured")
@@ -256,6 +262,13 @@ impl LocalEndpointGenerator {
             None
         }
     }
+}
+
+/// Whether the catalog id `served` is the model `chosen` names. Ollama lists
+/// every model with its tag and answers a name without one as that name's
+/// `:latest` tag.
+fn serves(served: &str, chosen: &str) -> bool {
+    served == chosen || served.strip_suffix(":latest") == Some(chosen)
 }
 
 impl MeetingTextGenerator for LocalEndpointGenerator {
@@ -294,8 +307,17 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
         let endpoint = self.endpoint.clone();
         let model = self.model.clone();
         let system_prompt = system_prompt.to_string();
-        let evidence = evidence.to_string();
-        let json_response = shape.is_json();
+        let mut labels = SourceLabels::default();
+        let evidence = match shape {
+            ReplyShape::MeetingNotes | ReplyShape::MeetingLedger => labels.alias(evidence),
+            _ => None,
+        }
+        .unwrap_or_else(|| evidence.to_string());
+        let reply = match shape.wire_schema() {
+            Some((name, schema)) => LoopbackReply::Schema(name, schema),
+            None if shape.is_json() => LoopbackReply::Json,
+            None => LoopbackReply::Text,
+        };
         let response = run_async(async move {
             send_loopback_chat_completion(
                 &endpoint,
@@ -304,13 +326,14 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
                 &evidence,
                 max_tokens,
                 MEETING_REQUEST_TIMEOUT,
-                json_response,
+                reply,
             )
             .await
         })
         .unwrap_or(Err(LoopbackChatCompletionError::Failed))
         .map_err(|error| match error {
             LoopbackChatCompletionError::Unreachable => MeetingTextGenerationError::Unreachable,
+            LoopbackChatCompletionError::TimedOut => MeetingTextGenerationError::TimedOut,
             LoopbackChatCompletionError::Failed => MeetingTextGenerationError::Failed,
         })?;
         log::info!(
@@ -329,8 +352,95 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
         if content.is_empty() {
             Err(MeetingTextGenerationError::Failed)
         } else {
-            Ok(content)
+            Ok(labels.restore(content))
         }
+    }
+}
+
+/// The line ids a local model reads and cites in place of the transcript's
+/// uuids: `L1` for the first id a pack names, `L2` for the next.
+///
+/// A uuid is 34 tokens for qwen3:14b to read and as many to write, and a
+/// part's notes cite dozens of lines. On one part of a test meeting the
+/// notes cited by label took 970 answer tokens and 60 s, cited by uuid 2,256
+/// tokens and 139 s, every citation found both times.
+#[derive(Default)]
+struct SourceLabels(Vec<String>);
+
+impl SourceLabels {
+    /// `pack` with every line id under its label, or `None` when it names
+    /// none and goes out as it is.
+    fn alias(&mut self, pack: &str) -> Option<String> {
+        let mut value: Value = serde_json::from_str(pack).ok()?;
+        self.alias_ids(&mut value);
+        (!self.0.is_empty()).then(|| value.to_string())
+    }
+
+    fn alias_ids(&mut self, value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object.iter_mut() {
+                    match child {
+                        Value::String(id)
+                            if matches!(key.as_str(), "entity_id" | "segment_uuid") =>
+                        {
+                            let index = match self.0.iter().position(|known| *known == **id) {
+                                Some(index) => index,
+                                None => {
+                                    self.0.push(std::mem::take(id));
+                                    self.0.len() - 1
+                                }
+                            };
+                            *id = format!("L{}", index + 1);
+                        }
+                        _ => self.alias_ids(child),
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| self.alias_ids(item)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    /// `reply` with every label it cites back under its id. A label the pack
+    /// never named stays as written, for the reply's reader to refuse.
+    fn restore(&self, reply: String) -> String {
+        if self.0.is_empty() {
+            return reply;
+        }
+        let mut values = serde_json::Deserializer::from_str(&reply).into_iter::<Value>();
+        let Some(Ok(mut value)) = values.next() else {
+            return reply;
+        };
+        self.restore_ids(&mut value);
+        format!("{value}{}", &reply[values.byte_offset()..])
+    }
+
+    fn restore_ids(&self, value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object.iter_mut() {
+                    match child {
+                        Value::Array(citations) if key == "citations" => {
+                            for citation in citations {
+                                if let Some(id) = citation.as_str().and_then(|label| self.id(label))
+                                {
+                                    *citation = Value::String(id.clone());
+                                }
+                            }
+                        }
+                        _ => self.restore_ids(child),
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| self.restore_ids(item)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    fn id(&self, label: &str) -> Option<&String> {
+        let number = label.strip_prefix('L')?.parse::<usize>().ok()?;
+        self.0.get(number.checked_sub(1)?)
     }
 }
 
@@ -467,6 +577,13 @@ mod tests {
     struct ResponseFormat {
         #[serde(rename = "type")]
         kind: String,
+        json_schema: Option<WireSchema>,
+    }
+
+    #[derive(Deserialize)]
+    struct WireSchema {
+        name: String,
+        schema: Value,
     }
 
     #[derive(Deserialize)]
@@ -482,10 +599,18 @@ mod tests {
 
     #[test]
     fn sends_required_json_request_and_strips_fences() {
-        for shape in [
-            ReplyShape::Json,
-            ReplyShape::MeetingNotes,
-            ReplyShape::MeetingLedger,
+        for (shape, kind, schema) in [
+            (ReplyShape::Json, "json_object", None),
+            (
+                ReplyShape::MeetingNotes,
+                "json_schema",
+                Some("meeting_notes"),
+            ),
+            (
+                ReplyShape::MeetingLedger,
+                "json_schema",
+                Some("meeting_ledger"),
+            ),
         ] {
             let fixture = fixture_server(vec![
                 r#"{"choices":[{"message":{"content":"```json\n{\"headline\":\"done\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}"#.to_string(),
@@ -500,12 +625,21 @@ mod tests {
             assert_eq!(body.model, "fixture-model");
             assert_eq!(body.max_tokens, 42);
             assert_eq!(body.reasoning_effort, "none");
+            let format = body.response_format.expect("a response format");
+            assert_eq!(format.kind, kind);
             assert_eq!(
-                body.response_format
-                    .as_ref()
-                    .map(|format| format.kind.as_str()),
-                Some("json_object")
+                format.json_schema.as_ref().map(|wire| wire.name.as_str()),
+                schema
             );
+            if let Some(wire) = format
+                .json_schema
+                .filter(|wire| wire.name == "meeting_ledger")
+            {
+                assert_eq!(
+                    wire.schema["definitions"]["RawLedgerReceipt"]["properties"]["quote"]["type"],
+                    "string"
+                );
+            }
             assert_eq!(body.messages[0].role, "system");
             assert_eq!(body.messages[1].content, "evidence");
             fixture.handle.join().expect("fixture thread");
@@ -582,6 +716,56 @@ mod tests {
         assert_eq!(fixture.connections.load(Ordering::Relaxed), 1);
         fixture.handle.join().expect("fixture thread");
     }
+
+    #[test]
+    fn a_model_chosen_without_its_latest_tag_is_served() {
+        let fixture = fixture_server(vec![
+            r#"{"object":"list","data":[{"id":"sona-notes:latest","object":"model","context_length":16384}]}"#
+                .to_string(),
+        ]);
+        let generator =
+            LocalEndpointGenerator::new_with_context(&fixture.base_url, "sona-notes", None)
+                .expect("generator");
+        assert!(generator.is_available());
+        assert_eq!(
+            generator.context_window_bytes(),
+            Some(16_384 * LOCAL_CONTEXT_BYTES_PER_TOKEN)
+        );
+        fixture.handle.join().expect("fixture thread");
+    }
+
+    #[test]
+    fn a_notes_part_is_read_and_cited_by_line_labels() {
+        let first = "00000000-0000-0000-0000-000000000001";
+        let second = "00000000-0000-0000-0000-000000000002";
+        let reply = serde_json::json!({
+            "summary": [{"text": "Shipped.", "citations": ["L2", "L1", "L9"]}]
+        });
+        let fixture = fixture_server(vec![serde_json::json!({
+            "choices": [{"message": {"content": reply.to_string()}, "finish_reason": "stop"}]
+        })
+        .to_string()]);
+        let generator =
+            LocalEndpointGenerator::new(&fixture.base_url, "fixture-model").expect("generator");
+        let pack = serde_json::json!({"transcript": [
+            {"entity_id": first, "text": "We ship Monday."},
+            {"entity_id": second, "text": "Agreed."}
+        ]});
+        let answer = generator
+            .generate("system", &pack.to_string(), 42, ReplyShape::MeetingNotes)
+            .expect("generation");
+        let body = request_body(&fixture.requests.recv().expect("request"));
+        let sent: Value = serde_json::from_str(&body.messages[1].content).expect("sent part");
+        assert_eq!(sent["transcript"][0]["entity_id"], "L1");
+        assert_eq!(sent["transcript"][1]["entity_id"], "L2");
+        let answer: Value = serde_json::from_str(&answer).expect("restored reply");
+        assert_eq!(
+            answer["summary"][0]["citations"],
+            serde_json::json!([second, first, "L9"])
+        );
+        fixture.handle.join().expect("fixture thread");
+    }
+
     #[test]
     fn reachable_invalid_catalog_is_reported_not_skipped() {
         let fixture = fixture_server_with_status(vec![(503, r#"{"error":"busy"}"#.to_string())]);

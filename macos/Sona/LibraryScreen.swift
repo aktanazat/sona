@@ -1065,7 +1065,7 @@ private struct LibraryRetentionSection: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } trailing: {
-                    InputField(prompt: "5", text: $limitText)
+                    InputField(prompt: "100", text: $limitText)
                         .frame(width: 88)
                         .focused($editingLimit)
                         .disabled(store.savingRetention)

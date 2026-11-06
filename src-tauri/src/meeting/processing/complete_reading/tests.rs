@@ -248,7 +248,8 @@ mod tests {
         );
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let notes = notes(&generator, &evidence, &prompt, || Ok(())).expect("complete notes");
+        let notes = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
+            .expect("complete notes");
         assert_eq!(notes.decisions.len(), 3);
         assert_eq!(
             notes.decisions[0].citations[0].segment_id.uuid(),
@@ -318,7 +319,8 @@ mod tests {
         evidence.transcript.truncate(1);
         evidence.transcript[0].text = "会話 quoted \"speech\"\n".repeat(2_000);
         let scope = SourceScope::new(&evidence.transcript).expect("original unicode source");
-        let packs = notes_packs(&evidence, &scope, 700).expect("sectioned unicode turn");
+        let packs =
+            notes_packs(&evidence, &scope, &HashMap::new(), 700).expect("sectioned unicode turn");
         let mut recovered = String::new();
         for pack in packs {
             assert!(pack.as_ref().len() <= 700);
@@ -344,6 +346,7 @@ mod tests {
         let result = notes(
             &generator,
             &evidence,
+            &HashMap::new(),
             &artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default()),
             || {
                 if checks.fetch_add(1, Ordering::SeqCst) >= 2 {
@@ -628,6 +631,7 @@ mod tests {
         let content = notes(
             &generator,
             &evidence,
+            &HashMap::new(),
             &artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default()),
             || Ok(()),
         )
@@ -675,10 +679,15 @@ mod tests {
                 citations: vec![evidence.transcript[0].citation.entity_id.clone()],
             },
         };
-        let section = validate_artifact_output(&raw, &evidence.transcript, &evidence.template)
-            .expect("valid independently cited summary lines");
+        let section = validate_artifact_output(
+            &raw,
+            &evidence.transcript,
+            &HashMap::new(),
+            &evidence.template,
+        )
+        .expect("valid independently cited summary lines");
         let rows = notes_facts(&raw.summary, &section, &scope).expect("validated notes facts");
-        let packed = packs(rows, "{\"section_facts\":[", "]}", 2_000)
+        let packed = packs(rows, "{\"section_facts\":[", "]}", 2_000, Fill::Even)
             .expect("individual summary lines fit even when their joined display block does not");
         let mut cited_sources = Vec::new();
         for pack in packed {
@@ -784,8 +793,14 @@ mod tests {
             condense: true,
             calls: AtomicUsize::new(0),
         };
-        let result = notes(&generator, &evidence, "Read the meeting.", || Ok(()))
-            .expect("smaller facts keep making progress even within the same pack count");
+        let result = notes(
+            &generator,
+            &evidence,
+            &HashMap::new(),
+            "Read the meeting.",
+            || Ok(()),
+        )
+        .expect("smaller facts keep making progress even within the same pack count");
         assert_eq!(
             result
                 .summary
@@ -808,7 +823,13 @@ mod tests {
             condense: false,
             calls: AtomicUsize::new(0),
         };
-        let result = notes(&generator, &evidence, "Read the meeting.", || Ok(()));
+        let result = notes(
+            &generator,
+            &evidence,
+            &HashMap::new(),
+            "Read the meeting.",
+            || Ok(()),
+        );
         assert!(matches!(
             result,
             Err(ReadingError::Invalid(EngineFailureCause::EvidencePack))
@@ -858,16 +879,48 @@ mod tests {
             .collect()
     }
 
-    /// Answers a part of one turn, and cuts off the reply to a part of more
-    /// turns the way Apple Intelligence cuts off a reply at its limit.
-    struct CutOffWhenDense;
+    /// A ledger reply of one thread, quoting the first sentence of `turn`.
+    fn ledger_reply_citing(turn: &Value) -> String {
+        let text = turn["text"].as_str().expect("turn text");
+        let quote = text.split_inclusive('.').next().unwrap_or(text);
+        json!({
+            "headline": "The meeting was read.",
+            "threads": [{"topic": "Discussion", "state": "closed", "substantive": true, "owner": null,
+                "receipt": {"quote": quote, "speaker": null, "citations": [turn["segment_uuid"]]}}],
+            "open_loops": [], "commitments": [], "stances": [], "caveats": []
+        })
+        .to_string()
+    }
 
-    impl MeetingTextGenerator for CutOffWhenDense {
+    type DenseFailure = fn(ReplyShape) -> Result<String, MeetingTextGenerationError>;
+
+    /// The ways a reply to a part too big for the model fails: cut off at
+    /// its limit, or citing a line the part does not hold.
+    fn dense_failures() -> [(&'static str, DenseFailure); 2] {
+        [
+            ("cut off", |_| {
+                Err(MeetingTextGenerationError::ReplyNotStructured)
+            }),
+            ("rejected", |shape| {
+                Ok(if matches!(shape, ReplyShape::MeetingLedger) {
+                    ledger_reply_citing(&json!({"segment_uuid": "not-a-line", "text": "Agenda."}))
+                } else {
+                    reply_citing(r#"{"transcript":[{"entity_id":"not-a-line"}]}"#)
+                })
+            }),
+        ]
+    }
+
+    /// Answers a part of one turn, and fails the reply to a part of more
+    /// turns the way its `DenseFailure` says.
+    struct FailsWhenDense(DenseFailure);
+
+    impl MeetingTextGenerator for FailsWhenDense {
         fn is_available(&self) -> bool {
             true
         }
         fn model_id(&self) -> &'static str {
-            "cut-off-when-dense"
+            "fails-when-dense"
         }
         fn model_version(&self) -> Cow<'static, str> {
             Cow::Borrowed("1")
@@ -880,16 +933,19 @@ mod tests {
             _: &str,
             pack: &str,
             _: i32,
-            _: ReplyShape,
+            shape: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
             let input: Value = serde_json::from_str(pack).expect("bounded input");
-            if input["transcript"]
-                .as_array()
-                .is_some_and(|turns| turns.len() > 1)
-            {
-                return Err(MeetingTextGenerationError::ReplyNotStructured);
+            if input.get("part_headlines").is_some() {
+                return Ok(json!({"headline": "The meeting was read."}).to_string());
             }
-            Ok(reply_citing(pack))
+            match input["transcript"].as_array() {
+                Some(turns) if turns.len() > 1 => (self.0)(shape),
+                Some(turns) if matches!(shape, ReplyShape::MeetingLedger) => {
+                    Ok(ledger_reply_citing(&turns[0]))
+                }
+                _ => Ok(reply_citing(pack)),
+            }
         }
     }
 
@@ -897,9 +953,95 @@ mod tests {
     fn a_part_too_dense_for_one_reply_is_read_in_quarters() {
         let mut evidence = evidence();
         evidence.transcript.truncate(4);
-        let result = notes(&CutOffWhenDense, &evidence, "Read the meeting.", || Ok(()))
-            .expect("each quarter fits in one reply");
-        assert_eq!(cited_ids(&result), source_ids(&evidence));
+        for (failure, dense) in dense_failures() {
+            let result = notes(
+                &FailsWhenDense(dense),
+                &evidence,
+                &HashMap::new(),
+                "Read the meeting.",
+                || Ok(()),
+            )
+            .unwrap_or_else(|error| panic!("{failure}: {error:?}"));
+            assert_eq!(cited_ids(&result), source_ids(&evidence), "{failure}");
+            assert!(result.left_out.is_empty(), "{failure}");
+        }
+    }
+
+    #[test]
+    fn a_part_out_of_time_is_read_in_halves_once() {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(3);
+        let result = notes(
+            &FailsWhenDense(|_| Err(MeetingTextGenerationError::TimedOut)),
+            &evidence,
+            &HashMap::new(),
+            "Read the meeting.",
+            || Ok(()),
+        );
+        let left_out = match result {
+            Ok(result) => result.left_out.len(),
+            Err(error) => panic!("{error:?}"),
+        };
+        assert_eq!(
+            left_out, 1,
+            "the half that ran out of time is left out, not halved"
+        );
+    }
+
+    #[test]
+    fn a_ledger_part_too_dense_for_one_reply_is_read_in_quarters() {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(4);
+        let haystack =
+            ledger::fold_haystack(evidence.transcript.iter().map(|turn| turn.text.as_str()));
+        for (failure, dense) in dense_failures() {
+            let ledger = ledger(
+                &FailsWhenDense(dense),
+                &evidence,
+                &HashMap::new(),
+                &haystack,
+                || Ok(()),
+            )
+            .unwrap_or_else(|error| panic!("{failure}: {error:?}"));
+            let cited: Vec<String> = ledger
+                .threads
+                .iter()
+                .flat_map(|thread| &thread.receipt.citations)
+                .map(|citation| citation.segment_id.uuid().to_string())
+                .collect();
+            assert_eq!(cited, source_ids(&evidence), "{failure}");
+            assert!(ledger.caveats.is_empty(), "{failure}");
+        }
+    }
+
+    #[test]
+    fn a_notes_row_names_its_speaker_and_not_its_meeting() {
+        let mut evidence = evidence();
+        evidence.transcript.truncate(2);
+        let scope = SourceScope::new(&evidence.transcript).expect("original sources");
+        let speakers =
+            HashMap::from([(evidence.transcript[1].citation.entity_id.clone(), "Casey")]);
+        let packs = notes_packs(&evidence, &scope, &speakers, 6_000).expect("one notes part");
+        let input: Value = serde_json::from_str(packs[0].as_ref()).expect("notes part");
+        let rows = input["transcript"].as_array().expect("notes rows");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.get("session_id").is_none()));
+        assert!(rows[0].get("speaker").is_none());
+        assert_eq!(rows[1]["speaker"], "Casey");
+    }
+
+    #[test]
+    fn a_meeting_longer_than_one_notes_part_is_cut_into_even_parts() {
+        let evidence = evidence();
+        let scope = SourceScope::new(&evidence.transcript).expect("original sources");
+        let speakers = HashMap::new();
+        let whole = notes_packs(&evidence, &scope, &speakers, usize::MAX).expect("one part");
+        assert_eq!(whole.len(), 1);
+        let length = whole[0].as_ref().len();
+        let parts = notes_packs(&evidence, &scope, &speakers, length * 9 / 10).expect("parts");
+        let sizes: Vec<usize> = parts.iter().map(|part| part.as_ref().len()).collect();
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes[0].abs_diff(sizes[1]) < length / 20, "{sizes:?}");
     }
 
     /// Stops every notes request by the safety filter unless it is asked under
@@ -936,9 +1078,13 @@ mod tests {
     #[test]
     fn a_part_the_safety_filter_keeps_stopping_is_read_under_short_instructions() {
         let evidence = gradual_evidence();
-        let result = notes(&StoppedUnlessShort, &evidence, "Read the meeting.", || {
-            Ok(())
-        })
+        let result = notes(
+            &StoppedUnlessShort,
+            &evidence,
+            &HashMap::new(),
+            "Read the meeting.",
+            || Ok(()),
+        )
         .expect("the short instructions pass");
         assert_eq!(cited_ids(&result), source_ids(&evidence));
     }
@@ -1070,7 +1216,7 @@ mod tests {
             invalid_reduction_reference: false,
             several_cited_facts: false,
         };
-        let content = notes(&generator, &evidence, &prompt, || Ok(()))
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
             .expect("repeated source provenance must not prevent complete notes");
         assert_eq!(
             content
@@ -1131,8 +1277,8 @@ mod tests {
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
         assert!(matches!(
-            notes(&generator, &evidence, &prompt, || Ok(())),
-            Err(ReadingError::Invalid(EngineFailureCause::ReplyRejected))
+            notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(())),
+            Err(ReadingError::Rejected(_))
         ));
     }
 
@@ -1154,7 +1300,7 @@ mod tests {
         };
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let content = notes(&generator, &evidence, &prompt, || Ok(())).expect(
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(())).expect(
         "several supported facts must not multiply source metadata until complete reading stops",
     );
         assert_eq!(
@@ -1247,7 +1393,7 @@ mod tests {
         });
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let content = notes(&generator, &evidence, &prompt, || Ok(()))
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
             .expect("complete reconciled meeting notes");
         assert_eq!(content.decisions.len(), 3);
         assert_eq!(content.action_items.len(), 1);
@@ -1283,8 +1429,13 @@ mod tests {
             "key_questions": [], "risks": [], "follow_up_draft": cited(159)
         }))
         .expect("returning decision fixture");
-        let section = validate_artifact_output(&raw, &evidence.transcript, &evidence.template)
-            .expect("cited returning decisions");
+        let section = validate_artifact_output(
+            &raw,
+            &evidence.transcript,
+            &HashMap::new(),
+            &evidence.template,
+        )
+        .expect("cited returning decisions");
         let scope = SourceScope::new(&evidence.transcript).expect("original sources");
         let decisions: Vec<Value> = notes_facts(&raw.summary, &section, &scope)
             .expect("chronological note facts")
@@ -1330,8 +1481,13 @@ mod tests {
             "follow_up_draft": cited("No follow-up was agreed.", 0)
         }))
         .expect("separately cited narrative fixture");
-        let section = validate_artifact_output(&raw, &evidence.transcript, &evidence.template)
-            .expect("valid narrative");
+        let section = validate_artifact_output(
+            &raw,
+            &evidence.transcript,
+            &HashMap::new(),
+            &evidence.template,
+        )
+        .expect("valid narrative");
         let scope = SourceScope::new(&evidence.transcript).expect("original sources");
         let rows: Vec<Value> = notes_facts(&raw.summary, &section, &scope)
             .expect("compacted narrative facts")
@@ -1521,13 +1677,14 @@ mod tests {
         let generator = CompleteSourceConsumer::new(&evidence);
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let content =
-            notes(&generator, &evidence, &prompt, || Ok(())).expect("complete original meeting");
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
+            .expect("complete original meeting");
         let expected: Vec<_> = evidence
             .transcript
             .iter()
             .map(|turn| {
-                serde_json::to_value(PromptEvidence::from(turn)).expect("original source fields")
+                serde_json::to_value(NotesPromptEvidence::from(turn))
+                    .expect("original source fields")
             })
             .collect();
         assert_eq!(
@@ -1716,8 +1873,8 @@ mod tests {
         let generator = CompleteSourceConsumer::new(&evidence);
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let content =
-            notes(&generator, &evidence, &prompt, || Ok(())).expect("single-pass grouped notes");
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
+            .expect("single-pass grouped notes");
         assert_eq!(generator.replay.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             content
@@ -1809,7 +1966,7 @@ mod tests {
         ids.push(uuid::Uuid::from_u128(9001).to_string());
         let index = transcript_citation_index(&evidence.transcript).expect("all original sources");
         assert!(
-            resolve_citations(&ids, &index).is_err(),
+            resolve_citations(&ids, &index, "threads.receipt").is_err(),
             "a foreign source after the first page is still rejected"
         );
     }
@@ -1833,14 +1990,14 @@ mod tests {
         let generator = CompleteSourceConsumer::new(&evidence);
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        let content = notes(&generator, &evidence, &prompt, || Ok(()))
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
             .expect("all irregular original occurrences");
         assert_eq!(
             *generator.observed.lock().expect("observed original fields"),
             evidence
                 .transcript
                 .iter()
-                .map(|turn| serde_json::to_value(PromptEvidence::from(turn))
+                .map(|turn| serde_json::to_value(NotesPromptEvidence::from(turn))
                     .expect("original source fields"))
                 .collect::<Vec<_>>()
         );
