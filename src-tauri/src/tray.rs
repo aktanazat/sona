@@ -931,7 +931,9 @@ pub(crate) fn set_tray_visibility_with(
 }
 
 pub fn set_tray_visibility(app: &AppHandle, visible: bool) {
-    let tray = app.state::<TrayIcon>();
+    let Some(tray) = app.try_state::<TrayIcon>() else {
+        return;
+    };
     if let Err(error) = set_tray_visibility_with(visible, |visible| tray.set_visible(visible)) {
         error!("Failed to set tray visibility: {error}");
     } else {
