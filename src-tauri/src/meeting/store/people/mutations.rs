@@ -3,7 +3,7 @@ mod linking;
 
 pub(in crate::meeting::store) use derivation::{
     derive_calendar_links_in, derive_speaker_link_in, derive_title_links_in,
-    link_document_mentions_in, recompute_organizations_in,
+    link_document_mentions_in, person_for_named_speaker_in, recompute_organizations_in,
 };
 
 pub(in crate::meeting::store) use self::linking::upsert_link_in;
