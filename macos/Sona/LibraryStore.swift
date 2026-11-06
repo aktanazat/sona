@@ -631,7 +631,7 @@ final class LibraryStore {
     private func loadSettings() async {
         do {
             let settings: LibrarySettings = try await core.request("get_app_settings")
-            limit = settings.historyLimit ?? 5
+            limit = settings.historyLimit ?? 100
             retention = settings.recordingRetentionPeriod ?? .preserveLimit
         } catch {
             self.error = error.localizedDescription

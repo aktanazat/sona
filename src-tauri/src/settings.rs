@@ -1668,7 +1668,7 @@ fn default_reliable_paste() -> bool {
     true
 }
 
-pub(crate) const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 19;
+pub(crate) const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 20;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -1778,7 +1778,7 @@ fn default_auto_submit() -> bool {
 }
 
 fn default_history_limit() -> usize {
-    5
+    100
 }
 
 fn default_recording_retention_period() -> RecordingRetentionPeriod {
@@ -2829,6 +2829,15 @@ fn apply_settings_migrations(
         settings
             .replacements_rules
             .retain(|rule| !(rule.spoken == "at sign" && rule.written == "@" && rule.enabled));
+        updated = true;
+    }
+    if stored_schema_version < 20 {
+        // Five was the shipped default and kept only minutes of dictation, so
+        // a store still holding it is raised to the new default. A store can
+        // not tell a chosen 5 from the default; any other count stays.
+        if settings.history_limit == 5 {
+            settings.history_limit = default_history_limit();
+        }
         updated = true;
     }
     if settings.settings_schema_version < CURRENT_SETTINGS_SCHEMA_VERSION {
@@ -4285,6 +4294,19 @@ mod tests {
                 ("dot com", ".com", true),
             ]
         );
+    }
+
+    #[test]
+    fn schema_twenty_raises_only_the_old_default_history_limit() {
+        for (stored, migrated) in [(5, 100), (0, 0), (20, 20), (500, 500)] {
+            let mut settings = get_default_settings();
+            settings.history_limit = stored;
+            settings.settings_schema_version = 19;
+            let raw = serde_json::to_value(&settings).expect("nineteen settings serialize");
+
+            assert!(apply_settings_migrations(&mut settings, &raw));
+            assert_eq!(settings.history_limit, migrated, "stored {stored}");
+        }
     }
 
     /// A user who writes the retired rule back is not migrated a second time:
