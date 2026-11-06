@@ -3653,30 +3653,46 @@ pub fn update_settings<Rt: tauri::Runtime, R>(
         Ok::<R, SettingsPersistError>(update(settings))
     })
 }
-/// Persist a connection receipt without changing the generation settings
-/// proposals compare against.
-pub(crate) fn set_agent_panel_last_successful_connection_at<R: tauri::Runtime>(
+/// Persist bookkeeping without changing the generation settings proposals
+/// compare against: a stamp moves on its own schedule, and a moved generation
+/// makes every pending agent change and its Undo stale.
+fn write_bookkeeping<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    timestamp_utc_ms: i64,
+    setting: Option<&str>,
+    update: impl FnOnce(&mut AppSettings),
 ) -> Result<(), SettingsPersistError> {
     let persisted = {
         let _settings_lock = lock_settings_store();
         let mut settings = get_settings_locked(app);
-        settings.agent_panel_last_successful_connection_at = Some(timestamp_utc_ms);
+        update(&mut settings);
         write_settings_locked(app, &mut settings)
     };
     let _ = app.emit(
         "settings-changed",
-        serde_json::json!({ "setting": "agent_panel" }),
+        serde_json::json!({ "setting": setting }),
     );
     if let Err(error) = &persisted {
         warn!("Failed to persist settings: {error}");
     }
     persisted
 }
-pub(crate) fn mark_post_process_secret_verified(app: &AppHandle, provider_id: &str) {
+
+pub(crate) fn set_agent_panel_last_successful_connection_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    timestamp_utc_ms: i64,
+) -> Result<(), SettingsPersistError> {
+    write_bookkeeping(app, Some("agent_panel"), |settings| {
+        settings.agent_panel_last_successful_connection_at = Some(timestamp_utc_ms);
+    })
+}
+
+/// Every cloud cleanup that reached its provider with a key lands here.
+pub(crate) fn mark_post_process_secret_verified<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    provider_id: &str,
+) {
     // Nothing in this function's shape can report a store failure; the settings seam logs it.
-    let _ = update_settings(app, |settings| {
+    let _ = write_bookkeeping(app, None, |settings| {
         let state = settings
             .post_process_secret_states
             .entry(provider_id.to_string())
@@ -4733,6 +4749,41 @@ mod tests {
             "a write after the move must not report success"
         );
         assert!(!path.exists(), "nothing puts the settings file back");
+    }
+
+    /// Every cloud cleanup marks its provider's key verified. That stamp moved
+    /// the generation agent changes are checked against, so a change proposed
+    /// before a dictation could not be applied, and an applied change lost
+    /// its Undo.
+    #[test]
+    fn marking_a_key_verified_keeps_pending_changes_current() {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        update_settings(handle, |_| ()).expect("first write");
+        let revision = get_settings(handle).settings_revision;
+
+        mark_post_process_secret_verified(handle, "openai");
+
+        let mut stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(data_dir.path().join(SETTINGS_STORE_PATH)).expect("settings file"),
+        )
+        .expect("settings file parses");
+        let stored: AppSettings =
+            serde_json::from_value(stored["settings"].take()).expect("stored settings parse");
+        assert!(
+            stored.post_process_secret_states["openai"]
+                .last_verified_at
+                .is_some(),
+            "the stamp is saved"
+        );
+        assert_eq!(stored.settings_revision, revision);
+        assert_eq!(get_settings(handle).settings_revision, revision);
     }
 
     #[test]
