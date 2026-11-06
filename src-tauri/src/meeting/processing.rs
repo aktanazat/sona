@@ -897,6 +897,19 @@ pub(crate) struct RelationshipRefresh {
     generator: Arc<dyn MeetingTextGenerator>,
 }
 
+/// Processing parked behind the capture that holds this, lifted when the
+/// holder drops it and by nothing else. One flag rather than a count, because
+/// the capture lease admits one capture at a time.
+pub(crate) struct CaptureGate {
+    capture_active: Arc<AtomicBool>,
+}
+
+impl Drop for CaptureGate {
+    fn drop(&mut self) {
+        self.capture_active.store(false, Ordering::Release);
+    }
+}
+
 impl MeetingProcessingService {
     pub fn new(app: Option<AppHandle>) -> Self {
         let relay = RelayTextGenerator::new(app.clone());
@@ -1171,9 +1184,13 @@ impl MeetingProcessingService {
         }
     }
 
-    pub fn set_capture_active(&self, active: bool) {
-        let _activity = active.then(crate::planning::quiet::foreground_activity);
-        self.capture_active.store(active, Ordering::Release);
+    /// Park every run at its next checkpoint until the returned gate drops.
+    pub(crate) fn park_for_capture(&self) -> CaptureGate {
+        let _activity = crate::planning::quiet::foreground_activity();
+        self.capture_active.store(true, Ordering::Release);
+        CaptureGate {
+            capture_active: Arc::clone(&self.capture_active),
+        }
     }
 
     pub fn cancel(&self, session_id: MeetingSessionId) {
