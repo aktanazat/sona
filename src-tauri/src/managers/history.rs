@@ -1977,6 +1977,16 @@ impl HistoryManager {
     /// once it is released, so an open Library mirrors the sweep instead of
     /// finding out at its next reload.
     pub fn cleanup_old_entries(&self) -> Result<()> {
+        if self
+            .app_handle
+            .try_state::<crate::settings::UnreadableSettings>()
+            .is_some()
+        {
+            warn!(
+                "Retention skipped: the settings file was unreadable, so its limits are defaults"
+            );
+            return Ok(());
+        }
         let settings = crate::settings::get_settings(&self.app_handle);
         let limit = settings.history_limit;
         let expiry =
