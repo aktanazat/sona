@@ -442,18 +442,39 @@ fn is_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+/// The applied change beside whether it reached the disk. The store's memory
+/// takes a change the disk refused, so the change is live either way: the
+/// running app follows it, and its undo comes back with it.
 pub(crate) fn apply_changes(
     app: &AppHandle,
     expected_revision: u64,
     changes: &[SonaSettingChangeV1],
     allowed: &SonaAllowedValuesV1,
-) -> Result<AppliedSettings, ConfigError> {
-    let (undo, revision) = settings::try_update_settings_with_revision(app, |settings| {
-        apply_changes_to_settings(settings, expected_revision, changes, allowed)
-    })?;
-    let kinds = undo.iter().map(SettingUndo::kind).collect::<Vec<_>>();
+) -> Result<(AppliedSettings, Result<(), ConfigError>), ConfigError> {
+    let (applied, persisted) = write_changes(app, expected_revision, changes, allowed)?;
+    let kinds = applied
+        .undo
+        .iter()
+        .map(SettingUndo::kind)
+        .collect::<Vec<_>>();
     apply_runtime_effects(app, &kinds);
-    Ok(AppliedSettings { revision, undo })
+    Ok((applied, persisted))
+}
+
+fn write_changes<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    expected_revision: u64,
+    changes: &[SonaSettingChangeV1],
+    allowed: &SonaAllowedValuesV1,
+) -> Result<(AppliedSettings, Result<(), ConfigError>), ConfigError> {
+    let (undo, revision, persisted) =
+        settings::try_update_settings_with_revision(app, |settings| {
+            apply_changes_to_settings(settings, expected_revision, changes, allowed)
+        })?;
+    Ok((
+        AppliedSettings { revision, undo },
+        persisted.map_err(ConfigError::from),
+    ))
 }
 
 pub(super) fn apply_changes_to_settings(
@@ -466,17 +487,19 @@ pub(super) fn apply_changes_to_settings(
     mutate_settings(settings, expected_revision, &resolved)
 }
 
+/// The undo beside whether it reached the disk; like an apply, it is live
+/// either way.
 pub(crate) fn undo_changes(
     app: &AppHandle,
     expected_revision: u64,
     undo: &[SettingUndo],
-) -> Result<u64, ConfigError> {
-    let (_, revision) = settings::try_update_settings_with_revision(app, |settings| {
+) -> Result<(u64, Result<(), ConfigError>), ConfigError> {
+    let ((), revision, persisted) = settings::try_update_settings_with_revision(app, |settings| {
         undo_changes_to_settings(settings, expected_revision, undo)
     })?;
     let kinds = undo.iter().map(SettingUndo::kind).collect::<Vec<_>>();
     apply_runtime_effects(app, &kinds);
-    Ok(revision)
+    Ok((revision, persisted.map_err(ConfigError::from)))
 }
 
 pub(super) fn undo_changes_to_settings(
@@ -965,5 +988,42 @@ mod tests {
             ),
             Err(ConfigError::InvalidSetting)
         );
+    }
+
+    /// A settings save that failed still left the change live, because the
+    /// store's memory took it. The apply reported failure without the undo,
+    /// so the card said "Not applied" over a change it could no longer undo.
+    #[test]
+    fn a_change_the_disk_refused_keeps_its_undo() {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        settings::update_settings(handle, |settings| settings.theme = Theme::Light)
+            .expect("first write");
+        let revision = settings::get_settings(handle).settings_revision;
+        let mut blocked = data_dir
+            .path()
+            .join(settings::SETTINGS_STORE_PATH)
+            .into_os_string();
+        blocked.push(format!(".{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocked).expect("block the next save");
+
+        let (applied, persisted) = write_changes(
+            handle,
+            revision,
+            &[SonaSettingChangeV1::Theme(Theme::Dark)],
+            &SonaAllowedValuesV1::default(),
+        )
+        .expect("the change is live, so it comes back with its undo");
+
+        assert_eq!(persisted, Err(ConfigError::NotPersisted));
+        assert_eq!(settings::get_settings(handle).theme, Theme::Dark);
+        assert_eq!(applied.undo().len(), 1);
+        assert_eq!(applied.revision, revision + 1);
     }
 }
