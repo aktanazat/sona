@@ -265,22 +265,23 @@ struct StorageStatus: Decodable {
         migratedAt.map { Date(timeIntervalSince1970: $0 / 1000) }
     }
 
-    /// Only the reasons a reader can act on: "unlocking" is already the word above.
+    /// Only the reasons a reader can act on: "unlocking" is already the word
+    /// above. The core reports a file it cannot open as encrypted with a
+    /// reason, so the outcome follows `encrypted`, never the reason.
     var sentence: String? {
         guard !isReadable, !isUnlocking, let reason else { return nil }
-        switch reason {
-        case "key_unavailable":
-            return "The system credential store returned no usable key, so history is stored unencrypted."
-        case "encryption_unavailable":
-            return "This version of Sona cannot open an encrypted database, so history is stored unencrypted."
-        case "migration_failed":
-            return "Encrypting the existing database failed. The unencrypted database is intact and still in use."
-        case "key_rejected":
-            return "The stored key does not open the encrypted database, so history cannot be read."
-        default:
-            return reason
+        let cause = switch reason {
+        case "key_unavailable": "The system credential store returned no usable key"
+        case "encryption_unavailable": "This version of Sona cannot open an encrypted database"
+        case "migration_failed": "Encrypting the existing database failed"
+        case "key_rejected": "The stored key does not open the encrypted database"
+        default: reason
         }
+        return encrypted ? "\(cause), so history cannot be read." : "\(cause), so history is stored unencrypted."
     }
+
+    /// The one line the Library states.
+    var line: String { sentence ?? word }
 }
 
 // MARK: - What Sona holds

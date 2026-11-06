@@ -323,7 +323,8 @@ private struct KeptDictationRow: View {
                     PlaybackBar(store: store, id: entry.id, length: entry.length)
                     Button("Transcribe") { store.retryTranscription(entry.id) }
                         .buttonStyle(.compact)
-                        .disabled(busy)
+                        .disabled(busy || store.replayRefusal != nil)
+                        .help(store.replayRefusal ?? "")
                 }
                 Button("Delete") { confirmingDelete = true }
                     .buttonStyle(.compact)
@@ -702,7 +703,8 @@ private struct HistoryRowDetail: View {
 
             Button("Transcribe again") { store.retryTranscription(row.id) }
                 .buttonStyle(.compact)
-                .disabled(busy)
+                .disabled(busy || store.replayRefusal != nil)
+                .help(store.replayRefusal ?? "")
 
             Menu {
                 Button("Add correction") { correct(row) }
@@ -712,7 +714,7 @@ private struct HistoryRowDetail: View {
                 }
                 .disabled(busy)
                 Button("Process again") { processAgain(row) }
-                    .disabled(busy)
+                    .disabled(busy || store.replayRefusal != nil)
                 Divider()
                 Button("Delete", role: .destructive) { confirmingDelete = true }
                     .disabled(busy)
@@ -1051,7 +1053,7 @@ private struct ReceiptTable: View {
 private struct LibraryRetentionSection: View {
     let store: LibraryStore
 
-    @State private var limitText = ""
+    @State private var draft = LimitDraft()
     @FocusState private var editingLimit: Bool
 
     var body: some View {
@@ -1065,10 +1067,10 @@ private struct LibraryRetentionSection: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } trailing: {
-                    InputField(prompt: "100", text: $limitText)
+                    InputField(prompt: "100", text: $draft.text)
                         .frame(width: 88)
                         .focused($editingLimit)
-                        .disabled(store.savingRetention)
+                        .disabled(store.savingRetention || store.limit == nil)
                         .onSubmit { commit() }
                 }
                 ChoiceRow(
@@ -1086,24 +1088,19 @@ private struct LibraryRetentionSection: View {
                 }
             }
         }
-        .onAppear { limitText = "\(store.limit)" }
+        .onAppear { draft.follow(store.limit, editing: false) }
         .onChange(of: store.limit) { _, value in
-            if !editingLimit { limitText = "\(value)" }
+            draft.follow(value, editing: editingLimit)
         }
         .onChange(of: editingLimit) { _, focused in
             if !focused { commit() }
         }
     }
 
-    /// A field that does not hold a number is not a limit; the last accepted
-    /// one comes back rather than a zero the reader never typed.
     private func commit() {
-        guard let value = Int(limitText.trimmingCharacters(in: .whitespaces)), value >= 0 else {
-            limitText = "\(store.limit)"
-            return
+        if let limit = draft.commit(ceiling: LibraryStore.limitCeiling) {
+            store.updateLimit(limit)
         }
-        store.updateLimit(value)
-        limitText = "\(min(value, LibraryStore.limitCeiling))"
     }
 }
 

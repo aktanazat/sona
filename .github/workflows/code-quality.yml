@@ -46,3 +46,5 @@ jobs:
           xcode-version: latest-stable
       - name: Run native onboarding checks
         run: bash scripts/check-onboarding.sh
+      - name: Run native Library checks
+        run: bash scripts/check-library.sh

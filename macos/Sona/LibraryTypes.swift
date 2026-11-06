@@ -490,31 +490,34 @@ struct HistoryAudioChunk: Decodable {
     let eof: Bool
 }
 
-/// Whether the log is encrypted at rest, and why not when it is not.
-struct HistoryStorageState: Decodable {
-    let encrypted: Bool
-    let migratedAt: Int64?
-    let reason: String?
+/// The retention field's text and the limit it last showed. A field the
+/// reader has not edited follows the store and saves nothing, so a limit
+/// that lands while it has focus is never overwritten by the one it replaced.
+struct LimitDraft {
+    var text = ""
+    private var shown: Int?
 
-    /// The one line the storage row states.
-    var line: String {
-        if encrypted {
-            return "Encrypted at rest"
+    private var edited: Bool { text != (shown.map(String.init) ?? "") }
+
+    /// Shows `limit`, unless the reader is part way through typing another.
+    mutating func follow(_ limit: Int?, editing: Bool) {
+        guard !(editing && edited) else { return }
+        shown = limit
+        text = limit.map(String.init) ?? ""
+    }
+
+    /// The limit to save once the field lets go, at most `ceiling`; none when
+    /// the reader typed nothing new. Text that is not a count is not a limit,
+    /// so the shown one comes back.
+    mutating func commit(ceiling: Int) -> Int? {
+        guard edited else { return nil }
+        guard let value = Int(text.trimmingCharacters(in: .whitespaces)), value >= 0 else {
+            text = shown.map(String.init) ?? ""
+            return nil
         }
-        switch reason {
-        case "encryption_unavailable":
-            return "Not encrypted: this build cannot open an encrypted database."
-        case "key_rejected":
-            return "The stored key does not open the encrypted database, so history cannot be read."
-        case "key_unavailable":
-            return "Not encrypted: the system credential store returned no usable key."
-        case "migration_failed":
-            return "Not encrypted: encrypting the existing database failed, and the plain one is still in use."
-        case let other?:
-            return "Not encrypted: \(other)"
-        case nil:
-            return "Not encrypted"
-        }
+        let limit = min(value, ceiling)
+        follow(limit, editing: false)
+        return limit
     }
 }
 

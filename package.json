@@ -22,6 +22,7 @@
     "typecheck:mcp": "cd tools/sona-mcp && bun install && bun run typecheck",
     "generate:native-dispatch": "python3 scripts/gen_native_dispatch.py",
     "check:onboarding": "bash scripts/check-onboarding.sh",
+    "check:library": "bash scripts/check-library.sh",
     "check:identity": "bun scripts/ci/check-identity.ts"
   },
   "dependencies": {
