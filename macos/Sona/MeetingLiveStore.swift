@@ -501,6 +501,18 @@ final class MeetingLiveStore {
         textEngine = choice
     }
 
+    /// A local server stopping or starting, or the Apple model finishing its
+    /// download, sends no event, so the meetings home asks again on this beat
+    /// for as long as it is on screen.
+    private static let engineRecheck = Duration.seconds(30)
+
+    func watchEngine() async {
+        while !Task.isCancelled {
+            await loadEngine()
+            try? await Task.sleep(for: MeetingLiveStore.engineRecheck)
+        }
+    }
+
     /// System Settings → Apple Intelligence & Siri, where the switch and the
     /// model download are.
     func openAppleIntelligenceSettings() {
