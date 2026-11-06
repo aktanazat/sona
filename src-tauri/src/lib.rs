@@ -927,10 +927,8 @@ fn build_tray(app_handle: &AppHandle, visible: bool) -> anyhow::Result<()> {
                         session_id: snapshot.session_id,
                         expected_revision: snapshot.revision,
                     };
-                    if snapshot
-                        .allowed_actions
-                        .contains(&AllowedMeetingAction::CancelPreflight)
-                    {
+                    let cancel = tray::meeting_cancel(snapshot.phase, &snapshot.allowed_actions);
+                    if cancel == Some(tray::MeetingCancel::Preflight) {
                         match manager.cancel_preflight(request).await {
                             Ok(receipt) if receipt.result == OperationResult::Committed => {
                                 tray::set_meeting_tray_snapshot(&app, None);
@@ -942,10 +940,7 @@ fn build_tray(app_handle: &AppHandle, visible: bool) -> anyhow::Result<()> {
                                 );
                             }
                         }
-                    } else if snapshot
-                        .allowed_actions
-                        .contains(&AllowedMeetingAction::Discard)
-                    {
+                    } else if cancel == Some(tray::MeetingCancel::Capture) {
                         match manager.discard(request).await {
                             Ok(result) if result.removed => {
                                 tray::set_meeting_tray_snapshot(&app, None);
