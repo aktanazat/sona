@@ -97,9 +97,10 @@ final class LibraryStore {
 
     // MARK: What is kept
 
-    private(set) var limit = 0
+    /// Unknown until the core answers, so nothing can save a stand-in.
+    private(set) var limit: Int?
     private(set) var retention: LibraryRetention = .preserveLimit
-    private(set) var storage: HistoryStorageState?
+    private(set) var storage: StorageStatus?
     private(set) var savingRetention = false
 
     /// The last thing the core could not do, shown until the next success.
@@ -252,10 +253,13 @@ final class LibraryStore {
 
     /// A new core. Its recovery runs once storage unlocks, so a read may
     /// answer before it; the first read that names recovered ids is told to
-    /// the shell, once.
+    /// the shell, once. The limit is read again too: a Library first opened
+    /// while the core was down never had it.
     func coreStarted() async {
         recoveryPending = true
+        async let settings: Void = loadSettings()
         await loadKept()
+        await settings
     }
 
     /// The kept recordings, read again. Only the newest read writes; a read
@@ -640,6 +644,12 @@ final class LibraryStore {
 
     private func loadStorage() async {
         storage = try? await core.request("history_storage_status")
+    }
+
+    /// Why a recording cannot be transcribed again, when it cannot: with saved
+    /// history off, the new version has nowhere to go.
+    var replayRefusal: String? {
+        limit == 0 ? "Saved history is off. Set Dictations to keep above 0." : nil
     }
 
     /// How many entries the core keeps. Zero keeps none, which is how the log
