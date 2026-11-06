@@ -1108,6 +1108,26 @@ fn speaker_derivation_refuses_the_users_own_microphone_voice() {
     );
 }
 
+/// A rename back to a label the store wrote, as undoing a rename does, names
+/// nobody: it must not leave a person called `Speaker 2` behind.
+#[test]
+fn speaker_derivation_refuses_a_label_the_store_wrote() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session = meeting(&store, "Pricing review", 1);
+    let connection = store.connection()?;
+
+    for label in ["Speaker 2", "Unknown speaker"] {
+        speaker(&connection, session, SourceKind::SystemAudio, label);
+        assert_eq!(
+            derive_speaker_link_in(&connection, session, label, 10)?,
+            0,
+            "{label:?} minted a person"
+        );
+    }
+    assert!(all_people_in(&connection)?.is_empty());
+    Ok(())
+}
+
 fn speaker(
     connection: &Connection,
     session_id: MeetingSessionId,
