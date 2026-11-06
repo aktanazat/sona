@@ -50,7 +50,6 @@ pub(crate) struct NativeRecorderDevice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeRecorderError {
     Unsupported,
-    ScreenPermissionDenied,
     CameraPermissionDenied,
     MicrophonePermissionDenied,
     SourceSelectionCancelled,
@@ -68,7 +67,6 @@ impl NativeRecorderError {
     fn from_bridge(result: c_int) -> Self {
         match result {
             1 => Self::Unsupported,
-            2 => Self::ScreenPermissionDenied,
             3 => Self::CameraPermissionDenied,
             4 => Self::MicrophonePermissionDenied,
             5 => Self::SourceSelectionCancelled,
@@ -279,10 +277,6 @@ mod tests {
         assert_eq!(
             NativeRecorderError::from_bridge(6),
             NativeRecorderError::SourceUnavailable
-        );
-        assert_eq!(
-            NativeRecorderError::from_bridge(2),
-            NativeRecorderError::ScreenPermissionDenied
         );
     }
 }

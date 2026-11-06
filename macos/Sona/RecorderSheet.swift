@@ -81,7 +81,9 @@ struct RecorderSheet: View {
         case .idle:
             setup
         case .permission:
-            panel { RecorderNotice(text: store.permission.request, tone: Theme.accent) }
+            if let permission = store.permission {
+                panel { RecorderNotice(text: permission.request, tone: Theme.accent) }
+            }
         case .previewing, .starting, .recording, .paused, .finalizing:
             sources
         case .saved:
