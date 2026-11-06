@@ -1786,6 +1786,10 @@ pub struct InterruptedRecovery {
     /// was, so importing it again brings in the whole meeting, and a phone
     /// that never heard the import land sends it again.
     pub abandoned_imports: Vec<MeetingSessionId>,
+    /// Meetings a previous launch left in `processing` with their notes
+    /// already written for their current transcript, moved on to review by
+    /// this pass: the run had finished everything but that move.
+    pub finished: Vec<MeetingSessionId>,
 }
 
 /// One recorded rewrite of a meeting's notes.
@@ -6875,7 +6879,11 @@ impl MeetingStore {
     /// or mid-processing: the phase moves to `recovery_required` and the
     /// processing status becomes terminal in the same transaction, because a
     /// phase that parks the meeting for a human while the status still reads
-    /// `pending` is the state that showed "Processing" forever. A row already
+    /// `pending` is the state that showed "Processing" forever. The one
+    /// exception is a meeting left in `processing` whose notes were already
+    /// written for its current transcript: its run had finished everything
+    /// but the move to review, so this pass finishes that move instead of
+    /// asking for a recovery that would write the notes again. A row already
     /// parked in `recovery_required` with a non-terminal status is the same
     /// state left by launches that flipped the phase alone; it is healed
     /// without touching the phase, the revision, or the event log, since
@@ -6907,9 +6915,14 @@ impl MeetingStore {
             cause: None,
         })?;
         let mut recovered = Vec::new();
+        let mut finished = Vec::new();
         for value in ids {
             let session_id = MeetingSessionId::from_uuid(parse_uuid(&value)?);
             self.repair_session_tracks(session_id)?;
+            if self.finish_saved_run(session_id)? {
+                finished.push(session_id);
+                continue;
+            }
             let mut connection = self.connection()?;
             let transaction = connection.transaction()?;
             let current = session_row(&transaction, session_id)?;
@@ -6951,7 +6964,40 @@ impl MeetingStore {
             status_resolved,
             discarded,
             abandoned_imports,
+            finished,
         })
+    }
+
+    /// Move a meeting the last launch left in `processing` on to review when
+    /// its notes for its current transcript are already written, and say
+    /// whether it did. The status is written before the phase, so a launch
+    /// that ends between the two leaves a row the next pass finishes the
+    /// same way.
+    fn finish_saved_run(&self, session_id: MeetingSessionId) -> Result<bool, StoreError> {
+        let revision = {
+            let connection = self.connection()?;
+            let current = session_row(&connection, session_id)?;
+            if current.phase != MeetingPhase::Processing
+                || !has_notes_for_current_transcript(&connection, session_id)?
+            {
+                return Ok(false);
+            }
+            current.revision
+        };
+        self.set_processing_status(session_id, ProcessingStatus::Succeeded)?;
+        self.transition(StoreTransition {
+            operation_id: None,
+            actor: OperationActor::System,
+            command: MeetingCommandKind::Stop,
+            requested_at_utc_ms: utc_now_ms(),
+            session_id,
+            expected_revision: revision,
+            allowed_from: &[MeetingPhase::Processing],
+            next_phase: MeetingPhase::ReviewReady,
+            event_kind: "processing_finished",
+            reason_codes: Vec::new(),
+        })?;
+        Ok(true)
     }
 
     /// Meetings still parked at their start gate, deleted outright. Returned
@@ -8203,6 +8249,24 @@ fn append_event_with_details(
 /// the phase column uses.
 fn recovery_details(prior_phase: MeetingPhase) -> String {
     format!(r#"{{"prior_phase":"{}"}}"#, phase_db(prior_phase))
+}
+
+/// Whether the meeting's notes are written for the transcript it has now: a
+/// current revision with content, read from its current transcript.
+fn has_notes_for_current_transcript(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+) -> Result<bool, StoreError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM meeting_artifact_revisions a
+               JOIN meeting_sessions s ON s.id = a.session_id
+              WHERE a.session_id = ?1 AND a.state = 'current'
+                AND a.content_json IS NOT NULL
+                AND a.transcript_revision_id = s.current_transcript_revision_id)",
+        params![id(session_id)],
+        |row| row.get(0),
+    )?)
 }
 
 /* --------------------------------------------------- meetings-list helpers */
@@ -13794,6 +13858,30 @@ mod tests {
             listed_ids(&store, MeetingStatusFilter::Processing).is_empty(),
             "an abandoned meeting must leave the Processing filter"
         );
+    }
+
+    /// A launch that ended after its run had written the notes and before
+    /// the move to review: the notes are kept and the meeting goes on to
+    /// review, instead of asking for a recovery that writes them again.
+    #[test]
+    fn recovery_finishes_a_run_that_had_already_written_its_notes() {
+        let (_directory, store) = store();
+        let session_id = stranded_session(&store, "processing", ProcessingStatus::Running);
+        list_artifact(
+            &store,
+            session_id,
+            "The launch ended after the notes.",
+            None,
+        );
+
+        let recovery = store.recover_interrupted().expect("recovery sweep");
+
+        let snapshot = store.session_snapshot(session_id).unwrap();
+        assert_eq!(snapshot.phase, MeetingPhase::ReviewReady);
+        assert_eq!(snapshot.processing_status, ProcessingStatus::Succeeded);
+        assert!(recovery.recovered.is_empty());
+        assert_eq!(recovery.finished, vec![session_id]);
+        assert_eq!(latest_event(&store, session_id).0, "processing_finished");
     }
 
     /// Matrix 2: a launch that died mid-recording ends in the same terminal

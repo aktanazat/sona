@@ -713,8 +713,9 @@ impl MeetingSessionManager {
         recovery: &InterruptedRecovery,
     ) -> Result<(), MeetingCommandError> {
         log::info!(
-            "Meeting recovery sweep: {} interrupted, {} status healed, {} abandoned start gates discarded, {} unfinished imports discarded",
+            "Meeting recovery sweep: {} interrupted, {} finished, {} status healed, {} abandoned start gates discarded, {} unfinished imports discarded",
             recovery.recovered.len(),
+            recovery.finished.len(),
             recovery.status_resolved.len(),
             recovery.discarded.len(),
             recovery.abandoned_imports.len(),
@@ -729,6 +730,11 @@ impl MeetingSessionManager {
         for session_id in &recovery.status_resolved {
             log::info!(
                 "Meeting recovery: {session_id:?} was still marked as processing by an earlier launch, now marked interrupted",
+            );
+        }
+        for session_id in &recovery.finished {
+            log::info!(
+                "Meeting recovery: {session_id:?} had its notes written by an earlier launch that ended before review, now in review",
             );
         }
         for session_id in &recovery.discarded {
@@ -750,6 +756,7 @@ impl MeetingSessionManager {
             .iter()
             .map(|meeting| meeting.session_id)
             .chain(recovery.status_resolved.iter().copied())
+            .chain(recovery.finished.iter().copied())
         {
             let snapshot = store
                 .session_snapshot(session_id)
@@ -757,6 +764,34 @@ impl MeetingSessionManager {
             self.emit_session_changed(&snapshot);
         }
         Ok(())
+    }
+
+    /// The steps that follow a run's notes, for each meeting the sweep moved
+    /// on to review because an earlier launch wrote its notes and ended
+    /// before the move. A meeting the automatic reprocess would have run
+    /// again gets every step that run would have fired; one it would have
+    /// withheld gets only those that stay inside Sona.
+    fn finish_saved_runs(&self, store: &Arc<MeetingStore>, finished: &[MeetingSessionId]) {
+        for &session_id in finished {
+            let meeting = RecoveredMeeting {
+                session_id,
+                prior_phase: MeetingPhase::Processing,
+            };
+            let follow_ons = if self.reprocess_withheld(store, &meeting).is_none() {
+                FollowOns::All
+            } else {
+                FollowOns::InsideSona
+            };
+            match store.session_snapshot(session_id) {
+                Ok(snapshot) => {
+                    self.processing
+                        .notes_ready(Arc::clone(store), &snapshot, follow_ons);
+                }
+                Err(error) => log::warn!(
+                    "Meeting recovery could not read {session_id:?} to finish it: {error:?}"
+                ),
+            }
+        }
     }
 
     /// The automatic reprocess pass, off the startup path. It owns a thread
@@ -4381,6 +4416,7 @@ impl MeetingSessionManager {
             Arc::clone(&store),
             self.app.clone(),
         );
+        self.finish_saved_runs(&store, &recovery.finished);
         Ok(store)
     }
 
@@ -6628,6 +6664,46 @@ pub(crate) mod tests {
             .is_none());
     }
 
+    /// An earlier launch wrote a meeting's notes and ended before it moved
+    /// the meeting to review. This launch has no local model, so the run that
+    /// would have sent the meeting's automations is withheld: the meeting
+    /// goes to review with the notes it has, and gets only what stays inside
+    /// Sona.
+    #[test]
+    fn recovery_finishes_saved_notes_without_what_a_withheld_run_sends() {
+        let (_directory, manager, _backend) = mounted_manager();
+        manager
+            .processing
+            .set_text_generators(Arc::new(NotesAndAnswers), no_engine());
+        let earlier = earlier_launch(&manager);
+        let session_id = interrupted_session(
+            &earlier,
+            MeetingPhase::Processing,
+            ProcessingDestination::Local,
+        );
+        let store = tauri::async_runtime::block_on(earlier.store()).unwrap();
+        let (folder_prompt, series_prompt) = folder_and_series_prompts(&store, session_id);
+        save_notes(&store, session_id);
+        drop(store);
+        drop(earlier);
+
+        let recovered = tauri::async_runtime::block_on(manager.recover_at_startup_at(0)).unwrap();
+
+        assert!(
+            recovered.is_empty(),
+            "a meeting whose notes are written is not run again"
+        );
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let snapshot = store.session_snapshot(session_id).unwrap();
+        assert_eq!(snapshot.phase, MeetingPhase::ReviewReady);
+        assert_eq!(snapshot.processing_status, ProcessingStatus::Succeeded);
+        assert_eq!(
+            prompts_run(&store, session_id),
+            vec![folder_prompt],
+            "the series prompt {series_prompt:?} waits for a run"
+        );
+    }
+
     /// Matrix 8, the hazard this design exists to avoid: a failed automatic
     /// attempt must not walk the meeting into review. Review stamps a retention
     /// deadline, and a meeting nobody has read would then be deleted on a timer
@@ -7873,6 +7949,63 @@ pub(crate) mod tests {
 
     const FOLLOW_UP_MESSAGE: &str = "Thanks all - pricing is still open.";
 
+    /// The notes `meeting_with_artifact` files: one recap line and nothing
+    /// else.
+    fn recap_artifacts() -> crate::meeting::types::GeneratedMeetingArtifacts {
+        crate::meeting::types::GeneratedMeetingArtifacts {
+            summary: crate::meeting::types::CitedArtifactText {
+                text: RECAP_BULLET.to_string(),
+                citations: Vec::new(),
+            },
+            summary_trace: Vec::new(),
+            outline: Vec::new(),
+            decisions: Vec::new(),
+            action_items: Vec::new(),
+            key_questions: Vec::new(),
+            risks: Vec::new(),
+            follow_up_draft: crate::meeting::types::CitedArtifactText {
+                text: String::new(),
+                citations: Vec::new(),
+            },
+            ledger: None,
+            ledger_failure: None,
+            plain: false,
+            plain_because: None,
+            left_out: Vec::new(),
+        }
+    }
+
+    /// Notes for the transcript the meeting has now, written as a run writes
+    /// them, with the meeting left where it was.
+    fn save_notes(store: &MeetingStore, session_id: MeetingSessionId) {
+        let transcript_revision_id = store
+            .begin_transcript_revision(TranscriptRevisionInput {
+                session_id,
+                engine_id: "test",
+                model_version: None,
+                destination: &ProcessingDestination::Local,
+                source_set: &[SourceKind::Microphone],
+                language: "en",
+            })
+            .unwrap();
+        store
+            .complete_transcript_revision(session_id, transcript_revision_id)
+            .unwrap();
+        store
+            .store_artifact_revision(crate::meeting::store::ArtifactRevisionInput {
+                session_id,
+                transcript_revision_id,
+                input_revision: store.session_snapshot(session_id).unwrap().revision,
+                template_id: "test",
+                template_version: 1,
+                generation_key: "test-saved-notes",
+                state: MeetingArtifactState::Current,
+                content: Some(&recap_artifacts()),
+                generated_at_utc_ms: 1,
+            })
+            .unwrap();
+    }
+
     /// A review-ready meeting with a current artifact, which is the least a
     /// follow-up can be drafted from: with no record at all the draft is
     /// `NotFound` and no engine is ever asked.
@@ -7880,27 +8013,7 @@ pub(crate) mod tests {
         let session_id = review_ready_session(manager).session_id;
         tauri::async_runtime::block_on(async {
             let store = manager.store().await.unwrap();
-            let content = crate::meeting::types::GeneratedMeetingArtifacts {
-                summary: crate::meeting::types::CitedArtifactText {
-                    text: RECAP_BULLET.to_string(),
-                    citations: Vec::new(),
-                },
-                summary_trace: Vec::new(),
-                outline: Vec::new(),
-                decisions: Vec::new(),
-                action_items: Vec::new(),
-                key_questions: Vec::new(),
-                risks: Vec::new(),
-                follow_up_draft: crate::meeting::types::CitedArtifactText {
-                    text: String::new(),
-                    citations: Vec::new(),
-                },
-                ledger: None,
-                ledger_failure: None,
-                plain: false,
-                plain_because: None,
-                left_out: Vec::new(),
-            };
+            let content = recap_artifacts();
             // A `Current` artifact generated from a revision that is not the
             // session's own is filed `OutOfDate` instead, which is the whole
             // point of the field: the record moved on after the pass ran. The
