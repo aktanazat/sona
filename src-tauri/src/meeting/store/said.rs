@@ -1,5 +1,5 @@
 use super::transcript_corrections::{audio_retained_in, confirmed_person_for_speaker_in};
-use super::voice_identity::is_generated_speaker_label;
+use super::voice_identity::{is_generated_speaker_label, names_user};
 use super::{
     canonical_speaker_ids, from_i64, id, meeting_fts_match_query, parse_uuid, search_projection,
     speaker_assignment_from_db, speakers_for_session, to_sql_error, MeetingStore, StoreError,
@@ -35,6 +35,7 @@ pub(super) struct Voice {
 pub(super) struct SessionVoices {
     canonical: HashMap<SpeakerId, SpeakerId>,
     labels: HashMap<SpeakerId, String>,
+    user_name: Option<String>,
     voices: HashMap<SpeakerId, Voice>,
 }
 
@@ -44,12 +45,14 @@ impl MeetingStore {
     ///
     /// A person is named only from a confirmed identification. Any other
     /// label is shown only when the store wrote it ("Speaker 2", "Local
-    /// speaker"), because automatic voice matching writes names into labels
-    /// and nothing records that once the match is gone.
+    /// speaker") or it is `user_name`, the user's name from About me that
+    /// the user's own lines carry, because automatic voice matching writes
+    /// names into labels and nothing records that once the match is gone.
     pub(crate) fn said_search(
         &self,
         query: &str,
         limit: usize,
+        user_name: Option<&str>,
     ) -> Result<Vec<SaidMoment>, StoreError> {
         if query.trim().chars().count() < 2 {
             return Ok(Vec::new());
@@ -70,9 +73,11 @@ impl MeetingStore {
         for line in lines {
             let voices = match sessions.entry(line.session_id) {
                 Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    entry.insert(SessionVoices::read_in(&connection, line.session_id)?)
-                }
+                Entry::Vacant(entry) => entry.insert(SessionVoices::read_in(
+                    &connection,
+                    line.session_id,
+                    user_name,
+                )?),
             };
             let voice = voices.voice_in(
                 &connection,
@@ -164,6 +169,7 @@ impl SessionVoices {
     pub(super) fn read_in(
         connection: &Connection,
         session_id: MeetingSessionId,
+        user_name: Option<&str>,
     ) -> Result<Self, StoreError> {
         Ok(Self {
             canonical: canonical_speaker_ids(connection, session_id)?,
@@ -171,6 +177,7 @@ impl SessionVoices {
                 .into_iter()
                 .map(|speaker| (speaker.speaker_id, speaker.display_name))
                 .collect(),
+            user_name: user_name.map(str::to_owned),
             voices: HashMap::new(),
         })
     }
@@ -217,6 +224,7 @@ impl SessionVoices {
                 person.is_some()
                     || is_generated_speaker_label(label)
                     || label.as_str() == LOCAL_SPEAKER_LABEL
+                    || names_user(label, self.user_name.as_deref())
             })
             .cloned();
         let voice = Voice { label, person };
@@ -326,7 +334,7 @@ mod tests {
             params![Uuid::new_v4().to_string(), id(confirmed), id(noah)],
         )?;
 
-        let moments = store.said_search("budget", 8)?;
+        let moments = store.said_search("budget", 8, None)?;
 
         assert_eq!(moments.len(), 4);
         let said_by_noah = moments
@@ -363,6 +371,32 @@ mod tests {
             said_by_local.speaker_label.as_deref(),
             Some("Local speaker")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn said_lines_keep_the_users_own_name() -> Result<(), StoreError> {
+        let (_directory, store) = store();
+        meeting_with_lines(
+            &store,
+            &[
+                (SpeakerId::new(), "Aktan Azat", "I own the budget slides."),
+                (SpeakerId::new(), "Ada Lovelace", "The budget stays local."),
+            ],
+        )?;
+
+        let moments = store.said_search("budget", 8, Some("Aktan Azat"))?;
+
+        let said_by_user = moments
+            .iter()
+            .find(|moment| moment.text.contains("slides"))
+            .ok_or(StoreError::Corrupt)?;
+        assert_eq!(said_by_user.speaker_label.as_deref(), Some("Aktan Azat"));
+        let said_by_guess = moments
+            .iter()
+            .find(|moment| moment.text.contains("local"))
+            .ok_or(StoreError::Corrupt)?;
+        assert_eq!(said_by_guess.speaker_label, None);
         Ok(())
     }
 }

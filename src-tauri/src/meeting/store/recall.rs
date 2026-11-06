@@ -193,6 +193,7 @@ impl MeetingStore {
         session_id: MeetingSessionId,
         recent: &[String],
         memory: &mut RecallMemory,
+        user_name: Option<&str>,
     ) -> Result<Vec<MeetingRecallMatch>, StoreError> {
         let candidates = candidate_terms(recent);
         if candidates.is_empty() {
@@ -222,9 +223,11 @@ impl MeetingStore {
             for (line_rank, line) in lines.iter().enumerate() {
                 let meeting = match meetings.entry(line.session_id) {
                     Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        entry.insert(PastMeeting::read_in(&*self.connection()?, line.session_id)?)
-                    }
+                    Entry::Vacant(entry) => entry.insert(PastMeeting::read_in(
+                        &*self.connection()?,
+                        line.session_id,
+                        user_name,
+                    )?),
                 };
                 let person = meeting
                     .voices
@@ -355,7 +358,11 @@ struct PastMeeting {
 }
 
 impl PastMeeting {
-    fn read_in(connection: &Connection, session_id: MeetingSessionId) -> Result<Self, StoreError> {
+    fn read_in(
+        connection: &Connection,
+        session_id: MeetingSessionId,
+        user_name: Option<&str>,
+    ) -> Result<Self, StoreError> {
         let mut open = HashMap::<TranscriptSegmentId, Vec<PersonId>>::new();
         let mut decided = HashSet::new();
         if let Some(ledger) = current_ledger_in(connection, session_id)? {
@@ -395,7 +402,7 @@ impl PastMeeting {
             decided,
             people: confirmed_person_ids_in(connection, session_id)?,
             app_bundle_id: application_bundle_ids(&preflight)?.into_iter().next(),
-            voices: SessionVoices::read_in(connection, session_id)?,
+            voices: SessionVoices::read_in(connection, session_id, user_name)?,
         })
     }
 
@@ -791,6 +798,7 @@ mod tests {
             live,
             &["Did Dana send the pricing sheet yet?".to_owned()],
             &mut RecallMemory::default(),
+            None,
         )?;
 
         let order: Vec<_> = recalled
@@ -855,7 +863,7 @@ mod tests {
         let mut memory = RecallMemory::default();
         let mut check = || -> Result<Vec<MeetingSessionId>, StoreError> {
             Ok(store
-                .live_recall(live, &recent, &mut memory)?
+                .live_recall(live, &recent, &mut memory, None)?
                 .iter()
                 .map(|recall| recall.session_id)
                 .collect())

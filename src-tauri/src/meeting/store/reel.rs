@@ -41,12 +41,13 @@ impl MeetingStore {
     pub(crate) fn conversation_reel_for_person(
         &self,
         person_id: PersonId,
+        user_name: Option<&str>,
     ) -> Result<ConversationReel, StoreError> {
         let connection = self.connection()?;
         let person = person_by_id_in(&connection, person_id)?;
         let mut sessions = Vec::new();
         for session_id in latest_meetings_in(&connection, person_id)? {
-            if let Some(lines) = SessionLines::read_in(&connection, session_id)? {
+            if let Some(lines) = SessionLines::read_in(&connection, session_id, user_name)? {
                 sessions.push(lines);
             }
         }
@@ -138,6 +139,7 @@ impl MeetingStore {
     pub(crate) fn conversation_reel_for_loop(
         &self,
         loop_id: &MeetingLoopId,
+        user_name: Option<&str>,
     ) -> Result<ConversationReel, StoreError> {
         loop_id.session_id().ok_or(StoreError::Invalid)?;
         let connection = self.connection()?;
@@ -156,9 +158,10 @@ impl MeetingStore {
                 .find(|row| row.loop_id == occurrence),
                 None => None,
             };
-            let (Some(row), Some(mut lines)) =
-                (row, SessionLines::read_in(&connection, session_id)?)
-            else {
+            let (Some(row), Some(mut lines)) = (
+                row,
+                SessionLines::read_in(&connection, session_id, user_name)?,
+            ) else {
                 if occurrence == *loop_id {
                     return Err(StoreError::NotFound);
                 }
@@ -294,6 +297,7 @@ impl SessionLines {
     fn read_in(
         connection: &Connection,
         session_id: MeetingSessionId,
+        user_name: Option<&str>,
     ) -> Result<Option<Self>, StoreError> {
         let header: Option<(String, i64)> = connection
             .query_row(
@@ -312,7 +316,7 @@ impl SessionLines {
             title,
             started_at_utc_ms,
             segments: effective_segments_for_session(connection, session_id)?,
-            voices: SessionVoices::read_in(connection, session_id)?,
+            voices: SessionVoices::read_in(connection, session_id, user_name)?,
         }))
     }
 
