@@ -2218,7 +2218,12 @@ pub fn run(cli_args: CliArgs) {
             }
             {
                 let _span = launch_trace::span("migrations");
-                identity_adoption::adopt_before_startup(app.handle())?;
+                let shell_socket = if headless_mode {
+                    None
+                } else {
+                    native_socket.as_deref()
+                };
+                identity_adoption::adopt_before_startup(app.handle(), shell_socket)?;
             }
             let secret_manager = Arc::new(secrets::SecretManager::native());
             let migration_pending =

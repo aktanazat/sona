@@ -600,6 +600,7 @@ enum IdentityAdoptionFailure: String, Decodable {
     case secretMigrationFailed = "secret_migration_failed"
     case rollbackUnavailable = "rollback_unavailable"
     case rollbackFailed = "rollback_failed"
+    case choicePending = "choice_pending"
 
     var sentence: String {
         switch self {
@@ -611,6 +612,7 @@ enum IdentityAdoptionFailure: String, Decodable {
         case .secretMigrationFailed: "A provider key could not be moved back to the legacy credential store."
         case .rollbackUnavailable: "There is no completed adoption to undo."
         case .rollbackFailed: "Putting the data back did not finish. Nothing else was changed."
+        case .choicePending: "Open Sona once to choose whether to move your data from the legacy app."
         }
     }
 }
