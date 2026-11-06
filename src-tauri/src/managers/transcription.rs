@@ -23,6 +23,8 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::cell::Cell;
+use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
@@ -32,7 +34,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_specta::Event;
 use transcribe_cpp::{
     Backend, Feature, Model, ModelOptions, RunExtension, RunOptions, Session, StreamOptions, Task,
-    WhisperRunOptions,
+    Transcript, WhisperRunOptions,
 };
 use transcribe_rs::{
     onnx::{
@@ -52,8 +54,8 @@ use zeroize::Zeroizing;
 mod audio_chunks;
 mod diagnosis;
 use audio_chunks::transcribe_windows;
+use diagnosis::{seconds, FilterOutcome, NativeRuns, SAMPLING_SEED};
 pub use diagnosis::{DecodeDiagnosis, DecodeSwitches, TextFilter};
-use diagnosis::{FilterOutcome, NativeRuns, SAMPLING_SEED};
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -874,9 +876,9 @@ pub enum SpeechEvidence {
     /// its vocabulary prompt means nothing was said.
     Unknown,
     /// Voice detection forwarded speech, or a person asked for this recording
-    /// to be transcribed. A Whisper decode that returns nothing or only its
-    /// vocabulary prompt here means the prompt displaced noisy speech, so the
-    /// audio is decoded again without the prompt.
+    /// to be transcribed. A stretch of a Whisper window that hears nothing or
+    /// only its vocabulary prompt here means the prompt displaced noisy
+    /// speech, so that stretch is decoded again without the prompt.
     Detected,
 }
 
@@ -2400,6 +2402,7 @@ impl TranscriptionManager {
         // arch, not on the feature (see #1601).
         let mut model_is_whisper = false;
         let mut vocabulary_prompt: Option<String> = None;
+        let mut decoded_without_prompt = false;
 
         // Perform transcription with the appropriate engine.
         // We use catch_unwind to prevent engine panics from poisoning the mutex,
@@ -2515,12 +2518,24 @@ impl TranscriptionManager {
                         } else {
                             audio.len()
                         };
+                        let recovery = vocabulary_prompt
+                            .clone()
+                            .filter(|_| model_is_whisper && speech == SpeechEvidence::Detected)
+                            .map(|prompt| {
+                                SpanRecovery::new(
+                                    switches.keeps(TextFilter::PromptEcho).then_some(prompt),
+                                    &run_options,
+                                    checks_no_speech,
+                                    seed,
+                                )
+                            });
                         let mut diagnosed_runs = diagnosis.is_some().then(NativeRuns::default);
                         let text = transcribe_windows(audio, max_samples, |window| {
                             transcribe_cpp_window(
                                 session,
                                 window,
                                 &run_options,
+                                recovery.as_ref(),
                                 &mut model_detected_language,
                                 diagnosed_runs.as_mut(),
                                 3,
@@ -2549,6 +2564,7 @@ impl TranscriptionManager {
                                         session,
                                         window,
                                         &unchecked_options,
+                                        recovery.as_ref(),
                                         &mut None,
                                         None,
                                         3,
@@ -2560,45 +2576,10 @@ impl TranscriptionManager {
                                 }
                             };
                         }
-                        let prompt_heard_nothing = speech == SpeechEvidence::Detected
-                            && switches.keeps(TextFilter::PromptEcho)
-                            && vocabulary_prompt
-                                .as_deref()
-                                .is_some_and(|prompt| !model_heard_text(&text, Some(prompt)));
-                        if prompt_heard_nothing {
-                            info!(
-                                "The prompted decode heard nothing in audio known to hold speech; decoding again without the vocabulary prompt"
-                            );
-                            if let Some(diagnosis) = diagnosis.as_deref_mut() {
-                                diagnosis.engine_chars = text.chars().count();
-                                diagnosis.prompt_words = vocabulary_prompt
-                                    .as_deref()
-                                    .map(|prompt| prompt_words(prompt).count());
-                                diagnosis.prompt_echo =
-                                    FilterOutcome::whole(diagnosis.engine_chars, true);
-                            }
-                            vocabulary_prompt = None;
-                            let unprompted_options = RunOptions {
-                                family: whisper_check_extension(None, checks_no_speech, seed),
-                                ..run_options
-                            };
-                            let unprompted = transcribe_windows(audio, max_samples, |window| {
-                                transcribe_cpp_window(
-                                    session,
-                                    window,
-                                    &unprompted_options,
-                                    &mut model_detected_language,
-                                    None,
-                                    3,
-                                )
-                            })?;
-                            if let Some(diagnosis) = diagnosis.as_deref_mut() {
-                                diagnosis.retried_without_prompt = Some(unprompted.chars().count());
-                            }
-                            Ok(unprompted)
-                        } else {
-                            Ok(text)
-                        }
+                        decoded_without_prompt = recovery
+                            .as_ref()
+                            .is_some_and(|recovery| recovery.recovered_words.get());
+                        Ok(text)
                     }
                     LoadedEngine::Parakeet(parakeet_engine) => {
                         let params = ParakeetParams {
@@ -2773,27 +2754,28 @@ impl TranscriptionManager {
         // a silent microphone.
         let echo_prompt = vocabulary_prompt
             .as_deref()
-            .filter(|_| switches.keeps(TextFilter::PromptEcho));
+            .filter(|_| !decoded_without_prompt && switches.keeps(TextFilter::PromptEcho));
         let vocabulary_only_applies =
             !asr.prompt_vocabulary && switches.keeps(TextFilter::VocabularyOnly);
         let model_produced_text = model_heard_text(&result, echo_prompt)
             && !(vocabulary_only_applies && repeats_only_vocabulary(&result, &asr.custom_words));
         if let Some(diagnosis) = diagnosis.as_deref_mut() {
             let chars = result.chars().count();
-            if diagnosis.retried_without_prompt.is_none() {
-                diagnosis.engine_chars = chars;
-                diagnosis.prompt_words = vocabulary_prompt
-                    .as_deref()
-                    .map(|prompt| prompt_words(prompt).count());
-                diagnosis.prompt_echo = match (vocabulary_prompt.as_deref(), echo_prompt) {
-                    (None, _) => FilterOutcome::NotApplied("no prompt"),
-                    (Some(_), None) => FilterOutcome::SwitchedOff,
-                    (Some(_), Some(prompt)) => FilterOutcome::whole(
-                        chars,
-                        !result.trim().is_empty() && repeats_decode_prompt(&result, prompt),
-                    ),
-                };
-            }
+            diagnosis.engine_chars = chars;
+            diagnosis.prompt_words = vocabulary_prompt
+                .as_deref()
+                .map(|prompt| prompt_words(prompt).count());
+            diagnosis.prompt_echo = match (vocabulary_prompt.as_deref(), echo_prompt) {
+                (None, _) => FilterOutcome::NotApplied("no prompt"),
+                (Some(_), None) if decoded_without_prompt => {
+                    FilterOutcome::NotApplied("part was decoded again without the prompt")
+                }
+                (Some(_), None) => FilterOutcome::SwitchedOff,
+                (Some(_), Some(prompt)) => FilterOutcome::whole(
+                    chars,
+                    !result.trim().is_empty() && repeats_decode_prompt(&result, prompt),
+                ),
+            };
             diagnosis.vocabulary_only = if asr.prompt_vocabulary {
                 FilterOutcome::NotApplied("prompted plans skip it")
             } else if !vocabulary_only_applies {
@@ -2806,7 +2788,7 @@ impl TranscriptionManager {
             post_process_transcription_text(
                 result,
                 asr,
-                vocabulary_prompt.is_some(),
+                vocabulary_prompt.is_some() && !decoded_without_prompt,
                 &output_language,
                 &model_languages,
             )
@@ -2817,9 +2799,7 @@ impl TranscriptionManager {
             let filtered_chars = filtered_result.chars().count();
             diagnosis.post_processing = if switches.keeps(TextFilter::PostProcessing) {
                 FilterOutcome::Ran {
-                    before: diagnosis
-                        .retried_without_prompt
-                        .unwrap_or(diagnosis.engine_chars),
+                    before: diagnosis.engine_chars,
                     after: filtered_chars,
                 }
             } else {
@@ -2884,19 +2864,28 @@ fn transcribe_cpp_window(
     session: &mut Session,
     audio: &[f32],
     options: &RunOptions,
+    recovery: Option<&SpanRecovery>,
     detected_language: &mut Option<String>,
     mut diagnosed_runs: Option<&mut NativeRuns>,
     splits_left: u8,
 ) -> Result<String> {
     match session.run(audio, options) {
         Ok(transcript) => {
+            let recovered = recovery
+                .map(|recovery| recovery.recover(session, audio, &transcript))
+                .unwrap_or_default();
             if let Some(runs) = diagnosed_runs {
-                runs.record(&session.model(), audio.len(), &transcript);
+                runs.record(&session.model(), audio.len(), &transcript, &recovered);
             }
+            let text = if recovered.is_empty() {
+                transcript.text
+            } else {
+                splice_recovered(&transcript, &recovered)
+            };
             if detected_language.is_none() {
                 *detected_language = transcript.language;
             }
-            Ok(transcript.text)
+            Ok(text)
         }
         Err(
             transcribe_cpp::Error::InputTooLong(_) | transcribe_cpp::Error::OutputTruncated { .. },
@@ -2906,6 +2895,7 @@ fn transcribe_cpp_window(
                     session,
                     window,
                     options,
+                    recovery,
                     detected_language,
                     diagnosed_runs.as_deref_mut(),
                     splits_left - 1,
@@ -2917,6 +2907,163 @@ fn transcribe_cpp_window(
             error
         )),
     }
+}
+
+/// The shortest stretch of a whisper window, in milliseconds, that may hold
+/// no heard words before it is decoded again. Whole silent windows are
+/// decoded again at any length.
+const LOST_SPAN_MS: i64 = 5_000;
+
+/// What a prompted whisper window falls back on where it heard nothing in
+/// audio voice detection forwarded as speech. Over steady room noise the
+/// vocabulary prompt makes whisper write the prompt for a whole 30 s window
+/// and seek past it, so the window's speech vanishes while later windows
+/// decode. Without the prompt the same audio decodes.
+struct SpanRecovery {
+    /// The prompt whose bare repetition counts as hearing nothing.
+    echo_prompt: Option<String>,
+    /// The window's decode without the prompt.
+    unprompted: RunOptions,
+    /// Whether any span came back with words, so the transcript is no
+    /// longer wholly a prompted decode.
+    recovered_words: Cell<bool>,
+}
+
+/// Words decoded again for a span where the window first heard nothing.
+struct RecoveredSpan {
+    span: Range<i64>,
+    text: String,
+}
+
+impl SpanRecovery {
+    fn new(
+        echo_prompt: Option<String>,
+        options: &RunOptions,
+        checks_no_speech: bool,
+        seed: Option<u32>,
+    ) -> Self {
+        Self {
+            echo_prompt,
+            unprompted: RunOptions {
+                family: whisper_check_extension(None, checks_no_speech, seed),
+                ..options.clone()
+            },
+            recovered_words: Cell::new(false),
+        }
+    }
+
+    fn heard_spans(&self, transcript: &Transcript) -> Vec<Range<i64>> {
+        transcript
+            .segments
+            .iter()
+            .filter(|segment| model_heard_text(&segment.text, self.echo_prompt.as_deref()))
+            .map(|segment| segment.t0_ms..segment.t1_ms)
+            .collect()
+    }
+
+    fn recover(
+        &self,
+        session: &mut Session,
+        audio: &[f32],
+        transcript: &Transcript,
+    ) -> Vec<RecoveredSpan> {
+        let audio_ms = i64::try_from(audio.len() / 16).unwrap_or(i64::MAX);
+        lost_spans(&self.heard_spans(transcript), audio_ms)
+            .into_iter()
+            .map(|span| {
+                let samples = &audio[sample_at(span.start).min(audio.len())
+                    ..sample_at(span.end).min(audio.len())];
+                let text = match session.run(samples, &self.unprompted) {
+                    Ok(retry) if model_heard_text(&retry.text, None) => {
+                        info!(
+                            "Whisper heard nothing in {:.1}-{:.1}s of a window holding speech; decoded again without the prompt: {} characters",
+                            seconds(span.start),
+                            seconds(span.end),
+                            retry.text.chars().count()
+                        );
+                        self.recovered_words.set(true);
+                        retry.text
+                    }
+                    Ok(_) => {
+                        warn!(
+                            "Whisper heard nothing in {:.1}-{:.1}s of a window holding speech, even decoded again without the prompt",
+                            seconds(span.start),
+                            seconds(span.end)
+                        );
+                        String::new()
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Decoding {:.1}-{:.1}s again without the prompt failed: {error}",
+                            seconds(span.start),
+                            seconds(span.end)
+                        );
+                        String::new()
+                    }
+                };
+                RecoveredSpan { span, text }
+            })
+            .collect()
+    }
+}
+
+/// A window's segments with each recovered span's words in place of the
+/// segments inside it, in audio order and whisper's own spacing.
+fn splice_recovered(transcript: &Transcript, recovered: &[RecoveredSpan]) -> String {
+    let mut pieces: Vec<(i64, String)> = transcript
+        .segments
+        .iter()
+        .filter(|segment| {
+            let middle = segment.t0_ms + (segment.t1_ms - segment.t0_ms) / 2;
+            !recovered
+                .iter()
+                .any(|recovered| recovered.span.contains(&middle))
+        })
+        .map(|segment| (segment.t0_ms, segment.text.clone()))
+        .chain(
+            recovered
+                .iter()
+                .filter(|recovered| !recovered.text.trim().is_empty())
+                .map(|recovered| (recovered.span.start, format!(" {}", recovered.text.trim()))),
+        )
+        .collect();
+    pieces.sort_by_key(|(start, _)| *start);
+    pieces
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn sample_at(ms: i64) -> usize {
+    usize::try_from(ms.max(0))
+        .unwrap_or(usize::MAX)
+        .saturating_mul(16)
+}
+
+/// The stretches of a window of `audio_ms` that no heard segment covers:
+/// the whole window when nothing was heard, otherwise every uncovered
+/// stretch of at least [`LOST_SPAN_MS`]. `heard` is in audio order, as
+/// whisper emits segments.
+fn lost_spans(heard: &[Range<i64>], audio_ms: i64) -> Vec<Range<i64>> {
+    if heard.is_empty() {
+        return if audio_ms > 0 {
+            vec![0..audio_ms]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut lost = Vec::new();
+    let mut covered_to = 0;
+    for span in heard.iter().chain(std::iter::once(&(audio_ms..audio_ms))) {
+        let start = span.start.min(audio_ms);
+        if start - covered_to >= LOST_SPAN_MS {
+            lost.push(covered_to..start);
+        }
+        covered_to = covered_to.max(span.end.min(audio_ms));
+    }
+    lost
 }
 
 #[cfg(feature = "cloud-realtime")]
@@ -5430,6 +5577,174 @@ mod tests {
                 "{text:?} prompted with {prompt:?}"
             );
         }
+    }
+
+    fn segment(t0_ms: i64, t1_ms: i64, text: &str) -> transcribe_cpp::Segment {
+        transcribe_cpp::Segment {
+            t0_ms,
+            t1_ms,
+            text: text.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_window_that_heard_only_its_prompt_is_decoded_again_and_spliced_in_order() {
+        let recovery =
+            SpanRecovery::new(Some("Sona".to_owned()), &RunOptions::default(), true, None);
+        let first_window_lost = Transcript {
+            segments: vec![
+                segment(0, 29_980, " Sona"),
+                segment(30_000, 32_500, " so any deliveries need to be rescheduled."),
+                segment(
+                    35_760,
+                    39_840,
+                    " Finally, the new hire starts next Tuesday.",
+                ),
+                segment(32_600, 33_400, " Sona."),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            lost_spans(&recovery.heard_spans(&first_window_lost), 40_150),
+            vec![0..30_000]
+        );
+        let recovered = [RecoveredSpan {
+            span: 0..30_000,
+            text: " Okay, here is the plan for this week.".to_owned(),
+        }];
+        assert_eq!(
+            splice_recovered(&first_window_lost, &recovered),
+            "Okay, here is the plan for this week. so any deliveries need to be rescheduled. Sona. Finally, the new hire starts next Tuesday."
+        );
+
+        let nothing_heard = Transcript {
+            segments: vec![segment(0, 13_880, " Sona.")],
+            ..Default::default()
+        };
+        assert_eq!(
+            lost_spans(&recovery.heard_spans(&nothing_heard), 3_500),
+            vec![0..3_500]
+        );
+        assert_eq!(lost_spans(&[], 3_500), vec![0..3_500]);
+
+        let short_pauses = Transcript {
+            segments: vec![
+                segment(0, 4_000, " Please send the contract."),
+                segment(8_500, 12_000, " And remind Maria."),
+            ],
+            ..Default::default()
+        };
+        assert!(lost_spans(&recovery.heard_spans(&short_pauses), 15_000).is_empty());
+    }
+
+    /// About 40 s of synthetic speech 9 dB under steady pink noise at the
+    /// level of a real office room, the mix where a "Sona" prompt made
+    /// whisper-large-v3-turbo write only "Sona" for the first 30 s window.
+    fn noisy_multi_window_speech(dir: &std::path::Path) -> Vec<f32> {
+        let aiff = dir.join("speech.aiff");
+        let wav = dir.join("speech.wav");
+        let said = std::process::Command::new("say")
+            .args(["-v", "Samantha", "-o"])
+            .arg(&aiff)
+            .arg(
+                "Okay so here is the plan for this week. First, the quarterly budget review moves to Thursday afternoon, and Maria will send the draft numbers to the finance team before noon on Wednesday. Second, the vendor contract still needs a signature, so Jordan is going to call their legal team tomorrow morning and push for a final version by Friday. Third, we are pausing the mobile redesign until the research interviews are finished, which should be about two weeks from now. Also, please remember that the office is closed on Monday for the holiday, so any deliveries need to be rescheduled. Finally, the new hire starts next Tuesday, and Priya will run the onboarding session at ten in the morning in the large conference room.",
+            )
+            .status()
+            .expect("say runs");
+        assert!(said.success());
+        let converted = std::process::Command::new("afconvert")
+            .args(["-f", "WAVE", "-d", "LEI16@16000", "-c", "1"])
+            .arg(&aiff)
+            .arg(&wav)
+            .status()
+            .expect("afconvert runs");
+        assert!(converted.success());
+        let speech: Vec<f32> = hound::WavReader::open(&wav)
+            .expect("the converted speech opens")
+            .into_samples::<i16>()
+            .map(|sample| f32::from(sample.expect("a sample")) / 32_768.0)
+            .collect();
+        assert!(speech.len() > 35 * 16_000, "the speech spans two windows");
+
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut pink = [0.0_f32; 7];
+        let noise: Vec<f32> = speech
+            .iter()
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let high = u16::try_from(state >> 48).expect("the top 16 bits");
+                let low = u8::try_from((state >> 40) & 0xff).expect("the next 8 bits");
+                let white = (f32::from(high) * 256.0 + f32::from(low)) / 16_777_216.0 * 2.0 - 1.0;
+                pink[0] = 0.99886 * pink[0] + white * 0.055_517_9;
+                pink[1] = 0.99332 * pink[1] + white * 0.075_075_9;
+                pink[2] = 0.969 * pink[2] + white * 0.153_852;
+                pink[3] = 0.8665 * pink[3] + white * 0.310_485_6;
+                pink[4] = 0.55 * pink[4] - white * 0.532_952_2;
+                pink[5] = -0.7616 * pink[5] - white * 0.016_898;
+                let sample = pink[..6].iter().sum::<f32>() + pink[6] + white * 0.5362;
+                pink[6] = white * 0.115_926;
+                sample
+            })
+            .collect();
+        let rms = |samples: &[f32]| {
+            let (sum, count) = samples
+                .iter()
+                .fold((0.0_f32, 0.0_f32), |(sum, count), sample| {
+                    (sum + sample * sample, count + 1.0)
+                });
+            (sum / count).sqrt()
+        };
+        let noise_gain = 0.02 / rms(&noise);
+        let speech_gain = 0.02 * 10_f32.powf(-9.0 / 20.0) / rms(&speech);
+        speech
+            .iter()
+            .zip(&noise)
+            .map(|(speech, noise)| speech * speech_gain + noise * noise_gain)
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "decodes synthetic speech with the whisper model SONA_WHISPER_MODEL names; needs macOS say"]
+    fn a_noisy_first_window_lost_to_the_prompt_is_decoded_again() {
+        let model_path = std::env::var("SONA_WHISPER_MODEL")
+            .expect("SONA_WHISPER_MODEL names a whisper model file");
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let audio = noisy_multi_window_speech(dir.path());
+        let model = Model::load_with(std::path::Path::new(&model_path), &ModelOptions::default())
+            .expect("the whisper model loads");
+        let mut session = model.session().expect("a whisper session");
+        let prompt = vocabulary_initial_prompt(&[VocabularyEntry {
+            spoken: "Sona".to_owned(),
+            written: "Sona".to_owned(),
+        }]);
+        let options = RunOptions {
+            family: whisper_check_extension(prompt.clone(), true, Some(SAMPLING_SEED)),
+            ..Default::default()
+        };
+        let recovery = prompt
+            .map(|prompt| SpanRecovery::new(Some(prompt), &options, true, Some(SAMPLING_SEED)));
+        let text = transcribe_cpp_window(
+            &mut session,
+            &audio,
+            &options,
+            recovery.as_ref(),
+            &mut None,
+            None,
+            3,
+        )
+        .expect("the window decodes");
+        let text = text.to_lowercase();
+        assert!(
+            text.contains("quarterly budget"),
+            "the first window's words are missing: {text}"
+        );
+        assert!(
+            text.contains("conference room"),
+            "the last window's words are missing: {text}"
+        );
     }
 
     #[test]
