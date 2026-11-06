@@ -1504,6 +1504,7 @@ fn upcoming_result(
                 "always_record": series.always_record,
             })),
             "calendar": row.calendar_name,
+            "location": row.location,
             "join_url": row.join_url,
             "event_key": row.event_key,
         })).collect::<Vec<_>>(),
@@ -2507,6 +2508,36 @@ mod tests {
             sources.is_empty(),
             "a calendar event has no sona:// address"
         );
+    }
+
+    #[test]
+    fn upcoming_says_where_each_event_happens() {
+        let corpus = corpus();
+        let rows = upcoming_rows(
+            vec![CalendarOccurrence {
+                summary: CalendarEventSummary {
+                    event_key: "board@1".to_string(),
+                    series_key: "board".to_string(),
+                    title: "Board".to_string(),
+                    attendee_count: 1,
+                    start_utc_ms: WHEN + DAY,
+                    end_utc_ms: WHEN + DAY + 1_800_000,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: None,
+                    location: Some("Room 4B".to_string()),
+                    url: None,
+                },
+                is_recurring: false,
+            }],
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        let (value, _) =
+            result_json(upcoming_result(&corpus.store, CalendarAccess::Authorized, rows).unwrap());
+
+        assert_eq!(value["rows"][0]["location"], "Room 4B");
     }
 
     #[test]

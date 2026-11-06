@@ -698,6 +698,9 @@ private struct OverviewUpcomingRowView: View {
                         }
                     }
                     Text(row.meta).metaText()
+                    if let location = row.location {
+                        Text(location).metaText().lineLimit(1)
+                    }
                 }
             } trailing: {
                 HStack(spacing: 12) {

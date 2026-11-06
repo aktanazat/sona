@@ -67,6 +67,9 @@ pub struct MeetingUpcomingRow {
     pub calendar_name: Option<String>,
     /// The event's own URL, which for a scheduled call is the join link.
     pub join_url: Option<String>,
+    /// Where the event says it happens — a room, an address, a dial-in line
+    /// — as the calendar wrote it, or `None` when it names no place.
+    pub location: Option<String>,
     /// `Some` exactly when the event repeats. Carries the series' decisions.
     pub series: Option<MeetingUpcomingSeries>,
 }
