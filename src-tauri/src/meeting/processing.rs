@@ -38,8 +38,8 @@ use super::store::voice_identity::{
 };
 use super::store::{
     timestamp_drift_tolerance_ns, ArtifactEvidence, ArtifactRevisionInput,
-    DiarizationAssignmentInput, DurableTrackRecord, MeetingEvidence, MeetingStore, StoreError,
-    StoreTransition, TranscriptRevisionInput, TranscriptSegmentInput,
+    DiarizationAssignmentInput, DurableTrackRecord, MeetingEvidence, MeetingStore, NotesMark,
+    NotesMarkKind, StoreError, StoreTransition, TranscriptRevisionInput, TranscriptSegmentInput,
 };
 use super::template_types::{
     same_section_title, MeetingNotesLanguage, NotesTemplate, NotesTemplateChoice,
@@ -4430,7 +4430,8 @@ impl<'a> From<&'a MeetingEvidence> for PromptEvidence<'a> {
 /// with the line's speaker, without whom the owner of a first-person
 /// commitment is unknown. The notes prompt asks for segment ids, and a local
 /// model shown both uuids cited the session id for all 26 citations of one
-/// part.
+/// part. `marked` and `mark_labels` are the user's marks covering the line,
+/// and absent on every line no mark covers.
 #[derive(Serialize)]
 struct NotesPromptEvidence<'a> {
     kind: &'a CitationKind,
@@ -4440,6 +4441,10 @@ struct NotesPromptEvidence<'a> {
     start_offset_ns: Option<u64>,
     end_offset_ns: Option<u64>,
     text: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    marked: Vec<NotesMarkKind>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mark_labels: Vec<&'a str>,
 }
 
 impl<'a> From<&'a MeetingEvidence> for NotesPromptEvidence<'a> {
@@ -4451,6 +4456,8 @@ impl<'a> From<&'a MeetingEvidence> for NotesPromptEvidence<'a> {
             start_offset_ns: evidence.citation.start_offset_ns,
             end_offset_ns: evidence.citation.end_offset_ns,
             text: &evidence.text,
+            marked: Vec::new(),
+            mark_labels: Vec::new(),
         }
     }
 }
@@ -5723,8 +5730,13 @@ fn drop_vocabulary_echoes(
     });
 }
 
+/// What the notes are told about the moments the user marked. Only a meeting
+/// with marks is told, so every other meeting is asked exactly as before.
+const MARKED_ROWS_RULE: &str = "\n\nSome transcript rows carry `marked`: during the meeting the user pressed a button to mark what was being said, and the marked rows are the seconds leading up to that press. `decision` means a decision was made there: put it in `decisions`, citing the marked rows that state it. `action_item` means someone took on a task there: put it in `action_items`, citing the marked rows that state it. `mark_labels` are the user's own words for the mark: use them to tell what the mark is about, never cite them, and never state something only they say. A mark says where to look, not what was said: write only what the marked rows support.";
+
 /// The instructions the notes are written to, shaped by the user's notes
-/// language and the profile the user gave about themselves.
+/// language, the moments they marked and the profile they gave about
+/// themselves.
 fn notes_system_prompt(
     evidence: &ArtifactEvidence,
     settings: Option<&crate::settings::AppSettings>,
@@ -5736,6 +5748,9 @@ fn notes_system_prompt(
             .map(|settings| settings.meeting_notes_language)
             .unwrap_or_default(),
     );
+    if !evidence.marks.is_empty() {
+        prompt.push_str(MARKED_ROWS_RULE);
+    }
     if let Some(settings) = settings {
         prompt.push_str(&settings.meeting_prep.about_me.prompt_context());
     }
@@ -6255,6 +6270,7 @@ fn utc_now_ms() -> i64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::analytics::MeetingNotesTemplate;
+    use super::super::conversation_review::ConversationBookmarkKind;
     use super::super::local_generator::test_support::read_http_request;
     use super::*;
     use std::io::{Read, Write};
@@ -8408,6 +8424,281 @@ pub(crate) mod tests {
         assert_eq!(
             content.ledger_failure,
             Some(EngineFailureCause::ReplyRejected)
+        );
+    }
+
+    /// Eleven lines twelve seconds apart, each five seconds long: a mark
+    /// pressed just after a line covers that line alone, and one pressed as a
+    /// line begins covers the line before it too.
+    const MARKED_MEETING: [&str; 11] = [
+        "Thanks for joining, let's start with pricing.",
+        "We will keep the current price through March.",
+        "For the trial, I'd rather cut it to two weeks.",
+        "Agreed, two weeks it is.",
+        "Does that price include support?",
+        "Dana will send the revised quote.",
+        "And Sam will update the deck.",
+        "The onboarding emails are getting fewer opens.",
+        "I'll rewrite the subject lines by Monday.",
+        "Someone should check the invoice dates.",
+        "Let's move on to hiring.",
+    ];
+
+    struct MarkedMeeting {
+        _directory: tempfile::TempDir,
+        store: Arc<MeetingStore>,
+        session_id: MeetingSessionId,
+        lines: Vec<AnalyticsSegment>,
+    }
+
+    impl MarkedMeeting {
+        fn new() -> Self {
+            let (directory, store) = crate::meeting::store::workflow_core_tests::store();
+            let session_id =
+                crate::meeting::store::workflow_core_tests::meeting(&store, "Pricing", 1);
+            crate::meeting::store::workflow_core_tests::spaced_transcript_segments(
+                &store,
+                session_id,
+                &MARKED_MEETING,
+                12 * SECOND_NS,
+                5 * SECOND_NS,
+            );
+            let lines = store
+                .analytics_segments(session_id)
+                .expect("the meeting's lines");
+            Self {
+                _directory: directory,
+                store,
+                session_id,
+                lines,
+            }
+        }
+
+        /// A decision just after the second line and another as the fourth
+        /// begins, a question after the fifth, to-dos as the seventh and the
+        /// ninth begin and just after the tenth, and a plain bookmark after
+        /// the last.
+        fn mark(&self) {
+            let after = |line: usize| self.lines[line].end_offset_ns + 2 * SECOND_NS;
+            let into = |line: usize| self.lines[line].start_offset_ns + SECOND_NS;
+            for (at_offset_ns, kind) in [
+                (after(1), ConversationBookmarkKind::Decision),
+                (into(3), ConversationBookmarkKind::Decision),
+                (after(4), ConversationBookmarkKind::Question),
+                (into(6), ConversationBookmarkKind::Todo),
+                (into(8), ConversationBookmarkKind::Todo),
+                (after(9), ConversationBookmarkKind::Todo),
+                (after(10), ConversationBookmarkKind::Mark),
+            ] {
+                crate::meeting::store::workflow_core_tests::bookmark(
+                    &self.store,
+                    self.session_id,
+                    at_offset_ns,
+                    kind,
+                );
+            }
+        }
+
+        fn notes(&self, generator: Arc<dyn MeetingTextGenerator>) -> GeneratedMeetingArtifacts {
+            let outcome = MeetingProcessingService::new(None)
+                .generate_artifacts(
+                    &self.store,
+                    self.session_id,
+                    ARTIFACT_FIXTURE_REVISION,
+                    GenerationIntent::Pipeline,
+                    Some(generator),
+                )
+                .expect("artifact generation");
+            let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
+                panic!("the meeting gets notes written for it, not served from before");
+            };
+            artifact.content.expect("structured notes")
+        }
+
+        fn citation(&self, line: usize) -> ArtifactCitation {
+            let line = &self.lines[line];
+            ArtifactCitation {
+                segment_id: line.segment_id,
+                start_offset_ns: line.start_offset_ns,
+                end_offset_ns: line.end_offset_ns,
+            }
+        }
+    }
+
+    /// An engine that, whatever it is told, sums up the first line, writes
+    /// the second line's decision in its own words, lists the third and
+    /// fourth lines apart as decisions, gives the sixth and seventh lines'
+    /// tasks with their owners, lists the eighth line and the ninth with its
+    /// deadline apart as tasks, and leaves the tenth line's task out. It keeps
+    /// the instructions and the part of every notes request.
+    #[derive(Default)]
+    struct MarkBlindGenerator(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+
+    impl MeetingTextGenerator for MarkBlindGenerator {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn model_id(&self) -> &'static str {
+            "mark-blind"
+        }
+
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+
+        fn generate(
+            &self,
+            system_prompt: &str,
+            evidence: &str,
+            max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if shape != ReplyShape::MeetingNotes {
+                return EchoingGenerator.generate(system_prompt, evidence, max_tokens, shape);
+            }
+            let part: serde_json::Value =
+                serde_json::from_str(evidence).expect("a JSON evidence pack");
+            let line = |index: usize| part["transcript"][index]["entity_id"].clone();
+            let notes = serde_json::json!({
+                "summary": [{"text": "The team went over pricing.", "citations": [line(0)]}],
+                "outline": [],
+                "decisions": [
+                    {"text": "Keep the current price through March.", "citations": [line(1)]},
+                    {"text": MARKED_MEETING[2], "citations": [line(2)]},
+                    {"text": MARKED_MEETING[3], "citations": [line(3)]}
+                ],
+                "action_items": [
+                    {
+                        "text": {"text": "Dana will send the revised quote.", "citations": [line(5)]},
+                        "owner_text": "Dana",
+                        "due_text": null
+                    },
+                    {
+                        "text": {"text": "Sam will update the deck.", "citations": [line(6)]},
+                        "owner_text": "Sam",
+                        "due_text": null
+                    },
+                    {
+                        "text": {"text": MARKED_MEETING[7], "citations": [line(7)]},
+                        "owner_text": null,
+                        "due_text": null
+                    },
+                    {
+                        "text": {"text": MARKED_MEETING[8], "citations": [line(8)]},
+                        "owner_text": null,
+                        "due_text": "Monday"
+                    }
+                ],
+                "key_questions": [],
+                "risks": [],
+                "follow_up_draft": {"text": "Thanks for joining.", "citations": [line(0)]}
+            });
+            self.0
+                .lock()
+                .expect("notes requests")
+                .push((system_prompt.to_string(), part));
+            Ok(notes.to_string())
+        }
+    }
+
+    /// Marked decisions and to-dos land in the notes cited to the lines they
+    /// cover. A decision keeps the engine's own entry where it wrote one, and
+    /// becomes its lines as said where the engine only split them up. A to-do
+    /// keeps the tasks the engine wrote there with an owner or a deadline,
+    /// drops the bare copies of its lines listed beside them, and becomes its
+    /// line as said where the engine wrote none. A question or a plain
+    /// bookmark adds nothing.
+    #[test]
+    fn marked_decisions_and_todos_land_in_the_notes_cited_to_their_lines() {
+        let meeting = MarkedMeeting::new();
+        meeting.mark();
+        let content = meeting.notes(Arc::new(MarkBlindGenerator::default()));
+        assert_eq!(
+            content.decisions,
+            [
+                CitedArtifactText {
+                    text: "Keep the current price through March.".to_string(),
+                    citations: vec![meeting.citation(1)],
+                },
+                CitedArtifactText {
+                    text: format!("{} {}", MARKED_MEETING[2], MARKED_MEETING[3]),
+                    citations: vec![meeting.citation(2), meeting.citation(3)],
+                },
+            ]
+        );
+        let task =
+            |text: &str, line: usize, owner: Option<&str>, due: Option<&str>| MeetingActionItem {
+                text: CitedArtifactText {
+                    text: text.to_string(),
+                    citations: vec![meeting.citation(line)],
+                },
+                owner_text: owner.map(str::to_string),
+                due_text: due.map(str::to_string),
+            };
+        assert_eq!(
+            content.action_items,
+            [
+                task("Dana will send the revised quote.", 5, Some("Dana"), None),
+                task("Sam will update the deck.", 6, Some("Sam"), None),
+                task(MARKED_MEETING[8], 8, None, Some("Monday")),
+                task(MARKED_MEETING[9], 9, None, None),
+            ]
+        );
+    }
+
+    /// Marks reach the engine on the lines they cover and change nothing else
+    /// it is asked: the same meeting unmarked gets the same lines and the
+    /// same instructions, short of what the marks add at their end.
+    #[test]
+    fn marks_reach_the_engine_on_the_lines_they_cover_and_change_nothing_else() {
+        let meeting = MarkedMeeting::new();
+        let generator = Arc::new(MarkBlindGenerator::default());
+        meeting.notes(generator.clone());
+        meeting.mark();
+        meeting.notes(generator.clone());
+        let requests = generator.0.lock().expect("notes requests");
+        let [(unmarked_prompt, unmarked), (marked_prompt, marked)] = requests.as_slice() else {
+            panic!(
+                "one notes request per writing, but {} were made",
+                requests.len()
+            );
+        };
+        assert!(
+            marked_prompt.len() > unmarked_prompt.len()
+                && marked_prompt.starts_with(unmarked_prompt.as_str()),
+            "marks only add to the end of the instructions"
+        );
+        let mut stripped = marked.clone();
+        let marks: Vec<_> = stripped["transcript"]
+            .as_array_mut()
+            .expect("the part's lines")
+            .iter_mut()
+            .map(|line| line.as_object_mut().expect("a line").remove("marked"))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                None,
+                Some(serde_json::json!(["decision"])),
+                Some(serde_json::json!(["decision"])),
+                Some(serde_json::json!(["decision"])),
+                None,
+                Some(serde_json::json!(["action_item"])),
+                Some(serde_json::json!(["action_item"])),
+                Some(serde_json::json!(["action_item"])),
+                Some(serde_json::json!(["action_item"])),
+                Some(serde_json::json!(["action_item"])),
+                None
+            ]
+        );
+        assert_eq!(
+            &stripped, unmarked,
+            "marks add only their kinds to the lines they cover"
         );
     }
 

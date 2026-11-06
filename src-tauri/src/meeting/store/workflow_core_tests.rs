@@ -358,13 +358,24 @@ pub(crate) fn transcript(store: &MeetingStore, meeting_id: MeetingSessionId, tex
     transcript_segments(store, meeting_id, &[text]);
 }
 
-/// Several things one speaker said, a second apart, on a microphone track a
-/// review snapshot can read back: `health` is a JSON column, so it holds a
-/// JSON string.
+/// Several things one speaker said, a second apart.
 pub(crate) fn transcript_segments(
     store: &MeetingStore,
     meeting_id: MeetingSessionId,
     texts: &[&str],
+) {
+    spaced_transcript_segments(store, meeting_id, texts, 1_000_000_000, 1);
+}
+
+/// Several things one speaker said, each `length_ns` long and starting
+/// `every_ns` after the one before, on a microphone track a review snapshot
+/// can read back: `health` is a JSON column, so it holds a JSON string.
+pub(crate) fn spaced_transcript_segments(
+    store: &MeetingStore,
+    meeting_id: MeetingSessionId,
+    texts: &[&str],
+    every_ns: u64,
+    length_ns: u64,
 ) {
     let plan_id = Uuid::new_v4();
     let track_id = Uuid::new_v4();
@@ -428,8 +439,8 @@ pub(crate) fn transcript_segments(
                     revision_id.to_string(),
                     track_id.to_string(),
                     ordinal,
-                    ordinal * 1_000_000_000,
-                    ordinal * 1_000_000_000 + 1,
+                    ordinal * every_ns,
+                    ordinal * every_ns + length_ns,
                     speaker_id.to_string(),
                     text
                 ],
@@ -440,6 +451,30 @@ pub(crate) fn transcript_segments(
         .execute(
             "UPDATE meeting_sessions SET current_transcript_revision_id = ?1 WHERE id = ?2",
             params![revision_id.to_string(), meeting_id.uuid().to_string()],
+        )
+        .unwrap();
+}
+
+/// A bookmark of `kind` pressed `at_offset_ns` into the recording.
+pub(crate) fn bookmark(
+    store: &MeetingStore,
+    meeting_id: MeetingSessionId,
+    at_offset_ns: u64,
+    kind: crate::meeting::conversation_review::ConversationBookmarkKind,
+) {
+    // PANIC: a fixture that cannot write its row is a broken test.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO conversation_bookmarks(bookmark_id, session_id, start_offset_ns, label, kind, created_at_utc_ms)
+             VALUES (?1, ?2, ?3, NULL, ?4, 1)",
+            params![
+                Uuid::new_v4().to_string(),
+                meeting_id.uuid().to_string(),
+                at_offset_ns,
+                kind.as_str()
+            ],
         )
         .unwrap();
 }

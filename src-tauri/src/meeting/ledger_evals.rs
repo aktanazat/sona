@@ -137,6 +137,7 @@ fn fixture_with(
             transcript,
             manual_notes: Vec::new(),
             user_notes: String::new(),
+            marks: Vec::new(),
             template: MeetingNotesTemplate::General.into(),
         },
         speaker_names: speakers

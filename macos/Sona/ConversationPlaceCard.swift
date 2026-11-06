@@ -23,7 +23,9 @@ struct ConversationPlaceReview: Decodable {
 }
 
 /// `ConversationBookmarkKind`: what a bookmark marks, as the person pressing
-/// it said. A decision mark is not a ledger decision; a to-do makes no task.
+/// it said. The notes list what was said just before a decision mark as a
+/// decision, and just before a to-do mark as an action item. A bookmark or a
+/// question mark only marks a place to come back to.
 enum ConversationBookmarkKind: String, Codable, CaseIterable, Identifiable {
     case mark, decision, question, todo
 
