@@ -29,6 +29,11 @@
 //! raise and a Bluetooth headset cannot swallow. What it cannot tell apart is a
 //! call from music, so `machine::call_is_live` — not this module — decides what
 //! the level means.
+//!
+//! A capture a meeting app started reads that app's own processes instead,
+//! through `app_output_signal`. That reading is per process, so sound from
+//! anything else on the Mac cannot keep the meeting alive, and an app no
+//! process is attributed to reads as nothing rather than as quiet.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -119,6 +124,25 @@ impl InputDeviceState for UnavailableInputDevice {
     fn output_signal(&self) -> OutputSignal {
         OutputSignal::Idle
     }
+}
+
+/// What `bundle_id`'s own processes play, its helpers included, or `None`
+/// when CoreAudio attributes no process to the app. Read on each tick rather
+/// than listened to.
+#[cfg(target_os = "macos")]
+pub fn app_output_signal(bundle_id: &str) -> Option<OutputSignal> {
+    crate::audio_toolkit::audio::core_audio::app_is_playing(bundle_id).map(|playing| {
+        if playing {
+            OutputSignal::Active
+        } else {
+            OutputSignal::Idle
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn app_output_signal(_bundle_id: &str) -> Option<OutputSignal> {
+    None
 }
 
 #[cfg(target_os = "macos")]

@@ -862,9 +862,10 @@ pub struct StopInputs {
     /// own inputs include it: a system-audio-only capture is not listening to
     /// the microphone, and nothing holding it says nothing about the meeting.
     pub microphone_lane: bool,
-    /// What the default *output* device has done during this capture. Present
-    /// only for a capture a call app triggered, where it is the one liveness
-    /// signal Sona's own microphone does not pollute.
+    /// What the call's sound has done during this capture: the default
+    /// *output* device for a call app, the trigger app's own processes for any
+    /// other meeting app. Present only for a capture an app triggered, where
+    /// it is the one liveness signal Sona's own microphone does not pollute.
     pub call_output: Option<CallOutputWatch>,
     /// True while the process that triggered this capture is still running.
     pub trigger_app_running: bool,
@@ -883,8 +884,8 @@ pub struct StopInputs {
 /// past any device swap and still short next to a tick.
 pub const CALL_HANGUP_GRACE_MS: i64 = 10_000;
 
-/// What the default output device has done since a call capture started,
-/// folded in one tick at a time.
+/// What the call's sound has done since a call capture started, folded in
+/// one tick at a time.
 ///
 /// The level alone is not a hangup, for two reasons this carries. The output
 /// is evidence only once it has played during this capture: a listener that
@@ -934,7 +935,7 @@ pub enum StopTrigger {
     TriggerAppExited,
     /// The default input device became idle while Sona was not holding it.
     InputDeviceIdle,
-    /// A call capture's default output stayed idle after it had played.
+    /// A call capture's sound stayed idle after it had played.
     CallEnded,
 }
 
@@ -947,6 +948,15 @@ impl StopTrigger {
             Self::InputDeviceIdle => "input_device_idle",
             Self::CallEnded => "call_ended",
         }
+    }
+
+    /// True for the triggers that say the meeting itself is over. They count
+    /// down on screen before they stop; every other trigger stops at once.
+    pub const fn ends_meeting(self) -> bool {
+        matches!(
+            self,
+            Self::EventEnd | Self::TriggerAppExited | Self::CallEnded
+        )
     }
 }
 
@@ -965,8 +975,8 @@ pub fn evaluate_stop(inputs: &StopInputs) -> Option<StopTrigger> {
         return Some(StopTrigger::TriggerAppExited);
     }
     // Before the input-device rule, which cannot fire during a Sona capture:
-    // Sona's own microphone is what keeps that device raised. The output
-    // device is the call's own, and hanging up releases it.
+    // Sona's own microphone is what keeps that device raised. The sound read
+    // here is the call's own, and hanging up releases it.
     if inputs
         .call_output
         .is_some_and(|output| output.hung_up(inputs.now_utc_ms))
@@ -982,6 +992,89 @@ pub fn evaluate_stop(inputs: &StopInputs) -> Option<StopTrigger> {
         return Some(StopTrigger::InputDeviceIdle);
     }
     None
+}
+
+/// How long a capture whose meeting ended keeps recording, on screen, before
+/// it stops: long enough to answer "can you stay a minute?" with one click.
+pub const ENDING_COUNTDOWN_MS: i64 = 30_000;
+
+/// Where a capture stands between its meeting ending and its stop.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CaptureEnding {
+    #[default]
+    Recording,
+    /// The meeting ended. The capture stops at `stops_at_utc_ms` unless the
+    /// operator keeps it.
+    CountingDown {
+        trigger: StopTrigger,
+        stops_at_utc_ms: i64,
+    },
+    /// The operator kept recording past this ending. It holds until the stop
+    /// rule lets go, so the same ending never counts down twice.
+    Kept,
+}
+
+/// What one tick's stop reading did to a capture's ending.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EndingStep {
+    Unchanged,
+    CountdownStarted(StopTrigger),
+    CountdownWithdrawn,
+    Stop(StopTrigger),
+}
+
+impl CaptureEnding {
+    /// Folds one tick's `evaluate_stop` reading in. A trigger that ends the
+    /// meeting stops only once its countdown has run out, and any other
+    /// trigger stops at once. A reading with no trigger withdraws a countdown,
+    /// and lets a kept capture count down again at its next ending.
+    pub fn advance(&mut self, trigger: Option<StopTrigger>, now_utc_ms: i64) -> EndingStep {
+        match (trigger, *self) {
+            (Some(trigger), _) if !trigger.ends_meeting() => EndingStep::Stop(trigger),
+            (Some(trigger), Self::Recording) => {
+                *self = Self::CountingDown {
+                    trigger,
+                    stops_at_utc_ms: now_utc_ms.saturating_add(ENDING_COUNTDOWN_MS),
+                };
+                EndingStep::CountdownStarted(trigger)
+            }
+            (
+                Some(trigger),
+                Self::CountingDown {
+                    stops_at_utc_ms, ..
+                },
+            ) if now_utc_ms >= stops_at_utc_ms => EndingStep::Stop(trigger),
+            (Some(_), Self::CountingDown { .. } | Self::Kept) | (None, Self::Recording) => {
+                EndingStep::Unchanged
+            }
+            (None, Self::CountingDown { .. }) => {
+                *self = Self::Recording;
+                EndingStep::CountdownWithdrawn
+            }
+            (None, Self::Kept) => {
+                *self = Self::Recording;
+                EndingStep::Unchanged
+            }
+        }
+    }
+
+    /// The operator's "keep recording", handing back the ending it kept. It
+    /// lands only on a countdown that has not run out, so it cannot race the
+    /// stop it would cancel.
+    pub fn keep(&mut self, now_utc_ms: i64) -> Option<StopTrigger> {
+        let Self::CountingDown {
+            trigger,
+            stops_at_utc_ms,
+        } = *self
+        else {
+            return None;
+        };
+        if now_utc_ms >= stops_at_utc_ms {
+            return None;
+        }
+        *self = Self::Kept;
+        Some(trigger)
+    }
 }
 
 #[cfg(test)]

@@ -760,6 +760,7 @@ private struct MeetingRecordingDock: View {
     @State private var shutting: Task<Void, Never>?
     @State private var narrowing: Task<Void, Never>?
     @State private var marked = false
+    @State private var pointerInside = false
 
     private enum Drawer: Equatable {
         case shut
@@ -804,6 +805,7 @@ private struct MeetingRecordingDock: View {
             drawer = pending
         }
         .onPointer(inside: pointer, press: press)
+        .onChange(of: autoStop != nil, initial: true) { _, counting in countdownChanged(counting) }
         .animation(Theme.Slide.animation(reduced: reduceMotion), value: drawer)
         .padding([.vertical, .leading], 8)
     }
@@ -844,7 +846,9 @@ private struct MeetingRecordingDock: View {
                     MeetingClockText(clock: clock)
                 }
             }
-            if let error = store.error {
+            if let autoStop {
+                AutoStopLine(autoStop: autoStop)
+            } else if let error = store.error {
                 Text(error).bodyText(12, Theme.live).lineLimit(3)
             } else if let silent {
                 Text("No sound from the call for \(silent.clock) while you talk.")
@@ -868,6 +872,10 @@ private struct MeetingRecordingDock: View {
                 .help("Bookmark this moment")
                 .accessibilityLabel(marked ? "Bookmarked" : "Bookmark")
                 Spacer(minLength: 8)
+                if let autoStop {
+                    Button("Keep recording") { store.keepRecording(autoStop) }
+                        .buttonStyle(.compact)
+                }
                 Button("Stop", action: stop)
                     .buttonStyle(.compact)
                     .disabled(store.pending != nil)
@@ -881,6 +889,14 @@ private struct MeetingRecordingDock: View {
 
     private var open: some View {
         PanelCard(store: store, docked: true) {
+            if let autoStop {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    AutoStopLine(autoStop: autoStop)
+                    Spacer(minLength: 8)
+                    Button("Keep recording") { store.keepRecording(autoStop) }
+                        .buttonStyle(.compact)
+                }
+            }
             switch recording {
             case let .panel(state):
                 MeetingConsentActiveCard(store: store, state: state, collapse: shut)
@@ -891,15 +907,33 @@ private struct MeetingRecordingDock: View {
     }
 
     private func pointer(_ inside: Bool) {
+        pointerInside = inside
         shutting?.cancel()
         shutting = nil
         if inside {
             if drawer == .shut { pull(.peeking) }
-        } else if drawer == .peeking || drawer == .open(pressed: true) {
-            shutting = Task {
-                try? await Task.sleep(for: .milliseconds(400))
-                if !Task.isCancelled { shut() }
-            }
+        } else if autoStop == nil, drawer == .peeking || drawer == .open(pressed: true) {
+            shutSoon()
+        }
+    }
+
+    /// A countdown pulls the drawer out so its Keep is one click away, and
+    /// holds it there. Once it is over, a drawer the pointer is not on goes
+    /// back in.
+    private func countdownChanged(_ counting: Bool) {
+        if counting {
+            shutting?.cancel()
+            shutting = nil
+            if drawer == .shut { pull(.peeking) }
+        } else if !pointerInside, drawer == .peeking || drawer == .open(pressed: true) {
+            shutSoon()
+        }
+    }
+
+    private func shutSoon() {
+        shutting = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            if !Task.isCancelled { shut() }
         }
     }
 
@@ -967,6 +1001,9 @@ private struct MeetingRecordingDock: View {
     private var silent: MeetingCallSilent? {
         store.callSilent.flatMap { $0.sessionId == sessionId ? $0 : nil }
     }
+    private var autoStop: DetectionAutoStop? {
+        store.detection?.autoStop.flatMap { $0.sessionId == sessionId ? $0 : nil }
+    }
 
     private var title: String {
         switch recording {
@@ -989,6 +1026,19 @@ private struct MeetingRecordingDock: View {
         case let .panel(state): state.snapshot.captureStart
         case let .ritual(_, card): card.startedAtUtcMs.meetingDate
         }
+    }
+}
+
+/// What ended, and the time left before the recording stops by itself.
+private struct AutoStopLine: View {
+    let autoStop: DetectionAutoStop
+
+    var body: some View {
+        let stopsAt = autoStop.stopsAtUtcMs.meetingDate
+        let left = Text(timerInterval: min(Date.now, stopsAt)...stopsAt, countsDown: true)
+        Text("\(autoStop.trigger.label) Stopping in \(left).")
+            .bodyText(12, Theme.ink)
+            .lineLimit(3)
     }
 }
 

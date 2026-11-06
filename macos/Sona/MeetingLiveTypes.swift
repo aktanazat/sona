@@ -654,6 +654,30 @@ struct DetectionAdoptedCall: Decodable {
     let displayName: String
 }
 
+/// `StopTrigger`, for the three endings that count down before they stop a
+/// recording. No other trigger reaches the countdown.
+enum DetectionEnding: String, Decodable {
+    case eventEnd = "event_end"
+    case triggerAppExited = "trigger_app_exited"
+    case callEnded = "call_ended"
+
+    /// What ended, in the countdown's words.
+    var label: String {
+        switch self {
+        case .eventEnd: "Meeting time is up."
+        case .triggerAppExited, .callEnded: "The call ended."
+        }
+    }
+}
+
+/// `DetectionAutoStop`: a recording whose meeting ended, and when it stops
+/// by itself unless it is kept.
+struct DetectionAutoStop: Decodable, Equatable {
+    let sessionId: MeetingSessionId
+    let trigger: DetectionEnding
+    let stopsAtUtcMs: Int64
+}
+
 /// `DetectionStatus`: the whole detection read. Already camelCase on the wire.
 struct DetectionStatus: Decodable {
     let eventSchemaVersion: Int
@@ -667,6 +691,8 @@ struct DetectionStatus: Decodable {
     let suppressReason: DetectionSuppressReason?
     let countdown: DetectionCountdown?
     let adoptedCall: DetectionAdoptedCall?
+    /// A recording whose meeting ended, counting down to its stop.
+    let autoStop: DetectionAutoStop?
     /// Allowlisted bundle IDs running right now. Empty is a legitimate answer.
     let runningMeetingApps: [String]
     /// The Bluetooth-microphone false negative: nothing reports holding the
