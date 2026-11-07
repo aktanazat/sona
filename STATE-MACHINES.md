@@ -1063,16 +1063,19 @@ The tick is every 15 s, or sooner on an input-device edge. It reads the tray ses
 | any | `.preflight` with `session` | the held snapshot: the sheet shows its controls (Paused: Resume, Stop & save, Discard) instead of setup or CaptureBusy | RecorderTypes.swift:305-307 |
 | any | `.preflight` without `session` | unsupported → failure; CaptureBusy → failure; otherwise setup (unchanged) | RecorderTypes.swift:308-314 |
 | Saved | snapshot with `failure` | Saved view plus a notice naming the failure | RecorderSheet.swift:157-159 |
-| Recording or Paused | quit → Stop and Quit | `stopAndSave()` task awaited by the delegate → Finalizing → Saved | RecorderStore.swift:190-195; SonaApp.swift:96-98 |
+| Recording or Paused | quit → Stop and Quit | `stopAndSave()` task awaited by the delegate → Finalizing → Saved | RecorderStore.swift `stopAndSave`; SonaApp.swift `applicationShouldTerminate` |
+| Starting or Finalizing | quit | quit waits (`RecorderPhase.activity == .settling`) until Recording, which it then asks about, or Saved, which it does not | RecorderTypes.swift `activity`; AppModel.swift `waitForCapturesToSettle` |
 
 #### M9. App lifecycle, quit (SonaApp.swift)
 
 | From | Event | To | Path |
 |---|---|---|---|
-| no meeting in Capturing*, recorder not Recording or Paused | Quit (Cmd+Q, menu bar, Privacy, logout) | notes and scratchpad flush → terminate (unchanged) | SonaApp.swift:62-101 |
-| a meeting in Capturing* and/or recorder Recording or Paused | Quit | alert naming what records | SonaApp.swift:66-69, 105-121 |
-| alert | Keep Recording (Escape) | quit cancelled; sheet, meeting and recording untouched | SonaApp.swift:69-73 |
-| alert | Stop and Quit | flush → `meeting_stop` surface `quit` → recorder stop awaited → terminate | SonaApp.swift:75-99, 125-143 |
+| nothing recording, starting or finishing | Quit (Cmd+Q, menu bar, AppleScript, Dock, Privacy, logout) | notes and scratchpad flush → terminate (unchanged) | SonaApp.swift `applicationShouldTerminate` |
+| dictation transcribing, recorder Starting or Finalizing, or a meeting start request out | Quit | waits until it settles, then the rows below | AppModel.swift `waitForCapturesToSettle` |
+| meeting Starting or Stopping in the core | Quit | the active-state read takes the meeting actor lock the start or stop holds, so it answers once the meeting records (asked) or is sealed (not asked) | session.rs `tray_snapshot`, `start_with_provenance`, `stop` |
+| a meeting in Capturing*, recorder Recording or Paused, and/or dictation Recording | Quit | alert naming what records | SonaApp.swift `confirmStopping` |
+| alert | Keep Recording (Escape) | quit cancelled; sheet, meeting and recording untouched | SonaApp.swift `applicationShouldTerminate` |
+| alert | Stop and Quit | dictation finish sent → flush → `meeting_stop` surface `quit` → recorder stop awaited → dictation awaited until idle (words delivered and saved) → terminate | SonaApp.swift `applicationShouldTerminate`; AppModel.swift `waitForDictationToFinish` |
 | Stop and Quit | `meeting_stop` refused and the meeting still captures | Sona stays open: "The meeting could not be stopped, so it is still recording." | SonaApp.swift:137-142, 157-175 |
 | next launch | meeting stopped by quit | RecoveryRequired with prior phase Stopping or Processing → automatic reprocessing when local, model present and no audio missing; else Unfinished meetings | existing recovery (session.rs `reprocess_recovered`) |
 

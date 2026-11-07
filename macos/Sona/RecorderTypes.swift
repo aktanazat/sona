@@ -124,6 +124,15 @@ extension RecorderPhase {
         }
     }
 
+    /// What quit and the menu bar make of the recorder in this phase.
+    var activity: RecorderActivity {
+        switch self {
+        case .recording, .paused: .running
+        case .starting, .finalizing: .settling
+        case .checking, .permission, .idle, .selectingSource, .previewing, .saved, .failed: .none
+        }
+    }
+
     /// The `recorder.phase.*` copy.
     var label: String {
         switch self {
@@ -140,6 +149,15 @@ extension RecorderPhase {
         case .failed: "Needs attention"
         }
     }
+}
+
+/// A recording on disk, or one about to be. `running` can be stopped and
+/// saved. `settling` is opening its file or still writing it: quit waits for
+/// it, since cutting a save off deletes the recording.
+enum RecorderActivity {
+    case none
+    case settling
+    case running
 }
 
 // MARK: - Failures
