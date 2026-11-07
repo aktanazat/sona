@@ -1290,9 +1290,26 @@ struct RitualPrepView: View {
                 Spacer(minLength: 8)
                 Text("Prep").metaText()
             }
+            if let place = card.place {
+                Text("At: \(place)").bodyText(13, Theme.inkSecondary)
+            }
+            if let plan = card.plan {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Last time:").metaText()
+                    Button {
+                        model.openPast(plan.sessionId, segmentId: plan.citation?.segmentId)
+                    } label: {
+                        Text("\(plan.quote.map { "“\($0)”" } ?? plan.title) ▶")
+                            .bodyText(13, Theme.inkSecondary)
+                            .lineLimit(2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             if !card.headline.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(card.lastMeetingId == nil ? "Context:" : "Last time:").metaText()
+                    Text(card.lastMeetingId == nil ? "Context:" : card.plan == nil ? "Last time:" : "Last meeting:")
+                        .metaText()
                     Text(card.headline).bodyText(13, Theme.inkSecondary)
                 }
             }
@@ -1319,15 +1336,19 @@ struct RitualPrepView: View {
             if let lastTime {
                 lastTimeLine(lastTime)
             }
-            briefSection
+            if card.onCalendar {
+                briefSection
+            }
             HStack(spacing: 8) {
                 Spacer()
-                Button("Open brief") {
-                    store.respond(event, action: .prepOpenBrief)
-                    onOpenBrief(card.eventKey)
+                if card.onCalendar {
+                    Button("Open brief") {
+                        store.respond(event, action: .prepOpenBrief)
+                        onOpenBrief(card.eventKey)
+                    }
+                    .buttonStyle(QuietButton(compact: true))
+                    .disabled(store.pending != nil)
                 }
-                .buttonStyle(QuietButton(compact: true))
-                .disabled(store.pending != nil)
                 if card.canRecordWhenStarts {
                     Button("Record when it starts") {
                         store.respond(event, action: .prepRecordWhenStarts)
@@ -1344,6 +1365,7 @@ struct RitualPrepView: View {
             }
         }
         .task(id: card.eventKey) {
+            guard card.onCalendar else { return }
             preview = .loading
             do {
                 let brief = try await model.prep.preview(card.eventKey)
