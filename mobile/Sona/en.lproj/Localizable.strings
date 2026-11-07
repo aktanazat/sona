@@ -45,6 +45,8 @@
 
 "recording.bookmark" = "Bookmark";
 "recording.bookmarked %lld" = "%lld bookmarked";
+"control.record" = "Record a meeting";
+"control.off" = "Off";
 
 "consent.notifications" = "Notifications let Sona offer a note after a normal phone call. These reminders do not record calls.";
 

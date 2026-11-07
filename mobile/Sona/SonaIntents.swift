@@ -10,13 +10,17 @@ struct StartDictationIntent: AppIntent {
     }
 }
 
-struct RecordMeetingIntent: AppIntent {
+struct RecordMeetingIntent: AudioRecordingIntent, LiveActivityIntent {
     static var title: LocalizedStringResource = "Record a meeting"
-    static var description = IntentDescription("Open Sona and record a meeting.")
-    static var openAppWhenRun = true
+    static var description = IntentDescription("Start recording a meeting with Sona.")
+    static var supportedModes: IntentModes = [.background, .foreground(.dynamic)]
 
-    func perform() async throws -> some IntentResult & OpensIntent {
-        .result(opensIntent: OpenURLIntent(DictationLink.meetingURL))
+    @Dependency private var controls: any PhoneRecordingControls
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        try await startRecording(using: controls)
+        return .result()
     }
 }
 

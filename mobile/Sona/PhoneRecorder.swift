@@ -1,4 +1,5 @@
 import Accelerate
+import ActivityKit
 import AVFoundation
 import Combine
 import Foundation
@@ -71,6 +72,7 @@ final class PhoneRecorder: ObservableObject {
     private var startedAt: Date?
     private var ticker: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
+    private var activity: Activity<RecordingActivityAttributes>?
 
     init() {
         interruptionObserver = NotificationCenter.default.addObserver(
@@ -82,6 +84,12 @@ final class PhoneRecorder: ObservableObject {
                 self?.handleInterruption(notification)
             }
         }
+        /* A recording ends with the process that made it, so a Live Activity found at
+         * launch belongs to a run that never stopped. */
+        for stale in Activity<RecordingActivityAttributes>.activities {
+            Task { await stale.end(nil, dismissalPolicy: .immediate) }
+        }
+        RecordingControlState.set(false)
     }
 
     deinit {
@@ -126,7 +134,8 @@ final class PhoneRecorder: ObservableObject {
         }
         engine.prepare()
         try engine.start()
-        startedAt = Date()
+        let startedAt = Date()
+        self.startedAt = startedAt
         elapsed = 0
         bookmarks = []
         isRecording = true
@@ -138,12 +147,22 @@ final class PhoneRecorder: ObservableObject {
                 self.elapsed = Date().timeIntervalSince(startedAt)
             }
         }
+        activity = try? Activity.request(
+            attributes: RecordingActivityAttributes(startedAt: startedAt),
+            content: ActivityContent(state: .init(bookmarks: 0), staleDate: nil)
+        )
+        RecordingControlState.set(true)
     }
 
     /// Bookmark this moment of the running recording.
     func bookmark() {
         guard isRecording, let startedAt else { return }
         bookmarks.append(Int64(max(0, Date().timeIntervalSince(startedAt)) * 1000))
+        let content = ActivityContent(
+            state: RecordingActivityAttributes.ContentState(bookmarks: bookmarks.count),
+            staleDate: nil
+        )
+        Task { [activity] in await activity?.update(content) }
     }
 
     /// Stop and hand over the finished bytes with the wall-clock start of the capture and
@@ -158,6 +177,11 @@ final class PhoneRecorder: ObservableObject {
         meter.reset()
         self.resampler = nil
         self.startedAt = nil
+        if let activity {
+            self.activity = nil
+            Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        }
+        RecordingControlState.set(false)
         try? AVAudioSession.sharedInstance().setActive(false, options: [])
         guard let audio = try? resampler.finish(), audio.byteLength > 0 else { return nil }
         return (audio, Int64(startedAt.timeIntervalSince1970 * 1000), bookmarks)
