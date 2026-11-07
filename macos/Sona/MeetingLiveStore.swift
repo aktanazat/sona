@@ -1751,7 +1751,7 @@ final class MeetingLiveStore {
         if systemDown && microphoneDown {
             return MeetingLiveWarning(
                 text: session.phase == .capturingPaused
-                    ? "Nothing resumed: neither source could be reopened. Stop, or try again."
+                    ? "Nothing resumed: neither source could be reopened. Stop to keep what was recorded."
                     : "Nothing is being recorded: both sources have failed. Stop, or check the sources.",
                 urgent: true)
         }
