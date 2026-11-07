@@ -2047,9 +2047,12 @@ final class MeetingsStore {
         Task {
             defer { drafting = false }
             do {
-                followUp = try await core.request(
+                let draft: MeetingFollowUpDraft = try await core.request(
                     "meeting_follow_up_draft", MeetingRequest.followUpDraft(sessionId))
+                guard isOpen(sessionId) else { return }
+                followUp = draft
             } catch {
+                guard isOpen(sessionId) else { return }
                 self.error = reason(error)
             }
         }
