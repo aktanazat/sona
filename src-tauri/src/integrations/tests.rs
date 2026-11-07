@@ -232,7 +232,9 @@ fn folder_rules_send_old_notes_only_when_explicitly_filed_after_the_grant() {
 
 /// Two meetings of one series: one whose start named the event, one that
 /// found it under way when its recording was started by hand.
-fn chosen_and_found(store: &MeetingStore) -> (MeetingSessionId, MeetingSessionId) {
+fn chosen_and_found(
+    store: &MeetingStore,
+) -> Result<(MeetingSessionId, MeetingSessionId), crate::meeting::store::StoreError> {
     let event = CalendarEventSummary {
         event_key: "series-roadmap#100".into(),
         series_key: "series-roadmap".into(),
@@ -253,11 +255,9 @@ fn chosen_and_found(store: &MeetingStore) -> (MeetingSessionId, MeetingSessionId
     };
     let chosen = reviewable_meeting(store, "Roadmap review", 100);
     let found = reviewable_meeting(store, "Roadmap review", 100);
-    store.remember_calendar_facts(chosen, &event).unwrap();
-    store
-        .remember_calendar_event(found, &event, CalendarEventSource::FoundUnderWay)
-        .unwrap();
-    (chosen, found)
+    store.remember_calendar_facts(chosen, &event)?;
+    store.remember_calendar_event(found, &event, CalendarEventSource::FoundUnderWay)?;
+    Ok((chosen, found))
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn a_series_rule_never_sends_a_meeting_whose_event_was_found_under_way() {
     let (_directory, store) = store();
     let connection = connection();
     store.save_connection(&connection).unwrap();
-    let (chosen, found) = chosen_and_found(&store);
+    let (chosen, found) = chosen_and_found(&store).unwrap();
     let mut rule = AutoSendRule {
         id: uuid::Uuid::new_v4().to_string(),
         connection_id: connection.id.clone(),
@@ -292,7 +292,7 @@ fn a_series_rule_never_sends_a_meeting_whose_event_was_found_under_way() {
 #[test]
 fn an_automatic_send_matches_no_attendee_of_an_event_found_under_way() {
     let (_directory, store) = store();
-    let (chosen, found) = chosen_and_found(&store);
+    let (chosen, found) = chosen_and_found(&store).unwrap();
     let generated = serde_json::json!({
         "summary": {"text": "The roadmap is agreed.", "citations": []},
         "outline": [],

@@ -9279,7 +9279,13 @@ fn insert_segment_edit_in(
         "INSERT INTO meeting_segment_edits (
             segment_id, edit_sequence, replacement_text, removed, operator_at_utc_ms
          ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id(segment_id), sequence, replacement_text, bool_to_i64(removed), utc_now_ms()],
+        params![
+            id(segment_id),
+            sequence,
+            replacement_text,
+            bool_to_i64(removed),
+            utc_now_ms()
+        ],
     )?;
     Ok(sequence)
 }
