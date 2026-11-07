@@ -324,6 +324,31 @@ fn a_meeting_with_no_series_runs_nothing_even_when_a_series_is_configured() {
 }
 
 #[test]
+fn a_series_event_found_under_way_at_a_start_by_hand_runs_none_of_its_automations() {
+    let (_directory, store) = store();
+    let session_id = reviewable_meeting(&store, "Pricing review");
+    store
+        .remember_calendar_event(
+            session_id,
+            &series_event(NOW),
+            CalendarEventSource::FoundUnderWay,
+        )
+        .unwrap();
+    store_current_artifact(&store, session_id, &artifact_content(Some(ledger())));
+    enable(&store, MeetingAutomationKind::Webhook, Some(TAILNET_URL));
+    let effects = RecordingEffects::accepting();
+
+    let receipts = run_for_meeting(&store, session_id, &effects, NOW);
+
+    assert!(
+        receipts.is_empty(),
+        "nobody chose an event found under way, so its series runs nothing for this meeting"
+    );
+    assert!(effects.asked().webhooks.is_empty());
+    assert!(store.automation_runs(session_id).unwrap().is_empty());
+}
+
+#[test]
 fn only_the_enabled_kinds_run() {
     let (_directory, store) = store();
     let session_id = finished_meeting(&store);

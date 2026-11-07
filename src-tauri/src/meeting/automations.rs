@@ -392,6 +392,11 @@ fn plans_for_meeting(
     store: &MeetingStore,
     session_id: MeetingSessionId,
 ) -> Result<Vec<AutomationPlan>, StoreError> {
+    // Nobody chose an event found under way at a start by hand, so its
+    // series' after-meeting actions do not run for this meeting.
+    if store.calendar_event_found_under_way(session_id)? {
+        return Ok(Vec::new());
+    }
     let snapshot = store.series_automations_for_session(session_id)?;
     let Some(series_key) = snapshot.series_key.clone() else {
         return Ok(Vec::new());

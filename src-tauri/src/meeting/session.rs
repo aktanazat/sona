@@ -30,8 +30,8 @@ use super::processing::{
 };
 use super::store::voice_identity::names_user;
 use super::store::{
-    InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting, SegmentEdit,
-    SpeakerRename, StoreError, StoreMutation, StoreTransition, TrackCreation,
+    CalendarEventSource, InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting,
+    SegmentEdit, SpeakerRename, StoreError, StoreMutation, StoreTransition, TrackCreation,
     TranscriptRevisionInput, TranscriptSegmentInput, STORE_SCHEMA_VERSION,
 };
 use super::suggestions::{
@@ -1063,8 +1063,9 @@ impl MeetingSessionManager {
 
     /// A start made by hand that names no event. During the one meeting
     /// under way (`under_way`, which the caller reads from the calendar) it
-    /// records that meeting the way a detected start does: the preflight
-    /// carries the event, and the "Local notes" default takes its title.
+    /// records that meeting under its event: the preflight carries it, and
+    /// the "Local notes" default takes its title. The event is remembered as
+    /// found under way, so it starts no automatic send.
     pub async fn create_manual_preflight(
         &self,
         mut request: MeetingPreflightCreateRequest,
@@ -1077,7 +1078,7 @@ impl MeetingSessionManager {
                 request.title = title.to_string();
             }
         }
-        self.create_preflight_with_calendar(request, under_way)
+        self.create_preflight_for_event(request, under_way, CalendarEventSource::FoundUnderWay)
             .await
     }
 
@@ -1085,6 +1086,16 @@ impl MeetingSessionManager {
         &self,
         request: MeetingPreflightCreateRequest,
         calendar_event: Option<CalendarEventSummary>,
+    ) -> Result<MeetingMutationResult, MeetingCommandError> {
+        self.create_preflight_for_event(request, calendar_event, CalendarEventSource::Chosen)
+            .await
+    }
+
+    async fn create_preflight_for_event(
+        &self,
+        request: MeetingPreflightCreateRequest,
+        calendar_event: Option<CalendarEventSummary>,
+        source: CalendarEventSource,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
         match (&request.calendar_event_key, &calendar_event) {
             (None, None) => {}
@@ -1118,7 +1129,7 @@ impl MeetingSessionManager {
             let session_id = receipt.session_id.ok_or(MeetingCommandError::NotFound)?;
             if let Some(event) = calendar_event.as_ref() {
                 store
-                    .remember_calendar_facts(session_id, event)
+                    .remember_calendar_event(session_id, event, source)
                     .map_err(map_store_error)?;
             }
             return self.result_for_receipt(store, receipt, session_id);
@@ -1144,7 +1155,7 @@ impl MeetingSessionManager {
             .map_err(map_store_error)?;
         if let Some(event) = calendar_event.as_ref() {
             store
-                .remember_calendar_facts(session_id, event)
+                .remember_calendar_event(session_id, event, source)
                 .map_err(map_store_error)?;
         }
         let result = self.result_for_receipt(store, receipt, session_id)?;
@@ -6015,6 +6026,9 @@ pub(crate) mod tests {
                 .unwrap(),
             Some(event)
         );
+        assert!(!store
+            .calendar_event_found_under_way(result.snapshot.session_id)
+            .unwrap());
     }
 
     #[test]
@@ -6069,6 +6083,12 @@ pub(crate) mod tests {
         assert_eq!(
             store.meeting_calendar_facts(joined.session_id).unwrap(),
             Some(event)
+        );
+        assert!(
+            store
+                .calendar_event_found_under_way(joined.session_id)
+                .unwrap(),
+            "nobody chose the event a start by hand found, so nothing sends for it"
         );
         assert_eq!(joined_untitled.title, MANUAL_DEFAULT_TITLE);
         assert_eq!(

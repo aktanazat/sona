@@ -153,6 +153,22 @@ fn notes(store: &MeetingStore, session_id: MeetingSessionId) -> Result<NotesDocu
     })
 }
 
+/// The notes an automatic send delivers. An event found under way when a
+/// recording was started by hand names no recipients: nobody chose it.
+fn automatic_notes(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+) -> Result<NotesDocument, String> {
+    let mut document = notes(store, session_id)?;
+    if store
+        .calendar_event_found_under_way(session_id)
+        .map_err(store_error)?
+    {
+        document.attendee_emails.clear();
+    }
+    Ok(document)
+}
+
 pub(crate) fn valid_email(value: &str) -> bool {
     if value.len() > 254
         || !value.is_ascii()
@@ -187,7 +203,10 @@ pub(crate) async fn send_notes(
     let _guard = operation_gate().lock().await;
     uuid(&request.operation_id)?;
     let connection = selected(store, &request.connection_id)?;
-    let document = notes(store, request.session_id)?;
+    let document = match dedup {
+        Some(_) => automatic_notes(store, request.session_id)?,
+        None => notes(store, request.session_id)?,
+    };
     if dedup.is_some()
         && !automatic_destinations(store, request.session_id, document.started_at_utc_ms)?
             .contains(&connection.id)
@@ -331,13 +350,20 @@ fn automatic_destinations(
     let series = store
         .series_preferences_for_session(session_id)
         .map_err(store_error)?;
+    // Nobody chose an event found under way at a start by hand, so its
+    // series' rules do not send this meeting.
+    let chosen_event = !store
+        .calendar_event_found_under_way(session_id)
+        .map_err(store_error)?;
     let folders = store.meeting_folder_ids(session_id).map_err(store_error)?;
     let mut destinations = std::collections::BTreeSet::new();
     for rule in rules.into_iter().filter(|rule| rule.enabled) {
         let new_meeting = started_at > rule.created_at_utc_ms;
         let matches = match rule.scope {
             SendScope::All => new_meeting,
-            SendScope::Series(key) => new_meeting && series.series_key.as_deref() == Some(&key),
+            SendScope::Series(key) => {
+                new_meeting && chosen_event && series.series_key.as_deref() == Some(&key)
+            }
             SendScope::Folder(id) => match folders
                 .iter()
                 .find(|folder| folder.uuid().to_string() == id)

@@ -1548,6 +1548,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/processing_speed.sql")),
     M::up(include_str!("store/transcript_relisten.sql")),
     M::up(include_str!("store/audio_retention.sql")),
+    M::up(include_str!("store/calendar_found_under_way.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
@@ -1976,6 +1977,16 @@ impl MeetingTrendValues {
 
 fn meeting_trend_value(value: i64) -> Result<u64, StoreError> {
     u64::try_from(value).map_err(|_| StoreError::Corrupt)
+}
+
+/// How a meeting came to carry its calendar event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CalendarEventSource {
+    /// The start named it, or detection raised the meeting for it.
+    Chosen,
+    /// Found under way when a recording was started by hand. Nobody chose
+    /// it, so automatic sends and series automations leave it out.
+    FoundUnderWay,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
