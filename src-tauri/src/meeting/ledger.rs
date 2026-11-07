@@ -260,6 +260,32 @@ impl MeetingLedger {
     }
 }
 
+/// Each receipt names the person who spoke every line it cites, read from
+/// the transcript and never from the model, which leaves a placeholder name
+/// out when its rules say to. A receipt citing more than one voice, or a
+/// line nobody was assigned to, names nobody.
+pub(crate) fn attribute_receipts(
+    ledger: &mut MeetingLedger,
+    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    speaker_names: &HashMap<SpeakerId, String>,
+) {
+    let speaker = |receipt: &LedgerReceipt| {
+        let mut names = receipt.citations.iter().map(|citation| {
+            segment_speakers
+                .get(&citation.segment_id)
+                .and_then(|speaker_id| speaker_names.get(speaker_id))
+        });
+        let first = names.next()??;
+        names.all(|name| name == Some(first)).then(|| first.clone())
+    };
+    for thread in &mut ledger.threads {
+        thread.receipt.speaker = speaker(&thread.receipt);
+    }
+    for commitment in &mut ledger.commitments {
+        commitment.receipt.speaker = speaker(&commitment.receipt);
+    }
+}
+
 // ── verbatim receipts ───────────────────────────────────────────────────────
 //
 // The one assertion that catches an invented quote, ported from upstream's
