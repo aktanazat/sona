@@ -520,11 +520,12 @@ impl TimestampBridge {
             return None;
         }
         let delta = native_timestamp_value.checked_sub(self.native_anchor_value)?;
-        let delta_ns = u64::try_from(delta)
-            .ok()?
-            .checked_mul(1_000_000_000)?
-            .checked_div(u64::from(native_timescale))?;
-        self.session_offset_ns.checked_add(delta_ns)
+        // In u64 the product passes its limit 18.4 seconds past the anchor
+        // at a nanosecond timescale, the one the microphone reports in.
+        let delta_ns =
+            u128::from(u64::try_from(delta).ok()?) * 1_000_000_000 / u128::from(native_timescale);
+        self.session_offset_ns
+            .checked_add(u64::try_from(delta_ns).ok()?)
     }
 }
 
@@ -566,6 +567,12 @@ impl CapturedPacket {
             self.native_timestamp_timescale
                 .filter(|timescale| *timescale > 0)?,
         ))
+    }
+
+    pub fn duration_ns(self) -> Option<u64> {
+        u64::from(self.frame_count)
+            .checked_mul(1_000_000_000)?
+            .checked_div(u64::from(self.sample_rate_hz))
     }
 }
 

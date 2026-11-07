@@ -1189,6 +1189,8 @@ final class MeetingsStore {
     }
 
     /// `aggregateSourceGaps`: a run of one reason on one track reads as one row.
+    /// A gap that starts more than a second after the run ends is a separate
+    /// loss, as the core keeps it, and gets its own row and its own time.
     var gapRuns: [MeetingGapRun] {
         var runs: [MeetingGapRun] = []
         var keys: [(track: MeetingSourceTrackId, epoch: Int)] = []
@@ -1200,6 +1202,7 @@ final class MeetingsStore {
             let sameRun = keys.last?.track == gap.trackId
                 && keys.last?.epoch == gap.epoch
                 && runs.last?.reason == gap.reason
+                && Self.continues(runs.last, with: gap)
             guard sameRun, var last = runs.last else {
                 runs.append(MeetingGapRun(
                     id: "\(gap.trackId):\(gap.epoch):\(gap.reason.rawValue):\(runs.count)",
@@ -1227,6 +1230,16 @@ final class MeetingsStore {
             runs[runs.count - 1] = last
         }
         return runs
+    }
+
+    /// The core's rule for one loss: a gap that starts within a second of
+    /// where the run ends. Rows saved before the core recorded times have
+    /// nothing to tell them apart, so they stay together.
+    private static func continues(_ run: MeetingGapRun?, with gap: MeetingSourceGap) -> Bool {
+        guard let start = gap.startOffsetNs, let reach = run?.endOffsetNs ?? run?.startOffsetNs else {
+            return true
+        }
+        return start <= reach + 1_000_000_000
     }
 
     /// The transcript search, 250ms after the last keystroke, scoped to this

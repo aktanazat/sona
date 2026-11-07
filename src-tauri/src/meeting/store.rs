@@ -78,7 +78,7 @@ use super::analytics::{
     AnalyticsSegment, MeetingActionItemState, MeetingAnalytics, MeetingNotesTemplate,
     MeetingUserNotes,
 };
-use super::capture::SessionClock;
+use super::capture::packet_start_offset_ns;
 use super::cloud_bundle;
 use super::conversation_review::ConversationBookmarkKind;
 use super::ledger::{LedgerOutcomeCounts, LedgerThreadState};
@@ -111,6 +111,11 @@ const RECORD_HEADER_BYTES: usize = 92;
 const INDEX_PLAINTEXT_BYTES: usize = 48;
 const INDEX_RECORD_BYTES: usize = 76;
 const MISSING_OFFSET: u64 = u64::MAX;
+
+/// How soon after a gap ends another of its kind must start to read as the
+/// same loss. A lane coming out of a stall refuses and takes packets in turn
+/// for a moment; a stall minutes later is a different place to look.
+const GAP_CONTINUATION_NS: i64 = 1_000_000_000;
 
 /// How long a deleted meeting stays undoable.
 ///
@@ -4168,7 +4173,9 @@ impl MeetingStore {
     /// fsync per report on the connection both lanes share, which is what
     /// starved the microphone writer. Extending the run's open row keeps the
     /// interval and the frame total while holding the write rate at one row
-    /// per condition per epoch.
+    /// per condition per epoch. A report that starts more than
+    /// `GAP_CONTINUATION_NS` after the open row ends is another loss and
+    /// opens its own row, so each one keeps a time someone can find.
     pub fn record_gap(&self, gap: &SourceGap) -> Result<(), StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
@@ -4185,7 +4192,10 @@ impl MeetingStore {
                      WHERE track_id = ?5 ORDER BY gap_id DESC LIMIT 1
                  )
                AND source_epoch = ?6
-               AND reason = ?7",
+               AND reason = ?7
+               AND (?2 IS NULL
+                    OR COALESCE(end_offset_ns, start_offset_ns) IS NULL
+                    OR ?2 <= COALESCE(end_offset_ns, start_offset_ns) + ?8)",
             params![
                 optional_i64(gap.end_offset_ns)?,
                 optional_i64(gap.start_offset_ns)?,
@@ -4194,6 +4204,7 @@ impl MeetingStore {
                 id(gap.track_id),
                 to_i64(gap.epoch.get())?,
                 encode_json(&gap.reason)?,
+                GAP_CONTINUATION_NS,
             ],
         )?;
         if extended == 0 {
@@ -7581,18 +7592,9 @@ impl MeetingTrackWriter {
         }
 
         let skipped_source_packet = packet.sequence > self.next_sequence;
-        let duration_ns = u64::from(packet.frame_count)
-            .checked_mul(1_000_000_000)
-            .and_then(|frames| frames.checked_div(u64::from(packet.sample_rate_hz)))
-            .ok_or(StoreError::Invalid)?;
+        let duration_ns = packet.duration_ns().ok_or(StoreError::Invalid)?;
         let previous_end_offset_ns = self.latest_end_offset_ns();
-        let clock = SessionClock::new(SessionClockAnchor {
-            host_monotonic_anchor_ns: bridge.host_monotonic_anchor_ns,
-            wall_start_utc_ms: 0,
-            clock_policy_version: 1,
-        });
-        let start_offset_ns = clock
-            .map_packet(bridge, packet)
+        let start_offset_ns = packet_start_offset_ns(bridge, packet)
             .unwrap_or_else(|| previous_end_offset_ns.unwrap_or(bridge.session_offset_ns));
 
         let has_source_boundary = packet.discontinuity_flags.timestamp_reset
@@ -15167,6 +15169,43 @@ mod tests {
                 .gaps
                 .len(),
             3
+        );
+    }
+
+    /// Two stalls minutes apart are two places to look. Folded into one row
+    /// they read as a single loss from the first one's start to the last one's
+    /// end, a stretch that was mostly heard.
+    #[test]
+    fn a_gap_long_after_the_last_opens_its_own_interval() {
+        let (_directory, store) = store();
+        let (session_id, track_id, _storage) = microphone_track(&store, test_bridge());
+
+        for (start_ms, end_ms) in [(70_000, 80_000), (300_000, 305_000), (305_400, 306_000)] {
+            store
+                .record_gap(&SourceGap {
+                    track_id,
+                    epoch: SourceEpoch::new(0),
+                    start_offset_ns: Some(start_ms * 1_000_000),
+                    end_offset_ns: Some(end_ms * 1_000_000),
+                    reason: SourceGapReason::PacketDropped,
+                    dropped_frames: Some((end_ms - start_ms) * 48),
+                })
+                .expect("record gap");
+        }
+
+        let intervals = store
+            .review_snapshot(session_id)
+            .expect("review snapshot")
+            .gaps
+            .iter()
+            .map(|gap| (gap.start_offset_ns, gap.end_offset_ns, gap.dropped_frames))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            intervals,
+            [
+                (Some(70_000_000_000), Some(80_000_000_000), Some(480_000)),
+                (Some(300_000_000_000), Some(306_000_000_000), Some(268_800)),
+            ]
         );
     }
 

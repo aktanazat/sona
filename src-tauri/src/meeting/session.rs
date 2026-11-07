@@ -3,7 +3,10 @@ use super::analytics::{
     MeetingLiveHelpKind, MeetingNotesTemplate, MeetingProvisionalTranscript, MeetingUserNotes,
 };
 use super::call_silence::{CaptureAudibility, TrackMeter};
-use super::capture::{MeetingCaptureSource, PacketLaneReadError, PacketLaneReader, PacketSink};
+use super::capture::{
+    packet_start_offset_ns, DroppedRun, MeetingCaptureSource, PacketLaneReadError,
+    PacketLaneReader, PacketSink,
+};
 use super::clock::host_monotonic_now_ns;
 use super::detection::machine::CalendarEventSummary;
 use super::export;
@@ -4783,14 +4786,16 @@ fn run_track_worker(
     );
     let mut samples = Vec::new();
     loop {
-        let mut progressed = false;
-        while let Some(epoch) = reader.pop_clock_epoch() {
-            store.record_clock_epoch(epoch)?;
-            bridges.insert((epoch.epoch.get(), epoch.format_epoch), epoch.bridge);
-            progressed = true;
-        }
+        let mut progressed = record_clock_epochs(&store, &mut reader, &mut bridges)?;
         while let Some(gap) = reader.pop_gap() {
             store.record_gap(&gap)?;
+            progressed = true;
+        }
+        while let Some(run) = reader.pop_dropped() {
+            // An epoch reaches its ring before any packet that names it, so a
+            // second look finds the bridge for a run that ended after the first.
+            record_clock_epochs(&store, &mut reader, &mut bridges)?;
+            store.record_gap(&dropped_gap(run, &bridges))?;
             progressed = true;
         }
         if reader.take_gap_overflow() {
@@ -4825,15 +4830,8 @@ fn run_track_worker(
                 progressed = true;
             }
             Ok(None) => {}
-            Err(PacketLaneReadError::DescriptorWithoutSamples) => {
-                store.record_gap(&SourceGap {
-                    track_id: report.track_id,
-                    epoch: report.epoch,
-                    start_offset_ns: None,
-                    end_offset_ns: None,
-                    reason: SourceGapReason::PacketDropped,
-                    dropped_frames: None,
-                })?;
+            Err(PacketLaneReadError::DescriptorWithoutSamples(packet)) => {
+                store.record_gap(&dropped_gap(DroppedRun::new(packet), &bridges))?;
                 progressed = true;
             }
         }
@@ -4843,6 +4841,41 @@ fn run_track_worker(
         if !progressed {
             thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// Records the clock epochs the lane announced and keeps their bridges for
+/// what comes after them. True when there was one.
+fn record_clock_epochs(
+    store: &MeetingStore,
+    reader: &mut PacketLaneReader,
+    bridges: &mut HashMap<(u64, u64), TimestampBridge>,
+) -> Result<bool, StoreError> {
+    let mut recorded = false;
+    while let Some(epoch) = reader.pop_clock_epoch() {
+        store.record_clock_epoch(epoch)?;
+        bridges.insert((epoch.epoch.get(), epoch.format_epoch), epoch.bridge);
+        recorded = true;
+    }
+    Ok(recorded)
+}
+
+/// Where a run the lane refused sits on the session clock: from its first
+/// packet's start to its last packet's end, each read through the bridge its
+/// epoch announced. Without that bridge the run keeps its size but no time.
+fn dropped_gap(run: DroppedRun, bridges: &HashMap<(u64, u64), TimestampBridge>) -> SourceGap {
+    let start_of = |packet: CapturedPacket| {
+        let bridge = bridges.get(&(packet.source_epoch.get(), packet.format_epoch))?;
+        packet_start_offset_ns(*bridge, packet)
+    };
+    SourceGap {
+        track_id: run.first.track_id,
+        epoch: run.first.source_epoch,
+        start_offset_ns: start_of(run.first),
+        end_offset_ns: start_of(run.last)
+            .and_then(|start| start.checked_add(run.last.duration_ns()?)),
+        reason: SourceGapReason::PacketDropped,
+        dropped_frames: Some(run.frames),
     }
 }
 
@@ -8907,24 +8940,56 @@ pub(crate) mod tests {
         );
     }
 
-    /// A writer held up for ten seconds, by the database or a busy Mac, loses
-    /// none of what the device delivered meanwhile: the lane holds it and the
-    /// writer catches up. A lane of four seconds and 128 packets dropped all
-    /// but the first 1.3 seconds of it.
-    #[test]
-    fn a_writer_held_up_for_ten_seconds_loses_no_audio() {
-        const PACKETS: u64 = 1_000;
-        const FRAMES: u32 = 480;
-        let (_directory, manager, session_id, lane) =
-            capturing_meeting(Arc::new(ReadyEngine), no_engine());
-        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
-        let track_id = store.session_snapshot(session_id).unwrap().sources[0]
-            .track_id
-            .expect("a started microphone track");
+    /// A 10 ms microphone packet `sequence` packets into the meeting, stamped
+    /// in nanoseconds with when it was heard, as the microphone stamps it.
+    fn microphone_packet(track_id: SourceTrackId, sequence: u64) -> CapturedPacket {
+        let offset_ns = sequence * 10_000_000;
+        CapturedPacket {
+            track_id,
+            source_epoch: SourceEpoch::new(0),
+            format_epoch: 0,
+            sequence,
+            native_timestamp_value: Some(i64::try_from(offset_ns).unwrap()),
+            native_timestamp_timescale: Some(1_000_000_000),
+            host_monotonic_anchor_ns: Some(offset_ns),
+            sample_rate_hz: 48_000,
+            channels: 1,
+            frame_count: 480,
+            discontinuity_flags: PacketDiscontinuityFlags::default(),
+        }
+    }
+
+    /// Offers the lane microphone packets `sequences` and returns the ones it
+    /// refused.
+    fn deliver(
+        lane: &Mutex<Option<PacketSink>>,
+        track_id: SourceTrackId,
+        sequences: std::ops::Range<u64>,
+    ) -> Vec<u64> {
+        let samples = [0.4_f32; 480];
+        let mut guard = lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lane = guard.as_mut().expect("the source was handed a lane");
+        sequences
+            .filter(|&sequence| {
+                lane.try_push_interleaved(microphone_packet(track_id, sequence), &samples)
+                    != PacketPushResult::Accepted
+            })
+            .collect()
+    }
+
+    /// Offers the lane microphone packets `sequences` while something else
+    /// holds the meeting database, as a long write elsewhere in the app does,
+    /// then lets the database go. Returns the ones the lane refused.
+    fn deliver_while_the_database_is_held(
+        store: &Arc<MeetingStore>,
+        lane: &Mutex<Option<PacketSink>>,
+        track_id: SourceTrackId,
+        sequences: std::ops::Range<u64>,
+    ) -> Vec<u64> {
         let (held, holding) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
         let holder = thread::spawn({
-            let store = Arc::clone(&store);
+            let store = Arc::clone(store);
             move || {
                 store.with_planning_snapshot(|_| {
                     held.send(()).unwrap();
@@ -8934,34 +8999,14 @@ pub(crate) mod tests {
             }
         });
         holding.recv().unwrap();
-        let samples = vec![0.4_f32; FRAMES as usize];
-        let refused = {
-            let mut guard = lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let lane = guard.as_mut().expect("the source was handed a lane");
-            (0..PACKETS)
-                .filter(|&sequence| {
-                    let offset_ns = sequence * 10_000_000;
-                    lane.try_push_interleaved(
-                        CapturedPacket {
-                            track_id,
-                            source_epoch: SourceEpoch::new(0),
-                            format_epoch: 0,
-                            sequence,
-                            native_timestamp_value: Some(i64::try_from(offset_ns).unwrap()),
-                            native_timestamp_timescale: Some(1_000_000_000),
-                            host_monotonic_anchor_ns: Some(offset_ns),
-                            sample_rate_hz: 48_000,
-                            channels: 1,
-                            frame_count: FRAMES,
-                            discontinuity_flags: PacketDiscontinuityFlags::default(),
-                        },
-                        &samples,
-                    ) != PacketPushResult::Accepted
-                })
-                .count()
-        };
+        let refused = deliver(lane, track_id, sequences);
         release.send(()).unwrap();
         holder.join().unwrap().unwrap();
+        refused
+    }
+
+    fn stop_capturing(manager: &MeetingSessionManager, session_id: MeetingSessionId) {
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
         tauri::async_runtime::block_on(manager.stop(
             MeetingMutationRequest {
                 operation_id: MeetingOperationId::new(),
@@ -8971,9 +9016,30 @@ pub(crate) mod tests {
             MeetingStopCause::Operator(MeetingStopSurface::MeetingLive),
         ))
         .unwrap();
+    }
+
+    /// A writer held up for ten seconds, by the database or a busy Mac, loses
+    /// none of what the device delivered meanwhile: the lane holds it and the
+    /// writer catches up. A lane of four seconds and 128 packets dropped all
+    /// but the first 1.3 seconds of it.
+    #[test]
+    fn a_writer_held_up_for_ten_seconds_loses_no_audio() {
+        const PACKETS: u64 = 1_000;
+        let (_directory, manager, session_id, lane) =
+            capturing_meeting(Arc::new(ReadyEngine), no_engine());
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let track_id = store.session_snapshot(session_id).unwrap().sources[0]
+            .track_id
+            .expect("a started microphone track");
+        let refused = deliver_while_the_database_is_held(&store, &lane, track_id, 0..PACKETS);
+        stop_capturing(&manager, session_id);
         let review = tauri::async_runtime::block_on(manager.get(session_id)).unwrap();
 
-        assert_eq!(refused, 0, "the lane refused audio while its writer waited");
+        assert_eq!(
+            refused.len(),
+            0,
+            "the lane refused audio while its writer waited"
+        );
         assert!(
             review.gaps.iter().all(|gap| !matches!(
                 gap.reason,
@@ -8983,6 +9049,66 @@ pub(crate) mod tests {
             review.gaps
         );
         assert_eq!(review.tracks[0].durable_record_count, PACKETS);
+    }
+
+    /// A meeting whose writer was held up for longer than its lane holds: 63
+    /// seconds of microphone offered behind a held database, then more until
+    /// the lane takes ten packets again, then stopped. Returns the review,
+    /// the packets the lane refused, and where the last packet heard ends.
+    fn a_meeting_that_lost_audio_behind_a_held_writer() -> (MeetingReviewSnapshot, Vec<u64>, u64) {
+        let (_directory, manager, session_id, lane) =
+            capturing_meeting(Arc::new(ReadyEngine), no_engine());
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let track_id = store.session_snapshot(session_id).unwrap().sources[0]
+            .track_id
+            .expect("a started microphone track");
+        let mut refused = deliver_while_the_database_is_held(&store, &lane, track_id, 0..6_300);
+        assert!(!refused.is_empty(), "the lane never filled");
+        let (mut next, mut taken) = (6_300, 0);
+        while taken < 10 {
+            assert!(next < 1_000_000, "the lane never took audio again");
+            match deliver(&lane, track_id, next..next + 1).as_slice() {
+                [] => taken += 1,
+                _ => refused.push(next),
+            }
+            next += 1;
+        }
+        stop_capturing(&manager, session_id);
+        let review = tauri::async_runtime::block_on(manager.get(session_id)).unwrap();
+        (review, refused, next * 10_000_000)
+    }
+
+    /// A writer held up for longer than its lane holds loses what arrives
+    /// after the lane fills, and the review says where: from the first packet
+    /// the lane refused to the end of the last. It used to say "time unknown".
+    #[test]
+    fn a_loss_behind_a_held_writer_says_where_it_was() {
+        let (review, refused, _) = a_meeting_that_lost_audio_behind_a_held_writer();
+        let dropped = review
+            .gaps
+            .iter()
+            .filter(|gap| gap.reason == SourceGapReason::PacketDropped)
+            .map(|gap| (gap.start_offset_ns, gap.end_offset_ns, gap.dropped_frames))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            dropped,
+            [(
+                refused.first().map(|first| first * 10_000_000),
+                refused.last().map(|last| (last + 1) * 10_000_000),
+                Some(u64::try_from(refused.len()).unwrap() * 480),
+            )]
+        );
+    }
+
+    /// The audio heard after a loss stays where it was heard. Laid end to end
+    /// instead, it slid back over the hole, and the microphone drifted from
+    /// the system audio by every second either one lost.
+    #[test]
+    fn audio_after_a_loss_stays_where_it_was_heard() {
+        let (review, _, heard_until_ns) = a_meeting_that_lost_audio_behind_a_held_writer();
+
+        assert_eq!(review.tracks[0].last_offset_ns, Some(heard_until_ns));
     }
 
     /// What a recording holds (the Mac kept awake, processing parked behind
