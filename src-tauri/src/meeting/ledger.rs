@@ -260,17 +260,25 @@ impl MeetingLedger {
     }
 }
 
-/// Each receipt names the person who spoke every line it cites, read from
-/// the transcript and never from the model, which leaves a placeholder name
-/// out when its rules say to. A receipt citing more than one voice, or a
-/// line nobody was assigned to, names nobody.
+/// One line of a transcript as a receipt is named from it: who says it, and
+/// its words folded the way a quote is checked against them.
+pub(crate) struct SpokenLine {
+    pub(crate) speaker: SpeakerId,
+    pub(crate) folded: String,
+}
+
+/// Each receipt names the person who spoke the cited lines its quote is
+/// taken from, read from the transcript and never from the model, which
+/// leaves a placeholder name out when its rules say to. A quote taken from
+/// more than one voice, or a receipt citing a line nobody was assigned to,
+/// names nobody.
 pub(crate) fn attribute_receipts(
     ledger: &mut MeetingLedger,
-    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    lines: &HashMap<TranscriptSegmentId, SpokenLine>,
     speaker_names: &HashMap<SpeakerId, String>,
 ) {
     for receipt in receipts_mut(ledger) {
-        receipt.speaker = cited_speaker(receipt, segment_speakers, speaker_names);
+        receipt.speaker = quoted_speaker(receipt, lines, speaker_names);
     }
 }
 
@@ -278,11 +286,11 @@ pub(crate) fn attribute_receipts(
 /// named them when it was written, by the names the speakers have now. The
 /// ledger keeps the name it was written with, so a speaker renamed or merged
 /// since would otherwise still read "Speaker 1" on every row the ledger
-/// feeds. A receipt citing nothing, or a line `segment_speakers` does not
-/// hold because the transcript was replaced since, keeps the name it has.
+/// feeds. A receipt citing nothing, or a line `lines` does not hold because
+/// the transcript was replaced since, keeps the name it has.
 pub(crate) fn rename_receipt_speakers(
     ledger: &mut MeetingLedger,
-    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    lines: &HashMap<TranscriptSegmentId, SpokenLine>,
     speaker_names: &HashMap<SpeakerId, String>,
 ) {
     for receipt in receipts_mut(ledger) {
@@ -290,9 +298,9 @@ pub(crate) fn rename_receipt_speakers(
             && receipt
                 .citations
                 .iter()
-                .all(|citation| segment_speakers.contains_key(&citation.segment_id));
+                .all(|citation| lines.contains_key(&citation.segment_id));
         if lines_still_there {
-            receipt.speaker = cited_speaker(receipt, segment_speakers, speaker_names);
+            receipt.speaker = quoted_speaker(receipt, lines, speaker_names);
         }
     }
 }
@@ -306,18 +314,61 @@ fn receipts_mut(ledger: &mut MeetingLedger) -> impl Iterator<Item = &mut LedgerR
     threads.chain(commitments)
 }
 
-fn cited_speaker(
+fn quoted_speaker(
     receipt: &LedgerReceipt,
-    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    lines: &HashMap<TranscriptSegmentId, SpokenLine>,
     speaker_names: &HashMap<SpeakerId, String>,
 ) -> Option<String> {
-    let mut names = receipt.citations.iter().map(|citation| {
-        segment_speakers
-            .get(&citation.segment_id)
-            .and_then(|speaker_id| speaker_names.get(speaker_id))
-    });
+    let mut cited = receipt
+        .citations
+        .iter()
+        .map(|citation| Some((citation.start_offset_ns, lines.get(&citation.segment_id)?)))
+        .collect::<Option<Vec<_>>>()?;
+    cited.sort_by_key(|&(start, _)| start);
+    let texts: Vec<&str> = cited.iter().map(|(_, line)| line.folded.as_str()).collect();
+    let mut names = cited
+        .iter()
+        .zip(quoted_lines(&receipt.quote, &texts))
+        .filter(|&(_, quoted)| quoted)
+        .map(|((_, line), _)| speaker_names.get(&line.speaker));
     let first = names.next()??;
     names.all(|name| name == Some(first)).then(|| first.clone())
+}
+
+/// Which of the cited `lines`, folded and in transcript order, `quote` is
+/// taken from: each line holding one of its fragments, or the lines a
+/// fragment runs across. A receipt often cites the question beside the
+/// answer it quotes, two voices where its quote is one. Every line when no
+/// fragment is found in them.
+fn quoted_lines(quote: &str, lines: &[&str]) -> Vec<bool> {
+    let joined = lines.join(" ");
+    let mut quoted = vec![false; lines.len()];
+    for fragment in fragments(&fold(quote)) {
+        let mut found = false;
+        for (marked, line) in quoted.iter_mut().zip(lines) {
+            if line.contains(fragment) {
+                *marked = true;
+                found = true;
+            }
+        }
+        if found {
+            continue;
+        }
+        let Some(start) = joined.find(fragment) else {
+            continue;
+        };
+        let end = start + fragment.len();
+        let mut line_start = 0;
+        for (marked, line) in quoted.iter_mut().zip(lines) {
+            let line_end = line_start + line.len();
+            *marked |= line_start < end && start < line_end;
+            line_start = line_end + 1;
+        }
+    }
+    if !quoted.contains(&true) {
+        quoted.fill(true);
+    }
+    quoted
 }
 
 // ── verbatim receipts ───────────────────────────────────────────────────────
