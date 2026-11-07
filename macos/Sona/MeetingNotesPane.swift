@@ -132,9 +132,12 @@ struct ArtifactPane: View {
                 ? "The model wrote no follow-up for this meeting."
                 : content.followUpDraft.text)
                 .bodyText(14, content.followUpDraft.text.isEmpty ? Theme.inkSecondary : Theme.ink)
-            Button("Draft follow-up") { store.openFollowUp() }
-                .buttonStyle(.compact)
-                .padding(.top, 4)
+            Button("Draft follow-up") {
+                store.openWrap()
+                store.draftFollowUp()
+            }
+            .buttonStyle(.compact)
+            .padding(.top, 4)
         }
     }
 

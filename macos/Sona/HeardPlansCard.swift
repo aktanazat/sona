@@ -89,6 +89,36 @@ struct HeardPlansCard: View {
     let revision: Int
     @State private var plans: [HeardPlan] = []
     @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HeardPlanList(core: core, store: store, plans: $plans)
+            if let failure { Text(failure).metaText(Theme.live) }
+        }
+        .padding(.bottom, plans.isEmpty ? 0 : 16)
+        .task(id: "\(sessionId):\(revision):\(store.heardPlansRevision)") { await load() }
+    }
+
+    private func load() async {
+        do {
+            let result: [HeardPlan] = try await core.request("meeting_heard_plans", ["sessionId": sessionId])
+            guard !Task.isCancelled else { return }
+            plans = result
+            failure = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            failure = "Plans heard could not be read."
+        }
+    }
+}
+
+/// Each plan with the line that made it, and what can be done with it. A
+/// change here makes every list of the open meeting's plans read them again.
+struct HeardPlanList: View {
+    let core: Core
+    let store: MeetingsStore
+    @Binding var plans: [HeardPlan]
+    @State private var failure: String?
     @State private var busy = false
     @State private var editing: HeardPlan?
 
@@ -97,13 +127,11 @@ struct HeardPlansCard: View {
             ForEach(plans) { plan in row(plan) }
             if let failure { Text(failure).metaText(Theme.live) }
         }
-        .padding(.bottom, plans.isEmpty ? 0 : 16)
-        .task(id: "\(sessionId):\(revision):\(store.heardPlansRevision)") { await load() }
         .sheet(item: $editing) { plan in
             HeardPlanEditor(plan: plan) { request in
                 let updated: HeardPlan = try await core.request(
                     "meeting_heard_plan_edit", HeardPlanEditParams(request: request))
-                replace(updated)
+                changed(updated)
             }
         }
     }
@@ -117,12 +145,7 @@ struct HeardPlansCard: View {
                 Text("Plan heard: \(plan.title)").bodyText(14).lineLimit(2)
                 Spacer(minLength: 8)
                 if let segmentId = plan.citation?.segmentId {
-                    Button { store.playContribution(segmentId) } label: {
-                        Image(systemName: "play.fill")
-                    }
-                    .buttonStyle(QuietButton(color: Theme.accent, compact: true))
-                    .disabled(!store.canPlay(segmentId))
-                    .accessibilityLabel("Play where this was said")
+                    PlaySaidButton(store: store, segmentId: segmentId)
                 }
             }
             Text(plan.details).metaText()
@@ -173,7 +196,7 @@ struct HeardPlansCard: View {
             defer { busy = false }
             do {
                 let updated: HeardPlan = try await core.request(method, ["planId": plan.planId])
-                replace(updated)
+                changed(updated)
                 failure = nil
             } catch {
                 failure = error.localizedDescription
@@ -181,21 +204,26 @@ struct HeardPlansCard: View {
         }
     }
 
-    private func replace(_ plan: HeardPlan) {
-        guard let index = plans.firstIndex(where: { $0.planId == plan.planId }) else { return }
-        plans[index] = plan
-    }
-
-    private func load() async {
-        do {
-            let result: [HeardPlan] = try await core.request("meeting_heard_plans", ["sessionId": sessionId])
-            guard !Task.isCancelled else { return }
-            plans = result
-            failure = nil
-        } catch {
-            guard !Task.isCancelled else { return }
-            failure = "Plans heard could not be read."
+    private func changed(_ plan: HeardPlan) {
+        if let index = plans.firstIndex(where: { $0.planId == plan.planId }) {
+            plans[index] = plan
         }
+        store.heardPlansChanged()
+    }
+}
+
+/// ▶ for one line of the open meeting.
+struct PlaySaidButton: View {
+    let store: MeetingsStore
+    let segmentId: TranscriptSegmentId
+
+    var body: some View {
+        Button { store.playContribution(segmentId) } label: {
+            Image(systemName: "play.fill")
+        }
+        .buttonStyle(QuietButton(color: Theme.accent, compact: true))
+        .disabled(!store.canPlay(segmentId))
+        .accessibilityLabel("Play where this was said")
     }
 }
 

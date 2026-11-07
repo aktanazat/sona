@@ -324,8 +324,8 @@ final class MeetingsStore {
     /// choice can be undone.
     private(set) var setAside: [MeetingLoopRow] = []
     private(set) var people: [MeetingPersonContextRow] = []
-    /// Moves when the plans heard in the open meeting change, so the card
-    /// listing them reads them again.
+    /// Moves when the plans heard in the open meeting change, so every list
+    /// of them reads them again.
     private(set) var heardPlansRevision = 0
     private(set) var transcriptQuery = ""
     /// The one voice the transcript is narrowed to, picked on the talk bar.
@@ -348,7 +348,7 @@ final class MeetingsStore {
     // MARK: Sending it on
 
     private(set) var followUp: MeetingFollowUpDraft?
-    private(set) var followUpOpen = false
+    private(set) var wrapOpen = false
     private(set) var drafting = false
     private(set) var savedLedgerPath: String?
 
@@ -996,7 +996,7 @@ final class MeetingsStore {
         notesState = .idle
         catchUp = nil
         followUp = nil
-        followUpOpen = false
+        wrapOpen = false
         reviewLoading = true
         openTask = Task { [weak self] in
             guard let self else { return }
@@ -1017,7 +1017,7 @@ final class MeetingsStore {
         reviewFailure = nil
         reviewLoading = false
         focusedNoteId = nil
-        followUpOpen = false
+        wrapOpen = false
     }
 
     /// The page in front of the reader is about to change. Every read that
@@ -2022,32 +2022,43 @@ final class MeetingsStore {
 
     var hasLedger: Bool { snapshot?.readableLedger != nil }
 
-    func openFollowUp() {
-        guard let sessionId = openSessionId else { return }
-        followUpOpen = true
+    func heardPlansChanged() {
+        heardPlansRevision += 1
+    }
+
+    /// The wrap opens on what the meeting already holds. The follow-up is
+    /// written only when asked for, since writing it may reach the model.
+    func openWrap() {
+        guard openSessionId != nil else { return }
+        wrapOpen = true
         followUp = nil
         error = nil
+    }
+
+    func closeWrap() {
+        wrapOpen = false
+    }
+
+    func draftFollowUp() {
+        guard let sessionId = openSessionId, !drafting else { return }
+        followUp = nil
+        error = nil
+        drafting = true
         Task {
-            drafting = true
             defer { drafting = false }
             do {
                 followUp = try await core.request(
                     "meeting_follow_up_draft", MeetingRequest.followUpDraft(sessionId))
             } catch {
                 self.error = reason(error)
-                followUpOpen = false
             }
         }
-    }
-
-    func closeFollowUp() {
-        followUpOpen = false
     }
 
     func copyFollowUp() {
         guard let draft = followUp else { return }
         copy(draft.body)
-        followUpOpen = false
+        wrapOpen = false
         notice = "The draft is on the clipboard."
     }
 
@@ -2072,7 +2083,7 @@ final class MeetingsStore {
                         error = mail.state.detail
                         return
                     }
-                    followUpOpen = false
+                    wrapOpen = false
                     notice = "Mail is open with the full draft. Review it before sending."
                     return
                 }
@@ -2086,7 +2097,7 @@ final class MeetingsStore {
                     error = "No mail app opened. Copy the draft instead."
                     return
                 }
-                followUpOpen = false
+                wrapOpen = false
                 notice = mail.body == .clipboard
                     ? "The draft is on the clipboard. Paste it into the new email."
                     : "Your mail app is open with the draft. Review it before sending."
