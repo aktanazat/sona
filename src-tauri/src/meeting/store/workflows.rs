@@ -1,7 +1,7 @@
 mod runner;
 
 use super::learning::LearningInputs;
-use super::{MeetingStore, StoreError};
+use super::{CalendarEventSource, MeetingStore, StoreError};
 use crate::analytics::{DashboardTrendRequest, LocalCalendarRange};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::document_types::DocumentId;
@@ -311,16 +311,46 @@ impl MeetingStore {
         session_id: MeetingSessionId,
         event: &CalendarEventSummary,
     ) -> Result<(), StoreError> {
+        self.remember_calendar_event(session_id, event, CalendarEventSource::Chosen)
+    }
+
+    pub(crate) fn remember_calendar_event(
+        &self,
+        session_id: MeetingSessionId,
+        event: &CalendarEventSummary,
+        source: CalendarEventSource,
+    ) -> Result<(), StoreError> {
         let event_json = serde_json::to_string(event).map_err(|_| StoreError::Invalid)?;
         let connection = self.connection()?;
         connection.execute(
-            "INSERT INTO meeting_calendar_facts(session_id, event_key, event_json)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO meeting_calendar_facts(session_id, event_key, event_json, found_under_way)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
-                event_key = excluded.event_key, event_json = excluded.event_json",
-            params![session_id.uuid().to_string(), event.event_key, event_json],
+                event_key = excluded.event_key, event_json = excluded.event_json,
+                found_under_way = excluded.found_under_way",
+            params![
+                session_id.uuid().to_string(),
+                event.event_key,
+                event_json,
+                source == CalendarEventSource::FoundUnderWay
+            ],
         )?;
         Ok(())
+    }
+
+    pub(crate) fn calendar_event_found_under_way(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<bool, StoreError> {
+        let connection = self.connection()?;
+        let found: Option<bool> = connection
+            .query_row(
+                "SELECT found_under_way FROM meeting_calendar_facts WHERE session_id = ?1",
+                [session_id.uuid().to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.unwrap_or(false))
     }
 
     pub(crate) fn meeting_calendar_facts(

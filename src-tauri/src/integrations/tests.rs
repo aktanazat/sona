@@ -1,7 +1,12 @@
 use super::*;
-use crate::meeting::store::workflow_core_tests::{
-    reviewable_meeting, seed_connection_grant_time, seed_folder_filing_time, store,
+use crate::meeting::detection::machine::{
+    CalendarAttendee, CalendarEventSummary, ParticipationStatus,
 };
+use crate::meeting::store::workflow_core_tests::{
+    current_artifact, reviewable_meeting, seed_connection_grant_time, seed_folder_filing_time,
+    store,
+};
+use crate::meeting::store::CalendarEventSource;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn connection() -> Connection {
@@ -223,4 +228,98 @@ fn folder_rules_send_old_notes_only_when_explicitly_filed_after_the_grant() {
         )
         .unwrap();
     assert!(automatic_destinations(&store, old, 50).unwrap().is_empty());
+}
+
+/// Two meetings of one series: one whose start named the event, one that
+/// found it under way when its recording was started by hand.
+fn chosen_and_found(store: &MeetingStore) -> (MeetingSessionId, MeetingSessionId) {
+    let event = CalendarEventSummary {
+        event_key: "series-roadmap#100".into(),
+        series_key: "series-roadmap".into(),
+        title: "Roadmap review".into(),
+        attendee_count: 2,
+        start_utc_ms: 100,
+        end_utc_ms: 200,
+        attendees: vec![CalendarAttendee {
+            name: "Stephen Wolfram".into(),
+            email: Some("stephen@example.com".into()),
+            status: ParticipationStatus::Accepted,
+            is_self: false,
+        }],
+        notes: None,
+        calendar_name: None,
+        location: None,
+        url: None,
+    };
+    let chosen = reviewable_meeting(store, "Roadmap review", 100);
+    let found = reviewable_meeting(store, "Roadmap review", 100);
+    store.remember_calendar_facts(chosen, &event).unwrap();
+    store
+        .remember_calendar_event(found, &event, CalendarEventSource::FoundUnderWay)
+        .unwrap();
+    (chosen, found)
+}
+
+#[test]
+fn a_series_rule_never_sends_a_meeting_whose_event_was_found_under_way() {
+    let (_directory, store) = store();
+    let connection = connection();
+    store.save_connection(&connection).unwrap();
+    let (chosen, found) = chosen_and_found(&store);
+    let mut rule = AutoSendRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        connection_id: connection.id.clone(),
+        scope: SendScope::Series("series-roadmap".into()),
+        enabled: true,
+        created_at_utc_ms: 0,
+    };
+    store.save_connection_rule(&mut rule).unwrap();
+    let started_after_the_grant = rule.created_at_utc_ms + 1;
+
+    assert!(
+        automatic_destinations(&store, chosen, started_after_the_grant)
+            .unwrap()
+            .contains(&connection.id)
+    );
+    assert!(
+        automatic_destinations(&store, found, started_after_the_grant)
+            .unwrap()
+            .is_empty(),
+        "nobody chose an event found under way, so its series rule sends nothing"
+    );
+}
+
+#[test]
+fn an_automatic_send_matches_no_attendee_of_an_event_found_under_way() {
+    let (_directory, store) = store();
+    let (chosen, found) = chosen_and_found(&store);
+    let generated = serde_json::json!({
+        "summary": {"text": "The roadmap is agreed.", "citations": []},
+        "outline": [],
+        "decisions": [],
+        "action_items": [],
+        "key_questions": [],
+        "risks": [],
+        "follow_up_draft": {"text": "", "citations": []}
+    });
+    for session_id in [chosen, found] {
+        current_artifact(&store, session_id, &generated, 1);
+    }
+
+    assert_eq!(
+        automatic_notes(&store, chosen).unwrap().attendee_emails,
+        ["stephen@example.com"]
+    );
+    assert!(
+        automatic_notes(&store, found)
+            .unwrap()
+            .attendee_emails
+            .is_empty(),
+        "an automatic send matches nobody from an event nobody chose"
+    );
+    assert_eq!(
+        notes(&store, found).unwrap().attendee_emails,
+        ["stephen@example.com"],
+        "a send the person starts still reaches the attendees"
+    );
 }
