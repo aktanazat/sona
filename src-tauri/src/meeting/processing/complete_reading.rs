@@ -135,6 +135,19 @@ fn span(all: Range<usize>, more: Range<usize>) -> Range<usize> {
 /// cut off in halves.
 const MAX_SPLITS: u32 = 2;
 
+/// How many times a part of a round is halved when its reply fails. A round
+/// joining two sections reads its part whole: halves would give back two
+/// sections, which join nothing. On a 30-minute meeting the halves of such
+/// a join took seven to twelve minutes and came back with more facts than
+/// went in, so the round kept them as written.
+fn splits_joining(sections: usize) -> u32 {
+    if sections == 2 {
+        0
+    } else {
+        MAX_SPLITS
+    }
+}
+
 /// One part's reading: what each piece gave, and the pieces that failed on
 /// every try.
 pub(super) struct Part<T> {
@@ -143,17 +156,19 @@ pub(super) struct Part<T> {
 }
 
 /// A part read whole or, when its reply came back unusable, rejected or out
-/// of time, in halves, each half halved again while splits are left. A piece
-/// that still fails is left out, unless its failure ends the whole reading.
+/// of time, in halves, each half halved again while `splits` are left. A
+/// piece that still fails is left out, unless its failure ends the whole
+/// reading.
 fn read_part<T>(
     pack: &Pack,
+    splits: u32,
     read: &impl Fn(&str) -> Result<T, ReadingError>,
 ) -> Result<Part<T>, ReadingError> {
     let mut part = Part {
         sections: Vec::new(),
         left_out: Vec::new(),
     };
-    read_in_halves(pack, MAX_SPLITS, read, &mut part)?;
+    read_in_halves(pack, splits, read, &mut part)?;
     Ok(part)
 }
 
@@ -764,6 +779,7 @@ fn read_notes_part(
     instructions: &str,
     short: &str,
     pack: &Pack,
+    splits: u32,
     reply_tokens: i32,
     scope: &SourceScope<'_>,
     evidence: &ArtifactEvidence,
@@ -780,7 +796,7 @@ fn read_notes_part(
             check,
         )
     };
-    read_part(pack, &|text| {
+    read_part(pack, splits, &|text| {
         check().map_err(ReadingError::Stopped)?;
         let output = match generate(instructions, text) {
             Err(ReadingError::Engine(
@@ -1094,6 +1110,7 @@ pub(super) fn notes(
                 &instructions,
                 &short,
                 pack,
+                splits_joining(previous.len()),
                 reply_tokens,
                 &source_scope,
                 evidence,
@@ -2127,7 +2144,7 @@ fn read_ledger_part(
     scope: &SourceScope<'_>,
     check: &dyn Fn() -> Result<(), RunFailure>,
 ) -> Result<Part<MeetingLedger>, ReadingError> {
-    read_part(pack, &|text| {
+    read_part(pack, MAX_SPLITS, &|text| {
         read_ledger_pack(
             generator,
             evidence,

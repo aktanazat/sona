@@ -968,6 +968,58 @@ mod tests {
         );
     }
 
+    /// Reads every part of the meeting, counts each reply that joins
+    /// sections, and runs out of room on every one of them.
+    struct JoinRunsOut(AtomicUsize);
+
+    impl MeetingTextGenerator for JoinRunsOut {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "join-runs-out"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            2_000
+        }
+        fn generate(
+            &self,
+            _: &str,
+            pack: &str,
+            _: i32,
+            _: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            if pack.starts_with("{\"section_facts\"") {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                return Err(MeetingTextGenerationError::ReplyNotStructured);
+            }
+            Ok(reply_citing(pack))
+        }
+    }
+
+    #[test]
+    fn two_sections_whose_join_runs_out_stand_as_written_after_one_try() {
+        let evidence = gradual_evidence();
+        let generator = JoinRunsOut(AtomicUsize::new(0));
+        let content = notes(
+            &generator,
+            &evidence,
+            &HashMap::new(),
+            "Read the meeting.",
+            || Ok(()),
+        )
+        .expect("two sections no join could hold stand as written");
+        assert_eq!(
+            generator.0.load(Ordering::SeqCst),
+            1,
+            "the join is tried once and not again in halves"
+        );
+        assert_eq!(cited_ids(&content), source_ids(&evidence));
+    }
+
     /// A notes reply citing every source its pack holds.
     fn reply_citing(pack: &str) -> String {
         if let Some(reply) = no_topic_groups(pack) {
