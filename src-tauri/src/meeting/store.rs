@@ -26,6 +26,9 @@ mod evening_tests;
 #[cfg(test)]
 mod external_tests;
 mod fence;
+mod first_met;
+#[cfg(test)]
+mod first_met_tests;
 mod folders;
 #[cfg(test)]
 mod folders_tests;
@@ -1567,6 +1570,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/evening.sql")),
     M::up(include_str!("store/heard_plans.sql")),
     M::up(include_str!("store/filing_context.sql")),
+    M::up(include_str!("store/first_met.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

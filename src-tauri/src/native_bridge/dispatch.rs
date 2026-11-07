@@ -3294,6 +3294,27 @@ pub(super) async fn call(
             let person_id = args.take("personId")?;
             reply(crate::commands::people::person_detail(app.state(), person_id).await)
         }
+        "person_first_met" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            reply(crate::commands::people::person_first_met(app.state(), person_id).await)
+        }
+        "person_first_met_decide" => {
+            let mut args = Args::parse(params)?;
+            let person_id = args.take("personId")?;
+            let suggestion_id = args.take("suggestionId")?;
+            let accept = args.take("accept")?;
+            reply(
+                crate::commands::people::person_first_met_decide(
+                    app.clone(),
+                    app.state(),
+                    person_id,
+                    suggestion_id,
+                    accept,
+                )
+                .await,
+            )
+        }
         "person_memory" => {
             let mut args = Args::parse(params)?;
             let person_id = args.take("personId")?;

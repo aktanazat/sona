@@ -24,7 +24,7 @@ const TURN_NS: u64 = 2_000_000_000;
 /// One recorded talk on this Mac's microphone: each line a two-second turn
 /// said by its speaker under the transcript's label. Its audio is kept only
 /// when `kept`.
-fn talk(
+pub(super) fn talk(
     store: &MeetingStore,
     at_utc_ms: i64,
     lines: &[(SpeakerId, &str, &str)],
@@ -118,7 +118,7 @@ fn run(store: &MeetingStore, sql: &str, params: impl Params) {
     store.connection().unwrap().execute(sql, params).unwrap();
 }
 
-fn confirm(store: &MeetingStore, speaker_id: SpeakerId, person_id: PersonId) {
+pub(super) fn confirm(store: &MeetingStore, speaker_id: SpeakerId, person_id: PersonId) {
     run(
         store,
         "INSERT INTO meeting_voice_speaker_resolutions (

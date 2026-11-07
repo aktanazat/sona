@@ -120,6 +120,12 @@ pub enum FilingTarget {
     Place {
         location: ConversationLocation,
     },
+    /// Who introduced `person_id` to the user in this recording.
+    Introducer {
+        person_id: PersonId,
+        introducer_id: PersonId,
+        name: String,
+    },
 }
 
 /// Why a suggestion was made, in facts the card can show.
@@ -418,6 +424,9 @@ impl MeetingSessionManager {
                     .map_err(filing_failure)?;
                 self.emit_session_changed(&snapshot);
             }
+            FilingTarget::Introducer { .. } => store
+                .accept_filing(suggestion_id, now)
+                .map_err(filing_failure)?,
         }
         Ok(())
     }

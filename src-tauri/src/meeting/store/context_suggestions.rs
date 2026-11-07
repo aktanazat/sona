@@ -82,6 +82,7 @@ impl MeetingStore {
                 FilingTarget::Kind { .. } => context.kind == ConversationKind::Unspecified,
                 FilingTarget::Place { .. } => context.location.is_none(),
                 FilingTarget::Person { .. } | FilingTarget::Project { .. } => true,
+                FilingTarget::Introducer { .. } => false,
             })
             .collect())
     }
@@ -103,7 +104,8 @@ impl MeetingStore {
             FilingTarget::Place { location } => (current.kind, Some(location.clone())),
             FilingTarget::Event { .. }
             | FilingTarget::Person { .. }
-            | FilingTarget::Project { .. } => return Err(StoreError::Invalid),
+            | FilingTarget::Project { .. }
+            | FilingTarget::Introducer { .. } => return Err(StoreError::Invalid),
         };
         save_context_in(
             &transaction,

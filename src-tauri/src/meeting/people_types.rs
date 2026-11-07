@@ -217,6 +217,29 @@ pub struct PersonDetailResult {
     pub detail: PersonDetail,
 }
 
+/// The earliest meeting a person is confirmed in, where it was, and who
+/// introduced them when that meeting's transcript says so.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonFirstMet {
+    pub meeting_id: MeetingSessionId,
+    pub at_utc_ms: i64,
+    /// The place the meeting names, once the user chose one.
+    pub place: Option<String>,
+    pub introduction: Option<PersonIntroduction>,
+}
+
+/// Someone heard introducing the person, waiting as a filing suggestion
+/// until the user takes it or turns it down.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct PersonIntroduction {
+    pub suggestion_id: String,
+    pub introducer_name: String,
+    pub quote: String,
+    /// The line that introduced them, while the transcript still holds it.
+    pub segment_id: Option<TranscriptSegmentId>,
+    pub confirmed: bool,
+}
+
 /// What pressing "Regenerate" on a person's paragraph did. Every arm except
 /// `Written` leaves the earlier paragraph in place, so the page needs the
 /// word to say why nothing new appeared rather than reporting a success it
