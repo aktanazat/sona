@@ -323,6 +323,10 @@ struct DeviceRecordingManifest {
     personal_notes: Option<String>,
     #[serde(default)]
     calendar_event: Option<DeviceCalendarEvent>,
+    /// What the operator bookmarked while the device recorded, in
+    /// milliseconds from the start of the audio.
+    #[serde(default)]
+    bookmark_offsets_ms: Vec<u64>,
 }
 
 #[derive(Deserialize)]
@@ -427,6 +431,7 @@ struct DeviceRecordingImport {
     device_id: String,
     personal_notes: Option<String>,
     calendar_event: Option<CalendarEventSummary>,
+    bookmark_offsets_ns: Vec<u64>,
 }
 
 impl DeviceRecordingImport {
@@ -450,6 +455,11 @@ impl DeviceRecordingImport {
             device_id: manifest.device_id,
             personal_notes: manifest.personal_notes,
             calendar_event,
+            bookmark_offsets_ns: manifest
+                .bookmark_offsets_ms
+                .iter()
+                .map(|offset_ms| offset_ms.saturating_mul(1_000_000))
+                .collect(),
         }
     }
 
@@ -3464,6 +3474,7 @@ impl CloudSyncRuntime {
                 recording.request(),
                 recording.personal_notes.as_deref(),
                 recording.calendar_event.as_ref(),
+                &recording.bookmark_offsets_ns,
             )
             .await
             .map_err(|error| {
@@ -4975,15 +4986,17 @@ mod tests {
     }
 
     fn phone_object(audio: Vec<u8>, declared_sha256: &str, writer_device_id: &str) -> PhoneObject {
-        phone_object_with_event(audio, declared_sha256, writer_device_id, None)
+        phone_object_with(audio, declared_sha256, writer_device_id, None, None)
     }
 
-    /// `calendar_event` is the event's JSON exactly as the device encodes it.
-    fn phone_object_with_event(
+    /// `calendar_event` and `bookmark_offsets_ms` are JSON exactly as the
+    /// device encodes them.
+    fn phone_object_with(
         audio: Vec<u8>,
         declared_sha256: &str,
         writer_device_id: &str,
         calendar_event: Option<&str>,
+        bookmark_offsets_ms: Option<&str>,
     ) -> PhoneObject {
         let chunks: Vec<Vec<u8>> = audio
             .chunks(MAX_PLAINTEXT_CHUNK_BYTES)
@@ -4996,11 +5009,14 @@ mod tests {
         let manifest = format!(
             "{{\"audio\":{{\"byte_length\":{byte_length},\"channels\":1,\
              \"codec\":\"pcm_s16le\",\"sample_rate_hz\":16000,\
-             \"sha256\":\"{declared_sha256}\"}},{calendar_event}\
+             \"sha256\":\"{declared_sha256}\"}},{bookmark_offsets_ms}{calendar_event}\
              \"device_id\":\"{writer_device_id}\",\"duration_ms\":{duration_ms},\
              \"format_version\":1,\"kind\":\"device_recording\",\
              \"recorded_at_utc_ms\":1788305031276,\"title\":\"Phone recording\"}}",
             byte_length = audio.len(),
+            bookmark_offsets_ms = bookmark_offsets_ms
+                .map(|offsets| format!("\"bookmark_offsets_ms\":{offsets},"))
+                .unwrap_or_default(),
             calendar_event = calendar_event
                 .map(|event| format!("\"calendar_event\":{event},"))
                 .unwrap_or_default(),
@@ -5114,6 +5130,7 @@ mod tests {
             },
             Some("Confirm the launch date."),
             None,
+            &[],
         ))
         .expect("the pulled recording imports");
         let review = tauri::async_runtime::block_on(manager.get(snapshot.session_id))
@@ -5160,40 +5177,17 @@ mod tests {
         let store = tauri::async_runtime::block_on(manager.store()).expect("the store mounts");
         let audio = vec![1_u8; 32_000];
         let import = |calendar_event: Option<&str>| {
-            let object = phone_object_with_event(
-                audio.clone(),
-                &sha256_base64url(&audio),
-                TEST_DEVICE_ID,
-                calendar_event,
-            );
-            let manifest = match open_remote_manifest(
-                &TEST_VAULT_ROOT,
-                TEST_VAULT_ID,
-                TEST_OBJECT_ID,
-                TEST_REVISION_ID,
-                object.envelope.chunk_count,
-                &object.sealed_manifest,
+            import_phone_object(
+                &manager,
+                &store,
+                &phone_object_with(
+                    audio.clone(),
+                    &sha256_base64url(&audio),
+                    TEST_DEVICE_ID,
+                    calendar_event,
+                    None,
+                ),
             )
-            .expect("the manifest opens")
-            {
-                RemoteManifest::DeviceRecording(manifest) => manifest,
-                RemoteManifest::Meeting(_) => panic!("a device recording read as a meeting bundle"),
-            };
-            let staged = stage(
-                &object,
-                store
-                    .cloud_recording_staging_path(TEST_OBJECT_ID)
-                    .expect("the store owns a staging path"),
-            )
-            .expect("the object stages");
-            let recording = DeviceRecordingImport::new(staged, manifest, TEST_OBJECT_ID);
-            tauri::async_runtime::block_on(manager.import_recording_with(
-                recording.request(),
-                recording.personal_notes.as_deref(),
-                recording.calendar_event.as_ref(),
-            ))
-            .expect("the recording imports")
-            .session_id
         };
 
         let during = import(Some(PHONE_CALENDAR_EVENT));
@@ -5254,6 +5248,120 @@ mod tests {
         );
     }
 
+    /// What a pulled phone object hands the importer: its manifest opened,
+    /// its audio staged, and what the manifest said beside the audio.
+    fn import_phone_object(
+        manager: &MeetingSessionManager,
+        store: &MeetingStore,
+        object: &PhoneObject,
+    ) -> MeetingSessionId {
+        let manifest = match open_remote_manifest(
+            &TEST_VAULT_ROOT,
+            TEST_VAULT_ID,
+            TEST_OBJECT_ID,
+            TEST_REVISION_ID,
+            object.envelope.chunk_count,
+            &object.sealed_manifest,
+        )
+        .expect("the manifest opens")
+        {
+            RemoteManifest::DeviceRecording(manifest) => manifest,
+            RemoteManifest::Meeting(_) => panic!("a device recording read as a meeting bundle"),
+        };
+        let staged = stage(
+            object,
+            store
+                .cloud_recording_staging_path(TEST_OBJECT_ID)
+                .expect("the store owns a staging path"),
+        )
+        .expect("the object stages");
+        let recording = DeviceRecordingImport::new(staged, manifest, TEST_OBJECT_ID);
+        tauri::async_runtime::block_on(manager.import_recording_with(
+            recording.request(),
+            recording.personal_notes.as_deref(),
+            recording.calendar_event.as_ref(),
+            &recording.bookmark_offsets_ns,
+        ))
+        .expect("the recording imports")
+        .session_id
+    }
+
+    /// What `DeviceRecordingTests.testBookmarksAreTheAgreedJson` pins the
+    /// phone to, byte for byte: a moment a quarter second in, and one its
+    /// clock put just past the last sample of a one-second recording.
+    const PHONE_BOOKMARK_OFFSETS: &str = "[250,1040]";
+
+    /// What the operator bookmarked while the phone recorded arrives as the
+    /// meeting's own plain bookmarks, dated when each was pressed. One the
+    /// phone's clock put past its last sample lands on the end of the audio,
+    /// and a phone that bookmarked nothing files a meeting with none.
+    #[test]
+    fn a_phone_recording_keeps_what_was_bookmarked_while_it_recorded() {
+        use crate::meeting::conversation_review::ConversationBookmarkKind;
+
+        let (_files, manager) = crate::meeting::session::tests::importing_manager();
+        let store = tauri::async_runtime::block_on(manager.store()).expect("the store mounts");
+        let audio = vec![1_u8; 32_000];
+        let import = |bookmark_offsets_ms: Option<&str>| {
+            import_phone_object(
+                &manager,
+                &store,
+                &phone_object_with(
+                    audio.clone(),
+                    &sha256_base64url(&audio),
+                    TEST_DEVICE_ID,
+                    None,
+                    bookmark_offsets_ms,
+                ),
+            )
+        };
+
+        let marked = import(Some(PHONE_BOOKMARK_OFFSETS));
+        let end_ns = store
+            .session_snapshot(marked)
+            .expect("the meeting is readable")
+            .elapsed_offset_ns
+            .expect("the meeting has audio");
+        assert!(
+            end_ns < 1_040_000_000,
+            "the late bookmark has to fall past the audio"
+        );
+        let end_ms = i64::try_from(end_ns / 1_000_000).expect("the audio's length fits");
+        assert_eq!(
+            store
+                .conversation_bookmarks(marked)
+                .expect("bookmarks are readable")
+                .iter()
+                .map(|bookmark| (
+                    bookmark.start_offset_ns,
+                    bookmark.kind,
+                    bookmark.label.as_deref(),
+                    bookmark.created_at_utc_ms,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    250_000_000,
+                    ConversationBookmarkKind::Mark,
+                    None,
+                    1_788_305_031_526
+                ),
+                (
+                    end_ns,
+                    ConversationBookmarkKind::Mark,
+                    None,
+                    1_788_305_031_276 + end_ms
+                ),
+            ]
+        );
+
+        let unmarked = import(None);
+        assert!(store
+            .conversation_bookmarks(unmarked)
+            .expect("bookmarks are readable")
+            .is_empty());
+    }
+
     /// A phone may upload a recording with no title. The staged file is named
     /// for the object, so the importer's own fallback to the file stem would
     /// title the meeting with an opaque id; the request asks instead for the
@@ -5277,6 +5385,7 @@ mod tests {
             device_id: TEST_DEVICE_ID.to_owned(),
             personal_notes: None,
             calendar_event: None,
+            bookmark_offsets_ns: Vec::new(),
         };
 
         let snapshot =

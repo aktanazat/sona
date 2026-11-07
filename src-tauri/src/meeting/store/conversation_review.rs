@@ -265,6 +265,40 @@ impl MeetingStore {
         })
     }
 
+    /// The moments a device bookmarked while it recorded, filed as plain
+    /// bookmarks on the meeting its recording became, each dated when it was
+    /// pressed. A device clock that ran ahead of its samples can put a
+    /// last-instant bookmark past the audio; it lands on the end.
+    pub(crate) fn add_device_bookmarks(
+        &self,
+        session_id: MeetingSessionId,
+        offsets_ns: &[u64],
+    ) -> Result<(), StoreError> {
+        if offsets_ns.is_empty() {
+            return Ok(());
+        }
+        let session = self.session_snapshot(session_id)?;
+        let end_ns = session.elapsed_offset_ns.unwrap_or(0);
+        let started_at = session.started_at_utc_ms.unwrap_or_else(utc_now_ms);
+        let mut bookmarks = Vec::with_capacity(offsets_ns.len());
+        for &offset_ns in offsets_ns {
+            let start_offset_ns = offset_ns.min(end_ns);
+            bookmarks.push(ConversationBookmark {
+                bookmark_id: uuid::Uuid::new_v4().to_string(),
+                session_id,
+                start_offset_ns,
+                label: None,
+                kind: ConversationBookmarkKind::Mark,
+                created_at_utc_ms: started_at.saturating_add(to_i64(start_offset_ns / 1_000_000)?),
+            });
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        import_bookmarks_in(&transaction, session_id, &bookmarks)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn conversation_place_review(
         &self,
         session_id: MeetingSessionId,

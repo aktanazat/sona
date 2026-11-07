@@ -2494,19 +2494,22 @@ impl MeetingSessionManager {
         &self,
         request: ImportRecordingRequest,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
-        self.import_recording_with(request, None, None).await
+        self.import_recording_with(request, None, None, &[]).await
     }
 
     /// Install what the phone knew about a recording before any processing
-    /// can read the meeting: its own notes, and the calendar event it was
-    /// made during. The event is remembered the way a Mac preflight remembers
-    /// one, and followed by the start a live meeting records, so its
-    /// attendees are linked to people the way a Mac recording's are.
+    /// can read the meeting: its own notes, the calendar event it was made
+    /// during, and the moments bookmarked while it recorded, in nanoseconds
+    /// from the start of its audio. The event is remembered the way a Mac
+    /// preflight remembers one, and followed by the start a live meeting
+    /// records, so its attendees are linked to people the way a Mac
+    /// recording's are.
     pub(crate) async fn import_recording_with(
         &self,
         request: ImportRecordingRequest,
         notes: Option<&str>,
         calendar_event: Option<&CalendarEventSummary>,
+        bookmark_offsets_ns: &[u64],
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
         let _activity = crate::planning::quiet::foreground_activity();
         let media = validate_media_path(&request.path).map_err(|error| {
@@ -2560,6 +2563,11 @@ impl MeetingSessionManager {
         }
         match self.seal_imported_capture(&store, session_id, None).await {
             Ok(snapshot) => {
+                if let Err(error) = store.add_device_bookmarks(session_id, bookmark_offsets_ns) {
+                    return Err(self
+                        .abandon_import(session_id, map_store_error(error))
+                        .await);
+                }
                 self.processing
                     .submit(store, session_id, ProcessingOrigin::Stop);
                 self.emit_session_changed(&snapshot);
