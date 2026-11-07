@@ -2996,10 +2996,12 @@ impl MeetingProcessingService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&session_id)
-            .is_some_and(|job| job.cancelled.load(Ordering::Acquire));
-        if cancelled {
+            .map(|job| Arc::clone(&job.cancelled))
+            .unwrap_or_default();
+        if cancelled.load(Ordering::Acquire) {
             return Err(ProcessingFailure::Cancelled.into());
         }
+        self.wait_for_capture(&cancelled)?;
         if !self.route_still_allowed(store, session_id, route) {
             return Err(ProcessingFailure::RemoteUnavailable.into());
         }
