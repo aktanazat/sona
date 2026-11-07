@@ -15,8 +15,10 @@ enum Theme {
     static let inkTertiary = dynamic(light: 0x6E6E73, dark: 0xA8A9A9)
     static let inkDisabled = dynamic(light: 0x8A8A8E, dark: 0x7A7B7B)
 
-    static let border = dynamic(light: 0xE0E0E1, dark: 0x4A4B4B)
-    static let hairline = dynamic(light: 0xE4E4E5, dark: 0x484949)
+    /// Increase Contrast darkens the edges to at least 3:1 against
+    /// `surface` and `page`.
+    static let border = dynamic(light: 0xE0E0E1, dark: 0x4A4B4B, increased: (light: 0x7C7C80, dark: 0x9A9B9B))
+    static let hairline = dynamic(light: 0xE4E4E5, dark: 0x484949, increased: (light: 0x7C7C80, dark: 0x9A9B9B))
 
     static let accent = dynamic(light: 0x0A6BDB, dark: 0x4C9AFF)
     static let accentFill = dynamic(light: 0x0A6BDB, dark: 0x1F6FEB)
@@ -71,10 +73,16 @@ enum Theme {
         }
     }
 
-    private static func dynamic(light: UInt32, dark: UInt32, alpha: CGFloat = 1, darkAlpha: CGFloat? = nil) -> Color {
+    private static func dynamic(
+        light: UInt32, dark: UInt32, alpha: CGFloat = 1, darkAlpha: CGFloat? = nil,
+        increased: (light: UInt32, dark: UInt32)? = nil
+    ) -> Color {
         Color(
             nsColor: NSColor(name: nil) { appearance in
                 let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                if let increased, NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast {
+                    return NSColor(hex: isDark ? increased.dark : increased.light, alpha: 1)
+                }
                 return NSColor(hex: isDark ? dark : light, alpha: isDark ? (darkAlpha ?? alpha) : alpha)
             }
         )
