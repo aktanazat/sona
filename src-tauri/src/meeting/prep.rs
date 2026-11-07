@@ -206,6 +206,20 @@ pub(crate) fn gather_sources(
         serde_json::to_string(event).map_err(|_| StoreError::Invalid)?,
         None,
     );
+    if let Some(plan) = store.heard_plan_for_event(event)? {
+        source(
+            &mut sources,
+            format!("Plan heard · {}", plan.title),
+            format!(
+                "When: {}. With: {}. Where: {}. Said: {}",
+                plan.when_text,
+                plan.people.join(", "),
+                plan.place.as_deref().unwrap_or("Not said"),
+                plan.quote.as_deref().unwrap_or("Not kept")
+            ),
+            Some(plan.session_id),
+        );
+    }
     let emails = recipient_addresses(&event.attendees);
     let matched = store.person_ids_for_calendar_emails(&emails)?;
     let mut people = matched.values().copied().collect::<Vec<_>>();

@@ -1,4 +1,6 @@
-use super::{calendar::CalendarAccess, DetectionRuntime};
+use super::{calendar::CalendarAccess, machine, DetectionRuntime, MeetingPrepCard};
+use crate::meeting::heard_plan_types::HeardPlan;
+use crate::meeting::store::MeetingStore;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
@@ -70,5 +72,78 @@ impl DetectionRuntime {
                 }
             }
         });
+    }
+
+    /// The prep for a meeting only a heard plan predicts: once the plan's
+    /// time is within the reminder lead, the same card a calendar event gets.
+    pub(super) fn spawn_plan_prep_loop(self: &Arc<Self>) {
+        let runtime = Arc::downgrade(self);
+        tauri::async_runtime::spawn(async move {
+            // Half the shortest lead, so no plan's start falls between passes.
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(runtime) = runtime.upgrade() else {
+                    return;
+                };
+                if runtime.stop.load(Ordering::Acquire) {
+                    return;
+                }
+                runtime.present_plan_preps(super::utc_now_ms()).await;
+            }
+        });
+    }
+
+    async fn present_plan_preps(self: &Arc<Self>, now_utc_ms: i64) {
+        let settings = crate::settings::get_settings(&self.app);
+        if !self.enabled.load(Ordering::Acquire) || !settings.meeting_prep.upcoming_alerts_enabled {
+            return;
+        }
+        let lead_ms = i64::from(settings.meeting_prep.alert_minutes.clamp(1, 60)) * 60_000;
+        let Ok(store) = self.meetings.store().await else {
+            return;
+        };
+        let Ok(plans) = store.heard_plans_starting(now_utc_ms, now_utc_ms + lead_ms) else {
+            return;
+        };
+        let reads_calendar = settings.detection_calendar_enabled
+            && self.calendar.access() == CalendarAccess::Authorized;
+        for plan in plans {
+            let Some(card) = MeetingPrepCard::for_plan(plan.clone()) else {
+                continue;
+            };
+            let claimed = self.lock().briefing_events.insert(card.event_key.clone());
+            if !claimed || (reads_calendar && self.invited_event_keeps(&store, &plan).await) {
+                continue;
+            }
+            self.present_prep_card(card, now_utc_ms).await;
+        }
+    }
+
+    /// Whether an invited event the calendar prep will brief keeps `plan`,
+    /// so its card carries the plan and this one would be a second.
+    async fn invited_event_keeps(&self, store: &MeetingStore, plan: &HeardPlan) -> bool {
+        let Some(window) = plan.window else {
+            return false;
+        };
+        let calendar = Arc::clone(&self.calendar);
+        let Ok(events) = tauri::async_runtime::spawn_blocking(move || {
+            calendar.events_between(window.start_utc_ms, window.end_utc_ms)
+        })
+        .await
+        else {
+            return false;
+        };
+        events
+            .iter()
+            .filter(|occurrence| occurrence.summary.attendee_count >= machine::ATTENDEE_FLOOR)
+            .any(|occurrence| {
+                store
+                    .heard_plan_for_event(&occurrence.summary)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|kept| kept.plan_id == plan.plan_id)
+            })
     }
 }
