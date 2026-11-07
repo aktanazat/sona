@@ -93,6 +93,16 @@
 		CA0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
 		CC0000000000000000000044 /* BoundedRewrite.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000044 /* BoundedRewrite.swift */; };
 		CC0000000000000000000045 /* DictationDeliveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000045 /* DictationDeliveryTests.swift */; };
+		CA000000000000000000004A /* RecordingActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004A /* RecordingActivity.swift */; };
+		CA000000000000000000004B /* RecordingIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004B /* RecordingIntents.swift */; };
+		CA000000000000000000004E /* SonaWidgets.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004E /* SonaWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CE0000000000000000000017 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000017 /* Localizable.strings */; };
+		CE0000000000000000000019 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000019 /* Theme.swift */; };
+		CE0000000000000000000020 /* KeyboardDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000020 /* KeyboardDraft.swift */; };
+		CE000000000000000000004A /* RecordingActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004A /* RecordingActivity.swift */; };
+		CE000000000000000000004B /* RecordingIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004B /* RecordingIntents.swift */; };
+		CE000000000000000000004C /* SonaWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000000000000000000004C /* SonaWidgets.swift */; };
+		CE0000000000000000000038 /* KeyboardSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000038 /* KeyboardSession.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -109,6 +119,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = E00000000000000000000004;
 			remoteInfo = SonaKeyboard;
+		};
+		E20000000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E00000000000000000000005;
+			remoteInfo = SonaWidgets;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -129,7 +146,7 @@
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
-			files = (CA0000000000000000000024 /* SonaKeyboard.appex in Embed App Extensions */, );
+			files = (CA0000000000000000000024 /* SonaKeyboard.appex in Embed App Extensions */, CA000000000000000000004E /* SonaWidgets.appex in Embed App Extensions */, );
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -201,6 +218,12 @@
 		BB0000000000000000000044 /* BoundedRewrite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedRewrite.swift; sourceTree = "<group>"; };
 		BB0000000000000000000045 /* DictationDeliveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationDeliveryTests.swift; sourceTree = "<group>"; };
 		BB0000000000000000000046 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		BB000000000000000000004A /* RecordingActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActivity.swift; sourceTree = "<group>"; };
+		BB000000000000000000004B /* RecordingIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingIntents.swift; sourceTree = "<group>"; };
+		BB000000000000000000004C /* SonaWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SonaWidgets.swift; sourceTree = "<group>"; };
+		BB000000000000000000004D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB000000000000000000004E /* SonaWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SonaWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB000000000000000000004F /* SonaWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SonaWidgets.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -226,6 +249,12 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		D40000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50000000000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = ();
@@ -261,6 +290,7 @@
 				AA0000000000000000000006 /* SonaWatch */,
 				AA0000000000000000000007 /* SonaTests */,
 				AA0000000000000000000009 /* SonaKeyboard */,
+				AA000000000000000000000A /* SonaWidgets */,
 				AA0000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -272,6 +302,7 @@
 				BB0000000000000000000014 /* Sona Watch.app */,
 				BB0000000000000000000015 /* SonaTests.xctest */,
 				BB0000000000000000000024 /* SonaKeyboard.appex */,
+				BB000000000000000000004E /* SonaWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -300,6 +331,8 @@
 				BB000000000000000000003A /* PhoneMeeting.swift */,
 				BB000000000000000000003B /* CallService.swift */,
 				BB0000000000000000000044 /* BoundedRewrite.swift */,
+				BB000000000000000000004A /* RecordingActivity.swift */,
+				BB000000000000000000004B /* RecordingIntents.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -380,6 +413,16 @@
 			path = SonaKeyboard;
 			sourceTree = "<group>";
 		};
+		AA000000000000000000000A /* SonaWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				BB000000000000000000004C /* SonaWidgets.swift */,
+				BB000000000000000000004D /* Info.plist */,
+				BB000000000000000000004F /* SonaWidgets.entitlements */,
+			);
+			path = SonaWidgets;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -398,6 +441,7 @@
 			dependencies = (
 				E10000000000000000000001 /* PBXTargetDependency */,
 				E10000000000000000000002 /* PBXTargetDependency */,
+				E10000000000000000000003 /* PBXTargetDependency */,
 			);
 			name = Sona;
 			productName = Sona;
@@ -453,6 +497,21 @@
 			productReference = BB0000000000000000000024 /* SonaKeyboard.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		E00000000000000000000005 /* SonaWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F00000000000000000000006 /* Build configuration list for PBXNativeTarget "SonaWidgets" */;
+			buildPhases = (
+				D50000000000000000000001 /* Sources */,
+				D50000000000000000000002 /* Frameworks */,
+				D50000000000000000000003 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = SonaWidgets;
+			productName = SonaWidgets;
+			productReference = BB000000000000000000004E /* SonaWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -496,6 +555,7 @@
 				E00000000000000000000002 /* Sona Watch */,
 				E00000000000000000000003 /* SonaTests */,
 				E00000000000000000000004 /* SonaKeyboard */,
+				E00000000000000000000005 /* SonaWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -532,6 +592,12 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (CD0000000000000000000017 /* Localizable.strings in Resources */, );
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (CE0000000000000000000017 /* Localizable.strings in Resources */, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -580,6 +646,8 @@
 				CA000000000000000000003F /* SonaIntents.swift in Sources */,
 				CA0000000000000000000040 /* PhoneCallsScreen.swift in Sources */,
 				CA0000000000000000000044 /* BoundedRewrite.swift in Sources */,
+				CA000000000000000000004A /* RecordingActivity.swift in Sources */,
+				CA000000000000000000004B /* RecordingIntents.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -642,6 +710,19 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D50000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CE0000000000000000000019 /* Theme.swift in Sources */,
+				CE0000000000000000000020 /* KeyboardDraft.swift in Sources */,
+				CE000000000000000000004A /* RecordingActivity.swift in Sources */,
+				CE000000000000000000004B /* RecordingIntents.swift in Sources */,
+				CE000000000000000000004C /* SonaWidgets.swift in Sources */,
+				CE0000000000000000000038 /* KeyboardSession.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -654,6 +735,11 @@
 			isa = PBXTargetDependency;
 			target = E00000000000000000000004 /* SonaKeyboard */;
 			targetProxy = E20000000000000000000002 /* PBXContainerItemProxy */;
+		};
+		E10000000000000000000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E00000000000000000000005 /* SonaWidgets */;
+			targetProxy = E20000000000000000000003 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -710,6 +796,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sona uses the microphone while a recording is open, and while you are dictating.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Sona reads where your phone is once when a recording starts, so your Mac can suggest the place. Only a place you choose is saved.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Sona transcribes dictation on this iPhone after you tap Start dictating.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_FILE = Sona/Info.plist;
 				CODE_SIGN_ENTITLEMENTS = Sona/Sona.entitlements;
@@ -737,6 +824,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Sona uses the microphone while a recording is open, and while you are dictating.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Sona reads where your phone is once when a recording starts, so your Mac can suggest the place. Only a place you choose is saved.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Sona transcribes dictation on this iPhone after you tap Start dictating.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_FILE = Sona/Info.plist;
 				CODE_SIGN_ENTITLEMENTS = Sona/Sona.entitlements;
@@ -874,6 +962,50 @@
 			};
 			name = Release;
 		};
+		F1000000000000000000000B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SonaWidgets/SonaWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AAVB324H37;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SonaWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Sona;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mobile.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		F1000000000000000000000C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SonaWidgets/SonaWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = AAVB324H37;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SonaWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Sona;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aktanazat.sona.mobile.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -918,6 +1050,15 @@
 			buildConfigurations = (
 				F10000000000000000000009 /* Debug */,
 				F1000000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F00000000000000000000006 /* Build configuration list for PBXNativeTarget "SonaWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1000000000000000000000B /* Debug */,
+				F1000000000000000000000C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -1,3 +1,4 @@
+import ActivityKit
 import Combine
 import Foundation
 import Network
@@ -260,12 +261,7 @@ final class AppModel: NSObject, ObservableObject {
 
     func startRecording(during event: DeviceRecordingManifest.CalendarEvent? = nil) {
         guard consentAccepted, !startingRecording, !recorder.isRecording else { return }
-        /* A recording takes the microphone from dictation instead of refusing: the
-         * transcript so far stays on the dictation screen, and an offer the operator
-         * accepted from a call notification must not fail with a microphone error. */
-        dictation.cancel()
-        dictation.endWarmSession()
-        keyboardReturn = false
+        takeMicrophoneFromDictation()
         startingRecording = true
         Task {
             defer { startingRecording = false }
@@ -277,14 +273,7 @@ final class AppModel: NSObject, ObservableObject {
                 recorder.notice = .microphoneOff
                 return
             }
-            do {
-                try recorder.start()
-                recordingEvent = event
-                readPlace(unless: event)
-                AppModel.tap()
-            } catch {
-                recorder.notice = .microphoneUnavailable
-            }
+            beginRecording(during: event)
         }
     }
 
@@ -304,8 +293,46 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
 
+    /// A press outside the app records without bringing it up only when nothing has to
+    /// be asked first. The system ends a recording started that way unless a Live
+    /// Activity shows it, so Live Activities have to be on too.
+    func recordWithoutAsking() -> Bool {
+        if startingRecording || recorder.isRecording { return true }
+        guard consentAccepted, PhoneRecorder.hasPermission,
+              ActivityAuthorizationInfo().areActivitiesEnabled
+        else { return false }
+        takeMicrophoneFromDictation()
+        beginRecording(during: nil)
+        if recorder.isRecording { page = .recording }
+        return recorder.isRecording
+    }
+
+    func openRecording() {
+        handle(DictationLink.meetingURL)
+    }
+
     func bookmarkRecording() {
         recorder.bookmark()
+    }
+
+    /* A recording takes the microphone from dictation instead of refusing: the
+     * transcript so far stays on the dictation screen, and an offer the operator
+     * accepted from a call notification must not fail with a microphone error. */
+    private func takeMicrophoneFromDictation() {
+        dictation.cancel()
+        dictation.endWarmSession()
+        keyboardReturn = false
+    }
+
+    private func beginRecording(during event: DeviceRecordingManifest.CalendarEvent?) {
+        do {
+            try recorder.start()
+            recordingEvent = event
+            readPlace(unless: event)
+            AppModel.tap()
+        } catch {
+            recorder.notice = .microphoneUnavailable
+        }
     }
 
     // MARK: - Keyboard draft
@@ -710,6 +737,8 @@ final class AppModel: NSObject, ObservableObject {
         return "\(prefix) \(stamp)"
     }
 }
+
+extension AppModel: PhoneRecordingControls {}
 
 extension AppModel: WCSessionDelegate {
     nonisolated func session(

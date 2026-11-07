@@ -1,8 +1,15 @@
+import AppIntents
 import SwiftUI
 
 @main
 struct SonaApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
+
+    init() {
+        let model = AppModel()
+        _model = StateObject(wrappedValue: model)
+        AppDependencyManager.shared.add(dependency: model as any PhoneRecordingControls)
+    }
 
     var body: some Scene {
         WindowGroup {
