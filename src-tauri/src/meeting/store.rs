@@ -94,7 +94,8 @@ use super::capture::packet_start_offset_ns;
 use super::cloud_bundle;
 use super::conversation_review::ConversationBookmarkKind;
 use super::ledger::{
-    rename_receipt_speakers, LedgerOutcomeCounts, LedgerThreadState, MeetingLedger,
+    fold, rename_receipt_speakers, LedgerOutcomeCounts, LedgerThreadState, MeetingLedger,
+    SpokenLine,
 };
 use super::template_types::{NotesTemplate, NotesTemplateChoice};
 use super::types::*;
@@ -5336,7 +5337,8 @@ impl MeetingStore {
         }
         let notes = notes_for_session(&connection, session_id)?;
         let mut artifacts = artifact_revisions_for_session(&connection, session_id)?;
-        let speakers_now = ReceiptSpeakers::read(&connection, session_id)?;
+        let speakers_now =
+            ReceiptSpeakers::over(&connection, session_id, &transcript, &canonical_ids)?;
         for ledger in artifacts
             .iter_mut()
             .filter_map(|artifact| artifact.content.as_mut()?.ledger.as_mut())
@@ -9023,52 +9025,57 @@ fn speaker_display_names_in(
 }
 
 /// Who says each line of a meeting's transcript now, by the name that voice
-/// has now: what a stored ledger's receipts are named from as it is read, so
-/// a speaker renamed or merged after the ledger was written reads on every
-/// row the ledger feeds the way it reads in the transcript.
+/// has now, and what the line says: what a stored ledger's receipts are
+/// named from as it is read, so a speaker renamed or merged after the ledger
+/// was written reads on every row the ledger feeds the way it reads in the
+/// transcript.
 struct ReceiptSpeakers {
-    segment_speakers: HashMap<TranscriptSegmentId, SpeakerId>,
+    lines: HashMap<TranscriptSegmentId, SpokenLine>,
     speaker_names: HashMap<SpeakerId, String>,
 }
 
 impl ReceiptSpeakers {
     /// Removed lines stay in: a line removed after the ledger was written
-    /// was still said by the voice it is assigned to.
+    /// was still said by the voice it is assigned to. A line reads the way
+    /// the notes read it, with its edit and learned corrections.
     fn read(connection: &Connection, session_id: MeetingSessionId) -> Result<Self, StoreError> {
         let canonical_ids = canonical_speaker_ids(connection, session_id)?;
-        let mut statement = connection.prepare(
-            "SELECT s.segment_id, COALESCE(a.speaker_id, s.speaker_id)
-               FROM meeting_sessions m
-               JOIN meeting_transcript_segments s
-                 ON s.transcript_revision_id = m.current_transcript_revision_id
-               LEFT JOIN meeting_diarization_assignments a
-                 ON a.generation_id = m.current_diarization_generation_id
-                AND a.segment_id = s.segment_id
-              WHERE m.id = ?1",
-        )?;
-        let rows = statement.query_map(params![id(session_id)], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut segment_speakers = HashMap::new();
-        for row in rows {
-            let (segment_id, speaker_id) = row?;
-            let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
-            segment_speakers.insert(
-                TranscriptSegmentId::from_uuid(parse_uuid(&segment_id)?),
-                canonical_ids
-                    .get(&speaker_id)
+        let transcript = effective_segments_for_session(connection, session_id)?;
+        Self::over(connection, session_id, &transcript, &canonical_ids)
+    }
+
+    fn over(
+        connection: &Connection,
+        session_id: MeetingSessionId,
+        transcript: &[EffectiveTranscriptSegment],
+        canonical_ids: &HashMap<SpeakerId, SpeakerId>,
+    ) -> Result<Self, StoreError> {
+        let lines = transcript
+            .iter()
+            .map(|segment| {
+                let speaker = canonical_ids
+                    .get(&segment.assigned_speaker_id)
                     .copied()
-                    .unwrap_or(speaker_id),
-            );
-        }
+                    .unwrap_or(segment.assigned_speaker_id);
+                let text = segment
+                    .replacement_text
+                    .as_deref()
+                    .unwrap_or(&segment.base.text);
+                let line = SpokenLine {
+                    speaker,
+                    folded: fold(text),
+                };
+                (segment.base.segment_id, line)
+            })
+            .collect();
         Ok(Self {
-            segment_speakers,
-            speaker_names: speaker_display_names_in(connection, session_id, &canonical_ids)?,
+            lines,
+            speaker_names: speaker_display_names_in(connection, session_id, canonical_ids)?,
         })
     }
 
     fn name(&self, ledger: &mut MeetingLedger) {
-        rename_receipt_speakers(ledger, &self.segment_speakers, &self.speaker_names);
+        rename_receipt_speakers(ledger, &self.lines, &self.speaker_names);
     }
 }
 

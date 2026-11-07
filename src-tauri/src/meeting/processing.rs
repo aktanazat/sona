@@ -6218,7 +6218,17 @@ pub(crate) fn generate_ledger(
     let mut ledger =
         complete_reading::ledger(generator, evidence, &turn_speakers, &haystack, checkpoint)
             .map_err(reading_error_cause)?;
-    ledger::attribute_receipts(&mut ledger, &segment_speakers, speaker_names);
+    let lines = segments
+        .iter()
+        .map(|segment| {
+            let line = ledger::SpokenLine {
+                speaker: segment.speaker_id,
+                folded: ledger::fold(&segment.text),
+            };
+            (segment.segment_id, line)
+        })
+        .collect();
+    ledger::attribute_receipts(&mut ledger, &lines, speaker_names);
     // The page this ledger would render as, built the way the exporter builds
     // it so the checks read the measured numbers a reader would. Title, kind
     // and date are presentation and take no part in them; the axis runs to
@@ -10147,10 +10157,14 @@ pub(crate) mod tests {
         };
         let (ana, ben) = (SpeakerId::new(), SpeakerId::new());
         let names = HashMap::from([(ana, "Ana".to_owned()), (ben, "Ben".to_owned())]);
-        let segment_speakers = HashMap::from([
-            (line(1).segment_id, ana),
-            (line(2).segment_id, ana),
-            (line(3).segment_id, ben),
+        let spoken = |speaker| ledger::SpokenLine {
+            speaker,
+            folded: String::new(),
+        };
+        let lines = HashMap::from([
+            (line(1).segment_id, spoken(ana)),
+            (line(2).segment_id, spoken(ana)),
+            (line(3).segment_id, spoken(ben)),
         ]);
         ledger.threads.truncate(3);
         assert_eq!(ledger.threads.len(), 3, "the reference has three threads");
@@ -10159,7 +10173,7 @@ pub(crate) mod tests {
             thread.receipt.citations = cited.into_iter().map(line).collect();
         }
 
-        ledger::attribute_receipts(&mut ledger, &segment_speakers, &names);
+        ledger::attribute_receipts(&mut ledger, &lines, &names);
 
         let speakers = ledger
             .threads
@@ -10167,6 +10181,54 @@ pub(crate) mod tests {
             .map(|thread| thread.receipt.speaker.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(speakers, [Some("Ana"), None, None]);
+    }
+
+    /// A receipt often cites the question beside the answer it quotes. It
+    /// names the voice its quote was taken from, and nobody when the quote
+    /// runs across both voices.
+    #[test]
+    fn a_ledger_receipt_names_the_voice_its_quote_comes_from() {
+        let reference = include_str!("fixtures/ledger_evals/messy_two_party.ledger.json");
+        let raw: RawLedgerOutput = first_json_value(reference).expect("the reference ledger");
+        let mut ledger = validate_ledger_output(&raw, &ledger_reference_evidence())
+            .expect("the reference validates");
+        let line = |index: u64| ArtifactCitation {
+            segment_id: TranscriptSegmentId::from_uuid(uuid::Uuid::from_u128(index.into())),
+            start_offset_ns: index * 60_000_000_000,
+            end_offset_ns: index * 60_000_000_000 + 1_000_000_000,
+        };
+        let (ana, ben) = (SpeakerId::new(), SpeakerId::new());
+        let names = HashMap::from([(ana, "Ana".to_owned()), (ben, "Ben".to_owned())]);
+        let spoken = |speaker, text| ledger::SpokenLine {
+            speaker,
+            folded: ledger::fold(text),
+        };
+        let lines = HashMap::from([
+            (
+                line(1).segment_id,
+                spoken(ana, "Who takes the pricing page?"),
+            ),
+            (line(2).segment_id, spoken(ben, "I'll draft it by Friday.")),
+        ]);
+        ledger.threads.truncate(2);
+        assert_eq!(ledger.threads.len(), 2, "the reference has two threads");
+        for (thread, quote) in ledger
+            .threads
+            .iter_mut()
+            .zip(["I'll draft it by Friday.", "pricing page? I'll draft it"])
+        {
+            thread.receipt.quote = quote.to_owned();
+            thread.receipt.citations = vec![line(1), line(2)];
+        }
+
+        ledger::attribute_receipts(&mut ledger, &lines, &names);
+
+        let speakers = ledger
+            .threads
+            .iter()
+            .map(|thread| thread.receipt.speaker.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(speakers, [Some("Ben"), None]);
     }
 
     /// An engine that files the second line as a decision in the notes and
