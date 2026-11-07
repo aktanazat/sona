@@ -39,18 +39,17 @@ pub struct ExternalPlansPage {
     pub has_more: bool,
 }
 
-/// Newest first. A plan heard in a meeting whose series is kept on this Mac
-/// is left out, like the meeting itself.
+/// Newest first. A meeting whose series is kept on this Mac is left out as
+/// the place a plan was heard and as the place one happened.
 pub(crate) fn plans_page(
     store: &MeetingStore,
     limit: usize,
 ) -> Result<ExternalPlansPage, ExternalError> {
     let kept_local = KeptLocal::read(store).map_err(QueryError::from)?;
     let mut plans = store
-        .all_heard_plans()
+        .all_heard_plans_without(kept_local.sessions())
         .map_err(QueryError::from)?
-        .into_iter()
-        .filter(|plan| !kept_local.hides(plan.session_id));
+        .into_iter();
     let entries = plans.by_ref().take(limit).map(row).collect();
     Ok(ExternalPlansPage {
         schema_version: QUERY_SCHEMA_VERSION,
