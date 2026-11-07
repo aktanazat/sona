@@ -1261,11 +1261,123 @@ mod tests {
             "answered": [{"question": "O1", "by": "T2"}]
         }))
         .expect("merge reply");
-        apply_merge(&mut ledger, &reply);
+        apply_merge(&mut ledger, &[0, 1], &reply);
         assert!(ledger.open_loops.is_empty());
         let states: Vec<LedgerThreadState> =
             ledger.threads.iter().map(|thread| thread.state).collect();
         assert_eq!(states, [LedgerThreadState::Decided]);
+    }
+
+    /// A decision told in one part and revised in a later one is one thread
+    /// in the latest state, with the words and speaker that settled it. A
+    /// thread of the same part, or one sharing a single topic word, stays a
+    /// thread of its own even when the engine groups it.
+    #[test]
+    fn a_subject_a_later_part_returns_to_joins_its_first_thread() {
+        let thread = |topic: &str, state, seconds, quote: &str, speaker: &str| LedgerThread {
+            topic: topic.to_string(),
+            state,
+            substantive: true,
+            receipt: LedgerReceipt {
+                quote: quote.to_string(),
+                speaker: Some(speaker.to_string()),
+                t_ms: seconds * 1_000,
+                citations: vec![cited_at(seconds)],
+            },
+            owner: None,
+        };
+        let mut ledger = MeetingLedger {
+            headline: "The release was planned.".to_string(),
+            threads: vec![
+                thread(
+                    "PDF page cap",
+                    LedgerThreadState::Partial,
+                    100,
+                    "Cap it at 25 pages for now.",
+                    "Marco",
+                ),
+                thread(
+                    "Release date",
+                    LedgerThreadState::Decided,
+                    200,
+                    "We ship on the 20th.",
+                    "Priya",
+                ),
+                thread(
+                    "PDF streaming flag",
+                    LedgerThreadState::Decided,
+                    300,
+                    "It goes behind a flag.",
+                    "Priya",
+                ),
+                thread(
+                    "Page cap for the PDF preview",
+                    LedgerThreadState::Decided,
+                    900,
+                    "Thirty pages, and the rest streams.",
+                    "Jen",
+                ),
+                thread(
+                    "Rollout date",
+                    LedgerThreadState::Decided,
+                    1_000,
+                    "Full rollout on the 25th.",
+                    "Priya",
+                ),
+            ],
+            open_loops: Vec::new(),
+            commitments: Vec::new(),
+            stances: Vec::new(),
+            caveats: Vec::new(),
+            receipts: LedgerReceiptState::Verified,
+        };
+        let reply: LedgerMergeReply = serde_json::from_value(json!({
+            "headline": "The release was planned.",
+            "same_subject": [["T1", "T3", "T4"], ["T2", "T5"]]
+        }))
+        .expect("merge reply");
+        apply_merge(&mut ledger, &[0, 0, 0, 1, 1], &reply);
+        let threads: Vec<_> = ledger
+            .threads
+            .iter()
+            .map(|thread| {
+                (
+                    thread.topic.as_str(),
+                    thread.state,
+                    thread.receipt.quote.as_str(),
+                    thread.receipt.speaker.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            threads,
+            [
+                (
+                    "PDF page cap",
+                    LedgerThreadState::Decided,
+                    "Thirty pages, and the rest streams.",
+                    Some("Jen")
+                ),
+                (
+                    "Release date",
+                    LedgerThreadState::Decided,
+                    "We ship on the 20th.",
+                    Some("Priya")
+                ),
+                (
+                    "PDF streaming flag",
+                    LedgerThreadState::Decided,
+                    "It goes behind a flag.",
+                    Some("Priya")
+                ),
+                (
+                    "Rollout date",
+                    LedgerThreadState::Decided,
+                    "Full rollout on the 25th.",
+                    Some("Priya")
+                ),
+            ]
+        );
     }
 
     struct GroupsTopics(&'static str);

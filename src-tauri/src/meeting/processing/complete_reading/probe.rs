@@ -700,8 +700,8 @@ fn notes_probe() {
     }
     if ledgers.len() > 1 {
         let started = Instant::now();
-        let (headlines, joined) = concatenate_ledgers(ledgers);
-        match merge_reply(&witness, &headlines, &joined, &|| Ok(())) {
+        let (headlines, joined, parts) = concatenate_ledgers(ledgers);
+        match merge_reply(&witness, &headlines, &joined, &parts, &|| Ok(())) {
             Ok(_) => report("ledger merge", started, &witness.outcome(None)),
             Err(error) => report(
                 "ledger merge",
