@@ -70,6 +70,11 @@ struct RecordingScreen: View {
             }
             .safeAreaBar(edge: .bottom) {
                 control
+                    .frame(maxWidth: .infinity)
+                    .overlay(alignment: .trailing) {
+                        if recorder.isRecording { bookmark }
+                    }
+                    .padding(.horizontal, Theme.pageInset)
                     .padding(.vertical, 8)
             }
             .sheet(isPresented: $showsPairing) {
@@ -166,6 +171,25 @@ struct RecordingScreen: View {
         .disabled(model.startingRecording)
         .accessibilityLabel(Text(recorder.isRecording ? "a11y.stop" : "a11y.record"))
         .accessibilityIdentifier(recorder.isRecording ? "stop" : "record")
+    }
+
+    private var bookmark: some View {
+        Button(action: model.bookmarkRecording) {
+            HStack(spacing: 4) {
+                Image(systemName: recorder.bookmarks.isEmpty ? "bookmark" : "bookmark.fill")
+                if !recorder.bookmarks.isEmpty {
+                    Text(recorder.bookmarks.count, format: .number)
+                        .monospacedDigit()
+                }
+            }
+            .font(.body.weight(.semibold))
+            .frame(minWidth: 44, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .accessibilityLabel(Text("recording.bookmark"))
+        .accessibilityValue(Text("recording.bookmarked \(recorder.bookmarks.count)"))
+        .accessibilityIdentifier("bookmark")
     }
 
     private var status: some View {

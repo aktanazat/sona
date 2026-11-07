@@ -41,6 +41,8 @@ struct DeviceRecordingManifest: Codable, Equatable {
     var audio: Audio
     var personal_notes: String?
     var calendar_event: CalendarEvent?
+    /// Moments bookmarked while recording, in milliseconds from the start of the audio.
+    var bookmark_offsets_ms: [Int64]?
 }
 
 /// Recording capture format. The phone resamples to this before anything is written,
@@ -76,7 +78,8 @@ enum DeviceRecordingObject {
         audioByteLength: Int,
         audioSha256: String,
         notes: String? = nil,
-        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil
+        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
+        bookmarkOffsetsMs: [Int64] = []
     ) -> DeviceRecordingManifest {
         DeviceRecordingManifest(
             format_version: 1,
@@ -93,7 +96,8 @@ enum DeviceRecordingObject {
                 sha256: audioSha256
             ),
             personal_notes: notes?.isEmpty == false ? notes : nil,
-            calendar_event: calendarEvent
+            calendar_event: calendarEvent,
+            bookmark_offsets_ms: bookmarkOffsetsMs.isEmpty ? nil : bookmarkOffsetsMs
         )
     }
 
