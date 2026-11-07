@@ -781,16 +781,30 @@ final class VoiceIdentityStore {
     }
 
     /// Names a waiting speaker as the person their voice matches: the same
-    /// write the sheet makes when that person is picked.
+    /// write the sheet makes when that person is picked. A voice that is your
+    /// own gets your name, the way renaming it by hand does, and no person.
     func confirm(_ suggestion: VoiceSpeakerSuggestion) {
         guard let sessionId else { return }
         busy = true
         act { [self] in
             defer { busy = false }
-            _ = try await identify(
-                sessionId: sessionId,
-                speakerId: suggestion.speakerId,
-                action: .label(.existing(personId: suggestion.personId)))
+            if let personId = suggestion.personId {
+                _ = try await identify(
+                    sessionId: sessionId,
+                    speakerId: suggestion.speakerId,
+                    action: .label(.existing(personId: personId)))
+            } else {
+                let meeting: VoiceIdentityMeeting = try await core.request(
+                    "meeting_get", ["sessionId": sessionId])
+                let result: MeetingMutationResult = try await core.request(
+                    "meeting_speaker_rename",
+                    MeetingRequest.speakerRename(
+                        sessionId, revision: Int(meeting.session.revision),
+                        speakerId: suggestion.speakerId, displayName: suggestion.displayName))
+                if let refusal = result.receipt.refusal {
+                    throw PersonFailure(message: refusal)
+                }
+            }
             try await reread(sessionId)
         }
     }

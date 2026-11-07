@@ -224,7 +224,8 @@ pub(crate) struct VoiceSpeakerIdentityResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct VoiceSpeakerSuggestion {
     pub speaker_id: SpeakerId,
-    pub person_id: PersonId,
+    /// None when the voice is the user's own, named `display_name` in About me.
+    pub person_id: Option<PersonId>,
     pub display_name: String,
 }
 
@@ -694,11 +695,14 @@ impl MeetingStore {
     }
 
     /// For each speaker still waiting for a name, the one person whose
-    /// confirmed voices from any meeting it matches. Nothing is written: the
-    /// speaker is named only when the user confirms through `identify_speaker`.
+    /// confirmed voices from any meeting it matches, or the user, whose voice
+    /// is every speaker given `user_name`. Nothing is written: the speaker is
+    /// named only when the user confirms, through `identify_speaker` for a
+    /// person and a rename to `user_name` for the user.
     pub(crate) fn voice_speaker_suggestions(
         &self,
         session_id: MeetingSessionId,
+        user_name: Option<&str>,
     ) -> Result<Vec<VoiceSpeakerSuggestion>, StoreError> {
         let unresolved = self.unresolved_active_voice_speaker_ids(session_id)?;
         if unresolved.is_empty() {
@@ -706,8 +710,11 @@ impl MeetingStore {
         }
         let model = wespeaker_embedding_model_key();
         let connection = self.connection()?;
+        // SQLite's lower() folds ASCII only, so names_user below has the final
+        // say on which of these rows name the user.
         let mut statement = connection.prepare(
-            "SELECT voiceprint.speaker_id, person.id, person.display_name, voiceprint.embedding
+            "SELECT voiceprint.speaker_id, person.id, person.display_name, voiceprint.embedding,
+                    speaker.display_name
                FROM meeting_speaker_voiceprints voiceprint
                JOIN meeting_speakers speaker
                  ON speaker.speaker_id = voiceprint.speaker_id
@@ -721,9 +728,19 @@ impl MeetingStore {
                 AND voiceprint.model_sha256 = ?4 AND voiceprint.embedding_dimensions = ?5
                 AND voiceprint.sample_rate_hz = ?6 AND voiceprint.feature_bins = ?7
                 AND voiceprint.feature_pipeline_revision = ?8 AND voiceprint.normalization = ?9
-                AND (person.id IS NOT NULL OR voiceprint.session_id = ?1)
+                AND (person.id IS NOT NULL OR voiceprint.session_id = ?1
+                     OR lower(replace(speaker.display_name, ' ', '')) IN (?10, ?11))
               ORDER BY person.id, voiceprint.speaker_id",
         )?;
+        let user_names = user_name.map_or_else(Default::default, |name| {
+            (
+                normalized(name),
+                name.split_whitespace()
+                    .next()
+                    .map(normalized)
+                    .unwrap_or_default(),
+            )
+        });
         let rows = statement.query_map(
             params![
                 id(session_id),
@@ -736,6 +753,8 @@ impl MeetingStore {
                 i64::try_from(model.feature_bins).map_err(|_| StoreError::VoiceInvariant)?,
                 model.feature_pipeline_revision,
                 model.normalization,
+                user_names.0,
+                user_names.1,
             ],
             |row| {
                 Ok((
@@ -743,26 +762,34 @@ impl MeetingStore {
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )?;
-        let mut people: Vec<(PersonId, String, Vec<SpeakerEmbedding>)> = Vec::new();
+        let mut people: Vec<(Option<PersonId>, String, Vec<SpeakerEmbedding>)> = Vec::new();
+        let mut user_voices = Vec::new();
         let mut waiting = Vec::new();
         for row in rows {
-            let (speaker_id, person_id, display_name, embedding) = row?;
+            let (speaker_id, person_id, display_name, embedding, speaker_name) = row?;
             let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
             let embedding = embedding_from_blob(&embedding)?;
             match person_id.zip(display_name) {
                 Some((person_id, display_name)) => {
                     let person_id = PersonId::from_uuid(parse_uuid(&person_id)?);
                     match people.last_mut() {
-                        Some((last, _, voices)) if *last == person_id => voices.push(embedding),
-                        _ => people.push((person_id, display_name, vec![embedding])),
+                        Some((Some(last), _, voices)) if *last == person_id => {
+                            voices.push(embedding);
+                        }
+                        _ => people.push((Some(person_id), display_name, vec![embedding])),
                     }
                 }
+                None if names_user(&speaker_name, user_name) => user_voices.push(embedding),
                 None if unresolved.contains(&speaker_id) => waiting.push((speaker_id, embedding)),
                 None => {}
             }
+        }
+        if let Some(user_name) = user_name.filter(|_| !user_voices.is_empty()) {
+            people.push((None, user_name.to_owned(), user_voices));
         }
         let exemplars = people
             .into_iter()

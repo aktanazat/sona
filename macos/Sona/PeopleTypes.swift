@@ -400,10 +400,11 @@ struct VoiceIdentityStatus: Decodable {
 }
 
 /// A speaker whose voice matches the one you named as this person in other
-/// meetings. It names nobody until it is confirmed.
+/// meetings, or as yourself when `personId` is nil. It names nobody until it
+/// is confirmed.
 struct VoiceSpeakerSuggestion: Decodable, Identifiable {
     let speakerId: String
-    let personId: String
+    let personId: String?
     let displayName: String
 
     var id: String { speakerId }

@@ -1512,10 +1512,10 @@ fn a_voice_named_in_one_meeting_is_suggested_in_the_next_and_applied_only_on_con
     keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
 
     assert_eq!(
-        store.voice_speaker_suggestions(second)?,
+        store.voice_speaker_suggestions(second, None)?,
         [VoiceSpeakerSuggestion {
             speaker_id: same_voice,
-            person_id: ada,
+            person_id: Some(ada),
             display_name: "Ada Lovelace".to_owned(),
         }]
     );
@@ -1533,7 +1533,7 @@ fn a_voice_named_in_one_meeting_is_suggested_in_the_next_and_applied_only_on_con
     assert_eq!((display_name.as_str(), links), ("Speaker", 0));
 
     label_existing(&store, second, same_voice, ada, second_revision)?;
-    assert!(store.voice_speaker_suggestions(second)?.is_empty());
+    assert!(store.voice_speaker_suggestions(second, None)?.is_empty());
     Ok(())
 }
 
@@ -1823,10 +1823,10 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
     let other_voice = store.diarization_speaker(second, 1)?;
     keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
     assert_eq!(
-        store.voice_speaker_suggestions(second)?,
+        store.voice_speaker_suggestions(second, None)?,
         [VoiceSpeakerSuggestion {
             speaker_id: same_voice,
-            person_id: maya[0],
+            person_id: Some(maya[0]),
             display_name: "Maya".to_owned(),
         }]
     );
@@ -1862,7 +1862,7 @@ fn renaming_a_speaker_back_to_its_label_takes_the_voice_off_the_person() -> Resu
     let second = meeting(&store, "Second", 3);
     let same_voice = store.diarization_speaker(second, 0)?;
     keep_voices(&store, second, &[(same_voice, 0)])?;
-    assert!(store.voice_speaker_suggestions(second)?.is_empty());
+    assert!(store.voice_speaker_suggestions(second, None)?.is_empty());
     Ok(())
 }
 
@@ -1901,10 +1901,10 @@ fn a_first_name_names_the_one_person_known_by_it() -> Result<(), StoreError> {
     let same_voice = store.diarization_speaker(second, 0)?;
     keep_voices(&store, second, &[(same_voice, 0)])?;
     assert_eq!(
-        store.voice_speaker_suggestions(second)?,
+        store.voice_speaker_suggestions(second, None)?,
         [VoiceSpeakerSuggestion {
             speaker_id: same_voice,
-            person_id: maya,
+            person_id: Some(maya),
             display_name: "Maya Chen".to_owned(),
         }]
     );
@@ -1938,5 +1938,34 @@ fn naming_a_speaker_after_the_user_creates_no_person() -> Result<(), StoreError>
     assert!(!store
         .unresolved_active_voice_speaker_ids(first)?
         .contains(&speaker));
+    Ok(())
+}
+
+/// A voice named after the user in one meeting is suggested as theirs in the
+/// next, under their full About me name, and names nobody until confirmed.
+#[test]
+fn a_voice_named_after_the_user_is_suggested_as_theirs() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let user = Some("Aktan Azat");
+    let first = meeting(&store, "First", 1);
+    let mine = store.diarization_speaker(first, 1)?;
+    keep_voices(&store, first, &[(mine, 0)])?;
+    rename(&store, first, mine, "aktan", user)?;
+
+    let second = meeting(&store, "Second", 3);
+    let same_voice = store.diarization_speaker(second, 0)?;
+    let other_voice = store.diarization_speaker(second, 1)?;
+    keep_voices(&store, second, &[(same_voice, 0), (other_voice, 1)])?;
+    let suggested = [VoiceSpeakerSuggestion {
+        speaker_id: same_voice,
+        person_id: None,
+        display_name: "Aktan Azat".to_owned(),
+    }];
+    assert_eq!(store.voice_speaker_suggestions(second, user)?, suggested);
+    assert!(store.voice_speaker_suggestions(second, None)?.is_empty());
+    assert!(people_named(&store, "Aktan Azat")?.is_empty());
+
+    rename(&store, second, same_voice, "Aktan Azat", user)?;
+    assert!(store.voice_speaker_suggestions(second, user)?.is_empty());
     Ok(())
 }
