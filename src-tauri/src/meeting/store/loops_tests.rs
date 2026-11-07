@@ -94,10 +94,22 @@ pub(super) fn file_ledger(
     session_id: MeetingSessionId,
     ledger: MeetingLedger,
 ) {
+    file_notes(store, session_id, &notes(Some(ledger)));
+}
+
+/// Stores `content` as the meeting's current artifact revision, read off a
+/// transcript revision of its own.
+pub(super) fn file_notes(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    content: &GeneratedMeetingArtifacts,
+) {
     let revision_id = Uuid::new_v4();
     let artifact_id = Uuid::new_v4();
 
+    // PANIC: a fixture that cannot write its rows is a broken test.
     let connection = store.connection().unwrap();
+    // PANIC: as above, for the transcript revision row.
     connection
         .execute(
             "INSERT INTO meeting_transcript_revisions (
@@ -107,6 +119,7 @@ pub(super) fn file_ledger(
             params![revision_id.to_string(), session_id.uuid().to_string()],
         )
         .unwrap();
+    // PANIC: as above; the notes are the caller's own and always serialize.
     connection
         .execute(
             "INSERT INTO meeting_artifact_revisions (
@@ -119,7 +132,7 @@ pub(super) fn file_ledger(
                 session_id.uuid().to_string(),
                 revision_id.to_string(),
                 format!("test-{artifact_id}"),
-                serde_json::to_string(&notes(Some(ledger))).unwrap()
+                serde_json::to_string(content).unwrap()
             ],
         )
         .unwrap();
@@ -149,7 +162,7 @@ fn file_plain_notes(store: &MeetingStore, session_id: MeetingSessionId) -> Resul
     Ok(())
 }
 
-fn notes(ledger: Option<MeetingLedger>) -> GeneratedMeetingArtifacts {
+pub(super) fn notes(ledger: Option<MeetingLedger>) -> GeneratedMeetingArtifacts {
     GeneratedMeetingArtifacts {
         summary: crate::meeting::types::CitedArtifactText {
             text: "Pricing stayed open.".to_string(),

@@ -1939,6 +1939,98 @@ fn naming_a_speaker_names_the_ledger_receipts_that_quote_them() -> Result<(), St
     Ok(())
 }
 
+/// An action a voice took on, "I'll check the logs", reads by the name that
+/// voice has now: naming the speaker later names the task, and the user's
+/// own voice reads "Me" while the About-me name is empty.
+#[test]
+fn an_action_a_voice_took_on_reads_by_that_voices_name_now() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = reviewable_meeting(&store, "Release sync", 1);
+    let (microphone, system_audio) =
+        super::workflow_core_tests::recording_tracks(&store, session_id);
+    let revision = store.begin_transcript_revision(TranscriptRevisionInput {
+        session_id,
+        engine_id: "test",
+        model_version: None,
+        destination: &ProcessingDestination::Local,
+        source_set: &SourceKind::ALL,
+        language: "en",
+    })?;
+    let said = |track_id, source_kind, at: u64, text: &str, speaker: &str| TranscriptSegmentInput {
+        track_id,
+        source_kind,
+        start_offset_ns: at,
+        end_offset_ns: at + 1,
+        text: text.to_owned(),
+        confidence_milli: None,
+        speaker: Some(speaker.to_owned()),
+    };
+    store.append_transcript_segments(
+        session_id,
+        revision,
+        &[
+            said(
+                microphone,
+                SourceKind::Microphone,
+                0,
+                "I'll send the build notes.",
+                "Local speaker",
+            ),
+            said(
+                system_audio,
+                SourceKind::SystemAudio,
+                2,
+                "I'll check the crash logs.",
+                "Speaker 2",
+            ),
+        ],
+    )?;
+    store.complete_transcript_revision(session_id, revision)?;
+    let review = store.review_snapshot(session_id)?;
+    let action = |at: usize, text: &str, owner: &str| {
+        let line = &review.transcript[at].base;
+        MeetingActionItem {
+            text: CitedArtifactText {
+                text: text.to_owned(),
+                citations: vec![ArtifactCitation {
+                    segment_id: line.segment_id,
+                    start_offset_ns: line.start_offset_ns,
+                    end_offset_ns: line.end_offset_ns,
+                }],
+            },
+            owner_text: Some(owner.to_owned()),
+            due_text: None,
+        }
+    };
+    let mut notes = super::loops_tests::notes(None);
+    notes.action_items = vec![
+        action(0, "Send the build notes", "Local speaker"),
+        action(1, "Check the crash logs", "Speaker 2"),
+    ];
+    super::loops_tests::file_notes(&store, session_id, &notes);
+    let speaker_two = review
+        .speakers
+        .iter()
+        .find(|speaker| speaker.display_name == "Speaker 2")
+        .expect("the system-audio voice")
+        .speaker_id;
+
+    rename(&store, session_id, speaker_two, "Priya", None)?;
+
+    let owners = store
+        .review_snapshot(session_id)?
+        .artifacts
+        .iter()
+        .find_map(|artifact| artifact.content.as_ref())
+        .expect("the notes filed above")
+        .action_items
+        .iter()
+        .map(|item| item.owner_text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(owners, [Some("Me".to_owned()), Some("Priya".to_owned())]);
+    Ok(())
+}
+
 /// Renaming back to the label Sona wrote, as the chat rename's undo does,
 /// takes the voice off the person it was given to.
 #[test]
