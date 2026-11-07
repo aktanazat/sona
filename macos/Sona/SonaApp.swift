@@ -28,6 +28,10 @@ struct SonaApp: App {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)
             }
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Sona") { model.quit() }
+                    .keyboardShortcut("q", modifiers: .command)
+            }
             CommandMenu("Capture") {
                 CaptureMenuItem(model: model)
                 Button("Record a Meeting") { model.recordMeeting() }
@@ -70,6 +74,7 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
                 terminationPending = false
                 model.resumeQuietReview()
                 sender.reply(toApplicationShouldTerminate: false)
+                model.restoreSheetAfterCancelledQuit()
                 return
             }
             repeat {
@@ -269,7 +274,7 @@ struct MenuBarMenu: View {
         Button("Settings…") { model.openSettings() }
             .keyboardShortcut(",", modifiers: .command)
         Divider()
-        Button("Quit Sona") { NSApplication.shared.terminate(nil) }
+        Button("Quit Sona") { model.quit() }
             .keyboardShortcut("q", modifiers: .command)
     }
 }
