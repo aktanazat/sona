@@ -43,6 +43,9 @@
 "a11y.pair" = "Pair with your Mac";
 "a11y.qr" = "Pairing QR code";
 
+"recording.bookmark" = "Bookmark";
+"recording.bookmarked %lld" = "%lld bookmarked";
+
 "consent.notifications" = "Notifications let Sona offer a note after a normal phone call. These reminders do not record calls.";
 
 "call.onCall.title" = "On a call";

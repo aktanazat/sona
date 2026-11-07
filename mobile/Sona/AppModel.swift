@@ -278,6 +278,10 @@ final class AppModel: NSObject, ObservableObject {
         }
     }
 
+    func bookmarkRecording() {
+        recorder.bookmark()
+    }
+
     // MARK: - Keyboard draft
 
     /* The approved draft outlives the dictation screen, so the identity of what the
@@ -319,7 +323,8 @@ final class AppModel: NSObject, ObservableObject {
                     utcMs: finished.recordedAtUtcMs
                 ) : chosenTitle,
                 notes: notes,
-                calendarEvent: event
+                calendarEvent: event,
+                bookmarkOffsetsMs: finished.bookmarkOffsetsMs
             )
             if kept && !recorder.isRecording && meetingNotes == notes && meetingTitle.trimmingCharacters(in: .whitespacesAndNewlines) == chosenTitle {
                 meetingTitle = ""
@@ -334,14 +339,15 @@ final class AppModel: NSObject, ObservableObject {
         recordedAtUtcMs: Int64,
         title: String,
         notes: String = "",
-        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil
+        calendarEvent: DeviceRecordingManifest.CalendarEvent? = nil,
+        bookmarkOffsetsMs: [Int64] = []
     ) async -> Bool {
         do {
             try library.keep(kind: .meeting, title: title, text: notes,
                              date: Date(timeIntervalSince1970: Double(recordedAtUtcMs) / 1000), audio: audio)
             _ = try await queue.enqueue(
                 audio: audio, recordedAtUtcMs: recordedAtUtcMs, title: title, notes: notes,
-                calendarEvent: calendarEvent
+                calendarEvent: calendarEvent, bookmarkOffsetsMs: bookmarkOffsetsMs
             )
             await drain()
             return true

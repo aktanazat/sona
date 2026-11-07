@@ -62,6 +62,8 @@ final class PhoneRecorder: ObservableObject {
     @Published private(set) var elapsed: TimeInterval = 0
     /// Set when the system, not the operator, decided the outcome.
     @Published var notice: RecorderNotice?
+    /// Moments bookmarked in the running recording, in milliseconds from its start.
+    @Published private(set) var bookmarks: [Int64] = []
     let meter = InputLevelMeter()
 
     private let engine = AVAudioEngine()
@@ -126,6 +128,7 @@ final class PhoneRecorder: ObservableObject {
         try engine.start()
         startedAt = Date()
         elapsed = 0
+        bookmarks = []
         isRecording = true
         notice = nil
         ticker = Task { [weak self] in
@@ -137,8 +140,15 @@ final class PhoneRecorder: ObservableObject {
         }
     }
 
-    /// Stop and hand over the finished bytes with the wall-clock start of the capture.
-    func stop() -> (audio: CapturedAudio, recordedAtUtcMs: Int64)? {
+    /// Bookmark this moment of the running recording.
+    func bookmark() {
+        guard isRecording, let startedAt else { return }
+        bookmarks.append(Int64(max(0, Date().timeIntervalSince(startedAt)) * 1000))
+    }
+
+    /// Stop and hand over the finished bytes with the wall-clock start of the capture and
+    /// what was bookmarked in it.
+    func stop() -> (audio: CapturedAudio, recordedAtUtcMs: Int64, bookmarkOffsetsMs: [Int64])? {
         guard isRecording, let resampler, let startedAt else { return nil }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -150,7 +160,7 @@ final class PhoneRecorder: ObservableObject {
         self.startedAt = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: [])
         guard let audio = try? resampler.finish(), audio.byteLength > 0 else { return nil }
-        return (audio, Int64(startedAt.timeIntervalSince1970 * 1000))
+        return (audio, Int64(startedAt.timeIntervalSince1970 * 1000), bookmarks)
     }
 
     /// A call or another app taking the input ends the capture rather than pausing it:
