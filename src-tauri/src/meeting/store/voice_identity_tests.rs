@@ -1995,3 +1995,42 @@ fn a_voice_named_after_the_user_in_any_script_is_suggested_as_theirs() -> Result
     );
     Ok(())
 }
+
+/// A person who carries the user's name holds the user's voice: it joins the
+/// voices named after the user instead of standing beside them as a second
+/// match for the same voice, which would leave neither suggested.
+#[test]
+fn a_person_named_after_the_user_counts_as_the_users_voice() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let user = Some("Aktan Azat");
+    let namesake = person(&store, "Aktan Azat", &[], &[]);
+    let first = meeting(&store, "First", 1);
+    let labelled = SpeakerId::new();
+    insert_speaker(&store, first, labelled);
+    keep_voices(&store, first, &[(labelled, 0)])?;
+    label_existing(
+        &store,
+        first,
+        labelled,
+        namesake,
+        meeting_revision(&store, first)?,
+    )?;
+
+    let second = meeting(&store, "Second", 2);
+    let renamed = store.diarization_speaker(second, 1)?;
+    keep_voices(&store, second, &[(renamed, 0)])?;
+    rename(&store, second, renamed, "Aktan", user)?;
+
+    let third = meeting(&store, "Third", 3);
+    let same_voice = store.diarization_speaker(third, 0)?;
+    keep_voices(&store, third, &[(same_voice, 0)])?;
+    assert_eq!(
+        store.voice_speaker_suggestions(third, user)?,
+        [VoiceSpeakerSuggestion {
+            speaker_id: same_voice,
+            person_id: None,
+            display_name: "Aktan Azat".to_owned(),
+        }]
+    );
+    Ok(())
+}
