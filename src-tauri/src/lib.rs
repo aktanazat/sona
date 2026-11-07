@@ -2248,8 +2248,9 @@ pub fn run(cli_args: CliArgs) {
                 let history_manager = Arc::new(HistoryManager::new(&app_handle)?);
                 let meeting_secrets =
                     Arc::clone(&app_handle.state::<Arc<secrets::SecretManager>>());
-                let meeting_manager =
-                    Arc::new(MeetingSessionManager::new(&app_handle, meeting_secrets));
+                let meeting_manager = Arc::new(
+                    MeetingSessionManager::new(&app_handle, meeting_secrets).reading_only(),
+                );
                 app_handle.manage(history_manager);
                 app_handle.manage(meeting_manager);
 
