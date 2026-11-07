@@ -15,10 +15,11 @@ use super::{
     CaptureOptions, ContextPolicy, ContextSourceStatus, SelectionCapture, SourceOutcome,
     StartCapture, WebsiteHostCapture,
 };
+use crate::delivery::KeyboardFocus;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSWorkspace};
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
-    CFGetTypeID, CFRange, CFRetained, CFString, CFType, ConcreteType, CFURL,
+    CFGetTypeID, CFHash, CFRange, CFRetained, CFString, CFType, ConcreteType, CFURL,
 };
 use std::ptr::{self, NonNull};
 use std::time::Duration;
@@ -254,6 +255,24 @@ pub(crate) fn frontmost_application_identifier() -> Option<String> {
         .as_ref()
         .and_then(|application| application.bundleIdentifier())
         .map(|identifier| identifier.to_string())
+}
+
+/// The control keyboard input goes to right now: the frontmost app, and the
+/// hash of the focused element insertion would write to. A hash stands in for
+/// the element because the element type is not `Send`, and this value travels
+/// from the thread that stops a recording to the main thread that delivers it.
+pub(crate) fn keyboard_focus() -> KeyboardFocus {
+    let pid = NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|application| application.processIdentifier());
+    let element = (accessibility_access() == AccessibilityAccess::Granted)
+        .then(|| focused_element(CaptureDeadline::starting_now()).ok())
+        .flatten()
+        .map(|element| {
+            let element: &CFType = &element;
+            CFHash(Some(element))
+        });
+    KeyboardFocus { pid, element }
 }
 
 /// Reads just the browser host needed to select a local mode. The captured URL

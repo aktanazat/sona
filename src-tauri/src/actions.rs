@@ -2043,6 +2043,7 @@ impl TranscribeAction {
             context_plan.effective_policy()
         );
         let cancel_generation = rm.cancel_generation();
+        let stopped_at = delivery::KeyboardFocus::now();
 
         tauri::async_runtime::spawn(async move {
             let finish = Arc::new(FinishGuard {
@@ -2374,6 +2375,7 @@ impl TranscribeAction {
                                             &ah_clone,
                                             final_text,
                                             &delivery_settings,
+                                            stopped_at,
                                         );
                                         if let Some(event) =
                                             DictationDeliveryEvent::for_outcome(receipt.outcome)
