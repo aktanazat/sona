@@ -478,6 +478,19 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             .is_some_and(|active| !active.state.is_terminal())
     }
 
+    /// Whether the turn on the sheet must stay: its answer is still coming,
+    /// or one of its cards is being applied, edited or put back. A mutation
+    /// awaits with the panel lock released, and what it did, undo included,
+    /// is recorded on the card it started from, so that card must still be
+    /// there when it settles.
+    fn turn_holds_sheet(&self, state: &PanelState) -> bool {
+        state
+            .turn
+            .as_ref()
+            .is_some_and(|active| !active.state.is_terminal())
+            || self.action_operation.try_lock().is_err()
+    }
+
     fn configured_relay_status(&self) -> AgentPanelRelayStatusV1 {
         configured_relay_status(&self.app)
     }
@@ -569,11 +582,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
             .ok_or(AgentPanelCommandErrorV1::UnknownConversation)?;
         let invalidation_id = {
             let mut state = self.lock_state();
-            if state
-                .turn
-                .as_ref()
-                .is_some_and(|active| !active.state.is_terminal())
-            {
+            if self.turn_holds_sheet(&state) {
                 return Err(AgentPanelCommandErrorV1::TurnActive);
             }
             state.conversation_id = Some(conversation_id.to_string());
@@ -594,11 +603,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     pub(crate) fn new_conversation(&self) -> Result<AgentPanelStatusV1, AgentPanelCommandErrorV1> {
         let invalidation_id = {
             let mut state = self.lock_state();
-            if state
-                .turn
-                .as_ref()
-                .is_some_and(|active| !active.state.is_terminal())
-            {
+            if self.turn_holds_sheet(&state) {
                 return Err(AgentPanelCommandErrorV1::TurnActive);
             }
             state.conversation_id = None;
@@ -624,11 +629,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
     pub(crate) fn record_exchange(&self, conversation_id: &str, turns: Vec<SonaAgentChatTurnV1>) {
         let invalidation_id = {
             let mut state = self.lock_state();
-            if state
-                .turn
-                .as_ref()
-                .is_some_and(|active| !active.state.is_terminal())
-            {
+            if self.turn_holds_sheet(&state) {
                 drop(state);
                 let _history_write = match self.history_write.lock() {
                     Ok(guard) => guard,
@@ -813,11 +814,7 @@ impl<R: tauri::Runtime> AgentPanelManager<R> {
         }
         let invalidation_id = {
             let mut state = self.lock_state();
-            if state
-                .turn
-                .as_ref()
-                .is_some_and(|active| !active.state.is_terminal())
-            {
+            if self.turn_holds_sheet(&state) {
                 return Err(AgentPanelCommandErrorV1::TurnActive);
             }
             let conversation_id = match state.conversation_id.clone() {
@@ -3356,6 +3353,68 @@ mod tests {
         assert_eq!(
             history::turns_of(&manager.app, "command-2-2").expect("exchange was persisted"),
             exchange("Meanwhile?")
+        );
+    }
+
+    /// A card being applied keeps its answered turn on the sheet. A calendar
+    /// save awaits EventKit with the panel lock released and comes back with
+    /// the event id that undoes it; a voice exchange answered meanwhile goes
+    /// to disk only, and the save still lands on its card.
+    #[test]
+    fn a_card_being_applied_keeps_its_turn_and_its_undo() {
+        let (_data_dir, _app, manager) = panel_manager_for_test();
+        let mut state = active_chat_state("conversation-card", "turn-card", "Book the review");
+        let active = state.turn.as_mut().expect("an answered turn");
+        active.state = AgentPanelTurnStateV1::Succeeded;
+        active.submitting = false;
+        active.actions = vec![StoredAction::pending(
+            SonaChatActionV1::CreateCalendarEvent {
+                reason: "You asked to book it.".to_string(),
+                title: "Review".to_string(),
+                start_utc_ms: 1_700_000_000_000,
+                end_utc_ms: 1_700_001_800_000,
+                notes: String::new(),
+                location: String::new(),
+            },
+        )];
+        *manager.lock_state() = state;
+        let request = AgentPanelActionRequestV1 {
+            turn_id: "turn-card".to_string(),
+            action_index: 0,
+        };
+        let exchange = vec![SonaAgentChatTurnV1 {
+            role: SonaAgentChatRoleV1::User,
+            message: "What time is it?".to_string(),
+            outcome: None,
+        }];
+
+        let applying = manager
+            .action_operation
+            .try_lock()
+            .expect("no other action is running");
+        manager.record_exchange("command-3-3", exchange.clone());
+        assert!(matches!(
+            manager.new_conversation(),
+            Err(AgentPanelCommandErrorV1::TurnActive)
+        ));
+        drop(applying);
+
+        let status = manager
+            .settle_action(
+                &request,
+                StoredActionState::Applied(AppliedAction {
+                    operation_id: None,
+                    undo: ActionUndo::CalendarEvent {
+                        event_id: "event-1".to_string(),
+                    },
+                }),
+            )
+            .expect("the card's turn is still on the sheet");
+        assert_eq!(status.actions[0].state, AgentPanelActionStateV1::Applied);
+        assert!(status.actions[0].can_undo);
+        assert_eq!(
+            history::turns_of(&manager.app, "command-3-3").expect("exchange was persisted"),
+            exchange
         );
     }
 
