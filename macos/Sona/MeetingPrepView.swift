@@ -101,7 +101,7 @@ private struct MeetingPrepForm: View {
             PageSection("Prepare for meetings") {
                 Card {
                     ToggleRow(title: "Prepare tomorrow's briefs", detail: "While Sona is running, prepare calendar meetings for today and tomorrow. Nothing is recorded.", isOn: $draft.overnightEnabled)
-                    ToggleRow(title: "Include recent email", detail: "Read matching messages from Mail's Inbox and Sent. Email is kept on this Mac and used only by a local model. macOS asks for Automation access.", isOn: $draft.emailContextEnabled)
+                    ToggleRow(title: "Include recent email", detail: "Read matching messages from Mail's Inbox and Sent, and hotel booking emails when an in-person recording has no place. Email is kept on this Mac and used only by a local model. macOS asks for Automation access.", isOn: $draft.emailContextEnabled)
                     ToggleRow(title: "Open drafts in Mail", detail: "Put the full follow-up in a visible Mail compose window. You review it and send it yourself. Sona never sends mail.", isOn: $draft.mailComposeEnabled)
                     CardRow {
                         VStack(alignment: .leading, spacing: 8) {

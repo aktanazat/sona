@@ -19,6 +19,7 @@ pub mod export;
 pub mod folder_types;
 pub mod folders;
 pub mod follow_up;
+pub mod hotel_booking;
 pub mod import_formats;
 pub mod keep_awake;
 pub mod learning;
