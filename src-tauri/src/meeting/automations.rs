@@ -57,7 +57,7 @@ use super::types::{
     MeetingActionItem, MeetingArtifactId, MeetingArtifactState, MeetingExportFormat,
     MeetingSessionId, SavedPromptId,
 };
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
@@ -557,60 +557,7 @@ pub(crate) fn due_day_for(
                     .any(|cited| cited.segment_id == citation.segment_id)
             })
         })
-        .find_map(|item| due_day(item.due_text.as_deref()?, meeting_day))
-}
-
-/// The day a generated due text names, read against the day the meeting
-/// happened.
-///
-/// ponytail: English day words and ISO dates only — "tomorrow", "Friday",
-/// "2026-03-04", and a date or day word inside a longer phrase ("by Friday").
-/// A due text in another language, or one naming a month by name, produces no
-/// date rather than a guessed one: a reminder that fires on the wrong day is
-/// worse than one with no day at all. The upgrade path is a real date parser,
-/// not more arms here.
-fn due_day(due_text: &str, meeting_day: NaiveDate) -> Option<NaiveDate> {
-    let lowered = due_text.to_lowercase();
-    let words = lowered
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .filter(|word| !word.is_empty());
-    for word in words {
-        if let Ok(date) = NaiveDate::parse_from_str(word, "%Y-%m-%d") {
-            return Some(date);
-        }
-        match word {
-            "today" => return Some(meeting_day),
-            "tomorrow" => return meeting_day.succ_opt(),
-            _ => {}
-        }
-        if let Some(weekday) = weekday(word) {
-            return next_weekday(meeting_day, weekday);
-        }
-    }
-    None
-}
-
-fn weekday(word: &str) -> Option<chrono::Weekday> {
-    match word {
-        "monday" | "mon" => Some(chrono::Weekday::Mon),
-        "tuesday" | "tue" | "tues" => Some(chrono::Weekday::Tue),
-        "wednesday" | "wed" => Some(chrono::Weekday::Wed),
-        "thursday" | "thu" | "thurs" => Some(chrono::Weekday::Thu),
-        "friday" | "fri" => Some(chrono::Weekday::Fri),
-        "saturday" | "sat" => Some(chrono::Weekday::Sat),
-        "sunday" | "sun" => Some(chrono::Weekday::Sun),
-        _ => None,
-    }
-}
-
-/// The first `weekday` strictly after `from`.
-///
-/// "Next Friday" and "Friday" land on the same day here. Colloquially they can
-/// differ by a week, and a reminder a week late is worse than one a week early:
-/// the earlier day is the one the operator can still act on.
-fn next_weekday(from: NaiveDate, weekday: chrono::Weekday) -> Option<NaiveDate> {
-    let ahead = (7 + weekday.num_days_from_monday() - from.weekday().num_days_from_monday()) % 7;
-    from.checked_add_days(Days::new(u64::from(if ahead == 0 { 7 } else { ahead })))
+        .find_map(|item| super::spoken_time::day(item.due_text.as_deref()?, meeting_day))
 }
 
 /// The local calendar day one instant fell on. Reminders are dated in the
@@ -1029,7 +976,8 @@ pub fn request_reminders_access() -> super::detection::calendar::CalendarAccess 
 
 #[cfg(test)]
 mod tests {
-    use super::{due_day, next_weekday, shortcut, EffectOutcome, MeetingAutomationFailure};
+    use super::{shortcut, EffectOutcome, MeetingAutomationFailure};
+    use crate::meeting::spoken_time::{day as due_day, next_weekday};
     use chrono::{NaiveDate, Weekday};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -1051,6 +999,7 @@ mod tests {
         assert_eq!(due_day("Tomorrow", meeting_day()), day(2026, 3, 5));
         assert_eq!(due_day("by Friday", meeting_day()), day(2026, 3, 6));
         assert_eq!(due_day("end of day Mon", meeting_day()), day(2026, 3, 9));
+        assert_eq!(due_day("March 4th", meeting_day()), day(2026, 3, 4));
     }
 
     /// The day word that names the meeting's own weekday means the next one, not
@@ -1074,7 +1023,6 @@ mod tests {
             "",
             "soon",
             "end of the quarter",
-            "March 4th",
             "nächsten Freitag",
             "before we ship",
         ] {
