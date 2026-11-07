@@ -33,6 +33,7 @@ struct MeetingReviewView: View {
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     HeardPlansCard(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    MeetingDocumentsCard(core: model.core, store: store, session: snapshot.session)
                     pane(snapshot)
                 } else {
                     if let failure = store.reviewFailure {
@@ -279,6 +280,7 @@ struct MeetingReviewHeader: View {
                 Button("Add to folder…") {
                     store.openFiling(snapshot.session.sessionId, title: snapshot.session.title)
                 }
+                Button("Add a document…") { store.addDocument() }
                 Divider()
                 if let askAgent {
                     Button("Ask about this meeting") { askAgent(question) }

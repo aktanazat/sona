@@ -327,6 +327,9 @@ final class MeetingsStore {
     /// Moves when the plans heard in the open meeting change, so every list
     /// of them reads them again.
     private(set) var heardPlansRevision = 0
+    /// Moves when a document is added to the open meeting, so the card
+    /// listing its documents reads them again.
+    private(set) var documentsRevision = 0
     private(set) var transcriptQuery = ""
     /// The one voice the transcript is narrowed to, picked on the talk bar.
     private(set) var transcriptSpeaker: SpeakerId?
@@ -1571,6 +1574,30 @@ final class MeetingsStore {
     func exportOpenLedger() {
         guard let sessionId = openSessionId else { return }
         exportLedger(sessionId)
+    }
+
+    /// Add a PDF or a text document to the open meeting. The operation id is
+    /// the core's idempotency key: the same add twice is one document.
+    func addDocument() {
+        guard let sessionId = openSessionId else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "A PDF or text document for this meeting"
+        panel.allowedContentTypes = DocumentMedia.extensions.compactMap { UTType(filenameExtension: $0) }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            await act("Adding the document") {
+                let request: [String: JSONValue] = [
+                    "path": .string(url.path),
+                    "operation_id": .string(UUID().uuidString),
+                    "session_id": .string(sessionId),
+                ]
+                let _: DocumentMutationResult = try await self.core.request("doc_ingest", ["request": request])
+                self.documentsRevision += 1
+            }
+        }
     }
 
     func deleteOpenMeeting() {
