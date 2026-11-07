@@ -1621,6 +1621,9 @@ pub struct ProcessingProgress {
     /// Absent until this Mac has finished the stage under way at least once:
     /// time left is measured here, never assumed.
     pub eta_ms: Option<u64>,
+    /// Held until a recording under way finishes; no time passes for the run
+    /// meanwhile.
+    pub waiting_for_capture: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
