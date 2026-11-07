@@ -28,6 +28,9 @@ private struct MeetingPrepForm: View {
     @State private var draft: MeetingPrepPreferences
     @State private var webKey = ""
     @State private var askingVoiceConsent = false
+    @FocusState private var aboutMeFocus: AboutMeField?
+
+    private enum AboutMeField { case name, role, company, context }
 
     init(store: MeetingPrepStore, initial: MeetingPrepPreferences) {
         self.store = store
@@ -43,17 +46,22 @@ private struct MeetingPrepForm: View {
                             Text("Helps Sona choose what matters in notes, briefs and follow-ups. This context goes to your selected meeting model.")
                                 .bodyText(13, Theme.inkSecondary)
                             TextField("Name", text: $draft.aboutMe.name).textFieldStyle(.roundedBorder)
+                                .focused($aboutMeFocus, equals: .name)
                                 .accessibilityLabel("Your name")
                             TextField("Role", text: $draft.aboutMe.role).textFieldStyle(.roundedBorder)
+                                .focused($aboutMeFocus, equals: .role)
                                 .accessibilityLabel("Your role")
                             TextField("Company", text: $draft.aboutMe.company).textFieldStyle(.roundedBorder)
+                                .focused($aboutMeFocus, equals: .company)
                                 .accessibilityLabel("Your company")
                             TextField("What should Sona know about your work?", text: $draft.aboutMe.context, axis: .vertical)
                                 .lineLimit(3...6).textFieldStyle(.roundedBorder)
+                                .focused($aboutMeFocus, equals: .context)
                                 .accessibilityLabel("Context about your work")
                             Text("Names, role and company: 120 characters each. Context: 1,500 characters.")
                                 .metaText(Theme.inkSecondary)
                         }
+                        .onSubmit { aboutMeFocus = nil }
                     }
                     CardRow {
                         VStack(alignment: .leading, spacing: 6) {
@@ -66,7 +74,7 @@ private struct MeetingPrepForm: View {
                                     .bodyText(13, Theme.inkSecondary)
                             }
                             if store.preferences?.aboutMe.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
-                                Text("Save your name above so Sona can suggest you.").metaText(Theme.inkSecondary)
+                                Text("Add your name above so Sona can suggest you.").metaText(Theme.inkSecondary)
                             }
                             if store.userVoiceBusy { ProgressView("Reading your dictations…") }
                             ErrorNote(store.userVoiceError)
@@ -182,7 +190,18 @@ private struct MeetingPrepForm: View {
             .padding(.bottom, 24)
         }
         .disabled(store.saving)
-        .onDisappear { webKey = "" }
+        .onChange(of: aboutMeFocus) { saveAboutMe() }
+        .onDisappear {
+            webKey = ""
+            saveAboutMe()
+        }
+    }
+
+    /// About me is saved whenever one of its fields is left, on Enter, or
+    /// when the page goes away; a field still focused at quit is not saved.
+    private func saveAboutMe() {
+        let aboutMe = draft.aboutMe
+        Task { await store.saveAboutMe(aboutMe) }
     }
 }
 
