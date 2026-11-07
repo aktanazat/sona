@@ -398,13 +398,23 @@ fn describe_spans(spans: &[LeftOutSpan]) -> String {
         .join("; ")
 }
 
-/// The meeting, seeded into a scratch store the way the app stores an
-/// imported transcript, with every kept line under its speaker's name.
+/// The meeting, seeded into a scratch store as recorded on this Mac, with
+/// every kept line under its speaker's name on its speaker's lane. A speaker
+/// the export gives no lane sits on system audio, where only its name can
+/// make it the user's.
 fn seed(store: &MeetingStore, review: &Review) -> Result<MeetingSessionId, StoreError> {
-    let names: HashMap<SpeakerId, &str> = review
+    let speakers: HashMap<SpeakerId, (&str, SourceKind)> = review
         .speakers
         .iter()
-        .map(|speaker| (speaker.speaker_id, speaker.display_name.as_str()))
+        .map(|speaker| {
+            (
+                speaker.speaker_id,
+                (
+                    speaker.display_name.as_str(),
+                    speaker.source_kind.unwrap_or(SourceKind::SystemAudio),
+                ),
+            )
+        })
         .collect();
     let mut lines: Vec<(&Line, &str)> = review
         .transcript
@@ -419,34 +429,37 @@ fn seed(store: &MeetingStore, review: &Review) -> Result<MeetingSessionId, Store
         .filter(|(_, text)| !text.trim().is_empty())
         .collect();
     lines.sort_by_key(|(line, _)| line.base.start_offset_ns);
-    let texts: Vec<&str> = lines.iter().map(|(_, text)| *text).collect();
     let session_id = workflow_core_tests::reviewable_meeting(store, "probe", 1);
-    workflow_core_tests::transcript_segments(store, session_id, &texts);
+    let (microphone, system_audio) = workflow_core_tests::recording_tracks(store, session_id);
     let mut plan = empty_local_plan();
     plan.session_id = session_id;
     plan.attempt_number = 2;
     workflow_core_tests::processing_plan(store, &plan)?;
-    let track_id = store.review_snapshot(session_id)?.tracks[0].track_id;
     let revision = store.begin_transcript_revision(TranscriptRevisionInput {
         session_id,
         engine_id: "import",
         model_version: None,
         destination: &ProcessingDestination::Local,
-        source_set: &[SourceKind::Microphone],
+        source_set: &SourceKind::ALL,
         language: "en",
     })?;
     let inputs: Vec<_> = lines
         .iter()
-        .map(|(line, text)| TranscriptSegmentInput {
-            track_id,
-            source_kind: SourceKind::Microphone,
-            start_offset_ns: line.base.start_offset_ns,
-            end_offset_ns: line.base.end_offset_ns,
-            text: (*text).to_string(),
-            confidence_milli: None,
-            speaker: names
-                .get(&line.assigned_speaker_id)
-                .map(|name| (*name).to_string()),
+        .map(|(line, text)| {
+            let speaker = speakers.get(&line.assigned_speaker_id);
+            let source_kind = speaker.map_or(SourceKind::SystemAudio, |&(_, lane)| lane);
+            TranscriptSegmentInput {
+                track_id: match source_kind {
+                    SourceKind::Microphone => microphone,
+                    SourceKind::SystemAudio => system_audio,
+                },
+                source_kind,
+                start_offset_ns: line.base.start_offset_ns,
+                end_offset_ns: line.base.end_offset_ns,
+                text: (*text).to_string(),
+                confidence_milli: None,
+                speaker: speaker.map(|&(name, _)| name.to_string()),
+            }
         })
         .collect();
     store.append_transcript_segments(session_id, revision, &inputs)?;
