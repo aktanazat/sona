@@ -135,6 +135,7 @@ impl MeetingStore {
         day_start_utc_ms: i64,
         day_end_utc_ms: i64,
     ) -> Result<Vec<EveningMeeting>, StoreError> {
+        let user_name = self.user_name();
         let connection = self.connection()?;
         let mut statement = connection.prepare(&format!(
             "SELECT m.id, m.title, m.started_at_utc_ms, m.ended_at_utc_ms,
@@ -178,6 +179,7 @@ impl MeetingStore {
                     (started, ended),
                     artifacts,
                     not_filed,
+                    user_name.as_deref(),
                 )
             })
             .collect()
@@ -514,6 +516,7 @@ fn evening_meeting(
     (started_at_utc_ms, ended_at_utc_ms): (i64, Option<i64>),
     artifacts: Option<GeneratedMeetingArtifacts>,
     not_filed: bool,
+    user_name: Option<&str>,
 ) -> Result<EveningMeeting, StoreError> {
     let mut statement = connection.prepare_cached(
         "SELECT p.display_name FROM meeting_person_links l
@@ -524,7 +527,7 @@ fn evening_meeting(
     let people = statement
         .query_map([id(session_id)], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let loops = loops_in(connection, session_id)?.rows;
+    let loops = loops_in(connection, session_id, user_name)?.rows;
     let due = |row: &MeetingLoopRow| {
         artifacts.as_ref().and_then(|artifacts| {
             artifacts
