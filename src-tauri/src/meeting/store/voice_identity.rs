@@ -704,9 +704,10 @@ impl MeetingStore {
 
     /// For each speaker still waiting for a name, the one person whose
     /// confirmed voices from any meeting it matches, or the user, whose voice
-    /// is every speaker given `user_name`. Nothing is written: the speaker is
-    /// named only when the user confirms, through `identify_speaker` for a
-    /// person and a rename to `user_name` for the user.
+    /// is every speaker given `user_name` and every person who carries it.
+    /// Nothing is written: the speaker is named only when the user confirms,
+    /// through `identify_speaker` for a person and a rename to `user_name`
+    /// for the user.
     pub(crate) fn voice_speaker_suggestions(
         &self,
         session_id: MeetingSessionId,
@@ -771,6 +772,9 @@ impl MeetingStore {
             let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
             let embedding = embedding_from_blob(&embedding)?;
             match person_id.zip(display_name) {
+                Some((_, display_name)) if names_user(&display_name, user_name) => {
+                    user_voices.push(embedding);
+                }
                 Some((person_id, display_name)) => {
                     let person_id = PersonId::from_uuid(parse_uuid(&person_id)?);
                     match people.last_mut() {
