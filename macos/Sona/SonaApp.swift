@@ -60,6 +60,19 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
     private var terminationPending = false
 
+    /// AppKit answers a quit sent by AppleScript or the Dock by refusing it
+    /// while a sheet is up, before Sona is asked. Sona takes that event and
+    /// quits the way its own Quit does.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(quitEvent(_:reply:)),
+            forEventClass: AEEventClass(kCoreEventClass), andEventID: AEEventID(kAEQuitApplication))
+    }
+
+    @objc private func quitEvent(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        model.quit()
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls { model.open(url: url) }
     }
