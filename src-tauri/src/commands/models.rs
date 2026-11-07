@@ -86,15 +86,24 @@ pub async fn delete_model(
         .map_err(|e| e.to_string())
 }
 
+/// Whether picking a model loads it now. A run in flight keeps the model it
+/// was planned with resident, and "Immediately" keeps no model resident, so
+/// either way the next run loads the new selection on demand.
+fn loads_on_switch(unload_timeout: ModelUnloadTimeout, run_in_flight: bool) -> bool {
+    unload_timeout != ModelUnloadTimeout::Immediately && !run_in_flight
+}
+
 /// Shared logic for switching the active model, used by both the Tauri command
 /// and the tray menu handler.
 ///
 /// Validates the model, updates the persisted setting, and loads the model
-/// unless the unload timeout is set to "Immediately" (in which case the model
-/// will be loaded on-demand during the next transcription).
+/// when [`loads_on_switch`] says so.
 pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String> {
     let model_manager = app.state::<Arc<ModelManager>>();
     let transcription_manager = app.state::<Arc<TranscriptionManager>>();
+
+    // Read before claiming the loading slot, which this check counts.
+    let run_in_flight = transcription_manager.engine_busy();
 
     // Atomically claim the loading slot — prevents concurrent model loads
     // from tray double-clicks or overlapping commands. The guard resets the
@@ -121,9 +130,7 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
         previous
     })?;
 
-    // Skip eager loading if unload is set to "Immediately" — the model
-    // will be loaded on-demand during the next transcription.
-    if unload_timeout == ModelUnloadTimeout::Immediately {
+    if !loads_on_switch(unload_timeout, run_in_flight) {
         // Notify frontend — load_model won't be called so no events
         // would otherwise be emitted.
         let _ = app.emit(
@@ -136,8 +143,10 @@ pub fn switch_active_model(app: &AppHandle, model_id: &str) -> Result<(), String
             },
         );
         log::info!(
-            "Model selection changed to {} (not loading — unload set to Immediately).",
-            model_id
+            "Model selection changed to {} (not loading: unload {:?}, run in flight {}).",
+            model_id,
+            unload_timeout,
+            run_in_flight
         );
         return Ok(());
     }
@@ -196,4 +205,16 @@ pub async fn cancel_download(
     model_manager
         .cancel_download(&model_id)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_switch_during_a_run_leaves_the_model_the_run_was_planned_with() {
+        assert!(!loads_on_switch(ModelUnloadTimeout::Min5, true));
+        assert!(loads_on_switch(ModelUnloadTimeout::Min5, false));
+        assert!(!loads_on_switch(ModelUnloadTimeout::Immediately, false));
+    }
 }
