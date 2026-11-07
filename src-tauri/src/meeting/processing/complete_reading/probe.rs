@@ -68,7 +68,15 @@ struct Base {
 struct Witness {
     /// The endpoint the engine names; Apple Intelligence when it names none.
     local: Option<LocalEndpointGenerator>,
-    requests: Mutex<Vec<String>>,
+    requests: Mutex<Vec<Request>>,
+}
+
+/// One request as the report shows it: the pass that sent it, how it ended
+/// and how long it took.
+struct Request {
+    pass: &'static str,
+    line: String,
+    seconds: f64,
 }
 
 impl MeetingTextGenerator for Witness {
@@ -97,6 +105,7 @@ impl MeetingTextGenerator for Witness {
         max_tokens: i32,
         shape: ReplyShape,
     ) -> Result<String, MeetingTextGenerationError> {
+        let started = Instant::now();
         let (result, ended) = match &self.local {
             Some(local) => {
                 let result = local.generate(prompt, input, max_tokens, shape);
@@ -124,10 +133,27 @@ impl MeetingTextGenerator for Witness {
         } else {
             ""
         };
+        let pass = match shape {
+            ReplyShape::MeetingNotes => "notes",
+            ReplyShape::MeetingLedger => "ledger",
+            ReplyShape::LedgerMerge => "ledger merge",
+            ReplyShape::PlainNotes => "plain notes",
+            ReplyShape::Json if prompt == NOTES_TOPICS => "topics",
+            ReplyShape::Json if prompt == DECISION_CHECK => "decision check",
+            ReplyShape::Json | ReplyShape::Prose | ReplyShape::MemoryNote => "other",
+        };
+        let seconds = started.elapsed().as_secs_f64();
         self.requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(format!("{} bytes{short}: {ended}", input.len()));
+            .push(Request {
+                pass,
+                line: format!(
+                    "{pass} {} bytes{short}: {ended}, {seconds:.0} s",
+                    input.len()
+                ),
+                seconds,
+            });
         result
     }
 }
@@ -157,7 +183,7 @@ impl Witness {
 
     /// "ok" for a step its first request answered; otherwise every request
     /// of the step in order, so second tries, halves and the short
-    /// instructions all show.
+    /// instructions all show, then the requests and seconds of each pass.
     fn outcome(&self, failure: Option<String>) -> String {
         let requests =
             std::mem::take(&mut *self.requests.lock().unwrap_or_else(PoisonError::into_inner));
@@ -165,11 +191,30 @@ impl Witness {
             1 => "1 request".to_string(),
             count => format!("{count} requests"),
         };
-        let trail = requests.join("; ");
+        let trail = requests
+            .iter()
+            .map(|request| request.line.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let mut passes: Vec<(&str, usize, f64)> = Vec::new();
+        for request in &requests {
+            match passes.iter_mut().find(|(pass, ..)| *pass == request.pass) {
+                Some((_, count, seconds)) => {
+                    *count += 1;
+                    *seconds += request.seconds;
+                }
+                None => passes.push((request.pass, 1, request.seconds)),
+            }
+        }
+        let by_pass = passes
+            .iter()
+            .map(|(pass, count, seconds)| format!("{pass} {count} × {seconds:.0} s"))
+            .collect::<Vec<_>>()
+            .join(", ");
         match failure {
             None if requests.len() <= 1 => "ok".to_string(),
-            None => format!("ok after {count}: {trail}"),
-            Some(failure) => format!("{failure} after {count}: {trail}"),
+            None => format!("ok after {count}: {trail}; by pass: {by_pass}"),
+            Some(failure) => format!("{failure} after {count}: {trail}; by pass: {by_pass}"),
         }
     }
 }
