@@ -5,6 +5,12 @@ use crate::settings::TypingTool;
 use crate::settings::{AutoSubmitKey, PasteMethod};
 use enigo::{Direction, Enigo, Key, Keyboard};
 use log::info;
+#[cfg(target_os = "macos")]
+use objc2::{rc::Retained, runtime::ProtocolObject};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSArray, NSData, NSString};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -951,6 +957,65 @@ pub(crate) fn paste_frozen(
     }
 }
 
+/// Everything a macOS pasteboard holds: each item's data under every type it
+/// declares. Putting it back restores rich text, files, several items, and
+/// markers such as `org.nspasteboard.ConcealedType`, which a password manager
+/// sets so clipboard history skips the copy.
+///
+/// The data is copied out as owned bytes because a paste transaction shares
+/// its snapshot with a waiter thread, and the Foundation types are not `Send`.
+#[cfg(target_os = "macos")]
+pub(crate) struct PasteboardSnapshot {
+    items: Vec<Vec<(String, Vec<u8>)>>,
+}
+
+#[cfg(target_os = "macos")]
+impl PasteboardSnapshot {
+    pub(crate) fn capture(pasteboard: &NSPasteboard) -> Self {
+        let items = pasteboard
+            .pasteboardItems()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.types()
+                            .iter()
+                            .filter_map(|data_type| {
+                                let data = item.dataForType(&data_type)?;
+                                Some((data_type.to_string(), data.to_vec()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|types| !types.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { items }
+    }
+
+    /// Replaces whatever the pasteboard holds with the captured items.
+    pub(crate) fn restore(&self, pasteboard: &NSPasteboard) {
+        pasteboard.clearContents();
+        if self.items.is_empty() {
+            return;
+        }
+        let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = self
+            .items
+            .iter()
+            .map(|types| {
+                let item = NSPasteboardItem::new();
+                for (data_type, data) in types {
+                    item.setData_forType(&NSData::with_bytes(data), &NSString::from_str(data_type));
+                }
+                ProtocolObject::from_retained(item)
+            })
+            .collect();
+        if !pasteboard.writeObjects(&NSArray::from_retained_slice(&items)) {
+            log::warn!("Could not put the previous clipboard back");
+        }
+    }
+}
+
 fn clipboard_still_ours(current_text: Option<&str>, temporary_text: &str) -> bool {
     current_text == Some(temporary_text)
 }
@@ -982,7 +1047,11 @@ fn paste_via_clipboard_frozen(
     }
 
     let clipboard = app_handle.clipboard();
+    #[cfg(target_os = "macos")]
+    let saved = PasteboardSnapshot::capture(&NSPasteboard::generalPasteboard());
+    #[cfg(not(target_os = "macos"))]
     let saved_text = clipboard.read_text().ok().filter(|value| !value.is_empty());
+    #[cfg(not(target_os = "macos"))]
     let saved_image = if saved_text.is_none() {
         clipboard.read_image().ok().map(|image| image.to_owned())
     } else {
@@ -1020,6 +1089,9 @@ fn paste_via_clipboard_frozen(
     // cannot prove the temporary value remains ours (including a new image), it
     // deliberately leaves the user’s newer clipboard untouched.
     if clipboard_still_ours(clipboard.read_text().ok().as_deref(), text) {
+        #[cfg(target_os = "macos")]
+        saved.restore(&NSPasteboard::generalPasteboard());
+        #[cfg(not(target_os = "macos"))]
         if let Some(saved_text) = saved_text {
             let _ = write_text_to_clipboard(app_handle, &saved_text);
         } else if let Some(saved_image) = saved_image {
@@ -1148,6 +1220,62 @@ e.g. 28:1 28:0 means pressing on the Enter button on a standard US keyboard.
             "Sona temporary text"
         ));
         assert!(!clipboard_still_ours(None, "Sona temporary text"));
+    }
+
+    /// Pasting borrows the user's clipboard, so all of it has to come back: a
+    /// password manager's copy keeps the marker that keeps it out of
+    /// clipboard history, rich text keeps its formatting, and a second item
+    /// survives.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_restored_pasteboard_holds_every_item_and_type_it_held() {
+        use objc2::msg_send;
+
+        let held: [&[(&str, &[u8])]; 2] = [
+            &[
+                ("public.rtf", br"{\rtf1 \b secret\b0}"),
+                ("public.utf8-plain-text", b"secret"),
+                ("org.nspasteboard.ConcealedType", b""),
+            ],
+            &[("public.utf8-plain-text", b"second item")],
+        ];
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        pasteboard.clearContents();
+        let items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = held
+            .iter()
+            .map(|types| {
+                let item = NSPasteboardItem::new();
+                for (data_type, data) in *types {
+                    assert!(item.setData_forType(
+                        &NSData::with_bytes(data),
+                        &NSString::from_str(data_type)
+                    ));
+                }
+                ProtocolObject::from_retained(item)
+            })
+            .collect();
+        assert!(pasteboard.writeObjects(&NSArray::from_retained_slice(&items)));
+
+        let snapshot = PasteboardSnapshot::capture(&pasteboard);
+        pasteboard.clearContents();
+        pasteboard.setString_forType(
+            &NSString::from_str("the transcript"),
+            &NSString::from_str("public.utf8-plain-text"),
+        );
+        snapshot.restore(&pasteboard);
+
+        let restored = pasteboard.pasteboardItems().expect("the items are back");
+        assert_eq!(restored.count(), held.len());
+        for (item, types) in restored.iter().zip(held) {
+            for (data_type, data) in types {
+                let back = item
+                    .dataForType(&NSString::from_str(data_type))
+                    .map(|data| data.to_vec());
+                assert_eq!(back.as_deref(), Some(*data), "{data_type}");
+            }
+        }
+        // SAFETY: the pasteboard is this test's own and nothing reads it after this.
+        let _: () = unsafe { msg_send![&*pasteboard, releaseGlobally] };
     }
 
     #[cfg(unix)]

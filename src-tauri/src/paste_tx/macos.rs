@@ -25,7 +25,7 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use super::{evaluate, send_chord, take_auto_submit_key, TxState, WaitDecision};
-use crate::clipboard::send_return_key;
+use crate::clipboard::{send_return_key, PasteboardSnapshot};
 use crate::input::EnigoState;
 use crate::settings::{AutoSubmitKey, ClipboardHandling, PasteMethod};
 
@@ -97,8 +97,7 @@ impl SonaPasteProvider {
 
 struct MacPending {
     state: Arc<Mutex<TxState>>,
-    saved_text: Option<String>,
-    saved_image: Option<tauri::image::Image<'static>>,
+    saved: PasteboardSnapshot,
     change_count: NSInteger,
     provider: Option<Retained<SonaPasteProvider>>,
     auto_submit: bool,
@@ -172,14 +171,7 @@ fn settle(
         let _ = app_handle.clipboard().write_text(&p.transcript);
         info!("[reliable-paste] left transcript on clipboard as plain text");
     } else {
-        let clipboard = app_handle.clipboard();
-        if let Some(text) = &p.saved_text {
-            let _ = clipboard.write_text(text);
-        } else if let Some(image) = &p.saved_image {
-            let _ = clipboard.write_image(image);
-        } else {
-            let _ = clipboard.clear();
-        }
+        p.saved.restore(&NSPasteboard::generalPasteboard());
         info!("[reliable-paste] restored previous clipboard");
     }
 
@@ -273,19 +265,11 @@ pub(super) fn run(
     // user's original clipboard, not the previous transcript.
     flush_pending(app_handle, enigo);
 
-    let clipboard = app_handle.clipboard();
-    let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
-    // Only probe for an image when there is no text; reading an image decodes
-    // the full bitmap (mirrors the legacy path).
-    let saved_image = if saved_text.is_none() {
-        clipboard.read_image().ok().map(|image| image.to_owned())
-    } else {
-        None
-    };
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let saved = PasteboardSnapshot::capture(&pasteboard);
 
     let state = Arc::new(Mutex::new(TxState::new()));
     let provider = SonaPasteProvider::new(state.clone(), text.to_string());
-    let pasteboard = NSPasteboard::generalPasteboard();
 
     let mut types: Vec<Retained<NSString>> = Vec::with_capacity(1 + CONCEALMENT_TYPES.len());
     types.push(NSString::from_str("public.utf8-plain-text"));
@@ -326,8 +310,7 @@ pub(super) fn run(
 
     let pending = Arc::new(Mutex::new(MacPending {
         state,
-        saved_text,
-        saved_image,
+        saved,
         change_count,
         provider: Some(provider),
         auto_submit,
