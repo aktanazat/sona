@@ -37,6 +37,7 @@ use crate::query::external::{
     ExternalLoopSide, ExternalLoopStatus, ExternalRequest, ExternalResponse,
     EXTERNAL_ACCESS_SETTING_PATH, EXTERNAL_MUTATIONS_SETTING_PATH,
 };
+use crate::query::plans_page::plans_page;
 use crate::query::{
     assemble, events, QueryAudience, QueryEventsPage, QueryPageReason, QueryScope, QuerySearchPage,
     SearchRequest, QUERY_SCHEMA_VERSION,
@@ -1223,6 +1224,21 @@ fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
             )
             .unwrap();
     }
+    connection
+        .execute(
+            "INSERT INTO meeting_heard_plans (
+                plan_id, session_id, title, people_json, when_text, start_utc_ms,
+                end_utc_ms, created_at_utc_ms, updated_at_utc_ms
+             ) VALUES (?1, ?2, 'Pricing follow-up', '[\"Dana\"]', 'in three days', ?3, ?4, ?5, ?5)",
+            params![
+                Uuid::new_v4().to_string(),
+                corpus.older_id.uuid().to_string(),
+                NOW - 1_000,
+                NOW + 60 * 60 * 1_000,
+                EARLIER
+            ],
+        )
+        .unwrap();
     drop(connection);
     // The kept series on both sides of the older meeting: every row a source
     // reads first is kept, and none the reader may see follows the older one.
@@ -1283,6 +1299,13 @@ fn a_series_kept_on_this_mac_never_reaches_an_external_reader() {
     );
     assert_eq!(stats["meetings"]["confirmed"], json!(1));
     assert_eq!(stats["last_met_utc_ms"], json!(EARLIER));
+
+    let in_app = corpus.store.heard_plans(corpus.older_id).unwrap();
+    assert_eq!(in_app[0].happened_session_id, Some(corpus.session_id));
+    let plans = value(&plans_page(&corpus.store, 25).unwrap());
+    assert!(!shows_kept(&plans), "{plans}");
+    assert_eq!(plans["entries"][0]["happened_meeting_id"], json!(null));
+    assert_ne!(plans["entries"][0]["status"], json!("happened"), "{plans}");
 
     let search = |audience: QueryAudience, limit| {
         let kept_local = audience.kept_local(&corpus.store).unwrap();

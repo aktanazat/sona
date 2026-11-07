@@ -161,13 +161,24 @@ impl MeetingStore {
             "p.session_id = ?1",
             params![id(session_id)],
             utc_now_ms(),
+            &HashSet::new(),
         )
     }
 
-    /// Every plan heard, newest meeting first.
-    pub(crate) fn all_heard_plans(&self) -> Result<Vec<HeardPlan>, StoreError> {
+    /// Every plan heard, newest meeting first. A meeting in `hidden` is
+    /// neither where a plan was heard nor where one happened.
+    pub(crate) fn all_heard_plans_without(
+        &self,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<Vec<HeardPlan>, StoreError> {
         let connection = self.connection()?;
-        plans_in(&connection, "source.phase != 'deleting'", [], utc_now_ms())
+        plans_in(
+            &connection,
+            "source.phase != 'deleting'",
+            [],
+            utc_now_ms(),
+            hidden,
+        )
     }
 
     pub(crate) fn heard_plan(&self, plan_id: HeardPlanId) -> Result<HeardPlan, StoreError> {
@@ -288,6 +299,7 @@ fn happened_in(
     began_utc_ms: i64,
     window: HeardPlanWindow,
     names: &[String],
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Option<MeetingSessionId>, StoreError> {
     if names.is_empty() {
         return Ok(None);
@@ -314,9 +326,13 @@ fn happened_in(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     for (later, person_id) in confirmed {
+        let later = MeetingSessionId::from_uuid(parse_uuid(&later)?);
+        if hidden.contains(&later) {
+            continue;
+        }
         let person = person_by_id_in(connection, PersonId::from_uuid(parse_uuid(&person_id)?))?;
         if names.iter().any(|name| answers_to(&person, name)) {
-            return Ok(Some(MeetingSessionId::from_uuid(parse_uuid(&later)?)));
+            return Ok(Some(later));
         }
     }
     Ok(None)
@@ -342,6 +358,7 @@ fn plan_in(connection: &Connection, plan_id: HeardPlanId) -> Result<HeardPlan, S
         "p.plan_id = ?1",
         params![plan_id.uuid().to_string()],
         utc_now_ms(),
+        &HashSet::new(),
     )?
     .pop()
     .ok_or(StoreError::NotFound)
@@ -352,6 +369,7 @@ fn plans_in(
     filter: &str,
     arguments: impl Params,
     now_utc_ms: i64,
+    hidden: &HashSet<MeetingSessionId>,
 ) -> Result<Vec<HeardPlan>, StoreError> {
     let mut statement = connection.prepare(&format!(
         "SELECT {PLAN_COLUMNS}
@@ -385,9 +403,13 @@ fn plans_in(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    rows.into_iter()
-        .map(|row| row.plan(connection, now_utc_ms))
-        .collect()
+    let mut plans = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !hidden.contains(&MeetingSessionId::from_uuid(parse_uuid(&row.session_id)?)) {
+            plans.push(row.plan(connection, now_utc_ms, hidden)?);
+        }
+    }
+    Ok(plans)
 }
 
 struct PlanRow {
@@ -413,7 +435,12 @@ struct PlanRow {
 }
 
 impl PlanRow {
-    fn plan(self, connection: &Connection, now_utc_ms: i64) -> Result<HeardPlan, StoreError> {
+    fn plan(
+        self,
+        connection: &Connection,
+        now_utc_ms: i64,
+        hidden: &HashSet<MeetingSessionId>,
+    ) -> Result<HeardPlan, StoreError> {
         let window = match (self.start_utc_ms, self.end_utc_ms) {
             (Some(start_utc_ms), Some(end_utc_ms)) => Some(HeardPlanWindow {
                 start_utc_ms,
@@ -440,6 +467,7 @@ impl PlanRow {
                 self.began_utc_ms,
                 window,
                 &people,
+                hidden,
             )?,
             None => None,
         };
