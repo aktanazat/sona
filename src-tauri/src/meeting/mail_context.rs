@@ -11,6 +11,8 @@ pub enum MailContextState {
     NotConfigured,
     PermissionDenied,
     Unavailable,
+    /// Mail is not open, and Sona was not asked to open it.
+    Closed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -47,6 +49,7 @@ impl MailContext {
                 "Allow Sona to control Mail in System Settings > Privacy & Security > Automation."
             }
             MailContextState::Unavailable => "Mail could not be read. Open Mail and try again.",
+            MailContextState::Closed => "Mail is not open.",
         }
     }
 }
@@ -93,6 +96,37 @@ function run(argv) {
 }
 "#;
 
+/// Booking emails in the Inbox, newest first. Without `open_mail` it reads
+/// only a Mail that is already running, so a page never opens Mail by itself.
+const BOOKINGS_SCRIPT: &str = r#"
+function run(argv) {
+    const input = JSON.parse(argv[0]);
+    const mail = Application('com.apple.mail');
+    try {
+        if (!input.open_mail && !mail.running()) return JSON.stringify({state:'closed', threads:[]});
+        if (mail.accounts().length === 0) return JSON.stringify({state:'not_configured', threads:[]});
+        const words = ['reservation', 'booking', 'your stay', 'itinerary', 'hotel'];
+        const found = mail.inbox.messages.whose({_and:[
+            {dateReceived:{_greaterThan:new Date(input.since)}},
+            {dateReceived:{_lessThan:new Date(input.until)}},
+            {_or:words.map(word => ({subject:{_contains:word}}))}
+        ]});
+        const dates = found.dateReceived();
+        const order = dates.map((date, index) => index).sort((a, b) => dates[b] - dates[a]);
+        const rows = [];
+        for (const index of order.slice(0, 40)) {
+            const message = found[index];
+            const subject = message.subject();
+            if (/cancel/i.test(subject)) continue;
+            rows.push({subject:subject.slice(0,240), sender:message.sender().slice(0,240), received_at:dates[index].toISOString(), excerpt:message.content().slice(0,8000)});
+        }
+        return JSON.stringify({state:rows.length ? 'ready' : 'empty', threads:rows});
+    } catch (error) {
+        return JSON.stringify({state:Number(error.errorNumber) === -1743 ? 'permission_denied' : 'unavailable', threads:[]});
+    }
+}
+"#;
+
 const COMPOSE_SCRIPT: &str = r#"
 function run(argv) {
     const input = JSON.parse(argv[0]);
@@ -118,6 +152,13 @@ struct ReadRequest<'a> {
     since: i64,
     until: i64,
     probe: bool,
+}
+
+#[derive(Serialize)]
+struct BookingsRequest {
+    since: i64,
+    until: i64,
+    open_mail: bool,
 }
 
 #[derive(Serialize)]
@@ -184,6 +225,20 @@ pub(crate) async fn probe() -> MailContext {
             since: 0,
             until: 0,
             probe: true,
+        },
+    )
+    .await
+}
+
+/// Booking emails received in the nine months before `until_utc_ms`. The
+/// caller has already checked that email context is on.
+pub(crate) async fn read_bookings(until_utc_ms: i64, open_mail: bool) -> MailContext {
+    run(
+        BOOKINGS_SCRIPT,
+        &BookingsRequest {
+            since: until_utc_ms.saturating_sub(270 * 24 * 60 * 60_000),
+            until: until_utc_ms,
+            open_mail,
         },
     )
     .await

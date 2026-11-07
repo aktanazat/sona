@@ -2350,6 +2350,20 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "conversation_place_from_mail" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let open_mail = args.take("openMail")?;
+            reply(
+                crate::commands::conversation_context::conversation_place_from_mail(
+                    app.clone(),
+                    app.state(),
+                    session_id,
+                    open_mail,
+                )
+                .await,
+            )
+        }
         "transcript_correction_list" => {
             let mut args = Args::parse(params)?;
             let person_id = args.take("personId")?;

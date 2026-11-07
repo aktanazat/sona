@@ -1742,6 +1742,7 @@ pub fn run(cli_args: CliArgs) {
             commands::voice_identity::voice_user_forget,
             commands::conversation_context::conversation_context,
             commands::conversation_context::conversation_context_update,
+            commands::conversation_context::conversation_place_from_mail,
             commands::transcript_corrections::transcript_correction_list,
             commands::transcript_corrections::transcript_correction_review,
             commands::transcript_corrections::transcript_correction_teach,

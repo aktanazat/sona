@@ -71,6 +71,40 @@ private struct ConversationContext: Decodable {
     }
 }
 
+/// `MailHotelStay`: a hotel stay a booking email in Mail gives for the
+/// recording's day.
+private struct MailHotelStay: Decodable {
+    let hotel: String
+    let checkIn: String
+    let checkOut: String
+    let subject: String
+    let sender: String
+    let receivedAt: String
+
+    private static let isoDay: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    /// Where the guess came from, in his words: the stay and the email.
+    var source: String {
+        let from = sender.split(separator: "<").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        let who = from.isEmpty ? sender : from
+        return "Your stay \(Self.day(checkIn)) to \(Self.day(checkOut)), from the email “\(subject)” sent by \(who) on \(Self.day(String(receivedAt.prefix(10))))."
+    }
+
+    private static func day(_ text: String) -> String {
+        isoDay.date(from: text)?.formatted(.dateTime.month(.abbreviated).day()) ?? text
+    }
+}
+
+private struct MailHotelLookup: Decodable {
+    let state: String
+    let stay: MailHotelStay?
+}
+
 struct ConversationContextView: View {
     let sessionId: String
     let editable: Bool
@@ -79,6 +113,9 @@ struct ConversationContextView: View {
     @State private var context: ConversationContext?
     @State private var failure: String?
     @State private var editing = false
+    @State private var hotel: MailHotelLookup?
+    @State private var suggestedPlace: String?
+    @AppStorage("meetings.dismissedHotelSuggestions") private var dismissedHotels = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -107,9 +144,12 @@ struct ConversationContextView: View {
                         Text(location).metaText().lineLimit(1)
                     }
                     if editable {
-                        Button("Context…") { editing = true }
+                        Button("Context…") { suggestedPlace = nil; editing = true }
                             .buttonStyle(QuietButton(compact: true))
                     }
+                }
+                if editable, context.location == nil, !hotelDismissed, let stay = hotel?.stay {
+                    hotelSuggestion(stay)
                 }
             } else if let failure {
                 HStack {
@@ -122,7 +162,10 @@ struct ConversationContextView: View {
         .task(id: sessionId) { await load() }
         .sheet(isPresented: $editing) {
             if let context {
-                ConversationContextEditor(context: context, core: model.core) { saved in
+                ConversationContextEditor(
+                    context: context, core: model.core, suggestedPlace: suggestedPlace,
+                    mailClosed: hotel?.state == "closed"
+                ) { saved in
                     self.context = saved
                     editing = false
                 }
@@ -133,14 +176,38 @@ struct ConversationContextView: View {
     private func load() async {
         context = nil
         failure = nil
+        hotel = nil
         do {
             let result: ConversationContext = try await model.core.request(
                 "conversation_context", ["sessionId": sessionId])
             guard !Task.isCancelled else { return }
             context = result
+            if editable, result.location == nil, result.calendarLocation == nil, !hotelDismissed {
+                hotel = try? await placeFromMail(core: model.core, sessionId: sessionId, openMail: false)
+            }
         } catch {
             guard !Task.isCancelled else { return }
             failure = "Conversation context could not be read. \(error.localizedDescription)"
+        }
+    }
+
+    private var hotelDismissed: Bool { dismissedHotels.split(separator: " ").contains { $0 == sessionId } }
+
+    /// A maybe, never a write: he picks the place in Maps and saves it.
+    private func hotelSuggestion(_ stay: MailHotelStay) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Maybe at \(stay.hotel)", systemImage: "bed.double").bodyText(13)
+                Text(stay.source).metaText().fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Not this") { dismissedHotels += " \(sessionId)" }
+                .buttonStyle(.quiet)
+            Button("Use this place…") {
+                suggestedPlace = stay.hotel
+                editing = true
+            }
+            .buttonStyle(QuietButton(compact: true))
         }
     }
 }
@@ -149,6 +216,7 @@ struct ConversationContextView: View {
 private struct ConversationContextEditor: View {
     let context: ConversationContext
     let core: Core
+    let mailClosed: Bool
     let saved: (ConversationContext) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var kind: ConversationKind
@@ -158,14 +226,18 @@ private struct ConversationContextEditor: View {
     @State private var searching = false
     @State private var saving = false
     @State private var failure: String?
+    @State private var mailStay: MailHotelStay?
+    @State private var lookingInMail = false
 
-    init(context: ConversationContext, core: Core, saved: @escaping (ConversationContext) -> Void) {
+    init(context: ConversationContext, core: Core, suggestedPlace: String?, mailClosed: Bool,
+         saved: @escaping (ConversationContext) -> Void) {
         self.context = context
         self.core = core
+        self.mailClosed = mailClosed
         self.saved = saved
         _kind = State(initialValue: context.kind)
         _location = State(initialValue: context.location)
-        _query = State(initialValue: context.location?.name ?? context.calendarLocation ?? "")
+        _query = State(initialValue: context.location?.name ?? suggestedPlace ?? context.calendarLocation ?? "")
     }
 
     var body: some View {
@@ -223,6 +295,16 @@ private struct ConversationContextEditor: View {
                             .buttonStyle(.quiet)
                     }
                 }
+                if let mailStay {
+                    Text("Maybe \(mailStay.hotel). \(mailStay.source)")
+                        .metaText().fixedSize(horizontal: false, vertical: true)
+                } else if mailClosed && location == nil {
+                    Button(lookingInMail ? "Looking in Mail…" : "Look in Mail for a hotel booking") {
+                        Task { await lookInMail() }
+                    }
+                    .buttonStyle(.quiet)
+                    .disabled(lookingInMail)
+                }
                 Text("Only a place you choose is saved. Searching sends the place name to Apple Maps, not your conversation.")
                     .metaText().fixedSize(horizontal: false, vertical: true)
             }
@@ -254,6 +336,27 @@ private struct ConversationContextEditor: View {
         }
     }
 
+    /// Opens Mail if it is closed, on his tap only, and fills the search
+    /// with the hotel a booking email gives for this day.
+    private func lookInMail() async {
+        lookingInMail = true
+        failure = nil
+        defer { lookingInMail = false }
+        do {
+            let result = try await placeFromMail(core: core, sessionId: context.sessionId, openMail: true)
+            if let stay = result.stay {
+                mailStay = stay
+                query = stay.hotel
+            } else {
+                failure = result.state == "permission_denied"
+                    ? "Allow Sona to control Mail in System Settings → Privacy & Security → Automation."
+                    : "No hotel booking in Mail covers this day."
+            }
+        } catch {
+            failure = "Mail could not be read. \(error.localizedDescription)"
+        }
+    }
+
     private func save() async {
         saving = true
         failure = nil
@@ -269,6 +372,11 @@ private struct ConversationContextEditor: View {
             failure = "Context could not be saved. \(error.localizedDescription)"
         }
     }
+}
+
+private func placeFromMail(core: Core, sessionId: String, openMail: Bool) async throws -> MailHotelLookup {
+    try await core.request(
+        "conversation_place_from_mail", ["sessionId": JSONValue.string(sessionId), "openMail": .bool(openMail)])
 }
 
 private struct ContextUpdate: Encodable {
