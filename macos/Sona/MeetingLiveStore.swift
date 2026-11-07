@@ -1117,6 +1117,14 @@ final class MeetingLiveStore {
         }
     }
 
+    /// Asks now, when no ask is waiting and the capture has heard anything:
+    /// it was just given words of its own to recall by.
+    func recallNow(_ sessionId: MeetingSessionId) {
+        guard live?.session.sessionId == sessionId else { return }
+        recallAsked = nil
+        scheduleRecall()
+    }
+
     /// One ask. New matches go on top in the core's order; a card already
     /// shown or put away is not shown again. A read that fails keeps the
     /// cards and says past meetings could not be read.

@@ -36,7 +36,7 @@ struct MeetingLiveView: View {
                 if let session {
                     if geometry.size.width >= 820 {
                         VStack(alignment: .leading, spacing: 0) {
-                            captureHeader(session)
+                            captureHeader(session, proxy)
                             HStack(alignment: .top, spacing: 24) {
                                 // A jump's highlight reaches 8pt past the words,
                                 // and a scroll view clips at its own edge.
@@ -69,7 +69,7 @@ struct MeetingLiveView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     } else {
                         Page {
-                            captureHeader(session)
+                            captureHeader(session, proxy)
                             ownNotes
                             recalled
                             help(proxy)
@@ -108,11 +108,13 @@ struct MeetingLiveView: View {
     // MARK: The head of the page
 
     @ViewBuilder
-    private func captureHeader(_ session: MeetingSessionSnapshot) -> some View {
+    private func captureHeader(_ session: MeetingSessionSnapshot, _ proxy: ScrollViewProxy) -> some View {
         header(session)
         ErrorNote(store.error)
         warnings
-        ContextSuggestionsView(sessionId: session.sessionId, revision: session.revision)
+        ContextSuggestionsView(
+            sessionId: session.sessionId, revision: session.revision, heard: store.provisional.count,
+            showLive: { jump(to: $0, using: proxy) })
         MeetingSnapshotStrip(sessionId: session.sessionId)
         CallNamesLiveControl(sessionId: session.sessionId)
         if let state = store.active, state.snapshot.sessionId == session.sessionId {

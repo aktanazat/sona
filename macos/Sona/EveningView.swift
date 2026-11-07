@@ -124,6 +124,8 @@ struct FilingReasonsLine: View {
     @Environment(AppModel.self) private var model
     let sessionId: MeetingSessionId
     let reasons: [FilingReason]
+    /// Shows the running capture's words at an offset, on the live screen.
+    var showLive: ((Int64) -> Void)?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -139,8 +141,18 @@ struct FilingReasonsLine: View {
         switch reason {
         case let .onCalendar(overlaps):
             Text(overlaps ? "on your calendar then" : "on your calendar just before or after").metaText()
-        case let .voiceMatches(name):
-            Text("a voice matches \(name)").metaText()
+        case let .voiceMatches(name, startOffsetNs):
+            if let startOffsetNs, let showLive {
+                Button {
+                    showLive(startOffsetNs)
+                } label: {
+                    Text("\(name)'s voice at \(startOffsetNs.meetingOffsetClock) ▶")
+                        .metaText(Theme.inkSecondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("a voice matches \(name)").metaText()
+            }
         case let .said(phrase, count, segmentId):
             Button {
                 model.meetings.open(sessionId, segmentId: segmentId)
@@ -156,6 +168,16 @@ struct FilingReasonsLine: View {
             Text("voices came through \(InstalledApp.find(bundleId)?.name ?? bundleId)").metaText()
         case .inInvite:
             Text("from your calendar").metaText()
+        case let .planned(plannedIn, saidAtUtcMs, quote, citation):
+            Button {
+                model.openPast(plannedIn, segmentId: citation?.segmentId)
+            } label: {
+                Text(quote.map { "said \(FeedClock.ago(saidAtUtcMs)): “\($0)” ▶" }
+                    ?? "planned \(FeedClock.ago(saidAtUtcMs)) ▶")
+                    .metaText(Theme.inkSecondary)
+                    .lineLimit(2)
+            }
+            .buttonStyle(.plain)
         }
     }
 }

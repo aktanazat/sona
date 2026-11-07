@@ -553,14 +553,16 @@ final class AppModel {
         go(.meetings)
     }
 
-    /// A past moment the live screen recalled, open on its meeting's page.
-    /// The recording keeps going: the live notes are saved first, and the
-    /// meetings page's recording row leads back.
-    func openRecalled(_ match: MeetingRecallMatch) {
+    /// A past moment, open on its meeting's page. A recording on the live
+    /// screen keeps going: the live notes are saved first, and the meetings
+    /// page's recording row leads back.
+    func openPast(_ sessionId: MeetingSessionId, segmentId: TranscriptSegmentId?) {
         Task {
-            guard await live.flushLiveNotes() else { return }
-            live.closeLive()
-            meetings.open(match.sessionId, segmentId: match.segmentId)
+            if live.live != nil {
+                guard await live.flushLiveNotes() else { return }
+                live.closeLive()
+            }
+            meetings.open(sessionId, segmentId: segmentId)
             go(.meetings)
         }
     }
