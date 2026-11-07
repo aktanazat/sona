@@ -969,8 +969,70 @@ pub(crate) struct PasteboardSnapshot {
     items: Vec<Vec<(String, Vec<u8>)>>,
 }
 
+/// How long a paste waits to copy the clipboard aside. An app that copied
+/// lazily renders a type only when asked: six types that took half a second
+/// each held a test paste for 3.1 s, and the text alone came back in 0.3 s.
+#[cfg(target_os = "macos")]
+const SNAPSHOT_DEADLINE: Duration = Duration::from_millis(300);
+
 #[cfg(target_os = "macos")]
 impl PasteboardSnapshot {
+    /// The general pasteboard, whole if it copies aside within the deadline,
+    /// otherwise its first item's text or image.
+    pub(crate) fn capture_general() -> Self {
+        let original = NSPasteboard::generalPasteboard().changeCount();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let snapshot = objc2::rc::autoreleasepool(|_| {
+                let pasteboard = NSPasteboard::generalPasteboard();
+                // Reading Sona's own promise would tell its paste that the
+                // target app took the text.
+                (pasteboard.changeCount() == original).then(|| Self::capture(&pasteboard))
+            });
+            if let Some(snapshot) = snapshot {
+                let _ = sender.send(snapshot);
+            }
+        });
+        receiver
+            .recv_timeout(SNAPSHOT_DEADLINE)
+            .unwrap_or_else(|_| {
+                log::warn!("The clipboard was slow to copy aside; keeping its text or image only");
+                Self::capture_text_or_image(&NSPasteboard::generalPasteboard())
+            })
+    }
+
+    /// The first item's text, or its image when it has no text, with the
+    /// `org.nspasteboard.` markers that keep a password out of clipboard
+    /// history.
+    fn capture_text_or_image(pasteboard: &NSPasteboard) -> Self {
+        let Some(item) = pasteboard
+            .pasteboardItems()
+            .and_then(|items| items.iter().next())
+        else {
+            return Self { items: Vec::new() };
+        };
+        let Some(content) = ["public.utf8-plain-text", "public.png", "public.tiff"]
+            .into_iter()
+            .find_map(|data_type| {
+                let data = item.dataForType(&NSString::from_str(data_type))?.to_vec();
+                (!data.is_empty()).then(|| (data_type.to_string(), data))
+            })
+        else {
+            return Self { items: Vec::new() };
+        };
+        let types = item.types();
+        let markers = types.iter().filter_map(|data_type| {
+            let name = data_type.to_string();
+            name.starts_with("org.nspasteboard.").then(|| {
+                let data = item.dataForType(&data_type).map(|data| data.to_vec());
+                (name, data.unwrap_or_default())
+            })
+        });
+        Self {
+            items: vec![std::iter::once(content).chain(markers).collect()],
+        }
+    }
+
     pub(crate) fn capture(pasteboard: &NSPasteboard) -> Self {
         let items = pasteboard
             .pasteboardItems()
@@ -1048,7 +1110,7 @@ fn paste_via_clipboard_frozen(
 
     let clipboard = app_handle.clipboard();
     #[cfg(target_os = "macos")]
-    let saved = PasteboardSnapshot::capture(&NSPasteboard::generalPasteboard());
+    let saved = PasteboardSnapshot::capture_general();
     #[cfg(not(target_os = "macos"))]
     let saved_text = clipboard.read_text().ok().filter(|value| !value.is_empty());
     #[cfg(not(target_os = "macos"))]

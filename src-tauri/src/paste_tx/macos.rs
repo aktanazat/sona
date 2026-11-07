@@ -266,7 +266,7 @@ pub(super) fn run(
     flush_pending(app_handle, enigo);
 
     let pasteboard = NSPasteboard::generalPasteboard();
-    let saved = PasteboardSnapshot::capture(&pasteboard);
+    let saved = PasteboardSnapshot::capture_general();
 
     let state = Arc::new(Mutex::new(TxState::new()));
     let provider = SonaPasteProvider::new(state.clone(), text.to_string());
