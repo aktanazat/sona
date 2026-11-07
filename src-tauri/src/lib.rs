@@ -1865,6 +1865,8 @@ pub fn run(cli_args: CliArgs) {
             commands::upcoming::meeting_upcoming_events,
             commands::people::people_list,
             commands::people::person_detail,
+            commands::people::person_first_met,
+            commands::people::person_first_met_decide,
             meeting::person_memory::person_memory,
             commands::people::organization_detail,
             commands::people::companies_list,

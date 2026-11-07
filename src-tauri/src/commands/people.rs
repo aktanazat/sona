@@ -1,14 +1,14 @@
 use crate::meeting::people_types::{
     CompaniesListResult, MeetingPeopleContextResult, OpenLoopsInboxResult,
     OrganizationDetailResult, PeopleListResult, PeopleMutationResult, PersonContextResult,
-    PersonDeleteRequest, PersonDetailResult, PersonId, PersonLinkRequest, PersonMergeRequest,
-    PersonRenameRequest, PersonSplitRequest, PersonSummaryRegenerateResult,
+    PersonDeleteRequest, PersonDetailResult, PersonFirstMet, PersonId, PersonLinkRequest,
+    PersonMergeRequest, PersonRenameRequest, PersonSplitRequest, PersonSummaryRegenerateResult,
     VocabularyCandidatesResult,
 };
 use crate::meeting::session::MeetingSessionManager;
 use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 #[specta::specta]
@@ -25,6 +25,46 @@ pub async fn person_detail(
     person_id: PersonId,
 ) -> Result<PersonDetailResult, MeetingCommandError> {
     manager.person_detail(person_id).await
+}
+
+/// When the user first met this person on record, where, and who
+/// introduced them: a maybe until the user takes it.
+#[tauri::command]
+#[specta::specta]
+pub async fn person_first_met(
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    person_id: PersonId,
+) -> Result<Option<PersonFirstMet>, String> {
+    first_met(&manager, person_id).await
+}
+
+/// Takes the introducer or turns it down, and answers with the first
+/// meeting as it now reads.
+#[tauri::command]
+#[specta::specta]
+pub async fn person_first_met_decide(
+    app: AppHandle,
+    manager: State<'_, Arc<MeetingSessionManager>>,
+    person_id: PersonId,
+    suggestion_id: String,
+    accept: bool,
+) -> Result<Option<PersonFirstMet>, String> {
+    manager.decide_filing(&app, &suggestion_id, accept).await?;
+    first_met(&manager, person_id).await
+}
+
+async fn first_met(
+    manager: &MeetingSessionManager,
+    person_id: PersonId,
+) -> Result<Option<PersonFirstMet>, String> {
+    const UNREADABLE: &str = "When you first met could not be read.";
+    let store = manager.store().await.map_err(|_| UNREADABLE.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store.person_first_met(person_id, chrono::Utc::now().timestamp_millis())
+    })
+    .await
+    .map_err(|_| UNREADABLE.to_string())?
+    .map_err(|_| UNREADABLE.to_string())
 }
 
 /// One organization page: its people, and what they collectively left open.

@@ -610,6 +610,7 @@ fn target_identity(target: &FilingTarget) -> Result<(&'static str, String), Stor
             "place",
             format!("{:.6},{:.6}", location.latitude, location.longitude),
         ),
+        FilingTarget::Introducer { person_id, .. } => ("introducer", person_id.uuid().to_string()),
     })
 }
 
