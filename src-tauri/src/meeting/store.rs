@@ -1919,14 +1919,13 @@ pub(crate) struct ArtifactEvidence {
     /// The rough notes the user typed for this meeting. They steer the shape
     /// of the generated notes; they are never citable evidence.
     pub user_notes: String,
-    /// The decisions and to-dos the user marked while recording, in meeting
-    /// order.
+    /// The moments the user marked while recording, in meeting order.
     pub marks: Vec<NotesMark>,
     pub template: NotesTemplate,
 }
 
-/// A moment the user marked while recording as a decision or a to-do, with
-/// the words they gave it, if any.
+/// A moment the user marked while recording, with the words they gave it, if
+/// any.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NotesMark {
     pub kind: NotesMarkKind,
@@ -1934,12 +1933,14 @@ pub(crate) struct NotesMark {
     pub label: Option<String>,
 }
 
-/// The list of the notes a marked moment belongs in.
+/// The part of the notes a marked moment belongs in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum NotesMarkKind {
     Decision,
     ActionItem,
+    Question,
+    KeyPoint,
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -5950,19 +5951,15 @@ impl MeetingStore {
         }
         let marks = conversation_review::export_bookmarks_in(&connection, session_id)?
             .into_iter()
-            .filter_map(|bookmark| {
-                let kind = match bookmark.kind {
+            .map(|bookmark| NotesMark {
+                kind: match bookmark.kind {
                     ConversationBookmarkKind::Decision => NotesMarkKind::Decision,
                     ConversationBookmarkKind::Todo => NotesMarkKind::ActionItem,
-                    ConversationBookmarkKind::Mark | ConversationBookmarkKind::Question => {
-                        return None;
-                    }
-                };
-                Some(NotesMark {
-                    kind,
-                    at_offset_ns: bookmark.start_offset_ns,
-                    label: bookmark.label,
-                })
+                    ConversationBookmarkKind::Question => NotesMarkKind::Question,
+                    ConversationBookmarkKind::Mark => NotesMarkKind::KeyPoint,
+                },
+                at_offset_ns: bookmark.start_offset_ns,
+                label: bookmark.label,
             })
             .collect();
         Ok(ArtifactEvidence {

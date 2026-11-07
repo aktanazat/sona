@@ -5926,7 +5926,7 @@ fn drop_vocabulary_echoes(
 
 /// What the notes are told about the moments the user marked. Only a meeting
 /// with marks is told, so every other meeting is asked exactly as before.
-const MARKED_ROWS_RULE: &str = "\n\nSome transcript rows carry `marked`: during the meeting the user pressed a button to mark what was being said, and the marked rows are the seconds leading up to that press. `decision` means a decision was made there: put it in `decisions`, citing the marked rows that state it. `action_item` means someone took on a task there: put it in `action_items`, citing the marked rows that state it. `mark_labels` are the user's own words for the mark: use them to tell what the mark is about, never cite them, and never state something only they say. A mark says where to look, not what was said: write only what the marked rows support.";
+const MARKED_ROWS_RULE: &str = "\n\nSome transcript rows carry `marked`: during the meeting the user pressed a button to mark what was being said, and the marked rows are the seconds leading up to that press. `decision` means a decision was made there: put it in `decisions`, citing the marked rows that state it. `action_item` means someone took on a task there: put it in `action_items`, citing the marked rows that state it. `question` means a question was asked there: when the marked rows ask one, put it in `key_questions`, citing the marked rows that ask it. `key_point` means the user wants what was said there kept: cover it in `summary` or in an outline topic, citing the marked rows that say it. `mark_labels` are the user's own words for the mark: use them to tell what the mark is about, never cite them, and never state something only they say. A mark says where to look, not what was said: write only what the marked rows support.";
 
 /// The instructions the notes are written to, shaped by the user's notes
 /// language, the moments they marked and the profile they gave about
@@ -8931,8 +8931,7 @@ pub(crate) mod tests {
     /// becomes its lines as said where the engine only split them up. A to-do
     /// keeps the tasks the engine wrote there with an owner or a deadline,
     /// drops the bare copies of its lines listed beside them, and becomes its
-    /// line as said where the engine wrote none. A question or a plain
-    /// bookmark adds nothing.
+    /// line as said where the engine wrote none.
     #[test]
     fn marked_decisions_and_todos_land_in_the_notes_cited_to_their_lines() {
         let meeting = MarkedMeeting::new();
@@ -8967,6 +8966,58 @@ pub(crate) mod tests {
                 task("Sam will update the deck.", 6, Some("Sam"), None),
                 task(MARKED_MEETING[8], 8, None, Some("Monday")),
                 task(MARKED_MEETING[9], 9, None, None),
+            ]
+        );
+    }
+
+    /// A marked question the engine left out becomes an open question in the
+    /// words it was asked, and a plain bookmark the summary and topics leave
+    /// out becomes a summary line, in meeting order. A question mark on lines
+    /// that ask nothing, and a plain bookmark the summary already cites, add
+    /// nothing.
+    #[test]
+    fn marked_questions_and_bookmarks_land_in_the_notes_cited_to_their_lines() {
+        let meeting = MarkedMeeting::new();
+        meeting.mark();
+        let after = |line: usize| meeting.lines[line].end_offset_ns + 2 * SECOND_NS;
+        for (line, kind) in [
+            (7, ConversationBookmarkKind::Question),
+            (0, ConversationBookmarkKind::Mark),
+        ] {
+            crate::meeting::store::workflow_core_tests::bookmark(
+                &meeting.store,
+                meeting.session_id,
+                after(line),
+                kind,
+            );
+        }
+        let content = meeting.notes(Arc::new(MarkBlindGenerator::default()));
+        assert_eq!(
+            content.key_questions,
+            [CitedArtifactText {
+                text: MARKED_MEETING[4].to_string(),
+                citations: vec![meeting.citation(4)],
+            }]
+        );
+        assert_eq!(
+            content.summary.text,
+            format!("The team went over pricing.\n{}", MARKED_MEETING[10])
+        );
+        assert_eq!(
+            content.summary.citations,
+            [meeting.citation(0), meeting.citation(10)]
+        );
+        assert_eq!(
+            content.summary_trace,
+            [
+                SummaryLineTrace {
+                    line: 0,
+                    anchor: meeting.citation(0),
+                },
+                SummaryLineTrace {
+                    line: 1,
+                    anchor: meeting.citation(10),
+                },
             ]
         );
     }
@@ -9007,13 +9058,13 @@ pub(crate) mod tests {
                 Some(serde_json::json!(["decision"])),
                 Some(serde_json::json!(["decision"])),
                 Some(serde_json::json!(["decision"])),
-                None,
+                Some(serde_json::json!(["question"])),
                 Some(serde_json::json!(["action_item"])),
                 Some(serde_json::json!(["action_item"])),
                 Some(serde_json::json!(["action_item"])),
                 Some(serde_json::json!(["action_item"])),
                 Some(serde_json::json!(["action_item"])),
-                None
+                Some(serde_json::json!(["key_point"]))
             ]
         );
         assert_eq!(
