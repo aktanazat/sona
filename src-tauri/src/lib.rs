@@ -1901,6 +1901,7 @@ pub fn run(cli_args: CliArgs) {
             commands::heard_plans::meeting_heard_plan_edit,
             commands::heard_plans::meeting_heard_plan_add_to_calendar,
             commands::heard_plans::meeting_heard_plan_undo_calendar,
+            commands::wrap::meeting_wrap,
             meeting::prep::meeting_prep_preferences_get,
             meeting::prep::meeting_prep_preferences_set,
             meeting::prep::meeting_mail_context_check,

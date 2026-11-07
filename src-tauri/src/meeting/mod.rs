@@ -60,3 +60,4 @@ mod voice_identity;
 mod words;
 pub mod workflow_engine;
 pub mod workflow_types;
+pub mod wrap_types;
