@@ -1071,6 +1071,7 @@ The tick is every 15 s, or sooner on an input-device edge. It reads the tray ses
 | From | Event | To | Path |
 |---|---|---|---|
 | nothing recording, starting or finishing | Quit (Cmd+Q, menu bar, AppleScript, Dock, Privacy, logout) | notes and scratchpad flush → terminate (unchanged) | SonaApp.swift `applicationShouldTerminate` |
+| a sheet is up | Quit by AppleScript or the Dock (`kAEQuitApplication`) | Sona's own handler, not AppKit's refusal: the sheet closes, then terminate, as Quit Sona does | SonaApp.swift `applicationWillFinishLaunching`, `quitEvent`; AppModel.swift `quit` |
 | dictation transcribing, recorder Starting or Finalizing, or a meeting start request out | Quit | waits until it settles, then the rows below | AppModel.swift `waitForCapturesToSettle` |
 | meeting Starting or Stopping in the core | Quit | the active-state read takes the meeting actor lock the start or stop holds, so it answers once the meeting records (asked) or is sealed (not asked) | session.rs `tray_snapshot`, `start_with_provenance`, `stop` |
 | a meeting in Capturing*, recorder Recording or Paused, and/or dictation Recording | Quit | alert naming what records | SonaApp.swift `confirmStopping` |
