@@ -43,6 +43,7 @@ Sona is built on [Handy](https://github.com/cjpais/Handy) by CJ Pais, an open-so
 - a portrait comes from a file you choose, a contact you select, or a public image address you approve and credit. the original image and its source stay with that person. sona never guesses whose face it is.
 - conversation context distinguishes huddles, calls, in-person conversations, and note sessions. sources stay visible. a chosen location can show a map.
 - learned phrases apply only to the person you identify. you can review, edit, or remove them. the original transcript stays available.
+- you can teach sona your voice from your recent dictations under settings > meetings > about me. it keeps one voiceprint on this mac and only suggests which meeting speaker is you; you confirm each suggestion. forget my voice deletes it.
 - notes link to people, conversations, and other notes. local synthesis combines selected records into a new note with source links and saved evidence. originals stay unchanged.
 - agents can search notes, read their history, compare versions, and get corpus statistics through the consent-gated cli and memory tools.
 

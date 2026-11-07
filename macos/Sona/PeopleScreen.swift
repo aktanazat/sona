@@ -1496,7 +1496,7 @@ struct VoiceSuggestionRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     if suggestion.personId == nil {
                         Text("\(speakerName) sounds like you").bodyText(14)
-                        Text("Matches the voice you named as yourself in other meetings").metaText()
+                        Text("Matches the voice Sona knows as yours").metaText()
                     } else {
                         Text("\(speakerName) sounds like \(suggestion.displayName)").bodyText(14)
                         Text("Matches the voice you named \(suggestion.displayName) in other meetings").metaText()

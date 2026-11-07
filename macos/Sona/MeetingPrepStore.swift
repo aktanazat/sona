@@ -21,6 +21,16 @@ struct MeetingPrepPreferences: Codable, Equatable {
     var menuBarEnabled: Bool
 }
 
+/// The voiceprint Sona keeps of the user, made from their dictations.
+struct UserVoiceprint: Decodable, Equatable {
+    let dictationCount: Int
+    let speechMs: Int
+}
+
+private struct UserVoiceStatus: Decodable {
+    let voiceprint: UserVoiceprint?
+}
+
 enum MeetingMailState: String, Decodable {
     case off, ready, empty, unavailable
     case notConfigured = "not_configured"
@@ -123,6 +133,10 @@ final class MeetingPrepStore {
     private(set) var webBusy = false
     private(set) var webNotice: String?
     private(set) var webError: String?
+    private(set) var userVoice: UserVoiceprint?
+    private(set) var userVoiceLoaded = false
+    private(set) var userVoiceBusy = false
+    private(set) var userVoiceError: String?
     private(set) var brief: MeetingBrief?
     private(set) var briefLoading = false
     private(set) var briefError: String?
@@ -237,6 +251,54 @@ final class MeetingPrepStore {
             webNotice = try await core.request("meeting_web_research_test")
         } catch {
             webError = error.localizedDescription
+        }
+    }
+
+    func loadUserVoice() async {
+        guard !userVoiceBusy else { return }
+        do {
+            let status: UserVoiceStatus = try await core.request("voice_user_status")
+            userVoice = status.voiceprint
+            userVoiceLoaded = true
+            userVoiceError = nil
+        } catch {
+            userVoiceError = error.localizedDescription
+        }
+    }
+
+    /// Learns the user's voice from their recent dictations. The caller has
+    /// shown the consent text this version stands for.
+    func learnUserVoice() async {
+        guard !userVoiceBusy else { return }
+        userVoiceBusy = true
+        userVoiceError = nil
+        defer { userVoiceBusy = false }
+        do {
+            let status: UserVoiceStatus = try await core.request(
+                "voice_user_learn", ["consentVersion": JSONValue.number(1)])
+            userVoice = status.voiceprint
+        } catch {
+            userVoiceError = switch (error as? CoreError)?.remote(as: MeetingCommandError.self) {
+            case .insufficientEnrollmentEvidence:
+                "Sona needs about 20 seconds of your recent dictation first. Dictate a little more, then try again."
+            case .localModelUnavailable:
+                "Sona could not get its voice model. Check your internet connection, then try again."
+            case let failure?: failure.label
+            case nil: error.localizedDescription
+            }
+        }
+    }
+
+    func forgetUserVoice() async {
+        guard !userVoiceBusy else { return }
+        userVoiceBusy = true
+        userVoiceError = nil
+        defer { userVoiceBusy = false }
+        do {
+            let status: UserVoiceStatus = try await core.request("voice_user_forget")
+            userVoice = status.voiceprint
+        } catch {
+            userVoiceError = error.localizedDescription
         }
     }
 
