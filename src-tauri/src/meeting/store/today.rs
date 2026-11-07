@@ -98,10 +98,17 @@ impl TodayStoreCounts {
 }
 
 impl MeetingStore {
-    pub(crate) fn today_counts(&self, today: NaiveDate) -> TodayStoreCounts {
+    pub(crate) fn today_counts(
+        &self,
+        today: NaiveDate,
+        user_name: Option<&str>,
+    ) -> TodayStoreCounts {
         TodayStoreCounts {
             processing: TodayCount::read("processing", self.processing_count()),
-            unknown_speakers: TodayCount::read("unknown speakers", self.unknown_speakers()),
+            unknown_speakers: TodayCount::read(
+                "unknown speakers",
+                self.unknown_speakers(user_name),
+            ),
             owed: TodayCount::read("owed", self.owed(today)),
         }
     }
@@ -121,13 +128,13 @@ impl MeetingStore {
         u32::try_from(count).map_err(|_| StoreError::Corrupt)
     }
 
-    /// Speakers no person or "unknown" answer covers yet, across finished
-    /// meetings.
-    fn unknown_speakers(&self) -> Result<TodayTally, StoreError> {
+    /// Speakers no person, "unknown" answer or the user's own name covers
+    /// yet, across finished meetings.
+    fn unknown_speakers(&self, user_name: Option<&str>) -> Result<TodayTally, StoreError> {
         let finished = finished_meeting_ids(&*self.connection()?)?;
         let mut tally = TodayTally::default();
         for session_id in finished {
-            let unresolved = self.unresolved_active_voice_speaker_ids(session_id)?;
+            let unresolved = self.unresolved_active_voice_speaker_ids(session_id, user_name)?;
             if unresolved.is_empty() {
                 continue;
             }
@@ -229,7 +236,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.today_counts(today()),
+            store.today_counts(today(), None),
             TodayStoreCounts {
                 processing: TodayCount::Available { value: 1 },
                 unknown_speakers: TodayCount::Available {
@@ -248,7 +255,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.today_counts(today()),
+            store.today_counts(today(), None),
             TodayStoreCounts {
                 processing: TodayCount::Available { value: 1 },
                 unknown_speakers: TodayCount::Unavailable,
