@@ -20,7 +20,7 @@ use crate::meeting::context::{ConversationKind, ConversationLocation};
 use crate::meeting::detection::calendar::CalendarOccurrence;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::people_types::PersonId;
-use crate::meeting::types::{MeetingSessionId, TranscriptSegmentId};
+use crate::meeting::types::{ArtifactCitation, HeardPlanId, MeetingSessionId, TranscriptSegmentId};
 use chrono::{DateTime, Local, TimeZone, Timelike};
 use schemars::{schema::RootSchema, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -126,6 +126,34 @@ pub enum FilingTarget {
         introducer_id: PersonId,
         name: String,
     },
+    /// A plan heard in an earlier recording, which this one may be.
+    Meeting {
+        plan_id: HeardPlanId,
+        title: String,
+        /// The plan's people Sona knows.
+        people: Vec<FilingPerson>,
+        /// Where the plan said, as said.
+        place: Option<String>,
+        /// The place an earlier recording saved under those words.
+        location: Option<ConversationLocation>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
+pub struct FilingPerson {
+    pub person_id: PersonId,
+    pub name: String,
+}
+
+/// What the user changed on a meeting maybe before keeping it.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
+#[serde(deny_unknown_fields)]
+pub struct MeetingMaybeChange {
+    pub title: String,
+    /// Of the maybe's people, the ones to link.
+    pub people: Vec<PersonId>,
+    /// Whether to save the place the maybe found.
+    pub place: bool,
 }
 
 /// Why a suggestion was made, in facts the card can show.
@@ -135,8 +163,12 @@ pub enum FilingReason {
     /// The event was on the calendar during the recording, or just before
     /// or after it.
     OnCalendar { overlaps: bool },
-    /// A speaker's voice matches a person's confirmed voice.
-    VoiceMatches { name: String },
+    /// A speaker's voice matches a person's confirmed voice, first heard at
+    /// `start_offset_ns` when a running capture heard it.
+    VoiceMatches {
+        name: String,
+        start_offset_ns: Option<u64>,
+    },
     /// The transcript says the phrase, first at `segment_id`.
     Said {
         phrase: String,
@@ -150,6 +182,14 @@ pub enum FilingReason {
     AppAudio { bundle_id: String },
     /// The recording's calendar event pins this place.
     InInvite,
+    /// The plan was made in an earlier recording. Its words are read from
+    /// the plan each time, so they go when that transcript goes.
+    Planned {
+        session_id: MeetingSessionId,
+        said_at_utc_ms: i64,
+        quote: Option<String>,
+        citation: Option<ArtifactCitation>,
+    },
 }
 
 struct WritingGuard;
@@ -367,13 +407,15 @@ impl MeetingSessionManager {
             .map_err(store_failure)
     }
 
-    /// Takes one suggestion: files the recording where it says, or writes
-    /// the kind or place it names. Or turns the suggestion down for good.
+    /// Takes one suggestion: files the recording where it says, writes the
+    /// kind or place it names, or makes the recording the meeting it may be,
+    /// as `change` edits it. Or turns the suggestion down for good.
     pub(crate) async fn decide_filing(
         &self,
         app: &AppHandle,
         suggestion_id: &str,
         accept: bool,
+        change: Option<MeetingMaybeChange>,
     ) -> Result<(), String> {
         let store = self.store().await.map_err(filing_failure)?;
         let now = chrono::Utc::now().timestamp_millis();
@@ -385,6 +427,9 @@ impl MeetingSessionManager {
         let pending = store
             .pending_filing(suggestion_id)
             .map_err(|_| "This suggestion is no longer waiting.".to_string())?;
+        if change.is_some() && !matches!(pending.target, FilingTarget::Meeting { .. }) {
+            return Err("This suggestion cannot be changed.".to_string());
+        }
         match pending.target {
             FilingTarget::Person { person_id, .. } => {
                 let revision = store
@@ -427,6 +472,44 @@ impl MeetingSessionManager {
             FilingTarget::Introducer { .. } => store
                 .accept_filing(suggestion_id, now)
                 .map_err(filing_failure)?,
+            FilingTarget::Meeting {
+                title,
+                people,
+                location,
+                ..
+            } => {
+                let change = change.unwrap_or_else(|| MeetingMaybeChange {
+                    title,
+                    people: people.iter().map(|person| person.person_id).collect(),
+                    place: location.is_some(),
+                });
+                let title = change.title.trim();
+                if title.is_empty() {
+                    return Err("Give this recording a title.".to_string());
+                }
+                let people = people
+                    .into_iter()
+                    .map(|person| person.person_id)
+                    .filter(|person_id| change.people.contains(person_id))
+                    .collect::<Vec<_>>();
+                let revision = store
+                    .keep_meeting_maybe(
+                        suggestion_id,
+                        pending.session_id,
+                        title,
+                        &people,
+                        location.filter(|_| change.place),
+                        now,
+                    )
+                    .map_err(filing_failure)?;
+                if let Some(revision) = revision {
+                    self.emit_artifact_changed(Some(pending.session_id), revision);
+                }
+                let snapshot = store
+                    .session_snapshot(pending.session_id)
+                    .map_err(filing_failure)?;
+                self.emit_session_changed(&snapshot);
+            }
         }
         Ok(())
     }

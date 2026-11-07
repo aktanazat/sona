@@ -2667,6 +2667,7 @@ pub(super) async fn call(
             let session_id = args.take("sessionId")?;
             let suggestion_id = args.take("suggestionId")?;
             let accept = args.take("accept")?;
+            let change = args.take("change")?;
             reply(
                 crate::commands::context_suggestions::context_suggestion_decide(
                     app.clone(),
@@ -2674,6 +2675,7 @@ pub(super) async fn call(
                     session_id,
                     suggestion_id,
                     accept,
+                    change,
                 )
                 .await,
             )

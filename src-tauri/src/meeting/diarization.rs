@@ -1197,6 +1197,18 @@ impl MeetingDiarizationSession {
         }
     }
 
+    /// The mean voice of the windows a WeSpeaker session put in `cluster`.
+    /// Sortformer keeps none.
+    pub(crate) fn cluster_voice(&self, cluster: u32) -> Option<&SpeakerEmbedding> {
+        match self {
+            Self::Sortformer(_) => None,
+            Self::WeSpeaker(session) => session
+                .clusters
+                .get(usize::try_from(cluster).ok()?)
+                .map(|cluster| &cluster.centroid),
+        }
+    }
+
     pub(crate) fn diarize_window(
         &mut self,
         samples: &[f32],

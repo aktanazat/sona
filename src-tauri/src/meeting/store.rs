@@ -42,6 +42,9 @@ mod learning_tests;
 pub(crate) mod loops;
 #[cfg(test)]
 mod loops_tests;
+pub(crate) mod meeting_maybe;
+#[cfg(test)]
+mod meeting_maybe_tests;
 pub(crate) mod memory_index;
 pub(crate) mod note_evidence;
 #[cfg(test)]
@@ -1571,6 +1574,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/heard_plans.sql")),
     M::up(include_str!("store/filing_context.sql")),
     M::up(include_str!("store/first_met.sql")),
+    M::up(include_str!("store/meeting_maybe.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

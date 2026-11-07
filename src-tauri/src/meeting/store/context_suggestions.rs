@@ -1,12 +1,15 @@
 //! The maybes one recording carries from its own start: the events near a
-//! start made by hand, the place its invite pins, and the kind of
-//! conversation its tracks heard. They wait in `filing_suggestions` beside the
-//! evening's filings, and like those change nothing until the user takes one.
+//! start made by hand, the place its invite pins, the kind of conversation
+//! its tracks heard, and the meeting it may be when nothing is on its
+//! calendar. They wait in `filing_suggestions` beside the evening's filings,
+//! and like those change nothing until the user takes one.
 
 use super::context::{context_in, save_context_in};
 use super::evening::{
-    accept_filing_in, event_target, filed_event_keys_in, insert_suggestion_in, near_events,
+    accept_filing_in, confirmed_people_in, event_target, filed_event_keys_in, insert_suggestion_in,
+    near_events,
 };
+use super::meeting_maybe::{offer_meeting_maybes_in, with_plan_words_in, HeardVoice};
 use super::workflows::calendar_facts_in;
 use super::{
     canonical_speaker_ids, decode_json, effective_segments_for_session, id, session_row,
@@ -56,35 +59,48 @@ impl MeetingStore {
     }
 
     /// The maybes still open on one recording. A finished recording whose
-    /// kind is open is first offered the kind its tracks heard. A maybe the
-    /// recording has since settled another way is left out.
+    /// kind is open is first offered the kind its tracks heard, and one with
+    /// nothing on its calendar the meeting it may be, from the plans heard
+    /// before it and the voices in `heard`. A maybe the recording has since
+    /// settled another way is left out.
     pub(crate) fn context_suggestions(
         &self,
         session_id: MeetingSessionId,
+        heard: &[HeardVoice],
+        user_name: Option<&str>,
         now_utc_ms: i64,
     ) -> Result<Vec<FilingSuggestion>, StoreError> {
-        let connection = self.connection()?;
-        let context = context_in(&connection, session_id)?;
-        if let Some((conversation_kind, reason)) = heard_kind_in(&connection, &context)? {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let context = context_in(&transaction, session_id)?;
+        if let Some((conversation_kind, reason)) = heard_kind_in(&transaction, &context)? {
             insert_suggestion_in(
-                &connection,
+                &transaction,
                 session_id,
                 &FilingTarget::Kind { conversation_kind },
                 &[reason],
                 now_utc_ms,
             )?;
         }
-        let has_event = calendar_facts_in(&connection, session_id)?.is_some();
-        Ok(pending_in(&connection, session_id)?
+        let has_event = calendar_facts_in(&transaction, session_id)?.is_some();
+        if !has_event {
+            offer_meeting_maybes_in(&transaction, &context, heard, user_name, now_utc_ms)?;
+        }
+        let linked = confirmed_people_in(&transaction, session_id)?;
+        let suggestions = pending_in(&transaction, session_id)?
             .into_iter()
             .filter(|suggestion| match &suggestion.target {
-                FilingTarget::Event { .. } => !has_event,
+                FilingTarget::Event { .. } | FilingTarget::Meeting { .. } => !has_event,
                 FilingTarget::Kind { .. } => context.kind == ConversationKind::Unspecified,
                 FilingTarget::Place { .. } => context.location.is_none(),
-                FilingTarget::Person { .. } | FilingTarget::Project { .. } => true,
+                FilingTarget::Person { person_id, .. } => !linked.contains(person_id),
+                FilingTarget::Project { .. } => true,
                 FilingTarget::Introducer { .. } => false,
             })
-            .collect())
+            .filter_map(|suggestion| with_plan_words_in(&transaction, suggestion).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit()?;
+        Ok(suggestions)
     }
 
     /// Takes a kind or place maybe into the recording's context, with the
@@ -105,7 +121,8 @@ impl MeetingStore {
             FilingTarget::Event { .. }
             | FilingTarget::Person { .. }
             | FilingTarget::Project { .. }
-            | FilingTarget::Introducer { .. } => return Err(StoreError::Invalid),
+            | FilingTarget::Introducer { .. }
+            | FilingTarget::Meeting { .. } => return Err(StoreError::Invalid),
         };
         save_context_in(
             &transaction,

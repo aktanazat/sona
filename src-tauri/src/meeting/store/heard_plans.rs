@@ -340,7 +340,7 @@ fn happened_in(
 
 /// Whether `person` answers to `name`: by a full name or an alias, or by the
 /// first word of one, so "Stephen" is Stephen Park.
-fn answers_to(person: &Person, name: &str) -> bool {
+pub(super) fn answers_to(person: &Person, name: &str) -> bool {
     let said = normalized(name);
     !said.is_empty()
         && identity_names(person).any(|known| {
@@ -352,7 +352,10 @@ fn answers_to(person: &Person, name: &str) -> bool {
         })
 }
 
-fn plan_in(connection: &Connection, plan_id: HeardPlanId) -> Result<HeardPlan, StoreError> {
+pub(super) fn plan_in(
+    connection: &Connection,
+    plan_id: HeardPlanId,
+) -> Result<HeardPlan, StoreError> {
     plans_in(
         connection,
         "p.plan_id = ?1",
@@ -364,7 +367,7 @@ fn plan_in(connection: &Connection, plan_id: HeardPlanId) -> Result<HeardPlan, S
     .ok_or(StoreError::NotFound)
 }
 
-fn plans_in(
+pub(super) fn plans_in(
     connection: &Connection,
     filter: &str,
     arguments: impl Params,

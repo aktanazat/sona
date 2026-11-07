@@ -32,6 +32,7 @@ use super::processing::{
     MeetingProcessingService, MeetingTextGenerationError, ProcessingOrigin, ReplyShape, RunFailure,
     LIVE_HELP_QUESTION_MAX_CHARS, LIVE_RECALL_WINDOW_NS,
 };
+use super::store::meeting_maybe::HeardVoice;
 use super::store::voice_identity::names_user;
 use super::store::{
     CalendarEventSource, InterruptedRecovery, MeetingStore, MeetingTrackWriter, RecoveredMeeting,
@@ -4237,6 +4238,13 @@ impl MeetingSessionManager {
             })
     }
 
+    /// The voices the running capture has heard, when it is this meeting's.
+    pub(crate) fn heard_voices(&self, session_id: MeetingSessionId) -> Vec<HeardVoice> {
+        self.live_transcript(session_id)
+            .map(|live| live.heard_voices())
+            .unwrap_or_default()
+    }
+
     /// The past lines the running capture's last minute of words were
     /// already said in, for the live screen's recall cards. A meeting that
     /// is not capturing has no words to recall from, so no matches; a store
@@ -6534,7 +6542,7 @@ pub(crate) mod tests {
         .snapshot;
         let store = tauri::async_runtime::block_on(manager.store()).unwrap();
         let offered = store
-            .context_suggestions(started.session_id, now)
+            .context_suggestions(started.session_id, &[], None, now)
             .unwrap()
             .into_iter()
             .map(|suggestion| (suggestion.target, suggestion.reasons))

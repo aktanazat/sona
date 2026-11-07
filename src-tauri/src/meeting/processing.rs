@@ -31,6 +31,7 @@ use super::prompt_types::{
     PromptTargetRef, SavedPrompt,
 };
 use super::relay_generator::RelayTextGenerator;
+use super::store::meeting_maybe::HeardVoice;
 use super::store::recall::RecallMemory;
 use super::store::voice_identity::{
     DiarizationEvidenceKind, DiarizationEvidenceSpanInput, VoiceEnrollmentEvidence,
@@ -3522,6 +3523,12 @@ impl MeetingProcessingService {
                 }
             }
         }
+        live.hear(
+            cursors
+                .values()
+                .flat_map(|cursor| cursor.speakers.voices())
+                .collect(),
+        );
         // The live screen shows these words, and it learns of them the way it
         // learns of every other transcript: one event, then a read. Told only
         // when a pass found something, so a silent room is not a refresh
@@ -3735,6 +3742,8 @@ pub(crate) struct LiveTranscript {
     cursors: Mutex<HashMap<SourceTrackId, LiveTrackCursor>>,
     /// What this capture's recall checks have read from the store.
     recall: Mutex<RecallMemory>,
+    /// The voices the last pass had grouped, across tracks.
+    voices: Mutex<Vec<HeardVoice>>,
 }
 
 impl LiveTranscript {
@@ -3743,6 +3752,7 @@ impl LiveTranscript {
             segments: Mutex::new(Vec::new()),
             cursors: Mutex::new(HashMap::new()),
             recall: Mutex::new(RecallMemory::default()),
+            voices: Mutex::new(Vec::new()),
         }
     }
 
@@ -3757,6 +3767,13 @@ impl LiveTranscript {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(segment);
+    }
+
+    fn hear(&self, voices: Vec<HeardVoice>) {
+        *self
+            .voices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = voices;
     }
 
     /// What has been recognized so far, as the live screen shows it: every
@@ -3901,6 +3918,14 @@ impl LiveTranscript {
         self.recall
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Each voice the capture has heard so far, and when it first spoke.
+    pub(crate) fn heard_voices(&self) -> Vec<HeardVoice> {
+        self.voices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
