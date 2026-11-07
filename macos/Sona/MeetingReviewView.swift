@@ -20,8 +20,13 @@ struct MeetingReviewView: View {
             Page(back: PageBack("Meetings") { store.closeReview() }) {
                 if let snapshot = store.snapshot {
                     ConversationContextView(
-                        sessionId: snapshot.session.sessionId, editable: store.editable,
+                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision,
+                        editable: store.editable,
                         partialRecording: snapshot.session.captureCompleteness == .partial)
+                    if store.editable {
+                        ContextSuggestionsView(
+                            sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    }
                     ConversationPlaceCard(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     ConversationBookmarksView(core: model.core, store: store,

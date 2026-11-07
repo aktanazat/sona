@@ -2654,6 +2654,30 @@ pub(super) async fn call(
                 .await,
             )
         }
+        "context_suggestions" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(
+                crate::commands::context_suggestions::context_suggestions(app.state(), session_id)
+                    .await,
+            )
+        }
+        "context_suggestion_decide" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            let suggestion_id = args.take("suggestionId")?;
+            let accept = args.take("accept")?;
+            reply(
+                crate::commands::context_suggestions::context_suggestion_decide(
+                    app.clone(),
+                    app.state(),
+                    session_id,
+                    suggestion_id,
+                    accept,
+                )
+                .await,
+            )
+        }
         "meeting_preflight_create" => {
             let mut args = Args::parse(params)?;
             let request = args.take("request")?;

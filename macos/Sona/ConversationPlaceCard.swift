@@ -1,7 +1,7 @@
 import MapKit
 import SwiftUI
 
-struct ConversationPlace: Decodable {
+struct ConversationPlace: Decodable, Equatable {
     let name: String
     let latitude: Double
     let longitude: Double

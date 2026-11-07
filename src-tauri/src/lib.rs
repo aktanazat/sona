@@ -857,12 +857,11 @@ fn build_tray(app_handle: &AppHandle, visible: bool) -> anyhow::Result<()> {
                     Arc::clone(&app.state::<Arc<meeting::detection::DetectionRuntime>>());
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let under_way = tauri::async_runtime::spawn_blocking(move || {
-                        detection.calendar_event_under_way()
-                    })
-                    .await
-                    .unwrap_or_default();
-                    match manager.create_manual_preflight_from_tray(under_way).await {
+                    let calendar =
+                        tauri::async_runtime::spawn_blocking(move || detection.calendar_at_start())
+                            .await
+                            .unwrap_or_default();
+                    match manager.create_manual_preflight_from_tray(calendar).await {
                         Ok(snapshot) => {
                             tray::set_meeting_tray_snapshot(&app, Some(&snapshot));
                             show_meeting_destination(
@@ -1775,6 +1774,8 @@ pub fn run(cli_args: CliArgs) {
             commands::evening::home_evening,
             commands::evening::home_evening_write,
             commands::evening::filing_decide,
+            commands::context_suggestions::context_suggestions,
+            commands::context_suggestions::context_suggestion_decide,
             commands::meeting::meeting_preflight_create,
             commands::meeting::meeting_preflight_refresh,
             commands::meeting::meeting_preflight_cancel,

@@ -82,30 +82,52 @@ pub fn select_event<'a>(
         .map(|(index, _)| index)
 }
 
-/// The meeting under way at `now_utc_ms`, read in full, for a recording the
-/// operator starts by hand.
+/// What the calendar holds around a recording the operator starts by hand.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CalendarAtStart {
+    /// The one meeting under way, read in full. The recording takes it.
+    pub under_way: Option<CalendarEventSummary>,
+    /// Without one, every event within the slack of the start. The recording
+    /// may belong to one of them, and only the operator can say which.
+    pub near: Vec<CalendarOccurrence>,
+}
+
+/// The calendar around `now_utc_ms`, for a recording started by hand.
 ///
 /// Nothing is read unless the operator turned "Use my calendar" on. A meeting
 /// is an event in progress that meets the attendee floor, so a solo block
 /// never counts. Two meetings at once leave no way to tell which one is being
 /// recorded, and the recording stays unattached rather than taking a guess.
-pub fn meeting_under_way(
+pub fn calendar_at_start(
     settings: &crate::settings::AppSettings,
     calendar: &dyn CalendarSource,
     now_utc_ms: i64,
-) -> Option<CalendarEventSummary> {
+    slack_ms: i64,
+) -> CalendarAtStart {
     if !settings.detection_calendar_enabled {
-        return None;
+        return CalendarAtStart::default();
     }
-    let occurrences = calendar.events_between(now_utc_ms, now_utc_ms + 1);
-    let mut meetings = occurrences
-        .iter()
-        .filter(|occurrence| occurrence.summary.attendee_count >= ATTENDEE_FLOOR);
-    let meeting = meetings.next()?;
-    if meetings.next().is_some() {
-        return None;
+    let near = calendar.events_between(now_utc_ms - slack_ms, now_utc_ms + slack_ms);
+    let mut meetings = near.iter().filter(|occurrence| {
+        let event = &occurrence.summary;
+        event.start_utc_ms <= now_utc_ms
+            && now_utc_ms < event.end_utc_ms
+            && event.attendee_count >= ATTENDEE_FLOOR
+    });
+    let under_way = match (meetings.next(), meetings.next()) {
+        (Some(meeting), None) => calendar.event_by_key(&meeting.summary.event_key),
+        _ => None,
+    };
+    if under_way.is_some() {
+        return CalendarAtStart {
+            under_way,
+            near: Vec::new(),
+        };
     }
-    calendar.event_by_key(&meeting.summary.event_key)
+    CalendarAtStart {
+        under_way: None,
+        near,
+    }
 }
 
 /// Authorization for reading events, as the operator would recognize it.
@@ -1013,6 +1035,8 @@ mod tests {
         }
     }
 
+    const SLACK: i64 = 15 * MINUTE_MS;
+
     fn in_progress(event_key: &str, attendee_count: usize) -> CalendarEventSummary {
         CalendarEventSummary {
             event_key: event_key.to_string(),
@@ -1035,7 +1059,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            meeting_under_way(&calendar_on(), &calendar, NOW),
+            calendar_at_start(&calendar_on(), &calendar, NOW, SLACK).under_way,
             Some(meeting),
             "a solo block or a later meeting is not a second meeting under way"
         );
@@ -1047,11 +1071,44 @@ mod tests {
         let overlapping =
             Calendar::holding(vec![in_progress("first", 2), in_progress("second", 3)]);
 
-        assert_eq!(meeting_under_way(&calendar_on(), &solo, NOW), None);
         assert_eq!(
-            meeting_under_way(&calendar_on(), &overlapping, NOW),
+            calendar_at_start(&calendar_on(), &solo, NOW, SLACK).under_way,
+            None
+        );
+        assert_eq!(
+            calendar_at_start(&calendar_on(), &overlapping, NOW, SLACK).under_way,
             None,
             "two meetings at once leave no way to tell which one is being recorded"
+        );
+    }
+
+    /* Without one meeting under way, the events around the start stay in
+     * hand for the operator to choose from; an event past the slack does
+     * not. */
+    #[test]
+    fn a_manual_start_without_one_meeting_keeps_the_events_around_it() {
+        let calendar = Calendar::holding(vec![
+            in_progress("solo-block", 1),
+            CalendarEventSummary {
+                event_key: "review-soon".to_string(),
+                ..event(10 * MINUTE_MS, 30 * MINUTE_MS)
+            },
+            CalendarEventSummary {
+                event_key: "lunch-later".to_string(),
+                ..event(2 * 60 * MINUTE_MS, 60 * MINUTE_MS)
+            },
+        ]);
+
+        let at_start = calendar_at_start(&calendar_on(), &calendar, NOW, SLACK);
+
+        assert_eq!(at_start.under_way, None);
+        assert_eq!(
+            at_start
+                .near
+                .iter()
+                .map(|occurrence| occurrence.summary.event_key.as_str())
+                .collect::<Vec<_>>(),
+            ["solo-block", "review-soon"]
         );
     }
 
@@ -1060,8 +1117,13 @@ mod tests {
         let calendar = Calendar::holding(vec![in_progress("meeting", 2)]);
 
         assert_eq!(
-            meeting_under_way(&crate::settings::AppSettings::default(), &calendar, NOW),
-            None
+            calendar_at_start(
+                &crate::settings::AppSettings::default(),
+                &calendar,
+                NOW,
+                SLACK
+            ),
+            CalendarAtStart::default()
         );
         assert_eq!(calendar.reads.load(std::sync::atomic::Ordering::Relaxed), 0);
     }

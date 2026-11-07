@@ -2,6 +2,7 @@ pub mod audio;
 pub mod automations;
 pub mod call_names;
 pub mod cloud_sync;
+pub mod context_suggestions;
 pub mod conversation_context;
 pub mod conversation_review;
 pub mod detection;

@@ -97,13 +97,8 @@ private struct UnfiledRows: View {
         ForEach(recording.suggestions) { suggestion in
             CardRow {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(headline(suggestion.target)).bodyText(14)
-                    HStack(spacing: 6) {
-                        ForEach(Array(suggestion.reasons.enumerated()), id: \.offset) { index, reason in
-                            if index > 0 { Text("·").metaText() }
-                            reasonView(reason)
-                        }
-                    }
+                    Text(suggestion.target.headline).bodyText(14)
+                    FilingReasonsLine(sessionId: recording.sessionId, reasons: suggestion.reasons)
                 }
             } trailing: {
                 HStack(spacing: 12) {
@@ -121,15 +116,21 @@ private struct UnfiledRows: View {
         let start = FeedClock.date(recording.startedAtUtcMs)
         return "\(start.relativeDay) \(start.time)"
     }
+}
 
-    private func headline(_ target: FilingTarget) -> String {
-        switch target {
-        case let .event(title, startUtcMs, endUtcMs):
-            "Maybe \(title), \(FeedClock.date(startUtcMs).time)–\(FeedClock.date(endUtcMs).time)"
-        case let .person(_, name):
-            "Maybe with \(name)"
-        case let .project(_, title):
-            "Maybe part of \(title)"
+/// Why a maybe was offered, in facts he can check; a phrase opens where it
+/// was said.
+struct FilingReasonsLine: View {
+    @Environment(AppModel.self) private var model
+    let sessionId: MeetingSessionId
+    let reasons: [FilingReason]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(reasons.enumerated()), id: \.offset) { index, reason in
+                if index > 0 { Text("·").metaText() }
+                reasonView(reason)
+            }
         }
     }
 
@@ -142,13 +143,19 @@ private struct UnfiledRows: View {
             Text("a voice matches \(name)").metaText()
         case let .said(phrase, count, segmentId):
             Button {
-                model.meetings.open(recording.sessionId, segmentId: segmentId)
+                model.meetings.open(sessionId, segmentId: segmentId)
                 model.go(.meetings)
             } label: {
                 Text("“\(phrase)” said \(count == 1 ? "once" : "\(count) times") ▶")
                     .metaText(Theme.inkSecondary)
             }
             .buttonStyle(.plain)
+        case .onlyMicrophone:
+            Text("only the microphone heard voices").metaText()
+        case let .appAudio(bundleId):
+            Text("voices came through \(InstalledApp.find(bundleId)?.name ?? bundleId)").metaText()
+        case .inInvite:
+            Text("from your calendar").metaText()
         }
     }
 }

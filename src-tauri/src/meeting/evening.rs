@@ -16,6 +16,7 @@ use super::store::evening::{
 };
 use super::store::MeetingStore;
 use crate::managers::history::{HistoryEntry, HistoryManager};
+use crate::meeting::context::{ConversationKind, ConversationLocation};
 use crate::meeting::detection::calendar::CalendarOccurrence;
 use crate::meeting::detection::DetectionRuntime;
 use crate::meeting::people_types::PersonId;
@@ -111,6 +112,14 @@ pub enum FilingTarget {
         project_id: String,
         title: String,
     },
+    /// What kind of conversation the recording was.
+    Kind {
+        conversation_kind: ConversationKind,
+    },
+    /// Where the recording happened.
+    Place {
+        location: ConversationLocation,
+    },
 }
 
 /// Why a suggestion was made, in facts the card can show.
@@ -128,6 +137,12 @@ pub enum FilingReason {
         count: u32,
         segment_id: TranscriptSegmentId,
     },
+    /// Voices came only through the microphone, and no call app was recorded.
+    OnlyMicrophone,
+    /// Voices came through the recorded audio of this app.
+    AppAudio { bundle_id: String },
+    /// The recording's calendar event pins this place.
+    InInvite,
 }
 
 struct WritingGuard;
@@ -345,8 +360,8 @@ impl MeetingSessionManager {
             .map_err(store_failure)
     }
 
-    /// Files one stray where its suggestion says, or turns the suggestion
-    /// down for good.
+    /// Takes one suggestion: files the recording where it says, or writes
+    /// the kind or place it names. Or turns the suggestion down for good.
     pub(crate) async fn decide_filing(
         &self,
         app: &AppHandle,
@@ -393,10 +408,23 @@ impl MeetingSessionManager {
                     .accept_filing(suggestion_id, now)
                     .map_err(filing_failure)?;
             }
+            target @ (FilingTarget::Kind { .. } | FilingTarget::Place { .. }) => {
+                store
+                    .file_context(suggestion_id, pending.session_id, &target, now)
+                    .map_err(filing_failure)?;
+                let snapshot = store
+                    .session_snapshot(pending.session_id)
+                    .map_err(filing_failure)?;
+                self.emit_session_changed(&snapshot);
+            }
         }
         Ok(())
     }
 
+    /// Files the recording under the event the way a start from it would.
+    /// The event was found for the recording rather than chosen when it
+    /// started, so it is remembered as found under way and starts no
+    /// automatic send.
     async fn file_under_event(
         &self,
         app: &AppHandle,
@@ -430,7 +458,7 @@ impl MeetingSessionManager {
             .remember_calendar_event(
                 session_id,
                 &event,
-                super::store::CalendarEventSource::Chosen,
+                super::store::CalendarEventSource::FoundUnderWay,
             )
             .map_err(filing_failure)?;
         let revision = store
