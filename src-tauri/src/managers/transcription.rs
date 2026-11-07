@@ -4,8 +4,8 @@ use crate::audio_toolkit::ort_session::{
     report_transcribe_session, OrtProvider, DEFAULT_ASR_PROVIDER,
 };
 use crate::audio_toolkit::{
-    apply_british_spelling, apply_emoji_replacements, apply_exact_vocabulary_entries,
-    apply_literal_punctuation, apply_spoken_edits, apply_text_replacements,
+    apply_british_spelling, apply_emoji_replacements, apply_literal_punctuation,
+    apply_prompted_vocabulary_entries, apply_spoken_edits, apply_text_replacements,
     apply_vocabulary_entries, detect_output_language, normalize_transcription_output,
     remove_filler_words, OutputLanguageEvidence,
 };
@@ -16,7 +16,7 @@ use crate::modes::AsrPlan;
 use crate::modes::{CloudRunPlan, CloudSttProvider};
 use crate::settings::{
     get_settings, vocabulary_initial_prompt, ModelUnloadTimeout, OrtAcceleratorSetting,
-    TranscribeAcceleratorSetting, VocabularyEntry,
+    TranscribeAcceleratorSetting, VocabularyEntry, VocabularyPrompt,
 };
 use crate::snippets::apply_snippets;
 use anyhow::Result;
@@ -26,7 +26,7 @@ use specta::Type;
 use std::cell::Cell;
 use std::ops::Range;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -163,12 +163,57 @@ enum StreamControl {
 struct StreamRoute {
     audio_tx: mpsc::SyncSender<Vec<f32>>,
     control_tx: mpsc::Sender<StreamControl>,
+    claim: Arc<WorkerClaim>,
 }
 
 struct StreamLanes {
     audio_rx: mpsc::Receiver<Vec<f32>>,
     control_rx: mpsc::Receiver<StreamControl>,
     pending_finalize: Option<mpsc::Sender<Option<FinalizedStreamText>>>,
+    claim: Arc<WorkerClaim>,
+}
+
+/// Whether a local stream worker reached the engine before its dictation
+/// ended. The worker queues behind any other engine owner, such as a long
+/// import, and the first side to move the claim out of `QUEUED` decides: a
+/// worker that got the engine answers finalize, and a worker that finalize
+/// gave up on leaves without streaming.
+struct WorkerClaim(AtomicU8);
+
+impl WorkerClaim {
+    const QUEUED: u8 = 0;
+    const SERVING: u8 = 1;
+    const ABANDONED: u8 = 2;
+
+    fn new() -> Self {
+        Self(AtomicU8::new(Self::QUEUED))
+    }
+
+    /// The worker holds the engine gate. False when finalize already sent the
+    /// dictation to batch without it.
+    fn serve(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::QUEUED,
+                Self::SERVING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Finalize stops waiting for a worker still queued. False once the worker
+    /// holds the engine gate and will answer.
+    fn abandon(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::QUEUED,
+                Self::ABANDONED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
 }
 
 impl StreamLanes {
@@ -299,12 +344,14 @@ impl StreamRouter {
     fn open(&self) -> StreamLanes {
         let (audio_tx, audio_rx) = mpsc::sync_channel(STREAM_PREVIEW_QUEUE_CAPACITY);
         let (control_tx, control_rx) = mpsc::channel();
+        let claim = Arc::new(WorkerClaim::new());
         *self
             .route
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(StreamRoute {
             audio_tx,
             control_tx,
+            claim: Arc::clone(&claim),
         });
         self.preview_degraded.store(false, Ordering::Release);
         self.accepting_audio.store(true, Ordering::Release);
@@ -313,6 +360,7 @@ impl StreamRouter {
             audio_rx,
             control_rx,
             pending_finalize: None,
+            claim,
         }
     }
 
@@ -578,6 +626,73 @@ enum LoadedEngine {
     Cohere(CohereModel),
 }
 
+/// What a resident engine was built from. A run's frozen plan is served by the
+/// resident engine only when it asks for exactly this build, so a changed
+/// accelerator or GPU reloads on the next use of any kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EngineBuild {
+    model_id: String,
+    transcribe_accelerator: TranscribeAcceleratorSetting,
+    transcribe_gpu_device: Option<String>,
+    ort_accelerator: OrtAcceleratorSetting,
+}
+
+impl EngineBuild {
+    fn for_plan(plan: &AsrPlan) -> Self {
+        Self {
+            model_id: plan.model_id.clone(),
+            transcribe_accelerator: plan.transcribe_accelerator,
+            transcribe_gpu_device: plan.transcribe_gpu_device.clone(),
+            ort_accelerator: plan.ort_accelerator,
+        }
+    }
+}
+
+/// The one native engine. A batch or stream owner takes it out while holding
+/// the engine gate and puts it back before releasing the gate; while it is
+/// out the slot keeps its build, so the model still reads as loaded.
+enum EngineSlot {
+    Empty,
+    Resident(EngineBuild, LoadedEngine),
+    Leased(EngineBuild),
+}
+
+impl EngineSlot {
+    fn build(&self) -> Option<&EngineBuild> {
+        match self {
+            Self::Empty => None,
+            Self::Resident(build, _) | Self::Leased(build) => Some(build),
+        }
+    }
+
+    fn serves(&self, wanted: &EngineBuild) -> bool {
+        matches!(self, Self::Resident(build, _) if build == wanted)
+    }
+
+    fn lease(&mut self, wanted: &EngineBuild) -> Option<LoadedEngine> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Resident(build, engine) if build == *wanted => {
+                *self = Self::Leased(build);
+                Some(engine)
+            }
+            unchanged => {
+                *self = unchanged;
+                None
+            }
+        }
+    }
+
+    fn put_back(&mut self, engine: LoadedEngine) {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Leased(build) => *self = Self::Resident(build, engine),
+            unchanged => {
+                info!("The engine slot changed while its engine was out; dropping that engine");
+                *self = unchanged;
+            }
+        }
+    }
+}
+
 /// The engine's transition state: how many model loads are in flight and
 /// whether an unload is running. One owner for both facts, so serialization
 /// (loaders wait for loaders) and status reporting (the UI shows a spinner)
@@ -739,14 +854,13 @@ impl Drop for BatchUseGuard {
     }
 }
 
-/// RAII guard that clears the streaming worker/lease flags on any worker exit -
+/// RAII guard that clears the streaming worker flags on any worker exit -
 /// normal return, early return, or a panic in an engine call that unwinds the
 /// detached worker thread. Tokens prevent an older worker from clearing a newer
 /// worker's state if a start/finalize race ever slips through.
 struct StreamWorkerGuard {
     worker_id: u64,
     active_stream_worker: Arc<AtomicU64>,
-    active_engine_lease: Arc<AtomicU64>,
     stream_active: Arc<AtomicBool>,
     last_activity: Arc<AtomicU64>,
     idle_wakeup: Arc<IdleWakeup>,
@@ -760,12 +874,6 @@ impl Drop for StreamWorkerGuard {
         if self.active_stream_worker.load(Ordering::Acquire) == self.worker_id {
             self.stream_active.store(false, Ordering::Release);
         }
-        let _ = self.active_engine_lease.compare_exchange(
-            self.worker_id,
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
         let _ = self.active_stream_worker.compare_exchange(
             self.worker_id,
             0,
@@ -778,19 +886,17 @@ impl Drop for StreamWorkerGuard {
 
 #[derive(Clone)]
 pub struct TranscriptionManager {
-    engine: Arc<Mutex<Option<LoadedEngine>>>,
+    engine: Arc<Mutex<EngineSlot>>,
     /// Serializes loading, streaming, and batch use of the one native engine.
     engine_lease_gate: Arc<Mutex<()>>,
     model_manager: Arc<ModelManager>,
     app_handle: AppHandle,
-    current_model_id: Arc<Mutex<Option<String>>>,
     last_activity: Arc<AtomicU64>,
     shutdown_signal: Arc<AtomicBool>,
     watcher_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     idle_wakeup: Arc<IdleWakeup>,
     /// Load and unload progress; see [`EngineTransition`].
     transition: Arc<EngineTransition>,
-    reload_model_on_next_use: Arc<AtomicBool>,
     /// Routes real-time audio frames to the active streaming worker; see
     /// [`StreamRouter`]. Shared with the audio recorder so per-frame feeds skip
     /// Tauri state and the manager lock.
@@ -798,9 +904,9 @@ pub struct TranscriptionManager {
     /// True only while a transcribe-cpp `Stream` is actually in flight (set by
     /// the worker once `stream()` succeeds). Used for overlay/UI decisions.
     stream_active: Arc<AtomicBool>,
-    /// Streaming uses four independent flags: router open = frames should route,
-    /// worker active = no second worker may start, engine lease = engine is out
-    /// of the mutex, stream active = UI should show a live session.
+    /// Streaming uses three independent flags: router open = frames should
+    /// route, worker active = no second worker may start, stream active = UI
+    /// should show a live session. Whether the engine is out is the slot's.
     ///
     /// Monotonic id source for stream workers; zero means "no worker".
     next_stream_worker_id: Arc<AtomicU64>,
@@ -808,10 +914,6 @@ pub struct TranscriptionManager {
     /// yet. This prevents a second worker from starting after finalize/cancel
     /// closes the router but before the first worker has fully exited.
     active_stream_worker: Arc<AtomicU64>,
-    /// Nonzero while the streaming worker has taken the engine out of `engine`.
-    /// `is_model_loaded()` consults this so the model still reports "loaded"
-    /// while the worker holds it.
-    active_engine_lease: Arc<AtomicU64>,
     /// Active import jobs suspend automatic model unloading while they decode
     /// and wait for the engine. A manual unload remains user-controlled.
     active_media_imports: Arc<AtomicU64>,
@@ -873,8 +975,16 @@ impl BatchDecode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpeechEvidence {
     /// Only the decode can tell. A Whisper decode that returns nothing or only
-    /// its vocabulary prompt means nothing was said.
+    /// its vocabulary prompt means nothing was said, and only a stretch the
+    /// prompt was written over, beside words the model heard, is decoded
+    /// again without the prompt.
     Unknown,
+    /// Voice detection heard no speech, and the short clip is decoded only so
+    /// quiet speech it missed is not lost. Whisper decodes it without the
+    /// vocabulary prompt, which makes it write vocabulary words over silence,
+    /// and a decode of no words or only a phrase Whisper writes over silence
+    /// ("Thank you.") means nothing was said.
+    Undetected,
     /// Voice detection forwarded speech, or a person asked for this recording
     /// to be transcribed. A stretch of a Whisper window that hears nothing or
     /// only its vocabulary prompt here means the prompt displaced noisy
@@ -956,15 +1066,13 @@ fn automatic_unload_blocked(
 
 fn unload_engine(
     app_handle: &AppHandle,
-    engine: &Mutex<Option<LoadedEngine>>,
-    current_model_id: &Mutex<Option<String>>,
+    engine: &Mutex<EngineSlot>,
     transition: &Arc<EngineTransition>,
 ) -> Result<()> {
     let _unloading = transition.begin_unload();
     let unload_start = std::time::Instant::now();
     debug!("Starting to unload model");
-    *lock_recover(engine) = None;
-    *lock_recover(current_model_id) = None;
+    *lock_recover(engine) = EngineSlot::Empty;
     let _ = app_handle.emit(
         "model-state-changed",
         ModelStateEvent {
@@ -983,15 +1091,13 @@ fn unload_engine(
 
 struct IdleWatcherContext {
     app_handle: AppHandle,
-    engine: Arc<Mutex<Option<LoadedEngine>>>,
+    engine: Arc<Mutex<EngineSlot>>,
     engine_lease_gate: Arc<Mutex<()>>,
-    current_model_id: Arc<Mutex<Option<String>>>,
     last_activity: Arc<AtomicU64>,
     shutdown_signal: Arc<AtomicBool>,
     idle_wakeup: Arc<IdleWakeup>,
     transition: Arc<EngineTransition>,
     active_stream_worker: Arc<AtomicU64>,
-    active_engine_lease: Arc<AtomicU64>,
     active_media_imports: Arc<AtomicU64>,
     active_batch_uses: Arc<AtomicU64>,
 }
@@ -1002,21 +1108,18 @@ impl IdleWatcherContext {
             app_handle: manager.app_handle.clone(),
             engine: Arc::clone(&manager.engine),
             engine_lease_gate: Arc::clone(&manager.engine_lease_gate),
-            current_model_id: Arc::clone(&manager.current_model_id),
             last_activity: Arc::clone(&manager.last_activity),
             shutdown_signal: Arc::clone(&manager.shutdown_signal),
             idle_wakeup: Arc::clone(&manager.idle_wakeup),
             transition: Arc::clone(&manager.transition),
             active_stream_worker: Arc::clone(&manager.active_stream_worker),
-            active_engine_lease: Arc::clone(&manager.active_engine_lease),
             active_media_imports: Arc::clone(&manager.active_media_imports),
             active_batch_uses: Arc::clone(&manager.active_batch_uses),
         }
     }
 
     fn model_resident(&self) -> bool {
-        lock_recover(&self.engine).is_some()
-            || self.active_engine_lease.load(Ordering::Acquire) != 0
+        lock_recover(&self.engine).build().is_some()
     }
 
     fn unload_blocked(&self) -> bool {
@@ -1045,12 +1148,7 @@ impl IdleWatcherContext {
         ) {
             return Ok(false);
         }
-        unload_engine(
-            &self.app_handle,
-            &self.engine,
-            &self.current_model_id,
-            &self.transition,
-        )?;
+        unload_engine(&self.app_handle, &self.engine, &self.transition)?;
         Ok(true)
     }
 
@@ -1133,22 +1231,19 @@ impl IdleWatcherContext {
 impl TranscriptionManager {
     pub fn new(app_handle: &AppHandle, model_manager: Arc<ModelManager>) -> Result<Self> {
         let manager = Self {
-            engine: Arc::new(Mutex::new(None)),
+            engine: Arc::new(Mutex::new(EngineSlot::Empty)),
             engine_lease_gate: Arc::new(Mutex::new(())),
             model_manager,
             app_handle: app_handle.clone(),
-            current_model_id: Arc::new(Mutex::new(None)),
             last_activity: Arc::new(AtomicU64::new(Self::now_ms())),
             shutdown_signal: Arc::new(AtomicBool::new(false)),
             watcher_handle: Arc::new(Mutex::new(None)),
             idle_wakeup: Arc::new((Mutex::new(()), Condvar::new())),
             transition: Arc::new(EngineTransition::new()),
-            reload_model_on_next_use: Arc::new(AtomicBool::new(false)),
             router: Arc::new(StreamRouter::new()),
             stream_active: Arc::new(AtomicBool::new(false)),
             next_stream_worker_id: Arc::new(AtomicU64::new(1)),
             active_stream_worker: Arc::new(AtomicU64::new(0)),
-            active_engine_lease: Arc::new(AtomicU64::new(0)),
             active_media_imports: Arc::new(AtomicU64::new(0)),
             active_batch_uses: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "cloud-realtime")]
@@ -1166,8 +1261,8 @@ impl TranscriptionManager {
         Ok(manager)
     }
 
-    /// Lock the engine mutex, recovering from poison if a previous transcription panicked.
-    fn lock_engine(&self) -> MutexGuard<'_, Option<LoadedEngine>> {
+    /// Lock the engine slot, recovering from poison if a previous transcription panicked.
+    fn lock_engine(&self) -> MutexGuard<'_, EngineSlot> {
         self.engine.lock().unwrap_or_else(|poisoned| {
             warn!("Engine mutex was poisoned by a previous panic, recovering");
             poisoned.into_inner()
@@ -1175,9 +1270,7 @@ impl TranscriptionManager {
     }
 
     pub fn is_model_loaded(&self) -> bool {
-        // The engine may be leased out to the streaming worker (taken out of
-        // the mutex). It's still loaded, just in use, so report true.
-        self.lock_engine().is_some() || self.active_engine_lease.load(Ordering::Acquire) != 0
+        self.lock_engine().build().is_some()
     }
 
     fn lock_engine_lease_gate(&self) -> MutexGuard<'_, ()> {
@@ -1228,13 +1321,6 @@ impl TranscriptionManager {
         }
     }
 
-    /// Accelerator changes should not disturb the current transcription. Mark
-    /// the cached engine stale; the next model-use path reloads it with the
-    /// latest settings.
-    pub fn reload_model_on_next_use(&self) {
-        self.reload_model_on_next_use.store(true, Ordering::Release);
-    }
-
     /// Open a load scope only when no load is in progress. Returns a
     /// [`LoadingGuard`] whose [`Drop`] impl closes the scope and wakes waiters,
     /// or `None` if a load is already running.
@@ -1250,12 +1336,7 @@ impl TranscriptionManager {
 
     pub fn unload_model(&self) -> Result<()> {
         let _engine_lease = self.lock_engine_lease_gate();
-        let result = unload_engine(
-            &self.app_handle,
-            &self.engine,
-            &self.current_model_id,
-            &self.transition,
-        );
+        let result = unload_engine(&self.app_handle, &self.engine, &self.transition);
         self.signal_idle_watcher();
         result
     }
@@ -1418,16 +1499,9 @@ impl TranscriptionManager {
 
         // Drop the current engine BEFORE building the new one so transcribe-cpp
         // frees the previous native context first — avoids holding two models at
-        // once (peak memory on large GGUFs). Clear the id too: if the new load
-        // fails, status should read "no loaded model", not the dropped engine.
-        {
-            let mut engine = self.lock_engine();
-            *engine = None;
-        }
-        {
-            let mut current_model = lock_recover(&self.current_model_id);
-            *current_model = None;
-        }
+        // once (peak memory on large GGUFs). If the new load fails, status reads
+        // "no loaded model", not the dropped engine.
+        *self.lock_engine() = EngineSlot::Empty;
 
         // Create appropriate engine based on model type
         let emit_loading_failed = |error_msg: &str| {
@@ -1588,15 +1662,15 @@ impl TranscriptionManager {
             report_transcribe_session(model_id, ort_provider);
         }
 
-        // Update the current engine and model ID
-        {
-            let mut engine = self.lock_engine();
-            *engine = Some(loaded_engine);
-        }
-        {
-            let mut current_model = lock_recover(&self.current_model_id);
-            *current_model = Some(model_id.to_string());
-        }
+        *self.lock_engine() = EngineSlot::Resident(
+            EngineBuild {
+                model_id: model_id.to_string(),
+                transcribe_accelerator: accelerator,
+                transcribe_gpu_device: selected_gpu_device.map(str::to_owned),
+                ort_accelerator,
+            },
+            loaded_engine,
+        );
 
         // Reset idle timer so the watcher doesn't immediately unload a just-loaded model
         self.touch_activity();
@@ -1628,9 +1702,7 @@ impl TranscriptionManager {
             return;
         };
 
-        let reload_pending = self.reload_model_on_next_use.load(Ordering::Acquire);
-        let loaded_for_plan = self.get_current_model().as_deref() == Some(plan.model_id.as_str());
-        if !reload_pending && loaded_for_plan && self.is_model_loaded() {
+        if self.lock_engine().build() == Some(&EngineBuild::for_plan(plan)) {
             return;
         }
 
@@ -1641,11 +1713,6 @@ impl TranscriptionManager {
             // waiting stream or batch owner sees no gap between the decision to
             // load and the load itself.
             let _loading = loading;
-            if reload_pending {
-                self_clone
-                    .reload_model_on_next_use
-                    .store(false, Ordering::Release);
-            }
             if let Err(e) = self_clone.load_model_for_plan(&plan) {
                 error!("Failed to load frozen run model: {}", e);
             }
@@ -1653,8 +1720,9 @@ impl TranscriptionManager {
     }
 
     pub fn get_current_model(&self) -> Option<String> {
-        let current_model = lock_recover(&self.current_model_id);
-        current_model.clone()
+        self.lock_engine()
+            .build()
+            .map(|build| build.model_id.clone())
     }
 
     /// Returns the configured local ASR model only when its verified asset is
@@ -1713,12 +1781,12 @@ impl TranscriptionManager {
     /// its real backend string; ONNX engines report "onnx"; `None` when no
     /// model is loaded.
     pub fn current_backend(&self) -> Option<String> {
-        match self.lock_engine().as_ref() {
-            Some(LoadedEngine::TranscribeCpp(session)) => {
+        match &*self.lock_engine() {
+            EngineSlot::Resident(_, LoadedEngine::TranscribeCpp(session)) => {
                 Some(session.model().backend().to_string())
             }
-            Some(_) => Some("onnx".to_string()),
-            None => None,
+            EngineSlot::Resident(_, _) => Some("onnx".to_string()),
+            EngineSlot::Empty | EngineSlot::Leased(_) => None,
         }
     }
 
@@ -1857,7 +1925,6 @@ impl TranscriptionManager {
         let _worker = StreamWorkerGuard {
             worker_id,
             active_stream_worker: Arc::clone(&self.active_stream_worker),
-            active_engine_lease: Arc::clone(&self.active_engine_lease),
             stream_active: Arc::clone(&self.stream_active),
             last_activity: Arc::clone(&self.last_activity),
             idle_wakeup: Arc::clone(&self.idle_wakeup),
@@ -1880,58 +1947,35 @@ impl TranscriptionManager {
         let _worker = StreamWorkerGuard {
             worker_id,
             active_stream_worker: Arc::clone(&self.active_stream_worker),
-            active_engine_lease: Arc::clone(&self.active_engine_lease),
             stream_active: Arc::clone(&self.stream_active),
             last_activity: Arc::clone(&self.last_activity),
             idle_wakeup: Arc::clone(&self.idle_wakeup),
         };
 
         // start_stream races the background load kicked off when recording
-        // starts, so wait that load out before taking the engine.
+        // starts, and any decode already holding the engine, so wait those out
+        // before taking the engine.
         let _engine_lease = self.wait_for_load_then_lock_engine_lease();
+        if !lanes.claim.serve() {
+            info!("Live preview: the dictation ended while its worker waited for the engine");
+            return;
+        }
         let model_id = asr.model_id.clone();
-        if self.get_current_model().as_deref() != Some(model_id.as_str()) {
+
+        // Take the engine out of its slot so we own it during streaming,
+        // structurally excluding any concurrent batch transcription (which
+        // transcribe-cpp's compute_lock would refuse anyway). Put back when the
+        // worker exits.
+        let leased = self.lock_engine().lease(&EngineBuild::for_plan(&asr));
+        let Some(mut engine) = leased else {
             info!(
-                "Live preview: frozen model '{}' is unavailable; using batch fallback",
+                "Live preview: the resident engine was not built for frozen model '{}'; \
+                 using batch fallback",
                 model_id
             );
             self.router.clear();
             drain_until_finalize(lanes);
             return;
-        }
-
-        // Take the engine out of the mutex so we own it during streaming,
-        // structurally excluding any concurrent batch transcription (which
-        // transcribe-cpp's compute_lock would refuse anyway). Returned when the
-        // worker exits, or dropped if the model was switched/unloaded mid-stream.
-        if self
-            .active_engine_lease
-            .compare_exchange(0, worker_id, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            warn!("Live preview: another worker already holds the transcription engine");
-            self.router.clear();
-            drain_until_finalize(lanes);
-            return;
-        }
-        let mut engine = match self.lock_engine().take() {
-            Some(e) => e,
-            None => {
-                info!(
-                    "Live preview: model '{}' was unloaded before streaming could begin; \
-                 falling back to batch transcription",
-                    model_id
-                );
-                let _ = self.active_engine_lease.compare_exchange(
-                    worker_id,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-                self.router.clear();
-                drain_until_finalize(lanes);
-                return;
-            }
         };
 
         // Only transcribe-cpp models expose streaming; ONNX engines fall back to
@@ -1970,7 +2014,7 @@ impl TranscriptionManager {
         // A restricted set needs a short draft before one language is chosen.
         // Do not accept an unrestricted stream as this dictation's final.
         if !supports_streaming || asr.language_candidates.len() > 1 {
-            self.return_engine(engine, &model_id);
+            self.lock_engine().put_back(engine);
             self.router.clear();
             drain_until_finalize(lanes);
             return;
@@ -2001,7 +2045,7 @@ impl TranscriptionManager {
         // Run the stream on the held session. The Stream borrows the session
         // (and thus the engine) for its lifetime, so the feed/finalize loop
         // lives in a labeled block — when it exits, the borrow is released and
-        // the engine can be moved into return_engine().
+        // the engine can be put back.
         let mut finalize_reply: Option<mpsc::Sender<Option<FinalizedStreamText>>> = None;
         let mut finalize_result: Option<Option<FinalizedStreamText>> = None;
         let stream_started = 'stream: {
@@ -2133,17 +2177,17 @@ impl TranscriptionManager {
             // failed); drain so the finalize handshake still completes and the
             // caller falls back to batch transcription. Return the engine first
             // so the fallback can immediately use it.
-            self.return_engine(engine, &model_id);
+            self.lock_engine().put_back(engine);
             drain_until_finalize(lanes);
             return;
         }
 
-        self.return_engine(engine, &model_id);
+        self.lock_engine().put_back(engine);
         if let (Some(reply), Some(result)) = (finalize_reply, finalize_result) {
             let _ = reply.send(result);
         }
-        // `_worker` drops here, clearing this worker's active/lease flags after
-        // the engine has been returned to the pool.
+        // `_worker` drops here, clearing this worker's flags after the engine
+        // is back in its slot.
     }
 
     /// Consume a body-free cloud protocol event without promoting preview text.
@@ -2218,21 +2262,6 @@ impl TranscriptionManager {
         }
     }
 
-    /// Return the leased engine unless the model was switched or unloaded.
-    fn return_engine(&self, engine: LoadedEngine, expected_model_id: &str) {
-        let still_current =
-            lock_recover(&self.current_model_id).as_deref() == Some(expected_model_id);
-        if still_current {
-            *self.lock_engine() = Some(engine);
-        } else {
-            info!(
-                "Model changed/unloaded during transcription; dropping stale engine (was '{}')",
-                expected_model_id
-            );
-            // `engine` drops here, freeing its resources.
-        }
-    }
-
     /// Flush the active stream and return its final, post-filtered text
     /// alongside whether the model produced anything before post-processing.
     ///
@@ -2248,6 +2277,11 @@ impl TranscriptionManager {
         let Some(route) = self.router.take() else {
             return Ok(None);
         };
+        // A worker still queued behind another engine owner would answer only
+        // after that owner finishes, which can be minutes into an import.
+        if route.claim.abandon() {
+            return Ok(None);
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
         if route
             .control_tx
@@ -2275,7 +2309,7 @@ impl TranscriptionManager {
         let filtered = post_process_transcription_text(
             finalized.text,
             asr,
-            false,
+            None,
             &finalized.output_language,
             &finalized.supported_languages,
         );
@@ -2381,8 +2415,8 @@ impl TranscriptionManager {
         // call so imports and dictation make forward progress in FIFO order.
         let engine_lease = self.wait_for_load_then_lock_engine_lease();
         let active_model = asr.model_id.clone();
-        let model_is_ready = self.get_current_model().as_deref() == Some(active_model.as_str())
-            && self.lock_engine().is_some();
+        let build = EngineBuild::for_plan(asr);
+        let model_is_ready = self.lock_engine().serves(&build);
         if !model_is_ready {
             self.load_model_for_plan_while_leased(asr)?;
         }
@@ -2401,29 +2435,22 @@ impl TranscriptionManager {
         // with INVALID_ARG, so the whisper extension must be gated on the
         // arch, not on the feature (see #1601).
         let mut model_is_whisper = false;
-        let mut vocabulary_prompt: Option<String> = None;
+        let mut vocabulary_prompt: Option<VocabularyPrompt> = None;
         let mut decoded_without_prompt = false;
 
         // Perform transcription with the appropriate engine.
         // We use catch_unwind to prevent engine panics from poisoning the mutex,
         // which would make the app hang indefinitely on subsequent operations.
         let (result, output_language, model_languages) = {
-            let mut engine_guard = self.lock_engine();
-
-            // Take the engine out so we own it during transcription.
-            // If the engine panics, we simply don't put it back (effectively unloading it)
-            // instead of poisoning the mutex.
-            let mut engine = match engine_guard.take() {
-                Some(e) => e,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "Model failed to load after auto-load attempt. Please check your model settings."
-                    ));
-                }
+            // Take the engine out so we own it during transcription. If the
+            // engine panics it is not put back, and the slot empties instead of
+            // poisoning the mutex. No mutex is held during the engine call.
+            let leased = self.lock_engine().lease(&build);
+            let Some(mut engine) = leased else {
+                return Err(anyhow::anyhow!(
+                    "Model failed to load after auto-load attempt. Please check your model settings."
+                ));
             };
-
-            // Release the lock before transcribing — no mutex held during the engine call
-            drop(engine_guard);
 
             // Probe live transcribe-cpp capabilities once (cheap GGUF-metadata
             // reads); the loaded session is the source of truth, not the
@@ -2474,14 +2501,24 @@ impl TranscriptionManager {
                 match &mut engine {
                     LoadedEngine::TranscribeCpp(session) => {
                         // Only actual whisper-family sessions receive a decode
-                        // prompt, and only for plans that ask for one. Its written
-                        // forms still receive exact correction; only fuzzy matching
-                        // is skipped for prompted runs.
-                        let initial_prompt =
-                            (model_is_whisper && asr.prompt_vocabulary && !switches.without_prompt)
-                                .then(|| vocabulary_initial_prompt(&asr.custom_words))
-                                .flatten();
+                        // prompt, only for plans that ask for one, and never for
+                        // a clip voice detection heard no speech in. The prompt
+                        // holds the whole entries whisper keeps; its written forms
+                        // receive exact correction, and the entries left out get
+                        // fuzzy matching.
+                        let initial_prompt = (model_is_whisper
+                            && asr.prompt_vocabulary
+                            && !switches.without_prompt
+                            && speech != SpeechEvidence::Undetected)
+                            .then(|| {
+                                let model = session.model();
+                                vocabulary_initial_prompt(&asr.custom_words, |prompt| {
+                                    whisper_prompt_fits(&model, prompt)
+                                })
+                            })
+                            .flatten();
                         vocabulary_prompt.clone_from(&initial_prompt);
+                        let initial_prompt = initial_prompt.map(|prompt| prompt.text);
                         let checks_no_speech =
                             !(model_is_whisper && switches.without_no_speech_check);
                         let seed =
@@ -2518,17 +2555,17 @@ impl TranscriptionManager {
                         } else {
                             audio.len()
                         };
-                        let recovery = vocabulary_prompt
-                            .clone()
-                            .filter(|_| model_is_whisper && speech == SpeechEvidence::Detected)
-                            .map(|prompt| {
-                                SpanRecovery::new(
-                                    switches.keeps(TextFilter::PromptEcho).then_some(prompt),
-                                    &run_options,
-                                    checks_no_speech,
-                                    seed,
-                                )
-                            });
+                        let recovery = vocabulary_prompt.as_ref().map(|prompt| {
+                            SpanRecovery::new(
+                                switches
+                                    .keeps(TextFilter::PromptEcho)
+                                    .then(|| prompt.text.clone()),
+                                &run_options,
+                                checks_no_speech,
+                                seed,
+                                speech,
+                            )
+                        });
                         let mut diagnosed_runs = diagnosis.is_some().then(NativeRuns::default);
                         let text = transcribe_windows(audio, max_samples, |window| {
                             transcribe_cpp_window(
@@ -2553,7 +2590,9 @@ impl TranscriptionManager {
                             } else {
                                 let unchecked_options = RunOptions {
                                     family: whisper_check_extension(
-                                        vocabulary_prompt.clone(),
+                                        vocabulary_prompt
+                                            .as_ref()
+                                            .map(|prompt| prompt.text.clone()),
                                         false,
                                         seed,
                                     ),
@@ -2698,7 +2737,7 @@ impl TranscriptionManager {
                 Ok(inner_result) => {
                     // Success or normal error: return the engine unless a model
                     // switch/unload invalidated it while it was in use.
-                    self.return_engine(engine, &active_model);
+                    self.lock_engine().put_back(engine);
                     inner_result?
                 }
                 Err(_) => {
@@ -2706,14 +2745,8 @@ impl TranscriptionManager {
                     // The engine is dropped here, effectively unloading it.
                     error!("{ENGINE_PANIC_LOG_MESSAGE}");
 
-                    // Clear the model ID so it will be reloaded on next attempt.
-                    {
-                        let mut current_model = self
-                            .current_model_id
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        *current_model = None;
-                    }
+                    // Empty the slot so the next attempt reloads.
+                    *self.lock_engine() = EngineSlot::Empty;
 
                     let _ = self
                         .app_handle
@@ -2744,28 +2777,33 @@ impl TranscriptionManager {
         };
 
         drop(engine_lease);
-        // Prompted Whisper runs retain exact spoken-form correction, while
-        // unprompted runs (non-Whisper engines and meetings) use fuzzy
-        // correction. The post-processor owns that distinction for every engine.
+        // Whisper primes only the first 30 s chunk with the prompt, so text
+        // past it, or decoded again without the prompt, gets the fuzzy
+        // correction unprompted runs (non-Whisper engines and meetings) get.
+        // The post-processor owns that distinction for every engine.
         //
         // Whether the model produced anything is read here, before the
         // post-processor runs, because filler removal and spoken edits can
         // empty a real transcript and the capture receipt must not read that as
         // a silent microphone.
         let echo_prompt = vocabulary_prompt
-            .as_deref()
+            .as_ref()
+            .map(|prompt| prompt.text.as_str())
             .filter(|_| !decoded_without_prompt && switches.keeps(TextFilter::PromptEcho));
         let vocabulary_only_applies =
             !asr.prompt_vocabulary && switches.keeps(TextFilter::VocabularyOnly);
         let model_produced_text = model_heard_text(&result, echo_prompt)
-            && !(vocabulary_only_applies && repeats_only_vocabulary(&result, &asr.custom_words));
+            && !(vocabulary_only_applies && repeats_only_vocabulary(&result, &asr.custom_words))
+            && !(model_is_whisper
+                && speech == SpeechEvidence::Undetected
+                && is_whisper_silence_phrase(&result));
         if let Some(diagnosis) = diagnosis.as_deref_mut() {
             let chars = result.chars().count();
             diagnosis.engine_chars = chars;
             diagnosis.prompt_words = vocabulary_prompt
-                .as_deref()
-                .map(|prompt| prompt_words(prompt).count());
-            diagnosis.prompt_echo = match (vocabulary_prompt.as_deref(), echo_prompt) {
+                .as_ref()
+                .map(|prompt| prompt_words(&prompt.text).count());
+            diagnosis.prompt_echo = match (vocabulary_prompt.as_ref(), echo_prompt) {
                 (None, _) => FilterOutcome::NotApplied("no prompt"),
                 (Some(_), None) if decoded_without_prompt => {
                     FilterOutcome::NotApplied("part was decoded again without the prompt")
@@ -2788,7 +2826,11 @@ impl TranscriptionManager {
             post_process_transcription_text(
                 result,
                 asr,
-                vocabulary_prompt.is_some() && !decoded_without_prompt,
+                vocabulary_prompted_from(
+                    vocabulary_prompt.as_ref(),
+                    decoded_without_prompt,
+                    audio_len,
+                ),
                 &output_language,
                 &model_languages,
             )
@@ -2914,16 +2956,19 @@ fn transcribe_cpp_window(
 /// decoded again at any length.
 const LOST_SPAN_MS: i64 = 5_000;
 
-/// What a prompted whisper window falls back on where it heard nothing in
-/// audio voice detection forwarded as speech. Over steady room noise the
-/// vocabulary prompt makes whisper write the prompt for a whole 30 s window
-/// and seek past it, so the window's speech vanishes while later windows
-/// decode. Without the prompt the same audio decodes.
+/// What a prompted whisper window falls back on where it heard nothing.
+/// Over steady room noise the vocabulary prompt makes whisper write the
+/// prompt for a whole 30 s chunk and seek past it, so the chunk's speech
+/// vanishes while later chunks decode. Without the prompt the same audio
+/// decodes.
 struct SpanRecovery {
     /// The prompt whose bare repetition counts as hearing nothing.
     echo_prompt: Option<String>,
     /// The window's decode without the prompt.
     unprompted: RunOptions,
+    /// What voice detection said about the window, which decides which
+    /// stretches that heard nothing are decoded again.
+    speech: SpeechEvidence,
     /// Whether any span came back with words, so the transcript is no
     /// longer wholly a prompted decode.
     recovered_words: Cell<bool>,
@@ -2941,6 +2986,7 @@ impl SpanRecovery {
         options: &RunOptions,
         checks_no_speech: bool,
         seed: Option<u32>,
+        speech: SpeechEvidence,
     ) -> Self {
         Self {
             echo_prompt,
@@ -2948,6 +2994,7 @@ impl SpanRecovery {
                 family: whisper_check_extension(None, checks_no_speech, seed),
                 ..options.clone()
             },
+            speech,
             recovered_words: Cell::new(false),
         }
     }
@@ -2961,6 +3008,35 @@ impl SpanRecovery {
             .collect()
     }
 
+    /// Whether whisper wrote only its prompt over part of `span`.
+    fn echoes_within(&self, transcript: &Transcript, span: &Range<i64>) -> bool {
+        transcript.segments.iter().any(|segment| {
+            span.contains(&(segment.t0_ms + (segment.t1_ms - segment.t0_ms) / 2))
+                && !segment.text.trim().is_empty()
+                && !model_heard_text(&segment.text, self.echo_prompt.as_deref())
+        })
+    }
+
+    /// The stretches of a window of `audio_ms` to decode again without the
+    /// prompt.
+    fn spans_to_redo(&self, transcript: &Transcript, audio_ms: i64) -> Vec<Range<i64>> {
+        let heard = self.heard_spans(transcript);
+        match self.speech {
+            SpeechEvidence::Detected => lost_spans(&heard, audio_ms),
+            // Without voice detection only real words heard elsewhere show
+            // the capture holds speech, and a stretch is lost only where the
+            // prompt was written over it: decoded again, a pause turns into
+            // the phrases whisper writes over silence.
+            SpeechEvidence::Unknown | SpeechEvidence::Undetected if !heard.is_empty() => {
+                lost_spans(&heard, audio_ms)
+                    .into_iter()
+                    .filter(|span| self.echoes_within(transcript, span))
+                    .collect()
+            }
+            SpeechEvidence::Unknown | SpeechEvidence::Undetected => Vec::new(),
+        }
+    }
+
     fn recover(
         &self,
         session: &mut Session,
@@ -2968,7 +3044,7 @@ impl SpanRecovery {
         transcript: &Transcript,
     ) -> Vec<RecoveredSpan> {
         let audio_ms = i64::try_from(audio.len() / 16).unwrap_or(i64::MAX);
-        lost_spans(&self.heard_spans(transcript), audio_ms)
+        self.spans_to_redo(transcript, audio_ms)
             .into_iter()
             .map(|span| {
                 let samples = &audio[sample_at(span.start).min(audio.len())
@@ -3642,8 +3718,9 @@ fn with_model_detected_language(
 ///    including digital silence, at both Q4_K_M and Q8_0.
 ///
 /// So a phantom "Thank you." on a silent capture is a real defect, but not one
-/// these five fields can fix. It is caught downstream instead, where
-/// `capture_verdict` weighs the transcript against what VAD forwarded.
+/// these five fields can fix. A clip voice detection heard no speech in is
+/// decoded without the vocabulary prompt instead, and a decode of only such a
+/// phrase is read as nothing said ([`is_whisper_silence_phrase`]).
 fn whisper_run_extension(initial_prompt: Option<String>) -> Option<RunExtension> {
     initial_prompt.map(|initial_prompt| {
         RunExtension::Whisper(WhisperRunOptions {
@@ -3675,6 +3752,63 @@ fn whisper_check_extension(
 fn prompt_words(text: &str) -> impl Iterator<Item = &str> + Clone {
     text.split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
+}
+
+/// The most prompt tokens whisper keeps: half its 448-token decoder context,
+/// less one (`max_prev_context_tokens`, transcribe-cpp-sys 0.2.2
+/// `src/arch/whisper/public.cpp:69`). A longer prompt loses its head,
+/// mid-entry (`src/arch/whisper/model.cpp:1609-1612`).
+const WHISPER_PROMPT_TOKENS: usize = 223;
+
+/// Whisper primes only the first 30 s chunk of a decode with its prompt
+/// (`prompt_condition` FIRST_SEGMENT, `src/arch/whisper/model.cpp:1751-1756`).
+const WHISPER_PROMPTED_SAMPLES: usize = 30 * 16_000;
+
+/// Whether whisper keeps all of `prompt`, tokenized as the native run does:
+/// trimmed, after one space (`src/arch/whisper/model.cpp:1546-1559`).
+fn whisper_prompt_fits(model: &Model, prompt: &str) -> bool {
+    model
+        .tokenize(&format!(" {}", prompt.trim()))
+        .is_ok_and(|tokens| tokens.len() <= WHISPER_PROMPT_TOKENS)
+}
+
+/// The first vocabulary entry the whole decode was prompted with, or `None`
+/// when part of it was decoded without the prompt: again after an echo, or
+/// past the first 30 s chunk.
+fn vocabulary_prompted_from(
+    prompt: Option<&VocabularyPrompt>,
+    decoded_without_prompt: bool,
+    audio_samples: usize,
+) -> Option<usize> {
+    prompt
+        .filter(|_| !decoded_without_prompt && audio_samples <= WHISPER_PROMPTED_SAMPLES)
+        .map(|prompt| prompt.first_entry)
+}
+
+/// Everything whisper wrote, unprompted, over the 8 silent and noise-only
+/// 14-15 s clips measured with large-v3-turbo, small, small.en, base.en and
+/// medium, apart from text with no words.
+const WHISPER_SILENCE_PHRASES: [&str; 6] = [
+    "you",
+    "so",
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+    "thanks for watching please subscribe and hit that like button",
+];
+
+/// Whether `text` has no words, or only a phrase whisper writes over
+/// silence, ignoring case and punctuation.
+fn is_whisper_silence_phrase(text: &str) -> bool {
+    let words = prompt_words(text);
+    words.clone().next().is_none()
+        || WHISPER_SILENCE_PHRASES.iter().any(|phrase| {
+            let mut forms = phrase.split(' ');
+            words
+                .clone()
+                .all(|word| forms.next().is_some_and(|form| same_word(word, form)))
+                && forms.next().is_none()
+        })
 }
 
 /// Whether a decode carries text the model heard: anything but nothing, or
@@ -3759,13 +3893,22 @@ fn transcribe_cpp_run_plan(
 #[cfg(feature = "cloud-realtime")]
 pub(crate) fn finalize_cloud_text(text: String, asr: &AsrPlan, cloud: &CloudRunPlan) -> String {
     let evidence = resolve_output_language_evidence(asr, cloud.language(), &[], false);
-    post_process_transcription_text(text, asr, !cloud.keyterms().is_empty(), &evidence, &[])
+    post_process_transcription_text(
+        text,
+        asr,
+        (!cloud.keyterms().is_empty()).then_some(0),
+        &evidence,
+        &[],
+    )
 }
 
+/// `prompted_from` is the first of `asr.custom_words` the decode was prompted
+/// with, so it and every later entry are matched exactly, and the entries
+/// before it fuzzily, as after an unprompted decode.
 fn post_process_transcription_text(
     raw: String,
     asr: &AsrPlan,
-    vocabulary_already_prompted: bool,
+    prompted_from: Option<usize>,
     output_language: &OutputLanguageEvidence,
     supported_languages: &[String],
 ) -> String {
@@ -3828,12 +3971,17 @@ fn post_process_transcription_text(
         } else {
             corrected
         };
-        let corrected = if asr.custom_words.is_empty() {
-            corrected
-        } else if vocabulary_already_prompted {
-            apply_exact_vocabulary_entries(&corrected, &asr.custom_words)
-        } else {
-            apply_vocabulary_entries(&corrected, &asr.custom_words, asr.correction_threshold)
+        let corrected = match prompted_from {
+            _ if asr.custom_words.is_empty() => corrected,
+            Some(first_prompted) => apply_prompted_vocabulary_entries(
+                &corrected,
+                &asr.custom_words,
+                first_prompted,
+                asr.correction_threshold,
+            ),
+            None => {
+                apply_vocabulary_entries(&corrected, &asr.custom_words, asr.correction_threshold)
+            }
         };
         // After vocabulary correction, before snippets. Correction can *create*
         // the command phrase (a misheard "scratch back" becomes "scratch that"
@@ -4360,7 +4508,7 @@ mod tests {
             post_process_transcription_text(
                 "our company met north star yesterday.".to_string(),
                 &meeting,
-                false,
+                None,
                 &OutputLanguageEvidence::UserSelected("en".to_string()),
                 &languages(&["en"]),
             ),
@@ -4419,7 +4567,7 @@ mod tests {
             post_process_transcription_text(
                 "first thought new paragraph second thought".to_string(),
                 &asr,
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -4441,7 +4589,7 @@ mod tests {
             post_process_transcription_text(
                 "first thought new paragraph second thought new line third".to_string(),
                 &asr,
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -4471,7 +4619,7 @@ mod tests {
             post_process_transcription_text(
                 "example dot com".to_string(),
                 &asr,
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -4493,7 +4641,7 @@ mod tests {
             post_process_transcription_text(
                 "write to me at sign example dot com".to_string(),
                 &asr,
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -4924,6 +5072,24 @@ mod tests {
         assert_eq!(lanes.audio_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
     }
 
+    /// A stream worker waits behind any other engine owner, such as a long
+    /// import, before it can answer finalize. Finalize gives up on a worker
+    /// still waiting, which then leaves without the engine, and waits for a
+    /// worker that already holds it.
+    #[test]
+    fn finalize_abandons_a_stream_worker_still_waiting_for_the_engine() {
+        let router = StreamRouter::new();
+        let lanes = router.open();
+        let route = router.take().expect("an open route");
+        assert!(route.claim.abandon(), "finalize stops waiting");
+        assert!(!lanes.claim.serve(), "the worker leaves without the engine");
+
+        let lanes = router.open();
+        assert!(lanes.claim.serve(), "the worker holds the engine");
+        let route = router.take().expect("an open route");
+        assert!(!route.claim.abandon(), "finalize waits for its answer");
+    }
+
     #[test]
     fn ort_settings_fall_back_to_an_available_provider() {
         let provider = configured_ort_provider(OrtAcceleratorSetting::Auto);
@@ -5023,7 +5189,7 @@ mod tests {
             post_process_transcription_text(
                 "north starr north star Northstar color BrandColor".to_string(),
                 &asr,
-                true,
+                Some(0),
                 &OutputLanguageEvidence::Unknown,
                 &[],
             ),
@@ -5033,7 +5199,7 @@ mod tests {
             post_process_transcription_text(
                 "north starr".to_string(),
                 &asr,
-                false,
+                None,
                 &OutputLanguageEvidence::Unknown,
                 &[],
             ),
@@ -5066,14 +5232,14 @@ mod tests {
             post_process_transcription_text(
                 "organize comma north star".to_string(),
                 &asr,
-                false,
+                None,
                 &english,
                 &[],
             ),
             "organise, Northstar"
         );
         assert_eq!(
-            post_process_transcription_text("color".to_string(), &asr, false, &english, &[]),
+            post_process_transcription_text("color".to_string(), &asr, None, &english, &[]),
             "BrandColor"
         );
     }
@@ -5094,7 +5260,7 @@ mod tests {
             post_process_transcription_text(
                 source.clone(),
                 &AsrPlan::from_settings(&disabled),
-                false,
+                None,
                 &OutputLanguageEvidence::Unknown,
                 &[],
             ),
@@ -5107,7 +5273,7 @@ mod tests {
             post_process_transcription_text(
                 "const smiley face = 1".to_string(),
                 &AsrPlan::from_settings(&enabled),
-                false,
+                None,
                 &OutputLanguageEvidence::Unknown,
                 &[],
             ),
@@ -5143,7 +5309,7 @@ mod tests {
             post_process_transcription_text(
                 "north star".to_string(),
                 &AsrPlan::from_settings(&settings),
-                false,
+                None,
                 &OutputLanguageEvidence::Unknown,
                 &[],
             ),
@@ -5156,7 +5322,7 @@ mod tests {
             post_process_transcription_text(
                 "north star".to_string(),
                 &AsrPlan::from_settings(&disabled),
-                false,
+                None,
                 &OutputLanguageEvidence::Unknown,
                 &[],
             ),
@@ -5193,7 +5359,7 @@ mod tests {
             post_process_transcription_text(
                 "Keep this. Drop this. Scratch back.".to_string(),
                 &AsrPlan::from_settings(&settings),
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -5205,7 +5371,7 @@ mod tests {
             post_process_transcription_text(
                 "We should scratch that plan.".to_string(),
                 &AsrPlan::from_settings(&settings),
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -5221,7 +5387,7 @@ mod tests {
             post_process_transcription_text(
                 "Keep this. Drop this. Scratch back.".to_string(),
                 &AsrPlan::from_settings(&disabled),
-                false,
+                None,
                 &english,
                 &[],
             ),
@@ -5247,7 +5413,7 @@ mod tests {
         let result = post_process_transcription_text(
             "eu vi um carro".to_string(),
             &AsrPlan::from_settings(&settings),
-            false,
+            None,
             &evidence,
             &supported,
         );
@@ -5277,7 +5443,7 @@ mod tests {
         let result = post_process_transcription_text(
             "um uhm ok".to_string(),
             &AsrPlan::from_settings(&settings),
-            false,
+            None,
             &evidence,
             &languages(&["en", "pt"]),
         );
@@ -5297,7 +5463,7 @@ mod tests {
             "um so the weather forecast said it would probably rain throughout the whole weekend"
                 .to_string(),
             &AsrPlan::from_settings(&settings),
-            false,
+            None,
             &OutputLanguageEvidence::Unknown,
             &languages(&["en", "pt", "es", "de"]),
         );
@@ -5318,7 +5484,7 @@ mod tests {
         let result = post_process_transcription_text(
             "eu vi um carro na rua ontem de manhã quando fui ao mercado".to_string(),
             &AsrPlan::from_settings(&settings),
-            false,
+            None,
             &OutputLanguageEvidence::Unknown,
             &languages(&["en", "pt", "es", "de"]),
         );
@@ -5413,7 +5579,7 @@ mod tests {
         let result = post_process_transcription_text(
             "eu vi um carro".to_string(),
             &AsrPlan::from_settings(&settings),
-            false,
+            None,
             &evidence,
             &supported,
         );
@@ -5470,7 +5636,7 @@ mod tests {
 
         let raw = "Um.".to_string();
         let delivered =
-            post_process_transcription_text(raw, &asr, false, &english, &languages(&["en"]));
+            post_process_transcription_text(raw, &asr, None, &english, &languages(&["en"]));
 
         assert_eq!(delivered, "", "filler removal empties a bare hesitation");
     }
@@ -5521,7 +5687,7 @@ mod tests {
             post_process_transcription_text(
                 raw.to_string(),
                 &asr,
-                false,
+                None,
                 &english,
                 &languages(&["en"]),
             )
@@ -5590,8 +5756,13 @@ mod tests {
 
     #[test]
     fn a_window_that_heard_only_its_prompt_is_decoded_again_and_spliced_in_order() {
-        let recovery =
-            SpanRecovery::new(Some("Sona".to_owned()), &RunOptions::default(), true, None);
+        let recovery = SpanRecovery::new(
+            Some("Sona".to_owned()),
+            &RunOptions::default(),
+            true,
+            None,
+            SpeechEvidence::Detected,
+        );
         let first_window_lost = Transcript {
             segments: vec![
                 segment(0, 29_980, " Sona"),
@@ -5638,6 +5809,99 @@ mod tests {
         assert!(lost_spans(&recovery.heard_spans(&short_pauses), 15_000).is_empty());
     }
 
+    /// Without voice detection, a pause decoded again without the prompt turns
+    /// into the phrases whisper writes over silence, so only a stretch whose
+    /// words the prompt replaced is decoded again. With speech detected, every
+    /// stretch that heard nothing is.
+    #[test]
+    fn without_voice_detection_only_a_stretch_written_over_by_the_prompt_is_decoded_again() {
+        let first_window_lost = Transcript {
+            segments: vec![
+                segment(0, 29_980, " Sona"),
+                segment(30_000, 32_500, " so any deliveries need to be rescheduled."),
+            ],
+            ..Default::default()
+        };
+        let long_pause = Transcript {
+            segments: vec![
+                segment(0, 4_000, " Please send the contract."),
+                segment(10_000, 12_000, " And remind Maria."),
+            ],
+            ..Default::default()
+        };
+        let only_the_prompt = Transcript {
+            segments: vec![segment(0, 13_880, " Sona.")],
+            ..Default::default()
+        };
+        for (speech, expected) in [
+            (SpeechEvidence::Unknown, [vec![0..30_000], vec![], vec![]]),
+            (
+                SpeechEvidence::Detected,
+                [vec![0..30_000], vec![4_000..10_000], vec![0..15_000]],
+            ),
+        ] {
+            let recovery = SpanRecovery::new(
+                Some("Sona".to_owned()),
+                &RunOptions::default(),
+                true,
+                None,
+                speech,
+            );
+            assert_eq!(
+                [
+                    recovery.spans_to_redo(&first_window_lost, 32_500),
+                    recovery.spans_to_redo(&long_pause, 12_000),
+                    recovery.spans_to_redo(&only_the_prompt, 15_000),
+                ],
+                expected,
+                "{speech:?}"
+            );
+        }
+    }
+
+    /// Whisper primes only the first 30 s chunk with the prompt, so a longer
+    /// decode, or one partly decoded again without the prompt, gets fuzzy
+    /// correction for every entry.
+    #[test]
+    fn only_a_decode_whisper_primed_throughout_counts_as_prompted() {
+        let prompt = VocabularyPrompt {
+            text: "Bravo, Charlie".to_owned(),
+            first_entry: 1,
+        };
+        assert_eq!(
+            vocabulary_prompted_from(Some(&prompt), false, 20 * 16_000),
+            Some(1)
+        );
+        assert_eq!(
+            vocabulary_prompted_from(Some(&prompt), false, 40 * 16_000),
+            None
+        );
+        assert_eq!(
+            vocabulary_prompted_from(Some(&prompt), true, 20 * 16_000),
+            None
+        );
+        assert_eq!(vocabulary_prompted_from(None, false, 20 * 16_000), None);
+    }
+
+    #[test]
+    fn only_a_phrase_whisper_writes_over_silence_reads_as_silence() {
+        for (text, silence) in [
+            ("Thank you.", true),
+            (" thanks for watching!", true),
+            (
+                "Thanks for watching please subscribe and hit that like button....",
+                true,
+            ),
+            (".", true),
+            ("So", true),
+            ("Thank you, Maria.", false),
+            ("So we ship Friday.", false),
+            ("Sona", false),
+        ] {
+            assert_eq!(is_whisper_silence_phrase(text), silence, "{text:?}");
+        }
+    }
+
     /// About 40 s of synthetic speech 9 dB under steady pink noise at the
     /// level of a real office room, the mix where a "Sona" prompt made
     /// whisper-large-v3-turbo write only "Sona" for the first 30 s window.
@@ -5667,10 +5931,21 @@ mod tests {
             .collect();
         assert!(speech.len() > 35 * 16_000, "the speech spans two windows");
 
+        let noise = pink_noise(speech.len());
+        let noise_gain = 0.02 / rms(&noise);
+        let speech_gain = 0.02 * 10_f32.powf(-9.0 / 20.0) / rms(&speech);
+        speech
+            .iter()
+            .zip(&noise)
+            .map(|(speech, noise)| speech * speech_gain + noise * noise_gain)
+            .collect()
+    }
+
+    /// Steady pink noise from a fixed seed.
+    fn pink_noise(samples: usize) -> Vec<f32> {
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         let mut pink = [0.0_f32; 7];
-        let noise: Vec<f32> = speech
-            .iter()
+        (0..samples)
             .map(|_| {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -5688,63 +5963,183 @@ mod tests {
                 pink[6] = white * 0.115_926;
                 sample
             })
-            .collect();
-        let rms = |samples: &[f32]| {
-            let (sum, count) = samples
-                .iter()
-                .fold((0.0_f32, 0.0_f32), |(sum, count), sample| {
-                    (sum + sample * sample, count + 1.0)
-                });
-            (sum / count).sqrt()
-        };
-        let noise_gain = 0.02 / rms(&noise);
-        let speech_gain = 0.02 * 10_f32.powf(-9.0 / 20.0) / rms(&speech);
-        speech
-            .iter()
-            .zip(&noise)
-            .map(|(speech, noise)| speech * speech_gain + noise * noise_gain)
             .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        let (sum, count) = samples
+            .iter()
+            .fold((0.0_f32, 0.0_f32), |(sum, count), sample| {
+                (sum + sample * sample, count + 1.0)
+            });
+        (sum / count).sqrt()
+    }
+
+    fn test_whisper_model() -> Model {
+        let model_path = std::env::var("SONA_WHISPER_MODEL")
+            .expect("SONA_WHISPER_MODEL names a whisper model file");
+        Model::load_with(std::path::Path::new(&model_path), &ModelOptions::default())
+            .expect("the whisper model loads")
     }
 
     #[test]
     #[ignore = "decodes synthetic speech with the whisper model SONA_WHISPER_MODEL names; needs macOS say"]
     fn a_noisy_first_window_lost_to_the_prompt_is_decoded_again() {
-        let model_path = std::env::var("SONA_WHISPER_MODEL")
-            .expect("SONA_WHISPER_MODEL names a whisper model file");
         let dir = tempfile::tempdir().expect("a temporary directory");
         let audio = noisy_multi_window_speech(dir.path());
-        let model = Model::load_with(std::path::Path::new(&model_path), &ModelOptions::default())
-            .expect("the whisper model loads");
+        let model = test_whisper_model();
         let mut session = model.session().expect("a whisper session");
-        let prompt = vocabulary_initial_prompt(&[VocabularyEntry {
-            spoken: "Sona".to_owned(),
-            written: "Sona".to_owned(),
-        }]);
+        let prompt = vocabulary_initial_prompt(
+            &[VocabularyEntry {
+                spoken: "Sona".to_owned(),
+                written: "Sona".to_owned(),
+            }],
+            |prompt| whisper_prompt_fits(&model, prompt),
+        )
+        .expect("a one-entry prompt fits")
+        .text;
         let options = RunOptions {
-            family: whisper_check_extension(prompt.clone(), true, Some(SAMPLING_SEED)),
+            family: whisper_check_extension(Some(prompt.clone()), true, Some(SAMPLING_SEED)),
             ..Default::default()
         };
-        let recovery = prompt
-            .map(|prompt| SpanRecovery::new(Some(prompt), &options, true, Some(SAMPLING_SEED)));
-        let text = transcribe_cpp_window(
-            &mut session,
-            &audio,
-            &options,
-            recovery.as_ref(),
-            &mut None,
-            None,
-            3,
-        )
-        .expect("the window decodes");
-        let text = text.to_lowercase();
+        // Dictation with voice detection on, and every decode without it:
+        // imports, chat voice, dictation with voice detection off.
+        for speech in [SpeechEvidence::Detected, SpeechEvidence::Unknown] {
+            let recovery = SpanRecovery::new(
+                Some(prompt.clone()),
+                &options,
+                true,
+                Some(SAMPLING_SEED),
+                speech,
+            );
+            let text = transcribe_cpp_window(
+                &mut session,
+                &audio,
+                &options,
+                Some(&recovery),
+                &mut None,
+                None,
+                3,
+            )
+            .expect("the window decodes")
+            .to_lowercase();
+            assert!(
+                text.contains("quarterly budget") && !text.starts_with("sona"),
+                "{speech:?}: the prompt stands in for the first window's words: {text}"
+            );
+            assert!(
+                text.contains("conference room"),
+                "{speech:?}: the last window's words are missing: {text}"
+            );
+        }
+    }
+
+    /// What whisper writes, unprompted, over a short clip of silence or room
+    /// noise that voice detection heard no speech in reads as silence.
+    #[test]
+    #[ignore = "decodes silence with the whisper model SONA_WHISPER_MODEL names"]
+    fn whisper_writes_only_silence_phrases_over_a_clip_without_speech() {
+        let mut session = test_whisper_model().session().expect("a whisper session");
+        let options = RunOptions {
+            family: whisper_check_extension(None, true, Some(SAMPLING_SEED)),
+            ..Default::default()
+        };
+        let noise = pink_noise(10 * 16_000);
+        let gain = 0.02 / rms(&noise);
+        for (clip, audio) in [
+            ("silence", vec![0.0; 10 * 16_000]),
+            (
+                "room noise",
+                noise.iter().map(|sample| sample * gain).collect(),
+            ),
+        ] {
+            let text = session
+                .run(&audio, &options)
+                .expect("the clip decodes")
+                .text;
+            assert!(is_whisper_silence_phrase(&text), "{clip}: {text:?}");
+        }
+    }
+
+    /// A vocabulary too long for whisper's prompt is cut to its last whole
+    /// entries, which whisper keeps in full.
+    #[test]
+    #[ignore = "tokenizes with the whisper model SONA_WHISPER_MODEL names"]
+    fn a_long_vocabulary_prompt_keeps_whole_entries_whisper_keeps() {
+        let model = test_whisper_model();
+        let entries: Vec<VocabularyEntry> = (1..=80)
+            .map(|n| VocabularyEntry {
+                spoken: format!("kestrel {n}"),
+                written: format!("Kestrel Project {n}"),
+            })
+            .collect();
+        let prompt =
+            vocabulary_initial_prompt(&entries, |prompt| whisper_prompt_fits(&model, prompt))
+                .expect("the last entries fit");
+        let tokens = model
+            .tokenize(&format!(" {}", prompt.text))
+            .expect("the prompt tokenizes")
+            .len();
+        assert!(tokens <= WHISPER_PROMPT_TOKENS, "{tokens} tokens");
         assert!(
-            text.contains("quarterly budget"),
-            "the first window's words are missing: {text}"
+            prompt.first_entry > 0,
+            "80 entries fit whole: {tokens} tokens"
         );
         assert!(
-            text.contains("conference room"),
-            "the last window's words are missing: {text}"
+            prompt
+                .text
+                .starts_with(&format!("{}, ", entries[prompt.first_entry].written))
+                && prompt.text.ends_with("Kestrel Project 80"),
+            "{}",
+            prompt.text
         );
+    }
+
+    fn a_resident_cpu_engine() -> (EngineBuild, EngineSlot) {
+        let session = test_whisper_model().session().expect("a whisper session");
+        let on_the_cpu = EngineBuild {
+            model_id: "test-whisper".to_owned(),
+            transcribe_accelerator: TranscribeAcceleratorSetting::Cpu,
+            transcribe_gpu_device: None,
+            ort_accelerator: OrtAcceleratorSetting::Auto,
+        };
+        let slot = EngineSlot::Resident(on_the_cpu.clone(), LoadedEngine::TranscribeCpp(session));
+        (on_the_cpu, slot)
+    }
+
+    /// While a decode holds the engine the slot keeps its build, so a
+    /// dictation starting meanwhile finds the model loaded and starts no
+    /// second load.
+    #[test]
+    #[ignore = "loads the whisper model SONA_WHISPER_MODEL names"]
+    fn a_leased_engine_still_reads_as_loaded() {
+        let (on_the_cpu, mut slot) = a_resident_cpu_engine();
+
+        let engine = slot.lease(&on_the_cpu).expect("the resident engine");
+        assert_eq!(
+            slot.build(),
+            Some(&on_the_cpu),
+            "a leased engine reads as loaded"
+        );
+        assert!(slot.lease(&on_the_cpu).is_none(), "one owner at a time");
+        slot.put_back(engine);
+        assert!(slot.serves(&on_the_cpu));
+    }
+
+    /// A plan naming another accelerator is not served by the resident build,
+    /// so a changed setting reloads at the next use of any kind.
+    #[test]
+    #[ignore = "loads the whisper model SONA_WHISPER_MODEL names"]
+    fn a_changed_accelerator_is_not_served_by_the_resident_engine() {
+        let (on_the_cpu, mut slot) = a_resident_cpu_engine();
+        let on_the_gpu = EngineBuild {
+            transcribe_accelerator: TranscribeAcceleratorSetting::Auto,
+            ..on_the_cpu.clone()
+        };
+
+        assert!(!slot.serves(&on_the_gpu), "a changed accelerator reloads");
+        assert!(slot.lease(&on_the_gpu).is_none());
+        assert!(slot.serves(&on_the_cpu), "a refused lease keeps the engine");
     }
 
     #[test]

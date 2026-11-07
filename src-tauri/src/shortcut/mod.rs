@@ -1588,27 +1588,18 @@ pub fn change_show_tray_icon_setting(app: AppHandle, enabled: bool) -> Result<()
     Ok(())
 }
 
-/// Save accelerator settings and make the next model use reload with them.
-/// The currently running transcription, if any, keeps its existing engine.
-fn reload_model_on_next_use(app: &AppHandle) {
-    let tm = app.state::<std::sync::Arc<crate::managers::transcription::TranscriptionManager>>();
-    tm.reload_model_on_next_use();
-}
-
-// The accelerator in the store's memory is the one the next model load reads,
-// whether or not the disk took it, so the reload is flagged before a refused
-// write is reported.
+// The next decode reloads the engine when the accelerator or GPU its plan
+// names differs from the build it holds.
 #[tauri::command]
 #[specta::specta]
 pub fn change_transcribe_accelerator_setting(
     app: AppHandle,
     accelerator: settings::TranscribeAcceleratorSetting,
 ) -> Result<(), String> {
-    let persisted = settings::update_settings(&app, |settings| {
+    settings::update_settings(&app, |settings| {
         settings.transcribe_accelerator = accelerator;
-    });
-    reload_model_on_next_use(&app);
-    Ok(persisted?)
+    })?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1617,21 +1608,19 @@ pub fn change_ort_accelerator_setting(
     app: AppHandle,
     accelerator: settings::OrtAcceleratorSetting,
 ) -> Result<(), String> {
-    let persisted = settings::update_settings(&app, |settings| {
+    settings::update_settings(&app, |settings| {
         settings.ort_accelerator = accelerator;
-    });
-    reload_model_on_next_use(&app);
-    Ok(persisted?)
+    })?;
+    Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn change_transcribe_gpu_device(app: AppHandle, device: Option<String>) -> Result<(), String> {
-    let persisted = settings::update_settings(&app, |settings| {
+    settings::update_settings(&app, |settings| {
         settings.transcribe_gpu_device = device;
-    });
-    reload_model_on_next_use(&app);
-    Ok(persisted?)
+    })?;
+    Ok(())
 }
 
 /// Return which accelerators and GPU devices are available for this build.

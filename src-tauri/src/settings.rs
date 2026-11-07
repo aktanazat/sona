@@ -1128,17 +1128,43 @@ impl PersonaSample {
     }
 }
 
+/// The vocabulary a Whisper decode is prompted with: the written forms of
+/// every usable entry from `first_entry` on, joined by ", ".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocabularyPrompt {
+    pub text: String,
+    pub first_entry: usize,
+}
+
 /// Written vocabulary forms are the only text handed to Whisper's decode
 /// prompt. Empty legacy entries remain persisted but never become a prompt.
-pub fn vocabulary_initial_prompt(entries: &[VocabularyEntry]) -> Option<String> {
-    let mut prompt = String::new();
-    for entry in entries.iter().filter(|entry| entry.is_usable()) {
-        if !prompt.is_empty() {
-            prompt.push_str(", ");
+/// Whisper keeps only the end of a prompt too long for it, cut mid-entry, so
+/// the prompt is the longest run of whole entries, ending at the last one,
+/// that `fits` accepts.
+pub fn vocabulary_initial_prompt(
+    entries: &[VocabularyEntry],
+    fits: impl Fn(&str) -> bool,
+) -> Option<VocabularyPrompt> {
+    let mut prompt: Option<VocabularyPrompt> = None;
+    for (index, entry) in entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, entry)| entry.is_usable())
+    {
+        let text = match &prompt {
+            Some(prompt) => format!("{}, {}", entry.written, prompt.text),
+            None => entry.written.clone(),
+        };
+        if !fits(&text) {
+            break;
         }
-        prompt.push_str(&entry.written);
+        prompt = Some(VocabularyPrompt {
+            text,
+            first_entry: index,
+        });
     }
-    (!prompt.is_empty()).then_some(prompt)
+    prompt
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
@@ -4512,8 +4538,33 @@ mod tests {
         ];
 
         assert_eq!(
-            vocabulary_initial_prompt(&entries),
-            Some("Northstar".to_string())
+            vocabulary_initial_prompt(&entries, |_| true),
+            Some(VocabularyPrompt {
+                text: "Northstar".to_string(),
+                first_entry: 0,
+            })
+        );
+    }
+
+    /// Whisper cuts a long prompt from the front, mid-entry. The prompt
+    /// keeps the last entries, where mode vocabulary sits, and only whole
+    /// ones, and says where it starts so the rest get fuzzy correction.
+    #[test]
+    fn a_prompt_too_long_for_whisper_keeps_the_last_entries_whole() {
+        let entries: Vec<VocabularyEntry> = ["Alpha", "Bravo", "Charlie"]
+            .into_iter()
+            .map(|written| VocabularyEntry {
+                spoken: written.to_lowercase(),
+                written: written.to_string(),
+            })
+            .collect();
+
+        assert_eq!(
+            vocabulary_initial_prompt(&entries, |prompt| prompt.len() <= "Bravo, Charlie".len()),
+            Some(VocabularyPrompt {
+                text: "Bravo, Charlie".to_string(),
+                first_entry: 1,
+            })
         );
     }
 

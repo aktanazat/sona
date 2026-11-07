@@ -91,11 +91,13 @@ fn fuzzy_count_as_f64(value: usize) -> Option<f64> {
 }
 
 /// Finds the best spoken-form match for a candidate string. An exact key
-/// match wins in any script; the fuzzy scoring that follows is ASCII only.
+/// match wins in any script; the fuzzy scoring that follows is ASCII only,
+/// and only entries before `fuzzy_until` take part in it.
 fn find_best_vocabulary_match<'a>(
     candidate: &str,
     entries: &'a [VocabularyEntry],
     match_keys: &[VocabularyMatchKey],
+    fuzzy_until: usize,
     threshold: f64,
 ) -> Option<(&'a VocabularyEntry, f64)> {
     if candidate.is_empty() || candidate.chars().count() > 50 {
@@ -115,7 +117,7 @@ fn find_best_vocabulary_match<'a>(
     let mut best_score = f64::MAX;
 
     for match_key in match_keys {
-        if !is_supported_fuzzy_key(&match_key.key) {
+        if match_key.entry_index >= fuzzy_until || !is_supported_fuzzy_key(&match_key.key) {
             continue;
         }
         let candidate_len = candidate.chars().count();
@@ -180,6 +182,28 @@ fn find_best_vocabulary_match<'a>(
 /// line end is at least as strong a phrase boundary as a space, so an n-gram
 /// should never span one.
 pub fn apply_vocabulary_entries(text: &str, entries: &[VocabularyEntry], threshold: f64) -> String {
+    correct_vocabulary(text, entries, entries.len(), threshold)
+}
+
+/// [`apply_vocabulary_entries`] after a decode Whisper was prompted with the
+/// written forms of `entries[prompted_from..]`. Those forms already shaped
+/// the decode, so they replace only an exact spoken-form match, while the
+/// entries the prompt left out keep fuzzy matching.
+pub fn apply_prompted_vocabulary_entries(
+    text: &str,
+    entries: &[VocabularyEntry],
+    prompted_from: usize,
+    threshold: f64,
+) -> String {
+    correct_vocabulary(text, entries, prompted_from, threshold)
+}
+
+fn correct_vocabulary(
+    text: &str,
+    entries: &[VocabularyEntry],
+    fuzzy_until: usize,
+    threshold: f64,
+) -> String {
     if entries.is_empty() {
         return text.to_string();
     }
@@ -195,17 +219,20 @@ pub fn apply_vocabulary_entries(text: &str, entries: &[VocabularyEntry], thresho
     }
 
     text.split('\n')
-        .map(|line| apply_vocabulary_entries_to_line(line, entries, &match_keys, threshold))
+        .map(|line| {
+            apply_vocabulary_entries_to_line(line, entries, &match_keys, fuzzy_until, threshold)
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// One line of [`apply_vocabulary_entries`]. Split out only so the match keys
-/// are built once for the whole text rather than once per line.
+/// One line of [`correct_vocabulary`]. Split out only so the match keys are
+/// built once for the whole text rather than once per line.
 fn apply_vocabulary_entries_to_line(
     line: &str,
     entries: &[VocabularyEntry],
     match_keys: &[VocabularyMatchKey],
+    fuzzy_until: usize,
     threshold: f64,
 ) -> String {
     let words: Vec<&str> = line.split_whitespace().collect();
@@ -228,7 +255,7 @@ fn apply_vocabulary_entries_to_line(
             }
             let candidate = build_ngram(ngram_words);
             if let Some((entry, score)) =
-                find_best_vocabulary_match(&candidate, entries, match_keys, threshold)
+                find_best_vocabulary_match(&candidate, entries, match_keys, fuzzy_until, threshold)
             {
                 if ngram_len > 1 && !starts_with_spoken_character(&candidate, entry) {
                     continue;
@@ -256,11 +283,6 @@ fn apply_vocabulary_entries_to_line(
     }
 
     result.join(" ")
-}
-
-/// Applies only normalized exact vocabulary matches after prompt-biased decoding.
-pub fn apply_exact_vocabulary_entries(text: &str, entries: &[VocabularyEntry]) -> String {
-    apply_vocabulary_entries(text, entries, f64::EPSILON)
 }
 
 pub(crate) fn is_token_character(character: char) -> bool {
@@ -1954,7 +1976,7 @@ mod tests {
             pair("東京タワー", "Tokyo Tower"),
         ];
         assert_eq!(
-            apply_exact_vocabulary_entries("Meet at Café, then éric dupont.", &entries),
+            apply_prompted_vocabulary_entries("Meet at Café, then éric dupont.", &entries, 0, 0.5),
             "Meet at CAFÉ_BRAND, then Éric Dupont-Moretti."
         );
         assert_eq!(
@@ -1964,6 +1986,21 @@ mod tests {
         assert_eq!(
             apply_vocabulary_entries("cafe caff", &entries, 0.5),
             "cafe caff"
+        );
+    }
+
+    /// Whisper's prompt held only the written forms from the second entry
+    /// on, so a near miss of the first is corrected the way any unprompted
+    /// decode is, while a near miss of a prompted form is left as written.
+    #[test]
+    fn a_prompted_decode_fuzzily_corrects_only_entries_left_out_of_the_prompt() {
+        let entries = vec![
+            pair("north star", "Northstar"),
+            pair("brand color", "BrandColor"),
+        ];
+        assert_eq!(
+            apply_prompted_vocabulary_entries("north starr and brand colr", &entries, 1, 0.18),
+            "Northstar and brand colr"
         );
     }
 
