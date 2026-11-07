@@ -2549,12 +2549,7 @@ impl TranscriptionManager {
                             run_options.family.is_some()
                         );
 
-                        let limit_ms = session.limits()?.effective_max_audio_ms;
-                        let max_samples = if limit_ms > 0 {
-                            usize::try_from(limit_ms)?.saturating_mul(16)
-                        } else {
-                            audio.len()
-                        };
+                        let max_samples = transcribe_cpp_window_samples(session, audio.len())?;
                         let recovery = vocabulary_prompt.as_ref().map(|prompt| {
                             SpanRecovery::new(
                                 switches
@@ -2895,6 +2890,26 @@ impl TranscriptionManager {
             model_produced_text,
         })
     }
+}
+
+/// Canary accepts a long window in one pass but drops most of its words:
+/// on clean LibriSpeech, canary-180m-flash lost none in 33 s, 31% in 62 s
+/// and 75% in 130 s. Its ONNX engine decodes 30 s windows too.
+const CANARY_WINDOW_SAMPLES: usize = 30 * 16_000;
+
+/// How many samples a transcribe-cpp session decodes in one pass.
+fn transcribe_cpp_window_samples(session: &Session, audio_samples: usize) -> Result<usize> {
+    let limit_ms = session.limits()?.effective_max_audio_ms;
+    let max_samples = if limit_ms > 0 {
+        usize::try_from(limit_ms)?.saturating_mul(16)
+    } else {
+        audio_samples
+    };
+    Ok(if session.model().arch() == "canary" {
+        max_samples.min(CANARY_WINDOW_SAMPLES)
+    } else {
+        max_samples
+    })
 }
 
 /// Input bounds are advisory for models whose prompt and audio share context.
@@ -6142,6 +6157,33 @@ mod tests {
             "{}",
             prompt.text
         );
+    }
+
+    /// A minute and a half of clear speech keeps its words through Canary,
+    /// which drops most of them when it decodes that much in one pass.
+    #[test]
+    #[ignore = "decodes synthetic speech with the Canary model SONA_CANARY_MODEL names; needs macOS say"]
+    fn canary_keeps_the_words_of_a_long_capture() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let audio = said_speech(dir.path(), &format!("{SPOKEN_PLAN} {SPOKEN_PLAN}"));
+        let model_path = std::env::var("SONA_CANARY_MODEL")
+            .expect("SONA_CANARY_MODEL names a Canary model file");
+        let model = Model::load_with(std::path::Path::new(&model_path), &ModelOptions::default())
+            .expect("the Canary model loads");
+        let mut session = model.session().expect("a Canary session");
+        let options = RunOptions {
+            language: Some("en".to_owned()),
+            ..Default::default()
+        };
+        let max_samples =
+            transcribe_cpp_window_samples(&session, audio.len()).expect("the session's limits");
+        let text = transcribe_windows(&audio, max_samples, |window| {
+            transcribe_cpp_window(&mut session, window, &options, None, &mut None, None, 3)
+        })
+        .expect("the speech decodes");
+        let said = 2 * SPOKEN_PLAN.split_whitespace().count();
+        let heard = text.split_whitespace().count();
+        assert!(heard * 10 >= said * 9, "{heard} of {said} words: {text}");
     }
 
     fn a_resident_cpu_engine() -> (EngineBuild, EngineSlot) {
