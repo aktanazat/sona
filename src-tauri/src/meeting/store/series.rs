@@ -25,7 +25,7 @@
 use super::fence::{write_fenced, Fence, FencedWrite};
 use super::{
     grant_series_consent_in, id, live_series_consent_in, parse_uuid, revoke_series_consent_in,
-    MeetingStore, StoreError,
+    MeetingStore, StoreError, READABLE_ARTIFACT_CONTENT,
 };
 use crate::meeting::analytics::MeetingNotesTemplate;
 use crate::meeting::series_types::{
@@ -405,20 +405,16 @@ fn previous_series_brief_in(
 ) -> Result<Option<PreviousSeriesBrief>, StoreError> {
     let row: Option<(String, Option<String>)> = connection
         .query_row(
-            "SELECT f.session_id,
-                    (SELECT a.content_json
-                       FROM meeting_artifact_revisions a
-                      WHERE a.session_id = f.session_id
-                        AND a.state = 'current'
-                        AND a.content_json IS NOT NULL
-                      ORDER BY a.generated_at_utc_ms DESC LIMIT 1)
-               FROM meeting_calendar_facts f
-               JOIN meeting_sessions m ON m.id = f.session_id
-              WHERE json_extract(f.event_json, '$.seriesKey') = ?1
-                AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < ?2
-                AND m.phase != 'deleting'
-              ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC
-              LIMIT 1",
+            &format!(
+                "SELECT f.session_id, ({READABLE_ARTIFACT_CONTENT})
+                   FROM meeting_calendar_facts f
+                   JOIN meeting_sessions m ON m.id = f.session_id
+                  WHERE json_extract(f.event_json, '$.seriesKey') = ?1
+                    AND COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) < ?2
+                    AND m.phase != 'deleting'
+                  ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC
+                  LIMIT 1"
+            ),
             params![series_key, before_utc_ms],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

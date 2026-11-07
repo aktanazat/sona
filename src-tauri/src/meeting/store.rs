@@ -4516,10 +4516,10 @@ impl MeetingStore {
                     (SELECT SUM(w.end_offset_ns - w.start_offset_ns)
                        FROM meeting_capture_windows w
                       WHERE w.session_id = m.id AND w.end_offset_ns IS NOT NULL),
-                    json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.headline'),
-                    json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.summary.text'),
+                    json_extract(({READABLE_ARTIFACT_CONTENT}), '$.ledger.headline'),
+                    json_extract(({READABLE_ARTIFACT_CONTENT}), '$.summary.text'),
                     m.current_transcript_revision_id IS NOT NULL,
-                    json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads'),
+                    json_extract(({READABLE_ARTIFACT_CONTENT}), '$.ledger.threads'),
                     m.preflight_json
              FROM meeting_sessions m
              WHERE m.phase != 'deleting'
@@ -8271,16 +8271,34 @@ fn has_notes_for_current_transcript(
 
 /* --------------------------------------------------- meetings-list helpers */
 
-/// The newest current artifact revision that carries content: the only
-/// revision a list row is allowed to quote. Written once and interpolated at
-/// both JSON paths, so the ledger headline and the notes summary on one row can
-/// never come from two different revisions.
-const CURRENT_ARTIFACT_CONTENT: &str = "SELECT a.content_json
-                       FROM meeting_artifact_revisions a
-                      WHERE a.session_id = m.id
-                        AND a.state = 'current'
-                        AND a.content_json IS NOT NULL
-                      ORDER BY a.generated_at_utc_ms DESC LIMIT 1";
+/// The one artifact revision every reader of a meeting's ledger or notes
+/// quotes, for the session under join alias `m`: the newest revision that
+/// carries a ledger, a current one before one written against an earlier
+/// transcript; with no ledger in any of them, the newest notes, current first.
+/// The Mac's `readableLedger` picks the same ledger. An edit marks every
+/// revision out of date without unwriting it, so the reading, and the loop
+/// states keyed by ids derived from its words, stay until a rewrite lands.
+/// Interpolated at every JSON path, so the headline, summary and threads one
+/// row shows never come from two revisions.
+macro_rules! readable_artifact {
+    ($column:literal) => {
+        concat!(
+            "SELECT a.",
+            $column,
+            " FROM meeting_artifact_revisions a
+              WHERE a.session_id = m.id
+                AND a.state IN ('current', 'out_of_date')
+                AND a.content_json IS NOT NULL
+              ORDER BY json_type(a.content_json, '$.ledger') IS 'object' DESC,
+                       a.state = 'current' DESC,
+                       a.generated_at_utc_ms DESC
+              LIMIT 1"
+        )
+    };
+}
+
+const READABLE_ARTIFACT_CONTENT: &str = readable_artifact!("content_json");
+const READABLE_ARTIFACT_ID: &str = readable_artifact!("artifact_id");
 
 /// What one page row reads back before the per-session facts are attached.
 struct ListedSessionRow {

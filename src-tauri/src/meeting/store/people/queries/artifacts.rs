@@ -6,7 +6,7 @@ use crate::meeting::people_types::{
 };
 use crate::meeting::store::loops::{ledger_loop_seeds, ledger_rows_in, rows_from_seeds_in};
 use crate::meeting::store::people::{all_people_in, loop_concerns_person, owner_matches};
-use crate::meeting::store::{listed_outcomes, utc_now_ms, StoreError, CURRENT_ARTIFACT_CONTENT};
+use crate::meeting::store::{listed_outcomes, utc_now_ms, StoreError, READABLE_ARTIFACT_CONTENT};
 use crate::meeting::types::{GeneratedMeetingArtifacts, MeetingSessionId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -25,13 +25,11 @@ pub(super) fn meeting_summary_in(
 ) -> Result<PersonMeetingSummary, StoreError> {
     let row = connection
         .query_row(
-            "SELECT m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms),
-                    (SELECT a.content_json
-                       FROM meeting_artifact_revisions a
-                      WHERE a.session_id = m.id AND a.state = 'current'
-                        AND a.content_json IS NOT NULL
-                      ORDER BY a.generated_at_utc_ms DESC LIMIT 1)
-               FROM meeting_sessions m WHERE m.id = ?1",
+            &format!(
+                "SELECT m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms),
+                        ({READABLE_ARTIFACT_CONTENT})
+                   FROM meeting_sessions m WHERE m.id = ?1"
+            ),
             [meeting_id.uuid().to_string()],
             |row| {
                 Ok((
@@ -74,18 +72,14 @@ pub(super) fn facts_for_person_in(
     person: &Person,
 ) -> Result<PersonFacts, StoreError> {
     let now_utc_ms = utc_now_ms();
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT m.id, m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms),
-                (SELECT a.content_json
-                   FROM meeting_artifact_revisions a
-                  WHERE a.session_id = m.id AND a.state = 'current'
-                    AND a.content_json IS NOT NULL
-                  ORDER BY a.generated_at_utc_ms DESC LIMIT 1)
+                ({READABLE_ARTIFACT_CONTENT})
            FROM meeting_sessions m
            JOIN meeting_person_links l ON l.meeting_id = m.id
           WHERE l.person_id = ?1 AND l.confidence = 'confirmed'
-          ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC",
-    )?;
+          ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC"
+    ))?;
     let rows = statement
         .query_map([person.id.uuid().to_string()], |row| {
             Ok((
@@ -290,7 +284,7 @@ pub(super) fn confirmed_totals_in(
         "SELECT (SELECT SUM(w.end_offset_ns - w.start_offset_ns)
                    FROM meeting_capture_windows w
                   WHERE w.session_id = m.id AND w.end_offset_ns IS NOT NULL),
-                json_extract(({CURRENT_ARTIFACT_CONTENT}), '$.ledger.threads')
+                json_extract(({READABLE_ARTIFACT_CONTENT}), '$.ledger.threads')
            FROM meeting_person_links l
            JOIN meeting_sessions m ON m.id = l.meeting_id
           WHERE l.person_id = ?1 AND l.confidence = 'confirmed'

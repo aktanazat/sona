@@ -5,7 +5,7 @@
 //! index holds for them, and what each line's own meeting made of it.
 
 use super::context::application_bundle_ids;
-use super::loops::{current_ledger_in, ledger_loop_seeds, states_in};
+use super::loops::{ledger_loop_seeds, readable_ledger_in, states_in};
 use super::people::confirmed_person_ids_in;
 use super::said::{matched_lines_in, MatchedLine, SessionVoices};
 use super::{id, search_projection, MeetingStore, StoreError};
@@ -365,7 +365,7 @@ impl PastMeeting {
     ) -> Result<Self, StoreError> {
         let mut open = HashMap::<TranscriptSegmentId, Vec<PersonId>>::new();
         let mut decided = HashSet::new();
-        if let Some(ledger) = current_ledger_in(connection, session_id)? {
+        if let Some((_, ledger)) = readable_ledger_in(connection, session_id)? {
             for thread in &ledger.threads {
                 if matches!(
                     thread.state,

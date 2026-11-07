@@ -1,7 +1,7 @@
 //! Reels: the recorded moments behind a person or a promise, heard one after
 //! another, oldest first.
 
-use super::loops::{carry_chain_in, current_ledger_in, ledger_loop_seeds, rows_from_seeds_in};
+use super::loops::{carry_chain_in, ledger_loop_seeds, readable_ledger_in, rows_from_seeds_in};
 use super::people::{loop_concerns_person, person_by_id_in};
 use super::said::SessionVoices;
 use super::transcript_corrections::audio_retained_in;
@@ -55,7 +55,7 @@ impl MeetingStore {
         let mut decisions = Vec::new();
         let mut open_questions = Vec::new();
         for (session, lines) in sessions.iter().enumerate() {
-            let Some(ledger) = current_ledger_in(&connection, lines.session_id)? else {
+            let Some((_, ledger)) = readable_ledger_in(&connection, lines.session_id)? else {
                 continue;
             };
             let rows = rows_from_seeds_in(
@@ -148,8 +148,8 @@ impl MeetingStore {
             let Some(session_id) = occurrence.session_id() else {
                 continue;
             };
-            let row = match current_ledger_in(&connection, session_id)? {
-                Some(ledger) => rows_from_seeds_in(
+            let row = match readable_ledger_in(&connection, session_id)? {
+                Some((_, ledger)) => rows_from_seeds_in(
                     &connection,
                     session_id,
                     ledger_loop_seeds(session_id, &ledger),

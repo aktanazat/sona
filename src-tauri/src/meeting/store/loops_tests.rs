@@ -15,8 +15,8 @@ use crate::meeting::loop_types::{
 };
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
-    GeneratedMeetingArtifacts, MeetingCommandKind, MeetingOperationId, MeetingReasonCode,
-    MeetingSessionId, OperationActor, OperationResult,
+    GeneratedMeetingArtifacts, ManualNote, ManualNoteId, MeetingCommandKind, MeetingOperationId,
+    MeetingReasonCode, MeetingSessionId, OperationActor, OperationResult, SpeakerId,
 };
 use rusqlite::params;
 use std::sync::Arc;
@@ -96,27 +96,7 @@ pub(super) fn file_ledger(
 ) {
     let revision_id = Uuid::new_v4();
     let artifact_id = Uuid::new_v4();
-    let content = GeneratedMeetingArtifacts {
-        summary: crate::meeting::types::CitedArtifactText {
-            text: "Pricing stayed open.".to_string(),
-            citations: Vec::new(),
-        },
-        summary_trace: Vec::new(),
-        outline: Vec::new(),
-        decisions: Vec::new(),
-        action_items: Vec::new(),
-        key_questions: Vec::new(),
-        risks: Vec::new(),
-        follow_up_draft: crate::meeting::types::CitedArtifactText {
-            text: String::new(),
-            citations: Vec::new(),
-        },
-        ledger: Some(ledger),
-        ledger_failure: None,
-        plain: false,
-        plain_because: None,
-        left_out: Vec::new(),
-    };
+
     let connection = store.connection().unwrap();
     connection
         .execute(
@@ -139,10 +119,58 @@ pub(super) fn file_ledger(
                 session_id.uuid().to_string(),
                 revision_id.to_string(),
                 format!("test-{artifact_id}"),
-                serde_json::to_string(&content).unwrap()
+                serde_json::to_string(&notes(Some(ledger))).unwrap()
             ],
         )
         .unwrap();
+}
+
+/// Stores newer notes with no ledger in them as a second current revision,
+/// read off the same transcript revision as the meeting's ledger: a rewrite
+/// with a plain template, or one whose ledger pass failed.
+fn file_plain_notes(store: &MeetingStore, session_id: MeetingSessionId) -> Result<(), StoreError> {
+    let artifact_id = Uuid::new_v4();
+    store.connection()?.execute(
+        "INSERT INTO meeting_artifact_revisions (
+            artifact_id, session_id, transcript_revision_id, input_revision,
+            template_id, template_version, generation_key, state,
+            content_json, generated_at_utc_ms
+         )
+         SELECT ?1, session_id, transcript_revision_id, input_revision, 'plain', 1, ?2,
+                'current', ?3, generated_at_utc_ms + 1
+           FROM meeting_artifact_revisions WHERE session_id = ?4",
+        params![
+            artifact_id.to_string(),
+            format!("test-{artifact_id}"),
+            serde_json::to_string(&notes(None)).unwrap(),
+            session_id.uuid().to_string()
+        ],
+    )?;
+    Ok(())
+}
+
+fn notes(ledger: Option<MeetingLedger>) -> GeneratedMeetingArtifacts {
+    GeneratedMeetingArtifacts {
+        summary: crate::meeting::types::CitedArtifactText {
+            text: "Pricing stayed open.".to_string(),
+            citations: Vec::new(),
+        },
+        summary_trace: Vec::new(),
+        outline: Vec::new(),
+        decisions: Vec::new(),
+        action_items: Vec::new(),
+        key_questions: Vec::new(),
+        risks: Vec::new(),
+        follow_up_draft: crate::meeting::types::CitedArtifactText {
+            text: String::new(),
+            citations: Vec::new(),
+        },
+        ledger,
+        ledger_failure: None,
+        plain: false,
+        plain_because: None,
+        left_out: Vec::new(),
+    }
 }
 
 /// The first occurrence of a weekly series, in review, with its ledger stored.
@@ -677,7 +705,8 @@ fn a_meeting_outside_a_series_carries_nothing() {
 
 /// Give this session a microphone speaker with `name` on it, which is how the
 /// store knows which voice is the user's.
-fn microphone_speaker(store: &MeetingStore, session_id: MeetingSessionId, name: &str) {
+fn microphone_speaker(store: &MeetingStore, session_id: MeetingSessionId, name: &str) -> SpeakerId {
+    let speaker_id = SpeakerId(Uuid::new_v4());
     store
         .connection()
         .unwrap()
@@ -686,12 +715,13 @@ fn microphone_speaker(store: &MeetingStore, session_id: MeetingSessionId, name: 
                 speaker_id, session_id, source_kind, display_name, revision
              ) VALUES (?1, ?2, 'microphone', ?3, 0)",
             params![
-                Uuid::new_v4().to_string(),
+                speaker_id.0.to_string(),
                 session_id.uuid().to_string(),
                 name
             ],
         )
         .unwrap();
+    speaker_id
 }
 
 /// D27 through the real store. The fixture ledger attributes both rows to
@@ -775,6 +805,168 @@ fn the_corpus_walk_reaches_every_meeting_that_has_a_ledger() {
     assert_eq!(walked[0].at_utc_ms, NOW);
     assert_eq!(walked[0].rows.len(), 2);
     assert!(walked.iter().all(|entry| entry.session_id != without));
+}
+
+/// D9. Every edit marks the meeting's notes out of date, and none of them
+/// unwrites the ledger the review page still shows: its loops, and what the
+/// user already did about them, stay readable and writable until a rewrite
+/// replaces that ledger.
+#[test]
+fn an_edit_leaves_the_loops_and_what_was_done_about_them() {
+    let (_directory, store) = store();
+    let session_id = ledger_meeting(&store, NOW);
+    let speaker_id = microphone_speaker(&store, session_id, "Amir");
+    let commitment = loop_id(
+        session_id,
+        MeetingLoopKind::Commitment,
+        "Send the tier comparison",
+    );
+    store
+        .resolve_loop(
+            MeetingLoopResolveRequest {
+                operation_id: MeetingOperationId::new(),
+                loop_id: commitment.clone(),
+                expected_revision: 0,
+                resolution: MeetingLoopResolution::Done,
+            },
+            OperationActor::User,
+            NOW,
+        )
+        .unwrap();
+
+    let noted = store
+        .create_note(
+            MeetingOperationId::new(),
+            NOW,
+            &ManualNote {
+                note_id: ManualNoteId::new(),
+                session_id,
+                start_offset_ns: None,
+                end_offset_ns: None,
+                body: "Dana owes the comparison".to_string(),
+                revision: 0,
+                created_at_utc_ms: NOW,
+                updated_at_utc_ms: NOW,
+            },
+            0,
+        )
+        .unwrap();
+    assert_loops_outlive(&store, session_id, &commitment, "a note").unwrap();
+    let renamed = store
+        .rename_speaker(
+            MeetingOperationId::new(),
+            NOW,
+            session_id,
+            noted.new_revision.unwrap(),
+            speaker_id,
+            "Amir Khan".to_string(),
+        )
+        .unwrap();
+    assert_loops_outlive(&store, session_id, &commitment, "a renamed speaker").unwrap();
+    store
+        .set_title(
+            MeetingOperationId::new(),
+            NOW,
+            session_id,
+            renamed.new_revision.unwrap(),
+            "Pricing, settled".to_string(),
+        )
+        .unwrap();
+    assert_loops_outlive(&store, session_id, &commitment, "a new title").unwrap();
+
+    let question = loop_id(session_id, MeetingLoopKind::Loop, "Trial conversion tier");
+    let dana = person(&store, "Dana Reyes");
+    let assigned = store
+        .assign_loop(
+            MeetingLoopAssignRequest {
+                operation_id: MeetingOperationId::new(),
+                loop_id: question.clone(),
+                expected_revision: 0,
+                owner_person_id: Some(dana),
+            },
+            NOW,
+        )
+        .expect("a loop on the ledger the user is reading takes a change");
+    assert_eq!(
+        row_for(&assigned.loops.rows, &question).owner_person_id,
+        Some(dana)
+    );
+}
+
+/// What `edit` must leave behind: notes marked out of date, and the
+/// meeting's loops, with `resolved` still resolved, in both the meeting's own
+/// list and the corpus walk the inbox and the digest read, beside a ledger the
+/// export can still save.
+fn assert_loops_outlive(
+    store: &MeetingStore,
+    session_id: MeetingSessionId,
+    resolved: &MeetingLoopId,
+    edit: &str,
+) -> Result<(), StoreError> {
+    let connection = store.connection()?;
+    let state: String = connection.query_row(
+        "SELECT state FROM meeting_artifact_revisions WHERE session_id = ?1",
+        params![session_id.uuid().to_string()],
+        |row| row.get(0),
+    )?;
+    let walked = super::loops::ledger_rows_in(&connection)?;
+    drop(connection);
+    assert_eq!(state, "out_of_date", "{edit} marks the notes out of date");
+    let entry = walked
+        .iter()
+        .find(|entry| entry.session_id == session_id)
+        .unwrap_or_else(|| panic!("{edit} took the meeting out of the corpus walk"));
+    assert_eq!(
+        entry.rows.len(),
+        2,
+        "{edit} took rows out of the corpus walk"
+    );
+    assert_eq!(
+        row_for(&entry.rows, resolved).status,
+        MeetingLoopStatus::Done,
+        "{edit} forgot what the user did, in the corpus walk"
+    );
+    let rows = store.meeting_loops(session_id)?.rows;
+    assert_eq!(rows.len(), 2, "{edit} took the meeting's loops away");
+    assert_eq!(
+        row_for(&rows, resolved).status,
+        MeetingLoopStatus::Done,
+        "{edit} forgot what the user did"
+    );
+    assert_eq!(
+        store.readable_ledger(session_id)?,
+        Some(("test".to_string(), ledger())),
+        "{edit} left the ledger export nothing to save"
+    );
+    Ok(())
+}
+
+/// D3. Newer notes with no ledger in them do not take the loops off the
+/// ledger the review page still shows.
+#[test]
+fn newer_notes_without_a_ledger_keep_the_loops_of_the_ledger_shown() {
+    let (_directory, store) = store();
+    let session_id = ledger_meeting(&store, NOW);
+    file_plain_notes(&store, session_id).unwrap();
+
+    let walked = super::loops::ledger_rows_in(&store.connection().unwrap()).unwrap();
+
+    assert_eq!(walked.len(), 1);
+    assert_eq!(
+        walked[0].rows.len(),
+        2,
+        "the corpus walk reads the ledger shown"
+    );
+    assert_eq!(
+        store.meeting_loops(session_id).unwrap().rows.len(),
+        2,
+        "and so does the meeting's own list"
+    );
+    assert_eq!(
+        store.readable_ledger(session_id).unwrap(),
+        Some(("test".to_string(), ledger())),
+        "and so does the ledger export"
+    );
 }
 
 /// D27 reaching D20's evening sentence. The count is the whole corpus, not

@@ -15,7 +15,7 @@ use crate::meeting::store::transcript_corrections::{
 };
 use crate::meeting::store::{
     canonical_speaker_ids, effective_segments_for_session,
-    loops::{current_ledger_in, ledger_loop_seeds, rows_from_seeds_in},
+    loops::{ledger_loop_seeds, readable_ledger_in, rows_from_seeds_in},
     notes_for_session, speakers_for_session, utc_now_ms, MeetingStore, StoreError,
 };
 use crate::meeting::types::{
@@ -268,7 +268,7 @@ fn read_conversation(
             related_sources: vec![conversation.source.clone()],
         });
     }
-    let Some(ledger) = current_ledger_in(connection, session_id)? else {
+    let Some((_, ledger)) = readable_ledger_in(connection, session_id)? else {
         return Ok(());
     };
     for row in rows_from_seeds_in(

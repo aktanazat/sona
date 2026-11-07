@@ -3838,12 +3838,13 @@ impl MeetingSessionManager {
     /// Write this meeting's ledger as one self-contained HTML page.
     ///
     /// The page is a view, not a record. Its inferred half — threads, states,
-    /// receipts — comes from the current artifact revision; its measured half
-    /// — turns, seconds, word counts, talk share — comes from analytics, which
-    /// owns those numbers, and the two are joined only here. Nothing is
-    /// mutated, so this takes no operation id and no expected revision: run it
-    /// again after a transcript edit and the counts on the page move while the
-    /// model's reading of the conversation stays where it was.
+    /// receipts — comes from the meeting's readable ledger, the one its loops
+    /// are read off; its measured half — turns, seconds, word counts, talk
+    /// share — comes from analytics, which owns those numbers, and the two are
+    /// joined only here. Nothing is mutated, so this takes no operation id and
+    /// no expected revision: run it again after a transcript edit and the
+    /// counts on the page move while the model's reading of the conversation
+    /// stays where it was.
     pub async fn produce_ledger_html(
         &self,
         session_id: MeetingSessionId,
@@ -3853,14 +3854,9 @@ impl MeetingSessionManager {
         if !review.can_export {
             return Err(MeetingCommandError::InvalidTransition);
         }
-        let (template_id, ledger) = review
-            .artifacts
-            .iter()
-            .filter(|artifact| artifact.state == MeetingArtifactState::Current)
-            .find_map(|artifact| {
-                let ledger = artifact.content.as_ref()?.ledger.as_ref()?;
-                Some((artifact.template_id.clone(), ledger.clone()))
-            })
+        let (template_id, ledger) = store
+            .readable_ledger(session_id)
+            .map_err(map_store_error)?
             .ok_or(MeetingCommandError::NotFound)?;
 
         let analytics = self

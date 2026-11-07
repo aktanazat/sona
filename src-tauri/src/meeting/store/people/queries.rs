@@ -21,7 +21,7 @@ use crate::meeting::people_types::{
 use crate::meeting::store::workflows::{
     workflow_succeeded_for_calendar_event_in, workflow_succeeded_for_session_in,
 };
-use crate::meeting::store::{MeetingStore, StoreError};
+use crate::meeting::store::{MeetingStore, StoreError, READABLE_ARTIFACT_CONTENT};
 use crate::meeting::types::MeetingSessionId;
 use crate::meeting::workflow_types::WorkflowId;
 use rusqlite::{Connection, OptionalExtension};
@@ -296,29 +296,25 @@ fn people_list_in(
     hidden: &HashSet<MeetingSessionId>,
 ) -> Result<PeopleListResult, StoreError> {
     let revision = people_revision_in(connection)?;
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT p.id, p.display_name, p.aliases_json, p.calendar_emails_json,
                 p.organization, p.created_at_utc_ms, p.updated_at_utc_ms,
                 p.summary, p.summary_generated_at_utc_ms, p.summary_model_id,
                 SUM(CASE WHEN l.confidence = 'confirmed' THEN 1 ELSE 0 END),
-                lm.at_utc_ms,
+                m.at_utc_ms,
                 SUM(CASE WHEN l.confidence = 'suggested' THEN 1 ELSE 0 END),
                 COALESCE(GROUP_CONCAT(DISTINCT l.source), ''),
-                lm.id,
-                lm.title,
-                (SELECT a.content_json
-                   FROM meeting_artifact_revisions a
-                  WHERE a.session_id = lm.id AND a.state = 'current'
-                    AND a.content_json IS NOT NULL
-                  ORDER BY a.generated_at_utc_ms DESC LIMIT 1)
+                m.id,
+                m.title,
+                ({READABLE_ARTIFACT_CONTENT})
            FROM persons p
            LEFT JOIN meeting_person_links l ON l.person_id = p.id
                 AND l.meeting_id NOT IN (SELECT value FROM json_each(?1))
            LEFT JOIN (
-                SELECT m.id, m.title,
-                       COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) AS at_utc_ms
-                  FROM meeting_sessions m
-           ) lm ON lm.id = (
+                SELECT s.id, s.title,
+                       COALESCE(s.started_at_utc_ms, s.created_at_utc_ms) AS at_utc_ms
+                  FROM meeting_sessions s
+           ) m ON m.id = (
                 SELECT l2.meeting_id
                   FROM meeting_person_links l2
                   JOIN meeting_sessions m2 ON m2.id = l2.meeting_id
@@ -329,8 +325,8 @@ fn people_list_in(
                  LIMIT 1
            )
           GROUP BY p.id
-          ORDER BY p.display_name COLLATE NOCASE, p.id",
-    )?;
+          ORDER BY p.display_name COLLATE NOCASE, p.id"
+    ))?;
     let rows = statement
         .query_map([hidden_json(hidden)], |row| {
             Ok((
