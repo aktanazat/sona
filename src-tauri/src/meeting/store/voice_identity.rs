@@ -1255,7 +1255,9 @@ pub(crate) fn names_user(name: &str, user_name: Option<&str>) -> bool {
 /// meeting recorded on this Mac, or a speaker somebody named after them in
 /// About me. An imported file puts whoever it names on the microphone lane,
 /// so there only the name counts, and a name a voice match wrote is the
-/// matched person's, whoever else shares it.
+/// matched person's, whoever else shares it. A call's other voices count
+/// only by the full name: a colleague who shares the user's first name is
+/// on the call, not on the microphone.
 pub(crate) fn speaker_is_user(
     display_name: &str,
     lane: SourceKind,
@@ -1263,8 +1265,13 @@ pub(crate) fn speaker_is_user(
     named_by_voice_match: bool,
     user_name: Option<&str>,
 ) -> bool {
-    (lane == SourceKind::Microphone && !imported)
-        || (!named_by_voice_match && names_user(display_name, user_name))
+    if lane == SourceKind::Microphone {
+        return !imported || (!named_by_voice_match && names_user(display_name, user_name));
+    }
+    let name = normalized(display_name);
+    !named_by_voice_match
+        && !name.is_empty()
+        && user_name.is_some_and(|user_name| normalized(user_name) == name)
 }
 
 /// Every kept voice's speaker, from any meeting, that no person claims and
@@ -2317,4 +2324,37 @@ fn from_i64(value: i64) -> Result<u64, StoreError> {
 
 fn parse_uuid(value: &str) -> Result<uuid::Uuid, StoreError> {
     uuid::Uuid::parse_str(value).map_err(|_| StoreError::VoiceInvariant)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::speaker_is_user;
+    use crate::meeting::types::SourceKind;
+
+    #[test]
+    fn a_call_voice_with_only_the_users_first_name_is_someone_else() {
+        let user = Some("Alex Chen");
+
+        assert!(!speaker_is_user(
+            "Alex",
+            SourceKind::SystemAudio,
+            false,
+            false,
+            user
+        ));
+        assert!(speaker_is_user(
+            "alex  chen",
+            SourceKind::SystemAudio,
+            false,
+            false,
+            user
+        ));
+        assert!(speaker_is_user(
+            "Alex",
+            SourceKind::Microphone,
+            true,
+            false,
+            user
+        ));
+    }
 }
