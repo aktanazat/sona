@@ -221,6 +221,7 @@ final class AppModel {
     private var paletteSeed = ""
     @ObservationIgnored private var pendingOpenURLs: [URL] = []
     var sheet: Sheet?
+    @ObservationIgnored private var sheetBeforeQuit: Sheet?
 
     /// The core answered its first request. Nothing that reads the core is
     /// drawn before this.
@@ -470,6 +471,36 @@ final class AppModel {
     func recordScreen() {
         reveal()
         sheet = .recorder
+    }
+
+    /// AppKit refuses to quit while a sheet is up, before Sona can ask about
+    /// a recording, and the screen recorder is a sheet for as long as it
+    /// records. Quit closes the sheet, waits for it to leave, then quits.
+    func quit() {
+        sheetBeforeQuit = sheet
+        sheet = nil
+        Task {
+            for _ in 0..<20 where NSApp.windows.contains(where: { $0.attachedSheet != nil }) {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            // terminate: waits for Sona's answer in a nested run loop. Run
+            // from this task, that loop could not start the task that
+            // answers, and Sona never quit.
+            RunLoop.main.perform { MainActor.assumeIsolated { NSApp.terminate(nil) } }
+        }
+    }
+
+    /// The person kept recording: the sheet Quit closed comes back.
+    /// AppKit drops a sheet raised before its quit loop has unwound, so the
+    /// sheet waits for the main run loop.
+    func restoreSheetAfterCancelledQuit() {
+        let restored = sheetBeforeQuit
+        sheetBeforeQuit = nil
+        RunLoop.main.perform(inModes: [.default]) {
+            MainActor.assumeIsolated {
+                if self.sheet == nil { self.sheet = restored }
+            }
+        }
     }
 
     func openBrief(_ eventKey: String) {
