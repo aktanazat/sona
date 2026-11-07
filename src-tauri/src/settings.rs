@@ -3134,8 +3134,10 @@ pub(crate) fn decode_settings_backup(
 }
 
 /// Apply only portable user intent from the former application. Machine-bound
-/// devices, model selection, automation, cloud consent, context access, and
-/// agent permissions remain owned by the Sona Personal installation.
+/// devices, model selection, automation, cloud consent, context access, agent
+/// permissions, and how many dictations to keep remain owned by the Sona
+/// Personal installation: a smaller imported limit would delete dictations at
+/// the next cleanup without the history import's question.
 pub(crate) fn merge_upstream_import_settings(
     target: &AppSettings,
     mut imported: AppSettings,
@@ -3186,8 +3188,6 @@ pub(crate) fn merge_upstream_import_settings(
     merged.emoji_replacements_enabled = imported.emoji_replacements_enabled;
     merged.model_unload_timeout = imported.model_unload_timeout;
     merged.word_correction_threshold = imported.word_correction_threshold;
-    merged.history_limit = imported.history_limit;
-    merged.recording_retention_period = imported.recording_retention_period;
     merged.post_process_enabled = imported.post_process_enabled;
     merged.post_process_provider_id = imported.post_process_provider_id;
     merged.post_process_providers = imported.post_process_providers;
@@ -4514,6 +4514,27 @@ mod tests {
             assert!(apply_settings_migrations(&mut settings, &raw));
             assert_eq!(settings.history_limit, migrated, "stored {stored}");
         }
+    }
+
+    /// An import keeps how many dictations Sona holds. The former app's
+    /// smaller limit used to replace it, and the next cleanup deleted the
+    /// difference without the history import's question.
+    #[test]
+    fn an_import_keeps_how_many_dictations_sona_holds() {
+        let mut target = get_default_settings();
+        target.history_limit = 1000;
+        target.recording_retention_period = RecordingRetentionPeriod::PreserveLimit;
+        let mut imported = get_default_settings();
+        imported.history_limit = 0;
+        imported.recording_retention_period = RecordingRetentionPeriod::Days3;
+
+        let merged = merge_upstream_import_settings(&target, imported, &[]);
+
+        assert_eq!(merged.history_limit, 1000);
+        assert_eq!(
+            merged.recording_retention_period,
+            RecordingRetentionPeriod::PreserveLimit
+        );
     }
 
     /// A user who writes the retired rule back is not migrated a second time:
