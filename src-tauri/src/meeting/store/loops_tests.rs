@@ -3,7 +3,7 @@
 
 use super::loops::{ledger_loop_seeds, SCHEMA_VERSION};
 use super::workflow_core_tests::{meeting, person as insert_person, store};
-use super::{MeetingStore, StoreError};
+use super::{MeetingStore, SpeakerRename, StoreError};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::ledger::{
     LedgerCommitment, LedgerFirmness, LedgerOpenLoop, LedgerReceipt, LedgerReceiptState,
@@ -853,14 +853,15 @@ fn an_edit_leaves_the_loops_and_what_was_done_about_them() {
         .unwrap();
     assert_loops_outlive(&store, session_id, &commitment, "a note").unwrap();
     let renamed = store
-        .rename_speaker(
-            MeetingOperationId::new(),
-            NOW,
+        .rename_speaker(SpeakerRename {
+            operation_id: MeetingOperationId::new(),
+            requested_at_utc_ms: NOW,
             session_id,
-            noted.new_revision.unwrap(),
+            expected_revision: noted.new_revision.unwrap(),
             speaker_id,
-            "Amir Khan".to_string(),
-        )
+            display_name: "Amir Khan".to_string(),
+            user_name: None,
+        })
         .unwrap();
     assert_loops_outlive(&store, session_id, &commitment, "a renamed speaker").unwrap();
     store

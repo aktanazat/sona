@@ -8785,7 +8785,10 @@ pub(crate) mod tests {
                     self.session_id,
                     ARTIFACT_FIXTURE_REVISION,
                     GenerationIntent::Pipeline,
-                    Some(generator),
+                    Some(ChosenEngine {
+                        generator,
+                        route: ProcessingRoute::Local,
+                    }),
                 )
                 .expect("artifact generation");
             let ArtifactGenerationOutcome::Generated { artifact, .. } = outcome else {
