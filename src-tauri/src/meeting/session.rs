@@ -9404,6 +9404,94 @@ pub(crate) mod tests {
             );
         }
 
+        /// Notes for the meeting the person just left hold their next model
+        /// request for one that starts while they are being written. They
+        /// used to check for a recording only before their first request, so
+        /// a local model kept working beside the whole recording.
+        #[test]
+        fn notes_under_way_pause_for_a_recording_that_starts() {
+            struct FirstRequestWaits {
+                calls: AtomicUsize,
+                started: Mutex<Option<mpsc::Sender<()>>>,
+                resume: Mutex<mpsc::Receiver<()>>,
+            }
+
+            impl crate::meeting::processing::MeetingTextGenerator for FirstRequestWaits {
+                fn is_available(&self) -> bool {
+                    true
+                }
+
+                fn model_id(&self) -> &'static str {
+                    "first-request-waits"
+                }
+
+                fn model_version(&self) -> std::borrow::Cow<'static, str> {
+                    std::borrow::Cow::Borrowed("first-request-waits-v1")
+                }
+
+                fn max_input_bytes(&self) -> usize {
+                    usize::MAX
+                }
+
+                fn generate(
+                    &self,
+                    system_prompt: &str,
+                    evidence: &str,
+                    max_tokens: i32,
+                    shape: ReplyShape,
+                ) -> Result<String, MeetingTextGenerationError> {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    let first = self.started.lock().unwrap().take();
+                    if let Some(started) = first {
+                        started.send(()).unwrap();
+                        self.resume.lock().unwrap().recv().unwrap();
+                    }
+                    crate::meeting::processing::MeetingTextGenerator::generate(
+                        &NotesAndAnswers,
+                        system_prompt,
+                        evidence,
+                        max_tokens,
+                        shape,
+                    )
+                }
+            }
+
+            let (files, manager, _starts, _aborts) = manager();
+            let (started, first_request) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let generator = Arc::new(FirstRequestWaits {
+                calls: AtomicUsize::new(0),
+                started: Mutex::new(Some(started)),
+                resume: Mutex::new(resumed),
+            });
+            manager
+                .processing
+                .set_text_generators(Arc::clone(&generator) as _, no_engine());
+            let path = files.path().join("otter_export.txt");
+            std::fs::write(&path, include_str!("fixtures/otter_export.txt")).unwrap();
+
+            let (during, imported) = thread::scope(|scope| {
+                let import = scope.spawn(|| block_on(manager.import_transcript(path)));
+                first_request.recv().expect("notes reach the model");
+                let recording = manager.processing.park_for_capture();
+                resume.send(()).unwrap();
+                thread::sleep(UNPARKED_RUN);
+                let during = generator.calls.load(Ordering::SeqCst);
+                drop(recording);
+                (during, import.join().unwrap())
+            });
+
+            imported.expect("the transcript imports once the recording stops");
+            assert_eq!(
+                during, 1,
+                "notes asked the model again beside the recording"
+            );
+            assert!(
+                generator.calls.load(Ordering::SeqCst) > 1,
+                "notes go on once the recording stops"
+            );
+        }
+
         /// A synced meeting deleted while another records still queues the
         /// removal of its cloud copy. The delete used to skip it whenever any
         /// capture ran, and nothing queues it later, so the copy stayed in the
