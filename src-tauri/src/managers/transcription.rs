@@ -5902,18 +5902,16 @@ mod tests {
         }
     }
 
-    /// About 40 s of synthetic speech 9 dB under steady pink noise at the
-    /// level of a real office room, the mix where a "Sona" prompt made
-    /// whisper-large-v3-turbo write only "Sona" for the first 30 s window.
-    fn noisy_multi_window_speech(dir: &std::path::Path) -> Vec<f32> {
+    const SPOKEN_PLAN: &str = "Okay so here is the plan for this week. First, the quarterly budget review moves to Thursday afternoon, and Maria will send the draft numbers to the finance team before noon on Wednesday. Second, the vendor contract still needs a signature, so Jordan is going to call their legal team tomorrow morning and push for a final version by Friday. Third, we are pausing the mobile redesign until the research interviews are finished, which should be about two weeks from now. Also, please remember that the office is closed on Monday for the holiday, so any deliveries need to be rescheduled. Finally, the new hire starts next Tuesday, and Priya will run the onboarding session at ten in the morning in the large conference room.";
+
+    /// `text` as macOS says it in Samantha's voice, at 16 kHz.
+    fn said_speech(dir: &std::path::Path, text: &str) -> Vec<f32> {
         let aiff = dir.join("speech.aiff");
         let wav = dir.join("speech.wav");
         let said = std::process::Command::new("say")
             .args(["-v", "Samantha", "-o"])
             .arg(&aiff)
-            .arg(
-                "Okay so here is the plan for this week. First, the quarterly budget review moves to Thursday afternoon, and Maria will send the draft numbers to the finance team before noon on Wednesday. Second, the vendor contract still needs a signature, so Jordan is going to call their legal team tomorrow morning and push for a final version by Friday. Third, we are pausing the mobile redesign until the research interviews are finished, which should be about two weeks from now. Also, please remember that the office is closed on Monday for the holiday, so any deliveries need to be rescheduled. Finally, the new hire starts next Tuesday, and Priya will run the onboarding session at ten in the morning in the large conference room.",
-            )
+            .arg(text)
             .status()
             .expect("say runs");
         assert!(said.success());
@@ -5924,11 +5922,18 @@ mod tests {
             .status()
             .expect("afconvert runs");
         assert!(converted.success());
-        let speech: Vec<f32> = hound::WavReader::open(&wav)
+        hound::WavReader::open(&wav)
             .expect("the converted speech opens")
             .into_samples::<i16>()
             .map(|sample| f32::from(sample.expect("a sample")) / 32_768.0)
-            .collect();
+            .collect()
+    }
+
+    /// About 40 s of synthetic speech 9 dB under steady pink noise at the
+    /// level of a real office room, the mix where a "Sona" prompt made
+    /// whisper-large-v3-turbo write only "Sona" for the first 30 s window.
+    fn noisy_multi_window_speech(dir: &std::path::Path) -> Vec<f32> {
+        let speech = said_speech(dir, SPOKEN_PLAN);
         assert!(speech.len() > 35 * 16_000, "the speech spans two windows");
 
         let noise = pink_noise(speech.len());
