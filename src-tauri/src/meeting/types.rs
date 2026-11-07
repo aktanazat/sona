@@ -52,6 +52,7 @@ meeting_id!(SavedPromptId);
 meeting_id!(PromptRunId);
 meeting_id!(MeetingFolderId);
 meeting_id!(MeetingTemplateId);
+meeting_id!(HeardPlanId);
 
 /// The title a recording with no calendar event and no recognised app gets
 /// before anything has been read out of it. One constant because two places
@@ -1557,6 +1558,7 @@ meeting_event!(MeetingNoteChangedEvent, "meeting:note-changed");
 meeting_event!(MeetingArtifactChangedEvent, "meeting:artifact-changed");
 meeting_event!(MeetingRemoteJobChangedEvent, "meeting:remote-job-changed");
 meeting_event!(MeetingRemovedEvent, "meeting:removed");
+meeting_event!(MeetingHeardPlansChangedEvent, "meeting:heard-plans-changed");
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
 pub struct MeetingEventPayload {

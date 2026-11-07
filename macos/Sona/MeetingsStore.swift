@@ -324,6 +324,9 @@ final class MeetingsStore {
     /// choice can be undone.
     private(set) var setAside: [MeetingLoopRow] = []
     private(set) var people: [MeetingPersonContextRow] = []
+    /// Moves when the plans heard in the open meeting change, so the card
+    /// listing them reads them again.
+    private(set) var heardPlansRevision = 0
     private(set) var transcriptQuery = ""
     /// The one voice the transcript is narrowed to, picked on the talk bar.
     private(set) var transcriptSpeaker: SpeakerId?
@@ -415,6 +418,11 @@ final class MeetingsStore {
             }
             self.reloadListSoon()
             Task { await self.loadFolders() }
+        }
+        core.observe(CoreEvent.meetingHeardPlansChanged) { [weak self] line in
+            guard let self, let payload: MeetingEventPayload = try? Core.payload(line),
+                  payload.sessionId == self.openSessionId else { return }
+            self.heardPlansRevision += 1
         }
         core.observe("planning-changed-event") { [weak self] _ in
             guard let self, self.openSessionId != nil else { return }

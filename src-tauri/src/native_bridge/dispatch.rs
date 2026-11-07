@@ -37,6 +37,7 @@ pub(super) const TYPED_EVENTS: [&str; 41] = [
     crate::meeting::types::MeetingArtifactChangedEvent::NAME,
     crate::meeting::types::MeetingRemoteJobChangedEvent::NAME,
     crate::meeting::types::MeetingRemovedEvent::NAME,
+    crate::meeting::types::MeetingHeardPlansChangedEvent::NAME,
     crate::cloud_sync::types::CloudSyncChangedEvent::NAME,
     crate::meeting::types::MeetingNavigationRequestedEvent::NAME,
     crate::meeting::types::MeetingProcessingProgressEvent::NAME,
@@ -3469,6 +3470,46 @@ pub(super) async fn call(
                     app.clone(),
                     app.state(),
                     request,
+                )
+                .await,
+            )
+        }
+        "meeting_heard_plans" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::heard_plans::meeting_heard_plans(app.state(), session_id).await)
+        }
+        "meeting_heard_plan_not_now" => {
+            let mut args = Args::parse(params)?;
+            let plan_id = args.take("planId")?;
+            reply(
+                crate::commands::heard_plans::meeting_heard_plan_not_now(app.state(), plan_id)
+                    .await,
+            )
+        }
+        "meeting_heard_plan_edit" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::heard_plans::meeting_heard_plan_edit(app.state(), request).await)
+        }
+        "meeting_heard_plan_add_to_calendar" => {
+            let mut args = Args::parse(params)?;
+            let plan_id = args.take("planId")?;
+            reply(
+                crate::commands::heard_plans::meeting_heard_plan_add_to_calendar(
+                    app.state(),
+                    plan_id,
+                )
+                .await,
+            )
+        }
+        "meeting_heard_plan_undo_calendar" => {
+            let mut args = Args::parse(params)?;
+            let plan_id = args.take("planId")?;
+            reply(
+                crate::commands::heard_plans::meeting_heard_plan_undo_calendar(
+                    app.state(),
+                    plan_id,
                 )
                 .await,
             )

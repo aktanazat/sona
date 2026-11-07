@@ -59,6 +59,7 @@ explicit JSON. Existing `--json` uses remain supported.
 | `--person-stats <PERSON_ID>`                                         | The numbers the person page leads with: meetings, time together, last met, loops   |
 | `--events [--after CURSOR]`                                          | Receipts and workflow runs, newest first                                          |
 | `--upcoming [--limit N]`                                             | Today and the next seven local days of calendar                                   |
+| `--plans [--limit N]`                                                | Plans to meet heard in meetings, newest first, each with its quote and status     |
 | `--notes [--limit N]`                                                | Notes, most recently updated first; pin state does not change this ordering       |
 | `--note <NOTE_ID>`                                                   | A note with source links and related notes                                        |
 | `--note-context <TEXT> [--limit N]`                                  | Current matching note bodies, matching text and resolved source references         |
@@ -334,7 +335,7 @@ claude mcp add sona -- bun /absolute/path/to/sona/tools/sona-mcp/src/index.ts
 | `sona_people`                     | `name`, `limit?`                                             |
 | `sona_person_catch_up`            | `person_id`, `since_utc_ms?`                                 |
 | `sona_person_changes`             | `person_id`, `since_utc_ms`                                  |
-| `sona_upcoming`, `sona_notes`     | `limit?`                                                     |
+| `sona_upcoming`, `sona_plans`, `sona_notes` | `limit?`                                           |
 | `sona_note`, `sona_note_versions` | `note_id`                                                    |
 | `sona_note_context`               | `query`, `limit?`                                            |
 | `sona_note_diff`                  | `note_id`, `from_version`, `to_version?`                     |

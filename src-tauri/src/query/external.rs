@@ -32,6 +32,7 @@
 //! row's revision, then writes against it, so it requires both external-consent
 //! rows and returns the store receipt verbatim.
 
+use super::plans_page::{plans_page, ExternalPlansPage};
 use super::{
     loop_link, meeting_link, note_link, person_link, KeptLocal, QueryError, QueryEventsPage,
     QueryPageReason, QueryScope, QuerySearchPage, QUERY_SCHEMA_VERSION,
@@ -315,6 +316,9 @@ pub enum ExternalRequest {
     Upcoming {
         limit: usize,
     },
+    Plans {
+        limit: usize,
+    },
     Projects {
         limit: usize,
     },
@@ -361,6 +365,7 @@ impl ExternalRequest {
             | Self::PersonStats { .. }
             | Self::Events { .. }
             | Self::Upcoming { .. }
+            | Self::Plans { .. }
             | Self::Projects { .. }
             | Self::Project { .. }
             | Self::Notes { .. }
@@ -415,6 +420,7 @@ pub fn is_external_query(args: &CliArgs) -> bool {
         || args.person_stats.is_some()
         || args.events
         || args.upcoming
+        || args.plans
         || args.projects
         || args.project.is_some()
         || args.loop_resolve.is_some()
@@ -458,6 +464,7 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         || args.people.is_some()
         || args.events
         || args.upcoming
+        || args.plans
         || args.projects
         || args.notes
         || args.note_context.is_some();
@@ -501,7 +508,7 @@ fn foreign_modifier(args: &CliArgs) -> Option<&'static str> {
         (
             args.limit.is_some(),
             pages,
-            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --projects, --notes or --note-context.",
+            "--limit is only read by --query, --meetings, --loops, --people, --events, --upcoming, --plans, --projects, --notes or --note-context.",
         ),
         (
             args.from_version.is_some(),
@@ -630,6 +637,9 @@ impl ExternalRequest {
         if args.upcoming {
             return Ok(Self::Upcoming { limit });
         }
+        if args.plans {
+            return Ok(Self::Plans { limit });
+        }
         if args.projects {
             return Ok(Self::Projects { limit });
         }
@@ -680,7 +690,7 @@ impl ExternalRequest {
             });
         }
         Err(ExternalError::invalid(
-            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
+            "No verb was named. Pass --query, --meetings, --meeting, --transcript, --loops, --people, --person-catch-up, --person-changes, --person-stats, --events, --upcoming, --plans, --projects, --project, --notes, --note, --note-context, --note-versions, --note-diff, --stats or --loop-resolve.",
         ))
     }
 }
@@ -1282,6 +1292,7 @@ pub enum ExternalResponse {
     PersonStats(ExternalPersonStats),
     Events(QueryEventsPage),
     Upcoming(ExternalUpcomingPage),
+    Plans(ExternalPlansPage),
     Projects(ExternalProjectsPage),
     Project(ExternalProjectDetail),
     LoopResolve(ExternalReceipt),
@@ -1436,6 +1447,10 @@ pub async fn answer(
         ExternalRequest::Upcoming { limit } => Ok(ExternalResponse::Upcoming(
             upcoming_page(meetings, calendar, *limit).await?,
         )),
+        ExternalRequest::Plans { limit } => Ok(ExternalResponse::Plans(plans_page(
+            store(meetings).await?.as_ref(),
+            *limit,
+        )?)),
         ExternalRequest::Projects { limit } => {
             let projects = planning::planning_projects(app.state::<Arc<HistoryManager>>())
                 .map_err(|message| project_read_error(history, message))?;
@@ -3211,6 +3226,28 @@ fn text_response(response: &ExternalResponse) -> String {
             }
             page_footer(&mut text, page.has_more);
         }
+        ExternalResponse::Plans(page) => {
+            for row in &page.entries {
+                let when = row
+                    .start_utc_ms
+                    .map_or_else(|| row.when_text.clone(), local_time);
+                let _ = writeln!(text, "{when}  {}  [{}]", row.title, label(&row.status));
+                if !row.people.is_empty() {
+                    let _ = writeln!(text, "with {}", row.people.join(", "));
+                }
+                if let Some(place) = &row.place {
+                    let _ = writeln!(text, "at {place}");
+                }
+                if let Some(quote) = &row.quote {
+                    let _ = writeln!(text, "\"{quote}\"");
+                }
+                let _ = writeln!(text, "{}\n", row.link);
+            }
+            if page.entries.is_empty() {
+                text.push_str("no plans heard.\n");
+            }
+            page_footer(&mut text, page.has_more);
+        }
         ExternalResponse::Projects(page) => {
             for row in &page.entries {
                 let _ = writeln!(
@@ -3874,6 +3911,10 @@ mod tests {
             }
         );
         assert_eq!(
+            request(&["--plans", "--limit", "5"]),
+            ExternalRequest::Plans { limit: 5 }
+        );
+        assert_eq!(
             request(&["--loop-resolve", LOOP]),
             ExternalRequest::LoopResolve {
                 loop_id: MeetingLoopId(LOOP.to_string()),
@@ -4321,6 +4362,7 @@ mod tests {
             vec!["--people", "Dana"],
             vec!["--events"],
             vec!["--upcoming"],
+            vec!["--plans"],
             vec!["--person-stats", PERSON],
         ] {
             assert_eq!(

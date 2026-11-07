@@ -352,6 +352,18 @@ export const TOOLS: readonly ToolDefinition[] = [
     ],
   },
   {
+    name: "sona_plans",
+    title: "List plans heard in meetings",
+    description:
+      "List the plans to meet that were said aloud in recorded meetings, newest first: what, the time as said and the time Sona read it as (null when the words named none; all_day when they named a day only), the people and place as said, the exact quote, and status — heard, on_calendar, happened (a later recording overlapped it with one of its people) or no_record (its time passed with no such recording). Plans from a series kept on this Mac are left out. Requires external access; no writes, and nothing is added to any calendar.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: LIMIT },
+      additionalProperties: false,
+    },
+    argv: (input) => ["--plans", ...optional("--limit", count(input, "limit"))],
+  },
+  {
     name: "sona_projects",
     title: "List Sona personal projects",
     description:

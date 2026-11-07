@@ -157,7 +157,8 @@ pub(crate) trait AutomationEffects: Send + Sync {
     fn post_webhook(&self, url: &str, body: &[u8]) -> EffectOutcome;
 }
 
-/// Run enabled series automations, then saved folder prompts, for the meeting.
+/// Run enabled series automations, then saved folder prompts, for the meeting,
+/// then read the plans to meet heard in it.
 ///
 /// Spawns, and returns immediately: the caller is the processing job thread, and
 /// the meeting is already in review by the time this is called. In a headless
@@ -185,6 +186,7 @@ pub(crate) fn after_meeting_finalized(
                 now_utc_ms(),
             ),
         );
+        super::heard_plans::after_notes(&store, None, &processing, session_id);
         return;
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -198,28 +200,32 @@ pub(crate) fn after_meeting_finalized(
                 now_utc_ms(),
             ),
         );
+        super::heard_plans::after_notes(&store, app.as_ref(), &processing, session_id);
     });
 }
 
-/// Run the saved folder prompts, and nothing else, for a meeting whose notes
-/// came after its run: from a "Try again", or from a run an earlier launch
-/// finished. The series automations stay with the run that sets them off,
-/// because they can send the notes off the Mac. Spawns, or runs inline
-/// without an app, as [`after_meeting_finalized`] does.
+/// Run the saved folder prompts, then read the plans to meet heard, and
+/// nothing else, for a meeting whose notes came after its run: from a "Try
+/// again", or from a run an earlier launch finished. The series automations
+/// stay with the run that sets them off, because they can send the notes off
+/// the Mac. Spawns, or runs inline without an app, as
+/// [`after_meeting_finalized`] does.
 pub(crate) fn after_late_notes(
     store: Arc<MeetingStore>,
     app: Option<AppHandle>,
     processing: MeetingProcessingService,
     session_id: MeetingSessionId,
 ) {
+    let inline = app.is_none();
     let run = move || {
         if let Err(error) =
             super::prompts::run_folder_prompts(&store, &processing, session_id, now_utc_ms())
         {
             log::warn!("Could not run folder prompts for {session_id:?}: {error:?}");
         }
+        super::heard_plans::after_notes(&store, app.as_ref(), &processing, session_id);
     };
-    if app.is_none() {
+    if inline {
         run();
         return;
     }

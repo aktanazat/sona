@@ -26,6 +26,8 @@ struct MeetingReviewView: View {
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     ConversationBookmarksView(core: model.core, store: store,
                         sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
+                    HeardPlansCard(core: model.core, store: store,
+                        sessionId: snapshot.session.sessionId, revision: snapshot.session.revision)
                     pane(snapshot)
                 } else {
                     if let failure = store.reviewFailure {

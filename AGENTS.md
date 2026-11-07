@@ -273,6 +273,7 @@ off on install. With either needed grant off, it refuses with
 | `--people <NAME>`                                                     | Look a person up by name, alias or calendar address               |
 | `--events [--after <ID>]`                                             | Receipts and workflow runs, newest first                          |
 | `--upcoming [--limit N]`                                              | Today plus the next seven local days of calendar                  |
+| `--plans [--limit N]`                                                 | Plans to meet heard in meetings, with quote and status            |
 | `--loop-resolve <LOOP_ID>`                                            | **Writes.** Marks one loop done, prints the `OperationReceipt`    |
 
 Exit codes: 0 answered, 2 bad input (`invalid_request`), 1 everything else

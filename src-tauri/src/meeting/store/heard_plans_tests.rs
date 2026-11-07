@@ -1,0 +1,515 @@
+use super::workflow_core_tests::{
+    link, meeting, person, reviewable_meeting, store, transcript_segments,
+};
+use super::{MeetingStore, StoreError};
+use crate::meeting::heard_plan_types::{
+    HeardPlan, HeardPlanEdit, HeardPlanStatus, HeardPlanWindow,
+};
+use crate::meeting::heard_plans::read;
+use crate::meeting::processing::{
+    MeetingProcessingService, MeetingTextGenerationError, MeetingTextGenerator, ReplyShape,
+};
+use crate::meeting::types::{ArtifactCitation, MeetingSessionId};
+use chrono::{Local, TimeZone};
+use rusqlite::params;
+use serde::Serialize;
+use serde_json::json;
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use uuid::Uuid;
+
+/// What was said in the weekly sync, a second apart from 10:00 on Monday
+/// 2 November 2026. Every line to L10 is read, being within two lines of
+/// one that names a day or a time; L11 names neither and is not read.
+const SAID: [&str; 11] = [
+    "Morning all.",
+    "Let's do the pricing review Thursday at 2 with Nolan at the office.",
+    "Thursday at 2 works for me.",
+    "We met Acme last Tuesday at 3 and they pushed back.",
+    "Coffee with Dana tomorrow at 10?",
+    "Sure, tomorrow at 10.",
+    "And the board dinner is Friday at 7.",
+    "Let's call Priya on Monday at 11 about onboarding.",
+    "Good.",
+    "Nice work.",
+    "We should get lunch with Dana sometime.",
+];
+
+/// One plan as the engine names it in its reply.
+#[derive(Serialize)]
+struct Named {
+    what: &'static str,
+    when: &'static str,
+    people: &'static [&'static str],
+    place: &'static str,
+    quote: &'static str,
+    lines: &'static [&'static str],
+}
+
+/// The pricing review proposed in L2 and agreed in L3.
+const PRICING_REVIEW: Named = Named {
+    what: "pricing review",
+    when: "Thursday at 2",
+    people: &["Nolan"],
+    place: "the office",
+    quote: SAID[1],
+    lines: &["L2", "L3"],
+};
+
+/// An engine on this Mac that gives every request the same answer, or
+/// cannot be reached, and counts the requests.
+struct Scripted {
+    answer: Option<String>,
+    asked: AtomicUsize,
+}
+
+impl Scripted {
+    fn answering(plans: &[Named]) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Some(json!({ "plans": plans }).to_string()),
+            asked: AtomicUsize::new(0),
+        })
+    }
+
+    fn unreachable() -> Arc<Self> {
+        Arc::new(Self {
+            answer: None,
+            asked: AtomicUsize::new(0),
+        })
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+impl MeetingTextGenerator for Scripted {
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn model_id(&self) -> &'static str {
+        "scripted"
+    }
+
+    fn model_version(&self) -> Cow<'static, str> {
+        Cow::Borrowed("scripted-1")
+    }
+
+    fn max_input_bytes(&self) -> usize {
+        usize::MAX
+    }
+
+    fn context_window_bytes(&self) -> Option<usize> {
+        Some(4096 * 3)
+    }
+
+    fn generate(
+        &self,
+        _system_prompt: &str,
+        _evidence: &str,
+        _max_tokens: i32,
+        _shape: ReplyShape,
+    ) -> Result<String, MeetingTextGenerationError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.answer
+            .clone()
+            .ok_or(MeetingTextGenerationError::Unreachable)
+    }
+}
+
+fn engine(generator: &Arc<Scripted>) -> MeetingProcessingService {
+    let service = MeetingProcessingService::new(None);
+    let generator: Arc<dyn MeetingTextGenerator> = generator.clone();
+    service.set_text_generators(Arc::clone(&generator), generator);
+    service
+}
+
+fn local(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+    Local
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .expect("one such moment here")
+        .timestamp_millis()
+}
+
+fn notes_written() -> i64 {
+    local(2026, 11, 2, 11, 0)
+}
+
+fn weekly_sync(store: &MeetingStore) -> MeetingSessionId {
+    let sync = reviewable_meeting(store, "Weekly sync", local(2026, 11, 2, 10, 0));
+    transcript_segments(store, sync, &SAID);
+    sync
+}
+
+/// The same lines in a new transcript of `sync`, as transcribing it again
+/// makes.
+fn transcribed_again(store: &MeetingStore, sync: MeetingSessionId) -> Result<(), StoreError> {
+    let connection = store.connection()?;
+    let session = sync.uuid().to_string();
+    let lines = connection
+        .prepare(
+            "SELECT s.track_id, s.ordinal, s.start_offset_ns, s.end_offset_ns, s.speaker_id,
+                    s.base_text
+               FROM meeting_transcript_segments s
+               JOIN meeting_sessions m
+                 ON m.current_transcript_revision_id = s.transcript_revision_id
+              WHERE m.id = ?1",
+        )?
+        .query_map(params![session], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let revision = Uuid::new_v4().to_string();
+    connection.execute(
+        "INSERT INTO meeting_transcript_revisions (
+                transcript_revision_id, session_id, engine_id, destination_json,
+                source_set_json, language, state, created_at_utc_ms
+             ) VALUES (?1, ?2, 'test', '{}', '[]', 'en', 'complete', 2)",
+        params![revision, session],
+    )?;
+    for (track, ordinal, start, end, speaker, text) in lines {
+        connection.execute(
+            "INSERT INTO meeting_transcript_segments (
+                    segment_id, transcript_revision_id, track_id, ordinal,
+                    start_offset_ns, end_offset_ns, speaker_id, base_text
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                Uuid::new_v4().to_string(),
+                revision,
+                track,
+                ordinal,
+                start,
+                end,
+                speaker,
+                text
+            ],
+        )?;
+    }
+    connection.execute(
+        "UPDATE meeting_sessions SET current_transcript_revision_id = ?1 WHERE id = ?2",
+        params![revision, session],
+    )?;
+    Ok(())
+}
+
+/// Read `sync` with an engine that names `plans`, and the plans kept.
+fn read_with(
+    store: &MeetingStore,
+    sync: MeetingSessionId,
+    plans: &[Named],
+) -> Result<Vec<HeardPlan>, StoreError> {
+    read(
+        store,
+        &engine(&Scripted::answering(plans)),
+        sync,
+        notes_written(),
+    )?;
+    store.heard_plans(sync)
+}
+
+/// Each plan kept, as its title, people and place.
+fn kept(plans: &[HeardPlan]) -> Vec<(&str, Vec<&str>, Option<&str>)> {
+    plans
+        .iter()
+        .map(|plan| {
+            (
+                plan.title.as_str(),
+                plan.people.iter().map(String::as_str).collect(),
+                plan.place.as_deref(),
+            )
+        })
+        .collect()
+}
+
+/// The day comes from the moment the words were said, not from the
+/// reading: "Thursday at 2" said on the Monday is that Thursday afternoon.
+/// The citation spans the lines the plan cites, so its play button plays
+/// them.
+#[test]
+fn a_plan_is_kept_on_the_day_its_words_name_when_said() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+
+    let plans = read_with(&store, sync, &[PRICING_REVIEW]).unwrap();
+
+    let segments = store.analytics_segments(sync).unwrap();
+    let plan = plans.first().expect("the plan was kept");
+    assert_eq!(
+        (
+            plan.when_text.as_str(),
+            plan.window,
+            plan.quote.as_deref(),
+            plan.citation.clone()
+        ),
+        (
+            "Thursday at 2",
+            Some(HeardPlanWindow {
+                start_utc_ms: local(2026, 11, 5, 14, 0),
+                end_utc_ms: local(2026, 11, 5, 15, 0),
+                all_day: false,
+            }),
+            Some(SAID[1]),
+            Some(ArtifactCitation {
+                segment_id: segments[1].segment_id,
+                start_offset_ns: segments[1].start_offset_ns,
+                end_offset_ns: segments[2].end_offset_ns,
+            }),
+        )
+    );
+}
+
+/// What the engine names is kept only as far as the lines it cites bear it
+/// out. Each case is one plan the engine named.
+macro_rules! kept_as_its_lines_bear_it_out {
+    ($($name:ident: $plan:expr => $kept:expr;)*) => { $(
+        #[test]
+        fn $name() {
+            let (_directory, store) = store();
+            let sync = weekly_sync(&store);
+
+            let plans = read_with(&store, sync, &[$plan]).unwrap();
+
+            let expected: Vec<(&str, Vec<&str>, Option<&str>)> = $kept;
+            assert_eq!(kept(&plans), expected);
+        }
+    )* };
+}
+
+kept_as_its_lines_bear_it_out! {
+    a_plan_its_lines_bear_out_is_kept_with_the_names_and_place_said:
+        PRICING_REVIEW => vec![("pricing review", vec!["Nolan"], Some("the office"))];
+    a_name_or_place_its_lines_do_not_say_is_left_off:
+        Named { people: &["Nolan", "Stephen"], place: "the Hyatt lobby", ..PRICING_REVIEW }
+        => vec![("pricing review", vec!["Nolan"], None)];
+    a_quote_its_lines_do_not_hold_is_dropped:
+        Named {
+            what: "deck review", when: "Thursday at 2", people: &[], place: "",
+            quote: "Let's meet Wednesday at 4 to finalize the deck", lines: &["L2"]
+        }
+        => vec![];
+    a_when_its_lines_do_not_say_is_dropped:
+        Named { when: "Wednesday at 9", people: &[], place: "", lines: &["L2"], ..PRICING_REVIEW }
+        => vec![];
+    a_plan_from_a_line_the_engine_was_not_shown_is_dropped:
+        Named {
+            what: "lunch with Dana", when: "sometime", people: &["Dana"], place: "",
+            quote: SAID[10], lines: &["L11"]
+        }
+        => vec![];
+    a_meeting_already_over_when_it_was_said_is_dropped:
+        Named {
+            what: "Acme meeting", when: "last Tuesday at 3", people: &[], place: "",
+            quote: SAID[3], lines: &["L4"]
+        }
+        => vec![];
+}
+
+/// Once for each transcript, even when the reading found nothing: the
+/// engine is not asked again each time notes are written, only when the
+/// transcript is made anew.
+#[test]
+fn a_meeting_is_read_once_for_each_transcript() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    let engine_here = Scripted::answering(&[]);
+    let service = engine(&engine_here);
+
+    read(&store, &service, sync, notes_written()).unwrap();
+    read(&store, &service, sync, notes_written()).unwrap();
+    let asked_for_one_transcript = engine_here.asked();
+    transcribed_again(&store, sync).unwrap();
+    read(&store, &service, sync, notes_written()).unwrap();
+
+    assert_eq!((asked_for_one_transcript, engine_here.asked()), (1, 2));
+}
+
+/// An engine that could not be reached leaves the meeting unread, so the
+/// next notes read it rather than its plans being lost.
+#[test]
+fn a_meeting_the_engine_could_not_be_reached_for_is_read_next_time() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    read(
+        &store,
+        &engine(&Scripted::unreachable()),
+        sync,
+        notes_written(),
+    )
+    .unwrap();
+
+    let plans = read_with(&store, sync, &[PRICING_REVIEW]).unwrap();
+
+    assert_eq!(
+        kept(&plans),
+        [("pricing review", vec!["Nolan"], Some("the office"))]
+    );
+}
+
+/// A plan he edited, answered "Not now" or put on the calendar stays as he
+/// left it when the meeting is read again, and the new reading's copy of it
+/// is dropped. A plan he left alone is replaced by the new reading.
+#[test]
+fn what_he_answered_stays_through_the_next_reading_once() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    let reply = [
+        PRICING_REVIEW,
+        Named {
+            what: "coffee with Dana",
+            when: "tomorrow at 10",
+            people: &["Dana"],
+            place: "",
+            quote: SAID[4],
+            lines: &["L5", "L6"],
+        },
+        Named {
+            what: "board dinner",
+            when: "Friday at 7",
+            people: &[],
+            place: "",
+            quote: SAID[6],
+            lines: &["L7"],
+        },
+        Named {
+            what: "call with Priya",
+            when: "Monday at 11",
+            people: &["Priya"],
+            place: "",
+            quote: SAID[7],
+            lines: &["L8"],
+        },
+    ];
+    let plans = read_with(&store, sync, &reply).unwrap();
+    let plan = |title: &str| {
+        plans
+            .iter()
+            .find(|plan| plan.title == title)
+            .expect("the reading kept it")
+    };
+    let pricing = plan("pricing review");
+    let window = pricing.window.expect("a time was said");
+    store
+        .heard_plan_edit(HeardPlanEdit {
+            plan_id: pricing.plan_id,
+            title: "Pricing review with Nolan".into(),
+            start_utc_ms: window.start_utc_ms,
+            end_utc_ms: window.end_utc_ms,
+            people: vec!["Nolan".into()],
+            place: None,
+        })
+        .unwrap();
+    store
+        .heard_plan_not_now(plan("coffee with Dana").plan_id)
+        .unwrap();
+    store
+        .set_heard_plan_calendar_event(plan("board dinner").plan_id, Some("event-1"))
+        .unwrap();
+
+    transcribed_again(&store, sync).unwrap();
+    let plans = read_with(&store, sync, &reply).unwrap();
+
+    let mut answered = plans
+        .iter()
+        .map(|plan| {
+            (
+                plan.title.as_str(),
+                plan.edited,
+                plan.declined,
+                plan.on_calendar,
+            )
+        })
+        .collect::<Vec<_>>();
+    answered.sort_unstable();
+    assert_eq!(
+        answered,
+        [
+            ("Pricing review with Nolan", true, false, false),
+            ("board dinner", false, false, true),
+            ("call with Priya", false, false, false),
+            ("coffee with Dana", false, true, false),
+        ]
+    );
+}
+
+/// A plan on the calendar takes no second entry, and no edit until it is
+/// taken back off, so the entry and the plan never disagree: a second tap
+/// on "Add to calendar" is turned away and its entry undone.
+#[test]
+fn a_plan_on_the_calendar_takes_no_second_entry_or_edit_until_it_is_off() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    let plan = read_with(&store, sync, &[PRICING_REVIEW])
+        .unwrap()
+        .remove(0);
+    let window = plan.window.expect("a time was said");
+    let edit = HeardPlanEdit {
+        plan_id: plan.plan_id,
+        title: "Pricing review".into(),
+        start_utc_ms: window.start_utc_ms,
+        end_utc_ms: window.end_utc_ms,
+        people: Vec::new(),
+        place: None,
+    };
+    store
+        .set_heard_plan_calendar_event(plan.plan_id, Some("first"))
+        .unwrap();
+
+    let second = store.set_heard_plan_calendar_event(plan.plan_id, Some("second"));
+    let edited_while_on = store.heard_plan_edit(edit.clone());
+    let entry = store.heard_plan_calendar_event(plan.plan_id).unwrap();
+    store
+        .set_heard_plan_calendar_event(plan.plan_id, None)
+        .unwrap();
+    let edited_once_off = store.heard_plan_edit(edit).map(|plan| plan.title);
+
+    assert!(matches!(second, Err(StoreError::Conflict)));
+    assert!(matches!(edited_while_on, Err(StoreError::Conflict)));
+    assert_eq!(entry.as_deref(), Some("first"));
+    assert_eq!(edited_once_off.ok().as_deref(), Some("Pricing review"));
+}
+
+/// A plan happened where a later recording overlaps its hour with someone
+/// it named confirmed there; anything less is no record of it. Each case
+/// is that later recording: when it began, who was linked, and how surely.
+macro_rules! where_the_plan_happened {
+    ($($name:ident: $began:expr, $who:expr, $confidence:expr => $happened:expr;)*) => { $(
+        #[test]
+        fn $name() {
+            let (_directory, store) = store();
+            let sync = weekly_sync(&store);
+            read_with(&store, sync, &[PRICING_REVIEW]).unwrap();
+            let later = meeting(&store, "Pricing", $began);
+            link(&store, later, person(&store, $who, &[], &[]), "manual", $confidence);
+
+            let plan = store.heard_plans(sync).unwrap().remove(0);
+
+            let expected = if $happened {
+                (HeardPlanStatus::Happened, Some(later))
+            } else {
+                (HeardPlanStatus::NoRecord, None)
+            };
+            assert_eq!((plan.status, plan.happened_session_id), expected);
+        }
+    )* };
+}
+
+where_the_plan_happened! {
+    a_recording_in_its_hour_with_someone_it_named_is_where_it_happened:
+        local(2026, 11, 5, 14, 5), "Nolan Reyes", "confirmed" => true;
+    someone_only_suggested_there_is_not_enough:
+        local(2026, 11, 5, 14, 5), "Nolan Reyes", "suggested" => false;
+    a_recording_with_no_one_it_named_is_not_it:
+        local(2026, 11, 5, 14, 5), "Dana Lee", "confirmed" => false;
+    a_recording_after_its_hour_is_not_it:
+        local(2026, 11, 5, 16, 0), "Nolan Reyes", "confirmed" => false;
+}
