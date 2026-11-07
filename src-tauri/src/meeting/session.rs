@@ -3129,11 +3129,15 @@ impl MeetingSessionManager {
     ) -> Result<MeetingFollowUpDraft, MeetingCommandError> {
         let store = self.store().await?;
         let review = store.review_snapshot(session_id).map_err(map_store_error)?;
-        let content = review
-            .artifacts
-            .iter()
-            .filter(|artifact| artifact.state == MeetingArtifactState::Current)
-            .find_map(|artifact| artifact.content.as_ref());
+        let content_in = |state: MeetingArtifactState| {
+            review
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.state == state)
+                .find_map(|artifact| artifact.content.as_ref())
+        };
+        let content = content_in(MeetingArtifactState::Current)
+            .or_else(|| content_in(MeetingArtifactState::OutOfDate));
         let loops = store.meeting_loops(session_id).map_err(map_store_error)?;
         let evidence = FollowUpEvidence::gather(review.session.title.clone(), content, &loops.rows);
         if evidence.is_empty() {

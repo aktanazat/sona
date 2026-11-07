@@ -1976,7 +1976,7 @@ final class MeetingsStore {
 
     // MARK: - Sending it on
 
-    var hasLedger: Bool { snapshot?.currentLedger != nil }
+    var hasLedger: Bool { snapshot?.readableLedger != nil }
 
     func openFollowUp() {
         guard let sessionId = openSessionId else { return }
