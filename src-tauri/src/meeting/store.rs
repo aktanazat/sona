@@ -6047,32 +6047,8 @@ impl MeetingStore {
         session_id: MeetingSessionId,
     ) -> Result<HashMap<SpeakerId, String>, StoreError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT speaker_id, display_name FROM meeting_speakers
-             WHERE session_id = ?1",
-        )?;
-        let rows = statement.query_map(params![id(session_id)], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut display_names = HashMap::new();
-        for row in rows {
-            let (speaker_id, display_name) = row?;
-            display_names.insert(SpeakerId::from_uuid(parse_uuid(&speaker_id)?), display_name);
-        }
         let canonical_ids = canonical_speaker_ids(&connection, session_id)?;
-        let mut names = HashMap::new();
-        for (&speaker_id, display_name) in &display_names {
-            let canonical_id = canonical_ids
-                .get(&speaker_id)
-                .copied()
-                .unwrap_or(speaker_id);
-            let canonical_name = display_names
-                .get(&canonical_id)
-                .cloned()
-                .unwrap_or_else(|| display_name.clone());
-            names.insert(canonical_id, canonical_name);
-        }
-        Ok(names)
+        speaker_display_names_in(&connection, session_id, &canonical_ids)
     }
 
     /// The diarized transcript reduced to what conversation metrics and
@@ -8982,6 +8958,38 @@ fn analytics_segments_in(
         }
     }
     Ok(segments)
+}
+
+fn speaker_display_names_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+    canonical_ids: &HashMap<SpeakerId, SpeakerId>,
+) -> Result<HashMap<SpeakerId, String>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT speaker_id, display_name FROM meeting_speakers
+         WHERE session_id = ?1",
+    )?;
+    let rows = statement.query_map(params![id(session_id)], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut display_names = HashMap::new();
+    for row in rows {
+        let (speaker_id, display_name) = row?;
+        display_names.insert(SpeakerId::from_uuid(parse_uuid(&speaker_id)?), display_name);
+    }
+    let mut names = HashMap::new();
+    for (&speaker_id, display_name) in &display_names {
+        let canonical_id = canonical_ids
+            .get(&speaker_id)
+            .copied()
+            .unwrap_or(speaker_id);
+        let canonical_name = display_names
+            .get(&canonical_id)
+            .cloned()
+            .unwrap_or_else(|| display_name.clone());
+        names.insert(canonical_id, canonical_name);
+    }
+    Ok(names)
 }
 
 /// A deleted custom choice skips this meeting's rung without changing its body.
