@@ -362,12 +362,15 @@ fn value<T: serde::Serialize>(payload: &T) -> serde_json::Value {
 }
 
 fn headless_manager(corpus: &Corpus) -> Arc<MeetingSessionManager> {
-    Arc::new(MeetingSessionManager::with_parts(
-        None,
-        Some(corpus.directory.path().join("meetings")),
-        Arc::clone(&corpus.secrets),
-        Arc::new(NoCaptureSources),
-    ))
+    Arc::new(
+        MeetingSessionManager::with_parts(
+            None,
+            Some(corpus.directory.path().join("meetings")),
+            Arc::clone(&corpus.secrets),
+            Arc::new(NoCaptureSources),
+        )
+        .reading_only(),
+    )
 }
 
 fn loop_resolve_request(loop_id: &MeetingLoopId) -> ExternalRequest {

@@ -509,6 +509,10 @@ pub struct MeetingSessionManager {
     /// What the mount's recovery sweep moved into recovery, held until
     /// startup takes it for the automatic reprocess pass.
     recovered_at_mount: Mutex<Vec<RecoveredMeeting>>,
+    /// Whether mounting the store sweeps what an earlier launch left. Only the
+    /// app that records may: a command-line read runs beside a live meeting,
+    /// and its sweep would take that meeting for an interrupted one.
+    recovers_on_mount: bool,
     /// UUID namespace for this launch's automatic recovery attempts. Drawn
     /// once per launch so an attempt's operation id is stable inside the
     /// launch — a second pass is deduplicated by the receipt the first one
@@ -633,6 +637,7 @@ impl MeetingSessionManager {
             sources: Mutex::new(source_provider),
             store: Mutex::new(None),
             recovered_at_mount: Mutex::new(Vec::new()),
+            recovers_on_mount: true,
             recovery_launch: Uuid::new_v4(),
             processing,
             capture_active: Arc::new(AtomicBool::new(false)),
@@ -641,6 +646,13 @@ impl MeetingSessionManager {
                 tray_session_id: None,
             }),
         }
+    }
+
+    /// A manager for a process that only reads, beside an app that may be
+    /// recording: its mount leaves every meeting where it is.
+    pub fn reading_only(mut self) -> Self {
+        self.recovers_on_mount = false;
+        self
     }
 
     pub fn set_source_provider(&self, source_provider: Arc<dyn MeetingSourceProvider>) {
@@ -4389,7 +4401,11 @@ impl MeetingSessionManager {
             return Ok(store);
         }
         let opened = MeetingStore::open(root, key).map_err(map_store_error)?;
-        let recovery = opened.recover_interrupted().map_err(map_store_error)?;
+        let recovery = if self.recovers_on_mount {
+            opened.recover_interrupted().map_err(map_store_error)?
+        } else {
+            InterruptedRecovery::default()
+        };
         // A lane's health moves from the track worker's thread, which has no
         // handle to the shell. The store tells this listener after each
         // verdict commits, and the live screen re-reads the session — which
@@ -4409,8 +4425,10 @@ impl MeetingSessionManager {
         *self.recovered_at_mount_lock() = recovery.recovered.clone();
         let store = cached.insert(opened).clone();
         drop(cached);
-        if let Err(error) = self.announce_recovery(&store, &recovery) {
-            log::warn!("Meeting recovery could not refresh the open windows: {error:?}");
+        if self.recovers_on_mount {
+            if let Err(error) = self.announce_recovery(&store, &recovery) {
+                log::warn!("Meeting recovery could not refresh the open windows: {error:?}");
+            }
         }
         super::workflow_engine::resume_pending_workflow_events(
             Arc::clone(&store),
@@ -6589,6 +6607,26 @@ pub(crate) mod tests {
             Arc::clone(&manager.secrets),
             Arc::new(NoCaptureSources),
         )
+    }
+
+    /// A command-line read mounts the store while the app records. Its mount
+    /// must not take the live meeting for one an earlier launch left behind.
+    #[test]
+    fn a_reading_process_leaves_a_live_meeting_recording() {
+        let (_directory, manager, _backend) = mounted_manager();
+        let session_id = interrupted_session(
+            &manager,
+            MeetingPhase::CapturingRecording,
+            ProcessingDestination::Local,
+        );
+
+        let reader = earlier_launch(&manager).reading_only();
+        let read = tauri::async_runtime::block_on(reader.store())
+            .unwrap()
+            .session_snapshot(session_id)
+            .unwrap();
+
+        assert_eq!(read.phase, MeetingPhase::CapturingRecording);
     }
 
     /// Matrix 6: the whole point of the pass. A meeting interrupted after its
