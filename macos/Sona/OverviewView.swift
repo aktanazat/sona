@@ -49,8 +49,9 @@ struct OverviewView: View {
 // MARK: - Today
 
 /// One row across the top of Home: what today holds and what is waiting, each
-/// a count that opens its list. A zero is left out; a count whose source could
-/// not be read says so instead of reading as zero.
+/// a count that opens its list. A zero is left out, and so are today's
+/// meetings when no calendar is connected; a count whose source could not be
+/// read says so instead of reading as zero.
 struct OverviewTodayStrip: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -82,16 +83,17 @@ struct OverviewTodayStrip: View {
     }
 
     private func counters(_ now: Date) -> [TodayCounter] {
-        let meetings = today.meetings.value
         let speakers = today.unknownSpeakers.value
         let untracked = today.untracked.value
         let owed = today.owed.value
-        let counters = [
+        let meetings = today.meetings.map { count in
             TodayCounter(
-                id: "meetings", value: meetings?.count, label: meetings?.count == 1 ? "meeting" : "meetings",
+                id: "meetings", value: count.value?.count, label: count.value?.count == 1 ? "meeting" : "meetings",
                 name: "Meetings today", unreadable: "Calendar unavailable",
-                faces: (meetings?.people ?? []).map { AvatarFace(kind: .person($0.personId), name: $0.name) },
-                action: showUpcoming),
+                faces: (count.value?.people ?? []).map { AvatarFace(kind: .person($0.personId), name: $0.name) },
+                action: showUpcoming)
+        }
+        let counters: [TodayCounter] = [
             TodayCounter(
                 id: "processing", value: today.processing.value, label: "processing",
                 name: "Meetings processing",
@@ -112,7 +114,7 @@ struct OverviewTodayStrip: View {
                 late: owed?.late ?? 0,
                 action: showNeedsYou),
         ]
-        return counters.filter { $0.value != 0 }
+        return ([meetings].compactMap { $0 } + counters).filter { $0.value != 0 }
     }
 
     /// A meeting's review, where its speakers are named and its promises
