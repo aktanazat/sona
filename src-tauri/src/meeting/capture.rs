@@ -41,8 +41,12 @@ pub struct PacketSink {
     samples: Producer<f32>,
     descriptors: Producer<CapturedPacket>,
     gaps: Producer<SourceGap>,
+    dropped: Producer<DroppedRun>,
     clock_epochs: Producer<SourceClockEpoch>,
     gap_overflow: Arc<AtomicBool>,
+    /// The run the lane is refusing now. It goes out when the lane takes a
+    /// packet again, or when the source lets go of the lane.
+    refusing: Option<DroppedRun>,
 }
 
 /// Consumer side of one source lane. It is intentionally single-consumer and is
@@ -51,13 +55,40 @@ pub struct PacketLaneReader {
     samples: Consumer<f32>,
     descriptors: Consumer<CapturedPacket>,
     gaps: Consumer<SourceGap>,
+    dropped: Consumer<DroppedRun>,
     clock_epochs: Consumer<SourceClockEpoch>,
     gap_overflow: Arc<AtomicBool>,
 }
 
+/// Packets a full lane refused one after another, kept as the two ends and
+/// the frame total. Only the writer holds the bridge that places a packet on
+/// the session clock, so the lane hands it the packets themselves, and a
+/// stall of any length costs one entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DroppedRun {
+    pub first: CapturedPacket,
+    pub last: CapturedPacket,
+    pub frames: u64,
+}
+
+impl DroppedRun {
+    pub fn new(packet: CapturedPacket) -> Self {
+        Self {
+            first: packet,
+            last: packet,
+            frames: u64::from(packet.frame_count),
+        }
+    }
+}
+
+/// A run goes out only when the lane takes a packet again, which needs the
+/// writer to have made room since it last emptied this ring, so a lane never
+/// holds more than a few.
+const DROPPED_RUN_CAPACITY: usize = 16;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketLaneReadError {
-    DescriptorWithoutSamples,
+    DescriptorWithoutSamples(CapturedPacket),
 }
 
 impl PacketSink {
@@ -71,6 +102,7 @@ impl PacketSink {
         let (sample_producer, sample_consumer) = RingBuffer::new(sample_capacity);
         let (descriptor_producer, descriptor_consumer) = RingBuffer::new(descriptor_capacity);
         let (gap_producer, gap_consumer) = RingBuffer::new(descriptor_capacity);
+        let (dropped_producer, dropped_consumer) = RingBuffer::new(DROPPED_RUN_CAPACITY);
         let (clock_epoch_producer, clock_epoch_consumer) = RingBuffer::new(descriptor_capacity);
         let gap_overflow = Arc::new(AtomicBool::new(false));
         (
@@ -79,13 +111,16 @@ impl PacketSink {
                 samples: sample_producer,
                 descriptors: descriptor_producer,
                 gaps: gap_producer,
+                dropped: dropped_producer,
                 clock_epochs: clock_epoch_producer,
                 gap_overflow: Arc::clone(&gap_overflow),
+                refusing: None,
             },
             PacketLaneReader {
                 samples: sample_consumer,
                 descriptors: descriptor_consumer,
                 gaps: gap_consumer,
+                dropped: dropped_consumer,
                 clock_epochs: clock_epoch_consumer,
                 gap_overflow,
             },
@@ -114,17 +149,7 @@ impl PacketSink {
         }
 
         if self.samples.slots() < samples.len() || self.descriptors.slots() == 0 {
-            self.report_gap(SourceGap {
-                track_id: packet.track_id,
-                epoch: packet.source_epoch,
-                start_offset_ns: None,
-                end_offset_ns: None,
-                reason: SourceGapReason::PacketDropped,
-                dropped_frames: Some(u64::from(packet.frame_count)),
-            });
-            return PacketPushResult::Dropped {
-                frames: packet.frame_count,
-            };
+            return self.refuse(packet);
         }
 
         // The capacity test is stable for a single producer: the consumer can
@@ -133,20 +158,40 @@ impl PacketSink {
         if self.samples.push_entire_slice(samples).is_err()
             || self.descriptors.push(packet).is_err()
         {
-            self.report_gap(SourceGap {
-                track_id: packet.track_id,
-                epoch: packet.source_epoch,
-                start_offset_ns: None,
-                end_offset_ns: None,
-                reason: SourceGapReason::PacketDropped,
-                dropped_frames: Some(u64::from(packet.frame_count)),
-            });
-            return PacketPushResult::Dropped {
-                frames: packet.frame_count,
-            };
+            return self.refuse(packet);
         }
 
+        self.publish_refusal();
         PacketPushResult::Accepted
+    }
+
+    /// Adds the packet to the run being refused. A packet on another clock
+    /// starts a run of its own, so one bridge places both ends of each.
+    fn refuse(&mut self, packet: CapturedPacket) -> PacketPushResult {
+        match self.refusing.as_mut() {
+            Some(run)
+                if run.last.source_epoch == packet.source_epoch
+                    && run.last.format_epoch == packet.format_epoch =>
+            {
+                run.last = packet;
+                run.frames = run.frames.saturating_add(u64::from(packet.frame_count));
+            }
+            _ => {
+                self.publish_refusal();
+                self.refusing = Some(DroppedRun::new(packet));
+            }
+        }
+        PacketPushResult::Dropped {
+            frames: packet.frame_count,
+        }
+    }
+
+    fn publish_refusal(&mut self) {
+        if let Some(run) = self.refusing.take() {
+            if self.dropped.push(run).is_err() {
+                self.gap_overflow.store(true, Ordering::Release);
+            }
+        }
     }
 
     pub fn report_gap(&mut self, gap: SourceGap) {
@@ -180,6 +225,12 @@ impl PacketSink {
     }
 }
 
+impl Drop for PacketSink {
+    fn drop(&mut self) {
+        self.publish_refusal();
+    }
+}
+
 impl PacketLaneReader {
     /// Returns one descriptor and copies its matching samples into `output`.
     /// Worker-side allocation is permitted when the caller has not reserved a
@@ -193,21 +244,25 @@ impl PacketLaneReader {
             Err(_) => return Ok(None),
         };
         let Some(sample_count) = packet.format().checked_frame_samples(packet.frame_count) else {
-            return Err(PacketLaneReadError::DescriptorWithoutSamples);
+            return Err(PacketLaneReadError::DescriptorWithoutSamples(packet));
         };
         if self.samples.slots() < sample_count {
-            return Err(PacketLaneReadError::DescriptorWithoutSamples);
+            return Err(PacketLaneReadError::DescriptorWithoutSamples(packet));
         }
         output.clear();
         output.resize(sample_count, 0.0);
         if self.samples.pop_entire_slice(output).is_err() {
-            return Err(PacketLaneReadError::DescriptorWithoutSamples);
+            return Err(PacketLaneReadError::DescriptorWithoutSamples(packet));
         }
         Ok(Some(packet))
     }
 
     pub fn pop_gap(&mut self) -> Option<SourceGap> {
         self.gaps.pop().ok()
+    }
+
+    pub fn pop_dropped(&mut self) -> Option<DroppedRun> {
+        self.dropped.pop().ok()
     }
 
     pub fn pop_clock_epoch(&mut self) -> Option<SourceClockEpoch> {
@@ -259,6 +314,17 @@ impl SessionClock {
     }
 }
 
+/// Where a packet starts on the session clock, read through the bridge its
+/// epoch announced.
+pub fn packet_start_offset_ns(bridge: TimestampBridge, packet: CapturedPacket) -> Option<u64> {
+    SessionClock::new(SessionClockAnchor {
+        host_monotonic_anchor_ns: bridge.host_monotonic_anchor_ns,
+        wall_start_utc_ms: 0,
+        clock_policy_version: 1,
+    })
+    .map_packet(bridge, packet)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,8 +361,48 @@ mod tests {
         assert_eq!(samples, vec![0.25, -0.25]);
     }
 
+    /// A full lane refuses whole packets, and once it takes one again it hands
+    /// the writer the stretch it refused: the first and last packet, for
+    /// placing it in time, and every frame.
     #[test]
-    fn full_lane_reports_explicit_drop() {
+    fn full_lane_reports_the_stretch_it_refused() {
+        let track_id = SourceTrackId::new();
+        let (mut sink, mut reader) = PacketSink::new(track_id, 2, 1);
+        let numbered = |sequence| CapturedPacket {
+            sequence,
+            ..packet(track_id)
+        };
+        assert_eq!(
+            sink.try_push_interleaved(numbered(1), &[0.0, 0.0]),
+            PacketPushResult::Accepted
+        );
+        for sequence in 2..=4 {
+            assert_eq!(
+                sink.try_push_interleaved(numbered(sequence), &[0.0, 0.0]),
+                PacketPushResult::Dropped { frames: 2 }
+            );
+        }
+        reader.pop_into(&mut Vec::new()).unwrap();
+        assert_eq!(
+            sink.try_push_interleaved(numbered(5), &[0.0, 0.0]),
+            PacketPushResult::Accepted
+        );
+
+        assert_eq!(
+            std::iter::from_fn(|| reader.pop_dropped()).collect::<Vec<_>>(),
+            [DroppedRun {
+                first: numbered(2),
+                last: numbered(4),
+                frames: 6,
+            }]
+        );
+    }
+
+    /// A source that lets its lane go in the middle of a stall still reports
+    /// the stall, so a meeting stopped while its writer is stuck says what the
+    /// stop cut off.
+    #[test]
+    fn a_lane_let_go_mid_stall_reports_the_stall() {
         let track_id = SourceTrackId::new();
         let (mut sink, mut reader) = PacketSink::new(track_id, 2, 1);
         assert_eq!(
@@ -307,9 +413,16 @@ mod tests {
             sink.try_push_interleaved(packet(track_id), &[0.0, 0.0]),
             PacketPushResult::Dropped { frames: 2 }
         );
+
+        drop(sink);
+
         assert_eq!(
-            reader.pop_gap().unwrap().reason,
-            SourceGapReason::PacketDropped
+            reader.pop_dropped(),
+            Some(DroppedRun {
+                first: packet(track_id),
+                last: packet(track_id),
+                frames: 2,
+            })
         );
     }
 

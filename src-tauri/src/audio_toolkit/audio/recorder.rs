@@ -2232,11 +2232,15 @@ fn run_consumer(inputs: ConsumerInputs) {
                         lane.clear_overrun();
                         lane.resume();
                     }
-                    let _ = reply.send(if acknowledged {
+                    let result = if acknowledged {
                         Ok(capture.stop_report())
                     } else {
                         Err(MeetingCaptureError::StreamFailure)
-                    });
+                    };
+                    // The session seals the track once this reply lands, and a
+                    // run the lane was still refusing goes out with its sink.
+                    drop(capture);
+                    let _ = reply.send(result);
                 }
                 Cmd::AbortMeeting(reply) => {
                     let result = if let Some(mut capture) = active_meeting.take() {
