@@ -2695,7 +2695,8 @@ pub(crate) fn mutate_raw_settings_value<R>(
 /// Every stored field that is individually valid is kept; only broken values
 /// (e.g. an enum variant written by a newer or older version) fall back to
 /// their default. This means one bad field can never reset the rest of the
-/// user's configuration (#1619).
+/// user's configuration (#1619). A field the store lacks reads as it does in
+/// a whole parse, so an older store keeps its upgrade defaults.
 fn salvage_settings(stored: &serde_json::Value) -> AppSettings {
     let Some(stored_map) = stored.as_object() else {
         warn!("Stored settings are not a JSON object; falling back to defaults");
@@ -2709,6 +2710,7 @@ fn salvage_settings(stored: &serde_json::Value) -> AppSettings {
             return get_default_settings();
         }
     };
+    merged.retain(|key, _| stored_map.contains_key(key));
 
     for (key, value) in stored_map {
         let previous = merged.insert(key.clone(), value.clone());
@@ -5373,6 +5375,32 @@ mod tests {
         let salvaged = salvage_settings(&stored);
         assert_eq!(salvaged.selected_model, "kept");
         assert_eq!(salvaged.sound_theme, default_sound_theme());
+    }
+
+    /// A store from before modes and call-app detection, with one value this
+    /// build cannot read, loads as it would whole: its vocabulary and
+    /// language reach every mode, and FaceTime and Phone stay off.
+    #[test]
+    fn salvaging_an_older_store_keeps_its_upgrade_defaults() {
+        let whole_store = serde_json::json!({
+            "settings_schema_version": 1,
+            "selected_model": "whisper-large-v3-turbo",
+            "selected_language": "en",
+            "custom_words": ["Sona", "cjpais"]
+        });
+        let mut broken_store = whole_store.clone();
+        broken_store["sound_theme"] = serde_json::json!("theremin");
+
+        let mut whole: AppSettings = serde_json::from_value(whole_store.clone()).unwrap();
+        apply_settings_migrations(&mut whole, &whole_store);
+        let mut salvaged = salvage_settings(&broken_store);
+        apply_settings_migrations(&mut salvaged, &broken_store);
+
+        assert_eq!(
+            salvaged.detection_meeting_apps,
+            whole.detection_meeting_apps
+        );
+        assert_eq!(salvaged.modes, whole.modes);
     }
 
     #[test]
