@@ -17,6 +17,8 @@ const SAMPLE_RATE: u32 = 16_000;
 const NS_PER_SECOND: u64 = 1_000_000_000;
 const SURROUNDING_NS: u64 = 4 * NS_PER_SECOND;
 const CLIP_NS: u64 = 45 * NS_PER_SECOND;
+/// Two saved places this close are the same place.
+pub(super) const SAME_PLACE_METERS: f64 = 100.0;
 
 impl MeetingStore {
     /// A stretch of one conversation's audio, at most `CLIP_NS` long. Around a
@@ -286,7 +288,7 @@ impl MeetingStore {
         let mut rows = query.query(params![id(session_id)])?;
         while let Some(row) = rows.next()? {
             let candidate: ConversationLocation = decode_json(&row.get::<_, String>(3)?)?;
-            if !candidate.is_valid() || distance_meters(&location, &candidate) > 100.0 {
+            if !candidate.is_valid() || distance_meters(&location, &candidate) > SAME_PLACE_METERS {
                 continue;
             }
             sessions.push(ConversationPlaceSession {
@@ -448,7 +450,7 @@ fn wav_bytes(samples: &[f32], coverage: &[u16]) -> Result<Vec<u8>, StoreError> {
     Ok(bytes)
 }
 
-fn distance_meters(left: &ConversationLocation, right: &ConversationLocation) -> f64 {
+pub(super) fn distance_meters(left: &ConversationLocation, right: &ConversationLocation) -> f64 {
     let latitude = (right.latitude - left.latitude).to_radians();
     let longitude = (right.longitude - left.longitude).to_radians();
     let angle = (latitude / 2.0).sin().powi(2)
