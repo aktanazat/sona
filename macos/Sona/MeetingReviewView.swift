@@ -58,7 +58,12 @@ struct MeetingReviewView: View {
                 }
                 .padding(.bottom, 20)
             }
-            .sheet(isPresented: followUpPresented) { FollowUpSheet(store: store) }
+            .sheet(isPresented: wrapPresented) {
+                if let snapshot = store.snapshot {
+                    MeetingWrapSheet(core: model.core, store: store, sessionId: snapshot.session.sessionId,
+                        title: snapshot.session.title, revision: snapshot.session.revision)
+                }
+            }
             .sheet(isPresented: catchUpPresented) { CatchUpSheet(store: store) }
             .sheet(isPresented: Binding(get: { store.filing != nil }, set: { if !$0 { store.closeFiling() } })) {
                 MeetingFilingSheet(store: store)
@@ -130,8 +135,8 @@ struct MeetingReviewView: View {
         }
     }
 
-    private var followUpPresented: Binding<Bool> {
-        Binding(get: { store.followUpOpen }, set: { if !$0 { store.closeFollowUp() } })
+    private var wrapPresented: Binding<Bool> {
+        Binding(get: { store.wrapOpen && store.snapshot != nil }, set: { if !$0 { store.closeWrap() } })
     }
 
     private var catchUpPresented: Binding<Bool> {
@@ -261,7 +266,7 @@ struct MeetingReviewHeader: View {
                     }
             }
             if store.hasLedger {
-                Button("Follow up") { store.openFollowUp() }
+                Button("Wrap up") { store.openWrap() }
                     .buttonStyle(.compact)
             }
             if store.canExport {
@@ -1978,57 +1983,6 @@ struct LedgerTrustCard: View {
         case let .degraded(threads, commitments):
             "Sona dropped \(threads) threads and \(commitments) commitments whose quotes it could not find."
         }
-    }
-}
-
-// MARK: - Sending it on
-
-/// The follow-up: the words, the clipboard, and the mail client.
-struct FollowUpSheet: View {
-    let store: MeetingsStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Follow up").titleText().accessibilityAddTraits(.isHeader)
-                    if let draft = store.followUp {
-                        Text(draft.source.label).metaText(Theme.inkSecondary)
-                        Text(draft.mailContextStatus).metaText(Theme.inkSecondary)
-                    }
-                }
-                Spacer(minLength: 20)
-                Button("Close") { store.closeFollowUp() }.buttonStyle(.secondary)
-            }
-            .padding(24)
-            Hairline()
-            ErrorNote(store.error).padding(.horizontal, 24)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if store.drafting { ProgressView("Writing the draft…") }
-                    Text(store.followUp.map { $0.body.isEmpty ? "No follow-up is needed for this meeting." : $0.body }
-                        ?? (store.drafting ? "" : "No draft."))
-                        .bodyText()
-                        .textSelection(.enabled)
-                    Text("Sona opens a draft. Only you can send it.").metaText(Theme.inkSecondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(24)
-            }
-            Hairline()
-            HStack(spacing: 12) {
-                Spacer(minLength: 0)
-                Button("Copy") { store.copyFollowUp() }
-                    .buttonStyle(.secondary)
-                    .disabled(store.followUp?.body.isEmpty != false || store.pending != nil)
-                Button(store.pending == "Opening Mail" ? "Opening…" : "Open in Mail") { store.mailFollowUp() }
-                    .buttonStyle(.primary)
-                    .disabled(store.followUp?.body.isEmpty != false || store.pending != nil)
-            }
-            .padding(24)
-        }
-        .frame(width: 560, height: 480)
-        .background(Theme.page)
     }
 }
 

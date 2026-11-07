@@ -1122,9 +1122,10 @@ final class AppModel {
         MeetingConsentPanelView(
             store: live,
             onOpenBrief: { [weak self] eventKey in self?.openBrief(eventKey) },
-            onOpenNotes: { [weak self] id in
+            onWrapUp: { [weak self] id in
                 self?.reveal()
                 self?.openMeeting(id)
+                self?.meetings.openWrap()
             },
             followUp: { [core] id in
                 let draft: MeetingFollowUpDraft = try await core.request(

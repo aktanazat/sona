@@ -645,7 +645,7 @@ struct MeetingConsentPanelView: View {
 
     /// Reading a brief, notes or a meeting is another slice's page.
     var onOpenBrief: (String) -> Void = { _ in }
-    var onOpenNotes: (MeetingSessionId) -> Void = { _ in }
+    var onWrapUp: (MeetingSessionId) -> Void = { _ in }
 
     /// The follow-up text lives with the notes, which this slice does not
     /// read. Unwired, the copy button is not drawn at all.
@@ -683,7 +683,7 @@ struct MeetingConsentPanelView: View {
             PanelCard(store: store) {
                 RitualWrapView(
                     store: store, event: event, card: wrap,
-                    onOpenNotes: onOpenNotes, followUp: followUp)
+                    onWrapUp: onWrapUp, followUp: followUp)
             }
             .padding(8)
         }
@@ -1447,7 +1447,7 @@ struct RitualWrapView: View {
     let store: MeetingLiveStore
     let event: RitualEvent
     let card: RitualWrapCard
-    var onOpenNotes: (MeetingSessionId) -> Void = { _ in }
+    var onWrapUp: (MeetingSessionId) -> Void = { _ in }
     var followUp: ((MeetingSessionId) async throws -> String)?
 
     /// What the copy button says: the draft in flight, the copy that landed,
@@ -1494,9 +1494,9 @@ struct RitualWrapView: View {
             }
             HStack(spacing: 8) {
                 Spacer()
-                Button("Open notes") {
+                Button("Wrap up") {
                     store.respond(event, action: .wrapOpenNotes)
-                    onOpenNotes(card.sessionId)
+                    onWrapUp(card.sessionId)
                 }
                 .buttonStyle(QuietButton(compact: true))
                 .disabled(store.pending != nil)
@@ -1522,12 +1522,12 @@ struct RitualWrapView: View {
 struct RitualView: View {
     let store: MeetingLiveStore
     var onOpenBrief: (String) -> Void = { _ in }
-    var onOpenNotes: (MeetingSessionId) -> Void = { _ in }
+    var onWrapUp: (MeetingSessionId) -> Void = { _ in }
     var followUp: ((MeetingSessionId) async throws -> String)?
 
     var body: some View {
         MeetingConsentPanelView(
-            store: store, onOpenBrief: onOpenBrief, onOpenNotes: onOpenNotes,
+            store: store, onOpenBrief: onOpenBrief, onWrapUp: onWrapUp,
             followUp: followUp)
     }
 }
