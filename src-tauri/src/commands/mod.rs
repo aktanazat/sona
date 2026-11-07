@@ -67,6 +67,14 @@ pub fn finish_recording(app: AppHandle) {
     }
 }
 
+/// The pill's "Paste here": the words held back when the window changed go
+/// to the window in front now.
+#[tauri::command]
+#[specta::specta]
+pub fn paste_held_dictation(app: AppHandle) {
+    crate::actions::paste_held_dictation(&app);
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn is_portable() -> bool {

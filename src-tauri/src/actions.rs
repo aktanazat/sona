@@ -2,7 +2,7 @@
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
-use crate::delivery::{self, DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
+use crate::delivery::{self, Delivery, DeliveryMethod, DeliveryOutcome, DeliveryReceipt};
 use crate::managers::audio::{AudioRecordingManager, CaptureSpool, InputLevel, RecordingStop};
 use crate::managers::history::{CaptureStatus, HistoryManager, KeptDictationReason, NewRunReceipt};
 use crate::managers::model::ModelManager;
@@ -13,7 +13,9 @@ use crate::managers::transcription::StreamEngine;
 use crate::managers::transcription::{
     BatchDecode, SpeechEvidence, StreamWorkKind, TranscriptionManager,
 };
-use crate::modes::{AsrPlan, CloudReceiptStatus, RequestedEngine, RewriteOutcome, RunPlan};
+use crate::modes::{
+    AsrPlan, CloudReceiptStatus, DeliveryPlan, RequestedEngine, RewriteOutcome, RunPlan,
+};
 use crate::prompt_renderer::RenderedPrompt;
 use crate::secrets::{SecretAccount, SecretManager, SecretResolveError};
 use crate::settings::{
@@ -28,7 +30,7 @@ use crate::TranscriptionCoordinator;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use log::{debug, error, warn};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter};
@@ -68,10 +70,13 @@ impl RecordingErrorEvent {
 
 /// `paste-error`: the words were transcribed and kept, but never left Sona.
 /// The id says which history entry holds them, so a shell can open it; it is
-/// `None` when history is off and nothing was kept.
+/// `None` when history is off and nothing was kept. `focus_moved` says the
+/// window changed while the words were transcribed, so they wait for "Paste
+/// here".
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct PasteErrorEvent {
     history_id: Option<i64>,
+    focus_moved: bool,
 }
 
 pub(crate) const DICTATION_DELIVERY_EVENT: &str = "dictation-delivery";
@@ -1313,6 +1318,88 @@ fn persist_delivery_attempt(
     }
 }
 
+/// One dictation's words, the delivery they get, and what that delivery is
+/// recorded against.
+struct DictationWords {
+    text: String,
+    plan: DeliveryPlan,
+    history_id: Option<i64>,
+    run_id: u64,
+}
+
+/// The words of the last dictation refused because keyboard focus moved
+/// while they were transcribed. They wait for "Paste here" until it is used,
+/// the next dictation starts, or another refusal replaces them.
+#[derive(Default)]
+pub(crate) struct HeldDictation(Mutex<Option<DictationWords>>);
+
+impl HeldDictation {
+    /// "Paste here" pastes into whatever window is in front, so the held
+    /// words never press that window's submit key.
+    fn hold(&self, mut words: DictationWords) {
+        words.plan.auto_submit = false;
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(words);
+    }
+
+    fn take(&self) -> Option<DictationWords> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+}
+
+/// Delivers a dictation's words and reports where they went: the pill's
+/// delivery event, the paste error a shell shows, and the receipt appended
+/// to the history entry. Words refused because focus moved are held first.
+fn deliver_dictation(
+    app: &AppHandle,
+    history: &HistoryManager,
+    words: DictationWords,
+    stopped_at: delivery::KeyboardFocus,
+) {
+    let DictationWords {
+        text,
+        plan,
+        history_id,
+        run_id,
+    } = words;
+    let (receipt, focus_moved) = match delivery::deliver(app, text, &plan, stopped_at) {
+        Delivery::Attempted(receipt) => (receipt, false),
+        Delivery::FocusMoved { receipt, text } => {
+            app.state::<HeldDictation>().hold(DictationWords {
+                text,
+                plan,
+                history_id,
+                run_id,
+            });
+            (receipt, true)
+        }
+    };
+    if let Some(event) = DictationDeliveryEvent::for_outcome(receipt.outcome) {
+        let _ = app.emit(DICTATION_DELIVERY_EVENT, event);
+    }
+    if receipt.method != DeliveryMethod::None
+        && receipt.outcome == DeliveryOutcome::DefinitelyNotDispatched
+    {
+        let _ = app.emit(
+            "paste-error",
+            PasteErrorEvent {
+                history_id,
+                focus_moved,
+            },
+        );
+    }
+    persist_delivery_attempt(history, history_id, run_id, receipt);
+}
+
+/// "Paste here": the held words go to the control that has keyboard focus
+/// now. Only the person's click on the offer calls this.
+pub(crate) fn paste_held_dictation(app: &AppHandle) {
+    let Some(words) = app.state::<HeldDictation>().take() else {
+        return;
+    };
+    let history = app.state::<Arc<HistoryManager>>();
+    deliver_dictation(app, &history, words, delivery::KeyboardFocus::now());
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1904,6 +1991,7 @@ impl TranscribeAction {
                 // is already Recording, so the tray's Stop action is correct
                 // from here on.
                 set_tray_state(app, TrayIconState::Recording);
+                app.state::<HeldDictation>().take();
                 if let Some(warm_up) = rewrite_warm_up(&self.run) {
                     tauri::async_runtime::spawn(warm_up);
                 }
@@ -2347,12 +2435,15 @@ impl TranscribeAction {
                                     let ah_clone = ah.clone();
                                     let hm_for_main = Arc::clone(&hm);
                                     let hm_for_fallback = Arc::clone(&hm);
-                                    let history_for_main = history_id;
                                     let history_for_fallback = history_id;
                                     let run_id = run.run_id;
                                     let paste_time = Instant::now();
-                                    let final_text = processed.final_text;
-                                    let delivery_settings = run.delivery().clone();
+                                    let words = DictationWords {
+                                        text: processed.final_text,
+                                        plan: run.delivery().clone(),
+                                        history_id,
+                                        run_id,
+                                    };
                                     let rm_for_paste = Arc::clone(&rm);
                                     let finish_for_main = Arc::clone(&finish);
                                     let dispatch = ah.run_on_main_thread(move || {
@@ -2363,40 +2454,18 @@ impl TranscribeAction {
                                             );
                                             persist_delivery_attempt(
                                                 &hm_for_main,
-                                                history_for_main,
-                                                run_id,
+                                                words.history_id,
+                                                words.run_id,
                                                 DeliveryReceipt::not_dispatched(),
                                             );
                                             return;
                                         }
 
-                                        let receipt = delivery::deliver(
+                                        deliver_dictation(
                                             &ah_clone,
-                                            final_text,
-                                            &delivery_settings,
-                                            stopped_at,
-                                        );
-                                        if let Some(event) =
-                                            DictationDeliveryEvent::for_outcome(receipt.outcome)
-                                        {
-                                            let _ = ah_clone.emit(DICTATION_DELIVERY_EVENT, event);
-                                        }
-                                        if receipt.method != DeliveryMethod::None
-                                            && receipt.outcome
-                                                == DeliveryOutcome::DefinitelyNotDispatched
-                                        {
-                                            let _ = ah_clone.emit(
-                                                "paste-error",
-                                                PasteErrorEvent {
-                                                    history_id: history_for_main,
-                                                },
-                                            );
-                                        }
-                                        persist_delivery_attempt(
                                             &hm_for_main,
-                                            history_for_main,
-                                            run_id,
-                                            receipt,
+                                            words,
+                                            stopped_at,
                                         );
                                         debug!(
                                             "Text delivery completed in {:?}",
@@ -3105,6 +3174,31 @@ mod tests {
             held,
             serde_json::json!({ "error_type": "cloud_transcription_held" })
         );
+    }
+
+    /// "Paste here" pastes into whatever window is in front: the words it
+    /// holds never press that window's submit key, and one click pastes them
+    /// once.
+    #[test]
+    fn held_words_never_submit_and_paste_once() {
+        use super::{DictationWords, HeldDictation};
+
+        let mut plan = active_run(&crate::settings::get_default_settings())
+            .delivery()
+            .clone();
+        plan.auto_submit = true;
+        let held = HeldDictation::default();
+        held.hold(DictationWords {
+            text: "hello".to_string(),
+            plan,
+            history_id: Some(7),
+            run_id: 3,
+        });
+
+        let words = held.take().expect("the refused words are held");
+        assert_eq!(words.text, "hello");
+        assert!(!words.plan.auto_submit);
+        assert!(held.take().is_none());
     }
 
     #[test]

@@ -99,9 +99,12 @@ struct RecordingErrorEvent: Decodable {
 }
 
 /// `paste-error`: the words were kept but never left Sona. `historyId` is
-/// the entry that holds them, or nil when history is off.
+/// the entry that holds them, or nil when history is off. `focusMoved` says
+/// the window changed while they were transcribed, so the core holds them
+/// for "Paste here".
 struct PasteErrorEvent: Decodable {
     let historyId: Int64?
+    let focusMoved: Bool
 }
 
 /// `rewrite-skipped`: the mode asked for a rewrite and the words went out
@@ -152,6 +155,8 @@ enum PillFeedback: Equatable {
     case delivered(DictationDeliveryOutcome)
     case failed
     case kept
+    /// The words wait for a click to paste them into the window in front.
+    case held
 
     var label: String {
         switch self {
@@ -159,6 +164,7 @@ enum PillFeedback: Equatable {
         case .delivered(.sent): "Sent"
         case .failed: "Couldn't paste"
         case .kept: "Recording kept"
+        case .held: "Paste here"
         }
     }
 
@@ -168,14 +174,17 @@ enum PillFeedback: Equatable {
         case .delivered(.sent): "arrow.up.right"
         case .failed: "exclamationmark"
         case .kept: "tray.and.arrow.down"
+        case .held: "doc.on.clipboard"
         }
     }
 
-    /// How long the pill holds it. A line that needs reading stays longer.
+    /// How long the pill holds it. A line that needs reading stays longer,
+    /// and an offer stays long enough to click into a field first.
     var holdMilliseconds: Int {
         switch self {
         case .delivered: 900
         case .failed, .kept: 2200
+        case .held: 10_000
         }
     }
 }
@@ -720,6 +729,13 @@ final class AppModel {
         clearPillFeedback()
     }
 
+    /// The pill's "Paste here": the words held back when the window changed
+    /// go to the window in front now.
+    func pasteHeldDictation() {
+        clearPillFeedback()
+        call { try await self.core.request("paste_held_dictation") }
+    }
+
     /// The long dictation ends as any other, transcribed and delivered, and the
     /// meeting start opens for what comes next.
     func finishIntoMeeting() {
@@ -1220,12 +1236,11 @@ final class AppModel {
                 notice = CaptureNotice(text: Self.recordingErrorText(event.errorType))
             case CoreEvent.pasteError:
                 let event: PasteErrorEvent = try Core.payload(line)
+                let offered = event.focusMoved && settings.settings.overlayStyle != .none
                 notice = CaptureNotice(
-                    text: event.historyId == nil
-                        ? "The words could not be pasted into the app in front. Focus a text field and try again."
-                        : "The words could not be pasted into the app in front. They are kept in the Library.",
+                    text: Self.pasteErrorText(event, offered: offered),
                     dictation: event.historyId)
-                showPillFeedback(.failed)
+                showPillFeedback(event.focusMoved ? .held : .failed)
             case CoreEvent.rewriteSkipped:
                 let event: RewriteSkippedEvent = try Core.payload(line)
                 if let text = event.outcome.skippedText {
@@ -1297,5 +1312,20 @@ final class AppModel {
         default:
             "Couldn't start recording: Unknown error. Try again."
         }
+    }
+
+    /// Why the words stayed in Sona, and where they are now. `offered` says
+    /// the pill shows "Paste here".
+    private static func pasteErrorText(_ event: PasteErrorEvent, offered: Bool) -> String {
+        guard event.focusMoved else {
+            return event.historyId == nil
+                ? "The words could not be pasted into the app in front. Focus a text field and try again."
+                : "The words could not be pasted into the app in front. They are kept in the Library."
+        }
+        return [
+            "You switched windows before the words were ready, so they weren't pasted.",
+            offered ? "Click Paste here on the pill to paste them where you are now." : nil,
+            event.historyId == nil ? nil : "They are kept in the Library.",
+        ].compactMap { $0 }.joined(separator: " ")
     }
 }

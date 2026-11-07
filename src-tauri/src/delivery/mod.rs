@@ -11,6 +11,7 @@ use crate::modes::DeliveryPlan;
 use crate::settings::{ClipboardHandling, PasteMethod};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::AppHandle;
 
@@ -72,6 +73,18 @@ impl DeliveryReceipt {
     }
 }
 
+/// What became of one delivery.
+pub enum Delivery {
+    /// The route ran, and the receipt says how far it got.
+    Attempted(DeliveryReceipt),
+    /// Nothing went out: keyboard focus left the control that had it when
+    /// the recording stopped. The words come back exactly as they were given.
+    FocusMoved {
+        receipt: DeliveryReceipt,
+        text: String,
+    },
+}
+
 /// The control keyboard input went to when the recording stopped. Delivery
 /// compares it with the control that has focus once the text is ready, so a
 /// dictation never lands in, or gets submitted to, a window the user switched
@@ -115,49 +128,54 @@ impl KeyboardFocus {
 ///
 /// This function owns the two decisions every route shares: the exact text
 /// that gets dispatched, and what still has to happen once a route dispatched
-/// it. Routes below only move bytes.
+/// it. Routes below only move bytes. When keyboard focus left the control
+/// that had it at `stopped_at`, nothing goes out and the words come back.
 pub fn deliver(
     app: &AppHandle,
     text: String,
     settings: &DeliveryPlan,
     stopped_at: KeyboardFocus,
-) -> DeliveryReceipt {
-    let text = compose_final_text(text, settings);
+) -> Delivery {
+    let composed = compose_final_text(&text, settings);
     #[cfg(target_os = "macos")]
     let observation = if !settings.auto_submit
         && !matches!(
             settings.paste_method,
             PasteMethod::None | PasteMethod::ExternalScript
         ) {
-        crate::context::macos::corrections::prepare(app, &text)
+        crate::context::macos::corrections::prepare(app, &composed)
     } else {
         crate::context::macos::corrections::cancel();
         None
     };
-    let receipt = dispatch(app, &text, settings, stopped_at);
+    let focus_moved = focus_left(settings, stopped_at, KeyboardFocus::now);
+    let receipt = if focus_moved {
+        log::warn!("Keyboard focus moved after the recording stopped; text was not delivered");
+        DeliveryReceipt::new(
+            primary_method(settings),
+            DeliveryOutcome::DefinitelyNotDispatched,
+        )
+    } else {
+        dispatch(app, &composed, settings)
+    };
     #[cfg(target_os = "macos")]
     if let Some(observation) = observation {
         let _ = observation.send(receipt.outcome);
     }
-    receipt
+    if focus_moved {
+        Delivery::FocusMoved { receipt, text }
+    } else {
+        Delivery::Attempted(receipt)
+    }
 }
 
-fn dispatch(
-    app: &AppHandle,
-    text: &str,
-    settings: &DeliveryPlan,
-    stopped_at: KeyboardFocus,
-) -> DeliveryReceipt {
+fn dispatch(app: &AppHandle, text: &str, settings: &DeliveryPlan) -> DeliveryReceipt {
     let primary = primary_method(settings);
-    if focus_left(settings, stopped_at, KeyboardFocus::now) {
-        log::warn!("Keyboard focus moved after the recording stopped; text was not delivered");
-        return DeliveryReceipt::new(primary, DeliveryOutcome::DefinitelyNotDispatched);
-    }
     #[cfg(target_os = "macos")]
     if should_prefer_accessibility(settings) {
-        match crate::context::macos::insert_into_focused_editable(&text) {
+        match crate::context::macos::insert_into_focused_editable(text) {
             crate::context::macos::AccessibilityInsertion::Delivered => {
-                finish_after_dispatch(app, settings, &text);
+                finish_after_dispatch(app, settings, text);
                 return DeliveryReceipt::new(
                     DeliveryMethod::AccessibilityInsertion,
                     DeliveryOutcome::Delivered,
@@ -167,7 +185,7 @@ fn dispatch(
                 // Same certainty class as a clipboard chord that returned
                 // without a local error: the request left Sona. The user's
                 // configured finishing applies to both.
-                finish_after_dispatch(app, settings, &text);
+                finish_after_dispatch(app, settings, text);
                 return DeliveryReceipt::new(
                     DeliveryMethod::AccessibilityInsertion,
                     DeliveryOutcome::DispatchedButUnconfirmed,
@@ -186,9 +204,9 @@ fn dispatch(
     // suppressed paste distinguishable from an ordinary unconfirmed one.
     let dispatched = dispatched_outcome(settings.paste_method, secure_input_holds_keys_now());
 
-    let clipboard_dispatch = clipboard::paste_frozen(&text, app, settings);
+    let clipboard_dispatch = clipboard::paste_frozen(text, app, settings);
     if clipboard_dispatch_owes_finishing(&clipboard_dispatch) {
-        finish_after_dispatch(app, settings, &text);
+        finish_after_dispatch(app, settings, text);
     }
 
     match clipboard_dispatch {
@@ -251,11 +269,12 @@ fn secure_input_holds_keys_now() -> bool {
 
 /// The one place a trailing space is added, so every route dispatches the same
 /// string and the receipt describes the same delivery.
-fn compose_final_text(mut text: String, settings: &DeliveryPlan) -> String {
+fn compose_final_text<'a>(text: &'a str, settings: &DeliveryPlan) -> Cow<'a, str> {
     if settings.append_trailing_space {
-        text.push(' ');
+        Cow::Owned(format!("{text} "))
+    } else {
+        Cow::Borrowed(text)
     }
-    text
 }
 
 fn primary_method(settings: &DeliveryPlan) -> DeliveryMethod {
@@ -420,14 +439,14 @@ mod tests {
             let mut settings = plan(method);
             settings.append_trailing_space = true;
             assert_eq!(
-                compose_final_text("hello".to_string(), &settings),
+                compose_final_text("hello", &settings),
                 "hello ",
                 "composed text for {method:?}"
             );
 
             settings.append_trailing_space = false;
             assert_eq!(
-                compose_final_text("hello".to_string(), &settings),
+                compose_final_text("hello", &settings),
                 "hello",
                 "composed text for {method:?}"
             );

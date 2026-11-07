@@ -676,6 +676,7 @@ fn initialize_core_logic(app_handle: &AppHandle, runtime: StartupRuntime) -> any
     app_handle.manage(Arc::new(
         commands::onboarding::OnboardingPracticeManager::default(),
     ));
+    app_handle.manage(actions::HeldDictation::default());
     #[cfg(target_os = "macos")]
     app_handle.manage(chat_voice::VoiceManager::new(
         app_handle,
@@ -1665,6 +1666,7 @@ pub fn run(cli_args: CliArgs) {
             show_main_window_command,
             commands::cancel_operation,
             commands::finish_recording,
+            commands::paste_held_dictation,
             commands::is_portable,
             commands::get_app_dir_path,
             commands::get_app_settings,
