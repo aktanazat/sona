@@ -50,10 +50,11 @@ struct SonaApp: App {
     }
 }
 
-/// The app's single lifetime owner. Ordinary quit asks before it ends a
-/// meeting or a screen recording, waits for editable notes, and stops what the
-/// person agreed to stop; the core keeps running until AppKit actually commits
-/// to termination.
+/// The app's single lifetime owner. Ordinary quit waits for a capture that
+/// is starting or finishing, asks before it ends a dictation, a meeting or a
+/// screen recording, waits for editable notes, and stops what the person
+/// agreed to stop; the core keeps running until AppKit actually commits to
+/// termination.
 @MainActor
 final class SonaAppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
@@ -68,15 +69,19 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
         terminationPending = true
         model.pauseQuietReview()
         Task {
+            await model.waitForCapturesToSettle()
             let meeting = await stoppableMeeting() != nil
-            let screen = [RecorderPhase.recording, .paused].contains(model.recorder.phase)
-            if meeting || screen, !confirmStopping(meeting: meeting, screen: screen) {
+            let screen = model.recorder.phase.activity == .running
+            let dictation = if case .recording = model.capture { true } else { false }
+            if meeting || screen || dictation,
+               !confirmStopping(meeting: meeting, screen: screen, dictation: dictation) {
                 terminationPending = false
                 model.resumeQuietReview()
                 sender.reply(toApplicationShouldTerminate: false)
                 model.restoreSheetAfterCancelledQuit()
                 return
             }
+            if dictation { model.stopCapture() }
             repeat {
                 guard await model.live.flushLiveNotes() else {
                     cancelTermination(
@@ -101,23 +106,27 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
             if screen {
                 await model.recorder.stopAndSave().value
             }
+            if dictation {
+                await model.waitForDictationToFinish()
+            }
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
 
     /// True when the person chose to stop the capture and quit.
-    private func confirmStopping(meeting: Bool, screen: Bool) -> Bool {
+    private func confirmStopping(meeting: Bool, screen: Bool, dictation: Bool) -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        switch (meeting, screen) {
-        case (true, true): alert.messageText = "A meeting and the screen are recording"
-        case (true, false): alert.messageText = "A meeting is recording"
-        default: alert.messageText = "The screen is recording"
-        }
+        let recording = [meeting ? "a meeting" : nil, screen ? "the screen" : nil, dictation ? "a dictation" : nil]
+            .compactMap(\.self)
+        let subject = ListFormatter.localizedString(byJoining: recording)
+        alert.messageText = subject.prefix(1).uppercased() + subject.dropFirst()
+            + (recording.count == 1 ? " is recording" : " are recording")
         var lines: [String] = []
         if meeting { lines.append("The meeting stops now and its audio is kept.") }
         if screen { lines.append("The screen recording stops and is saved.") }
+        if dictation { lines.append("The dictation stops, and Sona quits once its words are saved.") }
         alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "Stop and Quit")
         alert.addButton(withTitle: "Keep Recording").keyEquivalent = "\u{1b}"
@@ -147,8 +156,9 @@ final class SonaAppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// The capture a quit would cut off. A meeting still starting is not
-    /// reported, so quitting in that moment still ends it unasked.
+    /// The capture a quit would cut off. A meeting's start or stop holds the
+    /// lock this read takes, so a meeting starting is reported once it
+    /// records, and one stopping is not reported once it is sealed.
     private func stoppableMeeting() async -> MeetingSessionSnapshot? {
         do {
             let active: MeetingConsentPanelSessionState? =

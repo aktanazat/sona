@@ -503,6 +503,27 @@ final class AppModel {
         }
     }
 
+    /// Quit waits while a capture is starting or finishing, then asks about
+    /// whatever records. Cut off, a screen recording being saved is deleted
+    /// and a dictation being transcribed never delivers its words.
+    func waitForCapturesToSettle() async {
+        while !coreStopped, captureSettling {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    private var captureSettling: Bool {
+        if case .working = capture { return true }
+        return live.starting || recorder.phase.activity == .settling
+    }
+
+    /// Quit stopped the dictation: wait until its words are delivered.
+    func waitForDictationToFinish() async {
+        while !coreStopped, capture != .idle {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     func openBrief(_ eventKey: String) {
         reveal()
         prep.openBrief(eventKey)
