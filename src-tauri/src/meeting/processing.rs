@@ -9975,6 +9975,30 @@ pub(crate) mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_decision_the_user_marked_stays_whatever_the_check_says() {
+        let meeting = MarkedMeeting::new();
+        crate::meeting::store::workflow_core_tests::bookmark(
+            &meeting.store,
+            meeting.session_id,
+            meeting.lines[4].end_offset_ns + 2 * SECOND_NS,
+            ConversationBookmarkKind::Decision,
+        );
+        let content = meeting.notes(Arc::new(StatusAsDecisionGenerator));
+        assert!(content
+            .decisions
+            .iter()
+            .any(|decision| decision.citations.contains(&meeting.citation(4))));
+        let support = content
+            .ledger
+            .expect("a ledger")
+            .threads
+            .into_iter()
+            .find(|thread| thread.topic == "Support")
+            .expect("the support thread");
+        assert_eq!(support.state, LedgerThreadState::Decided);
+    }
 }
 
 #[cfg(test)]

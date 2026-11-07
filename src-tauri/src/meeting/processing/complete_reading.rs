@@ -1784,7 +1784,8 @@ fn settles_a_choice(
 
 /// Keeps the decisions the transcript shows being made. A notes decision the
 /// check finds to be a status, a question or a goodbye leaves the decisions,
-/// and a ledger thread filed as decided on one becomes closed.
+/// and a ledger thread filed as decided on one becomes closed. A decision on
+/// lines the user marked as a decision is theirs and is not checked.
 pub(super) fn confirm_decisions(
     generator: &dyn MeetingTextGenerator,
     evidence: &ArtifactEvidence,
@@ -1792,16 +1793,35 @@ pub(super) fn confirm_decisions(
     notes: &mut GeneratedMeetingArtifacts,
     check: impl Fn() -> Result<(), RunFailure>,
 ) -> Result<(), RunFailure> {
+    let marked: HashSet<&str> = evidence
+        .marks
+        .iter()
+        .filter(|mark| mark.kind == NotesMarkKind::Decision)
+        .flat_map(|mark| {
+            evidence
+                .transcript
+                .iter()
+                .filter(move |line| marks_line(mark, line))
+        })
+        .map(|line| line.citation.entity_id.as_str())
+        .collect();
+    let user_marked = |citations: &[ArtifactCitation]| {
+        citations
+            .iter()
+            .any(|citation| marked.contains(citation.segment_id.uuid().to_string().as_str()))
+    };
     let mut kept = Vec::with_capacity(notes.decisions.len());
     for decision in std::mem::take(&mut notes.decisions) {
-        if settles_a_choice(
-            generator,
-            evidence,
-            speakers,
-            &decision.text,
-            &decision.citations,
-            &check,
-        )? {
+        if user_marked(&decision.citations)
+            || settles_a_choice(
+                generator,
+                evidence,
+                speakers,
+                &decision.text,
+                &decision.citations,
+                &check,
+            )?
+        {
             kept.push(decision);
         }
     }
@@ -1810,16 +1830,22 @@ pub(super) fn confirm_decisions(
         return Ok(());
     };
     for thread in &mut ledger.threads {
-        if thread.state == LedgerThreadState::Decided
-            && !settles_a_choice(
-                generator,
-                evidence,
-                speakers,
-                &thread.topic,
-                &thread.receipt.citations,
-                &check,
-            )?
-        {
+        if thread.state != LedgerThreadState::Decided || user_marked(&thread.receipt.citations) {
+            continue;
+        }
+        let claim = if thread.receipt.quote.is_empty() || thread.receipt.quote == thread.topic {
+            thread.topic.clone()
+        } else {
+            format!("{}: {}", thread.topic, thread.receipt.quote)
+        };
+        if !settles_a_choice(
+            generator,
+            evidence,
+            speakers,
+            &claim,
+            &thread.receipt.citations,
+            &check,
+        )? {
             thread.state = LedgerThreadState::Closed;
         }
     }
