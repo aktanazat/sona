@@ -6,7 +6,7 @@ Mapped at 4d1a0dc9. Every suspected bug went to a second reviewer who had not fo
 
 Each part has two sections. "After the audit fixes" is the current machine. "As mapped" is the machine the bugs were found in, kept because the candidate ids point into it.
 
-Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped app, 7 needing evidence. The reviewers found 8 more (N1-N7, E16a).
+Result: 86 candidates. 60 confirmed, 20 rejected, 5 unreachable in the shipped app, 1 still needing evidence. Seven were first marked as needing evidence; runs and probes settled six of them (B7, B12, C14, C16, E6, E15). The reviewers found 8 more (N1-N7, E16a), and those runs 2 more (N8, N9).
 
 ## Confirmed
 
@@ -23,10 +23,11 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | A10 | Dictation lifecycle | A sweep during a retry leaves the new version with no audio | Confirmed. Low likelihood, P3. | fixed: a retry row shows no player for audio a sweep removed |
 | B1 | Transcription | A streaming dictation fails outright when the engine stays busy for 30 s after stop | confirmed | fixed: a stream stopped behind a busy engine waits for the engine instead of failing at 30 s |
 | B2 | Transcription | With a long vocabulary, the oldest entries silently stop working | confirmed (the mechanism is right; the stated cost is too strong) | fixed: the prompt is trimmed to whole entries; skipped entries keep fuzzy correction |
-| B3 | Transcription | Echo detection misses echoes that do not begin at the prompt's first word | case A confirmed (it follows from B2); case B needs evidence | case A fixed with B2; case B needs a test build that prints per-segment text |
+| B3 | Transcription | Echo detection misses echoes that do not begin at the prompt's first word | case A confirmed (it follows from B2); case B rejected for speech: in 36 decodes of speech in room noise with 1-, 3- and 5-entry vocabularies, no echo began mid-prompt. Over non-speech, 9 of 98 decodes with five entries ended in the prompt's last entries; that is part of N8 | case A fixed with B2; case B not changed |
 | B4 | Transcription | The room-noise recovery never runs with VAD off, or on a quiet capture that VAD called silent | case A confirmed, corrected; case B is B5; case C rejected | case A fixed: the room-noise recovery runs with VAD off |
 | B5 | Transcription | Heard speech that decodes to nothing ends with no feedback | confirmed for "VAD forwarded speech, the model produced nothing" | fixed: speech that decodes to nothing is a failed capture kept for retry, with a message |
 | B6 | Transcription | Starting a dictation or retry during another decode reloads the same model | confirmed | fixed: one engine slot records its build; a second load of the same model is skipped |
+| B7 | Transcription | The redo without the prompt can turn noise into a made-up phrase | confirmed, measured with large-v3-turbo: over 98 non-speech clips that voice detection forwarded, with a one-entry vocabulary the redo ran 92 times and pasted made-up text 91 times, 23 of them a stock silence phrase or no words | fixed in part: a redo that writes only a stock silence phrase or no words counts as nothing heard; those 23 now paste nothing. The rest is N8. Cost: 4 of 48 "Thank you." dictations at or under the noise level, and 2 of 48 "So." dictations, now ask for a retry |
 | B9 | Transcription | Clipboard restore keeps only plain text or one image | confirmed | fixed: the paste restores every clipboard item and type, including the concealed marker; the copy is taken while the words are spoken, so an app that renders its types slowly keeps them too |
 | B10 | Transcription | Paste and auto-submit go to whatever app is in front at delivery time | confirmed | fixed: delivery is held if the target window changed; text kept in the Library and offered as "Paste here" on the pill, never submitted |
 | B13 | Transcription | Switching models mid-recording reloads the old model at stop | confirmed (low cost: slower paste, two wasted loads) | fixed: a lease keeps the in-use model; switching models waits for it |
@@ -46,6 +47,8 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | C11 | Meeting recording | Finishing an unfinished meeting during a recording clears the processing gate | confirmed (the gate half of C1's root cause) | fixed with C1 |
 | C12 | Meeting recording | If the screen recorder sheet is replaced while paused, the recording can't be reached until quit | confirmed (the user loses a lot, but only a few things trigger it) | fixed: reopening the recorder shows the held recording |
 | C13 | Meeting recording | Quitting or crashing during an import leaves a truncated "unfinished" meeting, and phone recordings come back twice | confirmed (medium) | fixed: an import cut off by quit or crash is discarded at launch |
+| C14 | Meeting recording | A paused, detection-tracked capture auto-stops across sleep | confirmed: the old rule stopped it at wake (its test failed with `Stop(SleepBoundary)`); the owner decided a paused capture waits | fixed: a paused capture is not stopped by sleep; it waits for Resume or Stop |
+| C16 | Meeting recording | The startup sweep races the first commands | confirmed: a meeting a first command started was swept into recovery (its test failed on the old code) | fixed with C17: recovery runs inside the store mount, before any command can reach the store |
 | C17 | Meeting recording | A startup recovery failure is never retried | confirmed, with a different trigger than the candidate's | fixed: startup recovery runs inside the store mount |
 | C18 | Meeting recording | A pause or resume that fails part-way leaves the meeting in Pausing or Resuming | confirmed (low; needs a failed database write) | fixed: a failed pause or resume rolls back to the prior phase |
 | C19 | Meeting recording | The tray's "Cancel Meeting Notes" discards with one click, during Processing too | confirmed (in the Mac app only through N1; fully reachable on tray builds) | fixed: Cancel Meeting Notes is offered only before capture ends |
@@ -64,9 +67,11 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | E2 | Settings and migrations | Re-importing Handy history after Handy was used again imports every entry and recording a second time | confirmed (same root cause as E3) | fixed: re-import matches by entry, not by the legacy app's identity, so nothing doubles |
 | E3 | Settings and migrations | The same identity change orphans the settings-import undo and re-arms the settings import over later edits | confirmed (same root cause as E2) | fixed with E2: the settings-import undo survives |
 | E5 | Settings and migrations | Importing from Handy deletes Sona history at the next dictation, with no warning | confirmed for sequence B; sequence A is a design choice | fixed: an import that would push out older dictations says how many first and runs only after "Import anyway" |
+| E6 | Settings and migrations | Undoing the identity move is reversed by Sona's own quit, and the move is never offered again | confirmed once N2 was fixed; before that no build could finish a move | fixed: Sona writes settings at quit only to retry a save that failed, so putting data back stays put |
 | E9 | Settings and migrations | A failed first entry blocks every later "Move data" | confirmed (rare trigger, but once hit it never recovers) | fixed: a failed move can run its plan again |
 | E12 | Settings and migrations | Bookkeeping writes advance the settings generation and break agent-panel changes | confirmed (common for users with cloud cleanup) | fixed: the verified-key stamp no longer moves the settings revision |
 | E13 | Settings and migrations | Import and revert write the receipt before the settings are saved | confirmed (low severity; needs a crash in a short window, or a save failure that lasts through quit) | fixed: the receipt is written only after the settings are saved |
+| E15 | Settings and migrations | Salvage fills missing keys with fresh-install values instead of upgrade values | confirmed through the app's settings load: the frozen v0.9 store with one unreadable value turned on FaceTime and Phone meeting prompts and built every mode without the user's vocabulary, language and model; read whole, the same store kept them | fixed: salvage starts from the stored fields only, so a missing field reads as it does in a whole parse |
 | N1 | Agent panel | Approving any chat review card (mail draft, Slack post, calendar event, notes send) hangs the chat until quit | confirmed | fixed: the command reads the chat panel under the type the app manages |
 | N2 | Settings and identity | The move-your-data prompt deadlocks the core at startup for anyone with old data | confirmed (reproduced with a scratch home) | fixed: the move question is asked without blocking startup |
 | N3 | Meeting recording | Chat settings can show the hidden Rust tray inside the Mac app | confirmed | fixed: the Mac app never builds the Rust tray |
@@ -75,18 +80,14 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | N6 | Dictation | Cancelling the next recording before delivery skips pasting the earlier dictation | confirmed | fixed with A1: the earlier paste runs before the next recording opens |
 | N7 | Dictation | Library says "Encrypted at rest" while history is locked; Privacy says unencrypted | confirmed | fixed: the storage line follows the lock state |
 | E16a | Settings and migrations | A chat Apply whose save fails says "Not applied" while the change is live | confirmed | fixed: a chat change whose save fails stays undoable |
+| N8 | Transcription | Voice detection forwards non-speech, and whisper writes text for it | confirmed, measured: of 124 fifteen-second non-speech clips (ESC-50 sounds, GTZAN music), dictation's voice detection forwarded 98, 469 s in all, longest run 11.7 s. Without a vocabulary, large-v3-turbo wrote text for all 98, 23 of them a stock silence phrase; whisper small wrote text for 49 | open: needs a decision on voice detection. Stricter settings forward less: with only Silero, 58 clips and 159 s |
+| N9 | Transcription | Canary on transcribe-cpp decodes up to 400 s in one pass and drops most words past about 30 s | confirmed on clean LibriSpeech with canary-180m-flash: word error 0% at 33 s, 31% at 62 s, 56% at 91 s, 75% at 130 s, 79% at 242 s | fixed: Canary windows on transcribe-cpp are at most 30 s, as on ONNX; the same clips then read 0%, 4%, 3%, 4% and 6% |
 
 ## Needs evidence
 
 | id | part | bug | verdict | fix |
 |---|---|---|---|---|
-| A11 | Dictation lifecycle | A slow microphone start turns a tap-to-latch into a stop | Needs evidence. The mechanism is confirmed in code. Same root cause and fix as A6. | fixed with A6 (release time comes from the key edge); hardware timing unmeasured |
-| B7 | Transcription | The redo without the prompt can turn noise into a made-up phrase | needs evidence | open: the whisper half is measured (see N5); whether voice detection forwards 5 s or more of non-speech is not |
-| B12 | Transcription | Window cuts in steady room noise fall mid-word | needs evidence (disproven for this week's whisper failure) | open: needs SenseVoice, GigaAM or Moonshine weights, not on this Mac |
-| C14 | Meeting recording | A paused, detection-tracked capture auto-stops across sleep | needs evidence (a product decision; the code trace is complete) | owner decision: a paused capture is not stopped by sleep; it waits for Resume or Stop |
-| C16 | Meeting recording | The startup sweep races the first commands | needs evidence (a timing window; the code has no guard) | closed by C17: recovery runs before the first command can reach the store |
-| E6 | Settings and migrations | Undoing the identity move is reversed by Sona's own quit, and the move is never offered again | needs evidence (can it be reached?); everything after a completed move checks out | fixed: Sona no longer writes settings back on quit, so putting data back stays put |
-| E15 | Settings and migrations | Salvage fills missing keys with fresh-install values instead of upgrade values | needs evidence | open: needs a legacy settings file to test; the owner's real one was not read |
+| A11 | Dictation lifecycle | A slow microphone start turns a tap-to-latch into a stop | Needs evidence on a Bluetooth microphone. Measured here, Sona's own microphone open takes 65 ms on the built-in mic and 176 ms on a USB one, far under the 400 ms tap; this Mac has no Bluetooth mic. Same root cause and fix as A6. | fixed with A6 (release time comes from the key edge); hardware timing for Bluetooth unmeasured; a probe is ready |
 
 ## Unreachable in the shipped app
 
@@ -106,6 +107,7 @@ Result: 86 candidates. 55 confirmed, 19 rejected, 5 unreachable in the shipped a
 | A12 | Dictation lifecycle | "Finish and start a meeting" plus a core crash tries to start a meeting on a dead core | Rejected: harmless. |
 | B8 | Transcription | One recovered span switches the whole capture to fuzzy correction and turns off the whole-text echo check | rejected |
 | B11 | Transcription | A failed paste chord is reported as "Sent", and the transcript is taken off the clipboard | rejected |
+| B12 | Transcription | Window cuts in steady room noise fall mid-word | rejected, measured over 40 cuts per model: the cut lands inside a word in 18 to 34 of them but costs almost nothing. Errors with the cut as shipped against a cut moved back to the last word gap: SenseVoice 310 vs 306 in 4,630 words, Moonshine 500 vs 494 in 5,840, GigaAM 43 vs 37 in 2,960 (Russian) |
 | B16 | Transcription | If the stream fails to begin, the worker holds the gate for the rest of the recording | rejected (harmless) |
 | B17 | Transcription | A new unload timeout is not applied until the next activity | rejected |
 | B19 | Transcription | A meeting chunk made only of vocabulary words is dropped | rejected (documented design) |
@@ -663,6 +665,7 @@ The map's out-of-band case ("finalize can arrive while the worker is still in W0
 4. Load when the slot does not serve the plan's whole build (T:2418-2422).
 5. Lease the engine; the slot keeps the build (T:2448).
 6. whisper: prompted when `model_is_whisper && prompt_vocabulary && !without_prompt && speech != Undetected`, with the prompt built to fit whisper's budget (T:2509-2521); span recovery for every prompted decode (T:2558-2568).
+6. transcribe-cpp: windows of the session's audio limit, at most 30 s for Canary (N9; `transcribe_cpp_window_samples`, T:2552, T:2895-2913).
 9. `model_produced_text` (T:2795-2799) also reads as nothing a whisper decode under Undetected that is only a stock silence phrase.
 10. Post-process: exact correction for the prompted entries and fuzzy for the rest only when `vocabulary_prompted_from` gives a first entry (the audio fits the first 30 s chunk and nothing was decoded again); fuzzy for everything otherwise (T:3778-3786, T:3908 onward).
 
@@ -672,6 +675,8 @@ The map's out-of-band case ("finalize can arrive while the worker is still in W0
 | Detected | every lost stretch: the whole window when nothing was heard, else every uncovered stretch of 5 s or more | T:3024-3025 |
 | Unknown or Undetected, some segment heard words | only the lost stretches that hold a segment echoing the prompt | T:3030-3035, T:3012-3018 |
 | Unknown or Undetected, nothing heard | none: output that is only the prompt means nothing was said | T:3036 |
+
+A redo that writes only a stock silence phrase, or no words, counts as nothing heard (B7, T:3068): the span stays lost, and a capture with nothing else heard ends as DecodedNothing.
 
 The map's first unchecked invariant ("whisper saw the whole `vocabulary_initial_prompt`") now holds by construction (S:1144-1168, T:3769-3773).
 
@@ -1665,7 +1670,7 @@ Format as in MapSettings.md. Paths are under `src-tauri/src` unless named.
 | S0, S6 | first settings read in any process | no `"settings"` key | S1 fresh defaults, saved | settings.rs:2501, 2539-2549 |
 | S5 | first open of the store in a process | not a JSON object | S7 (renamed, error logged), `UnreadableSettings` for this run, then as S0 | 2357-2360, 2388-2416 |
 | S2 | first read | a migration or heal step changed something | S1, saved | 2511-2536 |
-| S4 | first read | typed parse fails | salvaged document, saved, `warn!` | 2503-2508, 2604- |
+| S4 | first read | typed parse fails | salvaged document, saved, `warn!`: each readable field kept, a broken one at its fresh-install value, a missing one as a whole parse fills it (E15) | 2503-2508, `salvage_settings` 2657-2670 |
 | any | typed write | not retired | whole document to `<path>.<pid>.tmp`, fsync, rename | 3496-3508 → 2373-2385 → fs_util.rs:102-127 |
 | any | typed write | retired (S8) | refused; memory keeps the change; caller hears `Save` error | 2374-2378 |
 | any | clean exit | — | unchanged; the plugin's exit-save is refused before it opens the file | 2364 |
