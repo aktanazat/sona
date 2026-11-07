@@ -626,6 +626,7 @@ fn notes_probe() {
     let mut instructions = prompt.clone();
     let mut short = SHORT_NOTES_PROMPT.to_string();
     let mut left_out = Vec::new();
+    let mut joining = 0;
     for round in 1..=MAX_REDUCTION_ROUNDS {
         let mut sections = Vec::new();
         let round_start = left_out.len();
@@ -642,6 +643,7 @@ fn notes_probe() {
                 &instructions,
                 &short,
                 pack,
+                splits_joining(joining),
                 reply_tokens,
                 &scope,
                 &evidence,
@@ -707,6 +709,7 @@ fn notes_probe() {
             println!("notes stopped: round {round} did not make the notes shorter");
             break;
         }
+        joining = sections.len();
         input = next;
     }
     println!(
