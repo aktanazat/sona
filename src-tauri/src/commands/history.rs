@@ -5,7 +5,7 @@ use crate::managers::{
         HistoryEntry, HistoryManager, HistorySourceKind, HistoryStats, HistoryStorageStatus,
         HistoryTrendProjection, HistoryUsageStats, KeptDictations, NewRunReceipt, PaginatedHistory,
     },
-    transcription::{SpeechEvidence, TranscriptionManager},
+    transcription::{BatchDecode, SpeechEvidence, TranscriptionManager},
 };
 use log::error;
 use std::fs::{self, File};
@@ -261,10 +261,7 @@ async fn replay_stored_recording(
     .await
     .map_err(|error| format!("Transcription task panicked: {error}"))?
     .map_err(|error| error.to_string())?;
-    let transcription = decode.text;
-    if transcription.is_empty() {
-        return Err("Recording contains no speech".to_string());
-    }
+    let transcription = replay_transcript(&decode)?.to_owned();
 
     let processed = process_transcription_output(app, &transcription, &run).await;
     let word_count = u64::try_from(processed.final_text.split_whitespace().count()).ok();
@@ -399,9 +396,38 @@ pub async fn update_recording_retention_period(
     Ok(())
 }
 
+/// The text a replay saves. Only a decode the model wrote nothing for has no
+/// speech; text that cleanup (filler removal, spoken edits) emptied is saved
+/// empty, as dictation saves it.
+fn replay_transcript(decode: &BatchDecode) -> Result<&str, String> {
+    if decode.model_produced_text {
+        Ok(&decode.text)
+    } else {
+        Err("Recording contains no speech".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replay_that_cleanup_emptied_is_saved_rather_than_called_silent() {
+        let emptied = BatchDecode {
+            text: String::new(),
+            realtime_factor: None,
+            model_produced_text: true,
+        };
+        assert_eq!(replay_transcript(&emptied), Ok(""));
+        let silent = BatchDecode {
+            model_produced_text: false,
+            ..emptied
+        };
+        assert_eq!(
+            replay_transcript(&silent),
+            Err("Recording contains no speech".to_string())
+        );
+    }
 
     #[test]
     fn history_audio_reads_are_bounded_and_path_free() {
