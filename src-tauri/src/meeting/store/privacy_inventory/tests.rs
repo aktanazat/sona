@@ -143,6 +143,19 @@ fn counts_what_the_store_holds_and_measures_track_files() {
             1,
         )
         .unwrap();
+    store
+        .save_user_voiceprint(super::super::voice_identity::UserVoiceprintRequest {
+            consent: super::super::voice_identity::ExplicitVoiceConsent::granted(1).unwrap(),
+            model: crate::meeting::diarization::wespeaker_embedding_model_key(),
+            embedding: crate::meeting::diarization::SpeakerEmbedding::from_normalized_slice(&voice)
+                .unwrap(),
+            voiceprint: super::super::voice_identity::UserVoiceprint {
+                dictation_count: 12,
+                speech_ms: 18_000,
+            },
+            created_at_utc_ms: 1,
+        })
+        .unwrap();
 
     file(
         store.root.join(id(recent)).join("tracks").join("a.records"),
@@ -176,8 +189,8 @@ fn counts_what_the_store_holds_and_measures_track_files() {
             },
             transcripts: 2,
             voiceprints: VoiceprintHoldings {
-                people: 0,
-                sample_ms: 0,
+                people: 1,
+                sample_ms: 18_000,
                 speakers: 1,
             },
             portraits: PortraitHoldings {

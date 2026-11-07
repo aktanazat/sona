@@ -1549,6 +1549,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/transcript_relisten.sql")),
     M::up(include_str!("store/audio_retention.sql")),
     M::up(include_str!("store/calendar_found_under_way.sql")),
+    M::up(include_str!("store/user_voiceprint.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

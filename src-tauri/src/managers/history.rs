@@ -2956,6 +2956,29 @@ impl HistoryManager {
         recording_path(&self.recordings_dir, file_name)
     }
 
+    /// The recordings of the newest microphone dictations still kept, newest
+    /// first, at most `limit` of them.
+    pub(crate) async fn recent_dictation_recordings(&self, limit: u32) -> Result<Vec<PathBuf>> {
+        self.ensure_storage_unlocked().await;
+        let file_names = self.storage.with_connection(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT file_name FROM transcription_history
+                  WHERE source_kind = 'microphone' AND has_audio = 1
+                  GROUP BY file_name
+                  ORDER BY MAX(timestamp) DESC
+                  LIMIT ?1",
+            )?;
+            let file_names = statement
+                .query_map(params![limit], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(file_names)
+        })?;
+        Ok(file_names
+            .iter()
+            .filter_map(|file_name| self.get_audio_file_path(file_name))
+            .collect())
+    }
+
     pub async fn get_entry_by_id(&self, id: i64) -> Result<Option<HistoryEntry>> {
         self.storage
             .with_connection(|conn| Self::entry_by_id_with_connection(conn, id))

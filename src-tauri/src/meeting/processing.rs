@@ -47,8 +47,8 @@ use super::template_types::{
 use super::types::*;
 use super::voice_identity::{
     automatic_identity_mode, coalesce_evidence, fallback_evidence_span, identity_source_allowed,
-    map_sortformer_evidence, AudioSpan, AutoIdentityMode, VoiceEvidenceSpan,
-    VoiceIdentityCollector, VoiceMatchCandidate,
+    map_sortformer_evidence, AudioSpan, AutoIdentityMode, DictationVoiceprint, UserVoiceSample,
+    VoiceEvidenceSpan, VoiceIdentityCollector, VoiceMatchCandidate,
 };
 use super::workflow_engine::{known_vocabulary, record_meeting_finalized};
 use crate::audio_toolkit::vad::{self, VoiceActivityDetector};
@@ -64,7 +64,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -1069,6 +1069,52 @@ impl MeetingProcessingService {
             .embed(&samples)
             .map_err(enrollment_diarization_error)?;
         Ok((wespeaker_embedding_model_key(), embedding))
+    }
+
+    /// The user's voice from `recordings`, their dictations newest first, read
+    /// until the print holds all the speech it uses. A recording that cannot
+    /// be read is skipped.
+    pub(crate) async fn embed_user_voice(
+        &self,
+        store: &MeetingStore,
+        recordings: Vec<PathBuf>,
+    ) -> Result<(SpeakerEmbeddingModelKey, UserVoiceSample), StoreError> {
+        let model_directory = store.diarization_model_directory();
+        let mut embedder = open_enrollment_embedder(&self.diarizer, &model_directory).await?;
+        let vads = Arc::clone(
+            &*self
+                .vad_factory
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let sample = tauri::async_runtime::spawn_blocking(move || {
+            let mut print = DictationVoiceprint::new();
+            for path in recordings {
+                if print.is_full() {
+                    break;
+                }
+                let Ok(samples) = crate::audio_toolkit::read_wav_samples(&path) else {
+                    continue;
+                };
+                let mut vad = vads
+                    .open(SourceKind::Microphone)
+                    .map_err(|_| StoreError::LocalModelUnavailable)?;
+                let voice = samples
+                    .chunks_exact(VAD_FRAME_SAMPLES)
+                    .map(|frame| vad.is_voice(frame))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| StoreError::Unavailable)?;
+                print
+                    .add_dictation(&samples, &voice, &mut embedder)
+                    .map_err(enrollment_diarization_error)?;
+            }
+            print
+                .finish()
+                .ok_or(StoreError::InsufficientEnrollmentEvidence)
+        })
+        .await
+        .map_err(|_| StoreError::Unavailable)??;
+        Ok((wespeaker_embedding_model_key(), sample))
     }
 
     pub fn set_transcription_manager(&self, manager: Arc<TranscriptionManager>) {
