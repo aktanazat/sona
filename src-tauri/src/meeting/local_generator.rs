@@ -23,7 +23,13 @@ use std::time::{Duration, Instant};
 
 const LOCAL_ENGINE_MODEL_ID: &str = "local-openai-compatible";
 const AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(2);
-const MEETING_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+/// What a local request is allowed before its answer: a cold model load,
+/// measured at over three minutes on a loaded machine, and the read of its
+/// prompt, about 400 tokens a second on an M5 Pro.
+const MEETING_REQUEST_START: Duration = Duration::from_secs(240);
+/// The slowest pace a local model is allowed to write at, in tokens a
+/// second: a 14B model wrote at 9.4 on a busy M5 Pro.
+const SLOWEST_ANSWER_TOKENS_PER_SECOND: u64 = 8;
 /// What one token of a local model's window holds, in bytes of the pack as
 /// it is built, before [`SourceLabels`] shortens it. Measured with the
 /// qwen3 tokenizer on notes rows: 3.3 bytes a token once the uuids are
@@ -325,7 +331,7 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
                 &system_prompt,
                 &evidence,
                 max_tokens,
-                MEETING_REQUEST_TIMEOUT,
+                meeting_request_timeout(max_tokens),
                 reply,
             )
             .await
@@ -355,6 +361,14 @@ impl MeetingTextGenerator for LocalEndpointGenerator {
             Ok(labels.restore(content))
         }
     }
+}
+
+/// A request's whole allowance: the start, then the longest answer it asks
+/// for at the slowest pace. A flat four minutes stopped a 16k window's notes
+/// parts part-way through answers the window had room for.
+fn meeting_request_timeout(max_tokens: i32) -> Duration {
+    let answer = u64::try_from(max_tokens).unwrap_or(0) / SLOWEST_ANSWER_TOKENS_PER_SECOND;
+    MEETING_REQUEST_START + Duration::from_secs(answer)
 }
 
 /// The line ids a local model reads and cites in place of the transcript's
@@ -631,6 +645,17 @@ mod tests {
                 format.json_schema.as_ref().map(|wire| wire.name.as_str()),
                 schema
             );
+            if let Some(wire) = format
+                .json_schema
+                .as_ref()
+                .filter(|wire| wire.name == "meeting_notes")
+            {
+                assert_eq!(
+                    wire.schema["definitions"]["RawCitedText"]["properties"]["citations"]
+                        ["maxItems"],
+                    12
+                );
+            }
             if let Some(wire) = format
                 .json_schema
                 .filter(|wire| wire.name == "meeting_ledger")

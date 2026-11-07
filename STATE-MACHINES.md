@@ -1580,14 +1580,15 @@ Each piece ends as one of: read, halved, left out, stopped, unreachable.
 
 Rounds:
 - Round 0 reads the transcript parts. Later rounds join what earlier rounds wrote.
-- One section left means done. Any piece left out in a join round fails the whole reading (866).
-- A join round that does not shrink is EvidencePack (890). There are at most 16 rounds.
+- One section left means done. A piece left out in a join round keeps the sections of the round before it.
+- A join round whose facts are not smaller than its input, or cannot be packed, keeps its own sections. After 16 rounds the last round's sections are kept.
+- Kept sections are put together without the model (`joined_as_written`): an even share of every section's summary lines and list items, and outline topics with one title merged. The notes stay structured.
 
 Rules:
 - Halving applies to an unstructured reply, a timeout or a rejection, at most twice (`MAX_SPLITS`, 125). A half that times out is not halved again (162-166). Stopped and Unreachable end the reading (213-218).
 - A refusal (safety block or decline) is retried once under the short prompt (719-760).
-- Local calls time out at 240 s (local_generator.rs:26). One piece can take up to about 720 s before it is left out.
-- Budgets are read at 825-826 and 886-887.
+- A part's answer gets a third of the model window's room, between 1,024 and 8,192 tokens, and its evidence the rest (`part_budget`, processing.rs). Apple Intelligence and relay keep their own answer sizes.
+- Local calls time out at 240 s plus one second for every 8 answer tokens asked for (`meeting_request_timeout`, local_generator.rs). At a 16k window that is about 870 s.
 
 #### M6. Plain notes fallback
 Owner: processing.rs ~2600-2625; complete_reading.rs:955-1035.

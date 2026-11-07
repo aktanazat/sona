@@ -317,6 +317,71 @@ mod tests {
         });
     }
 
+    /// A local model as measured on a 30-minute meeting: its notes of a part
+    /// run to about 0.4 of the part's tokens, and an answer that reaches its
+    /// budget stops part-way through.
+    struct MeasuredLocalModel {
+        replay: ReplayGenerator,
+        cut: AtomicUsize,
+    }
+
+    impl MeetingTextGenerator for MeasuredLocalModel {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "measured-local-model"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            usize::MAX
+        }
+        fn context_window_bytes(&self) -> Option<usize> {
+            self.replay.window
+        }
+        fn generate(
+            &self,
+            prompt: &str,
+            pack: &str,
+            max_tokens: i32,
+            shape: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            let reply = self.replay.generate(prompt, pack, max_tokens, shape)?;
+            let needed = pack.len() / 3 * 2 / 5;
+            if usize::try_from(max_tokens).is_ok_and(|budget| needed > budget) {
+                self.cut.fetch_add(1, Ordering::SeqCst);
+                return Ok("{\"summary\":[".to_string());
+            }
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn a_local_model_reads_a_long_meeting_without_running_out_of_answer() {
+        let generator = MeasuredLocalModel {
+            replay: ReplayGenerator {
+                window: Some(16_384 * 3),
+                wire: usize::MAX,
+                reply: usize::MAX,
+                calls: AtomicUsize::new(0),
+            },
+            cut: AtomicUsize::new(0),
+        };
+        let evidence = evidence();
+        let prompt =
+            artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
+        let notes = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
+            .expect("complete notes");
+        assert!(notes.left_out.is_empty());
+        let haystack =
+            ledger::fold_haystack(evidence.transcript.iter().map(|item| item.text.as_str()));
+        ledger(&generator, &evidence, &HashMap::new(), &haystack, || Ok(()))
+            .expect("complete ledger");
+        assert_eq!(generator.cut.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn a_single_oversized_unicode_turn_is_read_without_losing_bytes_or_citation() {
         let mut evidence = evidence();
@@ -746,15 +811,38 @@ mod tests {
             let input: Value = serde_json::from_str(pack).expect("bounded input");
             let mut ids = Vec::new();
             let mut longest = 0;
+            let mut decisions = Vec::new();
+            let mut action_items = Vec::new();
             if let Some(turns) = input["transcript"].as_array() {
                 for turn in turns {
                     ids.push(turn["entity_id"].as_str().expect("source id").to_string());
                 }
+                let topic = turns[0]["text"]
+                    .as_str()
+                    .and_then(|text| text.split(':').next())
+                    .expect("topic");
+                decisions
+                    .push(json!({"text": format!("Adopt the {topic} plan."), "citations": ids}));
+                action_items.push(json!({
+                    "text": {"text": format!("Email the {topic} figures."), "citations": ids},
+                    "owner_text": null, "due_text": null
+                }));
             } else {
                 for fact in input["section_facts"].as_array().expect("section facts") {
                     let value = &fact["value"];
-                    longest = longest.max(value["text"].as_str().expect("cited text").len());
-                    for id in citation_ids(&value["citations"]) {
+                    let cited = match fact["kind"].as_str().expect("fact kind") {
+                        "decision" => {
+                            decisions.push(value.clone());
+                            value
+                        }
+                        "action_item" => {
+                            action_items.push(value.clone());
+                            &value["text"]
+                        }
+                        _ => value,
+                    };
+                    longest = longest.max(cited["text"].as_str().expect("cited text").len());
+                    for id in citation_ids(&cited["citations"]) {
                         if !ids.contains(&id) {
                             ids.push(id);
                         }
@@ -770,8 +858,8 @@ mod tests {
             };
             let cited = json!({"text": "reviewed ".repeat(width / 9), "citations": ids});
             Ok(json!({
-                "summary": [cited.clone()], "outline": [], "decisions": [],
-                "action_items": [], "key_questions": [], "risks": [],
+                "summary": [cited.clone()], "outline": [], "decisions": decisions,
+                "action_items": action_items, "key_questions": [], "risks": [],
                 "follow_up_draft": cited
             })
             .to_string())
@@ -821,23 +909,50 @@ mod tests {
     }
 
     #[test]
-    fn nonshrinking_notes_stop_before_another_model_round() {
+    fn nonshrinking_notes_stand_as_written_before_another_model_round() {
         let evidence = gradual_evidence();
         let generator = GradualReduction {
             condense: false,
             calls: AtomicUsize::new(0),
         };
-        let result = notes(
+        let content = notes(
             &generator,
             &evidence,
             &HashMap::new(),
             "Read the meeting.",
             || Ok(()),
+        )
+        .expect("sections no join could shorten stand as structured notes");
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 4);
+        let ids = |citations: &[ArtifactCitation]| {
+            citations
+                .iter()
+                .map(|citation| citation.segment_id.uuid().to_string())
+                .collect::<Vec<_>>()
+        };
+        let expected: Vec<_> = evidence
+            .transcript
+            .iter()
+            .map(|item| item.citation.entity_id.clone())
+            .collect();
+        assert!(!content.plain);
+        assert_eq!(ids(&content.summary.citations), expected);
+        assert_eq!(
+            content
+                .decisions
+                .iter()
+                .flat_map(|decision| ids(&decision.citations))
+                .collect::<Vec<_>>(),
+            expected
         );
-        assert!(matches!(
-            result,
-            Err(ReadingError::Invalid(EngineFailureCause::EvidencePack))
-        ));
+        assert_eq!(
+            content
+                .action_items
+                .iter()
+                .flat_map(|item| ids(&item.text.citations))
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 
     /// A notes reply citing every source its pack holds.
@@ -1387,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognized_reconciliation_source_cannot_publish_notes() {
+    fn an_unrecognized_reconciliation_source_leaves_the_notes_it_could_not_join() {
         let mut evidence = evidence();
         evidence.transcript.truncate(128);
         for (index, turn) in evidence.transcript.iter_mut().enumerate() {
@@ -1399,10 +1514,22 @@ mod tests {
         };
         let prompt =
             artifact_system_prompt(&evidence.template, false, MeetingNotesLanguage::default());
-        assert!(matches!(
-            notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(())),
-            Err(ReadingError::Rejected(_))
-        ));
+        let content = notes(&generator, &evidence, &HashMap::new(), &prompt, || Ok(()))
+            .expect("the first round's notes stand when their join cites an unknown source");
+        assert_eq!(
+            content
+                .summary
+                .citations
+                .iter()
+                .map(|citation| citation.segment_id.uuid().to_string())
+                .collect::<Vec<_>>(),
+            evidence
+                .transcript
+                .iter()
+                .map(|turn| turn.citation.entity_id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(content.left_out.is_empty());
     }
 
     #[test]
