@@ -18,6 +18,7 @@ struct MeetingPrepSettingsView: View {
         .task {
             await store.loadPreferences()
             await store.loadWebConnection()
+            await store.loadUserVoice()
         }
     }
 }
@@ -26,6 +27,7 @@ private struct MeetingPrepForm: View {
     let store: MeetingPrepStore
     @State private var draft: MeetingPrepPreferences
     @State private var webKey = ""
+    @State private var askingVoiceConsent = false
 
     init(store: MeetingPrepStore, initial: MeetingPrepPreferences) {
         self.store = store
@@ -53,6 +55,39 @@ private struct MeetingPrepForm: View {
                                 .metaText(Theme.inkSecondary)
                         }
                     }
+                    CardRow {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Your voice").bodyText(14)
+                            if let voice = store.userVoice {
+                                Text("Sona knows your voice from \(voice.dictationCount) \(voice.dictationCount == 1 ? "dictation" : "dictations"). The voiceprint stays on this Mac.")
+                                    .bodyText(13, Theme.inkSecondary)
+                            } else {
+                                Text("Sona can learn your voice from your dictations, then suggest which meeting speaker is you. You confirm each suggestion.")
+                                    .bodyText(13, Theme.inkSecondary)
+                            }
+                            if store.preferences?.aboutMe.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                                Text("Save your name above so Sona can suggest you.").metaText(Theme.inkSecondary)
+                            }
+                            if store.userVoiceBusy { ProgressView("Reading your dictations…") }
+                            ErrorNote(store.userVoiceError)
+                        }
+                    } trailing: {
+                        if store.userVoice != nil {
+                            Button("Forget my voice") { Task { await store.forgetUserVoice() } }
+                                .buttonStyle(.quiet)
+                                .disabled(store.userVoiceBusy)
+                        } else {
+                            Button("Learn my voice") { askingVoiceConsent = true }
+                                .buttonStyle(.compact)
+                                .disabled(store.userVoiceBusy || !store.userVoiceLoaded)
+                        }
+                    }
+                }
+                .alert("Learn your voice?", isPresented: $askingVoiceConsent) {
+                    Button("Learn my voice") { Task { await store.learnUserVoice() } }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Sona uses the recordings of up to 50 recent dictations to make one voiceprint, kept on this Mac. Nothing is uploaded. It only suggests which meeting speaker is you, and you confirm each suggestion. You can forget it here at any time.")
                 }
             }
             PageSection("Prepare for meetings") {
