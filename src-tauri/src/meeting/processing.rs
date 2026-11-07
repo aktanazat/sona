@@ -6514,7 +6514,9 @@ fn cited_words_say(citations: &[String], evidence: &[MeetingEvidence], phrase: &
 /// Whether one of the cited segments is `owner` committing in the first
 /// person: the owner of an "I'll ..." commitment is its speaker, whom its own
 /// words never name. A speaker asking someone else ("can you send me ...")
-/// is not the owner, and neither is a label the store wrote for a voice.
+/// is not the owner. A voice's label such as "Speaker 2" owns what that voice
+/// takes on, and reads by the voice's name now wherever the notes are read;
+/// "Unknown speaker" is everyone on a call nobody told apart.
 fn commits_in_first_person(
     citations: &[String],
     evidence: &[MeetingEvidence],
@@ -6529,19 +6531,10 @@ fn commits_in_first_person(
             speakers
                 .get(&line.citation.entity_id)
                 .is_some_and(|speaker| {
-                    !is_placeholder_speaker(speaker)
-                        && says_words(&normalized_words(speaker), &owner)
+                    *speaker != "Unknown speaker" && says_words(&normalized_words(speaker), &owner)
                 })
         })
         .any(|line| commits(&normalized_words(&line.text)))
-}
-
-fn is_placeholder_speaker(name: &str) -> bool {
-    name == "Unknown speaker"
-        || name == "Local speaker"
-        || name.strip_prefix("Speaker ").is_some_and(|number| {
-            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
-        })
 }
 
 /// Whether `text` only restates `earlier`: they cite a line in common,
@@ -9668,7 +9661,7 @@ pub(crate) mod tests {
                 (None, Some("Thursday")),
                 (Some("Lena"), None),
                 (None, None),
-                (None, None)
+                (Some("Speaker 2"), None)
             ]
         );
     }

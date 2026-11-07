@@ -99,6 +99,7 @@ use super::ledger::{
 };
 use super::template_types::{NotesTemplate, NotesTemplateChoice};
 use super::types::*;
+use super::words::{commits, normalized_words, says_words};
 use crate::analytics::{local_days_start_utc_ms, DashboardTrendRequest, LocalCalendarRange};
 use crate::secrets::MeetingStorageKey;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -5317,6 +5318,7 @@ impl MeetingStore {
         session_id: MeetingSessionId,
     ) -> Result<MeetingReviewSnapshot, StoreError> {
         let session = self.session_snapshot(session_id)?;
+        let user_name = self.user_name();
         let connection = self.connection()?;
         let tracks = track_snapshots(&connection, session_id)?;
         let gaps = gaps_for_session(&connection, session_id)?;
@@ -5339,11 +5341,17 @@ impl MeetingStore {
         let mut artifacts = artifact_revisions_for_session(&connection, session_id)?;
         let speakers_now =
             ReceiptSpeakers::over(&connection, session_id, &transcript, &canonical_ids)?;
-        for ledger in artifacts
+        let my_labels =
+            loops::user_speaker_labels_in(&connection, session_id, user_name.as_deref())?;
+        let me = user_name.as_deref().unwrap_or("Me");
+        for content in artifacts
             .iter_mut()
-            .filter_map(|artifact| artifact.content.as_mut()?.ledger.as_mut())
+            .filter_map(|artifact| artifact.content.as_mut())
         {
-            speakers_now.name(ledger);
+            if let Some(ledger) = content.ledger.as_mut() {
+                speakers_now.name(ledger);
+            }
+            speakers_now.name_owners(&mut content.action_items, &my_labels, me);
         }
         let questions = question_history_for_session(&connection, session_id)?;
         let diarization = diarization_snapshot_for_session(&connection, session_id)?;
@@ -9076,6 +9084,55 @@ impl ReceiptSpeakers {
 
     fn name(&self, ledger: &mut MeetingLedger) {
         rename_receipt_speakers(ledger, &self.lines, &self.speaker_names);
+    }
+
+    /// Names each action item's owner by the voice that took it on, as that
+    /// voice is named now. An owner the cited words say is the meeting's own
+    /// word and stays. One they do not say was read off the voice committing
+    /// in them, "I'll send it", so it reads by that voice's name now: the one
+    /// voice committing there, or of several the one whose name is the owner.
+    /// A voice in `my_labels` is the user's and reads as `me`.
+    fn name_owners(&self, items: &mut [MeetingActionItem], my_labels: &[String], me: &str) {
+        for item in items {
+            let Some(owner) = item.owner_text.as_deref() else {
+                continue;
+            };
+            let Some(lines) = item
+                .text
+                .citations
+                .iter()
+                .map(|citation| self.lines.get(&citation.segment_id))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let owner_words = normalized_words(owner);
+            let say_owner = |text: &str| says_words(&normalized_words(text), &owner_words);
+            if lines.iter().any(|line| say_owner(&line.folded)) {
+                continue;
+            }
+            let mut voices = Vec::new();
+            for line in lines {
+                if commits(&normalized_words(&line.folded)) && !voices.contains(&line.speaker) {
+                    voices.push(line.speaker);
+                }
+            }
+            let name_of = |voice: &SpeakerId| self.speaker_names.get(voice);
+            let voice = match voices.as_slice() {
+                [voice] => Some(voice),
+                _ => voices
+                    .iter()
+                    .find(|&voice| name_of(voice).is_some_and(|name| say_owner(name))),
+            };
+            let Some(name) = voice.and_then(name_of) else {
+                continue;
+            };
+            item.owner_text = Some(if my_labels.contains(name) {
+                me.to_owned()
+            } else {
+                name.clone()
+            });
+        }
     }
 }
 
