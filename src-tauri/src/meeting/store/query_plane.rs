@@ -61,19 +61,9 @@ pub(crate) enum QueryEventRow {
     },
 }
 
-/// The newest current artifact revision id for the session under join alias
-/// `m`. The companion of [`super::CURRENT_ARTIFACT_CONTENT`], which quotes the
-/// same revision's content.
-const CURRENT_ARTIFACT_ID: &str = "SELECT a.artifact_id
-                       FROM meeting_artifact_revisions a
-                      WHERE a.session_id = m.id
-                        AND a.state = 'current'
-                        AND a.content_json IS NOT NULL
-                      ORDER BY a.generated_at_utc_ms DESC LIMIT 1";
-
 /// What a session's chunks were built from, as SQL. The meeting revision also
 /// changes when an identity or learned correction changes the effective words.
-const SEMANTIC_INDEX_KEY: &str = "COALESCE(({CURRENT_ARTIFACT_ID}), '-') || ':' ||
+const SEMANTIC_INDEX_KEY: &str = "COALESCE(({READABLE_ARTIFACT_ID}), '-') || ':' ||
                      COALESCE(m.current_transcript_revision_id, '-') || ':' ||
                      COALESCE(m.transcript_purged_at_utc_ms, '-') || ':' || m.revision";
 
@@ -83,7 +73,7 @@ const SEMANTIC_INDEX_KEY: &str = "COALESCE(({CURRENT_ARTIFACT_ID}), '-') || ':' 
 const MAX_SNIPPET_BYTES: usize = 320;
 
 fn semantic_index_key_sql() -> String {
-    SEMANTIC_INDEX_KEY.replace("{CURRENT_ARTIFACT_ID}", CURRENT_ARTIFACT_ID)
+    SEMANTIC_INDEX_KEY.replace("{READABLE_ARTIFACT_ID}", super::READABLE_ARTIFACT_ID)
 }
 
 impl MeetingStore {
@@ -234,7 +224,7 @@ impl MeetingStore {
                FROM meeting_sessions m
               WHERE m.id IN ({placeholders})
                 AND m.phase != 'deleting'",
-            content = super::CURRENT_ARTIFACT_CONTENT,
+            content = super::READABLE_ARTIFACT_CONTENT,
         ))?;
         let rows = statement.query_map(
             params_from_iter(session_ids.iter().map(|session_id| super::id(*session_id))),
@@ -298,7 +288,7 @@ impl MeetingStore {
 
     /// The text one session contributes to the semantic index.
     ///
-    /// The summary and the ledger headline come from the current artifact —
+    /// The summary and the ledger headline come from the readable artifact —
     /// they are the reading of the meeting FTS5 never sees, which is the gap
     /// this index exists to close. The transcript uses the same effective-text
     /// owner as display, including manual edits and learned corrections.
@@ -316,7 +306,7 @@ impl MeetingStore {
                        FROM meeting_sessions m
                       WHERE m.id = ?1 AND m.phase != 'deleting'",
                     key = semantic_index_key_sql(),
-                    content = super::CURRENT_ARTIFACT_CONTENT,
+                    content = super::READABLE_ARTIFACT_CONTENT,
                 ),
                 params![super::id(session_id)],
                 |row| {

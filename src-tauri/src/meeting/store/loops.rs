@@ -12,13 +12,14 @@
 //! way.
 //!
 //! One rule keeps the two halves honest: a mutation only accepts a loop id the
-//! *current* ledger still contains. An id an agent invented, or one left behind
-//! by a regeneration that dropped the row, is `NotFound` rather than a state
-//! row pointing at nothing.
+//! meeting's readable ledger still contains. An id an agent invented, or one
+//! left behind by a regeneration that dropped the row, is `NotFound` rather
+//! than a state row pointing at nothing.
 
 use super::{
     committed_receipt, decode_json, from_i64, id, insert_operation_receipt, rejected_receipt,
     session_row, to_i64, utc_now_ms, MeetingStore, StoreError, StoreMutation,
+    READABLE_ARTIFACT_CONTENT, READABLE_ARTIFACT_ID,
 };
 use crate::meeting::ledger::{LedgerFirmness, LedgerOutcome, MeetingLedger};
 use crate::meeting::loop_types::{
@@ -105,6 +106,16 @@ impl MeetingStore {
     ) -> Result<MeetingLoopsResult, StoreError> {
         let connection = self.connection()?;
         loops_in(&connection, session_id)
+    }
+
+    /// The meeting's readable ledger, the one its loops are read off, with
+    /// the id of the template that wrote it.
+    pub(crate) fn readable_ledger(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Option<(String, MeetingLedger)>, StoreError> {
+        let connection = self.connection()?;
+        readable_ledger_in(&connection, session_id)
     }
 
     /// Every actionable row in the corpus, newest meeting first, beside what
@@ -382,7 +393,7 @@ pub(crate) struct CorpusLoops {
     pub awaiting_continuity: Vec<MeetingSessionId>,
 }
 
-/// Every retained meeting that has a current ledger, newest first, with its
+/// Every retained meeting that has a readable ledger, newest first, with its
 /// rows already joined to their stored state.
 ///
 /// Loops live in artifact JSON rather than in a table, so every question about
@@ -392,17 +403,13 @@ pub(crate) struct CorpusLoops {
 pub(crate) fn ledger_rows_in(
     connection: &Connection,
 ) -> Result<Vec<MeetingLedgerRows>, StoreError> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "SELECT m.id, m.title, COALESCE(m.started_at_utc_ms, m.created_at_utc_ms),
-                (SELECT a.content_json
-                   FROM meeting_artifact_revisions a
-                  WHERE a.session_id = m.id AND a.state = 'current'
-                    AND a.content_json IS NOT NULL
-                  ORDER BY a.generated_at_utc_ms DESC LIMIT 1)
+                ({READABLE_ARTIFACT_CONTENT})
            FROM meeting_sessions m
           WHERE m.phase != 'deleting'
-          ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC",
-    )?;
+          ORDER BY COALESCE(m.started_at_utc_ms, m.created_at_utc_ms) DESC, m.id DESC"
+    ))?;
     let meetings = statement
         .query_map([], |row| {
             Ok((
@@ -668,37 +675,41 @@ pub(crate) fn loops_in(
     })
 }
 
-/// The actionable rows of the newest artifact revision that carries content.
-/// A meeting with no generated ledger has no loops, which is not an error.
+/// The actionable rows of the meeting's readable ledger. A meeting with no
+/// generated ledger has no loops, which is not an error.
 pub(crate) fn seeds_in(
     connection: &Connection,
     session_id: MeetingSessionId,
 ) -> Result<Vec<LoopSeed>, StoreError> {
-    let Some(ledger) = current_ledger_in(connection, session_id)? else {
+    let Some((_, ledger)) = readable_ledger_in(connection, session_id)? else {
         return Ok(Vec::new());
     };
     Ok(ledger_loop_seeds(session_id, &ledger))
 }
 
-pub(crate) fn current_ledger_in(
+/// The ledger of the revision [`READABLE_ARTIFACT_ID`] names, with the id of
+/// the template that wrote it.
+pub(crate) fn readable_ledger_in(
     connection: &Connection,
     session_id: MeetingSessionId,
-) -> Result<Option<MeetingLedger>, StoreError> {
-    let content_json: Option<String> = connection
+) -> Result<Option<(String, MeetingLedger)>, StoreError> {
+    let row: Option<(String, String)> = connection
         .query_row(
-            "SELECT content_json FROM meeting_artifact_revisions
-              WHERE session_id = ?1 AND state = 'current' AND content_json IS NOT NULL
-              ORDER BY generated_at_utc_ms DESC LIMIT 1",
+            &format!(
+                "SELECT a.template_id, a.content_json
+                   FROM meeting_sessions m
+                   JOIN meeting_artifact_revisions a ON a.artifact_id = ({READABLE_ARTIFACT_ID})
+                  WHERE m.id = ?1"
+            ),
             params![id(session_id)],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-        .flatten();
-    let Some(content_json) = content_json else {
+        .optional()?;
+    let Some((template_id, content_json)) = row else {
         return Ok(None);
     };
     let content: GeneratedMeetingArtifacts = decode_json(&content_json)?;
-    Ok(content.ledger)
+    Ok(content.ledger.map(|ledger| (template_id, ledger)))
 }
 
 pub(crate) fn states_in(
