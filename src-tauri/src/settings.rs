@@ -8,13 +8,14 @@ use crate::modes::{
 };
 use crate::secrets::SecretState;
 use crate::snippets::Snippet;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use reqwest::Url;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
@@ -2386,6 +2387,11 @@ pub(crate) fn release_history_cleanup<R: tauri::Runtime>(
 /// again would make the next launch take Sona for a copy already in use.
 struct SettingsFileRetired;
 
+/// Set while a save of the settings file has failed and none has landed
+/// since, so memory holds settings the file does not.
+#[derive(Default)]
+struct SettingsSaveOwed(AtomicBool);
+
 /// The settings store and the file behind it. The store plugin saves by
 /// rewriting the file in place, so a save cut short leaves a torn file that
 /// the next load reads as empty; this writes a new file and swaps it in, and
@@ -2394,6 +2400,7 @@ struct SettingsFile<R: tauri::Runtime> {
     store: Arc<tauri_plugin_store::Store<R>>,
     path: std::path::PathBuf,
     retired: bool,
+    owed: Arc<SettingsSaveOwed>,
 }
 
 impl<R: tauri::Runtime> SettingsFile<R> {
@@ -2415,10 +2422,19 @@ impl<R: tauri::Runtime> SettingsFile<R> {
         if unreadable {
             store.set(HISTORY_CLEANUP_HELD, true);
         }
+        let owed = match app.try_state::<Arc<SettingsSaveOwed>>() {
+            Some(owed) => Arc::clone(owed.inner()),
+            None => {
+                let owed = Arc::new(SettingsSaveOwed::default());
+                app.manage(Arc::clone(&owed));
+                owed
+            }
+        };
         Ok(Self {
             store,
             path,
             retired: app.try_state::<SettingsFileRetired>().is_some(),
+            owed,
         })
     }
 
@@ -2433,7 +2449,11 @@ impl<R: tauri::Runtime> SettingsFile<R> {
             .entries()
             .into_iter()
             .collect::<serde_json::Map<_, _>>();
-        crate::fs_util::write_private_file(&self.path, &serde_json::to_vec_pretty(&document)?)
+        let saved = serde_json::to_vec_pretty(&document)
+            .map_err(std::io::Error::from)
+            .and_then(|document| crate::fs_util::write_private_file(&self.path, &document));
+        self.owed.0.store(saved.is_err(), Ordering::Relaxed);
+        saved
     }
 }
 
@@ -2478,6 +2498,29 @@ pub(crate) fn retire_settings_file<R: tauri::Runtime, T, E>(
     let moved = move_away()?;
     app.manage(SettingsFileRetired);
     Ok(moved)
+}
+
+/// Quit writes the settings file only to land a save that failed: memory
+/// holds settings the file does not, and the next launch would not have
+/// them. A file whose saves all landed is left as it is, and so is one moved
+/// out of Sona's folder.
+pub(crate) fn save_owed_settings<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let _settings_lock = lock_settings_store();
+    let owed = app
+        .try_state::<Arc<SettingsSaveOwed>>()
+        .is_some_and(|owed| owed.0.load(Ordering::Relaxed));
+    if !owed {
+        return;
+    }
+    let saved = SettingsFile::open(app)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+        .and_then(|file| file.save());
+    match saved {
+        Ok(()) => info!("Saved the settings an earlier save could not write"),
+        Err(error) => {
+            error!("Settings an earlier save could not write were not saved at quit: {error}")
+        }
+    }
 }
 
 pub(crate) fn legacy_provider_secret_migration_pending(app: &AppHandle) -> bool {
@@ -4781,6 +4824,37 @@ mod tests {
             "a write after the move must not report success"
         );
         assert!(!path.exists(), "nothing puts the settings file back");
+    }
+
+    /// A save that fails, as on a full disk, leaves the change in memory
+    /// only, and quitting lost it. Quit writes the file for that save and for
+    /// nothing else: a file whose saves all landed is left as it is.
+    #[test]
+    fn quitting_writes_the_settings_file_only_for_a_failed_save() {
+        let data_dir = tempfile::tempdir().expect("temporary app data");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().identifier = data_dir.path().to_string_lossy().into_owned();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_store::Builder::default().build())
+            .build(context)
+            .expect("test app with a store plugin");
+        let handle = app.handle();
+        update_settings(handle, |settings| settings.history_limit = 5000).expect("first write");
+        let path = data_dir.path().join(SETTINGS_STORE_PATH);
+        std::fs::remove_file(&path).expect("remove the settings file");
+        save_owed_settings(handle);
+        assert!(!path.exists(), "quit writes nothing when every save landed");
+
+        std::fs::create_dir(&path).expect("a directory in the settings file's place");
+        update_settings(handle, |settings| settings.history_limit = 10)
+            .expect_err("the save cannot land");
+        std::fs::remove_dir(&path).expect("the settings file's place is free again");
+        save_owed_settings(handle);
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("quit wrote the settings file"))
+                .expect("the saved settings parse");
+        assert_eq!(saved["settings"]["history_limit"], serde_json::json!(10));
     }
 
     /// Every cloud cleanup marks its provider's key verified. That stamp moved

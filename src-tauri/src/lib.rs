@@ -2461,6 +2461,7 @@ pub fn run(cli_args: CliArgs) {
         }
         // Teardown transcribe.cpp before exit
         tauri::RunEvent::Exit => {
+            settings::save_owed_settings(app);
             if let Some(runtime) = app.try_state::<Arc<cloud_sync::CloudSyncRuntime>>() {
                 runtime.shutdown();
             }

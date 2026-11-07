@@ -1675,7 +1675,7 @@ Format as in MapSettings.md. Paths are under `src-tauri/src` unless named.
 
 - Unloaded → loaded at the first `SettingsFile::open` (settings.rs:2349-2371). A process that loads it sets an unreadable file aside first (2358).
 - Loaded → saved only by Sona's own write (2373-2385). There is no debounced save (`disable_auto_save`, 2363).
-- Exit and Drop never write this file (2364). A save that failed earlier in the session is caught up by the next successful write, not at exit.
+- Exit writes this file only to land a save that failed and has not landed since (`save_owed_settings`); otherwise Exit and Drop never write it, and a file moved out of Sona's folder is never written again.
 
 #### M5. Settings generation (replaces the transitions of the map's M5)
 
