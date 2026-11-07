@@ -5,13 +5,15 @@ use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::evening::{FilingReason, FilingSuggestion, FilingTarget};
 use crate::meeting::types::MeetingSessionId;
 use rusqlite::params;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000_000;
 const ZOOM: &str = "us.zoom.xos";
 
 /// A finished recording that froze `apps` into its preflight, with one line
-/// heard on a track of each source kind in `heard`.
+/// for each entry in `heard`, said by its own voice on a track of that source
+/// kind.
 fn recording(
     store: &MeetingStore,
     apps: &[&str],
@@ -46,16 +48,24 @@ fn recording(
          ) VALUES (?1, ?2, 'test', '{}', '[]', 'en', 'complete', 1)",
         params![revision, session],
     )?;
-    for (ordinal, source_kind) in (0u64..).zip(heard) {
-        let track = Uuid::new_v4().to_string();
+    let mut tracks = HashMap::new();
+    for (ordinal, &source_kind) in (0u64..).zip(heard) {
+        let track = match tracks.get(source_kind) {
+            Some(track) => String::clone(track),
+            None => {
+                let track = Uuid::new_v4().to_string();
+                connection.execute(
+                    "INSERT INTO meeting_source_tracks (
+                        track_id, session_id, plan_id, source_kind, required, requested,
+                        descriptor_json, timestamp_bridge_json, health
+                     ) VALUES (?1, ?2, ?3, ?4, 1, 1, '{}', '{}', '\"healthy\"')",
+                    params![track, session, plan, source_kind],
+                )?;
+                tracks.insert(source_kind, track.clone());
+                track
+            }
+        };
         let speaker = Uuid::new_v4().to_string();
-        connection.execute(
-            "INSERT INTO meeting_source_tracks (
-                track_id, session_id, plan_id, source_kind, required, requested,
-                descriptor_json, timestamp_bridge_json, health
-             ) VALUES (?1, ?2, ?3, ?4, 1, 1, '{}', '{}', '\"healthy\"')",
-            params![track, session, plan, source_kind],
-        )?;
         connection.execute(
             "INSERT INTO meeting_speakers (
                 speaker_id, session_id, source_kind, display_name, revision
@@ -90,13 +100,16 @@ fn offers(suggestions: &[FilingSuggestion]) -> Vec<(FilingTarget, Vec<FilingReas
         .collect()
 }
 
-/* A finished recording only the microphone heard, with no call app, is
- * offered as in person, and its kind changes only when the operator takes
- * the offer. */
+/* Two voices only the microphone heard, with no call app, are offered as in
+ * person, and the kind changes only when the operator takes the offer. One
+ * voice alone may be a memo and is offered nothing. */
 #[test]
-fn a_recording_only_the_microphone_heard_is_offered_as_in_person() {
+fn two_voices_only_the_microphone_heard_are_offered_as_in_person() {
     let (_directory, store) = store();
-    let session_id = recording(&store, &[], &["microphone"]).unwrap();
+    let memo = recording(&store, &[], &["microphone"]).unwrap();
+    let session_id = recording(&store, &[], &["microphone", "microphone"]).unwrap();
+
+    assert!(store.context_suggestions(memo, NOW).unwrap().is_empty());
 
     let offered = store.context_suggestions(session_id, NOW).unwrap();
 
@@ -129,12 +142,13 @@ fn a_recording_only_the_microphone_heard_is_offered_as_in_person() {
 }
 
 /* Voices through a recorded call app make an online call. A call app whose
- * audio carried no voice is never read as in person. */
+ * audio carried no voice is never read as in person, even when two voices
+ * spoke into the microphone. */
 #[test]
 fn voices_through_a_recorded_call_app_are_offered_as_an_online_call() {
     let (_directory, store) = store();
     let call = recording(&store, &[ZOOM], &["microphone", "system_audio"]).unwrap();
-    let quiet_call = recording(&store, &[ZOOM], &["microphone"]).unwrap();
+    let quiet_call = recording(&store, &[ZOOM], &["microphone", "microphone"]).unwrap();
 
     assert_eq!(
         offers(&store.context_suggestions(call, NOW).unwrap()),
