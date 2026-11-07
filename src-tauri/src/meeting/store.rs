@@ -93,7 +93,9 @@ use super::analytics::{
 use super::capture::packet_start_offset_ns;
 use super::cloud_bundle;
 use super::conversation_review::ConversationBookmarkKind;
-use super::ledger::{LedgerOutcomeCounts, LedgerThreadState};
+use super::ledger::{
+    rename_receipt_speakers, LedgerOutcomeCounts, LedgerThreadState, MeetingLedger,
+};
 use super::template_types::{NotesTemplate, NotesTemplateChoice};
 use super::types::*;
 use crate::analytics::{local_days_start_utc_ms, DashboardTrendRequest, LocalCalendarRange};
@@ -5312,7 +5314,14 @@ impl MeetingStore {
             }
         }
         let notes = notes_for_session(&connection, session_id)?;
-        let artifacts = artifact_revisions_for_session(&connection, session_id)?;
+        let mut artifacts = artifact_revisions_for_session(&connection, session_id)?;
+        let speakers_now = ReceiptSpeakers::read(&connection, session_id)?;
+        for ledger in artifacts
+            .iter_mut()
+            .filter_map(|artifact| artifact.content.as_mut()?.ledger.as_mut())
+        {
+            speakers_now.name(ledger);
+        }
         let questions = question_history_for_session(&connection, session_id)?;
         let diarization = diarization_snapshot_for_session(&connection, session_id)?;
         let remote_cancellation_pending: bool = connection.query_row(
@@ -8990,6 +8999,56 @@ fn speaker_display_names_in(
         names.insert(canonical_id, canonical_name);
     }
     Ok(names)
+}
+
+/// Who says each line of a meeting's transcript now, by the name that voice
+/// has now: what a stored ledger's receipts are named from as it is read, so
+/// a speaker renamed or merged after the ledger was written reads on every
+/// row the ledger feeds the way it reads in the transcript.
+struct ReceiptSpeakers {
+    segment_speakers: HashMap<TranscriptSegmentId, SpeakerId>,
+    speaker_names: HashMap<SpeakerId, String>,
+}
+
+impl ReceiptSpeakers {
+    /// Removed lines stay in: a line removed after the ledger was written
+    /// was still said by the voice it is assigned to.
+    fn read(connection: &Connection, session_id: MeetingSessionId) -> Result<Self, StoreError> {
+        let canonical_ids = canonical_speaker_ids(connection, session_id)?;
+        let mut statement = connection.prepare(
+            "SELECT s.segment_id, COALESCE(a.speaker_id, s.speaker_id)
+               FROM meeting_sessions m
+               JOIN meeting_transcript_segments s
+                 ON s.transcript_revision_id = m.current_transcript_revision_id
+               LEFT JOIN meeting_diarization_assignments a
+                 ON a.generation_id = m.current_diarization_generation_id
+                AND a.segment_id = s.segment_id
+              WHERE m.id = ?1",
+        )?;
+        let rows = statement.query_map(params![id(session_id)], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut segment_speakers = HashMap::new();
+        for row in rows {
+            let (segment_id, speaker_id) = row?;
+            let speaker_id = SpeakerId::from_uuid(parse_uuid(&speaker_id)?);
+            segment_speakers.insert(
+                TranscriptSegmentId::from_uuid(parse_uuid(&segment_id)?),
+                canonical_ids
+                    .get(&speaker_id)
+                    .copied()
+                    .unwrap_or(speaker_id),
+            );
+        }
+        Ok(Self {
+            segment_speakers,
+            speaker_names: speaker_display_names_in(connection, session_id, &canonical_ids)?,
+        })
+    }
+
+    fn name(&self, ledger: &mut MeetingLedger) {
+        rename_receipt_speakers(ledger, &self.segment_speakers, &self.speaker_names);
+    }
 }
 
 /// A deleted custom choice skips this meeting's rung without changing its body.

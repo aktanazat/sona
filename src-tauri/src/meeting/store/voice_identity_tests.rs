@@ -9,6 +9,11 @@ use super::*;
 use crate::meeting::diarization::{
     wespeaker_embedding_model_key, SpeakerEmbedding, SPEAKER_EMBEDDING_DIMENSIONS,
 };
+use crate::meeting::ledger::{
+    LedgerCommitment, LedgerFirmness, LedgerReceipt, LedgerReceiptState, LedgerThread,
+    LedgerThreadState, MeetingLedger,
+};
+use crate::meeting::loop_types::MeetingLoopKind;
 use crate::meeting::people_types::{PersonId, VoiceProfileMergeResolution};
 use crate::meeting::store::voice_identity::VoiceSpeakerIdentityResult;
 use crate::meeting::transcript_correction_types::{
@@ -1841,6 +1846,96 @@ fn naming_a_speaker_remembers_the_voice_for_a_suggestion_in_the_next_meeting(
     assert!(store
         .unresolved_active_voice_speaker_ids(second, None)?
         .contains(&same_voice));
+    Ok(())
+}
+
+/// Naming a speaker reaches the ledger written before the name was: a
+/// receipt quoting only that voice names the person on the review page, in
+/// the ledger export and on its loop, and a receipt quoting another voice
+/// keeps that voice's name.
+#[test]
+fn naming_a_speaker_names_the_ledger_receipts_that_quote_them() -> Result<(), StoreError> {
+    let (_directory, store) = store();
+    let session_id = reviewable_meeting(&store, "Release sync", 1);
+    diarized_transcript(
+        &store,
+        session_id,
+        &[
+            (0, "Can we still ship on the 25th?"),
+            (1, "I'll send the build notes."),
+        ],
+    )?;
+    let lines = store.review_snapshot(session_id)?.transcript;
+    let receipt = |line: &EffectiveTranscriptSegment, speaker: &str| LedgerReceipt {
+        quote: line.base.text.clone(),
+        speaker: Some(speaker.to_owned()),
+        t_ms: line.base.start_offset_ns / 1_000_000,
+        citations: vec![ArtifactCitation {
+            segment_id: line.base.segment_id,
+            start_offset_ns: line.base.start_offset_ns,
+            end_offset_ns: line.base.end_offset_ns,
+        }],
+    };
+    super::loops_tests::file_ledger(
+        &store,
+        session_id,
+        MeetingLedger {
+            headline: "The ship date stayed open.".to_owned(),
+            threads: vec![LedgerThread {
+                topic: "Ship date".to_owned(),
+                state: LedgerThreadState::Unanswered,
+                substantive: true,
+                receipt: receipt(&lines[0], "Speaker 1"),
+                owner: None,
+            }],
+            open_loops: Vec::new(),
+            commitments: vec![LedgerCommitment {
+                who: "Speaker 2".to_owned(),
+                what: "Send the build notes".to_owned(),
+                firmness: LedgerFirmness::Firm,
+                receipt: receipt(&lines[1], "Speaker 2"),
+            }],
+            stances: Vec::new(),
+            caveats: Vec::new(),
+            receipts: LedgerReceiptState::Verified,
+        },
+    );
+
+    let first_voice = store.diarization_speaker(session_id, 0)?;
+    rename(&store, session_id, first_voice, "Priya", None)?;
+
+    let said_by = |ledger: &MeetingLedger| {
+        (
+            ledger.threads[0].receipt.speaker.clone(),
+            ledger.commitments[0].receipt.speaker.clone(),
+        )
+    };
+    let named = (Some("Priya".to_owned()), Some("Speaker 2".to_owned()));
+    let review = store.review_snapshot(session_id)?;
+    let shown = review
+        .artifacts
+        .iter()
+        .find_map(|artifact| artifact.content.as_ref()?.ledger.as_ref())
+        .expect("the ledger filed above");
+    assert_eq!(said_by(shown), named, "the review page");
+    let (_, exported) = store
+        .readable_ledger(session_id)?
+        .expect("the ledger filed above");
+    assert_eq!(said_by(&exported), named, "the ledger export");
+    let rows = store.meeting_loops(session_id)?.rows;
+    let loop_speaker = |kind| {
+        rows.iter()
+            .find(|row| row.kind == kind)
+            .and_then(|row| row.speaker.clone())
+    };
+    assert_eq!(
+        (
+            loop_speaker(MeetingLoopKind::Loop),
+            loop_speaker(MeetingLoopKind::Commitment)
+        ),
+        named,
+        "the loops"
+    );
     Ok(())
 }
 

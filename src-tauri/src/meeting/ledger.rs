@@ -269,21 +269,55 @@ pub(crate) fn attribute_receipts(
     segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
     speaker_names: &HashMap<SpeakerId, String>,
 ) {
-    let speaker = |receipt: &LedgerReceipt| {
-        let mut names = receipt.citations.iter().map(|citation| {
-            segment_speakers
-                .get(&citation.segment_id)
-                .and_then(|speaker_id| speaker_names.get(speaker_id))
-        });
-        let first = names.next()??;
-        names.all(|name| name == Some(first)).then(|| first.clone())
-    };
-    for thread in &mut ledger.threads {
-        thread.receipt.speaker = speaker(&thread.receipt);
+    for receipt in receipts_mut(ledger) {
+        receipt.speaker = cited_speaker(receipt, segment_speakers, speaker_names);
     }
-    for commitment in &mut ledger.commitments {
-        commitment.receipt.speaker = speaker(&commitment.receipt);
+}
+
+/// Names a stored ledger's receipts again the way [`attribute_receipts`]
+/// named them when it was written, by the names the speakers have now. The
+/// ledger keeps the name it was written with, so a speaker renamed or merged
+/// since would otherwise still read "Speaker 1" on every row the ledger
+/// feeds. A receipt citing nothing, or a line `segment_speakers` does not
+/// hold because the transcript was replaced since, keeps the name it has.
+pub(crate) fn rename_receipt_speakers(
+    ledger: &mut MeetingLedger,
+    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    speaker_names: &HashMap<SpeakerId, String>,
+) {
+    for receipt in receipts_mut(ledger) {
+        let lines_still_there = !receipt.citations.is_empty()
+            && receipt
+                .citations
+                .iter()
+                .all(|citation| segment_speakers.contains_key(&citation.segment_id));
+        if lines_still_there {
+            receipt.speaker = cited_speaker(receipt, segment_speakers, speaker_names);
+        }
     }
+}
+
+fn receipts_mut(ledger: &mut MeetingLedger) -> impl Iterator<Item = &mut LedgerReceipt> {
+    let threads = ledger.threads.iter_mut().map(|thread| &mut thread.receipt);
+    let commitments = ledger
+        .commitments
+        .iter_mut()
+        .map(|commitment| &mut commitment.receipt);
+    threads.chain(commitments)
+}
+
+fn cited_speaker(
+    receipt: &LedgerReceipt,
+    segment_speakers: &HashMap<TranscriptSegmentId, SpeakerId>,
+    speaker_names: &HashMap<SpeakerId, String>,
+) -> Option<String> {
+    let mut names = receipt.citations.iter().map(|citation| {
+        segment_speakers
+            .get(&citation.segment_id)
+            .and_then(|speaker_id| speaker_names.get(speaker_id))
+    });
+    let first = names.next()??;
+    names.all(|name| name == Some(first)).then(|| first.clone())
 }
 
 // ── verbatim receipts ───────────────────────────────────────────────────────

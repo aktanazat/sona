@@ -18,7 +18,7 @@
 
 use super::{
     committed_receipt, decode_json, from_i64, id, insert_operation_receipt, rejected_receipt,
-    session_row, to_i64, utc_now_ms, MeetingStore, StoreError, StoreMutation,
+    session_row, to_i64, utc_now_ms, MeetingStore, ReceiptSpeakers, StoreError, StoreMutation,
     READABLE_ARTIFACT_CONTENT, READABLE_ARTIFACT_ID,
 };
 use crate::meeting::ledger::{LedgerFirmness, LedgerOutcome, MeetingLedger};
@@ -431,9 +431,10 @@ pub(crate) fn ledger_rows_in(
             continue;
         };
         let content: GeneratedMeetingArtifacts = decode_json(&content_json)?;
-        let Some(ledger) = content.ledger else {
+        let Some(mut ledger) = content.ledger else {
             continue;
         };
+        ReceiptSpeakers::read(connection, session_id)?.name(&mut ledger);
         walked.push(MeetingLedgerRows {
             session_id,
             title,
@@ -709,7 +710,11 @@ pub(crate) fn readable_ledger_in(
         return Ok(None);
     };
     let content: GeneratedMeetingArtifacts = decode_json(&content_json)?;
-    Ok(content.ledger.map(|ledger| (template_id, ledger)))
+    let Some(mut ledger) = content.ledger else {
+        return Ok(None);
+    };
+    ReceiptSpeakers::read(connection, session_id)?.name(&mut ledger);
+    Ok(Some((template_id, ledger)))
 }
 
 pub(crate) fn states_in(
