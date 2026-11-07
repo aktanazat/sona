@@ -841,7 +841,61 @@ fn evening_lines(answer: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::evening_lines;
+    use super::{digest_day, evening_lines, evening_pack, EveningMeeting};
+    use crate::meeting::store::evening::EveningLoop;
+    use crate::meeting::types::MeetingSessionId;
+    use chrono::Local;
+
+    fn waiting(text: &str) -> EveningLoop {
+        EveningLoop {
+            text: text.to_string(),
+            who: Some("Priya Raman".to_string()),
+            due: None,
+        }
+    }
+
+    #[test]
+    fn a_line_the_model_repeats_is_kept_once() {
+        let reply = r#"{"lines": [
+            "you promised coffee with Dana tomorrow at 10",
+            "You promised coffee with  Dana tomorrow at 10",
+            "you are waiting on confirmation for the coffee with Dana"
+        ]}"#;
+
+        assert_eq!(
+            evening_lines(reply),
+            Some(vec![
+                "you promised coffee with Dana tomorrow at 10".to_string(),
+                "you are waiting on confirmation for the coffee with Dana".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_prompt_asks_only_for_the_kinds_the_day_holds() {
+        let day = digest_day(Local::now()).expect("today");
+        let imported = EveningMeeting {
+            session_id: MeetingSessionId::new(),
+            title: "Pricing check-in".to_string(),
+            started_at_utc_ms: day.start_utc_ms,
+            ended_at_utc_ms: Some(day.start_utc_ms + 60_000),
+            people: Vec::new(),
+            summary: Some("Pricing review with Nolan Thursday at 2.".to_string()),
+            decisions: vec!["Pricing review Thursday at 2.".to_string()],
+            promises: Vec::new(),
+            waiting_on: vec![waiting("pricing review Thursday at 2")],
+            not_filed: false,
+        };
+
+        let pack = evening_pack(&day, &[imported], &[], 8_192);
+
+        assert!(pack
+            .prompt
+            .contains("what was decided, what the reader is waiting on."));
+        assert!(!pack.prompt.contains("promised"));
+        assert!(!pack.prompt.contains("not filed"));
+        assert!(!pack.prompt.contains("talked with"));
+    }
 
     #[test]
     fn a_reply_longer_than_five_lines_is_refused() {
