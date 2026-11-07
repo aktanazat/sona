@@ -49,6 +49,9 @@ recordings not filed. Merge what fits on one line; leave out anything else.\n\
 Each line is one plain sentence under 140 characters, written to the reader as \"you\", \
 with no bullet, heading or preamble. Use only names, decisions, promises and dates that \
 appear in the record, and never guess who someone is.\n\
+Only a \"You promised:\" line is the reader's promise and only a \"Waiting on\" line is \
+something the reader waits on; write a \"Decided:\" line as what was decided, not as \
+something the reader agreed to. Say each fact once.\n\
 Reply with JSON only: {\"lines\": [\"...\"]}, one to five lines.";
 
 static RESPONSE_SCHEMA: LazyLock<RootSchema> = LazyLock::new(json_response_schema::<Generated>);
