@@ -651,24 +651,28 @@ fn generate_lines(
     })
 }
 
-/// The reply's lines, trimmed and capped, or `None` when it holds none or
-/// more than five.
+/// The reply's lines, trimmed, capped and without repeats, or `None` when
+/// it holds none or more than five.
 fn evening_lines(answer: &str) -> Option<Vec<String>> {
     if answer.len() > MAX_REPLY_BYTES {
         return None;
     }
     let generated = serde_json::from_str::<Generated>(answer.trim()).ok()?;
-    let lines = generated
-        .lines
-        .iter()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|line| !line.is_empty())
-        .map(|line| match line.char_indices().nth(MAX_LINE_CHARS) {
+    if generated.lines.len() > EVENING_MAX_LINES {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::with_capacity(generated.lines.len());
+    for line in &generated.lines {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let line = match line.char_indices().nth(MAX_LINE_CHARS) {
             Some((end, _)) => format!("{}…", line[..end].trim_end()),
             None => line,
-        })
-        .collect::<Vec<_>>();
-    (!lines.is_empty() && lines.len() <= EVENING_MAX_LINES).then_some(lines)
+        };
+        if !line.is_empty() && !lines.iter().any(|kept| kept.eq_ignore_ascii_case(&line)) {
+            lines.push(line);
+        }
+    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 #[cfg(test)]
