@@ -4,6 +4,13 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::atomic::AtomicUsize;
 
+    /// The reply to a request grouping an outline's topics: every topic is a
+    /// subject of its own.
+    fn no_topic_groups(pack: &str) -> Option<String> {
+        pack.starts_with(r#"{"topics":"#)
+            .then(|| r#"{"same_subject":[]}"#.to_owned())
+    }
+
     struct ReplayGenerator {
         window: Option<usize>,
         wire: usize,
@@ -40,6 +47,9 @@ mod tests {
         ) -> Result<String, MeetingTextGenerationError> {
             if pack.starts_with("Decision: ") {
                 return Ok(r#"{"settled": true}"#.to_owned());
+            }
+            if let Some(reply) = no_topic_groups(pack) {
+                return Ok(reply);
             }
             assert!(pack.len() <= evidence_budget(self, prompt, max_tokens));
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -805,6 +815,9 @@ mod tests {
             _: i32,
             _: ReplyShape,
         ) -> Result<String, MeetingTextGenerationError> {
+            if let Some(reply) = no_topic_groups(pack) {
+                return Ok(reply);
+            }
             if !self.condense && self.calls.fetch_add(1, Ordering::SeqCst) >= 4 {
                 return Err(MeetingTextGenerationError::TimedOut);
             }
@@ -957,6 +970,9 @@ mod tests {
 
     /// A notes reply citing every source its pack holds.
     fn reply_citing(pack: &str) -> String {
+        if let Some(reply) = no_topic_groups(pack) {
+            return reply;
+        }
         let input: Value = serde_json::from_str(pack).expect("bounded input");
         let mut ids = Vec::new();
         if let Some(turns) = input["transcript"].as_array() {
@@ -1250,6 +1266,89 @@ mod tests {
         let states: Vec<LedgerThreadState> =
             ledger.threads.iter().map(|thread| thread.state).collect();
         assert_eq!(states, [LedgerThreadState::Decided]);
+    }
+
+    struct GroupsTopics(&'static str);
+
+    impl MeetingTextGenerator for GroupsTopics {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_id(&self) -> &'static str {
+            "groups-topics"
+        }
+        fn model_version(&self) -> Cow<'static, str> {
+            Cow::Borrowed("1")
+        }
+        fn max_input_bytes(&self) -> usize {
+            6_000
+        }
+        fn generate(
+            &self,
+            _: &str,
+            pack: &str,
+            _: i32,
+            _: ReplyShape,
+        ) -> Result<String, MeetingTextGenerationError> {
+            assert!(no_topic_groups(pack).is_some(), "a topic grouping request");
+            Ok(self.0.to_owned())
+        }
+    }
+
+    /// A subject the meeting came back to shows under a title from each part;
+    /// the topics the engine reads as one subject fold into the first, which
+    /// keeps every detail and citation.
+    #[test]
+    fn topics_about_one_subject_fold_into_the_first() {
+        let evidence = evidence();
+        let cited = |index: usize, text: &str| json!({"text": text, "citations": [evidence.transcript[index].citation.entity_id]});
+        let raw: RawArtifactOutput = serde_json::from_value(json!({
+            "summary": [cited(0, "The release was planned.")],
+            "outline": [
+                {"title": cited(0, "PDF crash"), "detail": cited(0, "Old iPads crash on long PDFs.")},
+                {"title": cited(80, "Release date"), "detail": cited(80, "The release moves to the 25th.")},
+                {"title": cited(159, "PDF page cap"), "detail": cited(159, "Thirty pages, and the rest streams.")}
+            ],
+            "decisions": [], "action_items": [], "key_questions": [], "risks": [],
+            "follow_up_draft": cited(0, "Share the plan.")
+        }))
+        .expect("joined notes");
+        let content = validate_artifact_output(
+            &raw,
+            &evidence.transcript,
+            &HashMap::new(),
+            &evidence.template,
+        )
+        .expect("cited joined notes");
+        let content = one_topic_per_subject(
+            &GroupsTopics(r#"{"same_subject":[["T1","T3"]]}"#),
+            &evidence,
+            content,
+            &|| Ok(()),
+        )
+        .expect("grouped outline");
+        let outline: Vec<_> = content
+            .outline
+            .iter()
+            .map(|topic| {
+                (
+                    topic.title.text.as_str(),
+                    topic.detail.as_ref().map(|detail| detail.text.as_str()),
+                    topic.title.citations.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            outline,
+            [
+                (
+                    "PDF crash",
+                    Some("Old iPads crash on long PDFs.\nThirty pages, and the rest streams."),
+                    2
+                ),
+                ("Release date", Some("The release moves to the 25th."), 1),
+            ]
+        );
     }
 
     /// Parts that share lines write the same items, and a part can file what
