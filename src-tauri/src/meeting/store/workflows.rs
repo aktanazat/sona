@@ -314,6 +314,8 @@ impl MeetingStore {
         self.remember_calendar_event(session_id, event, CalendarEventSource::Chosen)
     }
 
+    /// Keeps the event a recording belongs to. An event that pins a place
+    /// also offers that place to a recording that names none yet.
     pub(crate) fn remember_calendar_event(
         &self,
         session_id: MeetingSessionId,
@@ -321,8 +323,9 @@ impl MeetingStore {
         source: CalendarEventSource,
     ) -> Result<(), StoreError> {
         let event_json = serde_json::to_string(event).map_err(|_| StoreError::Invalid)?;
-        let connection = self.connection()?;
-        connection.execute(
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
             "INSERT INTO meeting_calendar_facts(session_id, event_key, event_json, found_under_way)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
@@ -335,6 +338,15 @@ impl MeetingStore {
                 source == CalendarEventSource::FoundUnderWay
             ],
         )?;
+        if let Some(place) = &event.place {
+            super::context_suggestions::suggest_place_in(
+                &transaction,
+                session_id,
+                place,
+                super::utc_now_ms(),
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 

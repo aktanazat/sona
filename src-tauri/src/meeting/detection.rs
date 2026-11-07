@@ -1947,13 +1947,15 @@ impl DetectionRuntime {
         self.calendar.event_by_key(event_key)
     }
 
-    /// The one meeting under way now, for a recording started by hand that
-    /// names no event. Blocking, like every EventKit read.
-    pub fn calendar_event_under_way(&self) -> Option<CalendarEventSummary> {
-        calendar::meeting_under_way(
+    /// The calendar around now, for a recording started by hand that names no
+    /// event: the one meeting under way, or the events near enough to offer
+    /// as maybes. Blocking, like every EventKit read.
+    pub fn calendar_at_start(&self) -> calendar::CalendarAtStart {
+        calendar::calendar_at_start(
             &crate::settings::get_settings(&self.app),
             self.calendar.as_ref(),
             utc_now_ms(),
+            crate::meeting::store::evening::FILING_EVENT_SLACK_MS,
         )
     }
 
@@ -2586,7 +2588,11 @@ impl DetectionRuntime {
             log::info!("Meeting detection dropped a prompt whose application had already quit");
             return;
         }
-        let snapshot = match self.meetings.create_manual_preflight_from_tray(None).await {
+        let snapshot = match self
+            .meetings
+            .create_manual_preflight_from_tray(calendar::CalendarAtStart::default())
+            .await
+        {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 log::warn!("Meeting detection could not open a preflight: {error:?}");

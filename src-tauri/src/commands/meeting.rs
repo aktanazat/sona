@@ -118,7 +118,8 @@ fn today_meetings(rows: &[MeetingUpcomingRow]) -> TodayMeetings {
 /// event detection is looking at answers first; any other row of the week
 /// ahead is read back from the calendar, which blocks like every EventKit
 /// read and so runs off the async workers. A start made by hand that names
-/// none carries the one meeting under way, when there is one.
+/// none carries the calendar around it: the one meeting under way, or the
+/// events near enough to offer as maybes.
 #[tauri::command]
 #[specta::specta]
 pub async fn meeting_preflight_create(
@@ -128,11 +129,10 @@ pub async fn meeting_preflight_create(
 ) -> Result<MeetingMutationResult, MeetingCommandError> {
     if request.origin == MeetingOrigin::Manual && request.calendar_event_key.is_none() {
         let detection = Arc::clone(&detection);
-        let under_way =
-            tauri::async_runtime::spawn_blocking(move || detection.calendar_event_under_way())
-                .await
-                .unwrap_or_default();
-        return manager.create_manual_preflight(request, under_way).await;
+        let calendar = tauri::async_runtime::spawn_blocking(move || detection.calendar_at_start())
+            .await
+            .unwrap_or_default();
+        return manager.create_manual_preflight(request, calendar).await;
     }
     let calendar_event = match request.calendar_event_key.as_deref() {
         None => None,

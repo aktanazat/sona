@@ -2,7 +2,7 @@ import AppKit
 import MapKit
 import SwiftUI
 
-private enum ConversationKind: String, Codable, CaseIterable, Identifiable {
+enum ConversationKind: String, Codable, CaseIterable, Identifiable {
     case unspecified, huddle
     case onlineCall = "online_call"
     case inPerson = "in_person"
@@ -107,6 +107,7 @@ private struct MailHotelLookup: Decodable {
 
 struct ConversationContextView: View {
     let sessionId: String
+    let revision: Int
     let editable: Bool
     let partialRecording: Bool
     @Environment(AppModel.self) private var model
@@ -159,7 +160,7 @@ struct ConversationContextView: View {
             }
         }
         .padding(.bottom, context == nil ? 0 : 16)
-        .task(id: sessionId) { await load() }
+        .task(id: "\(sessionId):\(revision)") { await load() }
         .sheet(isPresented: $editing) {
             if let context {
                 ConversationContextEditor(
@@ -173,16 +174,21 @@ struct ConversationContextView: View {
         }
     }
 
+    /// A new revision of the same recording reads its context again in place;
+    /// the mail lookup runs until it answers once.
     private func load() async {
-        context = nil
+        let sameRecording = context?.sessionId == sessionId
+        if !sameRecording {
+            context = nil
+            hotel = nil
+        }
         failure = nil
-        hotel = nil
         do {
             let result: ConversationContext = try await model.core.request(
                 "conversation_context", ["sessionId": sessionId])
             guard !Task.isCancelled else { return }
             context = result
-            if editable, result.location == nil, result.calendarLocation == nil, !hotelDismissed {
+            if hotel == nil, editable, result.location == nil, result.calendarLocation == nil, !hotelDismissed {
                 hotel = try? await placeFromMail(core: model.core, sessionId: sessionId, openMail: false)
             }
         } catch {

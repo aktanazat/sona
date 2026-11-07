@@ -8,6 +8,7 @@ use super::capture::{
     PacketLaneReader, PacketSink,
 };
 use super::clock::host_monotonic_now_ns;
+use super::detection::calendar::CalendarAtStart;
 use super::detection::machine::CalendarEventSummary;
 use super::export;
 use super::follow_up::{
@@ -1158,15 +1159,18 @@ impl MeetingSessionManager {
     }
 
     /// A start made by hand that names no event. During the one meeting
-    /// under way (`under_way`, which the caller reads from the calendar) it
-    /// records that meeting under its event: the preflight carries it, and
-    /// the "Local notes" default takes its title. The event is remembered as
-    /// found under way, so it starts no automatic send.
+    /// under way (which the caller reads from the calendar) it records that
+    /// meeting under its event: the preflight carries it, and the "Local
+    /// notes" default takes its title. The event is remembered as found under
+    /// way, so it starts no automatic send. Without one, the events near the
+    /// start wait on the recording as maybes, which change nothing until the
+    /// operator takes one.
     pub async fn create_manual_preflight(
         &self,
         mut request: MeetingPreflightCreateRequest,
-        under_way: Option<CalendarEventSummary>,
+        calendar: CalendarAtStart,
     ) -> Result<MeetingMutationResult, MeetingCommandError> {
+        let CalendarAtStart { under_way, near } = calendar;
         if let Some(event) = under_way.as_ref() {
             request.calendar_event_key = Some(event.event_key.clone());
             let title = event.title.trim();
@@ -1174,8 +1178,18 @@ impl MeetingSessionManager {
                 request.title = title.to_string();
             }
         }
-        self.create_preflight_for_event(request, under_way, CalendarEventSource::FoundUnderWay)
-            .await
+        let result = self
+            .create_preflight_for_event(request, under_way, CalendarEventSource::FoundUnderWay)
+            .await?;
+        if !near.is_empty() {
+            let store = self.store().await?;
+            if let Err(error) =
+                store.suggest_start_events(result.snapshot.session_id, &near, utc_now_ms())
+            {
+                log::warn!("A start by hand could not offer the events near it: {error:?}");
+            }
+        }
+        Ok(result)
     }
 
     pub async fn create_preflight_with_calendar(
@@ -1261,7 +1275,7 @@ impl MeetingSessionManager {
 
     pub async fn create_manual_preflight_from_tray(
         &self,
-        under_way: Option<CalendarEventSummary>,
+        calendar: CalendarAtStart,
     ) -> Result<MeetingSessionSnapshot, MeetingCommandError> {
         let result = self
             .create_manual_preflight(
@@ -1281,7 +1295,7 @@ impl MeetingSessionManager {
                     microphone_device_uid: None,
                     frozen_system_audio_application_bundle_ids: Vec::new(),
                 },
-                under_way,
+                calendar,
             )
             .await?;
         let snapshot = result.snapshot;
@@ -4686,7 +4700,7 @@ impl MeetingSessionManager {
         }
     }
 
-    fn emit_session_changed(&self, snapshot: &MeetingSessionSnapshot) {
+    pub(super) fn emit_session_changed(&self, snapshot: &MeetingSessionSnapshot) {
         if let Some(app) = &self.app {
             let _ = app.emit(
                 "meeting:session-changed",
@@ -6422,9 +6436,13 @@ pub(crate) mod tests {
             frozen_system_audio_application_bundle_ids: Vec::new(),
         };
         let start = |under_way| {
-            tauri::async_runtime::block_on(
-                manager.create_manual_preflight(record_pressed(), under_way),
-            )
+            tauri::async_runtime::block_on(manager.create_manual_preflight(
+                record_pressed(),
+                CalendarAtStart {
+                    under_way,
+                    near: Vec::new(),
+                },
+            ))
             .unwrap()
             .snapshot
         };
@@ -6454,6 +6472,96 @@ pub(crate) mod tests {
         assert_eq!(alone.title, MANUAL_DEFAULT_TITLE);
         assert_eq!(
             store.meeting_calendar_facts(alone.session_id).unwrap(),
+            None
+        );
+    }
+
+    /* A start by hand between meetings offers the events around it, the one
+     * under way first, and keeps its own title and no event until the
+     * operator takes one. */
+    #[test]
+    fn a_manual_start_between_meetings_offers_the_events_around_it() {
+        use crate::meeting::detection::calendar::CalendarOccurrence;
+        use crate::meeting::evening::{FilingReason, FilingTarget};
+
+        let (_directory, manager, _, _) = manager();
+        let now = utc_now_ms();
+        let occurrence =
+            |key: &str, title: &str, start_utc_ms: i64, end_utc_ms: i64| CalendarOccurrence {
+                summary: CalendarEventSummary {
+                    event_key: key.to_string(),
+                    series_key: key.to_string(),
+                    title: title.to_string(),
+                    attendee_count: 1,
+                    start_utc_ms,
+                    end_utc_ms,
+                    attendees: Vec::new(),
+                    notes: None,
+                    calendar_name: Some("Work".to_string()),
+                    location: None,
+                    url: None,
+                    place: None,
+                },
+                is_recurring: false,
+            };
+        let review = occurrence("review#1", "Design review", now + 600_000, now + 2_400_000);
+        let focus = occurrence("focus#1", "Focus time", now - 1_200_000, now + 2_400_000);
+        let request = MeetingPreflightCreateRequest {
+            operation_id: MeetingOperationId::new(),
+            expected_revision: 0,
+            title: MANUAL_DEFAULT_TITLE.to_string(),
+            origin: MeetingOrigin::Manual,
+            suggestion_id: None,
+            calendar_event_key: None,
+            requested_sources: SourceKind::ALL.to_vec(),
+            required_sources: SourceKind::ALL.to_vec(),
+            accepted_known_missing_sources: Vec::new(),
+            degraded_start_policy: DegradedStartPolicy::AbortIfRequiredSourceFails,
+            destination: ProcessingDestination::Local,
+            remote_acknowledgement: None,
+            microphone_device_uid: None,
+            frozen_system_audio_application_bundle_ids: Vec::new(),
+        };
+
+        let started = tauri::async_runtime::block_on(manager.create_manual_preflight(
+            request,
+            CalendarAtStart {
+                under_way: None,
+                near: vec![review.clone(), focus.clone()],
+            },
+        ))
+        .unwrap()
+        .snapshot;
+        let store = tauri::async_runtime::block_on(manager.store()).unwrap();
+        let offered = store
+            .context_suggestions(started.session_id, now)
+            .unwrap()
+            .into_iter()
+            .map(|suggestion| (suggestion.target, suggestion.reasons))
+            .collect::<Vec<_>>();
+
+        let target = |occurrence: &CalendarOccurrence| FilingTarget::Event {
+            event_key: occurrence.summary.event_key.clone(),
+            title: occurrence.summary.title.clone(),
+            start_utc_ms: occurrence.summary.start_utc_ms,
+            end_utc_ms: occurrence.summary.end_utc_ms,
+        };
+        assert_eq!(
+            offered,
+            vec![
+                (
+                    target(&focus),
+                    vec![FilingReason::OnCalendar { overlaps: true }]
+                ),
+                (
+                    target(&review),
+                    vec![FilingReason::OnCalendar { overlaps: false }]
+                ),
+            ]
+        );
+        assert_eq!(started.title, MANUAL_DEFAULT_TITLE);
+        assert_eq!(
+            store.meeting_calendar_facts(started.session_id).unwrap(),
             None
         );
     }

@@ -9,6 +9,9 @@ mod automations_tests;
 mod call_speakers;
 mod connections;
 mod context;
+mod context_suggestions;
+#[cfg(test)]
+mod context_suggestions_tests;
 #[cfg(test)]
 mod conversation_bookmark_tests;
 mod conversation_review;
@@ -1563,6 +1566,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/user_voiceprint.sql")),
     M::up(include_str!("store/evening.sql")),
     M::up(include_str!("store/heard_plans.sql")),
+    M::up(include_str!("store/filing_context.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {

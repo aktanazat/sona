@@ -112,6 +112,7 @@ struct MeetingLiveView: View {
         header(session)
         ErrorNote(store.error)
         warnings
+        ContextSuggestionsView(sessionId: session.sessionId, revision: session.revision)
         MeetingSnapshotStrip(sessionId: session.sessionId)
         CallNamesLiveControl(sessionId: session.sessionId)
         if let state = store.active, state.snapshot.sessionId == session.sessionId {

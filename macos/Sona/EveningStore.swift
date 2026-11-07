@@ -141,9 +141,11 @@ enum FilingTarget: Decodable, Equatable {
     case event(title: String, startUtcMs: Int64, endUtcMs: Int64)
     case person(personId: String, name: String)
     case project(projectId: String, title: String)
+    case kind(ConversationKind)
+    case place(ConversationPlace)
 
     private enum CodingKeys: String, CodingKey {
-        case kind, title, startUtcMs, endUtcMs, personId, name, projectId
+        case kind, title, startUtcMs, endUtcMs, personId, name, projectId, conversationKind, location
     }
 
     init(from decoder: Decoder) throws {
@@ -162,9 +164,40 @@ enum FilingTarget: Decodable, Equatable {
             self = .project(
                 projectId: try container.decode(String.self, forKey: .projectId),
                 title: try container.decode(String.self, forKey: .title))
+        case "kind":
+            self = .kind(try container.decode(ConversationKind.self, forKey: .conversationKind))
+        case "place":
+            self = .place(try container.decode(ConversationPlace.self, forKey: .location))
         case let kind:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown filing target \(kind)")
+        }
+    }
+}
+
+extension FilingTarget {
+    var headline: String {
+        switch self {
+        case let .event(title, startUtcMs, endUtcMs):
+            "Maybe \(title), \(FeedClock.date(startUtcMs).time)–\(FeedClock.date(endUtcMs).time)"
+        case let .person(_, name):
+            "Maybe with \(name)"
+        case let .project(_, title):
+            "Maybe part of \(title)"
+        case .kind(.inPerson):
+            "Maybe in person"
+        case .kind(.onlineCall):
+            "Maybe an online call"
+        case .kind(.huddle):
+            "Maybe a huddle"
+        case .kind(.noteSession):
+            "Maybe a note session"
+        case .kind(.imported):
+            "Maybe an imported recording"
+        case .kind(.unspecified):
+            "Maybe a conversation"
+        case let .place(place):
+            "Maybe at \(place.name)"
         }
     }
 }
@@ -173,9 +206,12 @@ enum FilingReason: Decodable, Equatable {
     case onCalendar(overlaps: Bool)
     case voiceMatches(name: String)
     case said(phrase: String, count: Int, segmentId: TranscriptSegmentId)
+    case onlyMicrophone
+    case appAudio(bundleId: String)
+    case inInvite
 
     private enum CodingKeys: String, CodingKey {
-        case kind, overlaps, name, phrase, count, segmentId
+        case kind, overlaps, name, phrase, count, segmentId, bundleId
     }
 
     init(from decoder: Decoder) throws {
@@ -190,6 +226,12 @@ enum FilingReason: Decodable, Equatable {
                 phrase: try container.decode(String.self, forKey: .phrase),
                 count: try container.decode(Int.self, forKey: .count),
                 segmentId: try container.decode(TranscriptSegmentId.self, forKey: .segmentId))
+        case "only_microphone":
+            self = .onlyMicrophone
+        case "app_audio":
+            self = .appAudio(bundleId: try container.decode(String.self, forKey: .bundleId))
+        case "in_invite":
+            self = .inInvite
         case let kind:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: container, debugDescription: "unknown filing reason \(kind)")

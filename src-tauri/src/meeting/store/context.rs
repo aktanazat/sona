@@ -18,43 +18,52 @@ impl MeetingStore {
         &self,
         request: ConversationContextUpdate,
     ) -> Result<ConversationContext, StoreError> {
-        if request
-            .location
-            .as_ref()
-            .is_some_and(|location| !location.is_valid())
-        {
-            return Err(StoreError::Invalid);
-        }
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let current = context_in(&transaction, request.session_id)?;
-        if current.revision != request.expected_revision {
-            return Err(StoreError::StaleRevision);
-        }
-        let revision = current.revision.checked_add(1).ok_or(StoreError::Invalid)?;
-        transaction.execute(
-            "INSERT INTO conversation_context(session_id, revision, kind_json, location_json)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(session_id) DO UPDATE SET
-                revision = excluded.revision, kind_json = excluded.kind_json,
-                location_json = excluded.location_json",
-            params![
-                id(request.session_id),
-                i64::try_from(revision).map_err(|_| StoreError::Invalid)?,
-                encode_json(&request.kind)?,
-                request.location.as_ref().map(encode_json).transpose()?,
-            ],
-        )?;
-        let session = session_row(&transaction, request.session_id)?;
-        let revision = session.revision.checked_add(1).ok_or(StoreError::Invalid)?;
-        transaction.execute(
-            "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
-            params![to_i64(revision)?, id(request.session_id)],
-        )?;
-        let result = context_in(&transaction, request.session_id)?;
+        let result = save_context_in(&transaction, &request)?;
         transaction.commit()?;
         Ok(result)
     }
+}
+
+/// Saves one recording's kind and place over the revision the request read,
+/// and moves the recording's own revision with it.
+pub(super) fn save_context_in(
+    connection: &Connection,
+    request: &ConversationContextUpdate,
+) -> Result<ConversationContext, StoreError> {
+    if request
+        .location
+        .as_ref()
+        .is_some_and(|location| !location.is_valid())
+    {
+        return Err(StoreError::Invalid);
+    }
+    let current = context_in(connection, request.session_id)?;
+    if current.revision != request.expected_revision {
+        return Err(StoreError::StaleRevision);
+    }
+    let revision = current.revision.checked_add(1).ok_or(StoreError::Invalid)?;
+    connection.execute(
+        "INSERT INTO conversation_context(session_id, revision, kind_json, location_json)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+            revision = excluded.revision, kind_json = excluded.kind_json,
+            location_json = excluded.location_json",
+        params![
+            id(request.session_id),
+            i64::try_from(revision).map_err(|_| StoreError::Invalid)?,
+            encode_json(&request.kind)?,
+            request.location.as_ref().map(encode_json).transpose()?,
+        ],
+    )?;
+    let session = session_row(connection, request.session_id)?;
+    let revision = session.revision.checked_add(1).ok_or(StoreError::Invalid)?;
+    connection.execute(
+        "UPDATE meeting_sessions SET revision = ?1 WHERE id = ?2",
+        params![to_i64(revision)?, id(request.session_id)],
+    )?;
+    context_in(connection, request.session_id)
 }
 
 /// The apps whose audio this conversation captured, as frozen into its

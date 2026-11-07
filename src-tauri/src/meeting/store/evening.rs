@@ -4,7 +4,9 @@
 //! A stray is a finished recording with no calendar event and a title Sona
 //! made up itself. Each stray is reviewed once, in `filing_reviews`; what the
 //! review found waits in `filing_suggestions` until the user files it or
-//! turns it down. Nothing about a stray changes until he does.
+//! turns it down. Nothing about a stray changes until he does. The same table
+//! holds the maybes a recording gets from its start, its kind and its place;
+//! a kind or a place describes a recording but files it nowhere.
 
 use super::loops::loops_in;
 use super::people::{
@@ -40,10 +42,11 @@ const STRAY: &str = "m.phase = 'review_ready'
              AND NOT EXISTS (SELECT 1 FROM meeting_session_events e
                               WHERE e.session_id = m.id AND e.event_kind = 'title_set')))";
 
-/// A stray nobody has put anywhere yet: no filing accepted, no confirmed
-/// person.
+/// A stray nobody has put anywhere yet: no event, person or project filing
+/// accepted, no confirmed person.
 const NOT_FILED: &str = "NOT EXISTS (SELECT 1 FROM filing_suggestions s
-                    WHERE s.session_id = m.id AND s.state = 'accepted')
+                    WHERE s.session_id = m.id AND s.state = 'accepted'
+                      AND s.target_kind IN ('event', 'person', 'project'))
     AND NOT EXISTS (SELECT 1 FROM meeting_person_links l
                      WHERE l.meeting_id = m.id AND l.confidence = 'confirmed')";
 
@@ -333,23 +336,7 @@ impl MeetingStore {
         let suggestions =
             stray_suggestions(stray, evidence, &spoken, &filed_events, &linked_people);
         for (target, reasons) in &suggestions {
-            let (kind, key) = target_identity(target);
-            transaction.execute(
-                "INSERT INTO filing_suggestions(
-                     id, session_id, target_kind, target_key, target_json, reasons_json, state,
-                     created_at_utc_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)
-                 ON CONFLICT(session_id, target_kind, target_key) DO NOTHING",
-                params![
-                    Uuid::new_v4().to_string(),
-                    id(stray.session_id),
-                    kind,
-                    key,
-                    encode_json(target)?,
-                    encode_json(reasons)?,
-                    now_utc_ms,
-                ],
-            )?;
+            insert_suggestion_in(&transaction, stray.session_id, target, reasons, now_utc_ms)?;
         }
         transaction.execute(
             "INSERT INTO filing_reviews(session_id, reviewed_at_utc_ms) VALUES (?1, ?2)",
@@ -367,7 +354,8 @@ impl MeetingStore {
                     s.id, s.target_json, s.reasons_json
                FROM filing_suggestions s
                JOIN meeting_sessions m ON m.id = s.session_id
-              WHERE s.state = 'pending' AND {STRAY}
+              WHERE s.state = 'pending' AND s.target_kind IN ('event', 'person', 'project')
+                AND {STRAY}
               ORDER BY m.started_at_utc_ms, m.id, s.target_kind, s.created_at_utc_ms, s.id"
         ))?;
         let rows = statement.query_map([MANUAL_DEFAULT_TITLE], |row| {
@@ -505,7 +493,7 @@ impl MeetingStore {
     }
 }
 
-fn accept_filing_in(
+pub(super) fn accept_filing_in(
     connection: &Connection,
     suggestion_id: &str,
     now_utc_ms: i64,
@@ -589,7 +577,7 @@ fn evening_meeting(
     })
 }
 
-fn filed_event_keys_in(connection: &Connection) -> Result<HashSet<String>, StoreError> {
+pub(super) fn filed_event_keys_in(connection: &Connection) -> Result<HashSet<String>, StoreError> {
     let mut statement = connection.prepare("SELECT event_key FROM meeting_calendar_facts")?;
     let keys = statement
         .query_map([], |row| row.get::<_, String>(0))?
@@ -612,11 +600,55 @@ fn confirmed_people_in(
     Ok(ids)
 }
 
-fn target_identity(target: &FilingTarget) -> (&'static str, String) {
-    match target {
+fn target_identity(target: &FilingTarget) -> Result<(&'static str, String), StoreError> {
+    Ok(match target {
         FilingTarget::Event { event_key, .. } => ("event", event_key.clone()),
         FilingTarget::Person { person_id, .. } => ("person", person_id.uuid().to_string()),
         FilingTarget::Project { project_id, .. } => ("project", project_id.clone()),
+        FilingTarget::Kind { conversation_kind } => ("kind", encode_json(conversation_kind)?),
+        FilingTarget::Place { location } => (
+            "place",
+            format!("{:.6},{:.6}", location.latitude, location.longitude),
+        ),
+    })
+}
+
+/// Leaves one maybe waiting on a recording. A target the recording already
+/// has a suggestion for stays as it is, so a maybe turned down is never
+/// offered again.
+pub(super) fn insert_suggestion_in(
+    connection: &Connection,
+    session_id: MeetingSessionId,
+    target: &FilingTarget,
+    reasons: &[FilingReason],
+    now_utc_ms: i64,
+) -> Result<(), StoreError> {
+    let (kind, key) = target_identity(target)?;
+    connection.execute(
+        "INSERT INTO filing_suggestions(
+             id, session_id, target_kind, target_key, target_json, reasons_json, state,
+             created_at_utc_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)
+         ON CONFLICT(session_id, target_kind, target_key) DO NOTHING",
+        params![
+            Uuid::new_v4().to_string(),
+            id(session_id),
+            kind,
+            key,
+            encode_json(target)?,
+            encode_json(reasons)?,
+            now_utc_ms,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(super) fn event_target(event: &CalendarEventSummary) -> FilingTarget {
+    FilingTarget::Event {
+        event_key: event.event_key.clone(),
+        title: event.title.clone(),
+        start_utc_ms: event.start_utc_ms,
+        end_utc_ms: event.end_utc_ms,
     }
 }
 
@@ -630,7 +662,15 @@ fn stray_suggestions(
     linked_people: &HashSet<PersonId>,
 ) -> Vec<(FilingTarget, Vec<FilingReason>)> {
     let mut suggestions = Vec::new();
-    if let Some(event) = nearest_event(stray, evidence.events, filed_events) {
+    if let Some(event) = near_events(
+        stray.started_at_utc_ms,
+        stray.ended_at_utc_ms,
+        evidence.events,
+        filed_events,
+    )
+    .into_iter()
+    .next()
+    {
         let overlaps = event.start_utc_ms < stray.ended_at_utc_ms
             && stray.started_at_utc_ms < event.end_utc_ms;
         let mut reasons = vec![FilingReason::OnCalendar { overlaps }];
@@ -646,15 +686,7 @@ fn stray_suggestions(
             }
             reasons.extend(said(spoken, first));
         }
-        suggestions.push((
-            FilingTarget::Event {
-                event_key: event.event_key.clone(),
-                title: event.title.clone(),
-                start_utc_ms: event.start_utc_ms,
-                end_utc_ms: event.end_utc_ms,
-            },
-            reasons,
-        ));
+        suggestions.push((event_target(event), reasons));
     }
     let mut people = HashSet::new();
     for voice in evidence.voices {
@@ -710,28 +742,33 @@ fn stray_suggestions(
     suggestions
 }
 
-/// The timed event that overlaps the stray most, or else starts or ends
-/// nearest it. An event another meeting already holds is not a candidate.
-fn nearest_event<'a>(
-    stray: &StrayCandidate,
+/// The timed events near a recording from `started_at_utc_ms` to
+/// `ended_at_utc_ms`: the one that overlaps it most first, then the ones that
+/// start or end nearest it. An event another meeting already holds is not a
+/// candidate.
+pub(super) fn near_events<'a>(
+    started_at_utc_ms: i64,
+    ended_at_utc_ms: i64,
     events: &'a [CalendarOccurrence],
     filed_events: &HashSet<String>,
-) -> Option<&'a CalendarEventSummary> {
-    events
+) -> Vec<&'a CalendarEventSummary> {
+    let mut near = events
         .iter()
         .map(|occurrence| &occurrence.summary)
         .filter(|event| {
             event.end_utc_ms > event.start_utc_ms
                 && event.end_utc_ms - event.start_utc_ms < ALL_DAY_MS
-                && event.start_utc_ms < stray.ended_at_utc_ms + FILING_EVENT_SLACK_MS
-                && stray.started_at_utc_ms - FILING_EVENT_SLACK_MS < event.end_utc_ms
+                && event.start_utc_ms < ended_at_utc_ms + FILING_EVENT_SLACK_MS
+                && started_at_utc_ms - FILING_EVENT_SLACK_MS < event.end_utc_ms
                 && !filed_events.contains(&event.event_key)
         })
-        .max_by_key(|event| {
-            let overlap = event.end_utc_ms.min(stray.ended_at_utc_ms)
-                - event.start_utc_ms.max(stray.started_at_utc_ms);
-            (overlap, std::cmp::Reverse(event.event_key.clone()))
-        })
+        .collect::<Vec<_>>();
+    near.sort_by_key(|event| {
+        let overlap =
+            event.end_utc_ms.min(ended_at_utc_ms) - event.start_utc_ms.max(started_at_utc_ms);
+        (std::cmp::Reverse(overlap), event.event_key.clone())
+    });
+    near
 }
 
 /// How often the transcript says `phrase` as whole words, and where first.
