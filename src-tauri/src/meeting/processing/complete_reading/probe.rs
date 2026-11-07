@@ -473,6 +473,47 @@ fn notes_probe() {
             .map(|item| item.text.len())
             .sum::<usize>()
     );
+    let about_me = settings
+        .as_ref()
+        .map(|settings| settings.meeting_prep.about_me.name.trim().to_lowercase())
+        .unwrap_or_default();
+    let voiced: HashSet<SpeakerId> = export
+        .review
+        .transcript
+        .iter()
+        .filter(|line| !line.removed)
+        .map(|line| line.assigned_speaker_id)
+        .collect();
+    let names: Vec<&str> = export
+        .review
+        .speakers
+        .iter()
+        .filter(|speaker| voiced.contains(&speaker.speaker_id))
+        .map(|speaker| speaker.display_name.as_str())
+        .collect();
+    let numbered = names
+        .iter()
+        .filter(|name| {
+            **name == "Local speaker"
+                || name
+                    .strip_prefix("Speaker ")
+                    .is_some_and(|number| number.parse::<u32>().is_ok())
+        })
+        .count();
+    let yours = !about_me.is_empty()
+        && names
+            .iter()
+            .any(|name| name.trim().to_lowercase() == about_me);
+    println!(
+        "speakers: {} with lines, {numbered} still numbered, {}; about me name {}",
+        names.len(),
+        if yours {
+            "one named as you"
+        } else {
+            "none named as you"
+        },
+        if about_me.is_empty() { "empty" } else { "set" }
+    );
     if evidence.transcript.is_empty() {
         println!("nothing left to write notes from");
         return;
@@ -716,12 +757,17 @@ fn counted(notes: &GeneratedMeetingArtifacts) -> String {
         || format!("no ledger ({:?})", notes.ledger_failure),
         |ledger| {
             format!(
-                "a ledger of {} threads ({} say who said it), {} commitments, {} open questions and {} caveats",
+                "a ledger of {} threads ({} say who said it, {} decided), {} commitments, {} open questions and {} caveats",
                 ledger.threads.len(),
                 ledger
                     .threads
                     .iter()
                     .filter(|thread| thread.receipt.speaker.is_some())
+                    .count(),
+                ledger
+                    .threads
+                    .iter()
+                    .filter(|thread| thread.state == LedgerThreadState::Decided)
                     .count(),
                 ledger.commitments.len(),
                 ledger.open_loops.len(),
