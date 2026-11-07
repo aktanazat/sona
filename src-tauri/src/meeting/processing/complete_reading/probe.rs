@@ -7,6 +7,7 @@
 //! SONA_PROBE_ENGINE names in the form the settings keep it, such as
 //! `{"kind":"local_endpoint","base_url":"http://127.0.0.1:11434/v1","model":"sona-notes","context_window_tokens":16384}`.
 //! SONA_PROBE_PRINT_NOTES=1 also prints the pipeline's notes, words and all.
+//! SONA_PROBE_PIPELINE_ONLY=1 runs only the app's own pipeline.
 //! A Sona export carries no bookmarks; a `bookmarks` list added beside its
 //! `review`, each `{"kind":"question","at_offset_ns":15500000000}`, presses
 //! them on the meeting before its notes are written.
@@ -289,7 +290,14 @@ fn with_earlier_sentences(prompt: &str) -> String {
 /// whether they stop parts that now pass; a part the app gave up on is also
 /// tried again as it is, short, and without the profile, so the report says
 /// whether a sentence or chance stopped it.
-fn compare(witness: &Witness, prompt: &str, profile: &str, pack: &str, failed: bool) {
+fn compare(
+    witness: &Witness,
+    prompt: &str,
+    profile: &str,
+    pack: &str,
+    reply_tokens: i32,
+    failed: bool,
+) {
     let mut variants = vec![(
         "with the earlier untrusted-data sentences",
         with_earlier_sentences(prompt),
@@ -304,7 +312,7 @@ fn compare(witness: &Witness, prompt: &str, profile: &str, pack: &str, failed: b
     for (variant, other) in variants {
         let started = Instant::now();
         let failure = witness
-            .generate(&other, pack, ARTIFACT_MAX_TOKENS, ReplyShape::MeetingNotes)
+            .generate(&other, pack, reply_tokens, ReplyShape::MeetingNotes)
             .err()
             .map(|_| "failed".to_string());
         let outcome = witness.outcome(failure);
@@ -535,6 +543,10 @@ fn notes_probe() {
         println!("nothing left to write notes from");
         return;
     }
+    if std::env::var_os("SONA_PROBE_PIPELINE_ONLY").is_some() {
+        pipeline(&engine, &store, session_id).expect("scratch review");
+        return;
+    }
 
     let language = settings
         .as_ref()
@@ -549,13 +561,10 @@ fn notes_probe() {
         .speaker_display_names(session_id)
         .expect("scratch speakers");
     let speakers = turn_speakers(&segments, &speaker_names);
-    let mut input = notes_packs(
-        &evidence,
-        &scope,
-        &speakers,
-        evidence_budget(&witness, &prompt, ARTIFACT_MAX_TOKENS),
-    )
-    .expect("notes parts");
+    let budget = part_budget(&witness, &prompt, ARTIFACT_MAX_TOKENS);
+    let mut reply_tokens = budget.reply_tokens;
+    let mut input =
+        notes_packs(&evidence, &scope, &speakers, budget.evidence_bytes).expect("notes parts");
     let mut instructions = prompt.clone();
     let mut short = SHORT_NOTES_PROMPT.to_string();
     let mut left_out = Vec::new();
@@ -575,6 +584,7 @@ fn notes_probe() {
                 &instructions,
                 &short,
                 pack,
+                reply_tokens,
                 &scope,
                 &evidence,
                 &speakers,
@@ -593,7 +603,14 @@ fn notes_probe() {
             let failed = failure.is_some();
             report(&step, started, &witness.outcome(failure));
             if round == 1 && witness.local.is_none() {
-                compare(&witness, &prompt, &profile, pack.as_ref(), failed);
+                compare(
+                    &witness,
+                    &prompt,
+                    &profile,
+                    pack.as_ref(),
+                    reply_tokens,
+                    failed,
+                );
             }
         }
         if sections.is_empty() {
@@ -618,11 +635,13 @@ fn notes_probe() {
         }
         instructions = format!("{prompt}{NOTES_RECONCILIATION}");
         short = format!("{SHORT_NOTES_PROMPT}{NOTES_RECONCILIATION}");
+        let budget = part_budget(&witness, &instructions, ARTIFACT_MAX_TOKENS);
+        reply_tokens = budget.reply_tokens;
         let next = packs(
             facts.rows(&scope).expect("section fact rows"),
             "{\"section_facts\":[",
             "]}",
-            evidence_budget(&witness, &instructions, ARTIFACT_MAX_TOKENS),
+            budget.evidence_bytes,
             Fill::Even,
         )
         .expect("join parts");
@@ -643,12 +662,9 @@ fn notes_probe() {
 
     let haystack = ledger::fold_haystack(evidence.transcript.iter().map(|item| item.text.as_str()));
     let ledger_prompt = ledger_system_prompt();
-    let ledger_input = ledger_packs(
-        &scope,
-        &speakers,
-        evidence_budget(&witness, &ledger_prompt, LEDGER_MAX_TOKENS),
-    )
-    .expect("ledger parts");
+    let ledger_budget = part_budget(&witness, &ledger_prompt, LEDGER_MAX_TOKENS);
+    let ledger_input =
+        ledger_packs(&scope, &speakers, ledger_budget.evidence_bytes).expect("ledger parts");
     let mut ledgers = Vec::new();
     for (index, pack) in ledger_input.iter().enumerate() {
         let step = format!(
@@ -664,6 +680,7 @@ fn notes_probe() {
             &haystack,
             &ledger_prompt,
             pack,
+            ledger_budget.reply_tokens,
             &scope,
             &|| Ok(()),
         ) {
@@ -792,9 +809,13 @@ fn counted(notes: &GeneratedMeetingArtifacts) -> String {
             )
         },
     );
+    let kind = match (notes.plain, notes.plain_because) {
+        (false, _) => "structured notes".to_string(),
+        (true, Some(because)) => format!("plain notes after {because:?}"),
+        (true, None) => "plain notes".to_string(),
+    };
     format!(
-        "{} notes, {} summary lines, {} topics, {} decisions, {} action items ({owned} with an owner, {dated} with a date), {} questions, {} risks, {ledger}; left out: {}",
-        if notes.plain { "plain" } else { "structured" },
+        "{kind}, {} summary lines, {} topics, {} decisions, {} action items ({owned} with an owner, {dated} with a date), {} questions, {} risks, {ledger}; left out: {}",
         notes.summary.text.lines().count(),
         notes.outline.len(),
         notes.decisions.len(),

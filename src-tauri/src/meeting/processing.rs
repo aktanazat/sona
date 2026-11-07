@@ -86,8 +86,11 @@ const DIARIZATION_MIN_VOICED_FRAMES: u32 = 10;
 const MAX_ARTIFACT_EVIDENCE_BYTES: usize = 96 * 1024;
 const MAX_CATCH_UP_EVIDENCE_BYTES: usize = 32 * 1024;
 const MAX_QA_EVIDENCE: usize = 24;
-/// The generated notes' output budget. One pass writes the summary, the
-/// outline and every topic, which is why it is the widest ask on the page.
+/// The generated notes' output budget on an engine whose window this side
+/// cannot see, a relayed model's; an engine with a window here reads each
+/// part with a share of it, from [`part_budget`]. One pass writes the
+/// summary, the outline and every topic, which is why it is the widest ask
+/// on the page.
 const ARTIFACT_MAX_TOKENS: i32 = 3_200;
 /// A mid-meeting recap's output budget: a recap is a handful of bullets, and
 /// `CATCH_UP_MAX_BULLETS` already says how many.
@@ -96,8 +99,10 @@ const CATCH_UP_MAX_TOKENS: i32 = 900;
 /// prompt is asked for a list rather than a paragraph, and narrower than the
 /// notes pass, which writes a whole document.
 const PROMPT_MAX_TOKENS: i32 = 2_000;
-/// The ledger's own output budget. It is asked for separately from the
-/// generated notes so neither has to fit inside the other's ceiling.
+/// The ledger's own output budget, asked for separately from the generated
+/// notes so neither has to fit inside the other's ceiling. It bounds the
+/// reply that joins the parts' ledgers, and each part's ledger on the terms
+/// [`ARTIFACT_MAX_TOKENS`] gives the notes.
 const LEDGER_MAX_TOKENS: i32 = 3_200;
 /// One retry, and only for an unverifiable receipt. A second model call is
 /// cheap next to shipping a quote nobody said; a third would be hope.
@@ -423,7 +428,7 @@ impl ReplyShape {
         self,
     ) -> Option<(&'static str, &'static serde_json::value::RawValue)> {
         type Raw = std::sync::LazyLock<Option<Box<serde_json::value::RawValue>>>;
-        static NOTES: Raw = Raw::new(|| raw_schema(&reply_schema::<RawArtifactOutput>()));
+        static NOTES: Raw = Raw::new(|| raw_schema(&notes_reply_schema()));
         static LEDGER: Raw = Raw::new(|| raw_schema(&ledger_reply_schema()));
         static MERGE: Raw =
             Raw::new(|| raw_schema(&reply_schema::<complete_reading::LedgerMergeReply>()));
@@ -442,6 +447,25 @@ fn reply_schema<T: schemars::JsonSchema>() -> schemars::schema::RootSchema {
         .with(|settings| settings.meta_schema = None)
         .into_generator()
         .into_root_schema_for::<T>()
+}
+
+/// The most citations one cited text of the notes may carry. Left free, a
+/// 14B local model cited every line of a 145-line part for each summary line
+/// and outline topic, and ran out of answer before reaching the decisions.
+const MAX_TEXT_CITATIONS: u32 = 12;
+
+/// The notes' schema with each cited text held to [`MAX_TEXT_CITATIONS`].
+fn notes_reply_schema() -> schemars::schema::RootSchema {
+    let mut root = reply_schema::<RawArtifactOutput>();
+    if let Some(schemars::schema::Schema::Object(cited)) = root.definitions.get_mut("RawCitedText")
+    {
+        if let Some(schemars::schema::Schema::Object(citations)) =
+            cited.object().properties.get_mut("citations")
+        {
+            citations.array().max_items = Some(MAX_TEXT_CITATIONS);
+        }
+    }
+    root
 }
 
 /// The ledger's schema with each receipt quoting the words themselves: the
@@ -4802,6 +4826,55 @@ pub(crate) fn evidence_budget(
         }
     }
 }
+
+/// The least answer room a part of a meeting is read with: Apple
+/// Intelligence's whole reply, which that engine reserves whatever it is
+/// asked for.
+const PART_REPLY_MIN_TOKENS: usize = ON_DEVICE_REPLY_TOKENS;
+/// The most: at the 9.4 tokens a second a 14B local model wrote at on a busy
+/// M5 Pro, an answer this long takes a quarter of an hour.
+const PART_REPLY_MAX_TOKENS: usize = 8_192;
+
+/// How long one part's answer may run and what the part may weigh, split
+/// from the same window.
+pub(crate) struct PartBudget {
+    pub(crate) reply_tokens: i32,
+    pub(crate) evidence_bytes: usize,
+}
+
+/// The answer gets a third of the window the instructions leave and the part
+/// the rest, and no part outweighs twice the longest answer, so a part never
+/// needs more answer than it is given. Measured with a 14B local model on a
+/// 30-minute meeting: the notes of a part run to about 0.4 of the part's
+/// tokens, and a part holds about a token for every three of its bytes, so a
+/// full part needs about three quarters of its answer. The fixed 3,200-token
+/// answer this replaces ran out on the parts of a 16k window, and each cut
+/// answer split its part and grew the notes the joining rounds had to fit.
+///
+/// An engine whose window this side cannot see answers in `unwindowed_reply`
+/// and is bounded by its own submission ceiling, as [`evidence_budget`] has
+/// it.
+pub(crate) fn part_budget(
+    generator: &dyn MeetingTextGenerator,
+    instructions: &str,
+    unwindowed_reply: i32,
+) -> PartBudget {
+    let Some(window) = generator.context_window_bytes() else {
+        return PartBudget {
+            reply_tokens: unwindowed_reply,
+            evidence_bytes: evidence_budget(generator, instructions, unwindowed_reply),
+        };
+    };
+    let room = window.saturating_sub(instructions.len()) / ON_DEVICE_BYTES_PER_TOKEN;
+    let reply = (room / 3).clamp(PART_REPLY_MIN_TOKENS, PART_REPLY_MAX_TOKENS);
+    let reply_tokens = i32::try_from(reply).unwrap_or(i32::MAX);
+    PartBudget {
+        reply_tokens,
+        evidence_bytes: evidence_budget(generator, instructions, reply_tokens)
+            .min(2 * PART_REPLY_MAX_TOKENS * ON_DEVICE_BYTES_PER_TOKEN),
+    }
+}
+
 /// Serialize a model input, cut to what the engine will accept.
 ///
 /// `artifact_evidence` bounds evidence in bytes of quoted text, which is not
@@ -5098,7 +5171,7 @@ fn artifact_system_prompt(
         ""
     };
     let mut prompt = format!(
-        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision, and a status update or a confirmation that something is unchanged is not a decision either. A question the meeting answered is not a key question. {steering}{notes_rule}"
+        "{MEETING_PROMPT}\n\nReturn only JSON with this exact schema. `cited` means the object {{\"text\":string,\"citations\":[segment_uuid]}} and never a bare string: the segment UUIDs belong in the `citations` array, never written inside `text`. Schema: {{\"summary\":[cited],\"outline\":[{{\"title\":cited,\"detail\":cited_or_null}}],\"decisions\":[cited],\"action_items\":[{{\"text\":{{\"text\":string,\"citations\":[segment_uuid]}},\"owner_text\":string_or_null,\"due_text\":string_or_null}}],\"key_questions\":[cited],\"risks\":[cited],\"follow_up_draft\":cited}}. An action item's `text` is a whole `cited` object, written out above because the nesting is easy to misread: its citations go inside that object and never beside it, and an action item carries no `citations` key of its own. Only `cited` objects carry `citations`: an outline topic cites inside its `title` and `detail` objects. Use only the keys named in this schema. Every `cited` object must carry one or more segment UUID citations from transcript evidence. Cite only the segments that state what its text says, at most {MAX_TEXT_CITATIONS} of them, never every segment of a stretch. Each cited text is nonblank and at most 8,000 UTF-8 bytes after trimming; the joined summary is also at most 8,000 UTF-8 bytes. `outline` has at most 32 entries. `decisions`, `action_items`, `key_questions` and `risks` each have at most 64 entries. Non-null `owner_text` and `due_text` are nonblank and at most 512 UTF-8 bytes. `owner_text` names the person explicitly assigned the action or the speaker making a first-person singular commitment. A speaker saying 'we' has not identified an individual owner. Use `null` for unknown owners or due dates, never an empty string. The summary is a list of at least one and at most {MAX_SUMMARY_LINES} standalone lines in reading order, and each line cites the segments that line came from: a reader presses a line to hear that moment, so a citation that belongs to a different line is worse than none. `outline`, `decisions`, `action_items`, `key_questions` and `risks` are each `[]` when the evidence does not support them, but `summary` is never empty: if the meeting is thin, write the one line the material does support. `follow_up_draft` must be cited and nonblank too; if no follow-up was agreed, state that without inventing a task. Do not cite manual notes or the user's profile. Do not add facts, owners, or dates absent from evidence. Leave out greetings, small talk, jokes, farewells and asides. Write what the meeting established, never a narration of who said, asked, mentioned or confirmed something. A decision says what was chosen and, when the transcript says so, who made the call or owns it; a task someone takes on is an action item, not a decision, and a status update or a confirmation that something is unchanged is not a decision either. A question the meeting answered is not a key question. {steering}{notes_rule}"
     );
     if let NotesTemplate::Custom(template) = template {
         prompt.push_str("\n\nThe user's custom template arranges only the outline. The summary, decisions, action items, key questions, risks and follow-up draft retain the schema and all citation, text and list limits above. Use these outline sections in the order given, at most once each, with each title spelled exactly as given. Write each section's detail from the transcript following that section's instructions. Omit sections not covered by the transcript; an empty outline is valid. Each title and non-null detail still needs at least one transcript citation. Section instructions guide emphasis, never supply facts or override this schema.");
@@ -6204,6 +6277,7 @@ fn read_ledger_pack(
     haystack: &str,
     prompt: &str,
     input: &str,
+    reply_tokens: i32,
     scope: &complete_reading::source_scope::SourceScope<'_>,
     check: &dyn Fn() -> Result<(), RunFailure>,
 ) -> Result<MeetingLedger, complete_reading::ReadingError> {
@@ -6214,7 +6288,7 @@ fn read_ledger_pack(
             generator,
             prompt,
             input,
-            LEDGER_MAX_TOKENS,
+            reply_tokens,
             ReplyShape::MeetingLedger,
             check,
         )?;
@@ -6385,9 +6459,11 @@ fn ledger_firmness(value: &str) -> Result<LedgerFirmness, Rejection> {
     }
 }
 
+const MAX_GENERATED_TEXT_BYTES: usize = 8_000;
+
 fn required_generated_text(value: &str, field: &'static str) -> Result<String, Rejection> {
     let value = value.trim();
-    if value.is_empty() || value.len() > 8_000 {
+    if value.is_empty() || value.len() > MAX_GENERATED_TEXT_BYTES {
         return Err(ReplyRule::Length.on(field));
     }
     Ok(value.to_string())
@@ -7967,6 +8043,12 @@ pub(crate) mod tests {
     #[derive(serde::Deserialize)]
     struct CompletionRequest {
         max_tokens: i32,
+        messages: Vec<CompletionMessage>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CompletionMessage {
+        content: String,
     }
 
     fn completion_request(request: &str) -> CompletionRequest {
@@ -8242,14 +8324,14 @@ pub(crate) mod tests {
             .expect("second catalog fixture");
     }
     #[test]
-    fn a_local_endpoint_reserves_its_requested_reply_budget() {
-        let requested = ARTIFACT_MAX_TOKENS;
+    fn a_local_endpoint_answers_in_a_share_of_its_window() {
+        let window_tokens = 16_384;
         let fixture = artifact_store_fixture();
         let server = generation_fixture(&fixture.segment_id, GENERATION_FIXTURE_TRANSCRIPT);
         let generator = LocalEndpointGenerator::new_with_context(
             &server.base_url,
             "fixture-model",
-            Some(16_384),
+            Some(window_tokens),
         )
         .expect("fixture local endpoint");
         let service = MeetingProcessingService::new(None);
@@ -8282,7 +8364,17 @@ pub(crate) mod tests {
         assert_eq!(completion_requests.len(), 2);
         for request in completion_requests {
             let body = completion_request(request);
-            assert_eq!(body.max_tokens, requested);
+            let prompt_bytes: usize = body
+                .messages
+                .iter()
+                .map(|message| message.content.len())
+                .sum();
+            assert!(body.max_tokens > ARTIFACT_MAX_TOKENS);
+            assert!(
+                prompt_bytes / ON_DEVICE_BYTES_PER_TOKEN
+                    + usize::try_from(body.max_tokens).expect("a positive reply budget")
+                    <= window_tokens
+            );
         }
         server.handle.join().expect("generation fixture");
     }
