@@ -11,7 +11,7 @@ use tauri_specta::Event as _;
 use super::{encode_plain, off_main_thread, on_main_thread, reply, Args, Fault};
 
 /// Every typed event the core emits, by the name the bindings export.
-pub(super) const TYPED_EVENTS: [&str; 40] = [
+pub(super) const TYPED_EVENTS: [&str; 41] = [
     crate::chat_voice::ChatVoiceEvent::NAME,
     crate::upstream_import::UpstreamImportProgressEvent::NAME,
     crate::agent_bridge::AgentBridgeUpdateEvent::NAME,
@@ -47,6 +47,7 @@ pub(super) const TYPED_EVENTS: [&str; 40] = [
     crate::meeting::detection::MeetingRitualRetractedEvent::NAME,
     crate::meeting::detection::DetectionStatus::NAME,
     crate::meeting::digest::CaptureRequestedEvent::NAME,
+    crate::meeting::evening::EveningChangedEvent::NAME,
     crate::tray::TraySettingsRequestedEvent::NAME,
     crate::tray::TrayCopyFailedEvent::NAME,
     crate::query::QueryLinkRequestedEvent::NAME,
@@ -2629,6 +2630,28 @@ pub(super) async fn call(
         }
         "home_today" => {
             reply(crate::commands::meeting::home_today(app.state(), app.state(), app.state()).await)
+        }
+        "home_evening" => {
+            reply(crate::commands::evening::home_evening(app.state(), app.state()).await)
+        }
+        "home_evening_write" => reply(
+            crate::commands::evening::home_evening_write(app.clone(), app.state(), app.state())
+                .await,
+        ),
+        "filing_decide" => {
+            let mut args = Args::parse(params)?;
+            let suggestion_id = args.take("suggestionId")?;
+            let accept = args.take("accept")?;
+            reply(
+                crate::commands::evening::filing_decide(
+                    app.clone(),
+                    app.state(),
+                    app.state(),
+                    suggestion_id,
+                    accept,
+                )
+                .await,
+            )
         }
         "meeting_preflight_create" => {
             let mut args = Args::parse(params)?;

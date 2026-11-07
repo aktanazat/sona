@@ -287,6 +287,7 @@ final class AppModel {
     let onboarding: OnboardingStore
     let secureInput: SecureInputStore
     let overview: OverviewStore
+    let evening: EveningStore
     let library: LibraryStore
     let meetings: MeetingsStore
     let live: MeetingLiveStore
@@ -344,6 +345,7 @@ final class AppModel {
         onboarding = OnboardingStore(core: core)
         secureInput = SecureInputStore(core: core)
         overview = OverviewStore(core: core)
+        evening = EveningStore(core: core)
         library = LibraryStore(core: core)
         meetings = MeetingsStore(core: core)
         live = MeetingLiveStore(core: core)
@@ -905,6 +907,7 @@ final class AppModel {
         Task { await settings.start() }
         Task { await secureInput.start() }
         Task { await overview.start() }
+        Task { await evening.start() }
         Task { await live.start() }
         Task { await meetings.start() }
         Task { await meetingSettings.start() }

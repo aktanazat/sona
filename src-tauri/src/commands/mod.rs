@@ -6,6 +6,7 @@ pub mod conversation_context;
 pub mod conversation_review;
 pub mod detection;
 pub mod documents;
+pub mod evening;
 pub mod followup;
 pub mod history;
 pub mod hud;

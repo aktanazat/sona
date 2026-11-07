@@ -33,6 +33,7 @@ struct OverviewView: View {
             if let today = store.today {
                 OverviewTodayStrip(today: today, showUpcoming: showUpcoming, showNeedsYou: showNeedsYou)
             }
+            EveningView()
             OverviewWidgets(store: store, showNeedsYou: showNeedsYou)
             OverviewNeedsYou(store: store, openMeeting: openMeeting)
                 .id(Self.needsYouAnchor)

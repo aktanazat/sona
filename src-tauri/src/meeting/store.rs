@@ -17,6 +17,9 @@ mod custom_templates;
 mod custom_templates_tests;
 pub(crate) mod digest;
 mod documents;
+pub(crate) mod evening;
+#[cfg(test)]
+mod evening_tests;
 #[cfg(test)]
 mod external_tests;
 mod fence;
@@ -1550,6 +1553,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/audio_retention.sql")),
     M::up(include_str!("store/calendar_found_under_way.sql")),
     M::up(include_str!("store/user_voiceprint.sql")),
+    M::up(include_str!("store/evening.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
