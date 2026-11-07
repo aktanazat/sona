@@ -1,6 +1,6 @@
 //! The words of a line the way the notes' checks compare them.
 
-const SPELLED_UNITS: [[&str; 2]; 20] = [
+pub(crate) const SPELLED_UNITS: [[&str; 2]; 20] = [
     ["zero", "zeroth"],
     ["one", "first"],
     ["two", "second"],
@@ -23,7 +23,7 @@ const SPELLED_UNITS: [[&str; 2]; 20] = [
     ["nineteen", "nineteenth"],
 ];
 
-const SPELLED_TENS: [[&str; 2]; 8] = [
+pub(crate) const SPELLED_TENS: [[&str; 2]; 8] = [
     ["twenty", "twentieth"],
     ["thirty", "thirtieth"],
     ["forty", "fortieth"],

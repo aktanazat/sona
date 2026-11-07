@@ -254,6 +254,7 @@ fn build_swift_capture_bridges() {
     build_capture_bridge("swift/call_chat.swift", "call_chat");
     build_capture_bridge("swift/call_roster.swift", "call_roster");
     build_capture_bridge("swift/microphone_access.swift", "microphone_access");
+    build_capture_bridge("swift/pdf_document.swift", "pdf_document");
     for framework in [
         "ScreenCaptureKit",
         "AVFoundation",
@@ -267,6 +268,7 @@ fn build_swift_capture_bridges() {
         "CoreVideo",
         "Foundation",
         "CoreFoundation",
+        "PDFKit",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

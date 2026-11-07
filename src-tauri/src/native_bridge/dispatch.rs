@@ -3695,6 +3695,16 @@ pub(super) async fn call(
             let request = args.take("request")?;
             reply(crate::commands::documents::doc_delete(app.state(), request).await)
         }
+        "doc_meeting_list" => {
+            let mut args = Args::parse(params)?;
+            let session_id = args.take("sessionId")?;
+            reply(crate::commands::documents::doc_meeting_list(app.state(), session_id).await)
+        }
+        "doc_marked_copy" => {
+            let mut args = Args::parse(params)?;
+            let request = args.take("request")?;
+            reply(crate::commands::documents::doc_marked_copy(app.state(), request).await)
+        }
         "phone_thought_source_get" => {
             let mut args = Args::parse(params)?;
             let note_id = args.take("noteId")?;

@@ -1,3 +1,4 @@
+use super::documents::DocumentBody;
 use super::people::calendar_context_in;
 use super::people::{
     all_people_in, derive_calendar_links_in, derive_speaker_link_in, derive_title_links_in,
@@ -1026,8 +1027,11 @@ fn person_split_moves_only_selected_evidence_without_data_loss() {
             MeetingOperationId::new(),
             "Plan".to_string(),
             "plan.md".to_string(),
-            "text/markdown".to_string(),
-            "Private notes".to_string(),
+            DocumentBody::Text {
+                markdown: true,
+                content: "Private notes".to_string(),
+            },
+            None,
             30,
         )
         .unwrap()

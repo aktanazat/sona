@@ -1921,6 +1921,8 @@ pub fn run(cli_args: CliArgs) {
             commands::documents::doc_ingest,
             commands::documents::doc_list,
             commands::documents::doc_delete,
+            commands::documents::doc_meeting_list,
+            commands::documents::doc_marked_copy,
             commands::cloud_sync::phone_thought_source_get,
             commands::cloud_sync::phone_thought_photo_get,
             commands::cloud_sync::cloud_sync_overview_get,
