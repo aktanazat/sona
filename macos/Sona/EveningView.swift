@@ -124,7 +124,9 @@ struct FilingReasonsLine: View {
     @Environment(AppModel.self) private var model
     let sessionId: MeetingSessionId
     let reasons: [FilingReason]
-    /// Shows the running capture's words at an offset, on the live screen.
+    /// Set only on the live screen, while the recording is made: shows its
+    /// words at an offset. A plan's ▶ waits until the recording ends, so the
+    /// live screen never closes from here.
     var showLive: ((Int64) -> Void)?
 
     var body: some View {
@@ -169,15 +171,18 @@ struct FilingReasonsLine: View {
         case .inInvite:
             Text("from your calendar").metaText()
         case let .planned(plannedIn, saidAtUtcMs, quote, citation):
-            Button {
-                model.openPast(plannedIn, segmentId: citation?.segmentId)
-            } label: {
-                Text(quote.map { "said \(FeedClock.ago(saidAtUtcMs)): “\($0)” ▶" }
-                    ?? "planned \(FeedClock.ago(saidAtUtcMs)) ▶")
-                    .metaText(Theme.inkSecondary)
-                    .lineLimit(2)
+            let said = quote.map { "said \(FeedClock.ago(saidAtUtcMs)): “\($0)”" }
+                ?? "planned \(FeedClock.ago(saidAtUtcMs))"
+            if showLive == nil {
+                Button {
+                    model.openPast(plannedIn, segmentId: citation?.segmentId)
+                } label: {
+                    Text("\(said) ▶").metaText(Theme.inkSecondary).lineLimit(2)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(said).metaText().lineLimit(2)
             }
-            .buttonStyle(.plain)
         }
     }
 }
