@@ -46,6 +46,12 @@ pub(crate) fn resolve(text: &str, said_at: NaiveDateTime) -> Option<SpokenTime> 
     Some(SpokenTime::At { start, end })
 }
 
+/// The day `text` names, read against `today`. A time of day in it is not
+/// read.
+pub(crate) fn day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
+    day_in(&tokens(&normalized(text)), today)
+}
+
 /// The first `weekday` strictly after `from`.
 ///
 /// "Next Friday" and "Friday" land on the same day here. Colloquially they can
