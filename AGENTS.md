@@ -274,6 +274,9 @@ off on install. With either needed grant off, it refuses with
 | `--events [--after <ID>]`                                             | Receipts and workflow runs, newest first                          |
 | `--upcoming [--limit N]`                                              | Today plus the next seven local days of calendar                  |
 | `--plans [--limit N]`                                                 | Plans to meet heard in meetings, with quote and status            |
+| `--bookmarks [--limit N]`                                             | Bookmarks pressed while recording, newest meeting first           |
+| `--roster <ID>`                                                       | The names one meeting's call listed                               |
+| `--place <ID> [--limit N]`                                            | Where one meeting was recorded and recordings within 100 m        |
 | `--loop-resolve <LOOP_ID>`                                            | **Writes.** Marks one loop done, prints the `OperationReceipt`    |
 
 Exit codes: 0 answered, 2 bad input (`invalid_request`), 1 everything else
