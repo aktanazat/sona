@@ -200,6 +200,8 @@ struct PersonOpenLoop: Decodable, Identifiable {
     /// When it was first raised, if it reached this meeting by being carried.
     let carriedSinceAtUtcMs: Int64?
     let carriedIntoMeetingId: String?
+    /// How many meetings of its series it has come up in.
+    let raisedInMeetings: UInt32
 
     var id: String { loopId }
     var at: Date { PeopleFormat.date(atUtcMs) }
@@ -275,6 +277,8 @@ struct PersonDetail: Decodable {
     let ledgerOutcomes: LedgerOutcomeCounts?
     let documents: [PersonDocumentSummary]
     let contact: PersonContactCard?
+    /// Plans that named this person whose time passed with no recording.
+    let plansWithoutRecord: [HeardPlan]
 }
 
 struct PersonDetailResult: Decodable {

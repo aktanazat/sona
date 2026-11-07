@@ -918,9 +918,10 @@ fn person_stats_are_the_person_pages_numbers() {
                 "open": outcomes.open,
                 "dropped": outcomes.dropped,
             },
-            "open_loops": {"i_owe": 0, "owed_to_me": 1},
+            "open_loops": {"i_owe": 0, "owed_to_me": 1, "carried_over": 0},
             "weekly_counts": weekly_counts,
             "usual_gap_days": null,
+            "plans_without_record": 0,
         })
     );
     assert_eq!(

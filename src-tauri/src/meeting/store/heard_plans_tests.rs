@@ -517,6 +517,38 @@ where_the_plan_happened! {
         local(2026, 11, 5, 16, 0), "Nolan Reyes", "confirmed" => false;
 }
 
+/// Nolan's page keeps the pricing review he was named in once its hour has
+/// gone by with no recording of it, and lets it go once a recording in that
+/// hour has him confirmed there. Dana was never named in it.
+#[test]
+fn a_persons_page_keeps_a_passed_plan_until_a_recording_of_it() {
+    let (_directory, store) = store();
+    let sync = weekly_sync(&store);
+    read_with(&store, sync, &[PRICING_REVIEW]).unwrap();
+    let nolan = person(&store, "Nolan Reyes", &[], &[]);
+    let dana = person(&store, "Dana Lee", &[], &[]);
+    let without_record = |person_id| {
+        store
+            .person_detail(person_id)
+            .unwrap()
+            .detail
+            .plans_without_record
+            .into_iter()
+            .map(|plan| plan.title)
+            .collect::<Vec<_>>()
+    };
+
+    let before = without_record(nolan);
+    let never_named = without_record(dana);
+    let later = meeting(&store, "Pricing", local(2026, 11, 5, 14, 5));
+    link(&store, later, nolan, "manual", "confirmed");
+    let after = without_record(nolan);
+
+    assert_eq!(before, vec!["pricing review"]);
+    assert!(never_named.is_empty(), "{never_named:?}");
+    assert!(after.is_empty(), "{after:?}");
+}
+
 /// An invited event on Thursday, with `invited` and the user.
 fn invited_event(title: &str, start_utc_ms: i64, invited: &str) -> CalendarEventSummary {
     let attendee = |name: &str, is_self: bool| CalendarAttendee {

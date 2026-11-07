@@ -18,6 +18,7 @@ use crate::meeting::people_types::{
     PersonDetail, PersonDetailResult, PersonId, PersonLinkConfidence, PersonLinkSource,
     PersonListEntry, PersonListLastMeeting, PersonMeetingLink,
 };
+use crate::meeting::store::heard_plans::plans_without_record_in;
 use crate::meeting::store::workflows::{
     workflow_succeeded_for_calendar_event_in, workflow_succeeded_for_session_in,
 };
@@ -423,6 +424,7 @@ fn person_detail_in(
     let talk_share_avg_permille = talk_share_average_in(connection, &person, hidden)?;
     let (recorded_ms, ledger_outcomes) = confirmed_totals_in(connection, person_id, hidden)?;
     let contact = contact_card_in(connection, person_id)?;
+    let plans_without_record = plans_without_record_in(connection, &person, hidden)?;
     Ok(PersonDetailResult {
         schema_version: SCHEMA_VERSION,
         revision,
@@ -436,6 +438,7 @@ fn person_detail_in(
             ledger_outcomes,
             documents,
             contact,
+            plans_without_record,
         },
     })
 }
@@ -800,6 +803,7 @@ fn gate_continuity_facts_in(
             open_loop.meeting_id,
         )? {
             open_loop.carried_since_at_utc_ms = None;
+            open_loop.raised_in_meetings = 1;
         }
     }
     Ok(())

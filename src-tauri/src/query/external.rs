@@ -967,6 +967,9 @@ pub struct ExternalPersonStats {
     /// The median gap in days between the distinct local days of confirmed
     /// meetings, an even sample rounding up. Null under four such days.
     pub usual_gap_days: Option<u32>,
+    /// Plans heard naming this person whose time has passed with no
+    /// recording of them. `--plans` lists them.
+    pub plans_without_record: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -988,6 +991,8 @@ pub struct ExternalLedgerOutcomes {
 pub struct ExternalPersonOpenLoops {
     pub i_owe: u64,
     pub owed_to_me: u64,
+    /// How many of those have come up in more than one meeting of a series.
+    pub carried_over: u64,
 }
 
 /// One event in the week ahead.
@@ -2240,6 +2245,10 @@ pub(crate) fn person_stats(
         .iter()
         .filter(|open| open.direction == MeetingLoopDirection::Mine)
         .count();
+    let carried_over = outstanding
+        .iter()
+        .filter(|open| open.raised_in_meetings > 1)
+        .count();
     let earliest = store
         .earliest_meeting_utc_ms(kept_local.sessions())
         .map_err(person_read_error(person_id))?;
@@ -2266,9 +2275,11 @@ pub(crate) fn person_stats(
         open_loops: ExternalPersonOpenLoops {
             i_owe: row_count(i_owe),
             owed_to_me: row_count(outstanding.len() - i_owe),
+            carried_over: row_count(carried_over),
         },
         weekly_counts: weekly_counts(&confirmed, earliest.and_then(local_day), now.date_naive()),
         usual_gap_days: usual_gap_days(&confirmed),
+        plans_without_record: row_count(detail.plans_without_record.len()),
     })
 }
 
@@ -3232,6 +3243,9 @@ fn text_response(response: &ExternalResponse) -> String {
                 "you owe {}, owed to you {}",
                 stats.open_loops.i_owe, stats.open_loops.owed_to_me
             ));
+            if stats.open_loops.carried_over > 0 {
+                tiles.push(format!("{} carried over", stats.open_loops.carried_over));
+            }
             let _ = writeln!(
                 text,
                 "{}\n{}\nlast 52 weeks: {}",
@@ -3241,6 +3255,13 @@ fn text_response(response: &ExternalResponse) -> String {
             );
             if let Some(days) = stats.usual_gap_days {
                 let _ = writeln!(text, "usually every {days} d");
+            }
+            if stats.plans_without_record > 0 {
+                let _ = writeln!(
+                    text,
+                    "plans with no record since: {}",
+                    stats.plans_without_record
+                );
             }
         }
         ExternalResponse::Events(page) => {

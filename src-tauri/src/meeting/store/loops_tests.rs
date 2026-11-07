@@ -2,7 +2,7 @@
 //! fencing on each.
 
 use super::loops::{ledger_loop_seeds, SCHEMA_VERSION};
-use super::workflow_core_tests::{meeting, person as insert_person, store};
+use super::workflow_core_tests::{event, link, meeting, person as insert_person, store};
 use super::{MeetingStore, SpeakerRename, StoreError};
 use crate::meeting::detection::machine::CalendarEventSummary;
 use crate::meeting::ledger::{
@@ -10,14 +10,16 @@ use crate::meeting::ledger::{
     LedgerThread, LedgerThreadState, MeetingLedger,
 };
 use crate::meeting::loop_types::{
-    MeetingLoopAssignRequest, MeetingLoopId, MeetingLoopKind, MeetingLoopReopenRequest,
-    MeetingLoopResolution, MeetingLoopResolveRequest, MeetingLoopRow, MeetingLoopStatus,
+    MeetingLoopAssignRequest, MeetingLoopDirection, MeetingLoopId, MeetingLoopKind,
+    MeetingLoopReopenRequest, MeetingLoopResolution, MeetingLoopResolveRequest, MeetingLoopRow,
+    MeetingLoopStatus,
 };
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
     GeneratedMeetingArtifacts, ManualNote, ManualNoteId, MeetingCommandKind, MeetingOperationId,
     MeetingOrigin, MeetingReasonCode, MeetingSessionId, OperationActor, OperationResult, SpeakerId,
 };
+use crate::meeting::workflow_types::WorkflowEventKind;
 use rusqlite::params;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -1159,4 +1161,103 @@ fn drafting_a_follow_up_records_one_receipt_naming_its_engine() {
         .record_follow_up_draft(operation_id, session_id, "sona-relay")
         .unwrap();
     assert_eq!(replayed, receipt);
+}
+
+/// A thread left unanswered, which `owner` was left holding.
+fn unanswered(topic: &str, owner: &str) -> LedgerThread {
+    LedgerThread {
+        topic: topic.to_string(),
+        state: LedgerThreadState::Unanswered,
+        substantive: true,
+        receipt: LedgerReceipt {
+            quote: format!("who has {topic}"),
+            speaker: None,
+            t_ms: 12_000,
+            citations: Vec::new(),
+        },
+        owner: Some(owner.to_string()),
+    }
+}
+
+/// The continuity pass finished over this session, which is what lets a
+/// person's page say a loop was carried.
+fn continuity_ran(store: &MeetingStore, session_id: MeetingSessionId) {
+    let session = session_id.uuid().to_string();
+    // PANIC: a fixture; a setup that fails should fail the test that asked.
+    let dispatch = store
+        .record_workflow_event(event(
+            WorkflowEventKind::MeetingFinalized,
+            serde_json::json!({ "session_id": session }),
+            &format!("continuity-{session}"),
+        ))
+        .unwrap();
+    // PANIC: as above, for the run row.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO workflow_runs (
+                id, workflow_id, event_id, status, started_at_utc_ms,
+                finished_at_utc_ms, outcome_summary, error
+             ) VALUES (?1, 'continuity', ?2, 'ok', 1, 1, 'continuity', NULL)",
+            params![
+                Uuid::new_v4().to_string(),
+                dispatch.event_id.uuid().to_string()
+            ],
+        )
+        .unwrap();
+}
+
+/// Two weeks of the pricing review with Dana, Sam recording. Staging access
+/// was Sam's in both and still is; the invoice export came up the second
+/// week and is Dana's. Her page reads one each way, and staging access as
+/// asked in both meetings.
+#[test]
+fn a_persons_page_reads_open_loops_both_ways_and_how_often_one_came_up() {
+    let (_directory, store) = store();
+    let dana = person(&store, "Dana Reyes");
+    let weekly = |at_utc_ms: i64, threads: Vec<LedgerThread>| {
+        let session_id = meeting(&store, "Pricing review", at_utc_ms);
+        file_ledger(
+            &store,
+            session_id,
+            MeetingLedger {
+                threads,
+                open_loops: Vec::new(),
+                commitments: Vec::new(),
+                ..ledger()
+            },
+        );
+        store
+            .remember_calendar_facts(session_id, &series_event(at_utc_ms))
+            .unwrap();
+        microphone_speaker(&store, session_id, "Sam Park");
+        link(&store, session_id, dana, "manual", "confirmed");
+        continuity_ran(&store, session_id);
+        session_id
+    };
+    weekly(NOW, vec![unanswered("Staging access", "Sam Park")]);
+    let second = weekly(
+        NOW + WEEK_MS,
+        vec![
+            unanswered("Staging access", "Sam Park"),
+            unanswered("Invoice export", "Dana Reyes"),
+        ],
+    );
+    store.carry_loops_forward(second).unwrap();
+
+    let detail = store.person_detail(dana).unwrap().detail;
+
+    let open = detail
+        .open_loops
+        .iter()
+        .map(|open| (open.text.as_str(), open.direction, open.raised_in_meetings))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        open,
+        vec![
+            ("Staging access", MeetingLoopDirection::Mine, 2),
+            ("Invoice export", MeetingLoopDirection::WaitingOn, 1),
+        ]
+    );
 }

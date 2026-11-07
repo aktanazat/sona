@@ -1,4 +1,5 @@
 use super::document_types::{DocumentId, DocumentSummary};
+use super::heard_plan_types::HeardPlan;
 use super::ledger::LedgerOutcomeCounts;
 use super::loop_types::{MeetingLoopDirection, MeetingLoopId, MeetingLoopStatus};
 use super::types::{
@@ -144,6 +145,9 @@ pub struct PersonOpenLoop {
     pub carried_since_at_utc_ms: Option<i64>,
     /// The meeting this loop was carried into, if it has already moved on.
     pub carried_into_meeting_id: Option<MeetingSessionId>,
+    /// How many meetings of its series this loop has been raised in: one,
+    /// or the length of its carry chain once a later session took it up.
+    pub raised_in_meetings: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
@@ -208,6 +212,9 @@ pub struct PersonDetail {
     pub ledger_outcomes: Option<LedgerOutcomeCounts>,
     pub documents: Vec<DocumentSummary>,
     pub contact: Option<PersonContactCard>,
+    /// Plans heard that name this person whose time has passed with no
+    /// recording of them, newest first.
+    pub plans_without_record: Vec<HeardPlan>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, Type)]
