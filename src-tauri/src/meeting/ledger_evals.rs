@@ -595,6 +595,45 @@ fn a_cue_shaped_transcript_fails_the_density_check() {
 }
 
 #[test]
+fn a_lively_conversation_passes_the_density_check() {
+    let fixture = fixture(MeetingSessionId::new());
+    let expected = fixture.expected();
+    let (dana, amir) = (
+        fixture.segments[0].speaker_id,
+        fixture.segments[1].speaker_id,
+    );
+    // Every turn answered halfway through by a word from the other side, the
+    // pace of a quick call or a five-person huddle: about 20 turns a minute.
+    let lively: Vec<AnalyticsSegment> = fixture
+        .segments
+        .iter()
+        .flat_map(|turn| {
+            let third = (turn.end_offset_ns - turn.start_offset_ns) / 3;
+            let other = if turn.speaker_id == dana { amir } else { dana };
+            [(0_u64, turn.speaker_id), (1, other), (2, turn.speaker_id)]
+                .into_iter()
+                .map(move |(piece, speaker_id)| AnalyticsSegment {
+                    segment_id: TranscriptSegmentId::new(),
+                    speaker_id,
+                    start_offset_ns: turn.start_offset_ns + piece * third,
+                    end_offset_ns: if piece == 2 {
+                        turn.end_offset_ns
+                    } else {
+                        turn.start_offset_ns + (piece + 1) * third
+                    },
+                    text: "turn".to_string(),
+                })
+        })
+        .collect();
+    let page = fixture.page_over(&expected, &lively);
+    assert_eq!(page.turns.len(), 90);
+    assert_eq!(
+        ledger::check(&expected, &page, &fixture.haystack()),
+        Vec::new()
+    );
+}
+
+#[test]
 fn a_citation_past_the_duration_fails_the_geometry_check() {
     let fixture = fixture(MeetingSessionId::new());
     let mut mutated = fixture.expected();

@@ -725,10 +725,14 @@ pub(crate) fn render_html(page: &LedgerPage) -> Result<String, LedgerRenderError
 // forbids the repeat, and the check needs a number-word parser that would
 // be the largest thing in this section for the least likely failure.
 
-/// A turn is a whole speaking turn, not a subtitle cue. Upstream's bounds: a
-/// cue-shaped transcript overshoots the ceiling by ten to twenty times, and
-/// an under-split one falls through the floor.
-const TURNS_PER_MINUTE_MAX: f64 = 8.0;
+/// A turn is a whole speaking turn, not a subtitle cue. The ceiling is a turn
+/// every two seconds for the whole meeting, more than people take: two-party
+/// telephone calls average about 9 speaker changes a minute (Switchboard, in
+/// Levinson and Torreira 2015), and a five-person huddle measured 12. A
+/// cue-shaped transcript runs to 80 a minute and more. Upstream's ceiling of
+/// 8 flagged ordinary conversation as cue-shaped. An under-split transcript
+/// falls through the floor.
+const TURNS_PER_MINUTE_MAX: f64 = 30.0;
 const TURNS_PER_MINUTE_MIN: f64 = 0.8;
 
 /// One line `check_ledger.py` would have printed with a cross beside it.
