@@ -844,8 +844,8 @@ fn first_left_out(left_out: Vec<LeftOut>, round_start: usize) -> ReadingError {
     )
 }
 
-/// How far back a mark reaches: a decision or a task is marked as it is said
-/// or a few seconds after.
+/// How far back a mark reaches: a moment is marked as it is said or a few
+/// seconds after.
 const MARK_REACH_NS: u64 = 10_000_000_000;
 
 /// Whether `line` was being said in the [`MARK_REACH_NS`] up to the press of
@@ -860,13 +860,89 @@ fn marks_line(mark: &NotesMark, line: &MeetingEvidence) -> bool {
             .is_some_and(|end| end.saturating_add(MARK_REACH_NS) >= mark.at_offset_ns)
 }
 
-/// Each marked moment in the list its mark names. An engine that answers one
-/// mark with several entries has split it when some only repeat its lines
-/// word for word: those copies go, short of a task copy that names an owner
-/// or a deadline. A mark that nothing in its list then cites adds the lines
-/// it covers as they were said, cited and in meeting order, so a mark counts
-/// even when the engine passed over it. A mark covering no line, or more
-/// words than one entry holds, is left as it is.
+/// The `lines` as they were said, cited and in meeting order, or `None` when
+/// there are none or they hold more words than one entry does.
+fn as_said(lines: &[&MeetingEvidence], evidence: &ArtifactEvidence) -> Option<CitedArtifactText> {
+    let said = RawCitedText {
+        text: lines
+            .iter()
+            .map(|line| line.text.trim())
+            .collect::<Vec<_>>()
+            .join(" "),
+        citations: lines
+            .iter()
+            .map(|line| line.citation.entity_id.clone())
+            .collect(),
+    };
+    validate_cited_text(&said, &evidence.transcript, "marks").ok()
+}
+
+/// Adds `line` to the summary in meeting order, unless the summary would
+/// then hold more than it may.
+fn add_summary_line(content: &mut GeneratedMeetingArtifacts, line: CitedArtifactText) {
+    let Some(anchor) = line
+        .citations
+        .iter()
+        .min_by_key(|citation| citation.start_offset_ns)
+        .cloned()
+    else {
+        return;
+    };
+    let text = line.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut lines: Vec<&str> = content.summary.text.lines().collect();
+    let at = content
+        .summary_trace
+        .iter()
+        .find(|trace| trace.anchor.start_offset_ns > anchor.start_offset_ns)
+        .and_then(|trace| usize::try_from(trace.line).ok())
+        .map_or(lines.len(), |at| at.min(lines.len()));
+    let Ok(ordinal) = u32::try_from(at) else {
+        return;
+    };
+    lines.insert(at, &text);
+    let Ok(summary) = required_generated_text(&lines.join("\n"), "summary") else {
+        return;
+    };
+    content.summary.text = summary;
+    for trace in &mut content.summary_trace {
+        if trace.line >= ordinal {
+            trace.line += 1;
+        }
+    }
+    let index = content
+        .summary_trace
+        .iter()
+        .position(|trace| trace.line > ordinal)
+        .unwrap_or(content.summary_trace.len());
+    content.summary_trace.insert(
+        index,
+        SummaryLineTrace {
+            line: ordinal,
+            anchor,
+        },
+    );
+    for citation in line.citations {
+        if !content
+            .summary
+            .citations
+            .iter()
+            .any(|existing| existing.segment_id == citation.segment_id)
+        {
+            content.summary.citations.push(citation);
+        }
+    }
+}
+
+/// Each marked moment in the part of the notes its mark names. An engine
+/// that answers one decision, to-do or question mark with several entries
+/// has split it when some only repeat its lines word for word: those copies
+/// go, short of a task copy that names an owner or a deadline. A decision or
+/// to-do mark that nothing in its list then cites adds the lines it covers
+/// as they were said, cited and in meeting order, so a mark counts even when
+/// the engine passed over it; a question mark adds only its lines that ask
+/// something, and a plain mark that neither the summary nor a topic cites
+/// adds its lines to the summary. A mark covering no line, or more words
+/// than one entry holds, is left as it is.
 fn keep_marked_moments(content: &mut GeneratedMeetingArtifacts, evidence: &ArtifactEvidence) {
     for mark in &evidence.marks {
         let lines: Vec<_> = evidence
@@ -874,18 +950,7 @@ fn keep_marked_moments(content: &mut GeneratedMeetingArtifacts, evidence: &Artif
             .iter()
             .filter(|line| marks_line(mark, line))
             .collect();
-        let said = RawCitedText {
-            text: lines
-                .iter()
-                .map(|line| line.text.trim())
-                .collect::<Vec<_>>()
-                .join(" "),
-            citations: lines
-                .iter()
-                .map(|line| line.citation.entity_id.clone())
-                .collect(),
-        };
-        let Ok(said) = validate_cited_text(&said, &evidence.transcript, "marks") else {
+        let Some(said) = as_said(&lines, evidence) else {
             continue;
         };
         let line_of = |citation: &ArtifactCitation| {
@@ -920,24 +985,38 @@ fn keep_marked_moments(content: &mut GeneratedMeetingArtifacts, evidence: &Artif
                 .map(|citation| citation.start_offset_ns)
                 .min()
         };
-        match mark.kind {
-            NotesMarkKind::Decision => {
-                if content
-                    .decisions
+        let keep_in = |list: &mut Vec<CitedArtifactText>, entry: Option<CitedArtifactText>| {
+            if list.iter().filter(|&text| within(text)).count() > 1 {
+                list.retain(|text| !copies(text));
+            }
+            if list.iter().any(cites_mark) {
+                return;
+            }
+            if let Some(entry) = entry {
+                let at = list
                     .iter()
-                    .filter(|&text| within(text))
-                    .count()
-                    > 1
-                {
-                    content.decisions.retain(|decision| !copies(decision));
-                }
-                if !content.decisions.iter().any(cites_mark) {
-                    let at = content
-                        .decisions
-                        .iter()
-                        .position(|decision| first(decision) > first(&said))
-                        .unwrap_or(content.decisions.len());
-                    content.decisions.insert(at, said);
+                    .position(|text| first(text) > first(&entry))
+                    .unwrap_or(list.len());
+                list.insert(at, entry);
+            }
+        };
+        match mark.kind {
+            NotesMarkKind::Decision => keep_in(&mut content.decisions, Some(said.clone())),
+            NotesMarkKind::Question => {
+                let asked: Vec<_> = lines
+                    .iter()
+                    .copied()
+                    .filter(|line| line.text.contains(['?', '？']))
+                    .collect();
+                keep_in(&mut content.key_questions, as_said(&asked, evidence));
+            }
+            NotesMarkKind::KeyPoint => {
+                let covered = cites_mark(&content.summary)
+                    || content.outline.iter().any(|topic| {
+                        cites_mark(&topic.title) || topic.detail.as_ref().is_some_and(cites_mark)
+                    });
+                if !covered {
+                    add_summary_line(content, said);
                 }
             }
             NotesMarkKind::ActionItem => {

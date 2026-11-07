@@ -63,8 +63,9 @@ pub struct ConversationPlaceReview {
 }
 
 /// What a bookmark marks, as the person pressing it said. The notes list what
-/// was said in the seconds up to a decision mark as a decision, and up to a
-/// to-do mark as an action item. The other two only mark a place.
+/// was said in the seconds up to a decision mark as a decision, up to a to-do
+/// mark as an action item, and the question asked up to a question mark as
+/// an open question, and keep what was said up to a plain bookmark.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationBookmarkKind {
