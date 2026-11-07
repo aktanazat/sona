@@ -1065,6 +1065,7 @@ The tick is every 15 s, or sooner on an input-device edge. It reads the tray ses
 | Saved | snapshot with `failure` | Saved view plus a notice naming the failure | RecorderSheet.swift:157-159 |
 | Recording or Paused | quit → Stop and Quit | `stopAndSave()` task awaited by the delegate → Finalizing → Saved | RecorderStore.swift `stopAndSave`; SonaApp.swift `applicationShouldTerminate` |
 | Starting or Finalizing | quit | quit waits (`RecorderPhase.activity == .settling`) until Recording, which it then asks about, or Saved, which it does not | RecorderTypes.swift `activity`; AppModel.swift `waitForCapturesToSettle` |
+| Starting, Recording, Paused or Finalizing | menu bar | a line names the recording and its clock; "Record the Screen" becomes "Stop Screen Recording", disabled while Starting or Finalizing | SonaApp.swift `ScreenRecordingStatus`, `ScreenRecordingMenuItem` |
 
 #### M9. App lifecycle, quit (SonaApp.swift)
 

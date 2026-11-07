@@ -473,6 +473,12 @@ final class AppModel {
         sheet = .recorder
     }
 
+    /// The menu bar's stop: the recording saves on its sheet, in front.
+    func stopScreenRecording() {
+        reveal()
+        recorder.stopAndSave()
+    }
+
     /// AppKit refuses to quit while a sheet is up, before Sona can ask about
     /// a recording, and the screen recorder is a sheet for as long as it
     /// records. Quit closes the sheet, waits for it to leave, then quits.
