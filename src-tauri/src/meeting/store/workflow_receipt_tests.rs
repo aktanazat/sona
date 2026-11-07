@@ -1,3 +1,4 @@
+use super::documents::DocumentBody;
 use super::workflow_core_tests::{event, inputs, meeting, person, store, transcript};
 use crate::analytics::{DashboardTrendRange, DashboardTrendRequest};
 use crate::meeting::detection::machine::{
@@ -124,8 +125,11 @@ fn document_workflow_links_exact_alias_mentions() {
             MeetingOperationId::new(),
             "Plan".to_string(),
             "plan.md".to_string(),
-            "text/markdown".to_string(),
-            "Alice Jones owns the rollout.".to_string(),
+            DocumentBody::Text {
+                markdown: true,
+                content: "Alice Jones owns the rollout.".to_string(),
+            },
+            None,
             10,
         )
         .unwrap()
@@ -160,8 +164,11 @@ fn disabled_document_linking_leaves_its_ingest_unlinked() {
             MeetingOperationId::new(),
             "Plan".to_string(),
             "plan.md".to_string(),
-            "text/markdown".to_string(),
-            "Alice Jones owns the rollout.".to_string(),
+            DocumentBody::Text {
+                markdown: true,
+                content: "Alice Jones owns the rollout.".to_string(),
+            },
+            None,
             10,
         )
         .unwrap()
@@ -373,8 +380,11 @@ fn document_ingest_operation_id_returns_the_original_result() {
             operation_id,
             "Plan".to_string(),
             "plan.md".to_string(),
-            "text/markdown".to_string(),
-            "Original content".to_string(),
+            DocumentBody::Text {
+                markdown: true,
+                content: "Original content".to_string(),
+            },
+            None,
             10,
         )
         .unwrap();
@@ -383,8 +393,11 @@ fn document_ingest_operation_id_returns_the_original_result() {
             operation_id,
             "Changed".to_string(),
             "changed.md".to_string(),
-            "text/plain".to_string(),
-            "Changed content".to_string(),
+            DocumentBody::Text {
+                markdown: false,
+                content: "Changed content".to_string(),
+            },
+            None,
             20,
         )
         .unwrap();

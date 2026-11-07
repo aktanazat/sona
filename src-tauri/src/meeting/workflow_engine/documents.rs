@@ -1,30 +1,48 @@
 use super::{map_store_error, now_utc_ms};
 use crate::meeting::document_types::{
     DocumentDeleteRequest, DocumentIngestRequest, DocumentListResult, DocumentMutationResult,
+    MarkedCopyRequest, MeetingDocument,
 };
+use crate::meeting::export;
+use crate::meeting::pdf::{self, PdfMark};
 use crate::meeting::people_types::PersonId;
 use crate::meeting::session::MeetingSessionManager;
-use crate::meeting::types::MeetingCommandError;
+use crate::meeting::store::documents::DocumentBody;
+use crate::meeting::types::{MeetingCommandError, MeetingSessionId};
 use crate::meeting::workflow_types::{NewWorkflowEvent, WorkflowEventKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl MeetingSessionManager {
     pub async fn doc_ingest(
         &self,
         request: DocumentIngestRequest,
     ) -> Result<DocumentMutationResult, MeetingCommandError> {
-        let path = Path::new(&request.path);
-        let (media_type, title, source_name) = document_metadata(path)?;
-        let content =
-            std::fs::read_to_string(path).map_err(|_| MeetingCommandError::InvalidRequest)?;
+        let path = PathBuf::from(&request.path);
+        let (title, source_name) = document_names(&path)?;
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .ok_or(MeetingCommandError::InvalidRequest)?;
+        let body = match extension.as_str() {
+            "txt" | "md" | "markdown" => DocumentBody::Text {
+                markdown: extension != "txt",
+                content: std::fs::read_to_string(&path)
+                    .map_err(|_| MeetingCommandError::InvalidRequest)?,
+            },
+            "pdf" => tauri::async_runtime::spawn_blocking(move || pdf_body(&path))
+                .await
+                .map_err(|_| MeetingCommandError::ImportUnreadable)??,
+            _ => return Err(MeetingCommandError::InvalidRequest),
+        };
         let store = self.store().await?;
         let result = store
             .ingest_document(
                 request.operation_id,
                 title,
                 source_name,
-                media_type,
-                content,
+                body,
+                request.session_id,
                 now_utc_ms(),
             )
             .map_err(map_store_error)?;
@@ -46,6 +64,55 @@ impl MeetingSessionManager {
         );
         self.emit_artifact_changed(None, result.revision);
         Ok(result)
+    }
+
+    pub async fn doc_meeting_list(
+        &self,
+        session_id: MeetingSessionId,
+    ) -> Result<Vec<MeetingDocument>, MeetingCommandError> {
+        self.store()
+            .await?
+            .meeting_documents(session_id)
+            .map_err(map_store_error)
+    }
+
+    /// Write a copy of a meeting's PDF with each passage highlighted and its
+    /// note beside it, returning how many notes the copy holds. The PDF is
+    /// copied from the bytes kept when it was added, so the file it came
+    /// from is never opened again.
+    pub async fn doc_marked_copy(
+        &self,
+        request: MarkedCopyRequest,
+    ) -> Result<u32, MeetingCommandError> {
+        let marks = request
+            .marks
+            .into_iter()
+            .map(|mark| {
+                Ok(PdfMark {
+                    page: usize::try_from(mark.page)
+                        .ok()
+                        .and_then(|page| page.checked_sub(1))
+                        .ok_or(MeetingCommandError::InvalidRequest)?,
+                    passage: mark.passage,
+                    note: mark.note,
+                })
+            })
+            .collect::<Result<Vec<_>, MeetingCommandError>>()?;
+        let original = self
+            .store()
+            .await?
+            .meeting_document_original(request.session_id, request.document_id)
+            .map_err(map_store_error)?;
+        let path = PathBuf::from(request.destination_path);
+        tauri::async_runtime::spawn_blocking(move || {
+            let marked = pdf::marked_copy(&original, &marks)
+                .map_err(|_| MeetingCommandError::ExportFailed)?;
+            export::write_atomic(&path, &marked.bytes)
+                .map_err(|_| MeetingCommandError::ExportFailed)?;
+            Ok(marked.marks)
+        })
+        .await
+        .map_err(|_| MeetingCommandError::ExportFailed)?
     }
 
     pub async fn doc_list(
@@ -72,17 +139,7 @@ impl MeetingSessionManager {
     }
 }
 
-fn document_metadata(path: &Path) -> Result<(String, String, String), MeetingCommandError> {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .ok_or(MeetingCommandError::InvalidRequest)?;
-    let media_type = match extension.as_str() {
-        "txt" => "text/plain",
-        "md" | "markdown" => "text/markdown",
-        _ => return Err(MeetingCommandError::InvalidRequest),
-    };
+fn document_names(path: &Path) -> Result<(String, String), MeetingCommandError> {
     let source_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -93,9 +150,17 @@ fn document_metadata(path: &Path) -> Result<(String, String, String), MeetingCom
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
         .ok_or(MeetingCommandError::InvalidRequest)?;
-    Ok((
-        media_type.to_string(),
-        title.to_string(),
-        source_name.to_string(),
-    ))
+    Ok((title.to_string(), source_name.to_string()))
+}
+
+fn pdf_body(path: &Path) -> Result<DocumentBody, MeetingCommandError> {
+    let length = std::fs::metadata(path)
+        .map_err(|_| MeetingCommandError::InvalidRequest)?
+        .len();
+    if length > pdf::MAX_PDF_BYTES {
+        return Err(MeetingCommandError::ImportUnreadable);
+    }
+    let original = std::fs::read(path).map_err(|_| MeetingCommandError::InvalidRequest)?;
+    let pages = pdf::page_texts(&original).map_err(|_| MeetingCommandError::ImportUnreadable)?;
+    Ok(DocumentBody::Pdf { pages, original })
 }

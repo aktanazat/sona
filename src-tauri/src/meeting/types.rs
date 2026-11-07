@@ -442,9 +442,9 @@ pub enum MeetingCommandError {
     ModelDeclined,
     /// Apple Intelligence does not support the meeting's language.
     UnsupportedLanguage,
-    /// The file offered for import is not a recording or transcript export
-    /// Sona can read. Every refusal reaching the operator says this, because
-    /// they all have the same answer: choose a different file.
+    /// The file offered for import is not a recording, transcript export or
+    /// PDF Sona can read. Every refusal reaching the operator says this,
+    /// because they all have the same answer: choose a different file.
     ImportUnreadable,
     /// The meeting's notes are already being written, by its processing run
     /// or by an earlier "Try again"; a second writer would race the first.

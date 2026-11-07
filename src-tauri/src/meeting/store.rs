@@ -19,7 +19,9 @@ mod custom_templates;
 #[cfg(test)]
 mod custom_templates_tests;
 pub(crate) mod digest;
-mod documents;
+pub(crate) mod documents;
+#[cfg(test)]
+mod documents_tests;
 pub(crate) mod evening;
 #[cfg(test)]
 mod evening_tests;
@@ -1582,6 +1584,7 @@ static MIGRATIONS: &[M] = &[
     M::up(include_str!("store/filing_context.sql")),
     M::up(include_str!("store/first_met.sql")),
     M::up(include_str!("store/meeting_maybe.sql")),
+    M::up(include_str!("store/meeting_documents.sql")),
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreError {
