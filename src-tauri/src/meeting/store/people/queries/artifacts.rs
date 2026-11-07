@@ -72,6 +72,7 @@ pub(super) fn meeting_summary_in(
 pub(super) fn facts_for_person_in(
     connection: &Connection,
     person: &Person,
+    user_name: Option<&str>,
 ) -> Result<PersonFacts, StoreError> {
     let now_utc_ms = utc_now_ms();
     let mut statement = connection.prepare(&format!(
@@ -118,6 +119,7 @@ pub(super) fn facts_for_person_in(
             connection,
             meeting_id,
             ledger_loop_seeds(meeting_id, &ledger),
+            user_name,
         )?;
         for row in loop_rows {
             if !loop_concerns_person(person, &row) {
@@ -180,11 +182,12 @@ pub(super) fn facts_for_person_in(
 /// dropped or carried forward is gone from every one of them at once.
 pub(super) fn all_open_loops_in(
     connection: &Connection,
+    user_name: Option<&str>,
 ) -> Result<Vec<PersonOpenLoop>, StoreError> {
     let people = all_people_in(connection)?;
     let now_utc_ms = utc_now_ms();
     let mut loops = Vec::new();
-    for meeting in ledger_rows_in(connection)? {
+    for meeting in ledger_rows_in(connection, user_name)? {
         for row in meeting.rows {
             if row.kind != MeetingLoopKind::Loop || !row.is_open() {
                 continue;

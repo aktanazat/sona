@@ -3,7 +3,7 @@ use super::linking::upsert_link_in;
 use crate::meeting::detection::machine::{CalendarAttendee, CalendarEventSummary};
 use crate::meeting::document_types::DocumentId;
 use crate::meeting::people_types::{Person, PersonId, PersonLinkConfidence, PersonLinkSource};
-use crate::meeting::store::loops::microphone_speaker_labels_in;
+use crate::meeting::store::loops::user_speaker_labels_in;
 use crate::meeting::store::people::{
     all_people_in, exact_phrase_mentioned, identity_names, merge_unique_case_insensitive,
     normalized, normalized_email, person_by_id_in,
@@ -199,27 +199,28 @@ impl crate::meeting::store::MeetingStore {
 /// identity the rest of the corpus will be keyed to, and a label the store
 /// writes itself (`Speaker 2`, `Unknown speaker`) is no name at all.
 ///
-/// One voice-shaped: a microphone speaker is the user. `loop_types` states the
+/// One voice-shaped: a speaker that is the user. `loop_types` states the
 /// invariant — Sona models no `Person` for its own user, so a `PersonId` is
-/// always somebody else — and `microphone_speaker_labels_in` is already the
-/// whole answer to which voice that is. Reused here rather than re-derived, so
+/// always somebody else — and `user_speaker_labels_in` is already the whole
+/// answer to which voices those are. Reused here rather than re-derived, so
 /// this and `loop_direction` cannot disagree about it: a person minted from the
 /// user's own renamed voice would carry a `PersonId`, and `loop_direction`
 /// treats an explicit owner as settling the question *because* a person is
 /// somebody else — flipping what the user owes into what they are waiting on.
-/// `Local speaker`, the label the store writes for that same row, clears the
-/// two-word bar on its own.
+/// `Local speaker`, the label the store writes for the microphone of a meeting
+/// recorded here, clears the two-word bar on its own.
 pub(in crate::meeting::store) fn derive_speaker_link_in(
     connection: &Connection,
     meeting_id: MeetingSessionId,
     display_name: &str,
+    user_name: Option<&str>,
     now_utc_ms: i64,
 ) -> Result<usize, StoreError> {
     let display_name = display_name.trim();
     if display_name.split_whitespace().count() < 2 || is_generated_speaker_label(display_name) {
         return Ok(0);
     }
-    if microphone_speaker_labels_in(connection, meeting_id)?
+    if user_speaker_labels_in(connection, meeting_id, user_name)?
         .iter()
         .any(|label| normalized(label) == normalized(display_name))
     {
@@ -258,9 +259,9 @@ pub(in crate::meeting::store) fn derive_speaker_link_in(
 /// A single word that is nobody's full name or alias goes to the one person
 /// whose first name it is, so `Maya` finds the `Maya Chen` already known
 /// instead of creating a second Maya. A name several people answer to keeps
-/// the person the voice already belongs to when they are one of them. The
-/// microphone bar is the one [`derive_speaker_link_in`] states, and
-/// `user_name`, the user's name from About me, is barred on any lane for the
+/// the person the voice already belongs to when they are one of them. The bar
+/// on the user's own voices is the one [`derive_speaker_link_in`] states, and
+/// `user_name`, the user's name from About me, is barred as a new name for the
 /// same reason: naming a voice after the user says it is the user's.
 pub(in crate::meeting::store) fn person_for_named_speaker_in(
     connection: &Connection,
@@ -273,7 +274,7 @@ pub(in crate::meeting::store) fn person_for_named_speaker_in(
     let display_name = display_name.trim();
     if display_name.is_empty()
         || names_user(display_name, user_name)
-        || microphone_speaker_labels_in(connection, meeting_id)?
+        || user_speaker_labels_in(connection, meeting_id, user_name)?
             .iter()
             .any(|label| normalized(label) == normalized(display_name))
     {

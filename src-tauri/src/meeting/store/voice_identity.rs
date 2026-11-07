@@ -16,7 +16,8 @@ use crate::meeting::people_types::{
 };
 use crate::meeting::types::{
     MeetingCommandKind, MeetingDiarizationGenerationId, MeetingOperationId, MeetingOrigin,
-    MeetingPhase, MeetingSessionId, OperationActor, OperationReceipt, SourceTrackId, SpeakerId,
+    MeetingPhase, MeetingSessionId, OperationActor, OperationReceipt, SourceKind, SourceTrackId,
+    SpeakerId,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -1248,6 +1249,22 @@ pub(crate) fn names_user(name: &str, user_name: Option<&str>) -> bool {
                 .split_whitespace()
                 .next()
                 .is_some_and(|first| normalized(first) == name))
+}
+
+/// Whether one of a meeting's speakers is the user: the microphone of a
+/// meeting recorded on this Mac, or a speaker somebody named after them in
+/// About me. An imported file puts whoever it names on the microphone lane,
+/// so there only the name counts, and a name a voice match wrote is the
+/// matched person's, whoever else shares it.
+pub(crate) fn speaker_is_user(
+    display_name: &str,
+    lane: SourceKind,
+    imported: bool,
+    named_by_voice_match: bool,
+    user_name: Option<&str>,
+) -> bool {
+    (lane == SourceKind::Microphone && !imported)
+        || (!named_by_voice_match && names_user(display_name, user_name))
 }
 
 /// Every kept voice's speaker, from any meeting, that no person claims and

@@ -16,10 +16,10 @@ use crate::meeting::loop_types::{
 use crate::meeting::people_types::PersonId;
 use crate::meeting::types::{
     GeneratedMeetingArtifacts, ManualNote, ManualNoteId, MeetingCommandKind, MeetingOperationId,
-    MeetingReasonCode, MeetingSessionId, OperationActor, OperationResult, SpeakerId,
+    MeetingOrigin, MeetingReasonCode, MeetingSessionId, OperationActor, OperationResult, SpeakerId,
 };
 use rusqlite::params;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -758,6 +758,79 @@ fn a_session_with_no_microphone_speaker_attributes_nothing_to_the_user() {
     }
 }
 
+/// Mark this session as a file the user imported rather than recorded here.
+fn imported(store: &MeetingStore, session_id: MeetingSessionId) {
+    // PANIC: a fixture; a setup that fails should fail the test that asked.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE meeting_sessions SET origin_kind = ?1 WHERE id = ?2",
+            params![
+                super::encode_json(&MeetingOrigin::Import).unwrap(),
+                session_id.uuid().to_string()
+            ],
+        )
+        .unwrap();
+}
+
+/// An imported file puts every voice it holds on the microphone lane, so
+/// there only the name says who the user is. The name is the one settings
+/// hold at each read: changing it turns the same rows round, no reopen.
+#[test]
+fn an_imported_meeting_finds_the_user_by_the_name_settings_hold_now() {
+    let (_directory, store) = store();
+    let session_id = ledger_meeting(&store, NOW);
+    microphone_speaker(&store, session_id, "Dana Reyes");
+    imported(&store, session_id);
+    let name = Arc::new(Mutex::new(Some("Aktan Azat".to_string())));
+    let settings = Arc::clone(&name);
+    store.set_user_name_source(move || settings.lock().unwrap().clone());
+
+    for row in &store.meeting_loops(session_id).unwrap().rows {
+        assert!(
+            row.is_waiting_on(),
+            "Dana is in the file, not at this Mac: {row:?}"
+        );
+    }
+    *name.lock().unwrap() = Some("Dana Reyes".to_string());
+    for row in &store.meeting_loops(session_id).unwrap().rows {
+        assert!(row.is_mine(), "the user is Dana now: {row:?}");
+    }
+}
+
+/// A voice match names a speaker after the person whose voice it heard, and
+/// a contact who shares the user's name is still that contact.
+#[test]
+fn a_name_a_voice_match_wrote_does_not_make_the_speaker_the_user() {
+    let (_directory, store) = store();
+    let session_id = ledger_meeting(&store, NOW);
+    let speaker_id = microphone_speaker(&store, session_id, "Dana Reyes");
+    imported(&store, session_id);
+    let namesake = person(&store, "Dana Reyes");
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO voice_speaker_matches (
+                speaker_id, session_id, person_id, profile_revision, speaker_revision,
+                matched_at_utc_ms
+             ) VALUES (?1, ?2, ?3, 1, 0, ?4)",
+            params![
+                speaker_id.0.to_string(),
+                session_id.uuid().to_string(),
+                namesake.uuid().to_string(),
+                NOW
+            ],
+        )
+        .unwrap();
+    store.set_user_name_source(|| Some("Dana Reyes".to_string()));
+
+    for row in &store.meeting_loops(session_id).unwrap().rows {
+        assert!(row.is_waiting_on(), "the voice is the contact's: {row:?}");
+    }
+}
+
 /// Assigning a person is the user saying "not me, them", and it has to win
 /// over the microphone. Persons never model the user, so an assignment can
 /// only ever mean somebody else.
@@ -799,7 +872,7 @@ fn the_corpus_walk_reaches_every_meeting_that_has_a_ledger() {
     let with_ledger = ledger_meeting(&store, NOW);
     let without = meeting(&store, "Nothing generated yet", NOW + 1);
 
-    let walked = super::loops::ledger_rows_in(&store.connection().unwrap()).unwrap();
+    let walked = super::loops::ledger_rows_in(&store.connection().unwrap(), None).unwrap();
 
     assert_eq!(walked.len(), 1, "a meeting with no artifact has no rows");
     assert_eq!(walked[0].session_id, with_ledger);
@@ -911,7 +984,7 @@ fn assert_loops_outlive(
         params![session_id.uuid().to_string()],
         |row| row.get(0),
     )?;
-    let walked = super::loops::ledger_rows_in(&connection)?;
+    let walked = super::loops::ledger_rows_in(&connection, None)?;
     drop(connection);
     assert_eq!(state, "out_of_date", "{edit} marks the notes out of date");
     let entry = walked
@@ -951,7 +1024,7 @@ fn newer_notes_without_a_ledger_keep_the_loops_of_the_ledger_shown() {
     let session_id = ledger_meeting(&store, NOW);
     file_plain_notes(&store, session_id).unwrap();
 
-    let walked = super::loops::ledger_rows_in(&store.connection().unwrap()).unwrap();
+    let walked = super::loops::ledger_rows_in(&store.connection().unwrap(), None).unwrap();
 
     assert_eq!(walked.len(), 1);
     assert_eq!(

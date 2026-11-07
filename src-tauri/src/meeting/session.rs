@@ -4513,6 +4513,9 @@ impl MeetingSessionManager {
                 );
             });
         }
+        if let Some(app) = self.app.clone() {
+            opened.set_user_name_source(move || super::prep::user_name(&app));
+        }
         *self.recovered_at_mount_lock() = recovery.recovered.clone();
         let store = cached.insert(opened).clone();
         drop(cached);

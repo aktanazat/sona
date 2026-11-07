@@ -109,7 +109,7 @@ impl MeetingStore {
                 "unknown speakers",
                 self.unknown_speakers(user_name),
             ),
-            owed: TodayCount::read("owed", self.owed(today)),
+            owed: TodayCount::read("owed", self.owed(today, user_name)),
         }
     }
 
@@ -148,11 +148,11 @@ impl MeetingStore {
 
     /// The open loops the needs-you list holds as the user's own: open loop
     /// rows, theirs, from meetings whose continuity pass finished.
-    fn owed(&self, today: NaiveDate) -> Result<TodayOwed, StoreError> {
+    fn owed(&self, today: NaiveDate, user_name: Option<&str>) -> Result<TodayOwed, StoreError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let mut owed = TodayOwed::default();
-        for meeting in ledger_rows_in(&transaction)? {
+        for meeting in ledger_rows_in(&transaction, user_name)? {
             let mine = meeting
                 .rows
                 .iter()

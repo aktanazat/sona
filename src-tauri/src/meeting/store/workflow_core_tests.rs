@@ -511,7 +511,7 @@ fn link_derivation_respects_evidence_strength() {
     };
     let connection = store.connection().unwrap();
     derive_calendar_links_in(&connection, calendar_meeting, &[attendee], 10).unwrap();
-    derive_speaker_link_in(&connection, speaker_meeting, "Bob Smith", 10).unwrap();
+    derive_speaker_link_in(&connection, speaker_meeting, "Bob Smith", None, 10).unwrap();
     derive_title_links_in(&connection, title_meeting, "1:1 with Charlie", 10).unwrap();
     for (meeting_id, person_id, source, confidence) in [
         (calendar_meeting, calendar_person, "calendar", "confirmed"),
@@ -529,7 +529,7 @@ fn link_derivation_respects_evidence_strength() {
         assert_eq!(row, (source.to_string(), confidence.to_string()));
     }
     assert_eq!(
-        derive_speaker_link_in(&connection, speaker_meeting, "Bob", 10).unwrap(),
+        derive_speaker_link_in(&connection, speaker_meeting, "Bob", None, 10).unwrap(),
         0
     );
 }
@@ -949,6 +949,7 @@ fn calendar_context_matches_known_people_by_exact_email() {
                 is_self: true,
             },
         ],
+        None,
     )
     .unwrap()
     .rows;
@@ -1089,11 +1090,12 @@ fn previously_together_reads_only_meetings_before_this_one() {
 ///
 /// Two places state the invariant. `loop_types::MeetingLoopDirection` says
 /// "Sona models no `Person` for its own user … a `PersonId` is always somebody
-/// else", and `store::loops::microphone_speaker_labels_in` says the microphone
-/// track is the whole answer to which voice is the user's. So the one speaker
-/// row a rename must never derive a person from is the microphone one — and
-/// `Local speaker`, the display name the store writes for that row itself,
-/// clears the two-word bar the derivation uses to reject a bare first name.
+/// else", and `store::loops::user_speaker_labels_in` is the whole answer to
+/// which voices are the user's: on a meeting recorded here, the microphone
+/// ones. So the speaker rows a rename must never derive a person from include
+/// the microphone one — and `Local speaker`, the display name the store writes
+/// for that row itself, clears the two-word bar the derivation uses to reject
+/// a bare first name.
 ///
 /// The consequence is not cosmetic. A person for the user gets a `PersonId`,
 /// and `loop_direction` treats an explicit `owner_person_id` as settling the
@@ -1113,7 +1115,7 @@ fn speaker_derivation_refuses_the_users_own_microphone_voice() {
     for (session, label) in [(placeholder, "Local speaker"), (renamed, "Aktan Azat")] {
         speaker(&connection, session, SourceKind::Microphone, label);
         assert_eq!(
-            derive_speaker_link_in(&connection, session, label, 10).unwrap(),
+            derive_speaker_link_in(&connection, session, label, None, 10).unwrap(),
             0,
             "{label:?} minted a person out of the user"
         );
@@ -1128,10 +1130,10 @@ fn speaker_derivation_refuses_the_users_own_microphone_voice() {
         SourceKind::SystemAudio,
         "Stephen Kowalski",
     );
-    assert!(derive_speaker_link_in(&connection, remote, "Stephen Kowalski", 10).unwrap() > 0);
+    assert!(derive_speaker_link_in(&connection, remote, "Stephen Kowalski", None, 10).unwrap() > 0);
     // And the bar the guard was originally written for still holds.
     assert_eq!(
-        derive_speaker_link_in(&connection, remote, "Stephen", 10).unwrap(),
+        derive_speaker_link_in(&connection, remote, "Stephen", None, 10).unwrap(),
         0
     );
     assert_eq!(
@@ -1155,7 +1157,7 @@ fn speaker_derivation_refuses_a_label_the_store_wrote() -> Result<(), StoreError
     for label in ["Speaker 2", "Unknown speaker"] {
         speaker(&connection, session, SourceKind::SystemAudio, label);
         assert_eq!(
-            derive_speaker_link_in(&connection, session, label, 10)?,
+            derive_speaker_link_in(&connection, session, label, None, 10)?,
             0,
             "{label:?} minted a person"
         );

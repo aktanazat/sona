@@ -2140,6 +2140,10 @@ pub struct MeetingStore {
     /// are written from the track workers, which have no way to reach the
     /// shell; the session manager installs this so they do not need one.
     health_listener: OnceLock<Box<dyn Fn(HealthChange) + Send + Sync>>,
+    /// Reads the user's name from About me. Settings own the name and the
+    /// store keeps no copy, so a rename counts from the next read. The
+    /// session manager installs this; a store nobody told knows no name.
+    user_name_source: OnceLock<Box<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -2183,6 +2187,7 @@ impl MeetingStore {
             connection: Mutex::new(connection),
             master_key: Arc::new(master_key),
             health_listener: OnceLock::new(),
+            user_name_source: OnceLock::new(),
         }))
     }
 
@@ -2190,6 +2195,22 @@ impl MeetingStore {
     /// the owner that can reach the shell; a second call is ignored.
     pub(crate) fn watch_health(&self, listener: impl Fn(HealthChange) + Send + Sync + 'static) {
         let _ = self.health_listener.set(Box::new(listener));
+    }
+
+    /// Install the one reader of the user's About-me name. Installed once, by
+    /// the owner that can reach settings; a second call is ignored.
+    pub(crate) fn set_user_name_source(
+        &self,
+        source: impl Fn() -> Option<String> + Send + Sync + 'static,
+    ) {
+        let _ = self.user_name_source.set(Box::new(source));
+    }
+
+    /// The user's About-me name as settings hold it now. Read it before
+    /// taking the connection, so the settings read never runs under the
+    /// store's lock.
+    pub(crate) fn user_name(&self) -> Option<String> {
+        self.user_name_source.get().and_then(|source| source())
     }
 
     fn publish_health_change(&self, change: Option<HealthChange>) {
