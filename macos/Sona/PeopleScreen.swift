@@ -1466,10 +1466,10 @@ struct VoiceIdentitySection: View {
     }
 }
 
-/// A waiting speaker whose voice matches the one you named as somebody in
-/// other meetings. Confirm names the speaker; "Not them" asks who it is
-/// instead, where another person or "unknown" answers it. Nothing is named
-/// until one of those is pressed.
+/// A waiting speaker whose voice matches the one you named as somebody, or
+/// as yourself, in other meetings. Confirm names the speaker; "Not them" asks
+/// who it is instead, where another person or "unknown" answers it. Nothing
+/// is named until one of those is pressed.
 struct VoiceSuggestionRow: View {
     let suggestion: VoiceSpeakerSuggestion
     let speakerName: String
@@ -1481,19 +1481,31 @@ struct VoiceSuggestionRow: View {
     var body: some View {
         CardRow {
             HStack(spacing: 12) {
-                PersonPortrait(
-                    personId: suggestion.personId,
-                    name: suggestion.displayName,
-                    size: 28,
-                    revision: model.people.photoRevision)
+                if let personId = suggestion.personId {
+                    PersonPortrait(
+                        personId: personId,
+                        name: suggestion.displayName,
+                        size: 28,
+                        revision: model.people.photoRevision)
+                } else {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .frame(width: 28, height: 28)
+                }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(speakerName) sounds like \(suggestion.displayName)").bodyText(14)
-                    Text("Matches the voice you named \(suggestion.displayName) in other meetings").metaText()
+                    if suggestion.personId == nil {
+                        Text("\(speakerName) sounds like you").bodyText(14)
+                        Text("Matches the voice you named as yourself in other meetings").metaText()
+                    } else {
+                        Text("\(speakerName) sounds like \(suggestion.displayName)").bodyText(14)
+                        Text("Matches the voice you named \(suggestion.displayName) in other meetings").metaText()
+                    }
                 }
             }
         } trailing: {
             HStack(spacing: 8) {
-                Button("Not them", action: reject)
+                Button(suggestion.personId == nil ? "Not me" : "Not them", action: reject)
                     .buttonStyle(.quiet)
                     .disabled(busy)
                 Button("Confirm", action: confirm)
