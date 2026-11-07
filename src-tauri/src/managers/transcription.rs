@@ -3050,7 +3050,7 @@ impl SpanRecovery {
                 let samples = &audio[sample_at(span.start).min(audio.len())
                     ..sample_at(span.end).min(audio.len())];
                 let text = match session.run(samples, &self.unprompted) {
-                    Ok(retry) if model_heard_text(&retry.text, None) => {
+                    Ok(retry) if !is_whisper_silence_phrase(&retry.text) => {
                         info!(
                             "Whisper heard nothing in {:.1}-{:.1}s of a window holding speech; decoded again without the prompt: {} characters",
                             seconds(span.start),
@@ -6059,6 +6059,50 @@ mod tests {
                 .text;
             assert!(is_whisper_silence_phrase(&text), "{clip}: {text:?}");
         }
+    }
+
+    /// Room noise that voice detection forwarded: the prompted decode writes
+    /// only its prompt, and the decode without it writes no words or only a
+    /// phrase whisper writes over silence. Neither is something said.
+    #[test]
+    #[ignore = "decodes room noise with the whisper model SONA_WHISPER_MODEL names"]
+    fn room_noise_decoded_again_without_the_prompt_still_heard_nothing() {
+        let model = test_whisper_model();
+        let mut session = model.session().expect("a whisper session");
+        let prompt = vocabulary_initial_prompt(
+            &[VocabularyEntry {
+                spoken: "Sona".to_owned(),
+                written: "Sona".to_owned(),
+            }],
+            |prompt| whisper_prompt_fits(&model, prompt),
+        )
+        .expect("a one-entry prompt fits")
+        .text;
+        let options = RunOptions {
+            family: whisper_check_extension(Some(prompt.clone()), true, Some(SAMPLING_SEED)),
+            ..Default::default()
+        };
+        let noise = pink_noise(10 * 16_000);
+        let gain = 0.02 / rms(&noise);
+        let audio: Vec<f32> = noise.iter().map(|sample| sample * gain).collect();
+        let recovery = SpanRecovery::new(
+            Some(prompt.clone()),
+            &options,
+            true,
+            Some(SAMPLING_SEED),
+            SpeechEvidence::Detected,
+        );
+        let text = transcribe_cpp_window(
+            &mut session,
+            &audio,
+            &options,
+            Some(&recovery),
+            &mut None,
+            None,
+            3,
+        )
+        .expect("the noise decodes");
+        assert!(!model_heard_text(&text, Some(&prompt)), "{text:?}");
     }
 
     /// A vocabulary too long for whisper's prompt is cut to its last whole
