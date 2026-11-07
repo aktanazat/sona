@@ -6,7 +6,9 @@ use crate::meeting::people_types::{
 };
 use crate::meeting::store::loops::{ledger_loop_seeds, ledger_rows_in, rows_from_seeds_in};
 use crate::meeting::store::people::{all_people_in, loop_concerns_person, owner_matches};
-use crate::meeting::store::{listed_outcomes, utc_now_ms, StoreError, READABLE_ARTIFACT_CONTENT};
+use crate::meeting::store::{
+    listed_outcomes, utc_now_ms, ReceiptSpeakers, StoreError, READABLE_ARTIFACT_CONTENT,
+};
 use crate::meeting::types::{GeneratedMeetingArtifacts, MeetingSessionId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
@@ -108,9 +110,10 @@ pub(super) fn facts_for_person_in(
             headline,
             series_number: total.saturating_sub(index),
         });
-        let Some(ledger) = content.and_then(|content| content.ledger) else {
+        let Some(mut ledger) = content.and_then(|content| content.ledger) else {
             continue;
         };
+        ReceiptSpeakers::read(connection, meeting_id)?.name(&mut ledger);
         let loop_rows = rows_from_seeds_in(
             connection,
             meeting_id,
